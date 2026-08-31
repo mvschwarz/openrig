@@ -937,7 +937,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // response env so the caller's shell can produce activity signal.
     activityEnv: { url: resolvedActivityHookUrl, token: resolvedActivityHookToken },
   });
-  const rigLifecycleService = new RigLifecycleService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter });
+  const rigLifecycleService = new RigLifecycleService({
+    db, rigRepo, sessionRegistry, discoveryRepo, eventBus, queueRepo: queueRepoInstance, tmuxAdapter,
+  });
   const rigExpansionService = new RigExpansionService({ db, rigRepo, eventBus, nodeLauncher, podInstantiator, sessionRegistry });
 
   const specReviewService = new SpecReviewService();

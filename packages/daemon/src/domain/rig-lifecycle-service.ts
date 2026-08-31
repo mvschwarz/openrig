@@ -4,6 +4,7 @@ import type { SessionRegistry } from "./session-registry.js";
 import type { DiscoveryRepository } from "./discovery-repository.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import type { QueueRepository } from "./queue-repository.js";
 
 type ClaimedSessionRow = {
   session_id: string;
@@ -34,6 +35,12 @@ type RigReleaseRow = {
   session_origin: string | null;
 };
 
+type FallbackValidationFailure = {
+  ok: false;
+  code: "fallback_not_running" | "fallback_in_target";
+  error: string;
+};
+
 export type UnclaimSessionResult =
   | {
       ok: true;
@@ -56,12 +63,16 @@ export type RemoveNodeResult =
       nodeId: string;
       logicalId: string;
       sessionsKilled: number;
+      fallbackDestination?: string;
+      reroutedQitemIds: string[];
     }
   | {
       ok: false;
-      code: "rig_not_found" | "node_not_found" | "active_qitems" | "kill_failed";
+      code: "rig_not_found" | "node_not_found" | "active_qitems" | "fallback_not_running" | "fallback_in_target" | "kill_failed";
       error: string;
       activeQitemIds?: string[];
+      fallbackDestination?: string;
+      reroutedQitemIds?: string[];
     };
 
 export type ReleaseRigResult =
@@ -100,6 +111,8 @@ export type ShrinkPodResult =
       namespace: string;
       removedLogicalIds: string[];
       sessionsKilled: number;
+      fallbackDestination?: string;
+      reroutedQitemIds: string[];
       nodes: Array<{
         nodeId: string;
         logicalId: string;
@@ -110,8 +123,11 @@ export type ShrinkPodResult =
     }
   | {
       ok: false;
-      code: "rig_not_found" | "pod_not_found" | "kill_failed";
+      code: "rig_not_found" | "pod_not_found" | "active_qitems" | "fallback_not_running" | "fallback_in_target" | "kill_failed";
       error: string;
+      activeQitemIds?: string[];
+      fallbackDestination?: string;
+      reroutedQitemIds?: string[];
     };
 
 interface RigLifecycleDeps {
@@ -120,6 +136,7 @@ interface RigLifecycleDeps {
   sessionRegistry: SessionRegistry;
   discoveryRepo: DiscoveryRepository;
   eventBus: EventBus;
+  queueRepo: QueueRepository;
   tmuxAdapter?: TmuxAdapter;
 }
 
@@ -129,6 +146,7 @@ export class RigLifecycleService {
   private readonly sessionRegistry: SessionRegistry;
   private readonly discoveryRepo: DiscoveryRepository;
   private readonly eventBus: EventBus;
+  private readonly queueRepo: QueueRepository;
   private readonly tmuxAdapter: TmuxAdapter | null;
 
   constructor(deps: RigLifecycleDeps) {
@@ -136,11 +154,13 @@ export class RigLifecycleService {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("RigLifecycleService: sessionRegistry must share the same db handle");
     if (deps.db !== deps.discoveryRepo.db) throw new Error("RigLifecycleService: discoveryRepo must share the same db handle");
     if (deps.db !== deps.eventBus.db) throw new Error("RigLifecycleService: eventBus must share the same db handle");
+    if (deps.db !== deps.queueRepo.db) throw new Error("RigLifecycleService: queueRepo must share the same db handle");
     this.db = deps.db;
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
     this.discoveryRepo = deps.discoveryRepo;
     this.eventBus = deps.eventBus;
+    this.queueRepo = deps.queueRepo;
     this.tmuxAdapter = deps.tmuxAdapter ?? null;
   }
 
@@ -340,7 +360,11 @@ export class RigLifecycleService {
     };
   }
 
-  async removeNode(rigId: string, nodeRef: string): Promise<RemoveNodeResult> {
+  async removeNode(
+    rigId: string,
+    nodeRef: string,
+    opts?: { fallbackDestination?: string },
+  ): Promise<RemoveNodeResult> {
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) {
       return { ok: false, code: "rig_not_found", error: `Rig '${rigId}' not found.` };
@@ -351,25 +375,32 @@ export class RigLifecycleService {
       return { ok: false, code: "node_not_found", error: `Node '${nodeRef}' not found in rig '${rigId}'.` };
     }
 
-    const activeQitemIds = node.latest_session_name
-      ? (this.db.prepare(`
-          SELECT qitem_id
-          FROM queue_items
-          WHERE destination_session = ?
-            AND state IN ('pending', 'in-progress', 'blocked')
-          ORDER BY qitem_id
-        `).all(node.latest_session_name) as Array<{ qitem_id: string }>).map((row) => row.qitem_id)
-      : [];
-    if (activeQitemIds.length > 0) {
-      const fallbackCommands = activeQitemIds
-        .map((qitemId) => `rig queue fallback ${qitemId} --destination <live-seat>`)
-        .join("\n");
+    const fallbackDestination = opts?.fallbackDestination;
+    if (fallbackDestination !== undefined) {
+      const invalidFallback = this.validateFallbackDestination(fallbackDestination, new Set([node.node_id]));
+      if (invalidFallback) return invalidFallback;
+    }
+
+    const activeQitemIds = this.activeQitemIdsForSessionNames(
+      node.latest_session_name ? [node.latest_session_name] : [],
+    );
+    if (activeQitemIds.length > 0 && fallbackDestination === undefined) {
       return {
         ok: false,
         code: "active_qitems",
         activeQitemIds,
-        error: `Node '${node.logical_id}' still has active queue work addressed to '${node.latest_session_name}'. Reroute each qitem before removing the node:\n${fallbackCommands}`,
+        error: this.activeQitemsError(
+          `Node '${node.logical_id}' still has active queue work addressed to '${node.latest_session_name}'.`,
+          activeQitemIds,
+          "removing the node",
+        ),
       };
+    }
+
+    if (fallbackDestination !== undefined) {
+      for (const qitemId of activeQitemIds) {
+        this.queueRepo.routeToFallback(qitemId, fallbackDestination, `explicit fallback while removing node ${node.logical_id}`);
+      }
     }
 
     const preserveDetachedClaimedSession = node.latest_session_origin === "claimed" && node.latest_session_status === "detached";
@@ -382,6 +413,8 @@ export class RigLifecycleService {
           ok: false,
           code: "kill_failed",
           error: `Failed to kill session '${node.latest_session_name}': ${kill.message}`,
+          fallbackDestination,
+          reroutedQitemIds: activeQitemIds,
         };
       }
       sessionsKilled = !kill || kill.ok ? 1 : 0;
@@ -436,10 +469,16 @@ export class RigLifecycleService {
       nodeId: node.node_id,
       logicalId: node.logical_id,
       sessionsKilled,
+      ...(fallbackDestination !== undefined ? { fallbackDestination } : {}),
+      reroutedQitemIds: activeQitemIds,
     };
   }
 
-  async shrinkPod(rigId: string, podRef: string): Promise<ShrinkPodResult> {
+  async shrinkPod(
+    rigId: string,
+    podRef: string,
+    opts?: { fallbackDestination?: string },
+  ): Promise<ShrinkPodResult> {
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) {
       return { ok: false, code: "rig_not_found", error: `Rig '${rigId}' not found.` };
@@ -451,11 +490,42 @@ export class RigLifecycleService {
     }
 
     const nodes = this.db.prepare(`
-      SELECT id, logical_id
-      FROM nodes
-      WHERE rig_id = ? AND pod_id = ?
-      ORDER BY logical_id
-    `).all(rigId, pod.id) as Array<{ id: string; logical_id: string }>;
+      SELECT n.id, n.logical_id,
+        (SELECT s.session_name FROM sessions s WHERE s.node_id = n.id ORDER BY s.created_at DESC, s.id DESC LIMIT 1) AS latest_session_name
+      FROM nodes n
+      WHERE n.rig_id = ? AND n.pod_id = ?
+      ORDER BY n.logical_id
+    `).all(rigId, pod.id) as Array<{ id: string; logical_id: string; latest_session_name: string | null }>;
+
+    const fallbackDestination = opts?.fallbackDestination;
+    if (fallbackDestination !== undefined) {
+      const invalidFallback = this.validateFallbackDestination(
+        fallbackDestination,
+        new Set(nodes.map((node) => node.id)),
+      );
+      if (invalidFallback) return invalidFallback;
+    }
+
+    const activeQitemIds = this.activeQitemIdsForSessionNames(
+      nodes.flatMap((node) => node.latest_session_name ? [node.latest_session_name] : []),
+    );
+    if (activeQitemIds.length > 0 && fallbackDestination === undefined) {
+      return {
+        ok: false,
+        code: "active_qitems",
+        activeQitemIds,
+        error: this.activeQitemsError(
+          `Pod '${pod.namespace}' still has active queue work addressed to members being removed.`,
+          activeQitemIds,
+        ),
+      };
+    }
+
+    if (fallbackDestination !== undefined) {
+      for (const qitemId of activeQitemIds) {
+        this.queueRepo.routeToFallback(qitemId, fallbackDestination, `explicit fallback while shrinking pod ${pod.namespace}`);
+      }
+    }
 
     let sessionsKilled = 0;
     const removedLogicalIds: string[] = [];
@@ -489,6 +559,8 @@ export class RigLifecycleService {
             namespace: pod.namespace,
             removedLogicalIds,
             sessionsKilled,
+            fallbackDestination,
+            reroutedQitemIds: activeQitemIds,
             nodes: nodeOutcomes,
           };
         }
@@ -498,6 +570,8 @@ export class RigLifecycleService {
             ok: false,
             code: "rig_not_found",
             error: removed.error,
+            fallbackDestination,
+            reroutedQitemIds: activeQitemIds,
           };
         }
         if (removed.code === "node_not_found") {
@@ -505,12 +579,16 @@ export class RigLifecycleService {
             ok: false,
             code: "kill_failed",
             error,
+            fallbackDestination,
+            reroutedQitemIds: activeQitemIds,
           };
         }
         return {
           ok: false,
           code: "kill_failed",
           error,
+          fallbackDestination,
+          reroutedQitemIds: activeQitemIds,
         };
       }
       sessionsKilled += removed.sessionsKilled;
@@ -553,8 +631,60 @@ export class RigLifecycleService {
       namespace: pod.namespace,
       removedLogicalIds,
       sessionsKilled,
+      ...(fallbackDestination !== undefined ? { fallbackDestination } : {}),
+      reroutedQitemIds: activeQitemIds,
       nodes: nodeOutcomes,
     };
+  }
+
+  private activeQitemIdsForSessionNames(sessionNames: string[]): string[] {
+    const uniqueSessionNames = [...new Set(sessionNames)];
+    if (uniqueSessionNames.length === 0) return [];
+    const placeholders = uniqueSessionNames.map(() => "?").join(", ");
+    return (this.db.prepare(`
+      SELECT qitem_id
+      FROM queue_items
+      WHERE destination_session IN (${placeholders})
+        AND state IN ('pending', 'in-progress', 'blocked')
+      ORDER BY qitem_id
+    `).all(...uniqueSessionNames) as Array<{ qitem_id: string }>).map((row) => row.qitem_id);
+  }
+
+  private activeQitemsError(subject: string, activeQitemIds: string[], before = "removal"): string {
+    const fallbackCommands = activeQitemIds
+      .map((qitemId) => `rig queue fallback ${qitemId} --destination <live-seat>`)
+      .join("\n");
+    return `${subject} Reroute each qitem before ${before}:\n${fallbackCommands}`;
+  }
+
+  private validateFallbackDestination(
+    fallbackDestination: string,
+    targetNodeIds: Set<string>,
+  ): FallbackValidationFailure | null {
+    const row = this.db.prepare(`
+      SELECT s.node_id, n.logical_id, s.status
+      FROM sessions s
+      JOIN nodes n ON n.id = s.node_id
+      WHERE s.session_name = ?
+      ORDER BY s.created_at DESC, s.id DESC
+      LIMIT 1
+    `).get(fallbackDestination) as { node_id: string; logical_id: string; status: string } | undefined;
+
+    if (!row || row.status !== "running") {
+      return {
+        ok: false,
+        code: "fallback_not_running",
+        error: `Fallback destination '${fallbackDestination}' is not a currently running seat. No queue or topology changes were made.`,
+      };
+    }
+    if (targetNodeIds.has(row.node_id)) {
+      return {
+        ok: false,
+        code: "fallback_in_target",
+        error: `Fallback destination '${fallbackDestination}' belongs to '${row.logical_id}', which is part of the removal target. No queue or topology changes were made.`,
+      };
+    }
+    return null;
   }
 
   private resolveNodeRef(rigId: string, nodeRef: string): NodeLifecycleRow | null {

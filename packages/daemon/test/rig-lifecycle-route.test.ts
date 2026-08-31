@@ -206,6 +206,130 @@ describe("Rig lifecycle routes", () => {
     });
   });
 
+  it("DELETE /api/rigs/:rigId/nodes/:nodeRef reroutes active qitems to an explicit running fallback before removal", async () => {
+    const rig = setup.rigRepo.createRig("remove-fallback-rig");
+    const expanded = await setup.rigExpansionService.expand({
+      rigId: rig.id,
+      pod: {
+        id: "infra",
+        label: "Infrastructure",
+        members: [
+          { id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+          { id: "fallback", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+        ],
+        edges: [],
+      },
+    });
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+
+    const targetSession = expanded.nodes.find((node) => node.logicalId === "infra.server")?.sessionName;
+    const fallbackSession = expanded.nodes.find((node) => node.logicalId === "infra.fallback")?.sessionName;
+    expect(targetSession).toBeTruthy();
+    expect(fallbackSession).toBeTruthy();
+    if (!targetSession || !fallbackSession) return;
+
+    const queueRepo = new QueueRepository(db, setup.eventBus);
+    const qitem = await queueRepo.create({
+      sourceSession: "source@remove-fallback-rig",
+      destinationSession: targetSession,
+      body: "must move with the removal",
+      nudge: false,
+    });
+
+    const res = await setup.app.request(
+      `/api/rigs/${rig.id}/nodes/infra.server?fallback=${encodeURIComponent(fallbackSession)}`,
+      { method: "DELETE" },
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.fallbackDestination).toBe(fallbackSession);
+    expect(body.reroutedQitemIds).toEqual([qitem.qitemId]);
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.map((node) => node.logicalId)).toEqual(["infra.fallback"]);
+    expect(db.prepare("SELECT qitem_id, destination_session, state FROM queue_items WHERE qitem_id = ?").get(qitem.qitemId)).toEqual({
+      qitem_id: qitem.qitemId,
+      destination_session: fallbackSession,
+      state: "pending",
+    });
+  });
+
+  it("DELETE /api/rigs/:rigId/nodes/:nodeRef refuses a non-running fallback before changing queue or topology", async () => {
+    const rig = setup.rigRepo.createRig("remove-stopped-fallback-rig");
+    const expanded = await setup.rigExpansionService.expand({
+      rigId: rig.id,
+      pod: {
+        id: "infra",
+        label: "Infrastructure",
+        members: [
+          { id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+          { id: "fallback", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+        ],
+        edges: [],
+      },
+    });
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+    const targetSession = expanded.nodes.find((node) => node.logicalId === "infra.server")?.sessionName;
+    const fallbackNode = expanded.nodes.find((node) => node.logicalId === "infra.fallback");
+    expect(targetSession).toBeTruthy();
+    expect(fallbackNode?.sessionName).toBeTruthy();
+    if (!targetSession || !fallbackNode?.sessionName) return;
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE session_name = ?").run(fallbackNode.sessionName);
+
+    const queueRepo = new QueueRepository(db, setup.eventBus);
+    const qitem = await queueRepo.create({
+      sourceSession: "source@remove-stopped-fallback-rig",
+      destinationSession: targetSession,
+      body: "must not move to a stopped seat",
+      nudge: false,
+    });
+    const killSession = setup.tmuxAdapter.killSession as ReturnType<typeof import("vitest").vi.fn>;
+    killSession.mockClear();
+
+    const res = await setup.app.request(
+      `/api/rigs/${rig.id}/nodes/infra.server?fallback=${encodeURIComponent(fallbackNode.sessionName)}`,
+      { method: "DELETE" },
+    );
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({ ok: false, code: "fallback_not_running" }));
+    expect(killSession).not.toHaveBeenCalled();
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.map((node) => node.logicalId).sort()).toEqual(["infra.fallback", "infra.server"]);
+    expect(db.prepare("SELECT destination_session, state FROM queue_items WHERE qitem_id = ?").get(qitem.qitemId)).toEqual({
+      destination_session: targetSession,
+      state: "pending",
+    });
+  });
+
+  it("DELETE /api/rigs/:rigId/nodes/:nodeRef refuses the removed seat as its own fallback", async () => {
+    const rig = setup.rigRepo.createRig("remove-self-fallback-rig");
+    const expanded = await setup.rigExpansionService.expand({
+      rigId: rig.id,
+      pod: {
+        id: "infra",
+        label: "Infrastructure",
+        members: [{ id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }],
+        edges: [],
+      },
+    });
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+    const sessionName = expanded.nodes[0]?.sessionName;
+    expect(sessionName).toBeTruthy();
+    if (!sessionName) return;
+
+    const res = await setup.app.request(
+      `/api/rigs/${rig.id}/nodes/infra.server?fallback=${encodeURIComponent(sessionName)}`,
+      { method: "DELETE" },
+    );
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({ ok: false, code: "fallback_in_target" }));
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.map((node) => node.logicalId)).toEqual(["infra.server"]);
+  });
+
   it("DELETE /api/rigs/:rigId/nodes/:nodeRef preserves a previously detached claimed session while removing the node", async () => {
     const rig = setup.rigRepo.createRig("remove-detached-rig");
     const discovered = setup.discoveryRepo.upsertDiscoveredSession({
@@ -278,6 +402,140 @@ describe("Rig lifecycle routes", () => {
 
     const podEvents = db.prepare("SELECT type FROM events WHERE type = 'pod.deleted'").all() as Array<{ type: string }>;
     expect(podEvents).toHaveLength(1);
+  });
+
+  it("DELETE /api/rigs/:rigId/pods/:podRef reroutes member work to an explicit fallback outside the pod", async () => {
+    const rig = setup.rigRepo.createRig("shrink-fallback-rig");
+    const dev = await setup.rigExpansionService.expand({
+      rigId: rig.id,
+      pod: {
+        id: "dev",
+        label: "Development",
+        members: [
+          { id: "impl", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+          { id: "qa", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+        ],
+        edges: [],
+      },
+    });
+    const ops = await setup.rigExpansionService.expand({
+      rigId: rig.id,
+      pod: {
+        id: "ops",
+        label: "Operations",
+        members: [{ id: "fallback", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }],
+        edges: [],
+      },
+    });
+    expect(dev.ok).toBe(true);
+    expect(ops.ok).toBe(true);
+    if (!dev.ok || !ops.ok) return;
+    const fallbackSession = ops.nodes[0]?.sessionName;
+    expect(fallbackSession).toBeTruthy();
+    if (!fallbackSession) return;
+
+    const queueRepo = new QueueRepository(db, setup.eventBus);
+    const qitems = await Promise.all(dev.nodes.map((node) => queueRepo.create({
+      sourceSession: "source@shrink-fallback-rig",
+      destinationSession: node.sessionName!,
+      body: `must move before ${node.logicalId} is removed`,
+      nudge: false,
+    })));
+    qitems.push(await queueRepo.create({
+      sourceSession: "source@shrink-fallback-rig",
+      destinationSession: dev.nodes[0]!.sessionName!,
+      body: "pending work must move too",
+      nudge: false,
+    }));
+    db.prepare("UPDATE queue_items SET state = 'in-progress' WHERE qitem_id = ?").run(qitems[0]!.qitemId);
+    db.prepare("UPDATE queue_items SET state = 'blocked' WHERE qitem_id = ?").run(qitems[1]!.qitemId);
+
+    const res = await setup.app.request(
+      `/api/rigs/${rig.id}/pods/dev?fallback=${encodeURIComponent(fallbackSession)}`,
+      { method: "DELETE" },
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.fallbackDestination).toBe(fallbackSession);
+    expect(body.reroutedQitemIds).toEqual(qitems.map((qitem) => qitem.qitemId).sort());
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.map((node) => node.logicalId)).toEqual(["ops.fallback"]);
+    const expectedStates = ["in-progress", "blocked", "pending"];
+    qitems.forEach((qitem, index) => {
+      expect(db.prepare("SELECT destination_session, state FROM queue_items WHERE qitem_id = ?").get(qitem.qitemId)).toEqual({
+        destination_session: fallbackSession,
+        state: expectedStates[index],
+      });
+    });
+  });
+
+  it("DELETE /api/rigs/:rigId/pods/:podRef refuses active work before removing an earlier pod member", async () => {
+    const rig = setup.rigRepo.createRig("shrink-active-qitem-rig");
+    const expanded = await setup.rigExpansionService.expand({
+      rigId: rig.id,
+      pod: {
+        id: "dev",
+        label: "Development",
+        members: [
+          { id: "impl", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+          { id: "qa", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+        ],
+        edges: [],
+      },
+    });
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+    const qaSession = expanded.nodes.find((node) => node.logicalId === "dev.qa")?.sessionName;
+    expect(qaSession).toBeTruthy();
+    if (!qaSession) return;
+    const queueRepo = new QueueRepository(db, setup.eventBus);
+    const qitem = await queueRepo.create({
+      sourceSession: "source@shrink-active-qitem-rig",
+      destinationSession: qaSession,
+      body: "later member work blocks the whole shrink",
+      nudge: false,
+    });
+
+    const res = await setup.app.request(`/api/rigs/${rig.id}/pods/dev`, { method: "DELETE" });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({
+      ok: false,
+      code: "active_qitems",
+      activeQitemIds: [qitem.qitemId],
+    }));
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.map((node) => node.logicalId).sort()).toEqual(["dev.impl", "dev.qa"]);
+  });
+
+  it("DELETE /api/rigs/:rigId/pods/:podRef refuses a fallback inside the removed pod before mutation", async () => {
+    const rig = setup.rigRepo.createRig("shrink-in-pod-fallback-rig");
+    const expanded = await setup.rigExpansionService.expand({
+      rigId: rig.id,
+      pod: {
+        id: "dev",
+        label: "Development",
+        members: [
+          { id: "impl", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+          { id: "qa", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+        ],
+        edges: [],
+      },
+    });
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+    const fallbackSession = expanded.nodes.find((node) => node.logicalId === "dev.qa")?.sessionName;
+    expect(fallbackSession).toBeTruthy();
+    if (!fallbackSession) return;
+
+    const res = await setup.app.request(
+      `/api/rigs/${rig.id}/pods/dev?fallback=${encodeURIComponent(fallbackSession)}`,
+      { method: "DELETE" },
+    );
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({ ok: false, code: "fallback_in_target" }));
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.map((node) => node.logicalId).sort()).toEqual(["dev.impl", "dev.qa"]);
   });
 
   it("DELETE /api/rigs/:rigId/pods/:podRef returns partial state when a later node removal fails", async () => {

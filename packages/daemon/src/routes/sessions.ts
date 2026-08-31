@@ -431,16 +431,19 @@ nodesRoutes.post("/:logicalId/focus", async (c) => {
 nodesRoutes.delete("/:logicalId", async (c) => {
   const rigId = c.req.param("rigId")!;
   const nodeRef = decodeURIComponent(c.req.param("logicalId")!);
+  const fallbackDestination = c.req.query("fallback");
   const { rigLifecycleService } = getDeps(c);
   if (!rigLifecycleService) {
     return c.json({ error: "Lifecycle service not available" }, 500);
   }
 
-  const result = await rigLifecycleService.removeNode(rigId, nodeRef);
+  const result = await rigLifecycleService.removeNode(rigId, nodeRef, { fallbackDestination });
   if (!result.ok) {
     const status = result.code === "rig_not_found" ? 404
       : result.code === "node_not_found" ? 404
       : result.code === "active_qitems" ? 409
+      : result.code === "fallback_not_running" ? 409
+      : result.code === "fallback_in_target" ? 409
       : result.code === "kill_failed" ? 409
       : 500;
     return c.json(result, status);

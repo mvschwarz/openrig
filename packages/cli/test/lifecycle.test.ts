@@ -105,6 +105,20 @@ describe("Lifecycle CLI commands", () => {
         return;
       }
 
+      if (req.method === "DELETE" && req.url === "/api/rigs/rig-1/nodes/dev.impl?fallback=ops-fallback%40rig-1") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: true,
+          rigId: "rig-1",
+          nodeId: "node-1",
+          logicalId: "dev.impl",
+          sessionsKilled: 1,
+          fallbackDestination: "ops-fallback@rig-1",
+          reroutedQitemIds: ["qitem-remove-1"],
+        }));
+        return;
+      }
+
       if (req.method === "DELETE" && req.url === "/api/rigs/rig-1/pods/dev") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -114,6 +128,22 @@ describe("Lifecycle CLI commands", () => {
           namespace: "dev",
           removedLogicalIds: ["dev.impl", "dev.qa"],
           sessionsKilled: 2,
+        }));
+        return;
+      }
+
+      if (req.method === "DELETE" && req.url === "/api/rigs/rig-1/pods/dev?fallback=ops-fallback%40rig-1") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: true,
+          status: "ok",
+          rigId: "rig-1",
+          podId: "pod-1",
+          namespace: "dev",
+          removedLogicalIds: ["dev.impl", "dev.qa"],
+          sessionsKilled: 2,
+          fallbackDestination: "ops-fallback@rig-1",
+          reroutedQitemIds: ["qitem-shrink-1", "qitem-shrink-2"],
         }));
         return;
       }
@@ -218,6 +248,37 @@ describe("Lifecycle CLI commands", () => {
     expect(logs.join("\n")).toContain("Removed node dev.impl from rig rig-1");
   });
 
+  it("remove sends an explicit fallback and names rerouted qitems in human output", async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(removeCommand(runningDeps()));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "remove", "rig-1", "dev.impl", "--fallback", "ops-fallback@rig-1"]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    const output = logs.join("\n");
+    expect(output).toContain("Rerouted qitem-remove-1 to ops-fallback@rig-1");
+    expect(output).toContain("Removed node dev.impl from rig rig-1");
+  });
+
+  it("remove preserves explicit fallback details in JSON output", async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(removeCommand(runningDeps()));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "remove", "rig-1", "dev.impl", "--fallback", "ops-fallback@rig-1", "--json"]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    expect(JSON.parse(logs.join("\n"))).toEqual(expect.objectContaining({
+      fallbackDestination: "ops-fallback@rig-1",
+      reroutedQitemIds: ["qitem-remove-1"],
+    }));
+  });
+
   it("release prints released rig summary", async () => {
     const program = new Command();
     program.exitOverride();
@@ -246,6 +307,37 @@ describe("Lifecycle CLI commands", () => {
     expect(exitCode).toBeUndefined();
     expect(logs.join("\n")).toContain("Removed pod dev from rig rig-1");
     expect(logs.join("\n")).toContain("2 node(s)");
+  });
+
+  it("shrink sends an explicit fallback and preserves reroute details in JSON output", async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(shrinkCommand(runningDeps()));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "shrink", "rig-1", "dev", "--fallback", "ops-fallback@rig-1", "--json"]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    expect(JSON.parse(logs.join("\n"))).toEqual(expect.objectContaining({
+      fallbackDestination: "ops-fallback@rig-1",
+      reroutedQitemIds: ["qitem-shrink-1", "qitem-shrink-2"],
+    }));
+  });
+
+  it("shrink names the explicit fallback and rerouted qitems in human output", async () => {
+    const program = new Command();
+    program.exitOverride();
+    program.addCommand(shrinkCommand(runningDeps()));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await program.parseAsync(["node", "rig", "shrink", "rig-1", "dev", "--fallback", "ops-fallback@rig-1"]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    const output = logs.join("\n");
+    expect(output).toContain("Rerouted qitem-shrink-1, qitem-shrink-2 to ops-fallback@rig-1");
+    expect(output).toContain("Removed pod dev from rig rig-1");
   });
 
   it("shrink prints partial pod removal honestly and exits non-zero", async () => {

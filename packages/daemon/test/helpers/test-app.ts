@@ -77,6 +77,7 @@ import { RigLifecycleService } from "../../src/domain/rig-lifecycle-service.js";
 import { RigRepository } from "../../src/domain/rig-repository.js";
 import { SessionRegistry } from "../../src/domain/session-registry.js";
 import { EventBus } from "../../src/domain/event-bus.js";
+import { QueueRepository } from "../../src/domain/queue-repository.js";
 import { NodeLauncher } from "../../src/domain/node-launcher.js";
 import { SnapshotRepository } from "../../src/domain/snapshot-repository.js";
 import { CheckpointStore } from "../../src/domain/checkpoint-store.js";
@@ -250,6 +251,7 @@ export function createTestApp(
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
   const eventBus = new EventBus(db);
+  const queueRepo = new QueueRepository(db, eventBus);
   const tmux = opts?.tmux ?? mockTmuxAdapter();
   const cmux = opts?.cmux ?? unavailableCmuxAdapter();
   const transcriptStore = new TranscriptStore("/tmp/openrig-test-transcripts");
@@ -335,7 +337,7 @@ export function createTestApp(
   const claimService = new ClaimService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux, transcriptStore });
   const selfAttachService = new SelfAttachService({ db, rigRepo, podRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, transcriptStore });
   const rigExpansionService = new RigExpansionService({ db, rigRepo, eventBus, nodeLauncher, podInstantiator, sessionRegistry });
-  const rigLifecycleService = new RigLifecycleService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux });
+  const rigLifecycleService = new RigLifecycleService({ db, rigRepo, sessionRegistry, discoveryRepo, eventBus, queueRepo, tmuxAdapter: tmux });
   const contextUsageStore = new ContextUsageStore(db, { stateDir: "/tmp/openrig-test" });
   const whoamiService = new WhoamiService({ db, rigRepo, sessionRegistry, transcriptStore, contextUsageStore });
   const cmuxTmux = { ...tmux, hasSession: vi.fn(async () => true) } as unknown as TmuxAdapter;

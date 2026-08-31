@@ -816,15 +816,19 @@ rigsRoutes.post("/:rigId/pods/:podNamespace/members", async (c) => {
 rigsRoutes.delete("/:rigId/pods/:podRef", async (c) => {
   const rigId = c.req.param("rigId")!;
   const podRef = decodeURIComponent(c.req.param("podRef")!);
+  const fallbackDestination = c.req.query("fallback");
   const lifecycleService = c.get("rigLifecycleService" as never) as RigLifecycleService | undefined;
   if (!lifecycleService) {
     return c.json({ error: "Lifecycle service not available" }, 500);
   }
 
-  const result = await lifecycleService.shrinkPod(rigId, podRef);
+  const result = await lifecycleService.shrinkPod(rigId, podRef, { fallbackDestination });
   if (!result.ok) {
     const status = result.code === "rig_not_found" ? 404
       : result.code === "pod_not_found" ? 404
+      : result.code === "active_qitems" ? 409
+      : result.code === "fallback_not_running" ? 409
+      : result.code === "fallback_in_target" ? 409
       : result.code === "kill_failed" ? 409
       : 500;
     return c.json(result, status);

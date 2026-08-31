@@ -12,6 +12,8 @@ type ShrinkResponse = {
   namespace?: string;
   removedLogicalIds?: string[];
   sessionsKilled?: number;
+  fallbackDestination?: string;
+  reroutedQitemIds?: string[];
   nodes?: Array<{
     logicalId: string;
     nodeId: string;
@@ -35,8 +37,9 @@ export function shrinkCommand(depsOverride?: StatusDeps): Command {
   cmd
     .argument("<rigId>", "Target rig ID")
     .argument("<podRef>", "Pod namespace or pod ID")
+    .option("--fallback <live-seat>", "Reroute active qitems to this running seat before removing the pod")
     .option("--json", "JSON output")
-    .action(async (rigId: string, podRef: string, opts: { json?: boolean }) => {
+    .action(async (rigId: string, podRef: string, opts: { fallback?: string; json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);
       if (!client) {
@@ -44,11 +47,18 @@ export function shrinkCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
-      const res = await client.delete<ShrinkResponse>(`/api/rigs/${encodeURIComponent(rigId)}/pods/${encodeURIComponent(podRef)}`);
+      const fallbackQuery = opts.fallback ? `?fallback=${encodeURIComponent(opts.fallback)}` : "";
+      const res = await client.delete<ShrinkResponse>(
+        `/api/rigs/${encodeURIComponent(rigId)}/pods/${encodeURIComponent(podRef)}${fallbackQuery}`,
+      );
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));
         if (res.status >= 400 || (res.data.ok && res.data.status !== "ok")) process.exitCode = 1;
         return;
+      }
+
+      if ((res.data.reroutedQitemIds?.length ?? 0) > 0 && res.data.fallbackDestination) {
+        console.log(`Rerouted ${res.data.reroutedQitemIds!.join(", ")} to ${res.data.fallbackDestination}`);
       }
 
       if (res.status >= 400) {

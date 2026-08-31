@@ -17,8 +17,9 @@ export function removeCommand(depsOverride?: StatusDeps): Command {
   cmd
     .argument("<rigId>", "Target rig ID")
     .argument("<nodeRef>", "Node logical ID or node ID")
+    .option("--fallback <live-seat>", "Reroute active qitems to this running seat before removal")
     .option("--json", "JSON output")
-    .action(async (rigId: string, nodeRef: string, opts: { json?: boolean }) => {
+    .action(async (rigId: string, nodeRef: string, opts: { fallback?: string; json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);
       if (!client) {
@@ -26,11 +27,21 @@ export function removeCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
-      const res = await client.delete<Record<string, unknown>>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}`);
+      const fallbackQuery = opts.fallback ? `?fallback=${encodeURIComponent(opts.fallback)}` : "";
+      const res = await client.delete<Record<string, unknown>>(
+        `/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}${fallbackQuery}`,
+      );
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));
         if (res.status >= 400) process.exitCode = 1;
         return;
+      }
+
+      const reroutedQitemIds = Array.isArray(res.data["reroutedQitemIds"])
+        ? res.data["reroutedQitemIds"] as string[]
+        : [];
+      if (reroutedQitemIds.length > 0 && typeof res.data["fallbackDestination"] === "string") {
+        console.log(`Rerouted ${reroutedQitemIds.join(", ")} to ${res.data["fallbackDestination"]}`);
       }
 
       if (res.status >= 400) {
