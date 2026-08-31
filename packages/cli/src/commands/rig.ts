@@ -5,7 +5,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { parse as parseYaml } from "yaml";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 export interface RigDeps extends StatusDeps {
   readFile: (path: string) => string;
@@ -18,6 +18,56 @@ export function rigCommand(depsOverride?: RigDeps): Command {
     clientFactory: (url: string) => new DaemonClient(url),
     readFile: (p) => fs.readFileSync(p, "utf-8"),
   };
+
+  cmd
+    .command("show <rig-id>")
+    .description("Print the spec that recreates a running rig")
+    .option("--json", "JSON output")
+    .option("--as-template", "Strip instance-specific source state and use a replacement name")
+    .action(async (rigId: string, opts: { json?: boolean; asTemplate?: boolean }) => {
+      const deps = getDeps();
+      const status = await getDaemonStatus(deps.lifecycleDeps);
+      if (!daemonStatusGuard(status)) return;
+      const client = deps.clientFactory(getDaemonUrl(status));
+
+      if (opts.json && !opts.asTemplate) {
+        const res = await client.get<Record<string, unknown>>(`/api/rigs/${encodeURIComponent(rigId)}/spec.json`);
+        if (res.status >= 400) {
+          console.error(`Rig ${rigId} was not found.`);
+          process.exitCode = 1;
+          return;
+        }
+        console.log(JSON.stringify(res.data, null, 2));
+        return;
+      }
+
+      const res = await client.getText(`/api/rigs/${encodeURIComponent(rigId)}/spec`);
+      if (res.status >= 400) {
+        console.error(`Rig ${rigId} was not found.`);
+        process.exitCode = 1;
+        return;
+      }
+      if (!opts.asTemplate) {
+        console.log(res.data.trimEnd());
+        return;
+      }
+
+      const template = parseYaml(res.data) as Record<string, unknown>;
+      template["name"] = "REPLACE-ME";
+      const pods = Array.isArray(template["pods"])
+        ? template["pods"] as Array<Record<string, unknown>>
+        : [];
+      for (const pod of pods) {
+        const members = Array.isArray(pod["members"])
+          ? pod["members"] as Array<Record<string, unknown>>
+          : [];
+        for (const member of members) {
+          delete member["session_source"];
+          delete member["starter_ref"];
+        }
+      }
+      console.log(opts.json ? JSON.stringify(template, null, 2) : stringifyYaml(template).trimEnd());
+    });
 
   cmd
     .command("audit <path>")
