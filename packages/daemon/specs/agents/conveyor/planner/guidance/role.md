@@ -10,7 +10,6 @@ execute without guessing.
 - `mission-slice-sop`
 - `requirements-writer`
 - `context-builder`
-- `writing-plans`
 - `verification-before-completion`
 
 ## Responsibilities

@@ -50,13 +50,6 @@
       ],
       "category": "pm"
     },
-    "brainstorming": {
-      "edges": [
-        "canonical",
-        "spec"
-      ],
-      "category": "process"
-    },
     "claude-compaction-restore": {
       "edges": [
         "plugin"
@@ -110,13 +103,6 @@
         "spec"
       ],
       "category": "pm"
-    },
-    "executing-plans": {
-      "edges": [
-        "canonical",
-        "spec"
-      ],
-      "category": "process"
     },
     "forming-an-openrig-mental-model": {
       "edges": [
@@ -340,13 +326,6 @@
       ],
       "category": "pm"
     },
-    "using-superpowers": {
-      "edges": [
-        "canonical",
-        "spec"
-      ],
-      "category": "process"
-    },
     "verification-before-completion": {
       "edges": [
         "canonical",
@@ -360,13 +339,6 @@
         "spec"
       ],
       "category": "core"
-    },
-    "writing-plans": {
-      "edges": [
-        "canonical",
-        "spec"
-      ],
-      "category": "process"
     }
   }
 }

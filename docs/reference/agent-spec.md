@@ -46,7 +46,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [using-superpowers, openrig-user, development-team, test-driven-development, systematic-debugging]
+      skills: [openrig-user, development-team, test-driven-development, systematic-debugging]
       guidance: []
       subagents: []
       hooks: []

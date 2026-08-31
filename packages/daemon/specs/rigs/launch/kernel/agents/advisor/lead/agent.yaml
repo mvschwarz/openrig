@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [openrig-architect, brainstorming, requirements-writer]
+      skills: [openrig-architect, requirements-writer]
       guidance: [role]
       subagents: []
       plugins: [shared:openrig-core]

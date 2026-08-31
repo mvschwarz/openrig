@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [using-superpowers, systematic-debugging, verification-before-completion, vault-user]
+      skills: [systematic-debugging, verification-before-completion, vault-user]
       guidance: []
       subagents: []
       plugins: [shared:openrig-core]

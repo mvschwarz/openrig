@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [using-superpowers, dogfood, systematic-debugging, verification-before-completion]
+      skills: [dogfood, systematic-debugging, verification-before-completion]
       guidance: []
       subagents: []
       plugins: [shared:openrig-core]

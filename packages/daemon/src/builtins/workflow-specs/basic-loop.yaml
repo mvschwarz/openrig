@@ -16,16 +16,16 @@ workflow:
       skill_refs: [openrig-user, backlog-capture]
       preferred_targets: [intake-lead@conveyor]
     planner:
-      skill_refs: [openrig-user, writing-plans]
+      skill_refs: [openrig-user, verification-before-completion]
       preferred_targets: [plan-planner@conveyor]
     builder:
-      skill_refs: [openrig-user, executing-plans]
+      skill_refs: [openrig-user]
       preferred_targets: [build-builder@conveyor]
     reviewer:
       skill_refs: [openrig-user, review-team]
       preferred_targets: [review-reviewer@conveyor]
     closer:
-      skill_refs: [openrig-user, verification-before-completion]
+      skill_refs: [openrig-user]
       preferred_targets: [intake-lead@conveyor]
   steps:
     - id: intake

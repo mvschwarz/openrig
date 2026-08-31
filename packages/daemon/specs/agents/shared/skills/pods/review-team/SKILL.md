@@ -13,7 +13,7 @@ Review rigor scales to stakes and change size. A small, low-stakes diff gets a f
 ## Startup sequence
 
 Before you announce a review position:
-- load `using-superpowers`, `openrig-user`, `review-team`, `systematic-debugging`, and `verification-before-completion`
+- load `openrig-user`, `review-team`, `systematic-debugging`, and `verification-before-completion`
 - run `rig whoami --json`
 - inspect the current rig state so you know whether you are reviewing a diff, a working tree, verification output, or only startup behavior
 

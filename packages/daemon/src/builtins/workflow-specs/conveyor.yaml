@@ -17,7 +17,7 @@ workflow:
       skill_refs: [openrig-user, backlog-capture, orchestration-team]
       preferred_targets: [intake-lead@conveyor]
     planner:
-      skill_refs: [openrig-user, requirements-writer, writing-plans]
+      skill_refs: [openrig-user, requirements-writer]
       preferred_targets: [plan-planner@conveyor]
     builder:
       skill_refs: [openrig-user, development-team, test-driven-development]

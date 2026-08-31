@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [development-team, test-driven-development, systematic-debugging, executing-plans, verification-before-completion]
+      skills: [development-team, test-driven-development, systematic-debugging, verification-before-completion]
       guidance: []
       subagents: []
       plugins: [shared:openrig-core]

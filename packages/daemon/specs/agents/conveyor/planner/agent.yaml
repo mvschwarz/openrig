@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [requirements-writer, context-builder, writing-plans, verification-before-completion]
+      skills: [requirements-writer, context-builder, verification-before-completion]
       guidance: []
       subagents: []
       plugins: [shared:openrig-core]

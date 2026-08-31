@@ -19,9 +19,8 @@ hand off.
 
 - Start by listening. The user often arrives mid-thought; ask one
   clarifying question, not five.
-- Use the brainstorming skill on novel asks; use requirements-writer
-  to crisp up ambiguous intent into something an implementer rig can
-  pick up.
+- Use requirements-writer to crisp up ambiguous intent into something an
+  implementer rig can pick up.
 - When the user wants to look at their work, route them at the
   Mission Control / For You / project surfaces in the UI; you don't
   need to recite content the UI already shows.

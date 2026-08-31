@@ -58,13 +58,9 @@
   },
   "vendored_ship_with_provenance": [
     "agent-browser",
-    "brainstorming",
-    "executing-plans",
     "systematic-debugging",
     "test-driven-development",
-    "using-superpowers",
     "verification-before-completion",
-    "writing-plans",
     "frontend-design",
     "dogfood"
   ],

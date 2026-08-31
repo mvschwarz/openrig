@@ -6,30 +6,22 @@ resources:
   skills:
     - id: agent-browser
       path: skills/process/agent-browser
-    - id: brainstorming
-      path: skills/process/brainstorming
     - id: dogfood
       path: skills/process/dogfood
-    - id: executing-plans
-      path: skills/process/executing-plans
     - id: frontend-design
       path: skills/process/frontend-design
-    - id: using-superpowers
-      path: skills/process/using-superpowers
     - id: openrig-architect
       path: skills/core/openrig-architect
     - id: rig-lifecycle
       path: skills/core/rig-lifecycle
     - id: openrig-upgrade
       path: skills/core/openrig-upgrade
-    - id: systematic-debugging
-      path: skills/process/systematic-debugging
     - id: test-driven-development
       path: skills/process/test-driven-development
+    - id: systematic-debugging
+      path: skills/process/systematic-debugging
     - id: verification-before-completion
       path: skills/process/verification-before-completion
-    - id: writing-plans
-      path: skills/process/writing-plans
     - id: orchestration-team
       path: skills/pods/orchestration-team
     - id: development-team

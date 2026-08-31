@@ -37,6 +37,13 @@ const AGENT_SPECS = [
 
 const SHARED_AGENT_SPEC = "agents/shared/agent.yaml";
 
+const OBSOLETE_OBRA_SKILLS = [
+  "using-superpowers",
+  "brainstorming",
+  "writing-plans",
+  "executing-plans",
+];
+
 // V0.3.1 slice 05 kernel-rig-as-default + bug-fix slice
 // deprecation-check-keys-widening: kernel agents are built-in product
 // surface and pass through the same deprecation regression gates as
@@ -386,18 +393,14 @@ describe("Starter specs", () => {
       // containerized-e2e, control-plane-queue, intake-routing,
       // local-sysadmin (mis-imports or internal-only doctrine).
       "agent-browser",
-      "brainstorming",
       "dogfood",
-      "executing-plans",
       "frontend-design",
       "orchestration-team",
       "development-team",
       "review-team",
-      "systematic-debugging",
       "test-driven-development",
-      "using-superpowers",
+      "systematic-debugging",
       "verification-before-completion",
-      "writing-plans",
     ];
 
     for (const skillId of expectedSharedSkills) {
@@ -410,6 +413,9 @@ describe("Starter specs", () => {
     expect(sharedSkills.map((entry) => entry.id)).not.toContain("openrig-operator");
     expect(sharedSkills.map((entry) => entry.id)).not.toContain("openrig-user");
     expect(sharedSkills.map((entry) => entry.id)).not.toContain("mission-slice-sop");
+    for (const skillId of OBSOLETE_OBRA_SKILLS) {
+      expect(sharedSkills.map((entry) => entry.id)).not.toContain(skillId);
+    }
     for (const skill of sharedSkills) {
       expect(
         existsSync(join(SPECS_ROOT, "agents/shared", skill.path, "SKILL.md")),
@@ -439,15 +445,15 @@ describe("Starter specs", () => {
     const expectedAgentSkills = new Map<string, string[]>([
       [
         "agents/conveyor/lead/agent.yaml",
-        ["orchestration-team", "backlog-capture", "writing-plans", "executing-plans", "verification-before-completion", "brainstorming"],
+        ["orchestration-team", "backlog-capture", "verification-before-completion"],
       ],
       [
         "agents/conveyor/planner/agent.yaml",
-        ["requirements-writer", "context-builder", "writing-plans", "verification-before-completion"],
+        ["requirements-writer", "context-builder", "verification-before-completion"],
       ],
       [
         "agents/conveyor/builder/agent.yaml",
-        ["development-team", "test-driven-development", "systematic-debugging", "executing-plans", "verification-before-completion"],
+        ["development-team", "test-driven-development", "systematic-debugging", "verification-before-completion"],
       ],
       [
         "agents/conveyor/reviewer/agent.yaml",
@@ -455,23 +461,23 @@ describe("Starter specs", () => {
       ],
       [
         "agents/design/product-designer/agent.yaml",
-        ["using-superpowers", "development-team", "frontend-design", "brainstorming", "writing-plans", "verification-before-completion"],
+        ["development-team", "frontend-design", "verification-before-completion"],
       ],
       [
         "agents/development/implementer/agent.yaml",
-        ["using-superpowers", "development-team", "test-driven-development", "systematic-debugging", "writing-plans", "executing-plans", "verification-before-completion"],
+        ["development-team", "test-driven-development", "systematic-debugging", "verification-before-completion"],
       ],
       [
         "agents/development/qa/agent.yaml",
-        ["using-superpowers", "development-team", "systematic-debugging", "agent-browser", "dogfood", "writing-plans", "executing-plans", "verification-before-completion"],
+        ["development-team", "test-driven-development", "systematic-debugging", "verification-before-completion", "agent-browser", "dogfood"],
       ],
       [
         "agents/review/independent-reviewer/agent.yaml",
-        ["using-superpowers", "review-team", "systematic-debugging", "brainstorming", "writing-plans", "verification-before-completion"],
+        ["review-team", "systematic-debugging", "verification-before-completion"],
       ],
       [
         "agents/orchestration/orchestrator/agent.yaml",
-        ["using-superpowers", "orchestration-team", "systematic-debugging", "brainstorming", "writing-plans", "executing-plans", "verification-before-completion"],
+        ["orchestration-team", "systematic-debugging", "verification-before-completion"],
       ],
     ]);
 
@@ -487,6 +493,22 @@ describe("Starter specs", () => {
       const skills = (uses["skills"] as string[] | undefined) ?? [];
       for (const skillId of expectedAgentSkills.get(file) ?? []) {
         expect(skills).toContain(skillId);
+      }
+      for (const skillId of OBSOLETE_OBRA_SKILLS) {
+        expect(skills).not.toContain(skillId);
+      }
+    }
+
+    for (const file of RUNNABLE_SHIPPED_AGENT_SPECS) {
+      const yaml = readFileSync(join(SPECS_ROOT, file), "utf-8");
+      const raw = parseAgentSpec(yaml) as Record<string, unknown>;
+      const profiles = (raw["profiles"] as Record<string, Record<string, unknown>> | undefined) ?? {};
+      for (const profile of Object.values(profiles)) {
+        const uses = (profile["uses"] as Record<string, unknown> | undefined) ?? {};
+        const skills = (uses["skills"] as string[] | undefined) ?? [];
+        for (const skillId of OBSOLETE_OBRA_SKILLS) {
+          expect(skills).not.toContain(skillId);
+        }
       }
     }
   });

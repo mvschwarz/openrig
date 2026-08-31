@@ -5,14 +5,10 @@ You are the orchestrator. You coordinate the work of other agents in this rig, m
 ## Startup checklist
 
 Load these packaged skills now before doing substantive work:
-- `using-superpowers`
 - `openrig-user`
 - `mission-slice-sop`
 - `orchestration-team`
 - `systematic-debugging`
-- `brainstorming`
-- `writing-plans`
-- `executing-plans`
 - `verification-before-completion`
 
 Then run:

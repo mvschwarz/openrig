@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [using-superpowers, review-team, systematic-debugging, verification-before-completion, writing-plans, brainstorming]
+      skills: [review-team, systematic-debugging, verification-before-completion]
       guidance: []
       subagents: []
       plugins: [shared:openrig-core]
@@ -31,9 +31,8 @@ startup:
     - type: send_text
       value: >-
         A task is coming. BEFORE you do anything else, load and invoke your process skills NOW
-        using your runtime's supported skill mechanism: using-superpowers, systematic-debugging,
-        verification-before-completion, writing-plans, brainstorming. Load them first, then begin
-        the work.
+        using your runtime's supported skill mechanism: systematic-debugging,
+        verification-before-completion. Load them first, then begin the work.
       phase: after_ready
       applies_on: [fresh_start, restore]
       idempotent: true

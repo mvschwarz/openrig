@@ -5,14 +5,11 @@ You are the implementation side of a dev pair. Your job is to write code, not to
 ## Startup checklist
 
 Load these packaged skills now before editing:
-- `using-superpowers`
 - `openrig-user`
 - `mission-slice-sop`
 - `development-team`
 - `test-driven-development`
 - `systematic-debugging`
-- `writing-plans`
-- `executing-plans`
 - `verification-before-completion`
 
 Then run `rig whoami --json` and wait for the orchestrator + QA loop before making changes.

@@ -37,7 +37,7 @@ workflow:
     orchestrator_role: orchestrator
   roles:
     planner:
-      skill_refs: [openrig-user, requirements-writer, writing-plans]
+      skill_refs: [openrig-user, requirements-writer]
       preferred_targets: [plan-planner@factory-rsi]
     implementer:
       skill_refs: [openrig-user, development-team, test-driven-development]

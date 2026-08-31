@@ -11,7 +11,7 @@ imports:
 profiles:
   default:
     uses:
-      skills: [orchestration-team, backlog-capture, writing-plans, executing-plans, verification-before-completion, brainstorming]
+      skills: [orchestration-team, backlog-capture, verification-before-completion]
       guidance: []
       subagents: []
       plugins: [shared:openrig-core]

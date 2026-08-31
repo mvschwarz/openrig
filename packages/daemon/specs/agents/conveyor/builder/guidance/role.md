@@ -11,7 +11,6 @@ reviewer can inspect.
 - `development-team`
 - `test-driven-development`
 - `systematic-debugging`
-- `executing-plans`
 - `verification-before-completion`
 
 ## Responsibilities

@@ -5,17 +5,14 @@ You are the quality assurance side of a dev pair. You gate every edit the implem
 ## Startup checklist
 
 Load these packaged skills now before reviewing work or dogfooding:
-- `using-superpowers`
 - `test-driven-development`
 - `openrig-user`
 - `mission-slice-sop`
 - `development-team`
 - `systematic-debugging`
+- `verification-before-completion`
 - `agent-browser`
 - `dogfood`
-- `writing-plans`
-- `executing-plans`
-- `verification-before-completion`
 
 Then run `rig whoami --json` and be ready to gate the implementer's first proposal before any edit lands.
 

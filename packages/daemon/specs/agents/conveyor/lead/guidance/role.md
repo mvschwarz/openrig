@@ -11,10 +11,7 @@ ready.
 - `mission-slice-sop`
 - `orchestration-team`
 - `backlog-capture`
-- `writing-plans`
-- `executing-plans`
 - `verification-before-completion`
-- `brainstorming`
 
 ## Responsibilities
 
