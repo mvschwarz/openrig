@@ -4,7 +4,7 @@ Canonical OpenRig skills and hooks for cross-runtime agent topology coordination
 
 ## What this plugin ships
 
-**Skills (16):** canonical OpenRig operating knowledge, including the public `refocusing` skill and
+**Skills (17):** canonical OpenRig operating knowledge, including the public `refocusing` skill and
 its path-only topology/work trace.
 
 **Hooks:** activity tracking, compaction continuity, and the default-on refocus channel. Refocus is

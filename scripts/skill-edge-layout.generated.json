@@ -124,6 +124,12 @@
       ],
       "category": "core"
     },
+    "loading-addressable-markdown": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
     "messaging-the-human": {
       "edges": [
         "canonical",

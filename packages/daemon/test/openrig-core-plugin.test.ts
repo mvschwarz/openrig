@@ -34,6 +34,7 @@ const EXPECTED_SKILLS = [
   "claude-compaction-restore",
   "delegating-work",
   "forming-an-openrig-mental-model",
+  "loading-addressable-markdown",
   "messaging-the-human",
   "mission-slice-sop",
   "openrig-operating-model",
@@ -133,6 +134,12 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
       && fs.existsSync(nodePath.join(skillsDir, f, "SKILL.md")),
     );
     expect(actual.sort()).toEqual([...EXPECTED_SKILLS].sort());
+  });
+
+  it("ships the addressable-Markdown resolver with its skill", () => {
+    const skillRoot = nodePath.join(PLUGIN_ROOT, "skills", "loading-addressable-markdown");
+    expect(fs.existsSync(nodePath.join(skillRoot, "SKILL.md"))).toBe(true);
+    expect(fs.existsSync(nodePath.join(skillRoot, "scripts", "resolve-markdown.mjs"))).toBe(true);
   });
 
   // The 0.5.0 whole-set mirror (commit cabd2b2f) REVERSED the routing: openrig-user is now a
