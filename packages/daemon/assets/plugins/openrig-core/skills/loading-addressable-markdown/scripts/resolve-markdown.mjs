@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 const MIN_LEVEL = 2;
 const MAX_LEVEL = 3;
@@ -151,8 +152,8 @@ async function main(argv) {
   process.stdout.write(headerPath.length === 0 ? text : resolveAddress(text, headerPath).text);
 }
 
-const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : null;
-if (invokedPath === import.meta.url) {
+const invokedPath = process.argv[1] ? realpathSync(process.argv[1]) : null;
+if (invokedPath === realpathSync(fileURLToPath(import.meta.url))) {
   main(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${error.name ?? "Error"}: ${error.message}\n`);
     process.exitCode = 1;

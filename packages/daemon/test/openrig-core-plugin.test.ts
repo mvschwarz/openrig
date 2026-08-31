@@ -13,6 +13,7 @@
 // applicability filter (plugin_type=auto detects both manifest dirs).
 
 import { describe, it, expect } from "vitest";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
 
@@ -140,6 +141,33 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     const skillRoot = nodePath.join(PLUGIN_ROOT, "skills", "loading-addressable-markdown");
     expect(fs.existsSync(nodePath.join(skillRoot, "SKILL.md"))).toBe(true);
     expect(fs.existsSync(nodePath.join(skillRoot, "scripts", "resolve-markdown.mjs"))).toBe(true);
+  });
+
+  it("executes the addressable-Markdown resolver through a symlinked ancestor", () => {
+    const root = fs.mkdtempSync(nodePath.join(fs.realpathSync("/tmp"), "openrig-loader-"));
+    const actualRoot = nodePath.join(root, "actual");
+    const linkedRoot = nodePath.join(root, "linked");
+    const relativeScript = nodePath.join("scripts", "resolve-markdown.mjs");
+    try {
+      fs.mkdirSync(nodePath.join(actualRoot, "scripts"), { recursive: true });
+      fs.copyFileSync(
+        nodePath.join(PLUGIN_ROOT, "skills", "loading-addressable-markdown", relativeScript),
+        nodePath.join(actualRoot, relativeScript),
+      );
+      fs.writeFileSync(nodePath.join(actualRoot, "guide.md"), "# Guide\n\n## Intent\nLoaded.\n");
+      fs.symlinkSync(actualRoot, linkedRoot, "dir");
+
+      const result = spawnSync(
+        process.execPath,
+        [nodePath.join(linkedRoot, relativeScript), "--root", linkedRoot, "guide.md#intent"],
+        { encoding: "utf8" },
+      );
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe("## Intent\nLoaded.\n");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   // The 0.5.0 whole-set mirror (commit cabd2b2f) REVERSED the routing: openrig-user is now a
