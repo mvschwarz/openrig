@@ -234,6 +234,48 @@ describe("rig grow", () => {
     });
   });
 
+  it("reports every outcome when existing-pod batch growth partially mutates", async () => {
+    const client = {
+      get: vi.fn(async (path: string) => path.includes("specs/library")
+        ? { status: 200, data: library }
+        : { status: 200, data: [{ rigName: "alpha", podNamespace: "main" }] }),
+      post: vi.fn(async (_path: string, body: { member: { id: string } }) => body.member.id === "lead"
+        ? {
+            status: 409,
+            data: {
+              ok: false,
+              message: "Member main.lead already exists. Pick a different member id.",
+            },
+          }
+        : {
+            status: 201,
+            data: {
+              ok: true,
+              result: {
+                podNamespace: "main",
+                node: {
+                  logicalId: "main.worker",
+                  status: "launched",
+                  sessionName: "main-worker@alpha",
+                },
+              },
+            },
+          }),
+    };
+
+    const program = createProgram({ growDeps: deps(client) });
+    program.exitOverride();
+    const { logs, exitCode } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "grow", "rig-1", "lead", "worker", "--pod", "main"]));
+
+    const output = logs.join("\n");
+    expect(exitCode).toBe(1);
+    expect(output).toContain("[FAIL] main.lead");
+    expect(output).toContain("already exists");
+    expect(output).toContain("[OK] main.worker");
+    expect(output).toContain("main-worker@alpha");
+  });
+
   it("adds a new pod with several seats without YAML", async () => {
     const client = {
       get: vi.fn(async (path: string) => path.includes("specs/library")
@@ -281,6 +323,77 @@ describe("rig grow", () => {
       ok: true,
       pod: "review",
       seats: ["review.reviewer", "review.qa"],
+    });
+  });
+
+  it("preserves node outcomes and retry guidance for partial new-pod growth", async () => {
+    const client = {
+      get: vi.fn(async (path: string) => path.includes("specs/library")
+        ? { status: 200, data: library }
+        : { status: 200, data: [{ rigName: "alpha", podNamespace: "main" }] }),
+      post: vi.fn(async () => ({
+        status: 207,
+        data: {
+          ok: true,
+          status: "partial",
+          podNamespace: "review",
+          nodes: [
+            { logicalId: "review.reviewer", status: "launched", sessionName: "review-reviewer@alpha" },
+            { logicalId: "review.qa", status: "failed", error: "harness launch failed" },
+          ],
+          warnings: ["review.qa needs attention"],
+          retryTargets: ["review.qa"],
+        },
+      })),
+    };
+
+    const program = createProgram({ growDeps: deps(client) });
+    program.exitOverride();
+    const { logs, exitCode } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "grow", "rig-1", "reviewer", "qa", "--new-pod", "review"]));
+
+    const output = logs.join("\n");
+    expect(exitCode).toBe(1);
+    expect(output).toContain("[OK] review.reviewer");
+    expect(output).toContain("[FAIL] review.qa");
+    expect(output).toContain("harness launch failed");
+    expect(output).toContain("review.qa needs attention");
+    expect(output).toContain("rig launch rig-1 review.qa");
+  });
+
+  it("keeps partial new-pod JSON actionable", async () => {
+    const client = {
+      get: vi.fn(async (path: string) => path.includes("specs/library")
+        ? { status: 200, data: library }
+        : { status: 200, data: [{ rigName: "alpha", podNamespace: "main" }] }),
+      post: vi.fn(async () => ({
+        status: 207,
+        data: {
+          ok: true,
+          status: "partial",
+          podNamespace: "review",
+          nodes: [
+            { logicalId: "review.reviewer", status: "launched" },
+            { logicalId: "review.qa", status: "failed", error: "harness launch failed" },
+          ],
+          retryTargets: ["review.qa"],
+        },
+      })),
+    };
+
+    const program = createProgram({ growDeps: deps(client) });
+    program.exitOverride();
+    const { logs, exitCode } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "grow", "rig-1", "reviewer", "qa", "--new-pod", "review", "--json"]));
+
+    expect(exitCode).toBe(1);
+    expect(JSON.parse(logs.join("\n"))).toMatchObject({
+      ok: false,
+      nodes: [
+        { logicalId: "review.reviewer", status: "launched" },
+        { logicalId: "review.qa", status: "failed", error: "harness launch failed" },
+      ],
+      retryTargets: ["review.qa"],
     });
   });
 

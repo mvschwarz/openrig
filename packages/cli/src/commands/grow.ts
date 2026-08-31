@@ -34,6 +34,8 @@ interface ExpandResult {
   status?: "ok" | "partial" | "failed";
   podNamespace?: string;
   nodes?: GrowNode[];
+  warnings?: string[];
+  retryTargets?: string[];
   errors?: string[];
   message?: string;
   error?: string;
@@ -121,6 +123,8 @@ export function growCommand(depsOverride?: StatusDeps): Command {
       let nodes: GrowNode[] = [];
       let ok = false;
       let detail: string | undefined;
+      let warnings: string[] = [];
+      let retryTargets: string[] = [];
 
       if (opts.newPod) {
         const res = await client.post<ExpandResult>(
@@ -132,6 +136,8 @@ export function growCommand(depsOverride?: StatusDeps): Command {
           { timeoutMs: 120_000 },
         );
         nodes = res.data.nodes ?? [];
+        warnings = res.data.warnings ?? [];
+        retryTargets = res.data.retryTargets ?? [];
         ok = res.status < 400
           && res.data.ok
           && res.data.status === "ok"
@@ -141,6 +147,13 @@ export function growCommand(depsOverride?: StatusDeps): Command {
           ?? res.data.message
           ?? res.data.error
           ?? nodes.find((node) => node.error)?.error;
+        const returned = new Set(nodes.map((node) => node.logicalId));
+        for (const member of memberSpecs) {
+          const logicalId = `${pod}.${member.id}`;
+          if (!returned.has(logicalId)) {
+            nodes.push({ logicalId, status: "failed", error: detail ?? "No node outcome returned." });
+          }
+        }
       } else {
         const failures: string[] = [];
         for (const member of memberSpecs) {
@@ -178,6 +191,9 @@ export function growCommand(depsOverride?: StatusDeps): Command {
           source: agentRef,
           ...(nodes.length === 1 ? { seat: nodes[0]?.logicalId, node: nodes[0] } : {}),
           nodes,
+          ...(detail ? { detail } : {}),
+          warnings,
+          retryTargets,
         }, null, 2));
       } else if (ok) {
         console.log(`Grew rig ${rigName ?? rigId}`);
@@ -191,7 +207,21 @@ export function growCommand(depsOverride?: StatusDeps): Command {
           }
         }
       } else {
-        console.error(detail ?? "Grow failed.");
+        console.error(`Grow did not fully succeed for ${rigName ?? rigId}`);
+        for (const node of nodes) {
+          const icon = node.status === "launched" ? "OK" : node.status === "attention_required" ? "ATTENTION" : "FAIL";
+          const session = node.sessionName ? ` (${node.sessionName})` : "";
+          const error = node.error ? ` - ${node.error}` : "";
+          console.error(`  [${icon}] ${node.logicalId}: ${node.status}${session}${error}`);
+        }
+        if (detail && !nodes.some((node) => node.error && detail.includes(node.error))) {
+          console.error(`  ${detail}`);
+        }
+        for (const warning of warnings) console.error(`  Warning: ${warning}`);
+        if (retryTargets.length > 0) {
+          console.error("  Failed nodes can be relaunched individually. Recover by:");
+          for (const target of retryTargets) console.error(`    rig launch ${rigId} ${target}`);
+        }
       }
 
       if (!ok) process.exitCode = 1;
