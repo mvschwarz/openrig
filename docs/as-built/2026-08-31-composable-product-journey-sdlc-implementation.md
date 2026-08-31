@@ -1,12 +1,10 @@
 # Composable Product-Journey SDLC Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
-
 **Goal:** Ship a reusable, mission-composable product-journey SDLC reference and teach a base-world agent how to execute it from mission and slice YAML.
 
-**Architecture:** The reference document is the single source of truth for component contracts and example compositions. `sdlc-conventions.md` indexes it, the existing `mission-slice-sop` skill teaches discovery and loading, and the 0.5.7 YAML records the pilot composition without creating an execution engine.
+**Architecture:** The reference document is the single source of truth for component contracts and example compositions. `sdlc-conventions.md` indexes it, `mission-install.md` teaches discovery and loading through the existing SOP-to-SSOT chain, and the 0.5.7 YAML records the pilot composition without creating an execution engine.
 
-**Tech Stack:** Markdown references, OpenRig plugin skill Markdown, alpha mission/slice YAML, Vitest packaging and skill-contract tests.
+**Tech Stack:** Markdown references, alpha mission/slice YAML, address resolution, YAML parsing, and package assembly checks.
 
 ---
 
@@ -26,15 +24,14 @@
 
 **Files:**
 - Modify: `docs/reference/sdlc-conventions.md`
-- Modify: `packages/daemon/assets/plugins/openrig-core/skills/mission-slice-sop/SKILL.md`
-- Modify: `packages/daemon/test/mission-slice-sop-plugin-parity.test.ts`
+- Modify: `docs/reference/mission-install.md`
 
 **Steps:**
 
 1. Add the product-journey catalog to the component menu and reference list.
-2. Teach `mission-slice-sop` that `mission.yaml` and `slice.yaml` may select components, while Part A remains the fallback.
-3. Add a test asserting that the shipped skill names the catalog and the blank-agent readiness statement.
-4. Run the focused Vitest file under Node 22.
+2. Teach the shipped mission-install reference that `mission.yaml` and `slice.yaml` may select components, while Part A remains the fallback.
+3. Preserve the frequently loaded `mission-slice-sop` unchanged; it already points to the conventions SSOT.
+4. Verify the discovery chain by direct reads and address resolution.
 
 ### Task 3: Rebind the 0.5.7 pilot to component IDs
 
@@ -59,9 +56,9 @@
 **Steps:**
 
 1. Resolve representative H2 and H3 addresses with `loading-addressable-markdown`.
-2. Run `mission-slice-sop-plugin-parity.test.ts` under Node 22.
+2. Parse the mission/slice YAML and validate every component and edge endpoint.
 3. Run the package packing check and confirm `docs/reference/product-journey-sdlc.md` is present.
-4. Re-read the shipped skill and catalog from disk.
+4. Re-read the shipped conventions, mission-install reference, and catalog from disk.
 5. Run `git diff --check` and inspect the final repository/YAML diffs.
 
 ### Task 5: Integrate without runtime mutation
@@ -71,7 +68,7 @@
 
 **Steps:**
 
-1. Commit the reference, skill, and test changes on the documentation branch.
+1. Commit the reference and reference-index changes on the documentation branch.
 2. Fast-forward clean `main` only if it is still at the recorded base.
 3. Update the workspace YAML after the reference is reachable from main.
-4. Do not restart or adopt the daemon solely for documentation; the next normal runtime build will carry the updated base-world skill and installed reference.
+4. Do not restart or adopt the daemon solely for documentation; the next normal runtime build will carry the installed references.

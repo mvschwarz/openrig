@@ -71,8 +71,9 @@ open-ended root-cause excavation.
 
 ### Blank-agent entry
 
-The existing `mission-slice-sop` skill remains the base-world entry point. It gains a
-short section teaching a fresh agent to:
+The existing `mission-slice-sop` skill remains the base-world entry point through
+its existing pointer to `sdlc-conventions.md`. The hot skill stays unchanged. The
+shipped `mission-install.md` reference teaches a fresh agent to:
 
 1. derive identity;
 2. load `mission.yaml`, then the active `slice.yaml` if present;
@@ -81,7 +82,8 @@ short section teaching a fresh agent to:
 5. execute the selected components without treating old queue narrative as authority.
 
 If no YAML composition exists, the current lightweight Part A remains the default.
-The skill points to the reference; it does not duplicate the component definitions.
+The existing skill points to the conventions SSOT, and the conventions plus mission
+install point to the catalog; none duplicates the component definitions.
 
 ### YAML composition
 
@@ -116,7 +118,10 @@ machine-readable arrangement.
 ## Verification
 
 - The new reference is included in package packing output.
-- The base `mission-slice-sop` skill points to it and retains its retrieval budget.
+- The unchanged base `mission-slice-sop` points to the conventions SSOT; the shipped
+  mission-install reference teaches YAML loading and blank-agent readiness.
 - Addressed H2/H3 sections resolve with the existing Markdown resolver.
 - The updated 0.5.7 YAML parses and names only component IDs defined in the catalog.
-- The existing mission-slice skill tests and package packing checks pass.
+- The reference-address, YAML, and package packing checks pass; existing unrelated
+  mission-slice skill-test reds are measured against the exact base rather than
+  absorbed into this work.

@@ -99,6 +99,25 @@ it empty and say so.
   are reference; the reader's reaction names the sections actually read. Splitting
   the file is better when two consumers keep needing different subsets.
 
+## Mission-selected execution components
+
+A mission may carry `mission.yaml`, and a slice may carry `slice.yaml`, as an
+address map for the work arrangement. When present, install `mission.yaml` in
+the ARRANGEMENT layer and the active `slice.yaml` in the CONTRACT layer. Read
+the mission file first; the slice may narrow or override mission defaults.
+
+The reusable component catalog is repo
+`docs/reference/product-journey-sdlc.md` and installed
+`$OPENRIG_HOME/reference/product-journey-sdlc.md`. A catalog with
+`root: repository` resolves from `git rev-parse --show-toplevel`; use the
+`loading-addressable-markdown` skill for addressed H2/H3 sections.
+
+Before the installee claims work, require one readiness statement naming:
+**role; user outcome; starting candidate; boundaries**. The selected component
+IDs and explicit edges arrange the work; they do not expand scope, create a
+mode, or enforce gates. If no composition exists, the light Part A flow in
+`mission-slice-sop` is complete—absence is not a reason to mint YAML.
+
 ## Composition, not generation
 
 The install **composes authored, cited artifacts. It never generates summary prose at
@@ -183,8 +202,10 @@ deliver paced, assign the derive list, require the delta.
 2. Write or update the arrangement document — how the pieces connect, what to trust.
 3. Mark every contract piece with `updated-at`; mark underived facts `UNVERIFIED`.
 4. Choose the profile: planning-class full, or execution-class high-altitude.
-5. Compose the ordered piece list with provenance; deliver it paced, pointer-first.
-6. End with the derive list; require the dated delta; verify existence; second-read
+5. If mission/slice YAML selects execution components, include those files and
+   their addressed catalog sections at the appropriate layers.
+6. Compose the ordered piece list with provenance; deliver it paced, pointer-first.
+7. End with the derive list; require the dated delta; verify existence; second-read
    the facts; re-derive on error.
 
 A project of any kind fits this: for a book, the pieces are the outline's history and
