@@ -236,6 +236,8 @@ describe("Rig lifecycle routes", () => {
       body: "must move with the removal",
       nudge: false,
     });
+    const hasSession = setup.tmuxAdapter.hasSession as ReturnType<typeof import("vitest").vi.fn>;
+    hasSession.mockResolvedValue(true);
 
     const res = await setup.app.request(
       `/api/rigs/${rig.id}/nodes/infra.server?fallback=${encodeURIComponent(fallbackSession)}`,
@@ -296,6 +298,55 @@ describe("Rig lifecycle routes", () => {
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual(expect.objectContaining({ ok: false, code: "fallback_not_running" }));
     expect(killSession).not.toHaveBeenCalled();
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.map((node) => node.logicalId).sort()).toEqual(["infra.fallback", "infra.server"]);
+    expect(db.prepare("SELECT destination_session, state FROM queue_items WHERE qitem_id = ?").get(qitem.qitemId)).toEqual({
+      destination_session: targetSession,
+      state: "pending",
+    });
+  });
+
+  it("DELETE /api/rigs/:rigId/nodes/:nodeRef refuses a stale running fallback absent from tmux", async () => {
+    const rig = setup.rigRepo.createRig("remove-stale-fallback-rig");
+    const expanded = await setup.rigExpansionService.expand({
+      rigId: rig.id,
+      pod: {
+        id: "infra",
+        label: "Infrastructure",
+        members: [
+          { id: "server", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+          { id: "fallback", runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" },
+        ],
+        edges: [],
+      },
+    });
+    expect(expanded.ok).toBe(true);
+    if (!expanded.ok) return;
+    const targetSession = expanded.nodes.find((node) => node.logicalId === "infra.server")?.sessionName;
+    const fallbackSession = expanded.nodes.find((node) => node.logicalId === "infra.fallback")?.sessionName;
+    expect(targetSession).toBeTruthy();
+    expect(fallbackSession).toBeTruthy();
+    if (!targetSession || !fallbackSession) return;
+
+    const queueRepo = new QueueRepository(db, setup.eventBus);
+    const qitem = await queueRepo.create({
+      sourceSession: "source@remove-stale-fallback-rig",
+      destinationSession: targetSession,
+      body: "must stay with the target when fallback is absent",
+      nudge: false,
+    });
+    const hasSession = setup.tmuxAdapter.hasSession as ReturnType<typeof import("vitest").vi.fn>;
+    hasSession.mockClear();
+    hasSession.mockResolvedValue(false);
+
+    const res = await setup.app.request(
+      `/api/rigs/${rig.id}/nodes/infra.server?fallback=${encodeURIComponent(fallbackSession)}`,
+      { method: "DELETE" },
+    );
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual(expect.objectContaining({ ok: false, code: "fallback_not_running" }));
+    expect(hasSession).toHaveBeenCalledTimes(1);
+    expect(hasSession).toHaveBeenCalledWith(fallbackSession);
     expect(setup.rigRepo.getRig(rig.id)?.nodes.map((node) => node.logicalId).sort()).toEqual(["infra.fallback", "infra.server"]);
     expect(db.prepare("SELECT destination_session, state FROM queue_items WHERE qitem_id = ?").get(qitem.qitemId)).toEqual({
       destination_session: targetSession,
@@ -447,6 +498,8 @@ describe("Rig lifecycle routes", () => {
       body: "pending work must move too",
       nudge: false,
     }));
+    const hasSession = setup.tmuxAdapter.hasSession as ReturnType<typeof import("vitest").vi.fn>;
+    hasSession.mockResolvedValue(true);
     db.prepare("UPDATE queue_items SET state = 'in-progress' WHERE qitem_id = ?").run(qitems[0]!.qitemId);
     db.prepare("UPDATE queue_items SET state = 'blocked' WHERE qitem_id = ?").run(qitems[1]!.qitemId);
 

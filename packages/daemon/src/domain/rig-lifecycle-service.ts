@@ -377,7 +377,7 @@ export class RigLifecycleService {
 
     const fallbackDestination = opts?.fallbackDestination;
     if (fallbackDestination !== undefined) {
-      const invalidFallback = this.validateFallbackDestination(fallbackDestination, new Set([node.node_id]));
+      const invalidFallback = await this.validateFallbackDestination(fallbackDestination, new Set([node.node_id]));
       if (invalidFallback) return invalidFallback;
     }
 
@@ -499,7 +499,7 @@ export class RigLifecycleService {
 
     const fallbackDestination = opts?.fallbackDestination;
     if (fallbackDestination !== undefined) {
-      const invalidFallback = this.validateFallbackDestination(
+      const invalidFallback = await this.validateFallbackDestination(
         fallbackDestination,
         new Set(nodes.map((node) => node.id)),
       );
@@ -657,10 +657,10 @@ export class RigLifecycleService {
     return `${subject} Reroute each qitem before ${before}:\n${fallbackCommands}`;
   }
 
-  private validateFallbackDestination(
+  private async validateFallbackDestination(
     fallbackDestination: string,
     targetNodeIds: Set<string>,
-  ): FallbackValidationFailure | null {
+  ): Promise<FallbackValidationFailure | null> {
     const row = this.db.prepare(`
       SELECT s.node_id, n.logical_id, s.status
       FROM sessions s
@@ -682,6 +682,13 @@ export class RigLifecycleService {
         ok: false,
         code: "fallback_in_target",
         error: `Fallback destination '${fallbackDestination}' belongs to '${row.logical_id}', which is part of the removal target. No queue or topology changes were made.`,
+      };
+    }
+    if (!this.tmuxAdapter || !(await this.tmuxAdapter.hasSession(fallbackDestination))) {
+      return {
+        ok: false,
+        code: "fallback_not_running",
+        error: `Fallback destination '${fallbackDestination}' is not a currently running seat. No queue or topology changes were made.`,
       };
     }
     return null;
