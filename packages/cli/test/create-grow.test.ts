@@ -187,6 +187,103 @@ describe("rig grow", () => {
     });
   });
 
+  it("adds several seats to an existing pod without YAML", async () => {
+    const client = {
+      get: vi.fn(async (path: string) => path.includes("specs/library")
+        ? { status: 200, data: library }
+        : { status: 200, data: [{ rigName: "alpha", podNamespace: "main" }] }),
+      post: vi.fn(async (_path: string, body: { member: { id: string } }) => ({
+        status: 201,
+        data: {
+          ok: true,
+          result: {
+            podNamespace: "main",
+            node: {
+              logicalId: `main.${body.member.id}`,
+              status: "launched",
+              sessionName: `main-${body.member.id}@alpha`,
+            },
+          },
+        },
+      })),
+    };
+
+    const program = createProgram({ growDeps: deps(client) });
+    program.exitOverride();
+    const { logs, exitCode } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "grow", "rig-1", "worker", "qa", "--pod", "main", "--cwd", "/work", "--json"]));
+
+    expect(exitCode).toBeUndefined();
+    expect(client.post).toHaveBeenCalledTimes(2);
+    expect(client.post).toHaveBeenNthCalledWith(
+      1,
+      "/api/rigs/rig-1/pods/main/members",
+      expect.objectContaining({ member: expect.objectContaining({ id: "worker" }) }),
+      { timeoutMs: 120_000 },
+    );
+    expect(client.post).toHaveBeenNthCalledWith(
+      2,
+      "/api/rigs/rig-1/pods/main/members",
+      expect.objectContaining({ member: expect.objectContaining({ id: "qa" }) }),
+      { timeoutMs: 120_000 },
+    );
+    expect(JSON.parse(logs.join("\n"))).toMatchObject({
+      ok: true,
+      pod: "main",
+      seats: ["main.worker", "main.qa"],
+    });
+  });
+
+  it("adds a new pod with several seats without YAML", async () => {
+    const client = {
+      get: vi.fn(async (path: string) => path.includes("specs/library")
+        ? { status: 200, data: library }
+        : { status: 200, data: [{ rigName: "alpha", podNamespace: "main" }] }),
+      post: vi.fn(async (_path: string, _body: Record<string, unknown>) => {
+        return {
+          status: 201,
+          data: {
+            ok: true,
+            status: "ok",
+            podNamespace: "review",
+            nodes: [
+              { logicalId: "review.reviewer", status: "launched", sessionName: "review-reviewer@alpha" },
+              { logicalId: "review.qa", status: "launched", sessionName: "review-qa@alpha" },
+            ],
+          },
+        };
+      }),
+    };
+
+    const program = createProgram({ growDeps: deps(client) });
+    program.exitOverride();
+    const { logs, exitCode } = await captureLogs(() =>
+      program.parseAsync(["node", "rig", "grow", "rig-1", "reviewer", "qa", "--new-pod", "review", "--cwd", "/work", "--json"]));
+
+    expect(exitCode).toBeUndefined();
+    expect(client.post).toHaveBeenCalledWith(
+      "/api/rigs/rig-1/expand",
+      expect.objectContaining({
+        pod: {
+          id: "review",
+          label: "review",
+          members: [
+            expect.objectContaining({ id: "reviewer" }),
+            expect.objectContaining({ id: "qa" }),
+          ],
+          edges: [],
+        },
+        rigRoot: "/work",
+      }),
+      { timeoutMs: 120_000 },
+    );
+    expect(JSON.parse(logs.join("\n"))).toMatchObject({
+      ok: true,
+      pod: "review",
+      seats: ["review.reviewer", "review.qa"],
+    });
+  });
+
   it("requires --pod when the target is ambiguous", async () => {
     const client = {
       get: vi.fn(async () => ({
