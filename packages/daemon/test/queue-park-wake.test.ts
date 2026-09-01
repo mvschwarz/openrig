@@ -237,6 +237,62 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(jobs.getById(ref)!.state).not.toBe("active");
   });
 
+  it("OPR.0.5.8.1 S1b — re-parking SUPERSEDES the old timer: exactly one live job", async () => {
+    // The third repeat route. Re-parking used to arm a second job while the first
+    // stayed active, so one row carried two live timers, each firing on its own
+    // cadence. A new park episode now supersedes the old.
+    const row = await item("worker@rig");
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: first park", wakeAfterSeconds: 90,
+    } as never);
+    const first = (wakes(row.qitemId)[0] as { wake_ref: string }).wake_ref;
+    expect(jobs.getById(first)!.state).toBe("active");
+
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: re-park, longer", wakeAfterSeconds: 3600,
+    } as never);
+    const second = repo.getParkWakeStatus(row.qitemId)!.ref;
+    expect(second).not.toBe(first);
+
+    // exactly one live timer on this row
+    expect(jobs.getById(first)!.state).not.toBe("active");
+    expect((db.prepare("SELECT terminal_reason FROM watchdog_jobs WHERE job_id = ?")
+      .get(first) as { terminal_reason: string | null }).terminal_reason).toBe("park_superseded");
+    expect(jobs.getById(second)!.state).toBe("active");
+
+    // and the survivor is measured from ITS OWN arming, at ITS OWN duration
+    const secondJob = jobs.getById(second)!;
+    expect(secondJob.intervalSeconds).toBe(3600);
+    const armed = Date.parse(secondJob.registeredAt);
+    expect(isDue(secondJob, armed + 90_000)).toBe(false);      // not the old 90s
+    expect(isDue(secondJob, armed + 3_599_999)).toBe(false);
+    expect(isDue(secondJob, armed + 3_600_000)).toBe(true);
+  });
+
+  it("OPR.0.5.8.1 S1b — re-parking does NOT touch an operator's attached watchdog", async () => {
+    const job = jobs.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: \"worker@rig\"\nmessage: \"operator's own\"\n",
+      targetSession: "worker@rig",
+      intervalSeconds: 600,
+      registeredBySession: "operator@rig",
+    });
+    const row = await item("worker@rig");
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "park on operator watchdog",
+      wakeWatchdogId: job.jobId,
+    } as never);
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "re-park with a timer", wakeAfterSeconds: 90,
+    } as never);
+
+    expect(jobs.getById(job.jobId)!.state).toBe("active");   // still the operator's
+  });
+
   it("OPR.0.5.8.1 S1b — the S16 provider-limit path is UNCHANGED, and stays distinguishable", async () => {
     // Contract item 3 asked me to state whether this repair touches S16 and pin
     // it either way. It does not: provider-limit timers already ended after

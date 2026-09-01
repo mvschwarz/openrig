@@ -2455,6 +2455,28 @@ export class QueueRepository {
       ownerNotificationLevel: notification?.level,
     });
     if (parkWake) {
+      // OPR.0.5.8.1 S1b addendum — A NEW PARK EPISODE SUPERSEDES THE OLD.
+      // Re-parking (blocked -> blocked with a fresh --wake-after) used to arm a
+      // second job while the first stayed active, leaving two live timers on one
+      // row: the third repeat-fire route, alongside the never-stopped fire and
+      // the row-outliving timer.
+      //
+      // Read BEFORE recording the new armed row: getStatus returns the most
+      // recent armed wake, so after the record below it would return the one we
+      // are arming now rather than the one being superseded.
+      //
+      // Deliberately not gated on the previous state. The live+timer test is the
+      // real safety, and leaving it ungated also cleans up a stale park-generated
+      // timer left by any path that did not unpark cleanly. It cannot over-reach:
+      // a job already terminal fails `live`, and an operator's attached watchdog
+      // fails the kind test.
+      const superseded = this.wakeRepo.getStatus(input.qitemId);
+      if (superseded?.kind === "timer" && superseded.live && superseded.ref !== parkWake.ref) {
+        (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).markTerminal(
+          superseded.ref,
+          "park_superseded",
+        );
+      }
       this.wakeRepo.record({
         transitionId: transition.transitionId,
         qitemId: input.qitemId,
