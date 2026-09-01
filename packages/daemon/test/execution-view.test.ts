@@ -273,6 +273,17 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect((result.rows[0] as Record<string, unknown>).mission).toBe(MISSION);
   });
 
+  it("accepts a unique body-only mission on the active row before the newer-directory fallback", () => {
+    fs.mkdirSync(path.join(missionsRoot, "release-10.0", "slices"), { recursive: true });
+    db.prepare(`UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'`).run();
+    db.prepare(`UPDATE queue_items SET tags = ?, body = ? WHERE qitem_id = 'qitem-lane-31'`).run(
+      JSON.stringify(["gate:qa"]),
+      `Mission: ${MISSION}\nSlice: OPR.9.9.31\nworktree_path=${laneWorktree}\n`,
+    );
+    const result = projector.show("execution");
+    expect((result.rows[0] as Record<string, unknown>).mission).toBe(MISSION);
+  });
+
   it("EC-3: the worktree_path field is Q1's join key; a legacy baton falls back marked fragile", () => {
     const doc = show();
     const lanes = doc.q1_lanes as Record<string, unknown>[];

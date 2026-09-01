@@ -452,11 +452,15 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
   let mission: string | Indeterminate = opts?.mission ?? INDETERMINATE;
   if (mission === INDETERMINATE && missionsRoot) {
     const active = deps.db
-      .prepare(`SELECT tags FROM queue_items WHERE state = 'in-progress' ORDER BY ts_updated DESC`)
-      .all() as Array<{ tags: string | null }>;
+      .prepare(`SELECT tags, body FROM queue_items WHERE state = 'in-progress' ORDER BY ts_updated DESC`)
+      .all() as Array<{ tags: string | null; body: string | null }>;
     for (const row of active) {
       const tag = parseTags(row.tags).find((value) => value.startsWith("mission:"));
-      const candidate = tag?.slice("mission:".length);
+      // Canonical tags win; the conventional handoff line keeps older/body-only batons visible.
+      const bodyMissions = [...new Set(
+        [...(row.body?.matchAll(/^Mission:[ \t]+(\S+)[ \t]*$/gm) ?? [])].map((match) => match[1]!),
+      )];
+      const candidate = tag?.slice("mission:".length) ?? (bodyMissions.length === 1 ? bodyMissions[0] : undefined);
       const root = path.resolve(missionsRoot);
       const candidatePath = candidate ? path.resolve(root, candidate) : null;
       if (candidate && candidatePath?.startsWith(`${root}${path.sep}`) && fs.existsSync(candidatePath)) {
