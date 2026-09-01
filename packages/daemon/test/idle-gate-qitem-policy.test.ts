@@ -4,6 +4,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { migrate } from "../src/db/migrate.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
+import { idleGateFiredConditionSchema } from "../src/db/migrations/078_idle_gate_fired_condition.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -71,7 +72,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
 
   beforeEach(() => {
     db = createFullTestDb();
-    migrate(db, [watchdogJobsSchema, watchdogHistorySchema]); // idempotent; adds watchdog tables
+    migrate(db, [watchdogJobsSchema, watchdogHistorySchema, idleGateFiredConditionSchema]); // idempotent; adds watchdog tables
     eventBus = new EventBus(db);
     store = new AgentActivityStore({ db, eventBus, now: () => NOW });
     seedSeat();
@@ -92,6 +93,122 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     expect(out.notes?.gateRoles).toEqual(["guard"]);
     expect(out.notes?.activityState).toBe("idle");
     expect(out.notes?.activityEvidenceSource).toBe("runtime_hook");
+  });
+
+  // --- OPR.0.5.8.1 S2: fire once per MATERIAL STATE of the gated set ---
+  //
+  // Reproduced on a real daemon before any of this was written: an unchanged
+  // gate-shaped blocked row re-woke the seat at +0s and +120.3s (window expiry),
+  // and a brief seat-active flicker cleared `actionable` and produced a re-fire
+  // 60.1s into a 120s window. The window was never a cooldown.
+
+  function seedJobRow(jobId = "job-1"): void {
+    db.prepare(
+      `INSERT INTO watchdog_jobs (job_id, policy, spec_yaml, target_session, interval_seconds,
+         active_wake_interval_seconds, state, registered_by_session, registered_at)
+       VALUES (?, 'idle-gate-qitem', 'policy: idle-gate-qitem', ?, 30, 300, 'active', 'ops@kernel', '2026-07-03T07:00:00Z')`,
+    ).run(jobId, SEAT);
+  }
+  const firedCondition = (jobId = "job-1") =>
+    (db.prepare("SELECT last_fired_condition AS c FROM watchdog_jobs WHERE job_id = ?").get(jobId) as
+      | { c: string | null }
+      | undefined)?.c ?? null;
+  function appendTransition(qitemId: string, note: string, id: number): void {
+    db.prepare(
+      `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, actor_session, transition_note)
+       VALUES (?, ?, '2026-07-03T08:00:00Z', 'blocked', 'someone@rig', ?)`,
+    ).run(id, qitemId, note);
+  }
+
+  it("S2 R-1 — an UNCHANGED gated set does not re-wake when the window expires", async () => {
+    seedJobRow();
+    seedGateQitem("q-gate-1");
+    seedActivity("Stop", FRESH);
+    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+
+    expect((await policy.evaluate(makeJob())).action).toBe("send");
+    // Second evaluation with the window fully elapsed and nothing changed.
+    const out = await policy.evaluate(makeJob({ lastFireAt: "2026-07-03T07:00:00.000Z" }));
+    expect(out.action).toBe("skip");
+    expect((out as { reason: string }).reason).toBe("gate_condition_unchanged");
+  });
+
+  it("S2 R-2 — a seat_active FLICKER does not reset the fired-for memory", async () => {
+    // The engine clears `actionable` on every skip, which is what made a brief
+    // busy moment re-open immediate firing. The condition memory lives in the
+    // policy and keys to the CONDITION, so an activity skip cannot launder it.
+    seedJobRow();
+    seedGateQitem("q-gate-1");
+    seedActivity("Stop", FRESH);
+    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    expect((await policy.evaluate(makeJob())).action).toBe("send");
+    const afterFire = firedCondition();
+    expect(afterFire).not.toBeNull();
+
+    seedActivity("UserPromptSubmit", FRESH); // seat goes active
+    const busy = await policy.evaluate(makeJob());
+    expect((busy as { reason: string }).reason).toBe("seat_active");
+    expect(firedCondition()).toBe(afterFire); // memory untouched by the flicker
+
+    seedActivity("Stop", FRESH); // idle again
+    const out = await policy.evaluate(makeJob({ lastFireAt: null, actionable: false } as never));
+    expect(out.action).toBe("skip");
+    expect((out as { reason: string }).reason).toBe("gate_condition_unchanged");
+  });
+
+  it("S2 preserve — a NEW gate qitem arriving at the seat wakes", async () => {
+    seedJobRow();
+    seedGateQitem("q-gate-1");
+    seedActivity("Stop", FRESH);
+    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    expect((await policy.evaluate(makeJob())).action).toBe("send");
+
+    seedGateQitem("q-gate-2");
+    expect((await policy.evaluate(makeJob())).action).toBe("send");
+  });
+
+  it("S2 preserve — a MATERIAL transition on the row re-wakes promptly", async () => {
+    seedJobRow();
+    seedGateQitem("q-gate-1");
+    seedActivity("Stop", FRESH);
+    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    expect((await policy.evaluate(makeJob())).action).toBe("send");
+    expect((await policy.evaluate(makeJob())).action).toBe("skip");
+
+    appendTransition("q-gate-1", "reviewer asked a question", 9001);
+    expect((await policy.evaluate(makeJob())).action).toBe("send");
+  });
+
+  it("S2 — wake-machinery markers are NEVER material (else every wake justifies the next)", async () => {
+    seedJobRow();
+    seedGateQitem("q-gate-1");
+    seedActivity("Stop", FRESH);
+    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    expect((await policy.evaluate(makeJob())).action).toBe("send");
+
+    appendTransition("q-gate-1", "wake-attempt: 1/3 outcome=delivered", 9002);
+    appendTransition("q-gate-1", "escalation-rung: orchestrator -> orch@rig", 9003);
+    const out = await policy.evaluate(makeJob());
+    expect(out.action).toBe("skip");
+    expect((out as { reason: string }).reason).toBe("gate_condition_unchanged");
+  });
+
+  it("S2 — a suppressed wake stays derivable: the job records the condition it fired for", async () => {
+    // Suppressing the WAKE, never the record. The row itself is untouched and
+    // still appears in held/escalations; the job carries the exact condition.
+    seedJobRow();
+    seedGateQitem("q-gate-1");
+    seedActivity("Stop", FRESH);
+    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    expect(firedCondition()).toBeNull();
+    await policy.evaluate(makeJob());
+    const recorded = firedCondition();
+    expect(recorded).toMatch(/^[0-9a-f]{32}$/);
+    await policy.evaluate(makeJob());
+    expect(firedCondition()).toBe(recorded); // one overwritten value, not a ledger
+    expect(
+      (db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE qitem_id = 'q-gate-1'").get() as { n: number }).n,
+    ).toBe(1);
   });
 
   it("human-gate tier (no gate:* tag) + FRESH idle → send (secondary predicate, gate:human)", async () => {
@@ -215,11 +332,23 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
       expect(deliveries[0]?.targetSession).toBe(SEAT);
       expect(historyLog.listForJob(registered.jobId)[0]?.outcome).toBe("sent");
 
-      // Second immediate evaluation → engine active-wake throttle quiet-skips
-      // (cooldown is FREE; no duplicate wake).
+      // Second immediate evaluation → quiet skip, no duplicate wake.
+      //
+      // AMENDED by OPR.0.5.8.1 S2. This test's subject — fires once, then no
+      // duplicate wake — is unchanged and still asserted by the delivery count,
+      // which is what the user actually experiences. Only the REASON moved:
+      // the condition gate now decides before the engine's active-wake window
+      // is consulted, so the skip is `gate_condition_unchanged` rather than
+      // `active_wake_not_due`.
+      //
+      // Asserting the new reason rather than loosening to "any skip" on
+      // purpose: the two reasons are not interchangeable. `active_wake_not_due`
+      // expires with the window and is bypassed entirely once a skip has
+      // cleared `actionable`; `gate_condition_unchanged` holds until the gated
+      // set materially changes. Which one fired is the whole repair.
       const r2 = await engine.evaluate(jobsRepo.getByIdOrThrow(registered.jobId));
       expect(r2.outcome.action).toBe("skip");
-      expect((r2.outcome as { reason: string }).reason).toBe("active_wake_not_due");
+      expect((r2.outcome as { reason: string }).reason).toBe("gate_condition_unchanged");
       expect(deliveries).toHaveLength(1);
     });
   });

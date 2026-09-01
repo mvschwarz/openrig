@@ -412,8 +412,20 @@ describe("W2c watchdog auto-registration — production composition", () => {
       expect(deliveries[0]?.message).toContain("q-w2c-delivery");
       expect(history.listForJob(rows[0]!.jobId).map((entry) => entry.outcome)).toEqual(["sent"]);
 
+      // AMENDED by OPR.0.5.8.1 S2. The subject — "delivers once" — is unchanged
+      // and still asserted by the delivery count below. Only the skip REASON
+      // moved: the gated-condition gate now decides before the engine's
+      // active-wake window is consulted. The two are not interchangeable, so
+      // the new reason is asserted exactly rather than relaxed to "some skip".
       const second = await engine.evaluate(deps.watchdogJobsRepo!.getByIdOrThrow(rows[0]!.jobId));
-      expect(second.outcome).toEqual({ action: "skip", reason: "active_wake_not_due" });
+      expect(second.outcome).toEqual({
+        action: "skip",
+        reason: "gate_condition_unchanged",
+        // Notes match the convention of this policy's sibling quiet skips
+        // (seat_active carries them too): available to a caller inspecting the
+        // outcome, while the quiet classification keeps them out of history.
+        notes: { seat: sessionName, pendingGateCount: 1 },
+      });
       expect(deliveries).toHaveLength(1);
       expect(autoRows(db, sessionName)).toHaveLength(1);
 

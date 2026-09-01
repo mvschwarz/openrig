@@ -17,6 +17,7 @@
 // active_wake_interval_seconds on the registered job). It WAKES ONLY — it
 // never claims or acts on the gate.
 
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { AgentActivityStore } from "../agent-activity-store.js";
 import { effectiveGateRoles } from "../gate-predicate.js";
@@ -102,8 +103,37 @@ export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
         return { action: "skip", reason: "seat_active", notes: { seat, activityState: activity.state } };
       }
 
+      // Signal C — OPR.0.5.8.1 S2. Fire once per MATERIAL STATE of the gated
+      // set, not once per window and not once per idle episode.
+      //
+      // The engine's active-wake window was the only cooldown, and it is not
+      // one: `watchdog-policy-engine.ts` clears `actionable` on EVERY skip, and
+      // the throttle's precondition includes `job.actionable`. So a seat that
+      // went briefly active between scans re-opened immediate firing —
+      // reproduced at 60.1s into a 120s window. Window expiry alone also
+      // re-woke an unchanged row every interval.
+      //
+      // The memory keys to the CONDITION, never to seat activity: a skip for
+      // seat_active / needs_input / activity_stale returns above WITHOUT
+      // touching it, so a flicker can no longer manufacture a fresh wake.
+      const fingerprint = gatedConditionFingerprint(db, gated.map((g) => g.qitemId));
+      const firedFor = (
+        db.prepare("SELECT last_fired_condition AS c FROM watchdog_jobs WHERE job_id = ?")
+          .get(job.jobId) as { c: string | null } | undefined
+      )?.c ?? null;
+      if (firedFor !== null && firedFor === fingerprint) {
+        return {
+          action: "skip",
+          reason: "gate_condition_unchanged",
+          notes: { seat, pendingGateCount: gated.length },
+        };
+      }
+
       // Both signals joined → ONE bounded wake (single-target, keepalive
-      // shape). Engine active-wake throttle provides the cooldown.
+      // shape). Recorded at decision time, mirroring how the engine stamps
+      // last_fire_at on the send path regardless of delivery outcome.
+      db.prepare("UPDATE watchdog_jobs SET last_fired_condition = ? WHERE job_id = ?")
+        .run(fingerprint, job.jobId);
       const primary = gated[0]!;
       const message =
         job.message ??
@@ -127,6 +157,56 @@ export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
       };
     },
   };
+}
+
+/**
+ * Wake-machinery markers are NEVER material. If they were, every wake would
+ * justify the next one and the gate would be decorative.
+ */
+const WAKE_MACHINERY_NOTE_PREFIXES = [
+  "wake-attempt:",
+  "escalation-rung:",
+  "ladder-exhausted:",
+  "ladder-suspend:",
+  "ladder-resume:",
+  "park wake fired:",
+  "idle-gate:",
+];
+
+/**
+ * A stable digest of the gated condition: which rows qualify, and the material
+ * state of each.
+ *
+ * Material state per the ruled definition — a substantive transition on the row
+ * (state / claim / content-bearing note / resolution), a transition on its
+ * blocker or the blocker reaching terminal, and pickup evidence. Row identity
+ * alone is not enough: the same two rows can be in different states.
+ *
+ * Derived entirely from existing queue facts. Nothing new is recorded per wake;
+ * the only stored value is the single overwritten fingerprint on the job.
+ */
+function gatedConditionFingerprint(db: Database.Database, qitemIds: readonly string[]): string {
+  const notMachinery = WAKE_MACHINERY_NOTE_PREFIXES.map(() => "COALESCE(t.transition_note,'') NOT LIKE ?").join(" AND ");
+  const latestSubstantive = db.prepare(
+    `SELECT MAX(t.transition_id) AS marker
+       FROM queue_transitions t
+      WHERE t.qitem_id = ? AND ${notMachinery}`,
+  );
+  const rowFacts = db.prepare(
+    `SELECT q.state AS state, COALESCE(q.blocked_on,'') AS blockedOn,
+            COALESCE(q.claimed_at,'') AS claimedAt,
+            COALESCE((SELECT b.state FROM queue_items b WHERE b.qitem_id = q.blocked_on),'') AS blockerState
+       FROM queue_items q WHERE q.qitem_id = ?`,
+  );
+  const likeArgs = WAKE_MACHINERY_NOTE_PREFIXES.map((p) => `${p}%`);
+  const parts = [...qitemIds].sort().map((id) => {
+    const f = rowFacts.get(id) as
+      | { state: string; blockedOn: string; claimedAt: string; blockerState: string }
+      | undefined;
+    const marker = (latestSubstantive.get(id, ...likeArgs) as { marker: number | null } | undefined)?.marker ?? 0;
+    return [id, f?.state ?? "", f?.blockedOn ?? "", f?.blockerState ?? "", f?.claimedAt ?? "", marker].join("|");
+  });
+  return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32);
 }
 
 function buildIdleGateMessage(input: {

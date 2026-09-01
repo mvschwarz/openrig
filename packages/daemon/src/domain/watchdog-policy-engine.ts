@@ -124,6 +124,15 @@ const QUIET_SKIP_REASONS = new Set<string>([
   // audited signal is the WAKE (fired) path.
   "no_pending_gate",
   "seat_active",
+  // OPR.0.5.8.1 S2 — the gated condition has not materially changed since the
+  // wake that was already delivered for it. Quiet for the same reason as its
+  // siblings: a 60s scan must not write a history row every minute. The
+  // suppression stays derivable without one — the row itself remains visible in
+  // the held/escalations views (this suppresses the WAKE, never the record),
+  // and the job carries `last_fired_condition`, the exact condition it fired
+  // for. Adding this string changes no throttle semantics and no other policy
+  // emits it.
+  "gate_condition_unchanged",
   // OPR.0.5.6.24 — the parked-owner consumer's clean-scan no-op: nothing
   // parked, nothing closed, nothing deferred. Suppressed so a routine rig
   // scan writes no history (the loud, audited signals are the SENT wake,

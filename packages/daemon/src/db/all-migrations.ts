@@ -80,9 +80,10 @@ import { contextUsageWatchdogSchema } from "./migrations/074_context_usage_watch
 import { contextUsageWatchdogGenerationSchema } from "./migrations/075_context_usage_watchdog_generation.js";
 import { ownerNotificationLevelsSchema } from "./migrations/076_owner_notification_levels.js";
 import { nodeSessionSourceSchema } from "./migrations/077_node_session_source.js";
+import { idleGateFiredConditionSchema } from "./migrations/078_idle_gate_fired_condition.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→077 (068 enforcer decisions, dropped forward by 071; 069/070 W3 launch truth). */
+/** Ordered 001→078 (068 enforcer decisions, dropped forward by 071; 069/070 W3 launch truth). */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -161,4 +162,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   contextUsageWatchdogGenerationSchema,
   ownerNotificationLevelsSchema,
   nodeSessionSourceSchema,
+  idleGateFiredConditionSchema,
 ];
