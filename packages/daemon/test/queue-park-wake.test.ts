@@ -237,6 +237,127 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(jobs.getById(ref)!.state).not.toBe("active");
   });
 
+  // --- OPR.0.5.8.1 S1b repair (review50-r2 NOT-CLEAR at 8dfe8a3a) ---
+  //
+  // `queue_items.state` is written by SIX methods, not one. The first repair
+  // hooked only the generic `update()` path, so every other writer kept the timer
+  // alive — including `handoff()`, the exact route the founding specimen took.
+  // Each exit below is pinned through its REAL method, not another spelling of
+  // `update()`, which is what made the gap invisible the first time.
+
+  async function parkedWithTimer(session = "worker@rig", seconds = 7200) {
+    const row = await item(session);
+    repo.update({
+      qitemId: row.qitemId, actorSession: session, state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: parked", wakeAfterSeconds: seconds,
+    } as never);
+    const ref = (wakes(row.qitemId).at(-1) as { wake_ref: string }).wake_ref;
+    expect(jobs.getById(ref)!.state).toBe("active");
+    return { row, ref };
+  }
+  const terminalReason = (ref: string) =>
+    (db.prepare("SELECT terminal_reason FROM watchdog_jobs WHERE job_id = ?")
+      .get(ref) as { terminal_reason: string | null }).terminal_reason;
+
+  it("OPR.0.5.8.1 S1b — handoff() retires the timer (the founding specimen's own route)", async () => {
+    // Row b7a70333 went handed-off at 10:02:03Z and its timer fired at 10:18:07Z.
+    // handoff() is its own transaction and never routes through update().
+    const { row, ref } = await parkedWithTimer();
+
+    await repo.handoff({
+      qitemId: row.qitemId, fromSession: "worker@rig", toSession: "next@rig", nudge: false,
+    } as never);
+
+    expect(repo.getById(row.qitemId)!.state).toBe("handed-off");
+    expect(jobs.getById(ref)!.state).not.toBe("active");
+    expect(terminalReason(ref)).toBe("park_ended:handed-off");
+  });
+
+  it("OPR.0.5.8.1 S1b — handoffAndComplete() retires the timer", async () => {
+    const { row, ref } = await parkedWithTimer();
+
+    await repo.handoffAndComplete({
+      qitemId: row.qitemId, fromSession: "worker@rig", toSession: "next@rig", nudge: false,
+    } as never);
+
+    expect(jobs.getById(ref)!.state).not.toBe("active");
+    expect(terminalReason(ref)).toBe("park_ended:done");
+  });
+
+  it("OPR.0.5.8.1 S1b — closeCrossHostHandoffSource() retires the timer", async () => {
+    // Third member of the handoff family. Same own-transaction bypass; found by
+    // enumerating state writers rather than by being told about it.
+    const { row, ref } = await parkedWithTimer();
+
+    repo.closeCrossHostHandoffSource({
+      qitemId: row.qitemId,
+      fromSession: "worker@rig",
+      toSession: "next@rig",
+      closureTarget: "qitem-remote-1@otherhost",
+      terminalState: "handed-off",
+    });
+
+    expect(jobs.getById(ref)!.state).not.toBe("active");
+    expect(terminalReason(ref)).toBe("park_ended:handed-off");
+  });
+
+  it("OPR.0.5.8.1 S1b — claim() retires the timer (claim-resume, named by the contract)", async () => {
+    // A blocked row IS claimable, so claiming is a real park exit that writes
+    // state directly. My earlier pin spelled this through update(), not claim().
+    const { row, ref } = await parkedWithTimer();
+
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@rig" } as never);
+
+    expect(repo.getById(row.qitemId)!.state).toBe("in-progress");
+    expect(jobs.getById(ref)!.state).not.toBe("active");
+    expect(terminalReason(ref)).toBe("park_ended:claimed");
+  });
+
+  it("OPR.0.5.8.1 S1b — auto-unpark on blocker completion retires the timer", async () => {
+    // `--on X --wake-after 20m` carries BOTH a blocker and a timer. When X
+    // completes, the blocker does its job and the timer must not fire afterwards.
+    const blocker = await item("gate@rig");
+    const row = await item("worker@rig");
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: blocker.qitemId, transitionNote: "parked on a blocker AND a timer",
+      wakeAfterSeconds: 7200,
+    } as never);
+    const ref = (wakes(row.qitemId).at(-1) as { wake_ref: string }).wake_ref;
+    expect(jobs.getById(ref)!.state).toBe("active");
+
+    repo.update({
+      qitemId: blocker.qitemId, actorSession: "gate@rig", state: "done",
+      closureReason: "no-follow-on", transitionNote: "blocker cleared",
+    } as never);
+
+    expect(repo.getById(row.qitemId)!.state).toBe("pending");   // auto-unparked
+    expect(jobs.getById(ref)!.state).not.toBe("active");
+    expect(terminalReason(ref)).toBe("park_ended:auto-unparked");
+  });
+
+  it("OPR.0.5.8.1 S1b — every exit route leaves an operator's ATTACHED watchdog alone", async () => {
+    // The one way this class repair could do harm: retiring jobs it does not own,
+    // now from six call sites instead of one.
+    const job = jobs.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: \"worker@rig\"\nmessage: \"operator's own\"\n",
+      targetSession: "worker@rig", intervalSeconds: 600, registeredBySession: "operator@rig",
+    });
+    const row = await item("worker@rig");
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "park on operator watchdog",
+      wakeWatchdogId: job.jobId,
+    } as never);
+
+    await repo.handoff({
+      qitemId: row.qitemId, fromSession: "worker@rig", toSession: "next@rig", nudge: false,
+    } as never);
+
+    expect(jobs.getById(job.jobId)!.state).toBe("active");
+  });
+
   it("OPR.0.5.8.1 S1b — re-parking SUPERSEDES the old timer: exactly one live job", async () => {
     // The third repeat route. Re-parking used to arm a second job while the first
     // stayed active, so one row carried two live timers, each firing on its own
