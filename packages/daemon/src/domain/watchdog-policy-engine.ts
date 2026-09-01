@@ -475,6 +475,14 @@ export class WatchdogPolicyEngine {
     if (!isContextUsageThreshold) {
       this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true);
     }
+    // OPR.0.5.8.1 S2 — a policy's condition receipt is banked ONLY on positive
+    // delivery. `status` is "ok" | "failed"; anything that is not a definite ok
+    // leaves the receipt untouched so the next scan retries. A policy that does
+    // not propose a receipt is untouched by this, so no other policy's
+    // behaviour changes.
+    if (outcome.conditionReceipt !== undefined && delivery.status === "ok") {
+      this.jobsRepo.recordConditionReceipt(job.jobId, outcome.conditionReceipt);
+    }
     this.jobsRepo.setActionable(job.jobId, true, evaluatedAt, job.lastActionableAt);
     this.eventBus.emit({
       type: "watchdog.evaluation_fired",

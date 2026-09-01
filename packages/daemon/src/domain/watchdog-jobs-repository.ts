@@ -543,6 +543,20 @@ export class WatchdogJobsRepository {
       .run(stamp, jobId);
   }
 
+  /**
+   * OPR.0.5.8.1 S2 — record the CONDITION a job last successfully woke about.
+   *
+   * Called by the engine only after a delivery that returned `ok`. A policy that
+   * suppresses on "already told them" needs its receipt tied to evidence the
+   * telling happened; recording it on the ATTEMPT turns one transport failure
+   * into indefinite silence. One overwritten value per job, never appended to.
+   */
+  recordConditionReceipt(jobId: string, receipt: string): void {
+    this.db
+      .prepare(`UPDATE watchdog_jobs SET last_fired_condition = ? WHERE job_id = ?`)
+      .run(receipt, jobId);
+  }
+
   markTerminal(jobId: string, reason: string): void {
     this.db
       .prepare(

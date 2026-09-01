@@ -129,11 +129,20 @@ export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
         };
       }
 
-      // Both signals joined → ONE bounded wake (single-target, keepalive
-      // shape). Recorded at decision time, mirroring how the engine stamps
-      // last_fire_at on the send path regardless of delivery outcome.
-      db.prepare("UPDATE watchdog_jobs SET last_fired_condition = ? WHERE job_id = ?")
-        .run(fingerprint, job.jobId);
+      // Both signals joined → ONE bounded wake (single-target, keepalive shape).
+      //
+      // The fingerprint is PROPOSED here and persisted by the engine only if
+      // delivery succeeds. It is deliberately NOT written at this point.
+      //
+      // The first cut of this repair did write it here, justified as mirroring
+      // how the engine stamps `last_fire_at` on the send path regardless of
+      // delivery outcome. That mirrored the timing and inverted the consequence:
+      // `last_fire_at` gates a window that EXPIRES, so a failed delivery
+      // self-heals, while this gate holds until the gated set materially
+      // changes. dev50-qa reproduced the result — a send that failed transport
+      // still recorded the receipt, and the seat was never woken again until an
+      // unrelated transition released it. Suppression must rest on evidence the
+      // wake ARRIVED, never on the decision to attempt one.
       const primary = gated[0]!;
       const message =
         job.message ??
@@ -143,6 +152,7 @@ export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
         action: "send",
         target: { session: seat },
         message,
+        conditionReceipt: fingerprint,
         notes: {
           // Audit: which qitem + which activity signal + the join decision.
           qitemId: primary.qitemId,

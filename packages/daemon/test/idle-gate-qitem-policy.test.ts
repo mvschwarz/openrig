@@ -102,17 +102,38 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
   // and a brief seat-active flicker cleared `actionable` and produced a re-fire
   // 60.1s into a 120s window. The window was never a cooldown.
 
-  function seedJobRow(jobId = "job-1"): void {
-    db.prepare(
-      `INSERT INTO watchdog_jobs (job_id, policy, spec_yaml, target_session, interval_seconds,
-         active_wake_interval_seconds, state, registered_by_session, registered_at)
-       VALUES (?, 'idle-gate-qitem', 'policy: idle-gate-qitem', ?, 30, 300, 'active', 'ops@kernel', '2026-07-03T07:00:00Z')`,
-    ).run(jobId, SEAT);
+  // Engine-path S2 pins. These must run through the ENGINE, not the policy
+  // alone: the condition receipt is proposed by the policy and banked by the
+  // engine only on a delivery that returned ok. Testing the policy in isolation
+  // would assert a decision while the defect QA found lives in the join.
+  function engineFor(deliveryStatus: () => "ok" | "failed") {
+    let clock = NOW;
+    const advance = (seconds: number) => { clock = new Date(clock.getTime() + seconds * 1000); };
+    const jobsRepo = new WatchdogJobsRepository(db);
+    const historyLog = new WatchdogHistoryLog(db);
+    const attempts: Array<{ targetSession: string; message: string }> = [];
+    const deliver: DeliveryFn = async (req) => {
+      attempts.push(req);
+      return { status: deliveryStatus() };
+    };
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo, historyLog, eventBus, deliver, now: () => clock,
+      additionalPolicies: [makeIdleGateQitemPolicy({ db, agentActivityStore: store })],
+    });
+    const registered = jobsRepo.register({
+      policy: "idle-gate-qitem",
+      specYaml: `policy: idle-gate-qitem\ntarget:\n  session: ${SEAT}\ninterval_seconds: 30\n`,
+      targetSession: SEAT,
+      intervalSeconds: 30,
+      activeWakeIntervalSeconds: 300,
+      registeredBySession: "ops@kernel",
+    });
+    const evaluate = () => engine.evaluate(jobsRepo.getByIdOrThrow(registered.jobId));
+    const receipt = () =>
+      (db.prepare("SELECT last_fired_condition AS c FROM watchdog_jobs WHERE job_id = ?")
+        .get(registered.jobId) as { c: string | null } | undefined)?.c ?? null;
+    return { attempts, evaluate, receipt, advance };
   }
-  const firedCondition = (jobId = "job-1") =>
-    (db.prepare("SELECT last_fired_condition AS c FROM watchdog_jobs WHERE job_id = ?").get(jobId) as
-      | { c: string | null }
-      | undefined)?.c ?? null;
   function appendTransition(qitemId: string, note: string, id: number): void {
     db.prepare(
       `INSERT INTO queue_transitions (transition_id, qitem_id, ts, state, actor_session, transition_note)
@@ -120,92 +141,130 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     ).run(id, qitemId, note);
   }
 
-  it("S2 R-1 — an UNCHANGED gated set does not re-wake when the window expires", async () => {
-    seedJobRow();
+  it("S2 R-1 — an UNCHANGED gated set does not re-wake, however many windows pass", async () => {
     seedGateQitem("q-gate-1");
     seedActivity("Stop", FRESH);
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
-
-    expect((await policy.evaluate(makeJob())).action).toBe("send");
-    // Second evaluation with the window fully elapsed and nothing changed.
-    const out = await policy.evaluate(makeJob({ lastFireAt: "2026-07-03T07:00:00.000Z" }));
-    expect(out.action).toBe("skip");
-    expect((out as { reason: string }).reason).toBe("gate_condition_unchanged");
+    const { attempts, evaluate, advance } = engineFor(() => "ok");
+    await evaluate();
+    advance(301);
+    await evaluate();
+    advance(301);
+    await evaluate();
+    expect(attempts).toHaveLength(1);   // three windows, one wake
   });
 
-  it("S2 R-2 — a seat_active FLICKER does not reset the fired-for memory", async () => {
-    // The engine clears `actionable` on every skip, which is what made a brief
-    // busy moment re-open immediate firing. The condition memory lives in the
-    // policy and keys to the CONDITION, so an activity skip cannot launder it.
-    seedJobRow();
+  it("S2 R-2 — a seat_active FLICKER cannot manufacture a second wake", async () => {
+    // The engine clears `actionable` on every skip, which is what let a brief
+    // busy moment bypass the active-wake window entirely. The condition receipt
+    // is not touched by an activity skip, so the flicker buys nothing.
     seedGateQitem("q-gate-1");
     seedActivity("Stop", FRESH);
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
-    expect((await policy.evaluate(makeJob())).action).toBe("send");
-    const afterFire = firedCondition();
-    expect(afterFire).not.toBeNull();
+    const { attempts, evaluate, advance } = engineFor(() => "ok");
+    await evaluate();
+    expect(attempts).toHaveLength(1);
 
-    seedActivity("UserPromptSubmit", FRESH); // seat goes active
-    const busy = await policy.evaluate(makeJob());
-    expect((busy as { reason: string }).reason).toBe("seat_active");
-    expect(firedCondition()).toBe(afterFire); // memory untouched by the flicker
-
+    seedActivity("UserPromptSubmit", FRESH); // seat busy
+    await evaluate();
     seedActivity("Stop", FRESH); // idle again
-    const out = await policy.evaluate(makeJob({ lastFireAt: null, actionable: false } as never));
-    expect(out.action).toBe("skip");
-    expect((out as { reason: string }).reason).toBe("gate_condition_unchanged");
+    advance(301);                // past the window: only the condition gate can hold
+    await evaluate();
+    expect(attempts).toHaveLength(1);
   });
 
-  it("S2 preserve — a NEW gate qitem arriving at the seat wakes", async () => {
-    seedJobRow();
+  it("S2 F1 — a FAILED delivery banks no receipt, so the next scan RETRIES", async () => {
+    // dev50-qa NOT-CLEAR at f610eec7d. The first cut wrote the receipt inside
+    // evaluate(), before delivery was attempted, so one transport failure
+    // suppressed the wake until the gated set changed — silence, which is worse
+    // than the noise being fixed. Suppression must rest on evidence the wake
+    // ARRIVED.
     seedGateQitem("q-gate-1");
     seedActivity("Stop", FRESH);
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
-    expect((await policy.evaluate(makeJob())).action).toBe("send");
+    let status: "ok" | "failed" = "failed";
+    const { attempts, evaluate, receipt, advance } = engineFor(() => status);
 
-    seedGateQitem("q-gate-2");
-    expect((await policy.evaluate(makeJob())).action).toBe("send");
+    await evaluate();
+    expect(attempts).toHaveLength(1);
+    expect(receipt()).toBeNull();          // nothing banked for a failed send
+
+    // The engine still stamps last_fire_at on a failed send, so its active-wake
+    // window remains a FLOOR beneath the condition gate — exactly as ruled. The
+    // retry is therefore bounded by that window, not blocked until the row
+    // changes. Bounded and self-healing is the whole difference from the defect.
+    await evaluate();
+    expect(attempts).toHaveLength(1);      // inside the window: floor holds
+    advance(301);
+    await evaluate();
+    expect(attempts).toHaveLength(2);      // window elapsed -> retried, row unchanged
+
+    status = "ok";
+    advance(301);
+    await evaluate();
+    expect(attempts).toHaveLength(3);
+    expect(receipt()).not.toBeNull();      // banked only now
+
+    advance(301);
+    await evaluate();
+    expect(attempts).toHaveLength(3);      // condition gate holds past the window
   });
 
-  it("S2 preserve — a MATERIAL transition on the row re-wakes promptly", async () => {
-    seedJobRow();
+  it("S2 preserve — a MATERIAL transition re-wakes promptly", async () => {
     seedGateQitem("q-gate-1");
     seedActivity("Stop", FRESH);
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
-    expect((await policy.evaluate(makeJob())).action).toBe("send");
-    expect((await policy.evaluate(makeJob())).action).toBe("skip");
+    const { attempts, evaluate, advance } = engineFor(() => "ok");
+    await evaluate();
+    await evaluate();
+    expect(attempts).toHaveLength(1);
 
     appendTransition("q-gate-1", "reviewer asked a question", 9001);
-    expect((await policy.evaluate(makeJob())).action).toBe("send");
+    advance(301);
+    await evaluate();
+    expect(attempts).toHaveLength(2);
+  });
+
+  it("S2 preserve — a NEW gate qitem arriving wakes", async () => {
+    seedGateQitem("q-gate-1");
+    seedActivity("Stop", FRESH);
+    const { attempts, evaluate, advance } = engineFor(() => "ok");
+    await evaluate();
+    seedGateQitem("q-gate-2");
+    // MEASURED, not assumed — I got this wrong twice before instrumenting the
+    // engine. After a send, EVERY evaluation returns active_wake_not_due until
+    // the window elapses: the throttle branch preserves `actionable`, unlike the
+    // generic skip branch which clears it. So the window is a real floor here,
+    // and genuinely new work waits it out on a seat that stays idle.
+    await evaluate();
+    expect(attempts).toHaveLength(1);   // floor holds inside the window
+    advance(301);
+    await evaluate();
+    expect(attempts).toHaveLength(2);   // window elapsed, condition changed -> wakes
   });
 
   it("S2 — wake-machinery markers are NEVER material (else every wake justifies the next)", async () => {
-    seedJobRow();
     seedGateQitem("q-gate-1");
     seedActivity("Stop", FRESH);
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
-    expect((await policy.evaluate(makeJob())).action).toBe("send");
-
+    const { attempts, evaluate, advance } = engineFor(() => "ok");
+    await evaluate();
     appendTransition("q-gate-1", "wake-attempt: 1/3 outcome=delivered", 9002);
     appendTransition("q-gate-1", "escalation-rung: orchestrator -> orch@rig", 9003);
-    const out = await policy.evaluate(makeJob());
-    expect(out.action).toBe("skip");
-    expect((out as { reason: string }).reason).toBe("gate_condition_unchanged");
+    // Past the window, so a skip here can only be the CONDITION gate — otherwise
+    // this pin would pass on the throttle and prove nothing.
+    advance(301);
+    await evaluate();
+    expect(attempts).toHaveLength(1);
   });
 
-  it("S2 — a suppressed wake stays derivable: the job records the condition it fired for", async () => {
-    // Suppressing the WAKE, never the record. The row itself is untouched and
-    // still appears in held/escalations; the job carries the exact condition.
-    seedJobRow();
+  it("S2 — a suppressed wake stays derivable, and the row is never touched", async () => {
+    // Suppressing the WAKE, never the record.
     seedGateQitem("q-gate-1");
     seedActivity("Stop", FRESH);
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
-    expect(firedCondition()).toBeNull();
-    await policy.evaluate(makeJob());
-    const recorded = firedCondition();
-    expect(recorded).toMatch(/^[0-9a-f]{32}$/);
-    await policy.evaluate(makeJob());
-    expect(firedCondition()).toBe(recorded); // one overwritten value, not a ledger
+    const { evaluate, receipt, advance } = engineFor(() => "ok");
+    expect(receipt()).toBeNull();
+    await evaluate();
+    const banked = receipt();
+    expect(banked).toMatch(/^[0-9a-f]{32}$/);
+    advance(301);
+    await evaluate();
+    expect(receipt()).toBe(banked);        // one overwritten value, not a ledger
     expect(
       (db.prepare("SELECT COUNT(*) AS n FROM queue_items WHERE qitem_id = 'q-gate-1'").get() as { n: number }).n,
     ).toBe(1);

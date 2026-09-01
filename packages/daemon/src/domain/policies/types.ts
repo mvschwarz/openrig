@@ -37,7 +37,24 @@ export interface PolicyJob {
 }
 
 export type PolicyEvaluation =
-  | { action: "send"; target: { session: string }; message: string; notes?: Record<string, unknown> }
+  | {
+      action: "send";
+      target: { session: string };
+      message: string;
+      notes?: Record<string, unknown>;
+      /**
+       * OPR.0.5.8.1 S2 — an opaque receipt for the CONDITION this send is about,
+       * persisted by the engine ONLY when delivery actually succeeded.
+       *
+       * A policy that suppresses on "already told them" must record that against
+       * evidence the telling happened. The first cut of this wrote the receipt
+       * inside evaluate(), before delivery was attempted, so one transient
+       * transport failure suppressed the wake until the watched condition
+       * changed — silence instead of noise, which is the worse failure. Policies
+       * that do not set this are unaffected.
+       */
+      conditionReceipt?: string;
+    }
   | { action: "skip"; reason: string; notes?: Record<string, unknown> }
   | { action: "terminal"; reason: string; notes?: Record<string, unknown> };
 
