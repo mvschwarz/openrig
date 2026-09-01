@@ -1192,6 +1192,17 @@ function lineStartsOutsideString(content: string): boolean[] {
   while (i < content.length) {
     const ch = content[i]!;
     if (multiline) {
+      // A multiline BASIC string honours backslash escapes, so `\"""` is an
+      // escaped quote followed by two more — NOT the closing delimiter. A
+      // multiline LITERAL string ('''), by contrast, has no escapes at all.
+      // Missing this read `\"""` as the string's end and promoted the next
+      // line to a table header (review50-r2, 2026-09-01).
+      if (multiline === '"""' && ch === "\\") {
+        // Count an escaped newline so the line index stays aligned.
+        if (content[i + 1] === "\n") out.push(false);
+        i += 2;
+        continue;
+      }
       if (content.startsWith(multiline, i)) { multiline = null; i += 3; continue; }
       if (ch === "\n") out.push(false);
       i += 1;
@@ -1218,75 +1229,66 @@ function lineStartsOutsideString(content: string): boolean[] {
   return out;
 }
 
-/** `\0`-joined path of a single table header line, or null if it is not one. */
-function tableHeaderPath(headerLine: string): string | null {
-  let parsed: unknown;
-  // Parsing the header ALONE reuses smol-toml's quoting and whitespace rules
-  // (`[a."b c"]` and `[ a . b ]`) rather than restating them here.
-  try { parsed = parseToml(headerLine); } catch { return null; }
-  const segments: string[] = [];
-  let node: unknown = parsed;
-  while (node !== null && typeof node === "object" && !Array.isArray(node)) {
-    const keys = Object.keys(node as Record<string, unknown>);
-    if (keys.length !== 1) break;
-    segments.push(keys[0]!);
-    node = (node as Record<string, unknown>)[keys[0]!];
-  }
-  return segments.length > 0 ? segments.join("\0") : null;
-}
-
-/**
- * Table paths a document DECLARES with its own header.
- *
- * Deliberately not read off a parsed object: parsing cannot tell a declared
- * table from one implied by a child (`[a.b]` implies `a`), and only declared
- * tables collide — a user's `[mcp_servers.foo]` and a fragment's
- * `[mcp_servers.exa]` share an implied parent and are perfectly legal together.
- */
-function declaredTablePaths(content: string): Set<string> {
-  const structural = lineStartsOutsideString(content);
-  const paths = new Set<string>();
-  content.split("\n").forEach((line, index) => {
-    if (structural[index] !== true) return;
+/** A fragment split at its table headers: a leading preamble, then one entry per table. */
+function splitAtTableHeaders(fragment: string): Array<{ header: string | null; text: string }> {
+  const structural = lineStartsOutsideString(fragment);
+  const blocks: Array<{ header: string | null; lines: string[] }> = [{ header: null, lines: [] }];
+  fragment.split("\n").forEach((line, index) => {
     const trimmed = line.trim();
-    if (!trimmed.startsWith("[")) return;
-    const path = tableHeaderPath(trimmed);
-    if (path !== null) paths.add(path);
+    if (structural[index] === true && trimmed.startsWith("[")) {
+      blocks.push({ header: trimmed, lines: [line] });
+      return;
+    }
+    blocks[blocks.length - 1]!.lines.push(line);
   });
-  return paths;
+  return blocks.map((b) => ({ header: b.header, text: b.lines.join("\n") }));
+}
+
+function parsesAsToml(candidate: string): boolean {
+  try { parseToml(candidate); return true; } catch { return false; }
 }
 
 /**
- * Drop the fragment's tables whose headers are already declared by the user.
- * The user's table YIELDS NOTHING: their values are never merged, rewritten or
- * overwritten — the managed table simply stands down so the render stays valid.
+ * Drop the fragment tables that would collide with the user's own.
  *
- * Two deliberate limits, neither reachable by the shipped fragment (whose
- * tables are all sibling `[mcp_servers.*]`), both erring toward a config that
- * loads:
- *  - Matching `[[array.of.tables]]` on both sides is legal TOML (it appends),
- *    but is treated as a collision and dropped. Conservative, never invalid.
- *  - Keys before the fragment's first header cannot collide as TABLES, so they
- *    pass through here; a duplicate one is caught by the render check below,
- *    which refuses the write rather than guessing whose key wins.
+ * THE COLLISION DECISION IS THE PARSER'S, NOT OURS. For each table the fragment
+ * declares, we ask smol-toml whether the user's document still parses with that
+ * table appended. A duplicate declaration is exactly what TOML rejects, so the
+ * question the parser answers IS the question we need, on the arbitrary input —
+ * the user's file — where a lexical guess is least defensible.
+ *
+ * The earlier version scanned the USER's document for header lines and compared
+ * paths. That scanner mishandled a backslash-escaped delimiter inside a
+ * multiline basic string, so `\"""` read as the string's end, the next line read
+ * as a declared table, and a genuinely non-conflicting managed table was dropped
+ * while projection reported success (review50-r2, 2026-09-01, reproduced). A
+ * lexer over user input can be wrong in that silent direction; the parser cannot.
+ *
+ * The user's values are never merged, rewritten or overwritten — a colliding
+ * managed table simply stands down.
+ *
+ * Two remaining limits, both erring toward a config that loads:
+ *  - If the user's existing file does not parse at all, no collision can be
+ *    discriminated, so nothing is dropped and the render check below refuses the
+ *    write. We do not silently "fix" a file we cannot read.
+ *  - Keys before the fragment's first header are not tables and pass through; a
+ *    duplicate one is caught by the render check rather than guessing whose wins.
  */
 function dropCollidingFragmentTables(
   fragment: string,
-  taken: Set<string>,
+  userOwned: string,
 ): { kept: string; dropped: string[] } {
-  const structural = lineStartsOutsideString(fragment);
-  const lines = fragment.split("\n");
+  const userParses = parsesAsToml(userOwned);
   const kept: string[] = [];
   const dropped: string[] = [];
-  let dropping = false;
-  lines.forEach((line, index) => {
-    if (structural[index] === true && line.trim().startsWith("[")) {
-      const path = tableHeaderPath(line.trim());
-      dropping = path !== null && taken.has(path);
-      if (dropping) dropped.push(path!.split("\0").join("."));
-    }
-    if (!dropping) kept.push(line);
-  });
+  for (const block of splitAtTableHeaders(fragment)) {
+    const collides =
+      block.header !== null &&
+      userParses &&
+      !parsesAsToml(`${userOwned}\n${block.text}`);
+    if (collides) dropped.push(block.header!);
+    else kept.push(block.text);
+  }
   return {
     kept: kept.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "").replace(/\n*$/, ""),
     dropped,
@@ -1303,7 +1305,7 @@ function upsertManagedCodexConfigFragment(content: string, id: string, fragment:
   // wholesale — counting it would make the second projection drop everything
   // the first one legitimately landed.
   const userOwned = content.replace(pattern, "");
-  const { kept } = dropCollidingFragmentTables(fragment, declaredTablePaths(userOwned));
+  const { kept } = dropCollidingFragmentTables(fragment, userOwned);
   const block = `${start}\n${kept}\n${end}\n`;
 
   if (pattern.test(content)) {

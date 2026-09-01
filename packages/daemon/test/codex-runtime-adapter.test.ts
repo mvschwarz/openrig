@@ -1365,6 +1365,47 @@ describe("Codex runtime adapter", () => {
       .toBe("https://exa.internal.example/mcp");
   });
 
+  it("does not mistake a header after an ESCAPED delimiter inside a multi-line string (r2 NOT-CLEAR, 09-01)", async () => {
+    // review50-r2 blocking finding on candidate 4d2ad86c. `\"""` is an escaped
+    // quote plus two more, NOT the end of the string, so [mcp_servers.exa] here
+    // is string data and the managed exa must still land. The old user-side
+    // header scanner read the escape as a terminator and dropped it silently
+    // WHILE REPORTING SUCCESS — which the final parse guard cannot catch,
+    // because the wrong answer is still valid TOML.
+    const userConfig = [
+      "[profiles.notes]",
+      'text = """',
+      '\\"""',
+      "[mcp_servers.exa]",
+      "this is still string data",
+      '"""',
+      "",
+    ].join("\n");
+    const { project, read } = await projectFragment(userConfig);
+
+    // fact 1 — the user genuinely declares no exa table
+    expect((parseToml(userConfig) as Record<string, any>).mcp_servers).toBeUndefined();
+    // fact 2 — projection succeeds
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const after = parseToml(read()) as Record<string, any>;
+    // fact 3 — BOTH managed tables land
+    expect(after.mcp_servers.exa.url).toBe("https://mcp.exa.ai/mcp");
+    expect(after.mcp_servers.context7.url).toBe("https://mcp.context7.com/mcp");
+    // fact 4 — the user's string is untouched
+    expect(after.profiles.notes.text).toBe((parseToml(userConfig) as Record<string, any>).profiles.notes.text);
+  });
+
+  it("leaves the fragment intact when the user's config does not parse, and refuses the write", async () => {
+    // No collision can be discriminated against a file we cannot read, so
+    // nothing is dropped and the render guard refuses rather than "fixing" it.
+    const broken = "[mcp_servers.exa\nurl = \n";
+    const { project, read } = await projectFragment(broken);
+    const result = await project();
+    expect(result.projected).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(read()).toBe(broken);
+  });
+
   it("does not mistake a table header inside a multi-line string for a user-owned table", async () => {
     const { project, read } = await projectFragment([
       "[profiles.notes]",
