@@ -156,6 +156,10 @@ export function resolveWorkPosition(opts: {
     }
     const declared = projects as Array<{ id: string; root: string }>;
     const candidates = declared.map((entry) => entry.id);
+    const duplicateId = candidates.find((id, index) => candidates.indexOf(id) !== index);
+    if (duplicateId) {
+      return failure("project_identity_ambiguous", `project id '${duplicateId}' names multiple roots in ${catalogPath}`);
+    }
     const selectedId = opts.project ?? (declared.length === 1 ? declared[0]!.id : undefined);
     if (!selectedId) {
       return failure("project_required", "multiple projects are declared; select one with --project", candidates);

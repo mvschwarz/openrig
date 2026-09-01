@@ -142,4 +142,34 @@ composition:
     expect(JSON.stringify(betaPlan)).not.toContain(alphaRoot);
     expect(betaPlan.pieces.every((piece) => piece.path.startsWith(betaRoot))).toBe(true);
   });
+
+  it("refuses a selected project id that names two catalog roots", async () => {
+    for (const projectRoot of [alphaRoot, betaRoot]) {
+      writeFileSync(join(projectRoot, "project.yaml"), `schema: openrig.project/v0alpha1
+kind: project
+id: duplicate
+`);
+    }
+    writeFileSync(join(catalogRoot, "workspace.yaml"), `schema: openrig.workspace/v0alpha1
+projects:
+  - id: duplicate
+    root: ${relative(catalogRoot, alphaRoot)}
+  - id: duplicate
+    root: ${relative(catalogRoot, betaRoot)}
+`);
+
+    const result = await captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install", "--project", "duplicate", "--json",
+      ]);
+    });
+    expect(result.exitCode).toBe(1);
+    const body = JSON.parse(result.logs.join("")) as {
+      ok: boolean;
+      error: { code: string };
+      position?: { projectRoot?: string };
+    };
+    expect(body).toMatchObject({ ok: false, error: { code: "project_identity_ambiguous" } });
+    expect(body.position?.projectRoot).toBeUndefined();
+  });
 });
