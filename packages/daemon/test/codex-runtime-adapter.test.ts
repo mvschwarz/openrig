@@ -1395,6 +1395,35 @@ describe("Codex runtime adapter", () => {
     expect(after.profiles.notes.text).toBe((parseToml(userConfig) as Record<string, any>).profiles.notes.text);
   });
 
+  it("refuses an intrinsically invalid managed fragment instead of deleting it (r2 NOT-CLEAR, 09-01)", async () => {
+    // review50-r2 blocking finding on candidate ebfe60d9. "appending this block
+    // breaks the parse" has TWO causes — a user collision, or a malformed block.
+    // Conflating them let the collision filter DELETE an invalid authored
+    // fragment, after which the render guard passed precisely because the bad
+    // input was gone, and the receipt said projected.
+    const original = 'model = "gpt-5"\n';
+    const { project, read } = await projectFragment(original, "[mcp_servers.exa]\nurl =\n");
+
+    const result = await project();
+    expect(result.projected).toEqual([]);            // zero projected
+    expect(result.failed).toHaveLength(1);           // one failed projection
+    expect(result.failed[0]!.error).toMatch(/not valid TOML on its own/);
+    expect(read()).toBe(original);                   // user file byte-unchanged
+  });
+
+  it("refuses a fragment whose own tables collide with each other", async () => {
+    // Closed by the same standalone check: the per-block collision test compares
+    // each block against the USER only, so it could never have caught this.
+    const original = 'model = "gpt-5"\n';
+    const dup = "[mcp_servers.exa]\nurl = \"a\"\n\n[mcp_servers.exa]\nurl = \"b\"\n";
+    const { project, read } = await projectFragment(original, dup);
+
+    const result = await project();
+    expect(result.projected).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(read()).toBe(original);
+  });
+
   it("leaves the fragment intact when the user's config does not parse, and refuses the write", async () => {
     // No collision can be discriminated against a file we cannot read, so
     // nothing is dropped and the render guard refuses rather than "fixing" it.

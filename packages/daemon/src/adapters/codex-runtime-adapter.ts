@@ -607,6 +607,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
     const fragment = this.fs.readFile(entry.absolutePath);
+    // Before anything is dropped: a fragment that is invalid on its own must
+    // fail loudly, never be "resolved" by the collision filter deleting it.
+    assertFragmentParsesStandalone(fragment, entry.absolutePath, entry.effectiveId);
     const rendered = upsertManagedCodexConfigFragment(existing, entry.effectiveId, fragment);
     assertRendersAsLoadableToml(rendered, configPath, entry.effectiveId);
     this.fs.writeFile(configPath, rendered);
@@ -1249,6 +1252,24 @@ function parsesAsToml(candidate: string): boolean {
 }
 
 /**
+ * A managed fragment must be a valid TOML document on its own, checked BEFORE
+ * any collision filtering. Without this, an authoring error in the fragment is
+ * indistinguishable from a user collision and gets silently dropped — the
+ * write then succeeds precisely because the bad input was deleted, which is the
+ * opposite of what the render guard is for.
+ */
+function assertFragmentParsesStandalone(fragment: string, sourcePath: string, id: string): void {
+  try {
+    parseToml(fragment);
+  } catch (err) {
+    throw new Error(
+      `Codex config fragment '${id}' is not valid TOML on its own (${sourcePath}); ` +
+      `nothing was projected and the existing config was left unchanged. ${(err as Error).message}`,
+    );
+  }
+}
+
+/**
  * Drop the fragment tables that would collide with the user's own.
  *
  * THE COLLISION DECISION IS THE PARSER'S, NOT OURS. For each table the fragment
@@ -1267,12 +1288,19 @@ function parsesAsToml(candidate: string): boolean {
  * The user's values are never merged, rewritten or overwritten — a colliding
  * managed table simply stands down.
  *
- * Two remaining limits, both erring toward a config that loads:
- *  - If the user's existing file does not parse at all, no collision can be
- *    discriminated, so nothing is dropped and the render check below refuses the
- *    write. We do not silently "fix" a file we cannot read.
- *  - Keys before the fragment's first header are not tables and pass through; a
- *    duplicate one is caught by the render check rather than guessing whose wins.
+ * CALLERS MUST VALIDATE THE FRAGMENT STANDALONE FIRST. "Appending this block
+ * makes the document unparseable" has two causes — the user owns a conflicting
+ * path, or the block is malformed on its own — and this predicate cannot tell
+ * them apart. Left unguarded it answered both with "collides" and DELETED an
+ * invalid authored fragment, turning a resource error into a clean-looking empty
+ * managed block while the receipt said projected (review50-r2, 2026-09-01,
+ * reproduced). `assertFragmentParsesStandalone` eliminates the second cause
+ * before we get here, so a failure that survives to this point is a real
+ * collision.
+ *
+ * One remaining limit: keys before the fragment's first header are not tables
+ * and pass through; a duplicate one is caught by the render check rather than
+ * guessing whose key wins.
  */
 function dropCollidingFragmentTables(
   fragment: string,
