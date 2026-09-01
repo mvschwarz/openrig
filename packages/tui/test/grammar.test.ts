@@ -3,10 +3,11 @@ import { parseCommand } from "../src/grammar.js";
 import { defaultSections } from "../src/state.js";
 
 describe("safe-core grammar (FR-1, §4.B)", () => {
-  it("parses :section jump for the three launch sections", () => {
+  it("parses :section jump for the launch sections", () => {
     expect(parseCommand(":topology")).toEqual({ type: "jump", section: "topology" });
     expect(parseCommand(":specs")).toEqual({ type: "jump", section: "specs" });
     expect(parseCommand(":needs")).toEqual({ type: "jump", section: "needs" });
+    expect(parseCommand(":execution")).toEqual({ type: "jump", section: "execution" });
   });
 
   it("names the unknown section, never a silent no-op", () => {

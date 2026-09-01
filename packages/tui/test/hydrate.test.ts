@@ -122,6 +122,7 @@ const FIXTURES: Record<string, unknown> = {
   "/api/queue/list?attention=1": [],
 
   "/api/scopes?detail=1": { missions: [] },
+  "/api/views/execution": { rowCount: 1, rows: [{ view: "execution", mission: "release-0.5.8", q1_lanes: [], q2_sequencing: [], q4_ladder: [], q5_park: [], sources: {} }] },
   "/api/queue/list?state=blocked": [],
   // PULSE ◌ PARKED WITH BATON source (increment 2b) — in-progress qitems
   "/api/queue/list?state=in-progress": [],
@@ -155,6 +156,10 @@ function expectIncompleteNeedsTruth(snap: Awaited<ReturnType<typeof hydrateSnaps
 }
 
 describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
+  it("hydrates the execution projection through the existing generic view route", async () => {
+    const snap = await hydrateSnapshot(fixtureClient());
+    expect(snap.execution).toMatchObject({ view: "execution", mission: "release-0.5.8" });
+  });
   it("maps topology: pods grouped, agent rows VERBATIM from the maintained projection (PIN 2)", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
     const local = snap.hosts.find((h) => h.name === "local");

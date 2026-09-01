@@ -145,6 +145,11 @@ export class DaemonClient {
     return this.get("/api/scopes?detail=1");
   }
 
+  /** EXECUTION view via the shipped generic view route; no new endpoint. */
+  execution(mission?: string) {
+    return this.get(`/api/views/execution${mission ? `?mission=${encodeURIComponent(mission)}` : ""}`);
+  }
+
   queueAttention() {
     return this.get(`/api/queue/list?attention=1`);
   }

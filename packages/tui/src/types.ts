@@ -183,10 +183,13 @@ export interface SeatActivitySummary {
 }
 
 import type { MissionScopesSnap } from "./scopes/scopes-model.js";
+import type { ExecutionViewSnap } from "./execution/execution-model.js";
 
 export interface FleetSnapshot {
   /** SCOPES view (d64d2f5c): store-direct mission/slice projections; absent on old daemons (honest-empty). */
   scopes?: MissionScopesSnap[];
+  /** EXECUTION view: the daemon's existing derived six-question projection. */
+  execution?: ExecutionViewSnap | null;
   hosts: HostNode[];
   specs: SpecEntry[];
   /** grounded composeNeedsYou union in daemon priority order, VERBATIM (PIN 3) */
@@ -266,6 +269,7 @@ export type Action =
   | { type: "scopes-open"; mission: string; slice: string }
   | { type: "scopes-reqs" }
   | { type: "scopes-narrative" }
+  | { type: "execution-source"; source: string }
   | { type: "palette-open" }
   | { type: "palette-close" }
   | { type: "palette-query"; query: string }
@@ -291,6 +295,8 @@ export interface ViewState {
   /** SCOPES view flags: mini-reqs collapsed · narrative panel open. */
   scopesCollapseReqs: boolean;
   scopesNarrative: boolean;
+  /** EXECUTION row drill: exact source/basis selected in the content pane. */
+  executionSource: string | null;
   /** REGISTRY I3 — open command palette (null = closed). */
   palette: { query: string; selection: number } | null;
   instanceId: string;

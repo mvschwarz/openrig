@@ -7,6 +7,7 @@
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets, specDetailArrowsScroll } from "./state.js";
 import { filterPalette } from "./commands/palette.js";
 import { scopesContentLines } from "./scopes/scopes-model.js";
+import { executionContentLines } from "./execution/execution-model.js";
 import { COMMAND_REGISTRY } from "./commands/registry.js";
 import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
@@ -671,6 +672,9 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       narrative: state.scopesNarrative,
       width: contentWidth,
     });
+  }
+  if (state.section === "execution") {
+    return executionContentLines(snap.execution, snap.scopes, snap.readErrors, state.executionSource);
   }
   return [{ text: `(${state.section})` }];
 }

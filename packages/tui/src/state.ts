@@ -23,7 +23,7 @@ export function defaultSections(): SectionDef[] {
 }
 
 export function emptySnapshot(): FleetSnapshot {
-  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, attention: [], blocked: [], inProgress: [], seatActivity: [], pending: [], recentlyFinished: [], hostsDown: [], stream: [], readErrors: [] };
+  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, execution: null, attention: [], blocked: [], inProgress: [], seatActivity: [], pending: [], recentlyFinished: [], hostsDown: [], stream: [], readErrors: [] };
 }
 
 export interface CreateViewStateOptions {
@@ -63,6 +63,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     scopesSelected: null,
     scopesCollapseReqs: false,
     scopesNarrative: false,
+    executionSource: null,
   };
   const listeners = new Set<(s: ViewState) => void>();
 
@@ -93,6 +94,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "jump": {
       // scopes: jumping anywhere (incl. back to :scopes) closes the opened slice.
       next.scopesSelected = null;
+      next.executionSource = null;
       if (!state.sections.some((s) => s.name === action.section))
         return { ...next, lastError: `unknown section "${action.section}"` };
       return syncSelection(
@@ -106,6 +108,8 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       return { ...next, scopesCollapseReqs: !next.scopesCollapseReqs };
     case "scopes-narrative":
       return { ...next, scopesNarrative: !next.scopesNarrative };
+    case "execution-source":
+      return resetContent({ ...next, section: "execution", executionSource: action.source });
     case "palette-open":
       return { ...next, palette: { query: "", selection: 0 } };
     case "palette-close":

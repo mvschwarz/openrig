@@ -26,6 +26,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
+import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
 import { parseFrontmatter } from "./slices/slice-indexer.js";
 import { derivePickup } from "./queue-pickup.js";
@@ -228,6 +229,117 @@ interface WaveMapData {
   waves: { id: string; slices: string[]; serialized_order?: string[]; review_model?: string }[];
 }
 
+interface ArrangementSlice {
+  path: string;
+  order: number;
+  wave?: string;
+  reviewModel?: string;
+  dependsOn?: string[];
+}
+
+type ArrangementData =
+  | { state: "missing"; missionPath: string }
+  | { state: "malformed"; missionPath: string; warning: string }
+  | {
+      state: "valid";
+      missionPath: string;
+      byId: Map<string, ArrangementSlice>;
+      byDir: Map<string, ArrangementSlice>;
+    };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** The manifest arrangement is optional. Missing means compatibility fallback;
+ * malformed means the same fallback plus ONE named warning cell in `sources`.
+ * A valid manifest becomes the ordering/wave/dependency authority. */
+function readArrangement(missionsRoot: string, mission: string, slices: SliceFacts[]): ArrangementData {
+  const missionRoot = path.join(missionsRoot, mission);
+  const missionPath = path.join(missionRoot, "mission.yaml");
+  if (!fs.existsSync(missionPath)) return { state: "missing", missionPath };
+  try {
+    const manifest = parseYaml(fs.readFileSync(missionPath, "utf8")) as unknown;
+    if (!isRecord(manifest)) throw new Error("root is not a mapping");
+    const composition = manifest["composition"];
+    if (!isRecord(composition) || !Array.isArray(composition["slices"])) {
+      throw new Error("composition.slices is not a list");
+    }
+    const waveReview = new Map<string, string>();
+    const waveBySlice = new Map<string, string>();
+    const arrangement = manifest["arrangement"];
+    if (isRecord(arrangement) && arrangement["waves"] != null) {
+      if (!Array.isArray(arrangement["waves"])) throw new Error("arrangement.waves is not a list");
+      for (const rawWave of arrangement["waves"]) {
+        if (!isRecord(rawWave) || typeof rawWave["id"] !== "string") {
+          throw new Error("arrangement.waves contains an invalid entry");
+        }
+        let waveSlices: unknown[];
+        if (Array.isArray(rawWave["slices"])) {
+          waveSlices = rawWave["slices"];
+        } else if (isRecord(rawWave["lanes"])) {
+          const lanes = Object.values(rawWave["lanes"]);
+          if (lanes.some((value) => !Array.isArray(value))) throw new Error("arrangement.waves lanes are not lists");
+          waveSlices = lanes.flatMap((value) => value as unknown[]);
+        } else {
+          throw new Error("arrangement.waves entry has neither slices nor lanes");
+        }
+        if (waveSlices.some((value) => typeof value !== "string")) {
+          throw new Error("arrangement.waves contains a non-string slice id");
+        }
+        for (const sliceId of waveSlices as string[]) waveBySlice.set(sliceId, rawWave["id"]);
+        if (typeof rawWave["review_model"] === "string") waveReview.set(rawWave["id"], rawWave["review_model"]);
+      }
+    }
+    const byId = new Map<string, ArrangementSlice>();
+    const byDir = new Map<string, ArrangementSlice>();
+    for (const rawEntry of composition["slices"]) {
+      if (!isRecord(rawEntry) || typeof rawEntry["ref"] !== "string" || typeof rawEntry["order"] !== "number") {
+        throw new Error("composition.slices contains an invalid ref/order entry");
+      }
+      if (rawEntry["active"] === false) continue;
+      const ref = rawEntry["ref"];
+      const resolved = path.resolve(missionRoot, ref);
+      if (!resolved.startsWith(`${path.resolve(missionRoot)}${path.sep}`) || path.basename(resolved) !== "slice.yaml") {
+        throw new Error(`slice ref escapes the mission root: ${ref}`);
+      }
+      const relative = path.relative(path.join(missionRoot, "slices"), resolved);
+      const dir = relative.split(path.sep)[0];
+      if (!dir || dir === "..") throw new Error(`slice ref is outside slices/: ${ref}`);
+      const sliceManifest = parseYaml(fs.readFileSync(resolved, "utf8")) as unknown;
+      if (!isRecord(sliceManifest)) throw new Error(`${ref} root is not a mapping`);
+      const execution = sliceManifest["execution"];
+      if (execution != null && !isRecord(execution)) throw new Error(`${ref} execution is not a mapping`);
+      const dependsRaw = isRecord(execution) ? execution["depends_on"] : undefined;
+      if (dependsRaw != null && (!Array.isArray(dependsRaw) || dependsRaw.some((v) => typeof v !== "string"))) {
+        throw new Error(`${ref} execution.depends_on is not a string list`);
+      }
+      const facts = slices.find((slice) => slice.dir === dir);
+      const wave = isRecord(execution) && typeof execution["wave"] === "string"
+        ? execution["wave"]
+        : facts && facts.id !== INDETERMINATE
+          ? waveBySlice.get(facts.id)
+          : undefined;
+      const entry: ArrangementSlice = {
+        path: resolved,
+        order: rawEntry["order"],
+        ...(wave ? { wave } : {}),
+        ...(wave && waveReview.has(wave) ? { reviewModel: waveReview.get(wave)! } : {}),
+        ...(dependsRaw ? { dependsOn: dependsRaw as string[] } : {}),
+      };
+      byDir.set(dir, entry);
+      if (facts && facts.id !== INDETERMINATE) byId.set(facts.id, entry);
+    }
+    return { state: "valid", missionPath, byId, byDir };
+  } catch (err) {
+    return {
+      state: "malformed",
+      missionPath,
+      warning: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 function readWaveMap(db: Database.Database, mission: string): WaveMapData {
   const row = db
     .prepare(
@@ -332,8 +444,27 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
 
   const missionsRoot = deps.slicesRoot();
 
-  // Default mission: newest release-* dir under the missions root, derived.
+  // Default mission: the newest real in-progress mission on the board. The TUI
+  // asks without a mission before it has any mission state of its own; choosing
+  // the lexically newest directory can surface a planned future release instead
+  // of the mission people are actually executing. Explicit `?mission=` still
+  // wins, and the historical newest-directory behavior remains the fallback.
   let mission: string | Indeterminate = opts?.mission ?? INDETERMINATE;
+  if (mission === INDETERMINATE && missionsRoot) {
+    const active = deps.db
+      .prepare(`SELECT tags FROM queue_items WHERE state = 'in-progress' ORDER BY ts_updated DESC`)
+      .all() as Array<{ tags: string | null }>;
+    for (const row of active) {
+      const tag = parseTags(row.tags).find((value) => value.startsWith("mission:"));
+      const candidate = tag?.slice("mission:".length);
+      const root = path.resolve(missionsRoot);
+      const candidatePath = candidate ? path.resolve(root, candidate) : null;
+      if (candidate && candidatePath?.startsWith(`${root}${path.sep}`) && fs.existsSync(candidatePath)) {
+        mission = candidate;
+        break;
+      }
+    }
+  }
   if (mission === INDETERMINATE && missionsRoot) {
     try {
       const releases = fs.readdirSync(missionsRoot).filter((d) => /^release-\d/.test(d));
@@ -449,9 +580,26 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
     });
   }
 
-  // ---- wave map (EC-2) ----
+  // ---- arrangement authority: mission/slice YAML, with legacy EC-2 fallback ----
   const waveMap = mission === INDETERMINATE ? { rowId: INDETERMINATE as Indeterminate, waves: [] } : readWaveMap(deps.db, mission);
+  const arrangement = missionsRoot && mission !== INDETERMINATE
+    ? readArrangement(missionsRoot, mission, slices)
+    : null;
+  const arrangementSlice = (id: string, dir?: string): ArrangementSlice | null => {
+    if (arrangement?.state !== "valid") return null;
+    return arrangement.byId.get(id) ?? (dir ? arrangement.byDir.get(dir) : undefined) ?? null;
+  };
   const waveOfSlice = (id: string): { wave: string; rank: number; review_model?: string } | null => {
+    if (arrangement?.state === "valid") {
+      const facts = slices.find((slice) => slice.id === id);
+      const item = arrangementSlice(id, facts?.dir);
+      if (!item?.wave) return null;
+      return {
+        wave: item.wave,
+        rank: item.order,
+        ...(item.reviewModel ? { review_model: item.reviewModel } : {}),
+      };
+    }
     for (let wi = 0; wi < waveMap.waves.length; wi++) {
       const w = waveMap.waves[wi];
       if (!w) continue;
@@ -574,7 +722,8 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
   // ---- Q2 sequencing ----
   const q2 = slices.map((s) => {
     const fm = s.frontmatter;
-    const dependsOn = parseArrayField(fm["depends_on"]);
+    const arranged = typeof s.id === "string" ? arrangementSlice(s.id, s.dir) : null;
+    const dependsOn = arranged?.dependsOn ?? parseArrayField(fm["depends_on"]);
     const softMatch = s.body.match(SOFT_AFTER_LINE);
     const softAfter = softMatch?.[1] ? softMatch[1].split(",").map((x) => x.trim()).filter(Boolean) : [];
     // Only LIVE rows can hold work blocked: stale blockedOn on a terminal row is
@@ -637,7 +786,11 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       next_up: nextUp,
       next_up_basis: nextUpBasis,
       next_up_rank: nextUp === true && wave ? wave.rank : null,
-      source: { spec_path: s.specPath, wave_map_row: waveMap.rowId },
+      source: {
+        spec_path: s.specPath,
+        wave_map_row: waveMap.rowId,
+        ...(arranged ? { arrangement_path: arranged.path } : {}),
+      },
     };
   });
 
@@ -654,6 +807,9 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       planning_dial: dial,
       source: {
         wave_map_row: waveMap.rowId,
+        ...(typeof s.id === "string" && arrangementSlice(s.id, s.dir)
+          ? { arrangement_path: arrangementSlice(s.id, s.dir)!.path }
+          : {}),
         dial: dial === INDETERMINATE ? "no approved-spec-dial frontmatter field" : `frontmatter approved-spec-dial at ${s.specPath}`,
       },
     };
@@ -756,7 +912,29 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
     sources: {
       queue_db: { asof: asof(), basis: "queue_items/queue_transitions/queue_transition_wakes/sessions at read time" },
       slice_frontmatter: { root: missionsRoot ?? INDETERMINATE, asof: asof() },
-      wave_map: { row: waveMap.rowId, asof: asof() },
+      wave_map: {
+        row: waveMap.rowId,
+        asof: asof(),
+        ...(arrangement?.state === "valid" ? { superseded_by: `${arrangement.missionPath} + referenced slice.yaml files` } : {}),
+      },
+      ...(arrangement?.state === "valid"
+        ? {
+            arrangement: {
+              manifest: arrangement.missionPath,
+              asof: asof(),
+              basis: "mission.yaml composition order + referenced slice.yaml execution fields",
+            },
+          }
+        : arrangement?.state === "malformed"
+          ? {
+              arrangement: {
+                value: INDETERMINATE,
+                manifest: arrangement.missionPath,
+                asof: asof(),
+                basis: `mission.yaml arrangement malformed (${arrangement.warning}); fallback to legacy format:wave-map-v1 and SPEC frontmatter`,
+              },
+            }
+          : {}),
       git: { basis: repoCtx ? `per-lane git -C; repo context ${repoCtx}` : "no reachable repo context", asof: asof() },
       build_info: { commit: buildInfo.commit ?? INDETERMINATE, asof: asof() },
       review_artifacts: { root: rigsRoot, asof: asof() },

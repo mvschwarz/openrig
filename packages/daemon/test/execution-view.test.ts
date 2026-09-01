@@ -116,6 +116,38 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
       ["id: OPR.9.9.33", "slice: 33-gamma", `mission: ${MISSION}`].join("\n"),
       "## Intent\ngamma (no EC-1 fields — the INDETERMINATE arm)\n",
     );
+    const missionDir = path.join(missionsRoot, MISSION);
+    fs.writeFileSync(path.join(missionDir, "mission.yaml"), [
+      "schema: openrig.mission/v0alpha1",
+      "kind: mission",
+      "composition:",
+      "  slices:",
+      "    - { ref: slices/31-alpha/slice.yaml, order: 10, active: true }",
+      "    - { ref: slices/32-beta/slice.yaml, order: 20, active: true }",
+      "arrangement:",
+      "  waves:",
+      "    - id: WA",
+      "      lanes:",
+      "        dev: [OPR.9.9.31, OPR.9.9.32]",
+      "      review_model: author-excluded-r1-r2-wave",
+      "",
+    ].join("\n"));
+    fs.writeFileSync(path.join(missionDir, "slices", "31-alpha", "slice.yaml"), [
+      "schema: openrig.slice/v0alpha1",
+      "kind: slice",
+      "execution:",
+      "  wave: WA",
+      "  depends_on: []",
+      "",
+    ].join("\n"));
+    fs.writeFileSync(path.join(missionDir, "slices", "32-beta", "slice.yaml"), [
+      "schema: openrig.slice/v0alpha1",
+      "kind: slice",
+      "execution:",
+      "  wave: WA",
+      "  depends_on: [OPR.9.9.31]",
+      "",
+    ].join("\n"));
 
     // ---- review-artifact registry fixture for slice 31 ----
     const reviewDir = path.join(rigsRoot, "exec-fixture", "state", "review-fixture");
@@ -235,6 +267,12 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect(q6.lanes_live).toBe(2);
   });
 
+  it("defaults to the mission with real in-progress work before a newer planned release directory", () => {
+    fs.mkdirSync(path.join(missionsRoot, "release-10.0", "slices"), { recursive: true });
+    const result = projector.show("execution");
+    expect((result.rows[0] as Record<string, unknown>).mission).toBe(MISSION);
+  });
+
   it("EC-3: the worktree_path field is Q1's join key; a legacy baton falls back marked fragile", () => {
     const doc = show();
     const lanes = doc.q1_lanes as Record<string, unknown>[];
@@ -261,6 +299,51 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     const s33 = q3.find((s) => s.slice_id === "OPR.9.9.33")!;
     expect(s33.build_wave).toBe("INDETERMINATE");
     expect(s33.planning_dial).toBe("INDETERMINATE");
+  });
+
+  it("promotes mission/slice YAML ahead of a parity-matched legacy wave map and names the superseded authority", () => {
+    const doc = show();
+    const q2 = doc.q2_sequencing as Record<string, unknown>[];
+    expect((q2.find((s) => s.slice_id === "OPR.9.9.31")?.source as Record<string, unknown>).arrangement_path)
+      .toContain("31-alpha/slice.yaml");
+    expect(q2.find((s) => s.slice_id === "OPR.9.9.32")?.depends_on).toEqual(["OPR.9.9.31"]);
+    const q3 = doc.q3_care as Record<string, unknown>[];
+    expect(q3.find((s) => s.slice_id === "OPR.9.9.31")?.build_wave).toBe("WA");
+    const sources = doc.sources as Record<string, Record<string, unknown>>;
+    expect(String(sources.arrangement?.basis)).toContain("mission.yaml");
+    expect(String(sources.wave_map?.superseded_by)).toContain("mission.yaml");
+    fs.unlinkSync(path.join(missionsRoot, MISSION, "mission.yaml"));
+    const legacy = show();
+    const comparableQ2 = (value: Record<string, unknown>) => (value.q2_sequencing as Record<string, unknown>[]).map((item) => ({
+      slice_id: item.slice_id,
+      depends_on: item.depends_on,
+    }));
+    const comparableQ3 = (value: Record<string, unknown>) => (value.q3_care as Record<string, unknown>[]).map((item) => ({
+      slice_id: item.slice_id,
+      build_wave: item.build_wave,
+      review_model: item.review_model,
+    }));
+    expect(comparableQ2(doc)).toEqual(comparableQ2(legacy));
+    expect(comparableQ3(doc)).toEqual(comparableQ3(legacy));
+  });
+
+  it("malformed YAML emits one named warning cell and falls back to the legacy arrangement without blanking the view", () => {
+    fs.writeFileSync(path.join(missionsRoot, MISSION, "mission.yaml"), "composition: [not: valid");
+    const doc = show();
+    const q3 = doc.q3_care as Record<string, unknown>[];
+    expect(q3.find((s) => s.slice_id === "OPR.9.9.31")?.build_wave).toBe("WA");
+    expect(doc.q1_lanes).toBeInstanceOf(Array);
+    const arrangement = (doc.sources as Record<string, Record<string, unknown>>).arrangement;
+    expect(arrangement.value).toBe("INDETERMINATE");
+    expect(String(arrangement.basis)).toMatch(/mission\.yaml[\s\S]*fallback/i);
+  });
+
+  it("missing optional YAML falls back silently to the legacy arrangement", () => {
+    fs.unlinkSync(path.join(missionsRoot, MISSION, "mission.yaml"));
+    const doc = show();
+    const q3 = doc.q3_care as Record<string, unknown>[];
+    expect(q3.find((s) => s.slice_id === "OPR.9.9.31")?.build_wave).toBe("WA");
+    expect(JSON.stringify(doc.sources)).not.toMatch(/missing mission\.yaml/i);
   });
 
   it("Q2: EC-1 frontmatter edges + SOFT-AFTER line + blocked rows derive sequencing; absent EC-1 floors INDETERMINATE", () => {

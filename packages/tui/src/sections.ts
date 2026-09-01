@@ -18,6 +18,11 @@ export const SECTION_REGISTRY: readonly SectionDef[] = [
     drillShape: "mission>slice",
   },
   {
+    name: "execution",
+    sourceRead: "GET /api/views/execution?mission= (existing generic view route)",
+    drillShape: "group>derived-row>source",
+  },
+  {
     name: "needs",
     sourceRead: "GET /api/review/fleet + /api/queue/list?attention=1 (existing)",
     drillShape: "flat",
