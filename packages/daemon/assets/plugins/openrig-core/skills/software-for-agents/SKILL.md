@@ -1,15 +1,10 @@
 ---
 name: software-for-agents
 description: |
-  Load this FIRST, before you assume how anything here works — especially before building, modifying, or
-  "fixing a bug" in an OpenRig or studio-box system, or when something behaves unexpectedly and you're
-  about to treat it as a code bug. You are almost certainly NOT operating in traditional software. This
-  is a self-improving MARKDOWN CONTROL PLANE: the substrate is markdown + YAML + JSON + folder structure
-  (skills, instructions, bootstrap files, schemas, conventions), and most "bugs" are coherence gaps in
-  that layer, not broken functions. Read this to form the correct mental model so your fixes land at the
-  precise spot that stops the footgun for every future rig — not just patch a symptom. It also covers why STUDIO APPS skip the mockup phase — for an agent-built app the build is as fast as the mockup, so the PRD is the fleshed intent (velocity as method, not a quality waiver). NOTE: the
-  bug-tolerance in this model is SCOPED to agent-managed software; the OpenRig core and rigs.to stay
-  rock-solid — see the scope block up top before you apply anything here.
+  Use when building, modifying, or diagnosing an OpenRig or studio-box system; when surprising behavior
+  looks like a code bug but may come from Markdown, YAML, JSON, bootstrap files, schemas, skills, or
+  conventions; or when deciding whether an agent-built studio app needs a separate mockup phase. NOT for
+  treating defects in OpenRig core or rigs.to as tolerable control-plane drift.
 metadata:
   openrig:
     stage: factory-approved
