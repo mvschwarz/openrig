@@ -1395,6 +1395,60 @@ describe("Codex runtime adapter", () => {
     expect(after.profiles.notes.text).toBe((parseToml(userConfig) as Record<string, any>).profiles.notes.text);
   });
 
+  it("projects a fragment containing a multi-line nested array (r2 NOT-CLEAR #3, 09-01)", async () => {
+    // review50-r2 blocking finding on candidate a760ec27. `  [1, 2],` is a row
+    // of a multi-line array, not a table header — but the splitter classified
+    // any document-level-looking line starting with `[` as a header, tore the
+    // array apart, and the render guard then refused a fragment that is
+    // perfectly valid. The base implementation projected this fine, so it was a
+    // regression I introduced. Depth, not the line's own text, separates them.
+    const original = 'model = "gpt-5"\n';
+    const fragment = ["matrix = [", "  [1, 2],", "  [3, 4],", "]", ""].join("\n");
+    const { project, read } = await projectFragment(original, fragment);
+
+    const result = await project();
+    expect(result).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const after = parseToml(read()) as Record<string, any>;
+    expect(after.model).toBe("gpt-5");                  // user value preserved
+    expect(after.matrix).toEqual([[1, 2], [3, 4]]);     // array intact, not torn
+  });
+
+  it("still finds real headers that follow a multi-line array", async () => {
+    // The depth fix must not overshoot: once the array closes we are back at
+    // document level, so BOTH following headers are headers again — the
+    // colliding one yields to the user, the other lands.
+    const original = '[mcp_servers.exa]\nurl = "https://user.example/mcp"\n';
+    const fragment = [
+      "[managed.data]",
+      "matrix = [", "  [1, 2],", "]",
+      "[mcp_servers.exa]", 'url = "https://mcp.exa.ai/mcp"',
+      "[mcp_servers.context7]", 'url = "https://mcp.context7.com/mcp"', "",
+    ].join("\n");
+    const { project, read } = await projectFragment(original, fragment);
+
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const after = parseToml(read()) as Record<string, any>;
+    expect(after.mcp_servers.exa.url).toBe("https://user.example/mcp");   // user wins
+    expect(after.mcp_servers.context7.url).toBe("https://mcp.context7.com/mcp");
+    expect(after.managed.data.matrix).toEqual([[1, 2]]);                  // array intact
+  });
+
+  it("documents that fragment preamble keys bind to the user's LAST table (inherited)", async () => {
+    // Not introduced by this slice: the managed block is appended at the end, so
+    // bare keys ahead of the fragment's first header land inside whatever table
+    // the user's document was still inside. Verified identical against the base
+    // raw-append implementation on a non-colliding input. Pinned so the
+    // behaviour is visible rather than surprising; changing it would mean moving
+    // the managed block, which is outside this seam.
+    const original = '[mcp_servers.other]\nurl = "https://user.example/mcp"\n';
+    const { project, read } = await projectFragment(original, "matrix = [\n  [1, 2],\n]\n");
+
+    await project();
+    const after = parseToml(read()) as Record<string, any>;
+    expect(after.matrix).toBeUndefined();
+    expect(after.mcp_servers.other.matrix).toEqual([[1, 2]]);
+  });
+
   it("refuses an intrinsically invalid managed fragment instead of deleting it (r2 NOT-CLEAR, 09-01)", async () => {
     // review50-r2 blocking finding on candidate ebfe60d9. "appending this block
     // breaks the parse" has TWO causes — a user collision, or a malformed block.

@@ -1184,13 +1184,22 @@ function upsertCodexFeaturesHooksEnabled(content: string): string {
 }
 
 /**
- * For each line, whether it BEGINS outside any string — i.e. whether a `[` at
- * its start is a table header rather than string data. Tracks TOML's four
- * string forms plus comments; everything else is structure.
+ * For each line, whether it BEGINS at document level — outside every string AND
+ * outside every array or inline table. At document level, TOML grammar allows
+ * nothing but a table header to start with `[`, so that one bit is the whole
+ * header test; anywhere else a `[` is value syntax.
+ *
+ * Both halves were learned the hard way, each from a silent wrong answer:
+ *  - strings: `\"""` inside a multiline basic string read as the string's end,
+ *    promoting the next line to a header (review50-r2, 2026-09-01).
+ *  - nesting: a continuation row of a multi-line array (`  [1, 2],`) read as a
+ *    header, so a valid fragment was split apart and refused (review50-r2,
+ *    2026-09-01). Depth is what separates the two, not the line's own text.
  */
-function lineStartsOutsideString(content: string): boolean[] {
+function lineStartsAtDocumentLevel(content: string): boolean[] {
   const out: boolean[] = [true];
   let multiline: '"""' | "'''" | null = null;
+  let depth = 0;
   let i = 0;
   while (i < content.length) {
     const ch = content[i]!;
@@ -1226,7 +1235,11 @@ function lineStartsOutsideString(content: string): boolean[] {
       if (content[i] === quote) i += 1;
       continue;
     }
-    if (ch === "\n") { out.push(true); i += 1; continue; }
+    // A header's own brackets open and close on its line, so depth is back to 0
+    // by the newline; a multi-line array leaves it raised for its whole body.
+    if (ch === "[" || ch === "{") { depth += 1; i += 1; continue; }
+    if (ch === "]" || ch === "}") { depth = Math.max(0, depth - 1); i += 1; continue; }
+    if (ch === "\n") { out.push(depth === 0); i += 1; continue; }
     i += 1;
   }
   return out;
@@ -1234,7 +1247,7 @@ function lineStartsOutsideString(content: string): boolean[] {
 
 /** A fragment split at its table headers: a leading preamble, then one entry per table. */
 function splitAtTableHeaders(fragment: string): Array<{ header: string | null; text: string }> {
-  const structural = lineStartsOutsideString(fragment);
+  const structural = lineStartsAtDocumentLevel(fragment);
   const blocks: Array<{ header: string | null; lines: string[] }> = [{ header: null, lines: [] }];
   fragment.split("\n").forEach((line, index) => {
     const trimmed = line.trim();
@@ -1298,9 +1311,13 @@ function assertFragmentParsesStandalone(fragment: string, sourcePath: string, id
  * before we get here, so a failure that survives to this point is a real
  * collision.
  *
- * One remaining limit: keys before the fragment's first header are not tables
- * and pass through; a duplicate one is caught by the render check rather than
- * guessing whose key wins.
+ * One remaining limit, INHERITED from the raw-append design and not introduced
+ * here: keys before the fragment's first header are not tables, so they pass
+ * through — and because the managed block is appended at the END of the user's
+ * document, they bind to whatever table the user was still inside rather than to
+ * the document root. Verified identical against the base implementation on a
+ * non-colliding input. Changing it would mean relocating the managed block,
+ * which is a different seam; it is pinned in the tests so it is visible.
  */
 function dropCollidingFragmentTables(
   fragment: string,
