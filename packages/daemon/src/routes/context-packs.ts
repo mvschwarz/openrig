@@ -43,7 +43,13 @@ function jsonError(
 
 function isRelativeMarkdownAddress(value: unknown): value is string {
   if (typeof value !== "string") return false;
-  const path = value.split("#", 1)[0]!;
+  let path: string;
+  try {
+    path = parseAddress(value).ref;
+  } catch (err) {
+    if (err instanceof AddressResolutionError) return false;
+    throw err;
+  }
   return path.length > 0 &&
     !isAbsolute(path) &&
     !path.split(/[\\/]/).some((segment) => segment.length === 0 || segment === "." || segment === "..") &&

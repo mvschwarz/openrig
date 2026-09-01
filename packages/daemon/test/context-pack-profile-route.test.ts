@@ -410,6 +410,7 @@ missions:
   it.each([
     { caseName: "wrong-type", intent: "42" },
     { caseName: "traversal-shaped", intent: "../outside.md" },
+    { caseName: "malformed-fragment", intent: "\"SPEC.md#\"" },
   ])("Story 2: $caseName optional project intent warns and preserves the baseline install", async ({ intent }) => {
     const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
     const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
@@ -468,6 +469,7 @@ missions:
   it.each([
     { caseName: "wrong-type", context: "not-a-list" },
     { caseName: "mixed-invalid", context: "\n    - context/first.md\n    - ../outside.md" },
+    { caseName: "malformed-fragment", context: "\n    - context/first.md\n    - \"SPEC.md#a/b/c\"" },
   ])("Story 2: $caseName optional project context warns and preserves the baseline install", async ({ context }) => {
     const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
     const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
