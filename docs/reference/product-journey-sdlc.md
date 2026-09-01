@@ -62,7 +62,7 @@ mission YAML to change.
 
 ### intent.recover
 
-- **Use when:** work already exists but may have drifted from founder or user
+- **Use when:** work already exists but may have drifted from its original user
   intent.
 - **Skip when:** this is greenfield work with one current, unambiguous intent.
 - **Input:** the earliest authoritative intent, later mission/slice specs,
