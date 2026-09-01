@@ -1568,10 +1568,13 @@ describe("Codex runtime adapter", () => {
     // written and the file is byte-identical — but the assertion no longer
     // claims WHICH guard fired, because that claim is now false.
     //
-    // Standing note, deliberately not converted into a contrived test: after
-    // standalone-parse validation plus root-scope refusal, I could not construct
-    // any input that still reaches `assertRendersAsLoadableToml`. It is retained
-    // as a backstop, and its unreachability is reported rather than pinned.
+    // CORRECTION (orch-lead, 09-01): I reported here that
+    // `assertRendersAsLoadableToml` had become unreachable. That was WRONG, and
+    // the counterexample was already in this file — the invalid-user-config test
+    // below reaches it (userParses=false, so no block is dropped, and the
+    // rendered document is still invalid). Verified: that path fails with
+    // "would write a config Codex cannot parse". The guard is live; I searched
+    // my own imagination and reported the result as a property of the code.
     const original = 'model = "user-choice"\n';
     const { project, read } = await projectFragment(original, 'model = "managed-choice"\n');
 

@@ -1268,13 +1268,6 @@ function parsesAsToml(candidate: string): boolean {
 }
 
 /**
- * A managed fragment must be a valid TOML document on its own, checked BEFORE
- * any collision filtering. Without this, an authoring error in the fragment is
- * indistinguishable from a user collision and gets silently dropped — the
- * write then succeeds precisely because the bad input was deleted, which is the
- * opposite of what the render guard is for.
- */
-/**
  * Refuse a fragment that declares keys before its first table header.
  *
  * TOML HAS NO ROOT-REOPEN SYNTAX. The managed block is appended at the end of
@@ -1310,6 +1303,13 @@ function assertFragmentOpensWithTable(fragment: string, sourcePath: string, id: 
   );
 }
 
+/**
+ * A managed fragment must be a valid TOML document on its own, checked BEFORE
+ * any collision filtering. Without this, an authoring error in the fragment is
+ * indistinguishable from a user collision and gets silently dropped — the
+ * write then succeeds precisely because the bad input was deleted, which is the
+ * opposite of what the render guard is for.
+ */
 function assertFragmentParsesStandalone(fragment: string, sourcePath: string, id: string): void {
   try {
     parseToml(fragment);
@@ -1350,13 +1350,10 @@ function assertFragmentParsesStandalone(fragment: string, sourcePath: string, id
  * before we get here, so a failure that survives to this point is a real
  * collision.
  *
- * One remaining limit, INHERITED from the raw-append design and not introduced
- * here: keys before the fragment's first header are not tables, so they pass
- * through — and because the managed block is appended at the END of the user's
- * document, they bind to whatever table the user was still inside rather than to
- * the document root. Verified identical against the base implementation on a
- * non-colliding input. Changing it would mean relocating the managed block,
- * which is a different seam; it is pinned in the tests so it is visible.
+ * Keys ahead of the fragment's first header never reach here: OPR.0.5.8.15
+ * refuses that shape upstream in `assertFragmentOpensWithTable`, because an
+ * appended root key cannot bind at document root and would silently join the
+ * user's last table. Every block this function sees is therefore a table.
  */
 function dropCollidingFragmentTables(
   fragment: string,
