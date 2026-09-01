@@ -74,12 +74,36 @@ playbook.
 ## 6. The capability-delta lifecycle (standing law)
 
 Each release's capability delta is authored at the fence and bound to the exact
-published cut. Canon absorbs its named items; the canon header then names the delta,
-which EXPIRES it — verify the expiry fired, and never cite an expired delta. The new
-release's delta obligations start at ITS cut. A delta that outlives its absorption
-is a stale teaching site wearing a version number.
+published cut. Its baseline is the canon's actual last-absorbed marker, not an
+assumption that the immediately prior semver was absorbed. When canon is behind, the
+new delta is a cumulative synthesis of every intervening delta, preserving
+supersessions and pivots rather than concatenating old prose.
 
-## 7. What deliberately does NOT happen at the boundary
+Canon absorbs the kept public-product truths; the canon header then names the delta,
+which EXPIRES it — verify the expiry fired, and never cite an expired delta. Private
+project topology, host practice, and release ownership go to the versioned project
+world instead of leaking into the public package. The new release's delta obligations
+start at ITS cut. A delta that outlives its absorption is a stale teaching site
+wearing a version number.
+
+## 7. World absorption and discoverability
+
+- Every changed capability gets one small map: **user situation · current capability
+  · authoritative source · natural first product encounter · durable context home ·
+  clean-agent probe**. Record an already-good route and leave it alone.
+- Prefer point-of-need truth from the existing `--help`, error, command output, live
+  state, context catalog, work install, or skill router. The world install supplies
+  width and ontology; it should not copy exact facts a live surface can derive.
+- The release mission owns this review before its cut when possible, so public
+  world/help changes ship with the capability. This boundary verifies the exact
+  packaged result, repairs any missed absorption as explicit debt, absorbs private
+  project truth, re-primes, and observes whether a clean world-installed agent
+  reaches the capability from its situation without being told its name.
+- A missing route is a release finding. Repair the smallest existing seam or deposit
+  the evidenced gap into the derivable-context mission; do not create a second
+  capability registry, search service, or world store at the boundary.
+
+## 8. What deliberately does NOT happen at the boundary
 
 - No process migration: situational rules expired at the fence. The standing corpus
   is the four checking principles — verify by effect · evidence at source · honest
