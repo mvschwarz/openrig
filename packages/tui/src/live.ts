@@ -17,6 +17,12 @@ import type { FleetSnapshot, LoadState, RowFlash } from "./types.js";
 
 /** one-shot flash window (ms) — matches renderScreen's flashActive window */
 export const FLASH_WINDOW_MS = 600;
+/** One passive whole-snapshot read per quiet daemon sample window. */
+export const QUIET_REFRESH_MS = 30_000;
+
+export interface QuietTimerHandle {
+  unref?: () => void;
+}
 
 export interface LiveRefreshDeps {
   hydrate: () => Promise<FleetSnapshot>;
@@ -24,6 +30,9 @@ export interface LiveRefreshDeps {
    * in-flight frame is actually DRAWN at start and cleared on settle */
   onFrame: () => void;
   now: () => number;
+  /** injected by deterministic tests; production uses the Node timeout */
+  setTimeout?: (callback: () => void, delayMs: number) => QuietTimerHandle;
+  clearTimeout?: (handle: QuietTimerHandle) => void;
 }
 
 export interface LiveRefresh {
@@ -33,6 +42,8 @@ export interface LiveRefresh {
   snapshot: () => FleetSnapshot;
   load: () => LoadState;
   flashes: () => RowFlash[];
+  /** stop the quiet fallback during TUI shutdown */
+  close: () => void;
 }
 
 /** walk the snapshot topology and key every agent's served pane-activity
@@ -51,8 +62,30 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
   let snapshot = emptySnapshot();
   const load: LoadState = { inFlight: false, settled: false };
   let flashes: RowFlash[] = [];
+  let quietTimer: QuietTimerHandle | null = null;
+  let closed = false;
+  let refresh: () => Promise<void>;
+  const scheduleTimeout = deps.setTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+  const cancelTimeout = deps.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
 
-  const refresh = singleFlight(async () => {
+  function clearQuietTimer(): void {
+    if (quietTimer === null) return;
+    cancelTimeout(quietTimer);
+    quietTimer = null;
+  }
+
+  function armQuietTimer(): void {
+    clearQuietTimer();
+    if (closed) return;
+    quietTimer = scheduleTimeout(() => {
+      quietTimer = null;
+      void refresh();
+    }, QUIET_REFRESH_MS);
+    quietTimer.unref?.();
+  }
+
+  const runRefresh = singleFlight(async () => {
+    clearQuietTimer();
     load.inFlight = true;
     deps.onFrame();
     try {
@@ -74,13 +107,23 @@ export function createLiveRefresh(deps: LiveRefreshDeps): LiveRefresh {
       load.inFlight = false;
       load.settled = true;
       deps.onFrame();
+      armQuietTimer();
     }
   });
+
+  refresh = () => {
+    clearQuietTimer();
+    return runRefresh();
+  };
 
   return {
     refresh,
     snapshot: () => snapshot,
     load: () => ({ ...load }),
     flashes: () => [...flashes],
+    close: () => {
+      closed = true;
+      clearQuietTimer();
+    },
   };
 }

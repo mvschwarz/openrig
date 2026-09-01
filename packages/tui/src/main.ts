@@ -73,7 +73,8 @@ async function run(): Promise<void> {
   let motionTimer: NodeJS.Timeout | null = null;
   // S19 AM-R18 — the open view updates ITSELF: oracle pushes drive the refresh owner.
   // Notification-only; the refresh rehydrates the same ps projection through the
-  // daemon client (one oracle, no idle polling, HTTP stays in the client module).
+  // daemon client (one oracle, with the owner's bounded quiet fallback; HTTP stays
+  // in the client module).
   const activityEvents = live && client
     ? subscribeActivityEvents({ open: () => client.openActivityEvents(), onEvent: () => { void live.refresh(); } })
     : null;
@@ -253,6 +254,7 @@ async function run(): Promise<void> {
 
   async function shutdown(): Promise<void> {
     if (motionTimer) clearTimeout(motionTimer);
+    live?.close();
     process.stdout.write(MOUSE_DISABLE + ALT_SCREEN_OFF);
     await socket.close();
     activityEvents?.close();

@@ -46,7 +46,7 @@ afterEach(async () => {
 });
 
 describe("production TUI refresh cadence", () => {
-  it("does no steady-state reads merely by being open and refreshes on operator activity", async () => {
+  it("does not restore the five-second read series and still refreshes on operator activity", async () => {
     const requests: string[] = [];
     const server = createServer((req, res) => {
       requests.push(req.url ?? "");
@@ -94,7 +94,7 @@ describe("production TUI refresh cadence", () => {
       await until(() => requests.length > idleReads || child.exitCode != null, 1_500).catch(() => {});
       const activeReads = requests.length;
 
-      expect(idleReads, "an unchanged open TUI must not rebuild the fleet on a timer").toBe(initialReads);
+      expect(idleReads, "an unchanged open TUI must not rebuild the fleet in a five-second series").toBe(initialReads);
       expect(activeReads, "operator input must request fresh data").toBeGreaterThan(idleReads);
     } finally {
       await stop(child);
