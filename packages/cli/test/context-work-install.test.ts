@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { Command } from "commander";
@@ -64,6 +64,7 @@ install:
   intent: SPEC.md
 `);
     writeFileSync(join(alphaRoot, "missions", "alpha-active", "SPEC.md"), "# Alpha mission\n");
+    writeFileSync(join(alphaRoot, "missions", "alpha-active", "PROGRESS.md"), "# Alpha mission progress\n\n- [x] Story 2 complete\n- [ ] Release acceptance pending\n");
     writeFileSync(join(alphaRoot, "missions", "alpha-active", "mission.yaml"), `schema: openrig.mission/v0alpha1
 kind: mission
 composition:
@@ -71,6 +72,7 @@ composition:
     spec: SPEC.md
 `);
     writeFileSync(join(alphaRoot, "missions", "alpha-active", "slices", "01-live-work", "SPEC.md"), "# Alpha slice\n");
+    writeFileSync(join(alphaRoot, "missions", "alpha-active", "slices", "01-live-work", "PROGRESS.md"), "# Alpha slice progress\n\n- [x] Story 3 complete\n- [ ] Public publish pending\n");
     writeFileSync(join(betaRoot, "SPEC.md"), "# Beta project\n");
     writeFileSync(join(betaRoot, "project.yaml"), `schema: openrig.project/v0alpha1
 kind: project
@@ -95,7 +97,7 @@ composition:
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("selects two declared project roots independently and replaces the operative frame", async () => {
+  it("selects two declared roots and returns stable intent with current progress", async () => {
     const alpha = await captureLogs(async () => {
       await makeCommand().parseAsync([
         "node", "rig", "context", "work-install",
@@ -105,7 +107,7 @@ composition:
     expect(alpha.exitCode).toBeUndefined();
     const alphaPlan = JSON.parse(alpha.logs.join("")) as {
       position: { projectId: string; projectRoot: string; mission: string; slice: string; frontier: string };
-      pieces: Array<{ altitude: string; address: string; path: string; exists: boolean }>;
+      pieces: Array<{ altitude: string; address: string; path: string; exists: boolean; source: string }>;
     };
     expect(alphaPlan.position).toMatchObject({
       projectId: "alpha",
@@ -114,12 +116,18 @@ composition:
       slice: "01-live-work",
       frontier: "slice",
     });
-    expect(alphaPlan.pieces.map(({ altitude, address, exists }) => ({ altitude, address, exists }))).toEqual([
-      { altitude: "project", address: "project:SPEC.md", exists: true },
-      { altitude: "mission", address: "mission:SPEC.md", exists: true },
-      { altitude: "slice", address: "mission:slices/01-live-work/SPEC.md", exists: true },
+    expect(alphaPlan.pieces.map(({ altitude, address, exists, source }) => ({ altitude, address, exists, source }))).toEqual([
+      { altitude: "project", address: "project:SPEC.md", exists: true, source: "manifest" },
+      { altitude: "mission", address: "mission:SPEC.md", exists: true, source: "manifest" },
+      { altitude: "mission", address: "mission:PROGRESS.md", exists: true, source: "default" },
+      { altitude: "slice", address: "mission:slices/01-live-work/SPEC.md", exists: true, source: "explicit" },
+      { altitude: "slice", address: "mission:slices/01-live-work/PROGRESS.md", exists: true, source: "default" },
     ]);
     expect(alphaPlan.pieces.every((piece) => piece.path.startsWith(alphaRoot))).toBe(true);
+    expect(alphaPlan.pieces.filter((piece) => piece.address.endsWith("PROGRESS.md")).map((piece) => readFileSync(piece.path, "utf8"))).toEqual([
+      "# Alpha mission progress\n\n- [x] Story 2 complete\n- [ ] Release acceptance pending\n",
+      "# Alpha slice progress\n\n- [x] Story 3 complete\n- [ ] Public publish pending\n",
+    ]);
 
     const beta = await captureLogs(async () => {
       await makeCommand().parseAsync([
@@ -130,7 +138,7 @@ composition:
     expect(beta.exitCode).toBeUndefined();
     const betaPlan = JSON.parse(beta.logs.join("")) as {
       position: { projectId: string; projectRoot: string; mission: string; slice: null; frontier: string };
-      pieces: Array<{ address: string; path: string }>;
+      pieces: Array<{ altitude: string; address: string; path: string; exists: boolean; source: string }>;
     };
     expect(betaPlan.position).toMatchObject({
       projectId: "beta",
@@ -140,6 +148,11 @@ composition:
       frontier: "mission",
     });
     expect(JSON.stringify(betaPlan)).not.toContain(alphaRoot);
+    expect(betaPlan.pieces.map(({ altitude, address, exists, source }) => ({ altitude, address, exists, source }))).toEqual([
+      { altitude: "project", address: "project:SPEC.md", exists: true, source: "manifest" },
+      { altitude: "mission", address: "mission:SPEC.md", exists: true, source: "manifest" },
+      { altitude: "mission", address: "mission:PROGRESS.md", exists: false, source: "default" },
+    ]);
     expect(betaPlan.pieces.every((piece) => piece.path.startsWith(betaRoot))).toBe(true);
   });
 

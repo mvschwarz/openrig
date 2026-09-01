@@ -273,6 +273,9 @@ export function resolveWorkPosition(opts: {
       const plannedMission = piece("mission", `mission:${missionSpec}`, missionRoot, missionSource);
       if ("error" in plannedMission) return plannedMission;
       pieces.push(plannedMission);
+      const plannedMissionProgress = piece("mission", "mission:PROGRESS.md", missionRoot, "default");
+      if ("error" in plannedMissionProgress) return plannedMissionProgress;
+      pieces.push(plannedMissionProgress);
 
       if (opts.slice !== undefined) {
         sliceRoot = join(missionRoot, "slices", opts.slice);
@@ -305,6 +308,9 @@ export function resolveWorkPosition(opts: {
           );
           if ("error" in plannedSlice) return plannedSlice;
           pieces.push(plannedSlice);
+          const plannedSliceProgress = piece("slice", `mission:slices/${opts.slice}/PROGRESS.md`, missionRoot, "default");
+          if ("error" in plannedSliceProgress) return plannedSliceProgress;
+          pieces.push(plannedSliceProgress);
         }
       }
     }
