@@ -221,6 +221,52 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     expect(attempts).toHaveLength(2);
   });
 
+  it("S2 preserve — a SUBSTANTIVE BLOCKER transition re-wakes, even at unchanged blocker state", async () => {
+    // review50-r2 NOT-CLEAR at 0bbb9d9e2. The contract names TWO blocker axes:
+    // a substantive transition on the blocker, OR the blocker reaching terminal.
+    // The digest carried only the blocker's STATE, so a content-bearing note on a
+    // still-in-progress blocker produced an identical digest and was suppressed.
+    // My earlier "MATERIAL transition" pin only ever changed the gated ROW — a
+    // quantifier satisfied by one of its two routes.
+    seedGateQitem("q-gate-1");
+    db.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, body)
+       VALUES ('q-blocker', '2026-07-03T07:00:00Z', '2026-07-03T07:00:00Z', 'src@r', 'other@rig', 'in-progress', 'routine', null, 'the blocker')`,
+    ).run();
+    db.prepare("UPDATE queue_items SET state = 'blocked', blocked_on = 'q-blocker' WHERE qitem_id = 'q-gate-1'").run();
+    seedActivity("Stop", FRESH);
+    const { attempts, evaluate, advance } = engineFor(() => "ok");
+    await evaluate();
+    expect(attempts).toHaveLength(1);
+
+    // Blocker gains a substantive transition; its STATE is deliberately unchanged.
+    appendTransition("q-blocker", "decision context materially amended", 91001);
+    expect(
+      (db.prepare("SELECT state FROM queue_items WHERE qitem_id = 'q-blocker'").get() as { state: string }).state,
+    ).toBe("in-progress");
+    advance(301);
+    await evaluate();
+    expect(attempts).toHaveLength(2);
+  });
+
+  it("S2 — a wake-machinery marker on the BLOCKER is still not material", async () => {
+    // The exclusion has to hold on the blocker axis too, or a wake recorded there
+    // would justify the next wake — the same trap, one table over.
+    seedGateQitem("q-gate-1");
+    db.prepare(
+      `INSERT INTO queue_items (qitem_id, ts_created, ts_updated, source_session, destination_session, state, priority, tier, body)
+       VALUES ('q-blocker', '2026-07-03T07:00:00Z', '2026-07-03T07:00:00Z', 'src@r', 'other@rig', 'in-progress', 'routine', null, 'the blocker')`,
+    ).run();
+    db.prepare("UPDATE queue_items SET state = 'blocked', blocked_on = 'q-blocker' WHERE qitem_id = 'q-gate-1'").run();
+    seedActivity("Stop", FRESH);
+    const { attempts, evaluate, advance } = engineFor(() => "ok");
+    await evaluate();
+    appendTransition("q-blocker", "wake-attempt: 2/3 outcome=failed", 91002);
+    advance(301);
+    await evaluate();
+    expect(attempts).toHaveLength(1);
+  });
+
   it("S2 preserve — a NEW gate qitem arriving wakes", async () => {
     seedGateQitem("q-gate-1");
     seedActivity("Stop", FRESH);

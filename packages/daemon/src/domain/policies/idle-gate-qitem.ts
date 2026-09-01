@@ -214,7 +214,27 @@ function gatedConditionFingerprint(db: Database.Database, qitemIds: readonly str
       | { state: string; blockedOn: string; claimedAt: string; blockerState: string }
       | undefined;
     const marker = (latestSubstantive.get(id, ...likeArgs) as { marker: number | null } | undefined)?.marker ?? 0;
-    return [id, f?.state ?? "", f?.blockedOn ?? "", f?.blockerState ?? "", f?.claimedAt ?? "", marker].join("|");
+    // The blocker contributes TWO independent axes, not one. Its terminal state
+    // is carried by `blockerState`; a SUBSTANTIVE TRANSITION on it that leaves
+    // that state unchanged is a separate material event and needs its own marker.
+    // Omitting it meant a blocker note like "decision context materially amended"
+    // on a still-in-progress blocker produced an identical digest and was
+    // suppressed (review50-r2, reproduced against this exact policy). The same
+    // wake-machinery exclusion applies, so a wake recorded on the blocker cannot
+    // justify the next wake either.
+    const blockerMarker =
+      f?.blockedOn
+        ? (latestSubstantive.get(f.blockedOn, ...likeArgs) as { marker: number | null } | undefined)?.marker ?? 0
+        : 0;
+    return [
+      id,
+      f?.state ?? "",
+      f?.blockedOn ?? "",
+      f?.blockerState ?? "",
+      blockerMarker,
+      f?.claimedAt ?? "",
+      marker,
+    ].join("|");
   });
   return createHash("sha256").update(parts.join("\n")).digest("hex").slice(0, 32);
 }
