@@ -30,6 +30,7 @@ import { ATOM_TAXONOMIES, TAXONOMY_TEACHING } from "@openrig/daemon/context-pack
 import { ConfigStore } from "../config-store.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
+import { resolveWorkPosition } from "../lib/work-install.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -336,6 +337,37 @@ Examples:
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
   };
+
+  cmd.command("work-install")
+    .description("Resolve an ordered project, mission, and slice context plan without delivering it")
+    .option("--project <id>", "Exact project id from workspace.yaml")
+    .option("--mission <id>", "Exact mission id under the selected project")
+    .option("--slice <id>", "Exact slice id under the selected mission")
+    .option("--json", "JSON output")
+    .action((opts: { project?: string; mission?: string; slice?: string; json?: boolean }) => {
+      const workspaceRoot = String(new ConfigStore().resolveWithSource("workspace.root").value);
+      const result = resolveWorkPosition({
+        workspaceRoot,
+        ...(opts.project !== undefined ? { project: opts.project } : {}),
+        ...(opts.mission !== undefined ? { mission: opts.mission } : {}),
+        ...(opts.slice !== undefined ? { slice: opts.slice } : {}),
+      });
+      if ("error" in result) {
+        if (opts.json) console.log(JSON.stringify({ ok: false, ...result }));
+        else console.error(`${result.error.code}: ${result.error.message}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}`);
+      for (const planned of result.pieces) {
+        console.log(`${planned.altitude.padEnd(7)} ${planned.address} [${planned.source}] ${planned.exists ? planned.path : `(absent: ${planned.path})`}`);
+      }
+      for (const warning of result.warnings) console.error(`Warning: ${warning}`);
+    });
 
   async function getClient(): Promise<DaemonClient> {
     const deps = getDeps();
