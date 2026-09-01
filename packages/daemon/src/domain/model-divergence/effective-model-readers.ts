@@ -3,8 +3,9 @@
 // The detector compares effective vs pinned; these readers own "effective". Both specimens proved
 // the REQUESTED echo lies (the codex banner kept naming the pinned model while the footer ran a
 // fallback), so each read comes from the runtime's own record of what is actually answering:
-//   - claude-code: the last assistant message's `message.model` in the provider transcript — the
-//     API response names the model that produced it. Absent until the seat's first assistant turn.
+//   - claude-code: the newest determinate, non-synthetic model-bearing assistant record in the
+//     provider transcript — the API response names the model that produced it. Absent until the
+//     seat's first such record.
 //   - codex: the latest `world_state` event's `collaboration_mode.model` in the rollout.
 //
 // BOUNDED READS by contract: provider records on live seats reach hundreds of MB (a whole-file
@@ -44,8 +45,9 @@ export function readTailLines(path: string, tailBytes = TAIL_BYTES): string[] {
   }
 }
 
-/** The model that produced the seat's newest assistant turn, or null when no turn is in the tail
- *  window (a just-launched seat has none — the detector treats null as PENDING, not as a match). */
+/** The model from the seat's newest determinate, non-synthetic model-bearing assistant record, or
+ *  null when no such record is in the tail window (a just-launched or synthetic-only seat has none
+ *  — the detector treats null as PENDING, not as a match). */
 export function readClaudeEffectiveModel(transcriptPath: string): string | null {
   const lines = readTailLines(transcriptPath);
   for (let i = lines.length - 1; i >= 0; i--) {
