@@ -53,7 +53,7 @@ export function readClaudeEffectiveModel(transcriptPath: string): string | null 
     if (!line.includes('"assistant"') || !line.includes('"model"')) continue;
     try {
       const obj = JSON.parse(line) as { type?: unknown; message?: { role?: unknown; model?: unknown } };
-      if (obj.message?.role === "assistant" && typeof obj.message.model === "string" && obj.message.model.length > 0) {
+      if (obj.message?.role === "assistant" && typeof obj.message.model === "string" && obj.message.model.length > 0 && obj.message.model !== "<synthetic>") {
         return obj.message.model;
       }
     } catch {

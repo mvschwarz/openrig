@@ -37,6 +37,20 @@ describe("readClaudeEffectiveModel", () => {
     expect(readClaudeEffectiveModel(p)).toBe("claude-fable-5");
   });
 
+  it("skips a newer synthetic harness notice and returns the newest real assistant model", () => {
+    const p = tmp("t.jsonl", [
+      claudeLine("claude-fable-5"),
+      claudeLine("<synthetic>"),
+      "",
+    ].join("\n"));
+    expect(readClaudeEffectiveModel(p)).toBe("claude-fable-5");
+  });
+
+  it("a synthetic-only assistant history reads null instead of inventing an effective model", () => {
+    const p = tmp("t.jsonl", claudeLine("<synthetic>") + "\n");
+    expect(readClaudeEffectiveModel(p)).toBeNull();
+  });
+
   it("a transcript with NO assistant turn reads null (pending, never assumed)", () => {
     const p = tmp("t.jsonl", JSON.stringify({ type: "user", message: { role: "user", content: "boot" } }) + "\n");
     expect(readClaudeEffectiveModel(p)).toBeNull();
