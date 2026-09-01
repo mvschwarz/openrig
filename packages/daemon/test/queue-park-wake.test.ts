@@ -124,9 +124,60 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(wake?.wake_kind).toBe("timer");
     const job = wake ? jobs.getById(wake.wake_ref) : null;
     expect(job).toMatchObject({ state: "active", targetSession: "worker@rig", intervalSeconds: 90 });
-    expect(job?.lastEvaluationAt).toBeNull();
-    expect(isDue(job!, Date.parse(job!.registeredAt))).toBe(true);
+    // AMENDED by OPR.0.5.8.1 S1. This test's subject — a park arms a timer
+    // ATOMICALLY and records its generated watchdog id — is unchanged and still
+    // asserted above. Only these two incidental lines described behaviour that
+    // was a defect: an unseeded `last_evaluation_at` made `isDue` true at
+    // registration, so a 90s timer (like the measured 20m and 2h ones) fired on
+    // the scheduler's first pass. The interval now starts at registration for
+    // every explicit `--wake-after`, as it already did for provider-limit parks.
+    expect(job?.lastEvaluationAt).toBe(job?.registeredAt);
+    const armedAt = Date.parse(job!.registeredAt);
+    expect(isDue(job!, armedAt)).toBe(false);              // not due the instant it is armed
+    expect(isDue(job!, armedAt + 89_999)).toBe(false);     // nor one tick early
+    expect(isDue(job!, armedAt + 90_000)).toBe(true);      // due at the requested 90s
+    // Unchanged and deliberately still asserted: this repair does not add an
+    // expiry field to ordinary timer parks (no new per-wake bookkeeping).
     expect(repo.getParkWakeStatus(row.qitemId)).not.toHaveProperty("expiresAt");
+  });
+
+  it("OPR.0.5.8.1 S1 — two materially different --wake-after durations do NOT converge on one latency", async () => {
+    // The SPEC's own contract line. Measured on the base build through the real
+    // public seam: a requested 20m fired 0.69s after arming and a requested 2h
+    // fired 0.77s — a 6x difference in request collapsing to a shared sub-second
+    // latency, because `isDue` treats a job with no `last_evaluation_at` as due.
+    // Each duration must now be measured against its own arming instant.
+    const short = await item("worker@rig");
+    const long = await item("worker@rig");
+    await repo.update({
+      qitemId: short.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: short", wakeAfterSeconds: 120,
+    } as never);
+    await repo.update({
+      qitemId: long.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: long", wakeAfterSeconds: 7200,
+    } as never);
+
+    const shortJob = jobs.getById((wakes(short.qitemId)[0] as { wake_ref: string }).wake_ref)!;
+    const longJob = jobs.getById((wakes(long.qitemId)[0] as { wake_ref: string }).wake_ref)!;
+    expect(shortJob.intervalSeconds).toBe(120);
+    expect(longJob.intervalSeconds).toBe(7200);
+
+    const shortArmed = Date.parse(shortJob.registeredAt);
+    const longArmed = Date.parse(longJob.registeredAt);
+
+    // Neither fires on the scheduler's first pass.
+    expect(isDue(shortJob, shortArmed + 1_000)).toBe(false);
+    expect(isDue(longJob, longArmed + 1_000)).toBe(false);
+
+    // At two minutes the short one is due and the long one is emphatically not:
+    // the durations separate instead of converging.
+    expect(isDue(shortJob, shortArmed + 120_000)).toBe(true);
+    expect(isDue(longJob, longArmed + 120_000)).toBe(false);
+
+    // And the long one comes due only at its own requested time.
+    expect(isDue(longJob, longArmed + 7_199_999)).toBe(false);
+    expect(isDue(longJob, longArmed + 7_200_000)).toBe(true);
   });
 
   it("rolls the generated timer back when the park transaction aborts", async () => {

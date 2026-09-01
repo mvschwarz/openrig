@@ -2358,12 +2358,20 @@ export class QueueRepository {
         intervalSeconds: input.wakeAfterSeconds,
         registeredBySession: input.actorSession,
       });
-      // S16 only: ordinary periodic reminders intentionally evaluate immediately.
-      // A provider-limit timer instead starts its interval at registration so the
-      // existing scheduler's due boundary is registeredAt + intervalSeconds.
-      if (qitem.tags?.includes(USAGE_LIMIT_BLOCKER_TAG)) {
-        jobsRepo.recordEvaluation(job.jobId, job.registeredAt, false);
-      }
+      // OPR.0.5.8.1 S1 — start the interval at registration for EVERY explicit
+      // `--wake-after` timer, not only provider-limit ones.
+      //
+      // `isDue` treats a job with no `last_evaluation_at` as due immediately, so
+      // an unseeded timer fires on the scheduler's very first pass regardless of
+      // its interval: measured at 0.69s for a requested 20m and 0.77s for a
+      // requested 2h. The duration was never lost — `interval_seconds` held 1200
+      // and 7200 correctly — it simply was not the thing being measured against.
+      //
+      // S16 introduced this seeding for provider-limit parks only and recorded
+      // the narrow scope as deliberate. Widening it is the whole repair: the
+      // mechanism is unchanged and already proven by the provider-limit path, so
+      // this adds no scheduler and no per-wake bookkeeping.
+      jobsRepo.recordEvaluation(job.jobId, job.registeredAt, false);
       parkWake = { kind: "timer", ref: job.jobId };
     } else if (input.state === "blocked" && effectiveBlockedOn?.startsWith("qitem-")) {
       parkWake = { kind: "blocker", ref: effectiveBlockedOn };
