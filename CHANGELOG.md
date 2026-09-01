@@ -8,6 +8,45 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.5.7] - 2026-09-01
+
+**Status**: release-cut candidate. Final release-wide verification and public
+publish remain release-manager gates.
+
+### Summary For Installing Agents
+
+- **Package versions**: root, CLI, daemon, and web UI are `0.5.7`; the terminal
+  TUI remains `0.1.0`.
+- **Migration**: head advances `076` → `077_node_session_source`; normal daemon
+  startup applies the ordered migration list automatically.
+- **Theme**: elastic topology lifecycle and coherent work delivery.
+
+### Elastic topology lifecycle
+
+- Create a rig without hand-authored YAML; grow existing or new pods in single
+  or batch operations; and preserve faithful spec show/export, including a
+  member's declared agent-image source.
+- Refuse unsafe shrink while work is active. Explicit drain fallback preserves
+  queue identity and state, checks that the destination session is live, and
+  removes only the intended target; ordinary cleanup stays direct.
+
+### Coherent work delivery
+
+- Compose product-journey SDLC context across world, project, mission, and
+  slice layers, with useful non-overwriting scaffold defaults.
+- Accept optional project YAML enrichment with explicit warnings and default
+  fallback, load Markdown by section address, and support explicit project
+  selection, switching, root isolation, and ambiguity refusal.
+- Project the complete catalog of public plugin-only skills together with the
+  helper files their instructions reference.
+
+### Deferred and post-release
+
+- Restore honesty is deferred to `0.5.8`.
+- Cleaned parent-host two-project dogfood runs after release.
+
+See [`docs/releases/v0.5.7.md`](docs/releases/v0.5.7.md) for the full notes.
+
 ## [0.5.6] - 2026-08-30
 
 **Status**: shipped; **"world-building as context engineering."** OpenRig 0.5.6 ships the context system's next layer, makes long-running agents durable, and makes messages to humans trustworthy. Three themes: the context a seat runs on is structured, tagged, and verifiable; an agent seat can now outlive its own context window without a human managing the transition; and anything routed to a human carries proof of delivery. **v0.5.6 contains v0.5.5 in full.**
