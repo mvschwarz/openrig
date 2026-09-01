@@ -5,6 +5,7 @@ import os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import Database from "better-sqlite3";
+import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "./tmux.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import type {
@@ -606,7 +607,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
     const existing = this.fs.exists(configPath) ? this.fs.readFile(configPath) : "";
     const fragment = this.fs.readFile(entry.absolutePath);
-    this.fs.writeFile(configPath, upsertManagedCodexConfigFragment(existing, entry.effectiveId, fragment));
+    const rendered = upsertManagedCodexConfigFragment(existing, entry.effectiveId, fragment);
+    assertRendersAsLoadableToml(rendered, configPath, entry.effectiveId);
+    this.fs.writeFile(configPath, rendered);
     return true;
   }
 
@@ -1177,11 +1180,131 @@ function upsertCodexFeaturesHooksEnabled(content: string): string {
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * For each line, whether it BEGINS outside any string — i.e. whether a `[` at
+ * its start is a table header rather than string data. Tracks TOML's four
+ * string forms plus comments; everything else is structure.
+ */
+function lineStartsOutsideString(content: string): boolean[] {
+  const out: boolean[] = [true];
+  let multiline: '"""' | "'''" | null = null;
+  let i = 0;
+  while (i < content.length) {
+    const ch = content[i]!;
+    if (multiline) {
+      if (content.startsWith(multiline, i)) { multiline = null; i += 3; continue; }
+      if (ch === "\n") out.push(false);
+      i += 1;
+      continue;
+    }
+    if (content.startsWith('"""', i)) { multiline = '"""'; i += 3; continue; }
+    if (content.startsWith("'''", i)) { multiline = "'''"; i += 3; continue; }
+    if (ch === "#") { while (i < content.length && content[i] !== "\n") i += 1; continue; }
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      i += 1;
+      // Single-line strings cannot span a newline; stopping at one keeps the
+      // line index honest on malformed input instead of swallowing the rest.
+      while (i < content.length && content[i] !== quote && content[i] !== "\n") {
+        if (quote === '"' && content[i] === "\\") i += 1;
+        i += 1;
+      }
+      if (content[i] === quote) i += 1;
+      continue;
+    }
+    if (ch === "\n") { out.push(true); i += 1; continue; }
+    i += 1;
+  }
+  return out;
+}
+
+/** `\0`-joined path of a single table header line, or null if it is not one. */
+function tableHeaderPath(headerLine: string): string | null {
+  let parsed: unknown;
+  // Parsing the header ALONE reuses smol-toml's quoting and whitespace rules
+  // (`[a."b c"]` and `[ a . b ]`) rather than restating them here.
+  try { parsed = parseToml(headerLine); } catch { return null; }
+  const segments: string[] = [];
+  let node: unknown = parsed;
+  while (node !== null && typeof node === "object" && !Array.isArray(node)) {
+    const keys = Object.keys(node as Record<string, unknown>);
+    if (keys.length !== 1) break;
+    segments.push(keys[0]!);
+    node = (node as Record<string, unknown>)[keys[0]!];
+  }
+  return segments.length > 0 ? segments.join("\0") : null;
+}
+
+/**
+ * Table paths a document DECLARES with its own header.
+ *
+ * Deliberately not read off a parsed object: parsing cannot tell a declared
+ * table from one implied by a child (`[a.b]` implies `a`), and only declared
+ * tables collide — a user's `[mcp_servers.foo]` and a fragment's
+ * `[mcp_servers.exa]` share an implied parent and are perfectly legal together.
+ */
+function declaredTablePaths(content: string): Set<string> {
+  const structural = lineStartsOutsideString(content);
+  const paths = new Set<string>();
+  content.split("\n").forEach((line, index) => {
+    if (structural[index] !== true) return;
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("[")) return;
+    const path = tableHeaderPath(trimmed);
+    if (path !== null) paths.add(path);
+  });
+  return paths;
+}
+
+/**
+ * Drop the fragment's tables whose headers are already declared by the user.
+ * The user's table YIELDS NOTHING: their values are never merged, rewritten or
+ * overwritten — the managed table simply stands down so the render stays valid.
+ *
+ * Two deliberate limits, neither reachable by the shipped fragment (whose
+ * tables are all sibling `[mcp_servers.*]`), both erring toward a config that
+ * loads:
+ *  - Matching `[[array.of.tables]]` on both sides is legal TOML (it appends),
+ *    but is treated as a collision and dropped. Conservative, never invalid.
+ *  - Keys before the fragment's first header cannot collide as TABLES, so they
+ *    pass through here; a duplicate one is caught by the render check below,
+ *    which refuses the write rather than guessing whose key wins.
+ */
+function dropCollidingFragmentTables(
+  fragment: string,
+  taken: Set<string>,
+): { kept: string; dropped: string[] } {
+  const structural = lineStartsOutsideString(fragment);
+  const lines = fragment.split("\n");
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  let dropping = false;
+  lines.forEach((line, index) => {
+    if (structural[index] === true && line.trim().startsWith("[")) {
+      const path = tableHeaderPath(line.trim());
+      dropping = path !== null && taken.has(path);
+      if (dropping) dropped.push(path!.split("\0").join("."));
+    }
+    if (!dropping) kept.push(line);
+  });
+  return {
+    kept: kept.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "").replace(/\n*$/, ""),
+    dropped,
+  };
+}
+
 function upsertManagedCodexConfigFragment(content: string, id: string, fragment: string): string {
   const start = `# BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: ${id}`;
   const end = `# END OPENRIG MANAGED CODEX CONFIG FRAGMENT: ${id}`;
-  const block = `${start}\n${fragment.replace(/\n*$/, "")}\n${end}\n`;
   const pattern = new RegExp(`${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}\\n?`, "m");
+
+  // Everything outside THIS block is what the fragment must not collide with.
+  // Our own previous block is excluded because re-projection replaces it
+  // wholesale — counting it would make the second projection drop everything
+  // the first one legitimately landed.
+  const userOwned = content.replace(pattern, "");
+  const { kept } = dropCollidingFragmentTables(fragment, declaredTablePaths(userOwned));
+  const block = `${start}\n${kept}\n${end}\n`;
 
   if (pattern.test(content)) {
     return content.replace(pattern, block);
@@ -1189,6 +1312,22 @@ function upsertManagedCodexConfigFragment(content: string, id: string, fragment:
 
   const prefix = content.replace(/\n*$/, "");
   return prefix.length > 0 ? `${prefix}\n\n${block}` : block;
+}
+
+/**
+ * Refuse to hand Codex a config it cannot load. Throwing here (rather than
+ * writing and hoping) is what keeps a malformed render off disk entirely:
+ * `project()` records the entry as failed and the existing file is untouched.
+ */
+function assertRendersAsLoadableToml(rendered: string, configPath: string, id: string): void {
+  try {
+    parseToml(rendered);
+  } catch (err) {
+    throw new Error(
+      `Codex config projection '${id}' would write a config Codex cannot parse; ` +
+      `${configPath} left unchanged. ${(err as Error).message}`,
+    );
+  }
 }
 
 function escapeRegExp(value: string): string {

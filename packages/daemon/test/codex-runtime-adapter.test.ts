@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
 import Database from "better-sqlite3";
+import { parse as parseToml } from "smol-toml";
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
@@ -1249,6 +1250,147 @@ describe("Codex runtime adapter", () => {
     expect(content.match(/\[mcp_servers\.exa\]/g)?.length ?? 0).toBe(1);
     expect(content.match(/\[mcp_servers\.context7\]/g)?.length ?? 0).toBe(1);
     expect(content.match(/BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config/g)?.length ?? 0).toBe(1);
+  });
+
+  // --- OPR.0.5.8.12: user-owned Codex tables survive projection ---
+  //
+  // Before this repair the fragment was spliced in raw, so a user who already
+  // owned [mcp_servers.exa] got a duplicate table and Codex refused to start:
+  //   "failed to load bootstrap configuration ... duplicate key"
+  // (reproduced against codex-cli 0.147.0). Every assertion below ends at the
+  // real outcome — the rendered config PARSES — not at a string shape.
+
+  const SHIPPED_FRAGMENT = [
+    "[mcp_servers.exa]",
+    'url = "https://mcp.exa.ai/mcp"',
+    "",
+    "[mcp_servers.context7]",
+    'url = "https://mcp.context7.com/mcp"',
+    "",
+  ].join("\n");
+
+  async function projectFragment(userConfig: string, fragment = SHIPPED_FRAGMENT) {
+    const fs = mockFs({
+      "/agents/base/runtime/codex-config.toml": fragment,
+      "/home/tester/.codex/config.toml": userConfig,
+    });
+    const fsWithHome = { ...fs, homedir: "/home/tester" };
+    const adapter = new CodexRuntimeAdapter({ tmux: mockTmux(), fsOps: fsWithHome });
+    const plan: ProjectionPlan = {
+      runtime: "codex", cwd: "/tmp/workspace",
+      entries: [makeEntry({
+        category: "runtime_resource",
+        effectiveId: "codex-default-config",
+        resourceType: "codex_config_fragment",
+        absolutePath: "/agents/base/runtime/codex-config.toml",
+        resourcePath: "runtime/codex-config.toml",
+      })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+    const store = (fsWithHome as unknown as { _store: Record<string, string> })._store;
+    const project = () => adapter.project(plan, makeBinding("/tmp/workspace"));
+    return { project, read: () => store["/home/tester/.codex/config.toml"]! };
+  }
+
+  it("keeps a user-owned MCP table and its values when the fragment names the same table", async () => {
+    const { project, read } = await projectFragment([
+      '[projects."/tmp/workspace"]',
+      'trust_level = "trusted"',
+      "",
+      "[mcp_servers.exa]",
+      'url = "https://exa.internal.example/mcp"',
+      'api_key = "USER-OWNED"',
+      "",
+    ].join("\n"));
+
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+
+    const parsed = parseToml(read()) as Record<string, any>;
+    expect(parsed.mcp_servers.exa.url).toBe("https://exa.internal.example/mcp");
+    expect(parsed.mcp_servers.exa.api_key).toBe("USER-OWNED");
+    // the non-colliding half of the fragment still lands
+    expect(parsed.mcp_servers.context7.url).toBe("https://mcp.context7.com/mcp");
+    expect(parsed.projects["/tmp/workspace"].trust_level).toBe("trusted");
+  });
+
+  it("keeps MULTIPLE user-owned MCP tables when the fragment names all of them", async () => {
+    const { project, read } = await projectFragment([
+      "[mcp_servers.exa]",
+      'url = "https://exa.internal.example/mcp"',
+      "",
+      "[mcp_servers.context7]",
+      'url = "https://c7.internal.example/mcp"',
+      "",
+    ].join("\n"));
+
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+
+    const parsed = parseToml(read()) as Record<string, any>;
+    expect(parsed.mcp_servers.exa.url).toBe("https://exa.internal.example/mcp");
+    expect(parsed.mcp_servers.context7.url).toBe("https://c7.internal.example/mcp");
+  });
+
+  it("still lands the whole fragment when the user owns a DIFFERENT table under the same parent", async () => {
+    // [mcp_servers.other] and [mcp_servers.exa] share an implied parent and are
+    // legal together — a parent-level collision check would wrongly drop both.
+    const { project, read } = await projectFragment([
+      "[mcp_servers.other]",
+      'url = "https://other.example/mcp"',
+      "",
+    ].join("\n"));
+
+    await project();
+    const parsed = parseToml(read()) as Record<string, any>;
+    expect(parsed.mcp_servers.other.url).toBe("https://other.example/mcp");
+    expect(parsed.mcp_servers.exa.url).toBe("https://mcp.exa.ai/mcp");
+    expect(parsed.mcp_servers.context7.url).toBe("https://mcp.context7.com/mcp");
+  });
+
+  it("re-projects idempotently over a collision without duplicating the managed block", async () => {
+    const { project, read } = await projectFragment([
+      "[mcp_servers.exa]",
+      'url = "https://exa.internal.example/mcp"',
+      "",
+    ].join("\n"));
+
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const afterFirst = read();
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const afterSecond = read();
+
+    expect(afterSecond).toBe(afterFirst);
+    expect(() => parseToml(afterSecond)).not.toThrow();
+    expect(afterSecond.match(/BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config/g)!.length).toBe(1);
+    expect((parseToml(afterSecond) as Record<string, any>).mcp_servers.exa.url)
+      .toBe("https://exa.internal.example/mcp");
+  });
+
+  it("does not mistake a table header inside a multi-line string for a user-owned table", async () => {
+    const { project, read } = await projectFragment([
+      "[profiles.notes]",
+      'text = """',
+      "[mcp_servers.exa]",
+      'not a table, just prose"""',
+      "",
+    ].join("\n"));
+
+    await project();
+    // exa was never really declared by the user, so the managed table must land
+    expect((parseToml(read()) as Record<string, any>).mcp_servers.exa.url).toBe("https://mcp.exa.ai/mcp");
+  });
+
+  it("refuses to write a config Codex could not parse, leaving the existing file untouched", async () => {
+    // A duplicate top-level KEY is not a table collision, so table-dropping
+    // cannot save it — the render must be rejected before it reaches disk.
+    const original = 'model = "user-choice"\n';
+    const { project, read } = await projectFragment(original, 'model = "managed-choice"\n');
+
+    const result = await project();
+    expect(result.projected).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]!.error).toMatch(/Codex cannot parse/);
+    expect(result.failed[0]!.error).toMatch(/left unchanged/);
+    expect(read()).toBe(original);
   });
 
   // --- Regenerator bug repair: rig-role managed-block skip ---
