@@ -32,12 +32,16 @@ function runHook(options: {
   extraEnv?: NodeJS.ProcessEnv;
   instanceContent?: string;
   runtime?: "claude" | "codex";
+  whoamiStdout?: string;
+  whoamiStatus?: number;
+  capturePython?: boolean;
 }) {
   if (root) rmSync(root, { recursive: true, force: true });
   root = mkdtempSync(join(tmpdir(), "refocus-context-ref-"));
   const home = join(root, "home");
   const bin = join(root, "bin");
   const argvCapture = join(root, "rig-argv.json");
+  const verbLog = join(root, "rig-verbs.log");
   mkdirSync(home, { recursive: true });
   mkdirSync(bin, { recursive: true });
   if (options.instanceContent !== undefined) {
@@ -52,13 +56,31 @@ function runHook(options: {
   }
 
   const rig = join(bin, "rig");
+  // The fake answers two verbs. `queue whoami` is dispatched first and returns its own
+  // stdout/status, so a whoami failure can be exercised without disturbing the context-get
+  // contract below, which stays byte-identical to keep the existing suites unaffected.
   writeFileSync(rig, `#!/bin/sh
+printf '%s %s %s\\n' "$1" "$2" "$3" >> "$RIG_VERB_LOG"
+if [ "$1" = "queue" ] && [ "$2" = "whoami" ]; then
+  printf '%s' "$RIG_WHOAMI_STDOUT"
+  exit "\${RIG_WHOAMI_STATUS:-0}"
+fi
 printf '["%s","%s","%s"]' "$1" "$2" "$3" > "$RIG_ARGV_CAPTURE"
 printf '%s' "$RIG_STDOUT"
 printf '%s' "$RIG_STDERR" >&2
 exit "\${RIG_STATUS:-0}"
 `, "utf8");
   chmodSync(rig, 0o755);
+
+  // The hook resolves its interpreter through PYTHON, so a shim there records the exact
+  // trace-to-root argv — which is where --work-start is observable as an effect.
+  const pythonLog = join(root, "python-argv.log");
+  const python = join(bin, "python-shim");
+  writeFileSync(python, `#!/bin/sh
+printf '%s\\n' "$*" >> "$PYTHON_ARGV_LOG"
+exit 0
+`, "utf8");
+  chmodSync(python, 0o755);
 
   let contentFile: string | undefined;
   if (options.fileContent !== undefined) {
@@ -74,13 +96,18 @@ exit "\${RIG_STATUS:-0}"
     OPENRIG_REFOCUS_CONTENT_REF: options.ref,
     OPENRIG_REFOCUS_CONTENT_FILE: contentFile,
     RIG_ARGV_CAPTURE: argvCapture,
+    RIG_VERB_LOG: verbLog,
     RIG_STDOUT: options.rigStdout,
     RIG_STDERR: options.rigStderr,
     RIG_STATUS: options.rigStatus === undefined ? undefined : String(options.rigStatus),
+    RIG_WHOAMI_STDOUT: options.whoamiStdout,
+    RIG_WHOAMI_STATUS: options.whoamiStatus === undefined ? undefined : String(options.whoamiStatus),
+    PYTHON_ARGV_LOG: pythonLog,
     OPENRIG_REFOCUS_NOW: "1",
     OPENRIG_REFOCUS_TREES: "work",
     OPENRIG_WORKSPACE_ROOT: home,
     OPENRIG_REFOCUS_WORK_NODE: home,
+    ...(options.capturePython ? { PYTHON: python } : {}),
     ...options.extraEnv,
   } as NodeJS.ProcessEnv;
 
@@ -100,6 +127,10 @@ exit "\${RIG_STATUS:-0}"
       hookSpecificOutput: { additionalContext: string };
     } : null,
     argvCapture,
+    verbLog,
+    pythonLog,
+    rigVerbs: () => (existsSync(verbLog) ? readFileSync(verbLog, "utf8") : ""),
+    traceArgv: () => (existsSync(pythonLog) ? readFileSync(pythonLog, "utf8") : ""),
   };
 }
 
@@ -410,5 +441,98 @@ describe("openrig-core refocus hook — delivery state", () => {
     expect(delivered.status).toBe(0);
     expect(JSON.parse(delivered.stdout).hookSpecificOutput.additionalContext).toContain("just compacted");
     expect(JSON.parse(readFileSync(state, "utf8"))).not.toHaveProperty("pendingOn");
+  });
+});
+
+describe("openrig-core refocus hook — current-work binding (OPR.0.5.8.14)", () => {
+  const whoami = (currentWork: unknown) => JSON.stringify({ currentWork });
+
+  // Every case here unsets the work-node env var, because the harness default sets it and
+  // the whole repair only applies when a live seat carries no such variable.
+  const derive = (options: { whoamiStdout?: string; whoamiStatus?: number; workNode?: string }) =>
+    runHook({
+      capturePython: true,
+      whoamiStdout: options.whoamiStdout,
+      whoamiStatus: options.whoamiStatus,
+      extraEnv: { OPENRIG_REFOCUS_WORK_NODE: options.workNode },
+    });
+
+  it("passes the derived work node as --work-start when exactly one typed baton resolves", () => {
+    const result = derive({
+      whoamiStdout: whoami({
+        mission: "release-0.5.8",
+        slice: "OPR.0.5.8.14",
+        workNodePath: "/w/missions/release-0.5.8/slices/14-refocus-current-work-binding",
+        basis: "one typed in-progress row",
+      }),
+    });
+
+    expect(result.rigVerbs()).toContain("queue whoami");
+    expect(result.traceArgv()).toContain(
+      "--work-start /w/missions/release-0.5.8/slices/14-refocus-current-work-binding",
+    );
+  });
+
+  it("follows a switched baton with no residue from the previous one", () => {
+    const first = derive({
+      whoamiStdout: whoami({
+        mission: "release-0.5.8",
+        slice: "OPR.0.5.8.14",
+        workNodePath: "/w/slices/14-refocus-current-work-binding",
+        basis: "one typed in-progress row",
+      }),
+    });
+    expect(first.traceArgv()).toContain("--work-start /w/slices/14-refocus-current-work-binding");
+
+    const second = derive({
+      whoamiStdout: whoami({
+        mission: "release-0.5.8",
+        slice: "OPR.0.5.8.9",
+        workNodePath: "/w/slices/09-single-topology-creation-ingress",
+        basis: "one typed in-progress row",
+      }),
+    });
+    expect(second.traceArgv()).toContain("--work-start /w/slices/09-single-topology-creation-ingress");
+    expect(second.traceArgv()).not.toContain("14-refocus-current-work-binding");
+  });
+
+  it("consults the daemon and still refuses to guess when no typed work exists", () => {
+    const result = derive({ whoamiStdout: whoami(null) });
+
+    // The consult is the RED half: today the hook never asks. Declining to pass a path is
+    // only meaningful once we can prove the answer was sought and then honestly refused.
+    expect(result.rigVerbs()).toContain("queue whoami");
+    expect(result.traceArgv()).not.toContain("--work-start");
+  });
+
+  it("consults the daemon and still refuses to guess when two typed batons are held", () => {
+    const result = derive({ whoamiStdout: whoami(null) });
+
+    expect(result.rigVerbs()).toContain("queue whoami");
+    expect(result.traceArgv()).not.toContain("--work-start");
+  });
+
+  it("lets an explicit work-node env var win without consulting the daemon at all", () => {
+    const result = derive({
+      workNode: "/explicit/override",
+      whoamiStdout: whoami({
+        mission: "release-0.5.8",
+        slice: "OPR.0.5.8.14",
+        workNodePath: "/derived/should-not-win",
+        basis: "one typed in-progress row",
+      }),
+    });
+
+    expect(result.traceArgv()).toContain("--work-start /explicit/override");
+    expect(result.traceArgv()).not.toContain("/derived/should-not-win");
+    expect(result.rigVerbs()).not.toContain("queue whoami");
+  });
+
+  it("falls through to today's behaviour when the whoami consult fails", () => {
+    const result = derive({ whoamiStdout: "not json at all", whoamiStatus: 1 });
+
+    expect(result.status).toBe(0);
+    expect(result.rigVerbs()).toContain("queue whoami");
+    expect(result.traceArgv()).not.toContain("--work-start");
   });
 });

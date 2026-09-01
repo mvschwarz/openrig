@@ -1875,6 +1875,24 @@ export class QueueRepository {
   }
 
   /**
+   * Every in-progress row destined for `session`, UNBOUNDED and single-state.
+   *
+   * `whoami`'s `recent` is a display projection: it is capped (default 25, max 200) and
+   * mixes pending/in-progress/blocked. Anything that must reason about how many batons a
+   * seat truly holds — in particular a refusal that fires on ambiguity — cannot read it,
+   * because a second in-progress row sitting past the cap is invisible and the refusal
+   * silently degrades into a confident answer. This is that authoritative input.
+   */
+  listInProgressForDestination(session: string): QueueItem[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM queue_items WHERE destination_session = ? AND state = 'in-progress'`
+      )
+      .all(session) as QueueItemRow[];
+    return rows.map((r) => this.rowToItem(r));
+  }
+
+  /**
    * Mark a qitem `in-progress` (claim). Computes closure_required_at from tier.
    */
   claim(input: QueueClaimInput): QueueItem {

@@ -20,6 +20,7 @@ import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-re
 import { LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
+import { deriveCurrentWork } from "../domain/current-work.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -758,7 +759,25 @@ export function queueRoutes(): Hono {
     const recentLimit = c.req.query("recentLimit")
       ? Number.parseInt(c.req.query("recentLimit")!, 10)
       : undefined;
-    return c.json(getRepo(c).whoami(session, { recentLimit }));
+    const repo = getRepo(c);
+    const position = repo.whoami(session, { recentLimit });
+    // OPR.0.5.8.14: the derived work node rides the verb that already answers "what does
+    // the daemon think I hold". Same DI style as the sibling routes; a missing store means
+    // no configured root, which the derivation reports as a refusal rather than a guess.
+    const store = c.get("settingsStore" as never) as SettingsStore | undefined;
+    let missionsRoot: string | null = null;
+    try {
+      const value = store?.resolveOne("workspace.slices_root").value;
+      missionsRoot = value ? String(value) : null;
+    } catch {
+      missionsRoot = null;
+    }
+    // Deliberately NOT position.asDestination.recent: that is a capped, mixed-state display
+    // projection, so a second in-progress baton past the cap would be invisible and the
+    // ambiguity refusal would degrade into a confident wrong answer. The derivation reads
+    // the unbounded in-progress set, which makes it independent of recentLimit.
+    const derived = deriveCurrentWork(repo.listInProgressForDestination(session), missionsRoot);
+    return c.json({ ...position, ...derived });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.
