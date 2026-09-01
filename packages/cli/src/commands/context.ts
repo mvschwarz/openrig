@@ -570,11 +570,10 @@ Examples:
     .action(async (nameOrRef: string, opts: { json?: boolean }) => {
       try {
         const client = await getClient();
-        // OPR.0.5.3.5 Atom 4c (Q4: one `name#H2/H3` form across the verb
-        // family): an address routes to the daemon's single resolver home;
-        // stdout is exactly the resolved span bytes so an agent consumes the
-        // addressed section and nothing else. Fail-loud passthrough — the
-        // daemon names every failure; this verb adds nothing to it.
+        // OPR.0.5.3.5 Atom 4c: fragment addresses route directly to the
+        // daemon's resolver. A bare slash-containing value may be either a
+        // pack ref or a whole-file address, so exact-pack lookup wins and only
+        // its 404 falls through to the same resolver.
         if (nameOrRef.includes("#")) {
           const res = await client.get<{ text?: string; message?: string; error?: string }>(
             `/api/context-packs/library/resolve-address?address=${encodeURIComponent(nameOrRef)}`,
@@ -586,7 +585,28 @@ Examples:
           else console.log(res.data.text);
           return;
         }
-        const entry = await resolvePack(client, nameOrRef);
+        let entry: ContextPackEntryWire;
+        if (nameOrRef.includes("/")) {
+          const exact = await client.get<ContextPackEntryWire & { error?: string; message?: string }>(
+            `/api/context-packs/library/by-ref?ref=${encodeURIComponent(nameOrRef)}`,
+          );
+          if (exact.status === 404) {
+            const res = await client.get<{ text?: string; message?: string; error?: string }>(
+              `/api/context-packs/library/resolve-address?address=${encodeURIComponent(nameOrRef)}`,
+            );
+            if (res.status !== 200) {
+              throw new Error(res.data?.message ?? res.data?.error ?? `Daemon returned HTTP ${res.status} for resolve-address`);
+            }
+            if (opts.json) console.log(JSON.stringify(res.data, null, 2));
+            else process.stdout.write(res.data.text ?? "");
+            return;
+          }
+          if (exact.status === 400) throw new Error(exact.data?.message ?? `Unsafe context pack ref '${nameOrRef}'.`);
+          if (exact.status !== 200) throw new Error(`Daemon returned HTTP ${exact.status} for /api/context-packs/library/by-ref`);
+          entry = exact.data;
+        } else {
+          entry = await resolvePack(client, nameOrRef);
+        }
         const res = await client.get<PreviewWire>(`/api/context-packs/library/by-ref/preview?ref=${encodeURIComponent(entry.relativePath)}`);
         if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         const bundle = res.data;

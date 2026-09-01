@@ -1,8 +1,9 @@
 // OPR.0.5.3.5 Atom 4d — the CLI pins r1 asked for (4c A3 rec) plus the profile
 // verb. The ROUTING FORK is the one piece of logic that lives ONLY in the CLI:
-// an address carrying '#' goes to the daemon's resolver home, a bare ref stays
-// on the pack path — if it regresses, the failure is quiet. These pins cover
-// the fork without duplicating any resolution behavior (the daemon owns that).
+// an address carrying '#' goes straight to the daemon's resolver home; a bare
+// slash value tries exact-pack lookup first, then only a 404 falls through to
+// whole-file resolution. These pins cover the fork without duplicating any
+// resolution behavior (the daemon owns that).
 
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
@@ -29,17 +30,23 @@ function mockLifecycleDeps(port: number): LifecycleDeps {
   };
 }
 
-async function run(port: number, argv: string[]): Promise<{ logs: string[]; errLogs: string[] }> {
+async function run(port: number, argv: string[]): Promise<{ logs: string[]; errLogs: string[]; writes: string[] }> {
   const deps: StatusDeps = {
     lifecycleDeps: mockLifecycleDeps(port),
     clientFactory: (baseUrl) => new DaemonClient(baseUrl),
   };
   const logs: string[] = [];
   const errLogs: string[] = [];
+  const writes: string[] = [];
   const origLog = console.log;
   const origErr = console.error;
+  const origWrite = process.stdout.write;
   console.log = (...a: unknown[]) => { logs.push(a.map(String).join(" ")); };
   console.error = (...a: unknown[]) => { errLogs.push(a.map(String).join(" ")); };
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    writes.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
   try {
     const program = new Command();
     program.exitOverride();
@@ -48,9 +55,10 @@ async function run(port: number, argv: string[]): Promise<{ logs: string[]; errL
   } catch { /* commander exitOverride */ } finally {
     console.log = origLog;
     console.error = origErr;
+    process.stdout.write = origWrite;
     process.exitCode = undefined;
   }
-  return { logs, errLogs };
+  return { logs, errLogs, writes };
 }
 
 describe("rig context — address fork + profile verb (Atom 4d)", () => {
@@ -63,9 +71,16 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
     server = http.createServer((req, res) => {
       const url = req.url ?? "";
       hits.push(url);
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.setHeader("Content-Type", "application/json");
       if (url.startsWith("/api/context-packs/library/resolve-address")) {
-        res.end(JSON.stringify({ address: "a", packRef: "packs/smoke", filePath: "notes.md", text: "THE SPAN BYTES" }));
+        const address = new URL(url, "http://localhost").searchParams.get("address");
+        if (address === "packs/smoke/missing.md") {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: "file_not_in_pack", message: "pack 'packs/smoke' declares no file 'missing.md' — declared: notes.md" }));
+        } else {
+          const text = address?.includes("#") ? "THE SPAN BYTES" : "THE WHOLE FILE BYTES\n";
+          res.end(JSON.stringify({ address, packRef: "packs/smoke", filePath: "notes.md", text }));
+        }
       } else if (url.startsWith("/api/context-packs/library/by-ref/profile")) {
         res.end(JSON.stringify({
           ref: "packs/smoke", situation: "handover", runtime: "claude",
@@ -80,7 +95,13 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
       } else if (url.startsWith("/api/context-packs/library/by-ref/preview")) {
         res.end(JSON.stringify({ id: "x", name: "smoke", version: "1", bundleText: "WHOLE PACK BUNDLE", bundleBytes: 17, estimatedTokens: 5, files: [], missingFiles: [] }));
       } else if (url.startsWith("/api/context-packs/library/by-ref")) {
-        res.end(JSON.stringify({ id: "x", kind: "context-pack", name: "smoke", version: "1", purpose: null, sourceType: "user_file", sourcePath: "/s", relativePath: "packs/smoke", updatedAt: "t", manifestEstimatedTokens: null, derivedEstimatedTokens: 5, files: [] }));
+        const ref = new URL(url, "http://localhost").searchParams.get("ref");
+        if (ref !== "packs/smoke") {
+          res.statusCode = 404;
+          res.end(JSON.stringify({ error: "context_pack_not_found" }));
+        } else {
+          res.end(JSON.stringify({ id: "x", kind: "context-pack", name: "smoke", version: "1", purpose: null, sourceType: "user_file", sourcePath: "/s", relativePath: "packs/smoke", updatedAt: "t", manifestEstimatedTokens: null, derivedEstimatedTokens: 5, files: [] }));
+        }
       } else {
         res.end(JSON.stringify([]));
       }
@@ -91,15 +112,44 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
 
   afterAll(async () => { await new Promise<void>((r) => { server.close(() => r()); }); });
 
-  it("FORK PIN: a '#' address routes to resolve-address and stdout is exactly the span; a bare ref never touches resolve-address", async () => {
+  it("FORK PIN: exact refs preview; bare files fall through; fragments route directly; invalid files fail loud", async () => {
     hits.length = 0;
     const withAddr = await run(port, ["get", "packs/smoke/notes.md#welcome"]);
     expect(hits.some((h) => h.startsWith("/api/context-packs/library/resolve-address"))).toBe(true);
+    expect(hits.some((h) => h.startsWith("/api/context-packs/library/by-ref"))).toBe(false);
     expect(withAddr.logs.join("\n")).toBe("THE SPAN BYTES");
+
     hits.length = 0;
     const bare = await run(port, ["get", "packs/smoke"]);
     expect(hits.some((h) => h.startsWith("/api/context-packs/library/resolve-address"))).toBe(false);
     expect(bare.logs.join("\n")).toContain("WHOLE PACK BUNDLE");
+
+    hits.length = 0;
+    const wholeFile = await run(port, ["get", "packs/smoke/notes.md"]);
+    expect(hits.map((h) => h.split("?")[0])).toEqual([
+      "/api/context-packs/library/by-ref",
+      "/api/context-packs/library/resolve-address",
+    ]);
+    expect(wholeFile.logs).toEqual([]);
+    expect(wholeFile.writes.join("")).toBe("THE WHOLE FILE BYTES\n");
+
+    hits.length = 0;
+    const wholeFileJson = await run(port, ["get", "packs/smoke/notes.md", "--json"]);
+    expect(JSON.parse(wholeFileJson.logs.join("\n"))).toMatchObject({
+      address: "packs/smoke/notes.md",
+      packRef: "packs/smoke",
+      filePath: "notes.md",
+      text: "THE WHOLE FILE BYTES\n",
+    });
+
+    hits.length = 0;
+    const missing = await run(port, ["get", "packs/smoke/missing.md"]);
+    expect(hits.map((h) => h.split("?")[0])).toEqual([
+      "/api/context-packs/library/by-ref",
+      "/api/context-packs/library/resolve-address",
+    ]);
+    expect(missing.logs).toEqual([]);
+    expect(missing.errLogs.join("\n")).toBe("pack 'packs/smoke' declares no file 'missing.md' — declared: notes.md");
   });
 
   it("r1 4d obs (1): an escaping piece's stdout FRAMING header carries the escape marker — the payload is self-describing without touching composed bytes", async () => {
