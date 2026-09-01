@@ -157,6 +157,37 @@ describe("bare-rig front door — first-impression degrade (never a stack trace)
     expect(text).not.toMatch(/daemon not running/i);
   });
 
+  it.each(["named_profile_unresolved", "applied_launch_unknown"] as const)(
+    "launches the read-only TUI when Codex sandbox enforcement is unknown only because %s",
+    async (reason) => {
+      const deps = io({
+        probeDaemon: async () => ({
+          state: "diagnostic" as const,
+          diagnostic: {
+            transport: { state: "healthy" as const },
+            cwdRead: { state: "visible" as const },
+            commandPath: { state: "available" as const },
+            enforcement: {
+              axis: "sandbox" as const,
+              state: "unknown" as const,
+              expected: null,
+              effective: null,
+              sourcePath: null,
+              reason,
+            },
+            observedAt: "2026-09-01T00:00:00.000Z",
+          },
+        }),
+      });
+
+      await runFrontDoor(["node", "rig"], deps);
+
+      expect(deps.launches).toBe(1);
+      expect(deps.exits).toEqual([0]);
+      expect(deps.errLines).toEqual([]);
+    },
+  );
+
   it("front-door unreadable settings stays UNKNOWN_EFFECTIVE and never becomes daemon-down", async () => {
     const deps = io({
       probeDaemon: async () => ({
@@ -175,6 +206,8 @@ describe("bare-rig front door — first-impression degrade (never a stack trace)
     expect(text).toContain("runtime posture: UNKNOWN_EFFECTIVE");
     expect(text).toContain("reason=settings_unreadable");
     expect(text).not.toMatch(/daemon not running/i);
+    expect(deps.launches).toBe(0);
+    expect(deps.exits).toEqual([1]);
   });
 
   it("permission drift renders all four axes plus expected/effective/source and never launches", async () => {

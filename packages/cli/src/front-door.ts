@@ -219,12 +219,26 @@ export async function openMissionControl(io: FrontDoorIo = {}): Promise<void> {
   // unreachable from its entry point otherwise). So when the transport is not healthy (connect → down,
   // timeout → unverified), LAUNCH the TUI: its own `rig crash-cart --json` probe makes the honest
   // confirmed-down vs unverified distinction and renders the cockpit or the cannot-verify screen.
-  // A diagnostic with a HEALTHY transport (daemon UP but cwd/command/permission drift) is a genuine
-  // first-impression degrade — keep the concise diagnostic + exit; launching would MASK the drift by
-  // rendering normal mission control.
+  // A diagnostic with a HEALTHY transport (daemon UP but cwd/command/permission drift) is normally a
+  // genuine first-impression degrade — keep the concise diagnostic + exit. The narrow exception is a
+  // Codex sandbox observation gap: named profiles deliberately remain unresolved and an adopted
+  // generation can briefly have no launch observation. Neither is evidence of drift, and blocking the
+  // read-only control plane on that missing evidence makes the TUI unreachable from healthy managed
+  // seats. Keep every proven or settings-derived enforcement problem non-launching.
+  const launchObservationGap = probeResult.state === "diagnostic"
+    && probeResult.diagnostic.transport.state === "healthy"
+    && probeResult.diagnostic.cwdRead.state === "visible"
+    && probeResult.diagnostic.commandPath.state === "available"
+    && probeResult.diagnostic.enforcement.axis === "sandbox"
+    && probeResult.diagnostic.enforcement.state === "unknown"
+    && (
+      probeResult.diagnostic.enforcement.reason === "named_profile_unresolved"
+      || probeResult.diagnostic.enforcement.reason === "applied_launch_unknown"
+    );
   const shouldLaunchTui =
     probeResult.state === "ready"
-    || (probeResult.state === "diagnostic" && probeResult.diagnostic.transport.state !== "healthy");
+    || (probeResult.state === "diagnostic" && probeResult.diagnostic.transport.state !== "healthy")
+    || launchObservationGap;
   if (!shouldLaunchTui) {
     for (const line of USAGE_LINES) err(line);
     err("");
