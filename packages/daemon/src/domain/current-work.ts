@@ -18,14 +18,25 @@
  *    never the convention to reach for and is labelled as compat wherever it surfaces.
  *    (orch-lead ruling relayed 2026-09-01 09:43Z.)
  *
- * 2. Resolution runs BEFORE any counting, and it is failure-first. If every typed row
- *    resolves, ambiguity is judged on the resolved NODES rather than the raw tag strings,
- *    so two rows naming one slice through different forms collapse to one piece of work
- *    instead of reading as a conflict. But if any typed row fails to resolve, the answer
- *    is a refusal — an unresolved baton is unknown, not irrelevant, and letting the rows
- *    that happened to resolve carry the answer is precisely the guess this module exists
- *    to prevent. A basis-string disclosure does not discharge it: consumers read
+ * 2. There are two ambiguity checks and they run in a deliberate order.
+ *
+ *    WITHIN a row, a malformed baton is rejected up front, before any resolution: a row
+ *    carrying two different mission values (or two different slice values) is not a
+ *    well-formed baton at all, and rejecting malformed input is this module's job. Those
+ *    rows never reach resolution.
+ *
+ *    ACROSS rows, resolution runs BEFORE counting and is failure-first. If every typed
+ *    row resolves, ambiguity is judged on the resolved NODES rather than the raw tag
+ *    strings, so two rows naming one slice through different forms collapse to one piece
+ *    of work instead of reading as a conflict. But if any typed row fails to resolve, the
+ *    answer is a refusal — an unresolved baton is unknown, not irrelevant, and letting the
+ *    rows that happened to resolve carry the answer is precisely the guess this module
+ *    exists to prevent. A basis-string disclosure does not discharge it: consumers read
  *    workNodePath, not the prose beside it.
+ *
+ *    Note the resolve-then-compare machinery below COULD tell you that two spellings name
+ *    one directory. The within-row check does not use it, and that is a choice about what
+ *    a valid baton is, not a limitation.
  */
 
 import fs from "node:fs";
@@ -70,7 +81,27 @@ export interface CurrentWorkDerivation {
 interface TaggedRow {
   state?: string | null;
   tags?: string[] | null;
+  /** Optional, but the production call site passes full queue items so it is populated
+   *  there. A refusal that names the offending ROW is one command from actionable; one
+   *  that names only the values leaves the reader to go find which row meant it. */
+  qitemId?: string | null;
 }
+
+/** How a row is referred to in a refusal. Falls back cleanly when no id was supplied. */
+function rowLabel(qitemId?: string | null): string {
+  return qitemId ? `row ${qitemId}` : "a row";
+}
+
+/**
+ * Only in-progress rows are considered — a ruled decision, not an oversight. But the
+ * refusal has to say so: a seat whose one typed baton is BLOCKED holds real work, and
+ * "you have no typed work" would be true about the query while false about the world.
+ * "You hold nothing" and "your work is parked" call for different next actions, so the
+ * string names the scope rather than implying an empty desk.
+ */
+const NO_TYPED_IN_PROGRESS =
+  "no typed in-progress work (only in-progress rows are considered; a typed row that is " +
+  "pending or blocked is not current work)";
 
 interface Match {
   dir: string;
@@ -176,7 +207,7 @@ export function deriveCurrentWork(
 
   if (!missionsRoot) return refuse("no missions root configured");
 
-  const typed: { mission: string; slice: string }[] = [];
+  const typed: { mission: string; slice: string; qitemId?: string | null }[] = [];
   const conflicts: string[] = [];
   for (const r of rows) {
     if (r.state !== "in-progress") continue;
@@ -190,40 +221,43 @@ export function deriveCurrentWork(
     // explanation of an order-independence refusal would still be leaking array position.
     if (missions.length > 1) {
       conflicts.push(
-        `a row carries ${missions.length} distinct mission tags (${[...missions].sort().join(", ")})`,
+        `${rowLabel(r.qitemId)} carries ${missions.length} distinct mission tags (${[...missions].sort().join(", ")})`,
       );
       continue;
     }
     if (slices.length > 1) {
       conflicts.push(
-        `a row carries ${slices.length} distinct slice tags (${[...slices].sort().join(", ")})`,
+        `${rowLabel(r.qitemId)} carries ${slices.length} distinct slice tags (${[...slices].sort().join(", ")})`,
       );
       continue;
     }
-    typed.push({ mission: missions[0]!, slice: slices[0]! });
+    typed.push({ mission: missions[0]!, slice: slices[0]!, qitemId: r.qitemId });
   }
 
   // Conflicts outrank a usable sibling for the same reason an unresolved row does: the
   // seat's typed work is not unambiguous, and that is the whole precondition for answering.
-  // Note this refuses even when the two values would resolve to one node — the derivation
-  // cannot prove two spellings are the same thing before resolving them, and "probably the
-  // same" is the guess.
+  // This refuses even when the two values would resolve to one directory. Not because the
+  // module could not check — resolveRow and the byPath dedupe below do exactly that across
+  // rows — but because a single row naming its mission twice, differently, is MALFORMED,
+  // and refusing malformed input is this module's job. Resolving it would be repairing a
+  // caller's bad row on its behalf and calling the repair an answer.
   if (conflicts.length > 0) {
     return refuse(`conflicting typed tags: ${[...new Set(conflicts)].sort().join("; ")}`);
   }
-  if (typed.length === 0) return refuse("no typed in-progress work");
+  if (typed.length === 0) return refuse(NO_TYPED_IN_PROGRESS);
 
   // Resolve first, then count: different tag forms for one node must collapse to one node.
   const byPath = new Map<string, Candidate>();
   const failures: string[] = [];
-  for (const { mission, slice } of typed) {
+  for (const { mission, slice, qitemId } of typed) {
     const resolved = resolveRow(missionsRoot, mission, slice);
     if (resolved.ok) {
       if (!byPath.has(resolved.value.workNodePath)) {
         byPath.set(resolved.value.workNodePath, resolved.value);
       }
-    } else if (!failures.includes(resolved.reason)) {
-      failures.push(resolved.reason);
+    } else {
+      const reason = `${rowLabel(qitemId)} — ${resolved.reason}`;
+      if (!failures.includes(reason)) failures.push(reason);
     }
   }
 

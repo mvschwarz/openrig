@@ -145,9 +145,12 @@ describe("deriveCurrentWork — ambiguity is counted on RESOLVED nodes", () => {
       }],
       missions,
     );
-    // Both values happen to name the SAME mission here, and it still must refuse: the
-    // derivation cannot prove two spellings are one thing before it has resolved them,
-    // and "probably the same" is the guess.
+    // Both values happen to name the SAME mission here, and it still must refuse — not
+    // because the module is unable to tell (resolveRow and the byPath dedupe compare
+    // spellings across rows, and a test below relies on exactly that), but because a
+    // single row naming its mission twice, differently, is MALFORMED. Refusing malformed
+    // input is this module's job; resolving it would be repairing the caller's row and
+    // then presenting the repair as an answer.
     expect(result.currentWork).toBeNull();
     expect(result.currentWorkBasis).toContain("mission");
   });
@@ -164,6 +167,41 @@ describe("deriveCurrentWork — ambiguity is counted on RESOLVED nodes", () => {
     expect(result.currentWork?.workNodePath).toBe(
       join(missions, "release-0.5.8", "slices", "14-refocus-current-work-binding"),
     );
+  });
+
+  it("names the offending ROW in a refusal when the caller supplies row ids", () => {
+    // R1 F3: naming only the values leaves the reader to go find which row meant it. The
+    // production call site passes full queue items, so the id is available for free.
+    const missions = tree();
+    const conflict = deriveCurrentWork(
+      [{
+        qitemId: "qitem-conflict-1",
+        state: "in-progress",
+        tags: ["mission:release-0.5.8", "slice:OPR.0.5.8.14", "slice:OPR.0.5.8.9"],
+      }],
+      missions,
+    );
+    expect(conflict.currentWork).toBeNull();
+    expect(conflict.currentWorkBasis).toContain("qitem-conflict-1");
+
+    const unresolved = deriveCurrentWork(
+      [{
+        qitemId: "qitem-unresolved-2",
+        state: "in-progress",
+        tags: ["mission:release-0.5.8", "slice:OPR.0.5.8.999"],
+      }],
+      missions,
+    );
+    expect(unresolved.currentWork).toBeNull();
+    expect(unresolved.currentWorkBasis).toContain("qitem-unresolved-2");
+
+    // And it must degrade cleanly when no id is supplied, since the type allows that.
+    const anonymous = deriveCurrentWork(
+      [{ state: "in-progress", tags: ["mission:release-0.5.8", "slice:OPR.0.5.8.999"] }],
+      missions,
+    );
+    expect(anonymous.currentWorkBasis).toContain("a row");
+    expect(anonymous.currentWorkBasis).not.toContain("undefined");
   });
 
   it("refuses when a typed row fails to resolve alongside one that succeeds", () => {
@@ -261,8 +299,13 @@ describe("deriveCurrentWork — ambiguity is counted on RESOLVED nodes", () => {
     const missions = tree();
     expect(deriveCurrentWork([row("release-0.5.8", "OPR.0.5.8.999")], missions).currentWorkBasis)
       .toContain("resolves to 0");
-    expect(deriveCurrentWork([row("release-0.5.8", "OPR.0.5.8.14", "pending")], missions))
-      .toMatchObject({ currentWork: null, currentWorkBasis: "no typed in-progress work" });
+    // R1 F1: the refusal must name its SCOPE, not imply an empty desk. A seat whose only
+    // typed baton is blocked holds real work, and "you hold nothing" would send it
+    // somewhere different from "your work is parked".
+    const notClaimed = deriveCurrentWork([row("release-0.5.8", "OPR.0.5.8.14", "pending")], missions);
+    expect(notClaimed.currentWork).toBeNull();
+    expect(notClaimed.currentWorkBasis).toContain("only in-progress rows are considered");
+    expect(notClaimed.currentWorkBasis).toContain("blocked");
     expect(deriveCurrentWork([row("release-0.5.8", "OPR.0.5.8.14")], null))
       .toMatchObject({ currentWork: null });
   });
