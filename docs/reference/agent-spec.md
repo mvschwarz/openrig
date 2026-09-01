@@ -318,6 +318,39 @@ Recognized runtime resource types:
 
 Unknown runtime resource types are still copied to the runtime extension directory for agent-visible context.
 
+#### Writing a `codex_config_fragment`
+
+**Begin the fragment with a table header.** A fragment must be a valid TOML
+document on its own, and every key it sets must sit under a table it declares.
+A fragment that puts keys ahead of its first table header is refused at
+projection time, and nothing is written.
+
+The reason is TOML's grammar rather than a policy choice. The managed block is
+appended to the end of the user's `config.toml`, and TOML has no syntax for
+returning to document root once a table has been opened. So if the user's file
+ends inside any table, an appended root-level key does not land at root — it
+silently becomes a member of *their* table. Refusal is deterministic and never
+inspects the user's file: a fragment author cannot see user state, and a rule
+that passed or failed depending on it would be impossible to reproduce.
+
+```toml
+# refused — `model` would bind into whatever table the user's file ends inside
+model = "gpt-5"
+
+[mcp_servers.exa]
+url = "https://mcp.exa.ai/mcp"
+```
+
+```toml
+# accepted — every key sits under a table this fragment declares
+[mcp_servers.exa]
+url = "https://mcp.exa.ai/mcp"
+```
+
+Where a fragment's table is one the user already declares, the user's table
+wins: the managed table is dropped, their values are never merged, rewritten or
+overwritten, and the rest of the fragment still applies.
+
 ### Resource Path Rules
 
 - All resource paths must be safe relative paths (no `..` traversal, no absolute paths)

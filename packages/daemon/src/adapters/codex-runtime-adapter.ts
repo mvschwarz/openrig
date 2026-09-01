@@ -610,6 +610,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // Before anything is dropped: a fragment that is invalid on its own must
     // fail loudly, never be "resolved" by the collision filter deleting it.
     assertFragmentParsesStandalone(fragment, entry.absolutePath, entry.effectiveId);
+    // Ordered after the parse: an unparseable fragment gets the TOML error that
+    // names its line and column, not a root-scope complaint about wreckage.
+    assertFragmentOpensWithTable(fragment, entry.absolutePath, entry.effectiveId);
     const rendered = upsertManagedCodexConfigFragment(existing, entry.effectiveId, fragment);
     assertRendersAsLoadableToml(rendered, configPath, entry.effectiveId);
     this.fs.writeFile(configPath, rendered);
@@ -1271,6 +1274,42 @@ function parsesAsToml(candidate: string): boolean {
  * write then succeeds precisely because the bad input was deleted, which is the
  * opposite of what the render guard is for.
  */
+/**
+ * Refuse a fragment that declares keys before its first table header.
+ *
+ * TOML HAS NO ROOT-REOPEN SYNTAX. The managed block is appended at the end of
+ * the user's document, so once their file has opened any table there is no way
+ * for appended text to bind a key at document root — the key silently joins
+ * whatever table the user was last inside. This is not a limitation we can
+ * engineer around inside this seam: prepending the block inverts the same bug
+ * onto the managed content, and re-serializing the whole document would destroy
+ * the user's comments and formatting. So the honest contract is to refuse.
+ *
+ * REFUSAL IS DETERMINISTIC — it never consults the user's file. A fragment
+ * author cannot see user state, so a rule that depended on it would pass in
+ * testing and fail in the field for reasons the author could not reproduce.
+ *
+ * Detected from the fragment's PREAMBLE (everything ahead of its first
+ * document-level table header) rather than from the parsed object's value
+ * shapes. The ruling proposed the latter; the preamble is the same intent with
+ * a tighter edge, because a parsed root key holding an inline table (`x = [{a=1}]`)
+ * is indistinguishable from an array-of-tables after parsing, and would slip
+ * through — while it binds into the user's table exactly like any other root key.
+ */
+function assertFragmentOpensWithTable(fragment: string, sourcePath: string, id: string): void {
+  const preamble = splitAtTableHeaders(fragment)[0];
+  const declaresSomething = (preamble?.text ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .some((line) => line.length > 0 && !line.startsWith("#"));
+  if (!declaresSomething) return;
+  throw new Error(
+    `Codex config fragment '${id}' declares root-level keys before its first table header ` +
+    `(${sourcePath}); appended TOML cannot bind at document root — open a table first. ` +
+    `Nothing was projected and the existing config was left unchanged.`,
+  );
+}
+
 function assertFragmentParsesStandalone(fragment: string, sourcePath: string, id: string): void {
   try {
     parseToml(fragment);

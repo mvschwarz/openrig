@@ -1398,19 +1398,26 @@ describe("Codex runtime adapter", () => {
   it("projects a fragment containing a multi-line nested array (r2 NOT-CLEAR #3, 09-01)", async () => {
     // review50-r2 blocking finding on candidate a760ec27. `  [1, 2],` is a row
     // of a multi-line array, not a table header — but the splitter classified
-    // any document-level-looking line starting with `[` as a header, tore the
-    // array apart, and the render guard then refused a fragment that is
-    // perfectly valid. The base implementation projected this fine, so it was a
-    // regression I introduced. Depth, not the line's own text, separates them.
+    // any bracket-leading line as a header, tore the array apart, and the render
+    // guard then refused a perfectly valid fragment. Depth, not the line's own
+    // text, separates them.
+    //
+    // AMENDED BY OPR.0.5.8.15, NOT WEAKENED. R2's original repro put the array
+    // at root, a shape .15 now refuses outright for an unrelated reason (no
+    // root-reopen in TOML). Rewriting the assertion to expect a refusal would
+    // have made this pin green while retiring the thing R2 actually cleared, so
+    // the array is moved inside a table — the only legal shape — and the depth
+    // claim is asserted unchanged. The refusal of the root-level form is pinned
+    // separately below.
     const original = 'model = "gpt-5"\n';
-    const fragment = ["matrix = [", "  [1, 2],", "  [3, 4],", "]", ""].join("\n");
+    const fragment = ["[managed.data]", "matrix = [", "  [1, 2],", "  [3, 4],", "]", ""].join("\n");
     const { project, read } = await projectFragment(original, fragment);
 
     const result = await project();
     expect(result).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
     const after = parseToml(read()) as Record<string, any>;
-    expect(after.model).toBe("gpt-5");                  // user value preserved
-    expect(after.matrix).toEqual([[1, 2], [3, 4]]);     // array intact, not torn
+    expect(after.model).toBe("gpt-5");                          // user value preserved
+    expect(after.managed.data.matrix).toEqual([[1, 2], [3, 4]]); // array intact, not torn
   });
 
   it("still finds real headers that follow a multi-line array", async () => {
@@ -1433,20 +1440,68 @@ describe("Codex runtime adapter", () => {
     expect(after.managed.data.matrix).toEqual([[1, 2]]);                  // array intact
   });
 
-  it("documents that fragment preamble keys bind to the user's LAST table (inherited)", async () => {
-    // Not introduced by this slice: the managed block is appended at the end, so
-    // bare keys ahead of the fragment's first header land inside whatever table
-    // the user's document was still inside. Verified identical against the base
-    // raw-append implementation on a non-colliding input. Pinned so the
-    // behaviour is visible rather than surprising; changing it would mean moving
-    // the managed block, which is outside this seam.
-    const original = '[mcp_servers.other]\nurl = "https://user.example/mcp"\n';
-    const { project, read } = await projectFragment(original, "matrix = [\n  [1, 2],\n]\n");
+  // --- OPR.0.5.8.15: a fragment's root-level keys refuse instead of binding
+  // silently into a user-owned table.
+  //
+  // Superseded the OPR.0.5.8.12 pin that DOCUMENTED this as inherited behaviour
+  // (`matrix` landing as `mcp_servers.other.matrix`). That pin was correct about
+  // the mechanism and is now obsolete as a contract: the shape is refused.
 
-    await project();
+  it("refuses a fragment whose keys precede its first table header (OPR.0.5.8.15)", async () => {
+    // The spec repro: user's document ends inside [mcp_servers.other], so an
+    // appended root key could only ever bind into THEIR table. TOML has no
+    // root-reopen syntax, so preserving the author's intent here is impossible,
+    // not merely expensive — the honest answer is to refuse and say why.
+    const original = '[mcp_servers.other]\nurl = "https://user.example/mcp"\n';
+    const { project, read } = await projectFragment(original, "matrix = [[1, 2]]\n");
+
+    const result = await project();
+    expect(result.projected).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]!.error).toMatch(/root-level keys before its first table header/);
+    expect(result.failed[0]!.error).toMatch(/open a table first/);   // names the author's fix
+    expect(read()).toBe(original);                                   // byte-unchanged
+  });
+
+  it("refuses the same shape DETERMINISTICALLY even when the user's file ends at root", async () => {
+    // Here the key would in fact have bound at root, so a state-dependent rule
+    // would allow it. It is still refused: a fragment author cannot see user
+    // state, and a contract that passes or fails on someone else's file is one
+    // the author can never reproduce.
+    const original = 'model = "gpt-5"\n';
+    const { project, read } = await projectFragment(original, "matrix = [[1, 2]]\n");
+
+    const result = await project();
+    expect(result.projected).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(read()).toBe(original);
+  });
+
+  it("allows comments and blank lines ahead of the first table header", async () => {
+    // Refusing on a leading comment would make the rule feel arbitrary and
+    // would reject perfectly ordinary authored fragments.
+    const original = 'model = "gpt-5"\n';
+    const fragment = ["# managed by openrig", "", "[mcp_servers.context7]", 'url = "https://mcp.context7.com/mcp"', ""].join("\n");
+    const { project, read } = await projectFragment(original, fragment);
+
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    expect((parseToml(read()) as Record<string, any>).mcp_servers.context7.url).toBe("https://mcp.context7.com/mcp");
+  });
+
+  it("leaves the shipped codex-default-config fragment unaffected (OPR.0.5.8.15 regression)", async () => {
+    // The shipped fragment opens with a table header, so the new refusal must
+    // not touch it — including its OPR.0.5.8.12 collision behaviour.
+    const original = [
+      '[projects."/tmp/workspace"]', 'trust_level = "trusted"', "",
+      "[mcp_servers.exa]", 'url = "https://exa.internal.example/mcp"', 'api_key = "USER-SECRET"', "",
+    ].join("\n");
+    const { project, read } = await projectFragment(original);
+
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
     const after = parseToml(read()) as Record<string, any>;
-    expect(after.matrix).toBeUndefined();
-    expect(after.mcp_servers.other.matrix).toEqual([[1, 2]]);
+    expect(after.mcp_servers.exa.url).toBe("https://exa.internal.example/mcp");
+    expect(after.mcp_servers.exa.api_key).toBe("USER-SECRET");
+    expect(after.mcp_servers.context7.url).toBe("https://mcp.context7.com/mcp");
   });
 
   it("refuses an intrinsically invalid managed fragment instead of deleting it (r2 NOT-CLEAR, 09-01)", async () => {
@@ -1503,16 +1558,26 @@ describe("Codex runtime adapter", () => {
     expect((parseToml(read()) as Record<string, any>).mcp_servers.exa.url).toBe("https://mcp.exa.ai/mcp");
   });
 
-  it("refuses to write a config Codex could not parse, leaving the existing file untouched", async () => {
-    // A duplicate top-level KEY is not a table collision, so table-dropping
-    // cannot save it — the render must be rejected before it reaches disk.
+  it("refuses a duplicate root-level key rather than writing it, file untouched", async () => {
+    // Was: a duplicate top-level KEY is not a table collision, so table-dropping
+    // cannot save it and the RENDER guard must reject it.
+    //
+    // AMENDED BY OPR.0.5.8.15. That case is now caught one layer earlier by the
+    // root-scope refusal, so the render guard is no longer what stops it. The
+    // user-visible contract is unchanged and still pinned here — nothing is
+    // written and the file is byte-identical — but the assertion no longer
+    // claims WHICH guard fired, because that claim is now false.
+    //
+    // Standing note, deliberately not converted into a contrived test: after
+    // standalone-parse validation plus root-scope refusal, I could not construct
+    // any input that still reaches `assertRendersAsLoadableToml`. It is retained
+    // as a backstop, and its unreachability is reported rather than pinned.
     const original = 'model = "user-choice"\n';
     const { project, read } = await projectFragment(original, 'model = "managed-choice"\n');
 
     const result = await project();
     expect(result.projected).toEqual([]);
     expect(result.failed).toHaveLength(1);
-    expect(result.failed[0]!.error).toMatch(/Codex cannot parse/);
     expect(result.failed[0]!.error).toMatch(/left unchanged/);
     expect(read()).toBe(original);
   });
