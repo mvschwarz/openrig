@@ -180,6 +180,119 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(isDue(longJob, longArmed + 7_200_000)).toBe(true);
   });
 
+  it("OPR.0.5.8.1 S1b — a park timer is ONE-SHOT: firing ends it, no second wake", async () => {
+    // `periodic-reminder` repeats every intervalSeconds forever. An unstopped
+    // park timer therefore wakes its owner again at +2 intervals, +3, forever.
+    const row = await item("worker@rig");
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: one-shot", wakeAfterSeconds: 90,
+    } as never);
+    const ref = (wakes(row.qitemId)[0] as { wake_ref: string }).wake_ref;
+    expect(jobs.getById(ref)!.state).toBe("active");
+
+    repo.recordWatchdogWakeAttempt(ref, "verified");
+
+    // Ended by the fire itself, so the scheduler can never pick it up again.
+    expect(jobs.getById(ref)!.state).not.toBe("active");
+  });
+
+  it("OPR.0.5.8.1 S1b — leaving the park ends the timer: a terminal row cannot be woken", async () => {
+    // Specimen: job 01M1E6F3QG41N76Y1CDX48P766 fired at 10:18:07Z for a row that
+    // went handed-off at 10:02:03Z — sixteen minutes terminal, and the wake still
+    // instructed the seat to resume it. Done must never read as owed.
+    const row = await item("worker@rig");
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: lifetime", wakeAfterSeconds: 7200,
+    } as never);
+    const ref = (wakes(row.qitemId)[0] as { wake_ref: string }).wake_ref;
+    expect(jobs.getById(ref)!.state).toBe("active");
+
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "done",
+      closureReason: "no-follow-on", transitionNote: "row closed while parked",
+    } as never);
+
+    // The timer is gone at the moment the park ended — long before its 2h due
+    // time — so no clock advance can produce a wake for a closed row.
+    expect(jobs.getById(ref)!.state).not.toBe("active");
+    expect(repo.recordWatchdogWakeAttempt(ref, "verified")).toBeUndefined();
+    expect(wakes(row.qitemId).some((w) => (w as { phase: string }).phase === "fired")).toBe(false);
+  });
+
+  it("OPR.0.5.8.1 S1b — an unpark (blocked -> in-progress) also ends the timer", async () => {
+    const row = await item("worker@rig");
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: unpark", wakeAfterSeconds: 7200,
+    } as never);
+    const ref = (wakes(row.qitemId)[0] as { wake_ref: string }).wake_ref;
+
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "in-progress",
+      transitionNote: "owner resumed the row itself",
+    } as never);
+
+    expect(jobs.getById(ref)!.state).not.toBe("active");
+  });
+
+  it("OPR.0.5.8.1 S1b — the S16 provider-limit path is UNCHANGED, and stays distinguishable", async () => {
+    // Contract item 3 asked me to state whether this repair touches S16 and pin
+    // it either way. It does not: provider-limit timers already ended after
+    // firing, and they end for their OWN reason with their own blocker
+    // resolution, which a plain park timer must never perform. Asserting the
+    // reason rather than merely "terminal" is what keeps the two paths apart if
+    // someone later merges them.
+    const blocker = await repo.create({
+      sourceSession: "wake-ladder@system",
+      destinationSession: "wake-ladder@rig",
+      body: "provider limit for one account pool",
+      tags: [USAGE_LIMIT_BLOCKER_TAG, "usage-limit-pool:claude%3Alocal"],
+      nudge: false,
+    });
+    repo.update({
+      qitemId: blocker.qitemId, actorSession: "wake-ladder@system", state: "blocked",
+      blockedOn: "external:provider-limit:claude:local",
+      transitionNote: "usage-limit park until stated reset", wakeAfterSeconds: 60,
+    } as never);
+    const ref = repo.getParkWakeStatus(blocker.qitemId)!.ref;
+
+    repo.recordWatchdogWakeAttempt(ref, "verified");
+
+    const reason = (db.prepare("SELECT terminal_reason FROM watchdog_jobs WHERE job_id = ?")
+      .get(ref) as { terminal_reason: string | null }).terminal_reason;
+    expect(reason).toBe("usage_limit_expiry_fired");     // not park_timer_fired_once
+    expect(repo.getById(blocker.qitemId)!.state).toBe("done");  // its blocker resolution still runs
+  });
+
+  it("OPR.0.5.8.1 S1b — an operator's ATTACHED watchdog survives the park ending", async () => {
+    // Only park-GENERATED timers are owned by the park. A job the operator
+    // attached with --wake-watchdog is theirs, may target other rows, and must
+    // not be destroyed by this row's lifecycle.
+    const job = jobs.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: \"worker@rig\"\nmessage: \"operator's own\"\n",
+      targetSession: "worker@rig",
+      intervalSeconds: 600,
+      registeredBySession: "operator@rig",
+    });
+    const row = await item("worker@rig");
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: attached",
+      wakeWatchdogId: job.jobId,
+    } as never);
+    expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({ kind: "watchdog", ref: job.jobId });
+
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "done",
+      closureReason: "no-follow-on", transitionNote: "row closed while parked",
+    } as never);
+
+    expect(jobs.getById(job.jobId)!.state).toBe("active");   // still the operator's
+  });
+
   it("rolls the generated timer back when the park transaction aborts", async () => {
     const row = await item();
     db.exec(`
