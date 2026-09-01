@@ -152,8 +152,17 @@ async function main(argv) {
   process.stdout.write(headerPath.length === 0 ? text : resolveAddress(text, headerPath).text);
 }
 
-const invokedPath = process.argv[1] ? realpathSync(process.argv[1]) : null;
-if (invokedPath === realpathSync(fileURLToPath(import.meta.url))) {
+function isMainModule() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
   main(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${error.name ?? "Error"}: ${error.message}\n`);
     process.exitCode = 1;
