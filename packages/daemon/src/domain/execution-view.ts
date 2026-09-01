@@ -503,7 +503,10 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       const m = t.match(SLICE_TAG);
       if (m?.[1]) return m[1];
     }
-    return null;
+    const bodySlices = [...new Set(
+      [...(r.body?.matchAll(/^Slice:[ \t]+(\S+)[ \t]*$/gm) ?? [])].map((match) => match[1]!),
+    )];
+    return bodySlices.length === 1 ? bodySlices[0]! : null;
   };
 
   // ---- Q1: who is on what, where ----

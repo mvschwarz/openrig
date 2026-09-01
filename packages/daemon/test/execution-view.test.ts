@@ -281,7 +281,9 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
       `Mission: ${MISSION}\nSlice: OPR.9.9.31\nworktree_path=${laneWorktree}\n`,
     );
     const result = projector.show("execution");
-    expect((result.rows[0] as Record<string, unknown>).mission).toBe(MISSION);
+    const doc = result.rows[0] as Record<string, unknown>;
+    expect(doc.mission).toBe(MISSION);
+    expect((doc.q1_lanes as Record<string, unknown>[]).map((lane) => lane.slice)).toContain("OPR.9.9.31");
   });
 
   it("EC-3: the worktree_path field is Q1's join key; a legacy baton falls back marked fragile", () => {
