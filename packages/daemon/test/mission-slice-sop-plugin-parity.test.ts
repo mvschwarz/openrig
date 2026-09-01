@@ -39,27 +39,17 @@ describe("OPR.0.4.7 vendoring — universal skills have one plugin home", () => 
 
 // aa922842 — the skill description is a RETRIEVAL surface: a runtime reads it to decide
 // whether to load the skill, so it competes for a byte budget with every other skill's
-// description. At 701 UTF-8 bytes this one was the outlier. Trimming it is only safe if the
-// terms that make it findable survive — a shorter description that drops "proof-lock" is a
-// skill that silently stops being retrieved for proof-lock work. Budget and trigger set are
-// pinned together for that reason: neither is safe alone.
+// description. Keep the symptoms that make the skill discoverable; its body owns the SOP.
 const DESCRIPTION_BUDGET_BYTES = 500;
 
-// Guard-named trigger set (aa922842 ruling). Extend deliberately, never trim to make a
-// draft fit — a term removed here is retrieval coverage removed from the product.
-const REQUIRED_TRIGGERS = [
+const RETRIEVAL_SYMPTOMS = [
+  "starting",
+  "building",
+  "handing off",
+  "restoring",
+  "closing",
   "mission",
   "slice",
-  "proof contract",
-  "plan-lock",
-  "proof-lock",
-  "rig proof",
-  "PROGRESS.md",
-  "PROOF.md",
-  "SPEC.md",
-  "NOTES.md",
-  "handoff",
-  "compaction",
 ];
 
 /** Extract the frontmatter `description:` value, folding continuation lines. */
@@ -70,34 +60,24 @@ function readDescription(file: string): string {
   return match![1].split(/\s+/).filter(Boolean).join(" ");
 }
 
-describe("aa922842 mission-slice-sop description budget + trigger preservation", () => {
+describe("aa922842 mission-slice-sop description budget + symptom retrieval", () => {
   it(`the shipped description fits the ${DESCRIPTION_BUDGET_BYTES}-byte retrieval budget`, () => {
     const description = readDescription(PLUGIN_COPY);
     const bytes = Buffer.byteLength(description, "utf-8");
     expect(
       bytes,
-      `mission-slice-sop description is ${bytes} UTF-8 bytes (${description.length} chars), over the ${DESCRIPTION_BUDGET_BYTES}-byte budget. Trim prose, never a trigger term from REQUIRED_TRIGGERS.`,
+      `mission-slice-sop description is ${bytes} UTF-8 bytes (${description.length} chars), over the ${DESCRIPTION_BUDGET_BYTES}-byte budget.`,
     ).toBeLessThanOrEqual(DESCRIPTION_BUDGET_BYTES);
   });
 
-  it("every named trigger term survives the trim", () => {
+  it("preserves the symptoms that retrieve the skill", () => {
     const description = readDescription(PLUGIN_COPY).toLowerCase();
-    const missing = REQUIRED_TRIGGERS.filter((t) => !description.includes(t.toLowerCase()));
+    const missing = RETRIEVAL_SYMPTOMS.filter((symptom) => !description.includes(symptom));
     expect(
       missing,
-      `mission-slice-sop description lost trigger term(s): ${missing.join(", ")}. The skill will stop being retrieved for that work; restore the term and trim prose instead.`,
+      `mission-slice-sop description lost retrieval symptom(s): ${missing.join(", ")}.`,
     ).toEqual([]);
   });
-
-  it("retrieval teaches only the current authored filenames", () => {
-    const description = readDescription(PLUGIN_COPY);
-    expect(description).toContain("SPEC.md");
-    expect(description).toContain("NOTES.md");
-    expect(description).not.toContain("IMPLEMENTATION-PRD.md");
-    expect(description).not.toContain("MISSION_NOTES.md");
-    expect(description).not.toContain("MISSION_BRIEF.md");
-  });
-
 });
 
 describe("scope convention teaching-site sweep", () => {

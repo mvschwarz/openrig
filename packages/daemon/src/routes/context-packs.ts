@@ -15,7 +15,7 @@
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { extname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { ContextPackLibraryService } from "../domain/context-packs/context-pack-library-service.js";
 import { assembleBundle, assemblePlainFiles } from "../domain/context-packs/bundle-assembler.js";
@@ -39,6 +39,15 @@ function jsonError(
   details?: Record<string, unknown>,
 ): { status: RefErrorStatus; body: Record<string, unknown> } {
   return { status, body: { error, message, ...(details ?? {}) } };
+}
+
+function isRelativeMarkdownAddress(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const path = value.split("#", 1)[0]!;
+  return path.length > 0 &&
+    !isAbsolute(path) &&
+    !path.split(/[\\/]/).some((segment) => segment.length === 0 || segment === "." || segment === "..") &&
+    [".md", ".markdown"].includes(extname(path).toLowerCase());
 }
 
 export function contextPacksRoutes(): Hono {
@@ -427,15 +436,15 @@ export function contextPacksRoutes(): Hono {
             install?: { intent?: unknown; context?: unknown };
           } | null;
           const manifestIntent = projectManifest?.install?.intent;
-          if (typeof manifestIntent === "string") {
+          if (isRelativeMarkdownAddress(manifestIntent)) {
             projectIntent = manifestIntent;
             projectIntentSource = "manifest";
           } else if (manifestIntent !== undefined) {
             warnings.push("project.yaml: optional install.intent must be a relative Markdown address; ignored the invalid value and kept the baseline work install.");
           }
           const manifestContext = projectManifest?.install?.context;
-          if (Array.isArray(manifestContext)) {
-            projectContext = manifestContext.filter((address): address is string => typeof address === "string");
+          if (Array.isArray(manifestContext) && manifestContext.every(isRelativeMarkdownAddress)) {
+            projectContext = manifestContext;
           } else if (manifestContext !== undefined) {
             warnings.push("project.yaml: optional install.context must be a list of relative Markdown addresses; ignored the invalid value and kept the baseline work install.");
           }

@@ -226,7 +226,9 @@ describe("S22 OpenRig skill router coverage", () => {
         expect(wire.dispatcher.dispatch(OUTBOUND_OP, alert!.destinationSession!, alert)).toMatchObject({ ok: true });
         await new Promise((resolveWait) => setTimeout(resolveWait, 30));
         expect(posts).toHaveLength(1);
-        expect(JSON.stringify(posts[0])).toContain("<@UFOUNDER>");
+        const posted = JSON.stringify(posts[0]);
+        expect(posted).toContain("a founder decision is required");
+        expect(posted).not.toContain("<@UFOUNDER>");
         expect(await ports.listHumanAlerts({ minimumLevel: "NOTICE" })).toEqual([]);
         expect(
           repo.listTransitions(row.qitemId).filter((transition) =>

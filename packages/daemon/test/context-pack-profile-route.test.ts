@@ -407,7 +407,10 @@ missions:
     }
   });
 
-  it("Story 2: wrong-type optional project intent warns and preserves the baseline install", async () => {
+  it.each([
+    { caseName: "wrong-type", intent: "42" },
+    { caseName: "traversal-shaped", intent: "../outside.md" },
+  ])("Story 2: $caseName optional project intent warns and preserves the baseline install", async ({ intent }) => {
     const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
     const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
     try {
@@ -435,7 +438,7 @@ missions:
       writeFileSync(join(workspace, "project.yaml"), `schema: openrig.project/v0alpha1
 kind: project
 install:
-  intent: 42
+  intent: ${intent}
 missions:
   root: missions
 `);
@@ -462,15 +465,20 @@ missions:
     }
   });
 
-  it("Story 2: wrong-type optional project context warns and preserves the baseline install", async () => {
+  it.each([
+    { caseName: "wrong-type", context: "not-a-list" },
+    { caseName: "mixed-invalid", context: "\n    - context/first.md\n    - ../outside.md" },
+  ])("Story 2: $caseName optional project context warns and preserves the baseline install", async ({ context }) => {
     const savedWorkspace = process.env["OPENRIG_WORKSPACE_ROOT"];
     const savedSlices = process.env["OPENRIG_WORKSPACE_SLICES_ROOT"];
     try {
       const workspace = join(tmp, "workspace");
       const missionDir = join(workspace, "missions", "release-x");
       const sliceDir = join(missionDir, "slices", "10-work-install");
+      mkdirSync(join(workspace, "context"), { recursive: true });
       mkdirSync(sliceDir, { recursive: true });
       writeFileSync(join(workspace, "SPEC.md"), "# Project\nProject intent sentinel");
+      writeFileSync(join(workspace, "context", "first.md"), "# First\nValid context must not compose from a mixed list");
       writeFileSync(join(missionDir, "SPEC.md"), "# Mission\nMission change sentinel");
       writeFileSync(join(sliceDir, "SPEC.md"), "# Slice\nExact outcome sentinel");
       process.env["OPENRIG_WORKSPACE_ROOT"] = workspace;
@@ -490,7 +498,7 @@ missions:
       writeFileSync(join(workspace, "project.yaml"), `schema: openrig.project/v0alpha1
 kind: project
 install:
-  context: not-a-list
+  context: ${context}
 missions:
   root: missions
 `);
