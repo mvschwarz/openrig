@@ -339,12 +339,13 @@ Examples:
   };
 
   cmd.command("work-install")
-    .description("Resolve an ordered project, mission, and slice context plan without delivering it")
+    .description("Resolve an ordered project, mission, and slice context plan, optionally with exact file content")
     .option("--project <id>", "Exact project id from workspace.yaml")
     .option("--mission <id>", "Exact mission id under the selected project")
     .option("--slice <id>", "Exact slice id under the selected mission")
+    .option("--deliver", "Include the exact content of each extant planned file")
     .option("--json", "JSON output")
-    .action((opts: { project?: string; mission?: string; slice?: string; json?: boolean }) => {
+    .action((opts: { project?: string; mission?: string; slice?: string; deliver?: boolean; json?: boolean }) => {
       const workspaceRoot = String(new ConfigStore().resolveWithSource("workspace.root").value);
       const result = resolveWorkPosition({
         workspaceRoot,
@@ -359,7 +360,27 @@ Examples:
         return;
       }
       if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
+        const output = opts.deliver
+          ? {
+              ...result,
+              pieces: result.pieces.map((piece) => piece.exists
+                ? { ...piece, content: readFileSync(piece.path, "utf8") }
+                : piece),
+            }
+          : result;
+        console.log(JSON.stringify(output, null, 2));
+        return;
+      }
+      if (opts.deliver) {
+        for (const planned of result.pieces) {
+          if (!planned.exists) {
+            console.log(`=== ${planned.address} (absent: ${planned.path}) ===`);
+            continue;
+          }
+          console.log(`=== ${planned.altitude} ${planned.address} ===`);
+          console.log(readFileSync(planned.path, "utf8"));
+        }
+        for (const warning of result.warnings) console.error(`Warning: ${warning}`);
         return;
       }
       console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}`);

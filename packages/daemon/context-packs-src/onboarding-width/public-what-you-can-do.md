@@ -278,9 +278,9 @@ scheme, and nothing downstream can see it.
   own echo is the answer — not a re-read of the files.
 - **`rig workspace doctor` / `validate`** — does the daemon agree with you about where the work
   tree is, and which files are missing the frontmatter their kind requires.
-- **`rig context work-install --project … --mission … --slice …`** — resolves the ordered context
-  plan without delivering it. Load the returned addresses through `rig context get`; do not treat
-  resolution as installation.
+- **`rig context work-install --project … --mission … --slice … [--deliver]`** — resolves the ordered
+  context plan; add `--deliver` to emit the exact extant files in that same order while marking
+  absent pieces visibly. Without the flag it remains plan-only.
 - **`rig context show` / `sync` / `rm`** — what is inside a context pack before you prime a seat
   with it, and how to make the library catch up when you edit one.
 - **`rig context get <name-or-ref>`** — pull exact context by address instead of reading files:

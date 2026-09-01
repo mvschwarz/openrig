@@ -156,6 +156,76 @@ composition:
     expect(betaPlan.pieces.every((piece) => piece.path.startsWith(betaRoot))).toBe(true);
   });
 
+  it("delivers extant pieces byte-for-byte in plan order and marks absent pieces", async () => {
+    const args = [
+      "node", "rig", "context", "work-install",
+      "--project", "alpha", "--mission", "alpha-active", "--slice", "01-live-work", "--json",
+    ];
+    const planOnly = await captureLogs(async () => {
+      await makeCommand().parseAsync(args);
+    });
+    const delivered = await captureLogs(async () => {
+      await makeCommand().parseAsync([...args, "--deliver"]);
+    });
+
+    expect(delivered.exitCode).toBeUndefined();
+    const delivery = JSON.parse(delivered.logs.join("")) as {
+      pieces: Array<{ altitude: string; address: string; path: string; exists: boolean; content?: string }>;
+    };
+    expect(delivery.pieces.map(({ path, content }) => ({ path, content }))).toEqual(
+      delivery.pieces.map(({ path }) => ({ path, content: readFileSync(path, "utf8") })),
+    );
+    const planShape = {
+      ...delivery,
+      pieces: delivery.pieces.map(({ content: _content, ...piece }) => piece),
+    };
+    expect(JSON.stringify(planShape, null, 2)).toBe(planOnly.logs.join(""));
+
+    const missing = await captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install",
+        "--project", "beta", "--mission", "beta-scaffold", "--deliver", "--json",
+      ]);
+    });
+    const missingDelivery = JSON.parse(missing.logs.join("")) as {
+      pieces: Array<{ altitude: string; address: string; path: string; exists: boolean; content?: string }>;
+    };
+    expect(missingDelivery.pieces.map((piece) => ({
+      address: piece.address,
+      exists: piece.exists,
+      hasContent: Object.hasOwn(piece, "content"),
+    }))).toEqual([
+      { address: "project:SPEC.md", exists: true, hasContent: true },
+      { address: "mission:SPEC.md", exists: true, hasContent: true },
+      { address: "mission:PROGRESS.md", exists: false, hasContent: false },
+    ]);
+
+    const planHuman = await captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install",
+        "--project", "beta", "--mission", "beta-scaffold",
+      ]);
+    });
+    expect(planHuman.logs).toEqual([
+      `project beta: ${betaRoot}`,
+      `project project:SPEC.md [manifest] ${join(betaRoot, "SPEC.md")}`,
+      `mission mission:SPEC.md [manifest] ${join(betaRoot, "missions", "beta-scaffold", "SPEC.md")}`,
+      `mission mission:PROGRESS.md [default] (absent: ${join(betaRoot, "missions", "beta-scaffold", "PROGRESS.md")})`,
+    ]);
+
+    const human = await captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install",
+        "--project", "beta", "--mission", "beta-scaffold", "--deliver",
+      ]);
+    });
+    expect(human.logs.filter((line) => line.startsWith("=== "))).toEqual([
+      "=== project project:SPEC.md ===",
+      "=== mission mission:SPEC.md ===",
+      `=== mission:PROGRESS.md (absent: ${join(betaRoot, "missions", "beta-scaffold", "PROGRESS.md")}) ===`,
+    ]);
+  });
+
   it("refuses a selected project id that names two catalog roots", async () => {
     for (const projectRoot of [alphaRoot, betaRoot]) {
       writeFileSync(join(projectRoot, "project.yaml"), `schema: openrig.project/v0alpha1
