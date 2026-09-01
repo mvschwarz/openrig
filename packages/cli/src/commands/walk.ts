@@ -69,6 +69,7 @@ export function walkCommand(depsOverride?: WalkDeps): Command {
     .option("--rig <rig>", "With --through-profile: the seat-tree grant (with --seat)")
     .option("--seat-grant <seat>", "With --through-profile: the seat whose tree seat: atoms may read (with --rig)")
     .option("--mission <mission>", "With --through-profile: the mission-tree grant")
+    .option("--slice <slice>", "With --through-profile: the slice-tree grant (with --mission)")
     .option("--budget <tokens>", "With --through-profile: situation budget (reported, never truncated)")
     .option("--pace <duration>", "Delay between pieces (e.g. 10s or 500ms; unit suffix required); default 10s")
     // Mechanics-gate fix (desk ruling d9b3989a): send success means TYPED, not CONSUMED — every
@@ -87,7 +88,7 @@ Examples:
 Paced push-delivery: each piece is sent into the target pane, then --pace elapses
 before the next. The walker leads; it does not wait for replies — the spacing lets
 the agent process between sends. Small piece → 'rig send'; a real pack → walk.`)
-    .action(async (seat: string, opts: { through?: string[]; throughProfile?: string; situation?: string; runtime?: string; rig?: string; seatGrant?: string; mission?: string; budget?: string; pace?: string; consumeTimeout?: string; consumePoll?: string; turnTimeout?: string; json?: boolean }) => {
+    .action(async (seat: string, opts: { through?: string[]; throughProfile?: string; situation?: string; runtime?: string; rig?: string; seatGrant?: string; mission?: string; slice?: string; budget?: string; pace?: string; consumeTimeout?: string; consumePoll?: string; turnTimeout?: string; json?: boolean }) => {
       try {
         const deps = getDeps();
         const paceMs = parsePaceMs(opts.pace);
@@ -377,13 +378,14 @@ the agent process between sends. Small piece → 'rig send'; a real pack → wal
 
   async function resolveProfilePieces(
     deps: WalkDeps,
-    opts: { throughProfile?: string; situation?: string; runtime?: string; rig?: string; seatGrant?: string; mission?: string; budget?: string },
+    opts: { throughProfile?: string; situation?: string; runtime?: string; rig?: string; seatGrant?: string; mission?: string; slice?: string; budget?: string },
   ): Promise<{ pieces: WalkPiece[]; identity: Array<{ atomId: string; address: string }> }> {
     const client = await getClient(deps);
     const params = new URLSearchParams({ ref: opts.throughProfile!, situation: opts.situation!, runtime: opts.runtime ?? "claude" });
     if (opts.rig !== undefined) params.set("rig", opts.rig);
     if (opts.seatGrant !== undefined) params.set("seat", opts.seatGrant);
     if (opts.mission !== undefined) params.set("mission", opts.mission);
+    if (opts.slice !== undefined) params.set("slice", opts.slice);
     if (opts.budget !== undefined) params.set("budget", opts.budget);
     const res = await client.get<{
       pieces?: Array<{ atomId: string; address: string; text: string }>;

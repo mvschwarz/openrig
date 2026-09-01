@@ -40,8 +40,9 @@ function mockLifecycle(port: number): LifecycleDeps {
   };
 }
 
-async function runWalk(port: number, argv: string[], failTransportAt?: number): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined; transportPayloads: string[] }> {
+async function runWalk(port: number, argv: string[], failTransportAt?: number): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined; transportPayloads: string[]; profileRequestUrls: string[] }> {
   const transportPayloads: string[] = [];
+  const profileRequestUrls: string[] = [];
   let sends = 0;
   const server = http.createServer((req, res) => {
     let body = "";
@@ -49,6 +50,7 @@ async function runWalk(port: number, argv: string[], failTransportAt?: number): 
     req.on("end", () => {
       const url = req.url ?? "";
       if (url.startsWith("/api/context-packs/library/by-ref/profile")) {
+        profileRequestUrls.push(url);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(PROFILE_RESPONSE));
       } else if (url === "/api/transport/send") {
@@ -91,7 +93,7 @@ async function runWalk(port: number, argv: string[], failTransportAt?: number): 
     console.log = origLog; console.error = origErr;
     await new Promise<void>((r) => { server.close(() => r()); });
   }
-  return { logs, errLogs, exitCode, transportPayloads };
+  return { logs, errLogs, exitCode, transportPayloads, profileRequestUrls };
 }
 
 describe("rig walk --through-profile — the walk/profile join (Test-A)", () => {
@@ -111,6 +113,18 @@ describe("rig walk --through-profile — the walk/profile join (Test-A)", () => 
   it("NO-COPY: the bytes sent to the seat are exactly the bytes the profile served", async () => {
     const { transportPayloads } = await runWalk(0, ARGS);
     expect(transportPayloads).toEqual(["## Welcome\nhello world", "## Recent Decisions\nwe chose X"]);
+  });
+
+  it("accepts and forwards the exact slice grant alongside its mission", async () => {
+    const { exitCode, profileRequestUrls } = await runWalk(0, [
+      ...ARGS,
+      "--mission", "release-0.5.7",
+      "--slice", "10-work-install",
+    ]);
+    expect(exitCode ?? 0).toBe(0);
+    const request = new URL(profileRequestUrls[0]!, "http://localhost");
+    expect(request.searchParams.get("mission")).toBe("release-0.5.7");
+    expect(request.searchParams.get("slice")).toBe("10-work-install");
   });
 
   it("MISMATCH VISIBLE: a mid-walk failure reports the delivered PREFIX vs the expected set, by identity", async () => {
