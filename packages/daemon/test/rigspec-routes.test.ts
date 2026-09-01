@@ -4,6 +4,11 @@ import type { Hono } from "hono";
 import type { RigRepository } from "../src/domain/rig-repository.js";
 import type { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
 import { LegacyRigSpecCodec as RigSpecCodec } from "../src/domain/rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
+import { RigSpecCodec as PodRigSpecCodec } from "../src/domain/rigspec-codec.js";
+import { RigSpecSchema as PodRigSpecSchema } from "../src/domain/rigspec-schema.js";
+import { PodRepository } from "../src/domain/pod-repository.js";
+import { migrate } from "../src/db/migrate.js";
+import { workspacePrimitiveSchema } from "../src/db/migrations/038_workspace_primitive.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { createDaemon } from "../src/startup.js";
 import { RigSpecExporter as RigSpecExporterClass } from "../src/domain/rigspec-exporter.js";
@@ -39,6 +44,7 @@ describe("Rigspec export routes", () => {
 
   beforeEach(() => {
     db = createFullTestDb();
+    migrate(db, [workspacePrimitiveSchema]);
     const setup = createTestApp(db);
     app = setup.app;
     rigRepo = setup.rigRepo;
@@ -68,6 +74,34 @@ describe("Rigspec export routes", () => {
     const body = await res.json();
     expect(body.name).toBe("r99");
     expect(body.nodes).toHaveLength(1);
+  });
+
+  it("GET /api/rigs/:rigId/spec preserves a persisted pod-aware workspace", async () => {
+    const rig = rigRepo.createRig("workspace-rig");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    rigRepo.addNode(rig.id, "dev.worker", {
+      runtime: "claude-code",
+      podId: pod.id,
+      agentRef: "local:agents/worker",
+      profile: "default",
+      cwd: "/workspace/app",
+    });
+    const workspace: import("../src/domain/types.js").WorkspaceSpec = {
+      workspaceRoot: "/workspace",
+      repos: [
+        { name: "app", path: "/workspace/app", kind: "project" },
+        { name: "docs", path: "/workspace/docs", kind: "knowledge" },
+      ],
+      defaultRepo: "app",
+      knowledgeRoot: "/workspace/docs",
+    };
+    rigRepo.setRigWorkspace(rig.id, workspace);
+
+    const res = await app.request(`/api/rigs/${rig.id}/spec`);
+    expect(res.status).toBe(200);
+    const parsed = PodRigSpecCodec.parse(await res.text());
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    expect(PodRigSpecSchema.normalize(parsed as Record<string, unknown>).workspace).toEqual(workspace);
   });
 
   it("GET nonexistent rig -> 404", async () => {

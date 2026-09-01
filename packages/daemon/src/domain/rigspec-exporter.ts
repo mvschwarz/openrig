@@ -213,11 +213,13 @@ export class RigSpecExporter {
     // OPR.0.4.8.3 Seam B: rig-level permission_policy is a RIG-ROW field (not derivable
     // from the spec re-emit) — explicit repository read, emitted only when set.
     const rigPermissionPolicy = this.rigRepo.getRigPermissionPolicy(rigId);
+    const workspace = this.rigRepo.getRigWorkspace(rigId);
 
     return {
       version: "0.2",
       name: rig.rig.name,
       ...(rigPermissionPolicy ? { permissionPolicy: rigPermissionPolicy } : {}),
+      ...(workspace ? { workspace } : {}),
       pods: podSpecs,
       edges: crossPodEdges,
     };

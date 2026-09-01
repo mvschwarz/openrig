@@ -10,6 +10,7 @@ import { nodeSpecFieldsSchema } from "../src/db/migrations/007_node_spec_fields.
 import { checkpointsSchema } from "../src/db/migrations/005_checkpoints.js";
 import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot.js";
 import { podNamespaceSchema } from "../src/db/migrations/017_pod_namespace.js";
+import { workspacePrimitiveSchema } from "../src/db/migrations/038_workspace_primitive.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { RigSpecExporter } from "../src/domain/rigspec-exporter.js";
@@ -22,7 +23,9 @@ import { RigNotFoundError } from "../src/domain/errors.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 function setupDb(): Database.Database {
-  return createFullTestDb();
+  const db = createFullTestDb();
+  migrate(db, [workspacePrimitiveSchema]);
+  return db;
 }
 
 describe("RigSpecExporter", () => {
@@ -282,12 +285,34 @@ describe("RigSpecExporter (pod-aware)", () => {
     const { rig } = seedPodRig();
     const spec = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
     expect(spec.version).toBe("0.2");
+    expect(spec.workspace).toBeUndefined();
     expect(spec.pods).toHaveLength(2);
     const devPod = spec.pods.find((p) => p.id === "dev")!;
     expect(devPod).toBeDefined();
     expect(devPod.members).toHaveLength(2);
     expect(devPod.members.map((m) => m.id).sort()).toEqual(["impl", "qa"]);
     expect(devPod.members[0]!.agentRef).toContain("agents/");
+  });
+
+  it("exports the persisted workspace declaration", () => {
+    const { rig } = seedPodRig();
+    const workspace: import("../src/domain/types.js").WorkspaceSpec = {
+      workspaceRoot: "/workspace",
+      repos: [
+        { name: "app", path: "/workspace/app", kind: "project" },
+        { name: "docs", path: "/workspace/docs", kind: "knowledge" },
+      ],
+      defaultRepo: "app",
+      knowledgeRoot: "/workspace/docs",
+    };
+    rigRepo.setRigWorkspace(rig.id, workspace);
+
+    const spec = exporter.exportRig(rig.id) as import("../src/domain/types.js").RigSpec;
+    expect(spec.workspace).toEqual(workspace);
+
+    const parsed = PodRigSpecCodec.parse(PodRigSpecCodec.serialize(spec));
+    expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+    expect(PodRigSpecSchema.normalize(parsed as Record<string, unknown>).workspace).toEqual(workspace);
   });
 
   it("pod-local edges use member-local ids", () => {
