@@ -94,6 +94,25 @@ files:
     expect(m.files).toHaveLength(5);
   });
 
+  it("accepts inert UTF-8 script helpers with sh/ts/mjs/py suffixes", () => {
+    const ok = `name: helpers
+version: 1
+taxonomy: skills
+files:
+  - { path: scripts/a.sh, role: reference }
+  - { path: scripts/b.ts, role: reference }
+  - { path: scripts/c.mjs, role: reference }
+  - { path: scripts/d.py, role: reference }
+`;
+    const m = parseManifest(ok, "/helpers.yaml");
+    expect(m.files.map((file) => file.path)).toEqual([
+      "scripts/a.sh",
+      "scripts/b.ts",
+      "scripts/c.mjs",
+      "scripts/d.py",
+    ]);
+  });
+
   it("ignores estimated_tokens when not a finite number", () => {
     const m = parseManifest("name: x\nversion: 1\ntaxonomy: world\nfiles: []\nestimated_tokens: 'not-a-number'", "/x.yaml");
     expect(m.estimatedTokens).toBeUndefined();

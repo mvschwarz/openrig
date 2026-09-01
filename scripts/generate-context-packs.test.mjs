@@ -16,6 +16,7 @@ const { ContextPackLibraryService } = await import(distUrl("context-pack-library
 const { assembleBundle } = await import(distUrl("bundle-assembler.js"));
 const { EXCLUDES } = await import(pathToFileURL(join(HERE, "mirror-skills.mjs")).href);
 const REAL_SKILLS = join(REPO, "packages/daemon/specs/agents/shared/skills");
+const REAL_PLUGIN_SKILLS = join(REPO, "packages/daemon/assets/plugins/openrig-core/skills");
 const REAL_STATIC_PACKS = join(REPO, "packages/daemon/context-packs-src");
 
 // Independent computation of the mirror's exclude-only ship set on a real tree —
@@ -50,6 +51,16 @@ function run(source, out, args = []) {
   });
 }
 
+function runProduction(out, args = []) {
+  const env = { ...process.env };
+  delete env.OPENRIG_SKILLS_SOURCE;
+  delete env.OPENRIG_STATIC_PACKS_SOURCE;
+  return execFileSync("node", [GEN, ...args], {
+    encoding: "utf8",
+    env: { ...env, OPENRIG_PACKS_OUT: out, OPENRIG_PACKAGE_VERSION: "0.5.3" },
+  });
+}
+
 function scratch() {
   const base = mkdtempSync(join(tmpdir(), "s07-genpacks-"));
   return { source: join(base, "skills"), out: join(base, "out"), base };
@@ -75,6 +86,7 @@ test("generates a valid, daemon-parseable pack per skill; SKILL.md is the instru
     // both packs exist under skills/<rel>
     assert.ok(existsSync(join(out, "skills/core/attention-queue/manifest.yaml")));
     assert.ok(existsSync(join(out, "skills/process/tdd/manifest.yaml")));
+    assert.ok(!existsSync(join(out, "skills/mission-slice-sop")), "an explicit source override must remain isolated");
 
     // manifest parses through the DAEMON's parser and SKILL.md leads as instruction
     const m1 = parseManifest(readFileSync(join(out, "skills/core/attention-queue/manifest.yaml"), "utf8"), "m1");
@@ -201,6 +213,49 @@ test("REAL CANON: referenced helpers are DELIVERED in the served bundle (packed-
     assert.match(bundle.text, /find-polluter\.sh/, "helper .sh path must be in the served bundle");
     assert.match(bundle.text, /find-polluter\.sh <file_or_dir_to_check>/, "helper .sh CONTENT must be served");
     assert.match(bundle.text, /condition-based-waiting-example\.ts/, "helper .ts path must be in the served bundle");
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("PRODUCTION PUBLIC PLUGIN-ONLY: mission-slice-sop catalogs once and helper assets ship byte-identically", () => {
+  const out = mkdtempSync(join(tmpdir(), "s10-plugin-only-"));
+  try {
+    runProduction(out);
+    const ref = "skills/mission-slice-sop";
+    const projectedSkill = join(out, ref, "SKILL.md");
+    const pluginSkill = join(REAL_PLUGIN_SKILLS, "mission-slice-sop", "SKILL.md");
+    assert.deepEqual(
+      readFileSync(projectedSkill),
+      readFileSync(pluginSkill),
+      "the builtin pack must contain the packaged plugin's exact SKILL.md bytes",
+    );
+
+    const manifest = parseManifest(readFileSync(join(out, ref, "manifest.yaml"), "utf8"), ref);
+    assert.equal(manifest.name, "mission-slice-sop");
+    assert.equal(manifest.files[0].path, "SKILL.md");
+    assert.equal(manifest.files[0].role, "instruction");
+
+    const lib = new ContextPackLibraryService({ roots: [{ path: out, sourceType: "builtin" }] });
+    const scan = lib.scan();
+    assert.deepEqual(scan.errors, []);
+    assert.equal(lib.list().filter((entry) => entry.relativePath === ref).length, 1, "the public skill ref must be unique");
+    const entry = lib.getByRef(ref);
+    assert.ok(entry, "the plugin-only public skill must be retrievable from the catalog");
+    const bundle = assembleBundle({ packEntry: entry });
+    assert.deepEqual(bundle.missingFiles, []);
+    assert.match(bundle.text, /mission-slice-sop/);
+
+    for (const [skillName, helper] of [
+      ["loading-addressable-markdown", "scripts/resolve-markdown.mjs"],
+      ["openrig-operating-model", "scripts/compose.py"],
+    ]) {
+      assert.deepEqual(
+        readFileSync(join(out, "skills", skillName, helper)),
+        readFileSync(join(REAL_PLUGIN_SKILLS, skillName, helper)),
+        `${helper} must remain byte-identical to its packaged plugin source`,
+      );
+    }
   } finally {
     rmSync(out, { recursive: true, force: true });
   }

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // OPR.0.5.3.7 R2 — content ships WITH the CLI (the staleness kill).
 //
-// Projects canonical skill content (packages/daemon/specs/agents/shared/skills/)
-// into context-pack entries under packages/daemon/context-packs/. The daemon
+// Projects public skill content from its declared spec/plugin source into
+// context-pack entries under packages/daemon/context-packs/. The daemon
 // already registers that directory as a `builtin` discovery root resolved
 // RELATIVE TO THE BINARY (startup.ts: `import.meta.dirname/../context-packs`),
 // and `rig context get` already serves any builtin-root pack — so once this
 // projection is generated and shipped, served bytes match `rig --version` by
-// construction and cannot drift from a forked plugin copy.
+// construction and matches the source shipped by the same package.
 //
 // RULED SHAPE (dev-planner entry-shape ruling 2026-08-23, generated-manifest-
 // at-package-time): the projection is DERIVED AT PACKAGE TIME, never edited in
@@ -29,7 +29,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 // The projection membership MIRRORS the canonical mirror EXACTLY — imported so the
 // two never drift (r1/r2 HIGH-1: a narrower rule dropped referenced helper assets).
-import { EXCLUDES as MIRROR_EXCLUDES } from "./mirror-skills.mjs";
+import { EXCLUDES as MIRROR_EXCLUDES, shipSetFromMembership } from "./mirror-skills.mjs";
 import { scanInternalLeaks, buildInternalLeakMessage } from "./internal-leak-scanner.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -124,6 +124,37 @@ function findSkillDirs(dir, rel = "") {
     }
   }
   return found;
+}
+
+function findPluginOnlyPublicSkillDirs() {
+  if (process.env.OPENRIG_SKILLS_SOURCE) return { skills: [], errors: [] };
+
+  const membership = JSON.parse(
+    fs.readFileSync(path.join(REPO, "scripts/product-public-skills.generated.json"), "utf8"),
+  );
+  const layout = JSON.parse(
+    fs.readFileSync(path.join(REPO, "scripts/skill-edge-layout.generated.json"), "utf8"),
+  );
+  const pluginEdge = layout.edges?.plugin;
+  if (!pluginEdge || pluginEdge.layout !== "flat" || typeof pluginEdge.path !== "string") {
+    return { skills: [], errors: ["skill edge layout must declare a flat plugin source"] };
+  }
+
+  const pluginRoot = path.resolve(REPO, pluginEdge.path);
+  const skills = [];
+  const errors = [];
+  for (const name of shipSetFromMembership(membership)) {
+    const edges = layout.skills?.[name]?.edges ?? [];
+    if (!edges.includes("plugin") || edges.includes("canonical") || edges.includes("spec")) continue;
+    const abs = path.join(pluginRoot, name);
+    const skillFile = path.join(abs, "SKILL.md");
+    if (!fs.existsSync(skillFile) || !fs.statSync(skillFile).isFile()) {
+      errors.push(`public plugin-only skill '${name}' is missing declared plugin content at ${skillFile}`);
+      continue;
+    }
+    skills.push({ abs, rel: name });
+  }
+  return { skills, errors };
 }
 
 // Collect servable content files inside a skill dir, as posix relative paths.
@@ -269,7 +300,7 @@ function buildPack(skill, version) {
     ? oneLine(fm.description).slice(0, 500)
     : undefined;
   const manifestYaml = renderManifest({ name, version, purpose, files: ordered });
-  return { ref: `skills/${skill.rel}`, files: ordered, manifestYaml };
+  return { ref: `skills/${skill.rel}`, files: ordered, manifestYaml, srcDir: skill.abs };
 }
 
 async function main() {
@@ -287,14 +318,16 @@ async function main() {
     process.exit(2);
   }
 
-  const skills = findSkillDirs(SOURCE);
-  if (skills.length === 0) {
+  const sharedSkills = findSkillDirs(SOURCE);
+  if (sharedSkills.length === 0) {
     console.error(`[generate-context-packs] no skills found under ${SOURCE}`);
     process.exit(2);
   }
 
   const packs = [];
-  const errors = [];
+  const pluginOnly = findPluginOnlyPublicSkillDirs();
+  const skills = [...sharedSkills, ...pluginOnly.skills];
+  const errors = [...pluginOnly.errors];
   for (const skill of skills) {
     let pack;
     try {

@@ -23,12 +23,11 @@ import { isSafePackVersion } from "./ref-safety.js";
 import { AddressResolutionError, parseAddress } from "../markdown-address.js";
 import { parseSourceRef, SourceResolutionError } from "./profile-source-resolver.js";
 
-// Served as UTF-8 bundle text. `.sh`/`.ts` (OPR.0.5.3.7 R2) carry canonical skill
-// helper assets the served prose references (e.g. find-polluter.sh,
-// condition-based-waiting-example.ts) — text content, never executed. An unlisted
+// Served as UTF-8 bundle text. Script suffixes carry skill helper assets the
+// served prose references — inert text content, never executed. An unlisted
 // suffix still rejects loud, so a genuinely new pack file type fails at ingest
 // rather than serving a silently-incomplete bundle.
-const ALLOWED_FILE_SUFFIXES = [".md", ".markdown", ".yaml", ".yml", ".txt", ".sh", ".ts"];
+const ALLOWED_FILE_SUFFIXES = [".md", ".markdown", ".yaml", ".yml", ".txt", ".sh", ".ts", ".mjs", ".py"];
 
 export function parseManifest(rawYaml: string, sourcePath: string): ContextPackManifest {
   let parsed: unknown;
