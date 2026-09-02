@@ -862,6 +862,37 @@ describe("RestoreOrchestrator", () => {
       });
   });
 
+  it("keeps a Codex resume partial when prompt text looks like another resume command", async () => {
+    const resumeToken = "saved-thread-label";
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }],
+      edges: [],
+      resumeType: "codex_id",
+      resumeToken,
+    });
+    const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
+    const codexCommand = `${buildCodexResumeCore("different-thread", "resume", false, "--add-dir /tmp/openrig-state")} resume ${resumeToken}`;
+    const result = await createOrchestrator({
+      tmux,
+      codex: mockCodexResume({ ok: true }),
+      listProcesses: async () => [
+        { pid: 1234, ppid: 1, command: "-zsh" },
+        { pid: 54776, ppid: 1234, command: codexCommand },
+      ],
+    }).restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]!.status).toBe("attention_required");
+    expect(db.prepare("SELECT verdict, reason, observed_pid, observed_command FROM seat_identity_verdicts WHERE node_id = ?")
+      .get(result.result.nodes[0]!.nodeId)).toEqual({
+        verdict: "mismatch",
+        reason: "process_identity_ambiguous",
+        observed_pid: 1234,
+        observed_command: "node",
+      });
+  });
+
   it("keeps a Codex resume partial when the saved token is only prompt text after a different session", async () => {
     const resumeToken = "saved-thread-label";
     const snap = seedRigAndSnapshot({

@@ -33,10 +33,10 @@ function codexResumeInPaneLineage(
       queue.push(child.pid);
       const tokens = child.command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^['"]|['"]$/g, "")) ?? [];
       const codexIndex = tokens.findIndex((token) => token.split("/").pop() === "codex");
-      for (let resumeIndex = tokens.indexOf("resume", codexIndex + 1); codexIndex >= 0 && resumeIndex > codexIndex; resumeIndex = tokens.indexOf("resume", resumeIndex + 1)) {
-        const sessionIndex = tokens[resumeIndex + 1] === "--add-dir" ? resumeIndex + 3 : resumeIndex + 1;
-        if (tokens[sessionIndex] === resumeToken) return child;
-      }
+      let resumeIndex = codexIndex + 1;
+      while (["-p", "--profile", "-s", "--sandbox", "-m", "--model"].includes(tokens[resumeIndex] ?? "")) resumeIndex += 2;
+      const sessionIndex = tokens[resumeIndex + 1] === "--add-dir" ? resumeIndex + 3 : resumeIndex + 1;
+      if (codexIndex >= 0 && tokens[resumeIndex] === "resume" && tokens[sessionIndex] === resumeToken) return child;
     }
   }
   return null;
