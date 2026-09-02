@@ -63,17 +63,17 @@ describe("S19 A1 — the three-axis taxonomy, binding exclusions held", () => {
   });
 });
 
-describe("S19 A1 — the reference doc cites the ratified addendum and pins the rejects", () => {
+describe("S19 A1 — the reference doc is canonical and pins the rejects", () => {
   const docPath = join(repoRoot, "docs", "reference", "agent-state-taxonomy.md");
 
   it("docs/reference/agent-state-taxonomy.md exists", () => {
     expect(existsSync(docPath)).toBe(true);
   });
 
-  it("the doc CITES the ratified addendum as canonical text (no fork)", () => {
+  it("the public doc declares itself canonical and points at the typed source of truth (no fork)", () => {
     const doc = readFileSync(docPath, "utf8");
-    expect(doc).toContain("taxonomy-agent-state-ADDENDUM-2026-08-26.md");
-    expect(doc.toLowerCase()).toContain("canonical");
+    expect(doc).toContain("This document is the canonical text for the shipped taxonomy");
+    expect(doc).toContain("packages/daemon/src/domain/activity-taxonomy.ts");
   });
 
   it("the doc carries the dated reject receipts: transcript-quiescence and pane-scraping-as-primary", () => {

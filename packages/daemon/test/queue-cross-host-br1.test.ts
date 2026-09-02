@@ -8,9 +8,9 @@
 // is a durable audit carrier too — swept per-TOKEN, since a note may honestly
 // mention two separate 2-part sessions) all stay free of the 3-part form. The
 // ONLY columns allowed (and, for the cross-host closes, REQUIRED) to carry
-// the opaque 3-part form are `closure_target` on queue_items and its verbatim
-// mirror on queue_transitions (arch R1) — asserted positively so the
-// exemption is a pinned contract, not an accident.
+// the host-qualified successor key are `closure_target` on queue_items and its
+// verbatim mirror on queue_transitions — asserted positively so the exemption
+// is a pinned contract, not an accident.
 //
 // The VM proof's leg-7 grep runs the same negative over BOTH daemon homes;
 // this unit twin locks the A-side writer paths at the source.
@@ -26,7 +26,7 @@ import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { queueTargetRepoSchema } from "../src/db/migrations/039_queue_target_repo.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { QueueRepository } from "../src/domain/queue-repository.js";
+import { QueueRepository, deriveCrossHostSuccessorId } from "../src/domain/queue-repository.js";
 import { queueRoutes } from "../src/routes/queue.js";
 import type { HostRegistry } from "../src/domain/hosts/hosts-registry-reader.js";
 
@@ -41,7 +41,7 @@ describe("MH-3 C4 — BR-1 sweep: no @host in ANY persisted session carrier afte
   let db: Database.Database;
   afterEach(() => db?.close());
 
-  it("session carriers stay ≤2-part everywhere; closure_target alone carries the opaque 3-part form on cross-host closes", async () => {
+  it("session carriers stay ≤2-part everywhere; closure_target alone carries the host-qualified successor key on cross-host closes", async () => {
     db = createDb();
     migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueTargetRepoSchema]);
     const bus = new EventBus(db);
@@ -113,29 +113,33 @@ describe("MH-3 C4 — BR-1 sweep: no @host in ANY persisted session carrier afte
       }
     }
 
-    // THE EXEMPTION, pinned positively (R1): both cross-host source closes
-    // carry the opaque 3-part closure_target — and nothing else does. The
-    // transitions row mirrors the SAME closure_target column verbatim; that
-    // mirror is the only other 3-part site, pinned here so it can never
-    // widen silently.
-    const threePartCts = items.filter((r) => r.ct && atParts(r.ct) === 2).map((r) => r.id).sort();
-    expect(threePartCts).toEqual(["qitem-xh-src", "qitem-xh-src2"]);
+    // THE EXEMPTION, pinned positively: both cross-host source closes carry
+    // the deterministic successor qitem qualified by host — and nothing else
+    // carries that host suffix. The transition mirrors the SAME value.
+    const expectedClosureTargets = ["qitem-xh-src", "qitem-xh-src2"].map((id) =>
+      `${id}:${deriveCrossHostSuccessorId(id, "dev@rig-b", "vps-b")}@vps-b`,
+    ).sort();
+    const hostQualifiedCts = items
+      .filter((r) => r.ct?.endsWith("@vps-b"))
+      .map((r) => r.id)
+      .sort();
+    expect(hostQualifiedCts).toEqual(["qitem-xh-src", "qitem-xh-src2"]);
     for (const row of items) {
       if (row.ct) expect(atParts(row.ct)).toBeLessThanOrEqual(2);
     }
     // Guard G-MH3-BR1-FIXBACK-1: "verbatim mirror" must be proven on VALUES,
     // not ids/counts — compare the exact (qitem_id, closure_target) sets so a
-    // wrong 3-part value on the right qitem (or a swap) cannot pass.
+    // wrong host-qualified value on the right qitem (or a swap) cannot pass.
     const itemClosureTargets = items
-      .filter((r) => r.ct && atParts(r.ct) === 2)
+      .filter((r) => r.ct?.endsWith("@vps-b"))
       .map((r) => `${r.id}:${r.ct}`)
       .sort();
     const transitionClosureTargets = transitions
-      .filter((t) => t.ct && atParts(t.ct) === 2)
+      .filter((t) => t.ct?.endsWith("@vps-b"))
       .map((t) => `${t.id}:${t.ct}`)
       .sort();
     expect(transitionClosureTargets).toEqual(itemClosureTargets);
-    expect(itemClosureTargets).toEqual(["qitem-xh-src2:dev@rig-b@vps-b", "qitem-xh-src:dev@rig-b@vps-b"]);
+    expect(itemClosureTargets).toEqual(expectedClosureTargets);
     for (const t of transitions) {
       if (t.ct) expect(atParts(t.ct)).toBeLessThanOrEqual(2);
     }

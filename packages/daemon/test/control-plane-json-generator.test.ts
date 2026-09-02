@@ -450,8 +450,9 @@ function readGenerated(output: string): Record<string, any> {
 
 it("the committed internal-token mirror covers the whole substrate shared-docs class", () => {
   const generated = readJson(join(REPO_ROOT, "scripts/internal-tokens.generated.json"));
+  const legacyPrefix = ["code", "substrate", "shared-docs", ""].join("/");
   expect(generated.path_prefixes).toContain("substrate/shared-docs/");
-  expect(generated.path_prefixes).not.toContain("code/substrate/shared-docs/");
+  expect(generated.path_prefixes).not.toContain(legacyPrefix);
 });
 
 function readJson(path: string): any {

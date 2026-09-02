@@ -768,7 +768,7 @@ describe("Starter specs", () => {
     expect(roleContent.toLowerCase()).toContain("principles");
   });
 
-  it("demo culture and orchestration skill require full topology settlement before dispatch", () => {
+  it("demo culture owns its roster while the orchestration skill requires topology settlement without hardcoding it", () => {
     const demoCulture = readFileSync(join(SPECS_ROOT, "rigs/launch/demo/CULTURE.md"), "utf-8");
     const orchestrationSkill = readFileSync(
       join(SPECS_ROOT, "agents/shared/skills/pods/orchestration-team/SKILL.md"),
@@ -781,9 +781,9 @@ describe("Starter specs", () => {
     expect(demoCulture).toContain("rev1.r2");
     expect(orchestrationSkill).toContain("wait for the expected topology to settle");
     expect(orchestrationSkill).toContain("Do not silently shrink the team model");
-    expect(orchestrationSkill).toContain("orch1.lead");
-    expect(orchestrationSkill).toContain("dev1.qa");
-    expect(orchestrationSkill).toContain("rev1.r1");
-    expect(orchestrationSkill).toContain("rev1.r2");
+    expect(orchestrationSkill).toContain("Your rig's roster is a fact you READ");
+    for (const demoSeat of ["orch1.lead", "dev1.qa", "rev1.r1", "rev1.r2"]) {
+      expect(orchestrationSkill).not.toContain(demoSeat);
+    }
   });
 });

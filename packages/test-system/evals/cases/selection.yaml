@@ -56,9 +56,15 @@
   prompt: "this test keeps failing in a weird way — how do I chase it down methodically?"
   expectedPatterns: ['rig context get\s+skills/process/systematic-debugging']
   rubric: *selection_rubric
-- id: sel-10
-  name: selects process/writing-plans before building
+- id: sel-09
+  name: selects openrig-operating-model for placing durable knowledge
   category: selection
-  prompt: "write me a plan for this feature before I start building"
-  expectedPatterns: ['rig context get\s+skills/process/writing-plans']
+  prompt: "I learned something the next occupant of this seat needs — where should that knowledge live?"
+  expectedPatterns: ['rig context get\s+skills/openrig-operating-model']
+  rubric: *selection_rubric
+- id: sel-10
+  name: selects queue-handoff before ending with active work
+  category: selection
+  prompt: "my turn is ending but this work is still active — how do I make sure it survives and keeps moving?"
+  expectedPatterns: ['rig context get\s+skills/queue-handoff']
   rubric: *selection_rubric

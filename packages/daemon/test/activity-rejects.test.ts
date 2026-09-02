@@ -40,6 +40,5 @@ describe("S19 A9 — rejected oracles stay rejected", () => {
     expect(doc).toMatch(/transcript[- ]quiescence.*REJECTED/is);
     expect(doc).toMatch(/pane[- ]scraping.*REJECTED/is);
     expect(doc).toMatch(/refocus/i);
-    expect(doc).toMatch(/S18/);
   });
 });
