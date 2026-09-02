@@ -717,7 +717,7 @@ export type LoadResult =
 /** Recognize only projection bytes an adopted generator could have emitted. The
  * parsed snapshot is validation evidence, never identity input; current fragments
  * remain the registry truth and are re-projected after a compatible old format. */
-function canonicalProjectionSnapshot(body: string): { ok: true; format: "v2" | "legacy" } | { ok: false; error: string } {
+function canonicalProjectionSnapshot(body: string, expectedEntityBody: string): { ok: true; format: "v2" | "legacy" } | { ok: false; error: string } {
   let entityBody: string;
   let expectedDigest: string | undefined;
   let format: "v2" | "legacy";
@@ -772,6 +772,9 @@ function canonicalProjectionSnapshot(body: string): { ok: true; format: "v2" | "
       return { ok: false, error: "the v2 projection digest does not match its generated body (manual edit detected)" };
     }
   }
+  if (canonicalEntityBody !== expectedEntityBody) {
+    return { ok: false, error: "the generated body does not match the current fragment truth (manual edit detected)" };
+  }
   return { ok: true, format };
 }
 
@@ -788,7 +791,7 @@ export function loadHumanRegistry(home: string = getOpenRigHome()): LoadResult {
   }
   const stored = readFileSync(path, "utf8");
   if (stored !== proj.body) {
-    const snapshot = canonicalProjectionSnapshot(stored);
+    const snapshot = canonicalProjectionSnapshot(stored, stringifyYaml({ entities: proj.entities }));
     if (!snapshot.ok) {
       return {
         ok: false,

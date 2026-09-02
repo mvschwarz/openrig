@@ -141,6 +141,27 @@ describe("A3 proof-5 — fragments -> generated projection; re-project; hand-edi
     if (!loaded.ok) expect(loaded.error).toMatch(/HAND-EDITED|DRIFT/i);
   });
 
+  it("a canonically serialized legacy semantic hand-edit is REFUSED at load", () => {
+    const original = fragment({ entityId: "founder", displayName: "Founder", address: "founder@external" });
+    addHumanFragment(original, home);
+    const path = projectionPath(home);
+    const legacy = readFileSync(path, "utf8").replace(
+      /# Projection format: v2 content-addressed\n# projection-body-sha256: [a-f0-9]{64}\n/,
+      "",
+    );
+    const originalBody = stringifyYaml({ entities: [original] });
+    expect(legacy.endsWith(originalBody)).toBe(true);
+    const handEdited = legacy.slice(0, -originalBody.length) + stringifyYaml({
+      entities: [fragment({ entityId: "founder", displayName: "Hand Edited Founder", address: "founder@external" })],
+    });
+    writeFileSync(path, handEdited);
+
+    const loaded = loadHumanRegistry(home);
+    expect(loaded.ok).toBe(false);
+    if (!loaded.ok) expect(loaded.error).toMatch(/HAND-EDITED|DRIFT/i);
+    expect(readFileSync(path, "utf8")).toBe(handEdited);
+  });
+
   it("accepts a canonical legacy projection once and rewrites it to the content-addressed format", () => {
     addHumanFragment(fragment({ entityId: "mike" }), home);
     const path = projectionPath(home);
