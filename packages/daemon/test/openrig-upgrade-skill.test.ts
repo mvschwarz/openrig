@@ -48,6 +48,33 @@ describe("openrig-upgrade stays agent-driven", () => {
     expect(skill).toContain("Stop after every mutation");
   });
 
+  it("teaches the ALL-RIG node read for the post-upgrade seat check, in every shipped copy", () => {
+    // R2 F2 at 13531c17. Step 9 taught `rig ps --nodes --json`, which the live
+    // CLI scopes to the CURRENT rig. A daemon upgrade protects seats across
+    // every rig on the host, so the narrow form reports a verified upgrade
+    // while seats outside the caller's rig were never looked at. The inspect
+    // helper already used -A; the public step that runs AFTER the mutation did
+    // not, and only the helper's argv was pinned — which is why the
+    // contradiction stayed green.
+    //
+    // Both copies are asserted: the byte-for-byte mirror pin above covers the
+    // three helper scripts, not SKILL.md, so a divergent public copy would
+    // otherwise ship unnoticed.
+    for (const copy of [
+      skillPath,
+      path.join(repoRoot, "skills/_canonical/core/openrig-upgrade/SKILL.md"),
+    ]) {
+      const skill = fs.readFileSync(copy, "utf8");
+      const seatCheck = skill
+        .split("\n")
+        .filter((line) => line.includes("rig ps --nodes"));
+      expect(seatCheck.length, `no node read found in ${copy}`).toBeGreaterThan(0);
+      for (const line of seatCheck) {
+        expect(line, `narrow current-rig node read in ${copy}: ${line}`).toContain("-A");
+      }
+    }
+  });
+
   it("ships three bounded helpers and mirrors them byte-for-byte", () => {
     for (const helper of ["inspect-upgrade.mjs", "backup-sqlite.mjs", "refresh-managed-plugin.mjs"]) {
       const source = path.join(skillRoot, "scripts", helper);
@@ -104,6 +131,72 @@ describe("refresh-managed-plugin helper", () => {
     expect(fs.readFileSync(path.join(live, "skills/modified/SKILL.md"), "utf8")).toBe("local edit");
     expect(fs.existsSync(path.join(live, "skills/deleted/SKILL.md"))).toBe(false);
     expect(fs.readFileSync(path.join(live, "skills/private/SKILL.md"), "utf8")).toBe("private");
+  });
+
+  it("preserves a MODE-ONLY local modification instead of chmodding it back", () => {
+    // R2 F1 at 13531c17. The inventory carries each file's mode, but equality
+    // compared kind and hash only, so a file whose bytes still match the
+    // ancestor but whose mode the operator changed was classified refresh-safe
+    // — and apply then installed the packaged mode over their change. A chmod
+    // is a local modification; the contract says local modifications are never
+    // overwritten.
+    const root = temporaryRoot();
+    const ancestor = path.join(root, "ancestor");
+    const target = path.join(root, "target");
+    const live = path.join(root, "live");
+
+    // Same bytes in all three trees. The ONLY divergence is the live mode.
+    write(ancestor, "hooks/run.cjs", "same bytes");
+    write(target, "hooks/run.cjs", "same bytes");
+    write(live, "hooks/run.cjs", "same bytes");
+    fs.chmodSync(path.join(ancestor, "hooks/run.cjs"), 0o644);
+    fs.chmodSync(path.join(target, "hooks/run.cjs"), 0o644);
+    fs.chmodSync(path.join(live, "hooks/run.cjs"), 0o600);
+
+    const planned = runJson("refresh-managed-plugin.mjs", [
+      "--ancestor", ancestor,
+      "--target", target,
+      "--live", live,
+    ]);
+    expect(planned.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "hooks/run.cjs", decision: "preserve-local-modification" }),
+    ]));
+
+    const applied = runJson("refresh-managed-plugin.mjs", [
+      "--ancestor", ancestor,
+      "--target", target,
+      "--live", live,
+      "--apply-safe",
+    ]);
+    expect(applied.written).not.toContain("hooks/run.cjs");
+    expect(fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777).toBe(0o600);
+  });
+
+  it("still refreshes when the live file matches the ancestor in bytes AND mode", () => {
+    // The other side of the same axis: including mode in equality must not
+    // freeze a file the operator never touched. A packaged mode advance still
+    // lands when live is byte- and mode-identical to the ancestor.
+    const root = temporaryRoot();
+    const ancestor = path.join(root, "ancestor");
+    const target = path.join(root, "target");
+    const live = path.join(root, "live");
+
+    write(ancestor, "hooks/run.cjs", "old");
+    write(target, "hooks/run.cjs", "new");
+    write(live, "hooks/run.cjs", "old");
+    fs.chmodSync(path.join(ancestor, "hooks/run.cjs"), 0o644);
+    fs.chmodSync(path.join(live, "hooks/run.cjs"), 0o644);
+    fs.chmodSync(path.join(target, "hooks/run.cjs"), 0o755);
+
+    const applied = runJson("refresh-managed-plugin.mjs", [
+      "--ancestor", ancestor,
+      "--target", target,
+      "--live", live,
+      "--apply-safe",
+    ]);
+    expect(applied.written).toContain("hooks/run.cjs");
+    expect(fs.readFileSync(path.join(live, "hooks/run.cjs"), "utf8")).toBe("new");
+    expect(fs.statSync(path.join(live, "hooks/run.cjs")).mode & 0o777).toBe(0o755);
   });
 
   it("preserves target descendants beneath unsupported live parents", () => {

@@ -133,8 +133,11 @@ host in front of you.
 8. Run the plugin refresh helper in plan mode. Apply safe writes only after the
    three roots and classifications make sense; resolve preserved paths one at a
    time when required.
-9. Verify protected seats with `rig ps --nodes --json`, representative
-   `rig capture`, and `rig restore-check` where applicable.
+9. Verify protected seats with `rig ps --nodes -A --json`, representative
+   `rig capture`, and `rig restore-check` where applicable. `-A` is required:
+   without it the node read is your CURRENT rig only, and a daemon upgrade
+   protects seats across every rig on the host — so the narrow form reports
+   success while seats outside your rig went unchecked.
 10. Align wrappers only after deriving how that host owns them. Use its existing
     mechanism; this skill does not rewrite launchers.
 11. Record the observed result, remaining local preservation decisions, and the

@@ -40,8 +40,16 @@ function inventory(root) {
   return files;
 }
 
+// Equality is the COMPLETE inventoried state, not just the bytes. Mode is a
+// local modification like any other: an operator who chmods a managed file has
+// changed it, and comparing only the hash classifies that file refresh-safe and
+// then chmods it back to the packaged mode. The inventory already carries mode;
+// dropping the axis here is what let the write through.
 function same(left, right) {
-  return left?.kind === "file" && right?.kind === "file" && left.hash === right.hash;
+  return left?.kind === "file"
+    && right?.kind === "file"
+    && left.hash === right.hash
+    && left.mode === right.mode;
 }
 
 function hasNonDirectoryLiveAncestor(relative, live) {
