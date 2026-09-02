@@ -405,6 +405,20 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     expect(out.reason).toBe("seat_needs_input");
   });
 
+  it("unknown activity with positive needsInput preserves the needs-input meaning", async () => {
+    seedGateQitem("q-gate-unknown-needs-input");
+    setOracleState("unknown", { count: 1, reason: "permission prompt" });
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity });
+
+    const out = await policy.evaluate(makeJob());
+
+    expect(out).toEqual({
+      action: "skip",
+      reason: "seat_needs_input",
+      notes: { seat: SEAT, activityReason: "permission prompt" },
+    });
+  });
+
   it("STALE idle activity → honest skip activity_stale_unknown (never fake-idle)", async () => {
     seedGateQitem("q-gate-4");
     seedActivity("Stop", STALE); // stale evidence leaves the oracle honestly unknown

@@ -83,14 +83,14 @@ export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
       // oracle rendered by public surfaces; raw hook detail is evidence for
       // that oracle and must never independently decide a wake.
       const activity = seatActivity.getSeatStateBySession(seat);
-      if (!activity || activity.activity === "unknown") {
+      if (!activity) {
         return {
           action: "skip",
           reason: "activity_stale_unknown",
           notes: {
             seat,
-            activityState: activity?.activity ?? null,
-            activityReason: activity ? "oracle_unknown" : "no_activity_signal",
+            activityState: null,
+            activityReason: "no_activity_signal",
           },
         };
       }
@@ -100,6 +100,13 @@ export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
           action: "skip",
           reason: "seat_needs_input",
           notes: { seat, activityReason: activity.needsInput.reason },
+        };
+      }
+      if (activity.activity === "unknown") {
+        return {
+          action: "skip",
+          reason: "activity_stale_unknown",
+          notes: { seat, activityState: activity.activity, activityReason: "oracle_unknown" },
         };
       }
       if (activity.activity !== "idle-at-prompt") {
