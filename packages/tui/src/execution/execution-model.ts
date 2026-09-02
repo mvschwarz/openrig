@@ -1,17 +1,22 @@
-// EXECUTION view — a pure presentation model over the daemon's derived
-// projection. It never reads PROGRESS text, queue bodies, or transitions.
+// MISSION EXECUTION STORY — a pure presentation model over two shipped projections:
+// the scopes store (declared slice state, proof pairing) and the daemon's derived
+// execution view (lanes, sequencing, ladder, parks). It never reads PROGRESS text,
+// queue bodies, or transitions.
 //
-// Design (S4 UX pass): the human asks four questions and gets four groups.
-//   DONE       the completion ladder per slice, highest rung first; slices with no rung
-//              reached are summarised in one line instead of listed.
-//   NOW        claimed lanes with the arbitrated activity verbatim and who decided it.
-//   NEXT       dependency-eligible slices in arrangement order; when none are eligible,
-//              the reasons the projection gives are grouped and counted, never hidden.
-//   ATTENTION  needs-input, parked/stalled rows, fragile joins, and every named
-//              INDETERMINATE basis — grouped by basis with the affected slices counted,
-//              so one blind spot reads once instead of twenty times.
-// Every row opens a detail page built from the projection's own bases (one drill from
-// source); `esc` closes it. Nothing here invents an owner, a deadline, or a verdict.
+// Design (founder journey repair): a normal person reads the mission top to bottom.
+//   - The header says how many slices are DECLARED done/active (from the slice files)
+//     and how many are LIVE right now (claimed lanes). Those are two different facts.
+//   - One mission-level line names the shared EVIDENCE GAP when the daemon cannot reach a
+//     repository: reviewed / merged / live cannot be confirmed for anyone. That gap never
+//     relabels a declared-done slice as waiting work; it is stated once, with its basis one
+//     drill away.
+//   - Waves are the spine. Each slice appears once, as ordinary words: a state word
+//     (working, needs input, blocked, parked, or the declared status), the slice name, and
+//     the facts the projection actually holds — real assignee only when a lane exists,
+//     the highest confirmed evidence rung, proof pairing, and what unlocks next.
+//   - No positional glyph strings, no bare abbreviations, no placeholder cells. The full
+//     rung-by-rung ladder with bases lives on the slice page.
+// Every row opens a page built from the projections' own values; `esc` returns.
 import type { Action } from "../types.js";
 import { detailPage, listItem, sectionRule, type ContentLine, type Section } from "../detail.js";
 import type { MissionScopesSnap, SliceScopeSnap } from "../scopes/scopes-model.js";
@@ -29,10 +34,12 @@ export interface ExecutionViewSnap {
   q6_parallelism?: Record<string, unknown>;
 }
 
-const MAX_ROWS_PER_GROUP = 5;
+const MAX_ROWS_PER_WAVE = 5;
 const INDETERMINATE = "INDETERMINATE";
 const RUNGS = ["locked", "built", "reviewed", "folded", "adopted"] as const;
-const RUNG_LABEL = "lock·build·review·fold·adopt";
+type Rung = (typeof RUNGS)[number];
+/** Ordinary words for the ladder rungs. */
+const RUNG_WORD: Record<Rung, string> = { locked: "spec locked", built: "built", reviewed: "reviewed", folded: "merged", adopted: "live" };
 
 function record(value: unknown): Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value)
@@ -52,89 +59,71 @@ function clock(iso: unknown): string {
   return typeof iso === "string" && iso.length >= 19 ? `${iso.slice(11, 19)}Z` : "";
 }
 
+function clip(text: string, room: number): string {
+  return text.length > room ? `${text.slice(0, Math.max(room - 1, 0))}…` : text;
+}
+
 function open(key: string): Action {
   return { type: "execution-open", key };
 }
 
 /** A drillable row. The text is clamped so the open affordance always survives the pane
- *  width; the full basis lives one drill away. */
+ *  width; the full facts live one drill away. */
 function actionRow(text: string, action: Action, width = Number.MAX_SAFE_INTEGER): ContentLine {
-  const room = Math.max(width - 13, 24);
-  const shown = text.length > room ? `${text.slice(0, room - 1)}…` : text;
-  return { text: `  ${shown}  (open ▸)`, action };
+  return { text: `  ${clip(text, Math.max(width - 13, 24))}  (open ▸)`, action };
 }
 
 function row(text: string, key: string, width = Number.MAX_SAFE_INTEGER): ContentLine {
   return actionRow(text, open(key), width);
 }
 
-/** One overview group: its rows are built once and rendered either capped (overview, with a
- *  drillable "+N more" door) or in full (the group page). */
-interface Group {
-  key: "done" | "now" | "next" | "attention";
-  name: string;
-  title: string;
-  /** lines that sit between the rule and the rows (the DONE ladder legend) */
-  lead?: ContentLine[];
-  rows: ContentLine[];
-  empty: string;
-  /** lines that must stay visible under the cap (the DONE not-started door) */
-  trailing?: ContentLine[];
-}
+// ---- facts per slice ----------------------------------------------------------
 
-function groupLines(group: Group, width: number, capped: boolean): ContentLine[] {
-  const shown = capped ? group.rows.slice(0, MAX_ROWS_PER_GROUP) : group.rows;
-  const overflow = group.rows.length - shown.length;
-  return [
-    { text: "" },
-    sectionRule(group.title, width),
-    ...(group.lead ?? []),
-    ...(shown.length ? shown : [{ text: `  ${group.empty}` }]),
-    // the overflow row is a DOOR, never inert text: it opens the whole group, every row drillable
-    ...(overflow > 0 ? [row(`+${overflow} more — open all ${group.rows.length} ${group.name} rows`, `group:${group.key}`, width)] : []),
-    ...(group.trailing ?? []),
-  ];
-}
+interface RungCell { value: unknown; basis: string; state: "yes" | "no" | "undetermined" }
 
-// ---- ladder ----------------------------------------------------------------
-
-interface RungCell { value: unknown; basis: string; glyph: "✓" | "○" | "?" }
-
-function rungCell(ladder: Record<string, unknown>, rung: (typeof RUNGS)[number]): RungCell {
+function rungCell(ladder: Record<string, unknown>, rung: Rung): RungCell {
   const cell = record(ladder[rung]);
   const basis = str(cell["basis"], "basis unavailable");
   if (rung === "built") {
     const sha = cell["candidate_sha"];
-    return { value: sha, basis, glyph: typeof sha === "string" && sha !== INDETERMINATE ? "✓" : "?" };
+    return { value: sha, basis, state: typeof sha === "string" && sha !== INDETERMINATE ? "yes" : "undetermined" };
   }
   const value = cell["value"];
-  return { value, basis, glyph: value === true ? "✓" : value === false ? "○" : "?" };
+  return { value, basis, state: value === true ? "yes" : value === false ? "no" : "undetermined" };
 }
 
-/** Highest rung actually reached (true / built sha), 0 = nothing reached. */
-function reachedRank(cells: Record<string, RungCell>): number {
-  for (let i = RUNGS.length - 1; i >= 0; i--) if (cells[RUNGS[i]!]!.glyph === "✓") return i + 1;
+/** Highest rung actually confirmed (true / built sha), 0 = nothing confirmed. */
+function reachedRank(cells: Record<Rung, RungCell>): number {
+  for (let i = RUNGS.length - 1; i >= 0; i--) if (cells[RUNGS[i]!].state === "yes") return i + 1;
   return 0;
 }
 
-function reachedText(cells: Record<string, RungCell>, rank: number): string {
-  if (rank === 0) return "not started";
+/** The evidence fact in words: the highest confirmed rung, or the reason nothing is. */
+function evidenceText(cells: Record<Rung, RungCell>, rank: number): string {
+  if (rank === 0) return cells.built.state === "undetermined" ? "no candidate recorded" : "nothing confirmed";
   const rung = RUNGS[rank - 1]!;
-  if (rung === "built") return `built ${shortSha(cells["built"]!.value)}`;
-  return rung;
+  return rung === "built" ? `built ${shortSha(cells.built.value)}` : RUNG_WORD[rung];
 }
 
 interface SliceFacts {
   id: string;
   dir: string;
+  name: string;
   order: number;
   ladder: Record<string, unknown>;
-  cells: Record<string, RungCell>;
+  cells: Record<Rung, RungCell>;
   rank: number;
   sequencing: Record<string, unknown> | null;
   care: Record<string, unknown> | null;
   scope: SliceScopeSnap | null;
   lane: Record<string, unknown> | null;
+  park: Record<string, unknown> | null;
+}
+
+function sliceName(scope: SliceScopeSnap | null, dir: string): string {
+  const raw = scope?.displayName ?? dir;
+  // the id column already says which slice; "Slice 04 — " in front of the name is noise
+  return raw.replace(/^slice\s+\d+\s*[—–-]\s*/i, "").trim() || dir;
 }
 
 function sliceFacts(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined): SliceFacts[] {
@@ -142,24 +131,29 @@ function sliceFacts(execution: ExecutionViewSnap, scopes: readonly MissionScopes
   const seq = execution.q2_sequencing ?? [];
   const care = execution.q3_care ?? [];
   const lanes = execution.q1_lanes ?? [];
+  const parks = execution.q5_park ?? [];
   return (execution.q4_ladder ?? []).map((ladder, index) => {
     const id = str(ladder["slice_id"] ?? ladder["dir"]);
     const dir = str(ladder["dir"], id);
-    const cells = Object.fromEntries(RUNGS.map((rung) => [rung, rungCell(ladder, rung)])) as Record<string, RungCell>;
+    const cells = Object.fromEntries(RUNGS.map((rung) => [rung, rungCell(ladder, rung)])) as Record<Rung, RungCell>;
     const seqIndex = seq.findIndex((item) => item["slice_id"] === id || item["dir"] === dir);
+    const scope = missionScopes?.slices.find((slice) => slice.id === id || slice.dirName === dir) ?? null;
+    const lane = lanes.find((candidate) => candidate["slice"] === id) ?? null;
     return {
       id,
       dir,
+      name: sliceName(scope, dir),
       order: seqIndex >= 0 ? seqIndex : seq.length + index,
       ladder,
       cells,
       rank: reachedRank(cells),
       sequencing: seqIndex >= 0 ? seq[seqIndex]! : null,
       care: care.find((item) => item["slice_id"] === id) ?? null,
-      scope: missionScopes?.slices.find((slice) => slice.id === id || slice.dirName === dir) ?? null,
-      lane: lanes.find((lane) => lane["slice"] === id) ?? null,
+      scope,
+      lane,
+      park: lane ? parks.find((item) => item["qitem_id"] === lane["qitem_id"]) ?? null : null,
     };
-  });
+  }).sort((a, b) => a.order - b.order);
 }
 
 /** blocked_on_rows entries are `{ qitem_id, blocked_on }` — the slice's own row and the row it
@@ -172,20 +166,75 @@ function blockerText(rows: unknown, lead: "blocker" | "row" = "row"): string {
       const r = record(entry);
       const own = str(r["qitem_id"], "?");
       const blocker = str(r["blocked_on"], "?");
-      // the overview leads with the BLOCKER so it survives a narrow pane; the page has room for both
       return lead === "blocker" ? `waits on ${blocker} · own row ${own}` : `${own} waits on ${blocker}`;
     })
     .join("; ");
 }
 
-function proofText(scope: SliceScopeSnap | null): string {
-  return scope ? `proof ${scope.proof.paired}/${scope.proof.total}` : "proof ?";
+/** Declared work state — the slice file's own status word, verbatim. */
+function declaredText(slice: SliceFacts): string {
+  return slice.scope?.status?.trim().toLowerCase() || "no declared status";
 }
 
-function waveText(care: Record<string, unknown> | null): string {
-  const wave = care?.["build_wave"];
-  return typeof wave === "string" && wave !== INDETERMINATE ? ` · wave ${wave}` : "";
+function seatShort(seat: unknown): string {
+  const full = str(seat, "");
+  return full.includes("@") ? full.slice(0, full.indexOf("@")) : full;
 }
+
+/** A live problem on the slice, in words, or null. Elapsed time alone is never a verdict. */
+function problemText(slice: SliceFacts): string | null {
+  const activity = record(slice.lane?.["activity"]);
+  const needs = record(activity["needs_input"]);
+  if (Number(needs["count"] ?? 0) > 0) return `needs input: ${str(needs["reason"], String(needs["count"]))}`;
+  const blocked = blockerText(slice.sequencing?.["blocked_on_rows"], "blocker");
+  if (blocked) return blocked.split(" · own row ")[0]!;
+  const pickup = slice.park?.["pickup_state"];
+  if (slice.park && pickup !== "working") {
+    const age = slice.park["age_minutes"] != null ? ` ${String(slice.park["age_minutes"])} min` : "";
+    return `${str(pickup, INDETERMINATE)}${age}`;
+  }
+  return null;
+}
+
+/** The one state word a person scans: a live problem, live activity, else the declared status. */
+function stateWord(slice: SliceFacts): string {
+  const problem = problemText(slice);
+  if (problem) return problem.startsWith("needs input") ? "needs input" : problem.startsWith("waits on") ? "blocked" : problem.split(" ")[0]!;
+  if (slice.lane) return str(record(slice.lane["activity"])["activity"], "claimed");
+  return declaredText(slice);
+}
+
+function proofText(scope: SliceScopeSnap | null): string | null {
+  if (!scope) return null;
+  if (scope.proof.total === 0) return "no proof contract";
+  return `proof ${scope.proof.paired} of ${scope.proof.total}`;
+}
+
+function assigneeText(slice: SliceFacts): string | null {
+  if (!slice.lane) return null;
+  const activity = record(slice.lane["activity"]);
+  const by = str(activity["decided_by"], "");
+  return `${seatShort(slice.lane["seat"])}${by ? ` (${by})` : ""}`;
+}
+
+/** What unlocks next, only when the projection actually says so. */
+function nextText(slice: SliceFacts): string | null {
+  const seq = slice.sequencing;
+  if (!seq) return null;
+  if (seq["next_up"] === true) return "ready to start";
+  if (blockerText(seq["blocked_on_rows"])) return null; // the problem column carries it
+  if (slice.lane || slice.rank >= 4 || declaredText(slice) === "done") return null;
+  const deps = seq["depends_on"];
+  if (Array.isArray(deps) && deps.length > 0) return `after ${deps.map(String).join(", ")}`;
+  return null;
+}
+
+function waveOf(slice: SliceFacts): string {
+  const wave = slice.care?.["build_wave"];
+  return typeof wave === "string" && wave !== INDETERMINATE ? wave : "no wave declared";
+}
+
+// ---- rows ----------------------------------------------------------------------
 
 function sliceAction(execution: ExecutionViewSnap, slice: SliceFacts): Action {
   return slice.scope
@@ -193,297 +242,149 @@ function sliceAction(execution: ExecutionViewSnap, slice: SliceFacts): Action {
     : open(`slice:${slice.id}`);
 }
 
-function sliceProblem(execution: ExecutionViewSnap, slice: SliceFacts): string | null {
-  const activity = record(slice.lane?.["activity"]);
-  const needs = record(activity["needs_input"]);
-  if (Number(needs["count"] ?? 0) > 0) return `needs ${str(needs["reason"], String(needs["count"]))}`;
-  const blocked = blockerText(slice.sequencing?.["blocked_on_rows"], "blocker");
-  if (blocked) return blocked.split(" · own row ")[0]!;
-  const qitem = slice.lane?.["qitem_id"];
-  const park = (execution.q5_park ?? []).find((item) => item["qitem_id"] === qitem);
-  if (park && park["pickup_state"] !== "working") return `pickup ${str(park["pickup_state"], INDETERMINATE)} · ${str(park["park_kind"], "indeterminate")}`;
-  return null;
+function sliceRow(execution: ExecutionViewSnap, slice: SliceFacts, width: number, stateWidth: number, idWidth: number): ContentLine {
+  // facts in priority order; a narrow pane drops from the END (proof, evidence, next…) and
+  // the assignee's decider before it ever clips a fact mid-word
+  const facts = [
+    assigneeText(slice),
+    problemText(slice),
+    slice.lane ? null : nextText(slice),
+    evidenceText(slice.cells, slice.rank),
+    proofText(slice.scope),
+  ].filter((fact): fact is string => !!fact);
+  const prefix = `${stateWord(slice).padEnd(stateWidth)}  ${slice.id.padEnd(idWidth)}  `;
+  const budget = Math.max(width - 13, 24) - prefix.length;
+  let shown = facts;
+  while (shown.join(" · ").length > budget && shown.length > 1) {
+    const decider = shown.findIndex((fact) => / \(.+\)$/.test(fact) && fact === assigneeText(slice));
+    shown = decider >= 0 ? shown.map((fact, i) => (i === decider ? fact.replace(/ \(.+\)$/, "") : fact)) : shown.slice(0, -1);
+  }
+  const factsText = shown.join(" · ");
+  const room = budget - factsText.length - 3;
+  // the name gets whatever room the facts leave; below twelve cells it is dropped, not stubbed
+  const name = room >= 12 ? `${clip(slice.name, room)} · ` : "";
+  return actionRow(`${prefix}${name}${factsText}`, sliceAction(execution, slice), width);
 }
 
-type PathState = "DONE" | "NOW" | "NEXT" | "ATTENTION" | "WAITING";
-
-function pathState(execution: ExecutionViewSnap, slice: SliceFacts): PathState {
-  if (sliceProblem(execution, slice)) return "ATTENTION";
-  if (slice.lane) return "NOW";
-  if (slice.cells["folded"]?.glyph === "✓") return "DONE";
-  if (slice.sequencing?.["next_up"] === true) return "NEXT";
-  return "WAITING";
+function countWords(slices: SliceFacts[]): string {
+  const counts = new Map<string, number>();
+  for (const slice of slices) counts.set(stateWord(slice), (counts.get(stateWord(slice)) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([word, n]) => `${n} ${word}`).join(", ");
 }
 
-function pathGlyph(state: PathState): string {
-  return state === "DONE" ? "✓" : state === "NOW" ? "●" : state === "NEXT" ? "→" : state === "ATTENTION" ? "⚑" : "·";
+function waveTitle(wave: string, members: SliceFacts[]): string {
+  return `wave ${wave} · ${members.length} slice${members.length === 1 ? "" : "s"} · ${countWords(members)}`;
 }
 
-function nextText(slice: SliceFacts): string {
-  if (slice.cells["adopted"]?.glyph === "✓") return "complete";
-  // The ladder can be sparse (for example BUILT with no recorded lock), so the
-  // next transition is the rung above the strongest one reached, not the first gap.
-  const nextRung = RUNGS[slice.rank] ?? RUNGS[0];
-  if (slice.lane) return nextRung ? nextRung : "complete";
-  if (slice.cells["folded"]?.glyph === "✓") return nextRung;
-  if (slice.sequencing?.["next_up"] === true) return "unlocked";
-  const blocked = blockerText(slice.sequencing?.["blocked_on_rows"], "blocker");
-  if (blocked) return "blocked";
-  const deps = slice.sequencing?.["depends_on"];
-  if (Array.isArray(deps) && deps.length > 0) return `after ${deps.map(String).join(",")}`;
-  return str(slice.sequencing?.["next_up_basis"], nextRung ?? "unknown");
+function waveRows(execution: ExecutionViewSnap, wave: string, members: SliceFacts[], width: number, stateWidth: number, idWidth: number, capped: boolean): ContentLine[] {
+  const shown = capped ? members.slice(0, MAX_ROWS_PER_WAVE) : members;
+  const overflow = members.length - shown.length;
+  return [
+    { text: "" },
+    sectionRule(waveTitle(wave, members), width),
+    ...shown.map((slice) => sliceRow(execution, slice, width, stateWidth, idWidth)),
+    ...(overflow > 0 ? [row(`+${overflow} more — open all ${members.length} rows in wave ${wave}`, `group:wave:${wave}`, width)] : []),
+  ];
 }
 
-function pathRow(execution: ExecutionViewSnap, slice: SliceFacts, width: number): ContentLine {
-  const state = pathState(execution, slice);
-  const ladder = RUNGS.map((rung) => slice.cells[rung]!.glyph).join("");
-  const proof = slice.scope ? `p${slice.scope.proof.paired}/${slice.scope.proof.total}` : "p?";
-  const assigned = slice.lane ? `@${str(slice.lane["seat"])}` : "@—";
-  const problem = sliceProblem(execution, slice);
-  // A 110-column terminal leaves the content pane under 100 columns. At that
-  // width the glyph (defined in the always-visible spine legend) carries the
-  // state name, preserving assignment + problem + next unlock on the same row.
-  const compact = width < 100;
-  const problemText = problem?.replace(/^needs /, "");
-  const tail = compact
-    ? `→${nextText(slice)}${problemText ? ` !${problemText.replace(/^waits on /, "")}` : ""}`
-    : problemText ? `!${problemText} →${nextText(slice)}` : `→${nextText(slice)}`;
-  const label = compact
-    ? `${pathGlyph(state)} ${slice.id} ${ladder} ${proof} ${assigned} ${tail}`
-    : `${pathGlyph(state)} ${slice.id} ${ladder} ${proof} ${state} ${assigned} · ${tail}`;
-  return actionRow(label, sliceAction(execution, slice), width);
-}
-
-function waveOf(slice: SliceFacts): string {
-  return str(slice.care?.["build_wave"], INDETERMINATE);
-}
-
-function waveState(execution: ExecutionViewSnap, slices: SliceFacts[]): PathState {
-  const states = slices.map((slice) => pathState(execution, slice));
-  if (states.includes("ATTENTION")) return "ATTENTION";
-  if (states.includes("NOW")) return "NOW";
-  if (states.every((state) => state === "DONE")) return "DONE";
-  if (states.includes("NEXT")) return "NEXT";
-  return "WAITING";
-}
-
-// ---- INDETERMINATE bases, grouped -------------------------------------------
+// ---- the evidence gap, stated once ----------------------------------------------
 
 interface BasisGroup { basis: string; where: string; members: string[] }
 
 function collectIndeterminate(execution: ExecutionViewSnap, slices: SliceFacts[]): BasisGroup[] {
   const groups = new Map<string, BasisGroup>();
-  const add = (where: string, member: string, value: unknown, basis: unknown) => {
-    if (value !== INDETERMINATE || typeof basis !== "string") return;
+  const add = (where: string, member: string, basis: unknown) => {
+    if (typeof basis !== "string") return;
     const key = `${where}|${basis}`;
     const existing = groups.get(key) ?? { basis, where, members: [] };
     if (!existing.members.includes(member)) existing.members.push(member);
     groups.set(key, existing);
   };
   // Only the FIRST undetermined rung is a blind spot; every rung above it is undetermined
-  // as a consequence and would repeat the same fact. NEXT reasons are grouped in NEXT.
+  // as a consequence and would repeat the same fact.
   for (const slice of slices) {
-    const first = RUNGS.find((rung) => slice.cells[rung]!.glyph === "?");
-    if (first) add(first === "built" ? "build" : first, slice.id, INDETERMINATE, slice.cells[first]!.basis);
+    const first = RUNGS.find((rung) => slice.cells[rung].state === "undetermined");
+    if (first) add(RUNG_WORD[first], slice.id, slice.cells[first].basis);
   }
   for (const lane of execution.q1_lanes ?? []) {
     const activity = record(lane["activity"]);
-    add("activity", str(lane["slice"] ?? lane["qitem_id"], "lane"), activity["activity"], activity["basis"]);
-  }
-  for (const [name, raw] of Object.entries(execution.sources ?? {})) {
-    const cell = record(raw);
-    add(`source ${name}`, name, cell["value"], cell["basis"]);
+    if (activity["activity"] === INDETERMINATE) add("activity", str(lane["slice"] ?? lane["qitem_id"], "lane"), activity["basis"]);
   }
   return [...groups.values()].sort((a, b) => b.members.length - a.members.length);
 }
 
-function basisKey(kind: string, basis: string): string {
-  return `basis:${kind}:${basis}`;
-}
-
-// ---- overview ----------------------------------------------------------------
-
-function laneGlyph(activity: Record<string, unknown>): string {
-  if (Number(record(activity["needs_input"])["count"] ?? 0) > 0) return "⚑";
-  const state = activity["activity"];
-  if (state === "working") return "●";
-  if (state === "idle-at-prompt") return "○";
-  return "·";
-}
-
-function laneText(lane: Record<string, unknown>, id: (value: string) => string): string {
-  const activity = record(lane["activity"]);
-  const needs = record(activity["needs_input"]);
-  const count = Number(needs["count"] ?? 0);
-  const need = count > 0 ? ` · needs input: ${str(needs["reason"], String(count))}` : "";
-  const when = clock(activity["changed_at"]);
-  return `${laneGlyph(activity)} ${id(str(lane["slice"]))}  ${str(lane["seat"])}  ${str(activity["activity"], INDETERMINATE)} · by ${str(activity["decided_by"] ?? activity["basis"], "basis unavailable")}${when ? ` ${when}` : ""}${need}`;
-}
-
-function laneKey(lane: Record<string, unknown>): string {
-  return `lane:${str(lane["qitem_id"], "unknown")}`;
-}
-
-function headerLines(execution: ExecutionViewSnap, sliceCount: number, width: number): ContentLine[] {
-  const build = shortSha(record(execution.sources?.["build_info"])["commit"]);
-  const derived = clock(execution.derived_at);
-  const sourceCount = Object.keys(execution.sources ?? {}).length;
+/** The mission-level gap, stated once as two short lines (the first is the drill), or
+ *  nothing when every rung is determined for every slice. */
+function evidenceGapLines(execution: ExecutionViewSnap, slices: SliceFacts[], width: number): ContentLine[] {
+  const undetermined = slices.filter((slice) => RUNGS.some((rung) => slice.cells[rung].state === "undetermined"));
+  if (undetermined.length === 0) return [];
   const gitBasis = str(record(execution.sources?.["git"])["basis"], "");
+  const noRepo = /no reachable repo|no repo/i.test(gitBasis);
+  const rungs = RUNGS.filter((rung) => undetermined.some((slice) => slice.cells[rung].state === "undetermined")).map((rung) => RUNG_WORD[rung]);
+  const cause = noRepo ? "no repository reachable" : gitBasis || "evidence sources missing";
   return [
-    { text: `  ${execution.mission} · derived ${derived || "?"} · daemon build ${build} · ${sliceCount} slices` },
-    row(`sources: ${sourceCount} named${gitBasis ? ` · git: ${gitBasis}` : ""}`, "sources", width),
+    row(`evidence gap — ${cause}; declared state shown`, "evidence", width),
+    { text: `    ${rungs.join(" / ")} unconfirmed for ${undetermined.length} of ${slices.length} slices (unknown, not waiting)` },
   ];
 }
 
-function buildGroups(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number): { slices: SliceFacts[]; groups: Group[] } {
-  const slices = sliceFacts(execution, scopes);
-  const lanes = execution.q1_lanes ?? [];
-  const q6 = record(execution.q6_parallelism);
-  const idWidth = Math.max(...slices.map((slice) => slice.id.length), ...lanes.map((lane) => str(lane["slice"]).length), 1);
-  const id = (value: string) => value.padEnd(idWidth);
-  const groups: Group[] = [];
-
-  // DONE — highest rung first, then arrangement order; nothing-reached slices summarised
-  const counts = Object.fromEntries(RUNGS.map((rung) => [rung, slices.filter((slice) => slice.cells[rung]!.glyph === "✓").length]));
-  const reached = slices.filter((slice) => slice.rank > 0).sort((a, b) => b.rank - a.rank || a.order - b.order);
-  const notStarted = slices.filter((slice) => slice.rank === 0);
-  const doneRows = reached.map((slice) => {
-    const ladder = RUNGS.map((rung) => slice.cells[rung]!.glyph).join("");
-    return row(`${id(slice.id)}  ${ladder}  ${reachedText(slice.cells, slice.rank)} · ${proofText(slice.scope)}${waveText(slice.care)}`, `slice:${slice.id}`, width);
-  });
-  groups.push({
-    key: "done",
-    name: "DONE",
-    title: `DONE  ${RUNGS.map((rung) => `${rung} ${counts[rung]}`).join(" · ")}`,
-    lead: [{ text: `  ladder ${RUNG_LABEL} · ✓ yes ○ no ? undetermined` }],
-    rows: doneRows,
-    empty: slices.length ? "(no slice has reached a rung)" : "(no slices on this mission)",
-    // always visible, never behind the overflow: the slices this ladder says nothing about yet
-    trailing: notStarted.length ? [row(`${notStarted.length} slice${notStarted.length === 1 ? "" : "s"} with no rung reached`, basisKey("not-started", "no rung reached"), width)] : [],
-  });
-
-  // NOW — claimed lanes, activity verbatim
-  const idle = record(q6["idle_seats_with_capacity"])["value"];
-  groups.push({
-    key: "now",
-    name: "NOW",
-    title: `NOW  ${lanes.length} lane${lanes.length === 1 ? "" : "s"} live · idle seats with capacity ${idle === INDETERMINATE || idle == null ? "?" : String(idle)}`,
-    rows: lanes.map((lane) => row(laneText(lane, id), laneKey(lane), width)),
-    empty: "(no claimed lanes)",
-  });
-
-  // NEXT — eligible in rank order; otherwise the projection's reasons, grouped and counted
-  const eligible = slices
-    .filter((slice) => slice.sequencing?.["next_up"] === true && Array.isArray(slice.sequencing["blocked_on_rows"]) && slice.sequencing["blocked_on_rows"].length === 0)
-    .sort((a, b) => Number(a.sequencing!["next_up_rank"] ?? Number.MAX_SAFE_INTEGER) - Number(b.sequencing!["next_up_rank"] ?? Number.MAX_SAFE_INTEGER) || a.order - b.order);
-  const nextRows = eligible.map((slice) => {
-    const deps = slice.sequencing!["depends_on"];
-    const after = Array.isArray(deps) && deps.length ? `after ${deps.map(String).join(", ")} (met)` : "no dependencies";
-    return row(`→ ${id(slice.id)}  ${after}${waveText(slice.care)}`, `slice:${slice.id}`, width);
-  });
-  const blockedRows = slices
-    .filter((slice) => Array.isArray(slice.sequencing?.["blocked_on_rows"]) && (slice.sequencing!["blocked_on_rows"] as unknown[]).length > 0)
-    .map((slice) => row(`⧗ ${id(slice.id)}  ${blockerText(slice.sequencing!["blocked_on_rows"], "blocker")}`, `slice:${slice.id}`, width));
-  const reasons = new Map<string, { label: string; members: string[] }>();
-  for (const slice of slices) {
-    const seq = slice.sequencing;
-    if (!seq || seq["next_up"] === true) continue;
-    if (Array.isArray(seq["blocked_on_rows"]) && seq["blocked_on_rows"].length > 0) continue;
-    const basis = str(seq["next_up_basis"], "no basis given");
-    const label = seq["next_up"] === INDETERMINATE ? `? undetermined — ${basis}` : `· ${basis}`;
-    const entry = reasons.get(label) ?? { label, members: [] };
-    entry.members.push(slice.id);
-    reasons.set(label, entry);
-  }
-  const reasonRows = [...reasons.values()]
-    .sort((a, b) => b.members.length - a.members.length)
-    .map((entry) => row(`${entry.members.length} ${entry.label}`, basisKey("next", entry.label), width));
-  groups.push({
-    key: "next",
-    name: "NEXT",
-    title: `NEXT  ${eligible.length} eligible${blockedRows.length ? ` · ${blockedRows.length} blocked` : ""}${reasons.size ? ` · ${[...reasons.values()].reduce((n, e) => n + e.members.length, 0)} not eligible` : ""}`,
-    rows: [...nextRows, ...blockedRows, ...reasonRows],
-    empty: "(nothing sequenced)",
-  });
-
-  // ATTENTION — needs-input first, then parked/stalled, fragile joins, then grouped INDETERMINATE
-  const attention: ContentLine[] = [];
-  for (const lane of lanes) {
-    const needs = record(record(lane["activity"])["needs_input"]);
-    if (Number(needs["count"] ?? 0) > 0) attention.push(row(`⚑ ${id(str(lane["slice"]))}  ${str(lane["seat"])}  needs input: ${str(needs["reason"], String(needs["count"]))}`, laneKey(lane), width));
-  }
-  for (const park of execution.q5_park ?? []) {
-    if (park["pickup_state"] === "working") continue;
-    const qitemId = str(park["qitem_id"], "park");
-    const lane = lanes.find((candidate) => candidate["qitem_id"] === qitemId);
-    const age = park["age_minutes"] != null ? ` · ${String(park["age_minutes"])}m since claim` : "";
-    attention.push(row(`⚑ ${id(str(lane?.["slice"], qitemId))}  pickup ${str(park["pickup_state"], INDETERMINATE)} · ${str(park["park_kind"], "indeterminate")}${age}`, lane ? laneKey(lane) : `park:${qitemId}`, width));
-  }
-  const fragile = new Map<string, string[]>();
-  for (const lane of lanes) {
-    if (lane["fragile_join"] !== true) continue;
-    const basis = str(lane["join_basis"], "join basis unavailable");
-    fragile.set(basis, [...(fragile.get(basis) ?? []), str(lane["slice"] ?? lane["qitem_id"])]);
-  }
-  for (const [basis, members] of fragile) attention.push(row(`△ ${members.length} lane${members.length === 1 ? "" : "s"} on a fragile join — ${basis} · ${members.join(", ")}`, basisKey("fragile", basis), width));
+function evidenceDetail(execution: ExecutionViewSnap, slices: SliceFacts[], width: number): ContentLine[] {
+  const gitBasis = str(record(execution.sources?.["git"])["basis"], "(no git source cell)");
+  const lines: ContentLine[] = [
+    { text: `${execution.mission} · evidence gap · derived ${clock(execution.derived_at) || "?"}` },
+    { text: "" },
+    { text: "  Declared state comes from each slice file. Evidence rungs come from the daemon's" },
+    { text: "  execution projection, which needs a reachable repository to confirm reviewed, merged" },
+    { text: "  and live. Unconfirmed is not waiting work and not done; it is unknown." },
+    { text: "" },
+    sectionRule("repository source", width),
+    { text: `  git:         ${gitBasis}` },
+  ];
   for (const item of collectIndeterminate(execution, slices)) {
-    const what = item.where.startsWith("source") ? item.where : `${item.members.length} slice${item.members.length === 1 ? "" : "s"} ${item.where} undetermined`;
-    attention.push(row(`? ${what} — ${item.basis}`, basisKey(item.where, item.basis), width));
+    lines.push({ text: "" }, sectionRule(`${item.where} unconfirmed for ${item.members.length} slice${item.members.length === 1 ? "" : "s"}`, width));
+    lines.push({ text: `  basis:       ${item.basis}` });
+    for (const member of item.members) lines.push(listItem(member, open(`slice:${member}`)));
   }
-  groups.push({
-    key: "attention",
-    name: "ATTENTION",
-    title: `ATTENTION  ${attention.length}`,
-    rows: attention,
-    empty: "(nothing needs a person right now — on the surfaces this view reads)",
-  });
-  return { slices, groups };
+  lines.push({ text: "" }, row("projection sources and derivation bases", "sources", width), { text: "" }, back());
+  return lines;
 }
+
+// ---- overview ----------------------------------------------------------------------
 
 function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number): ContentLine[] {
-  const slices = sliceFacts(execution, scopes).sort((a, b) => a.order - b.order);
+  const slices = sliceFacts(execution, scopes);
+  const declared = new Map<string, number>();
+  for (const slice of slices) declared.set(declaredText(slice), (declared.get(declaredText(slice)) ?? 0) + 1);
+  const declaredText_ = [...declared.entries()].sort((a, b) => b[1] - a[1]).map(([word, n]) => `${n} ${word}`).join(", ");
+  const live = slices.filter((slice) => slice.lane).length;
+  const problems = slices.filter((slice) => problemText(slice)).length;
+  const build = shortSha(record(execution.sources?.["build_info"])["commit"]);
+  const lines: ContentLine[] = [
+    { text: `  ${execution.mission} EXECUTION · ${slices.length} slice${slices.length === 1 ? "" : "s"}` },
+    { text: `  declared in slice files: ${declaredText_ || "none"} · live now: ${live} working${problems ? `, ${problems} with a problem` : ""}` },
+    row(`sources · derived ${clock(execution.derived_at) || "?"} · daemon build ${build}`, "sources", width),
+    ...evidenceGapLines(execution, slices, width),
+  ];
+
   const waves = new Map<string, SliceFacts[]>();
   for (const slice of slices) waves.set(waveOf(slice), [...(waves.get(waveOf(slice)) ?? []), slice]);
-  const lines: ContentLine[] = [
-    { text: `  ${execution.mission} EXECUTION` },
-    ...headerLines(execution, slices.length, width),
-    { text: "  spine: ✓ done · ● now · → next · ⚑ problem · ladder lock·build·review·fold·adopt" },
-  ];
-  for (const [wave, members] of waves) {
-    const state = waveState(execution, members);
-    const shown = members.slice(0, MAX_ROWS_PER_GROUP);
-    lines.push({ text: "" }, sectionRule(`${pathGlyph(state)} WAVE ${wave} · ${state} · ${members.length} slice${members.length === 1 ? "" : "s"}`, width));
-    lines.push(...shown.map((slice) => pathRow(execution, slice, width)));
-    const overflow = members.length - shown.length;
-    if (overflow > 0) lines.push(row(`+${overflow} more — open all ${members.length} rows in wave ${wave}`, `group:wave:${wave}`, width));
-  }
+  const stateWidth = Math.max(...slices.map((slice) => stateWord(slice).length), 4);
+  const idWidth = Math.max(...slices.map((slice) => slice.id.length), 1);
+  for (const [wave, members] of waves) lines.push(...waveRows(execution, wave, members, width, stateWidth, idWidth, true));
   if (slices.length === 0) lines.push({ text: "  (no slices on this mission)" });
-  lines.push({ text: "" }, row("projection sources and derivation bases", "sources", width));
   return lines;
 }
 
 function waveDetail(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number, key: string): ContentLine[] | null {
-  if (!key.startsWith("group:wave:")) return null;
   const wave = key.slice("group:wave:".length);
-  const members = sliceFacts(execution, scopes).filter((slice) => waveOf(slice) === wave).sort((a, b) => a.order - b.order);
+  const slices = sliceFacts(execution, scopes);
+  const members = slices.filter((slice) => waveOf(slice) === wave);
   if (members.length === 0) return null;
+  const stateWidth = Math.max(...members.map((slice) => stateWord(slice).length), 4);
+  const idWidth = Math.max(...members.map((slice) => slice.id.length), 1);
   return [
     { text: `${execution.mission} · wave ${wave} · all ${members.length} rows` },
-    { text: "" },
-    ...members.map((slice) => pathRow(execution, slice, width)),
-    { text: "" },
-    back(),
-  ];
-}
-
-/** The "+N more" door: the whole group, every row still its own drill, esc back to the overview. */
-function groupDetail(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number, key: string): ContentLine[] | null {
-  const { groups } = buildGroups(execution, scopes, width);
-  const group = groups.find((item) => `group:${item.key}` === key);
-  if (!group) return null;
-  return [
-    { text: `${execution.mission} · all ${group.rows.length} ${group.name} rows` },
-    ...groupLines(group, width, false),
+    ...waveRows(execution, wave, members, width, stateWidth, idWidth, false),
     { text: "" },
     back(),
   ];
@@ -495,23 +396,30 @@ function back(): ContentLine {
   return { text: "  esc back · ⏎ open · : command bar" };
 }
 
+function laneKey(lane: Record<string, unknown>): string {
+  return `lane:${str(lane["qitem_id"], "unknown")}`;
+}
+
 function sliceDetail(execution: ExecutionViewSnap, slices: SliceFacts[], id: string): ContentLine[] | null {
   const slice = slices.find((item) => item.id === id);
   if (!slice) return null;
   const sections: Section[] = [];
   const ladderLines: ContentLine[] = [];
   for (const rung of RUNGS) {
-    const cell = slice.cells[rung]!;
-    const value = rung === "built" ? (cell.glyph === "✓" ? shortSha(cell.value) : INDETERMINATE) : str(cell.value, INDETERMINATE);
-    ladderLines.push({ text: `  ${rung.padEnd(9)} ${cell.glyph} ${value}` });
-    ladderLines.push({ text: `            basis: ${cell.basis}` });
+    const cell = slice.cells[rung];
+    const value = rung === "built" ? (cell.state === "yes" ? shortSha(cell.value) : "undetermined") : cell.state;
+    ladderLines.push({ text: `  ${RUNG_WORD[rung].padEnd(12)} ${value}` });
+    ladderLines.push({ text: `               basis: ${cell.basis}` });
   }
   const legs = record(slice.ladder["reviewed"])["legs"];
   if (Array.isArray(legs)) for (const leg of legs) {
     const l = record(leg);
     ladderLines.push(listItem(`review leg ${str(l["verdict"], "?")} · ${str(l["artifact_type"], "?")} · ${str(l["path"])}`, undefined, 12));
   }
-  sections.push({ title: `ladder · reached: ${reachedText(slice.cells, slice.rank)}`, lines: ladderLines });
+  sections.push({
+    title: `declared ${declaredText(slice)} · evidence ${evidenceText(slice.cells, slice.rank)}`,
+    lines: ladderLines,
+  });
 
   const seq = slice.sequencing;
   if (seq) {
@@ -524,14 +432,14 @@ function sliceDetail(execution: ExecutionViewSnap, slices: SliceFacts[], id: str
         { label: "next up", value: `${str(seq["next_up"], INDETERMINATE)} — ${str(seq["next_up_basis"], "no basis given")}` },
         { label: "rank", value: str(seq["next_up_rank"], "—") },
         { label: "blocked on", value: blocked || "(no rows)" },
-        ...(slice.care ? [{ label: "wave", value: str(slice.care["build_wave"], INDETERMINATE) }] : []),
+        { label: "wave", value: waveOf(slice) },
       ],
     });
   }
   if (slice.scope) {
     const drops = slice.scope.proofContract.flatMap((contract) => contract.drops.map((drop) => `${drop.artifactType ?? "?"} ${drop.verdict ?? ""} · ${drop.file}`));
     sections.push({
-      title: `proof ${slice.scope.proof.paired}/${slice.scope.proof.total} paired`,
+      title: `proof ${slice.scope.proof.paired} of ${slice.scope.proof.total} paired`,
       lines: drops.length ? drops.map((drop) => listItem(drop)) : [{ text: "  (no proof drops recorded)" }],
     });
   }
@@ -554,7 +462,7 @@ function sliceDetail(execution: ExecutionViewSnap, slices: SliceFacts[], id: str
       { label: "wave map", value: str(source["wave_map_row"], "(not named)") },
     ],
   });
-  return [...detailPage({ text: `${slice.id} — ${slice.dir}` }, sections), { text: "" }, back()];
+  return [...detailPage({ text: `${slice.id} — ${slice.name}` }, sections), { text: "" }, back()];
 }
 
 function laneDetail(execution: ExecutionViewSnap, key: string): ContentLine[] | null {
@@ -607,41 +515,6 @@ function laneDetail(execution: ExecutionViewSnap, key: string): ContentLine[] | 
   return [...detailPage({ text: heading }, sections), { text: "" }, back()];
 }
 
-function basisDetail(execution: ExecutionViewSnap, slices: SliceFacts[], key: string): ContentLine[] | null {
-  const m = key.match(/^basis:([^:]+):(.*)$/s);
-  if (!m) return null;
-  const [, kind, basis] = m as [string, string, string];
-  let members: string[] = [];
-  let heading = basis;
-  if (kind === "not-started") {
-    members = slices.filter((slice) => slice.rank === 0).map((slice) => slice.id);
-    heading = "slices with no rung reached (not locked, no candidate recorded)";
-  } else if (kind === "next") {
-    members = slices
-      .filter((slice) => {
-        const seq = slice.sequencing;
-        if (!seq || seq["next_up"] === true) return false;
-        const b = str(seq["next_up_basis"], "no basis given");
-        return (seq["next_up"] === INDETERMINATE ? `? undetermined — ${b}` : `· ${b}`) === basis;
-      })
-      .map((slice) => slice.id);
-  } else if (kind === "fragile") {
-    members = (execution.q1_lanes ?? []).filter((lane) => lane["fragile_join"] === true && str(lane["join_basis"], "join basis unavailable") === basis).map((lane) => str(lane["slice"] ?? lane["qitem_id"]));
-    heading = `fragile join — ${basis}`;
-  } else {
-    const found = collectIndeterminate(execution, slices).find((item) => item.where === kind && item.basis === basis);
-    if (!found) return null;
-    members = found.members;
-    heading = `${kind} undetermined — ${basis}`;
-  }
-  const items = members.map((member) => {
-    const slice = slices.find((s) => s.id === member);
-    const lane = (execution.q1_lanes ?? []).find((l) => str(l["slice"]) === member);
-    return listItem(member, slice ? open(`slice:${member}`) : lane ? open(laneKey(lane)) : undefined);
-  });
-  return [{ text: heading }, { text: "" }, sectionRule(`affected (${members.length})`), ...(items.length ? items : [{ text: "  (none)" }]), { text: "" }, back()];
-}
-
 function sourcesDetail(execution: ExecutionViewSnap): ContentLine[] {
   const lines: ContentLine[] = [{ text: `sources behind ${execution.mission} · derived ${clock(execution.derived_at) || "?"}` }];
   for (const [name, raw] of Object.entries(execution.sources ?? {})) {
@@ -676,15 +549,15 @@ export function executionContentLines(
     const slices = sliceFacts(execution, scopes);
     const page = opened === "sources"
       ? sourcesDetail(execution)
+      : opened === "evidence"
+        ? evidenceDetail(execution, slices, width)
       : opened.startsWith("group:wave:")
         ? waveDetail(execution, scopes, width, opened)
-      : opened.startsWith("group:")
-        ? groupDetail(execution, scopes, width, opened)
       : opened.startsWith("slice:")
         ? sliceDetail(execution, slices, opened.slice("slice:".length))
         : opened.startsWith("lane:") || opened.startsWith("park:")
           ? laneDetail(execution, opened)
-          : basisDetail(execution, slices, opened);
+          : null;
     return page ?? [{ text: `  ${opened} is not in the current snapshot (it may have closed or been re-derived)` }, { text: "" }, back()];
   }
   return overviewLines(execution, scopes, width);
@@ -697,20 +570,27 @@ export function executionSliceStripLines(
   sliceId: string,
   sliceDir: string,
   width = 96,
+  declared?: string | null,
 ): ContentLine[] {
-  if (!execution) return [{ text: "" }, sectionRule("EXECUTION · INDETERMINATE", width), { text: "  mission execution projection not loaded for this selection" }];
+  if (!execution) return [{ text: "" }, sectionRule("EXECUTION · not loaded", width), { text: "  mission execution projection not loaded for this selection" }];
   const slice = sliceFacts(execution, undefined).find((item) => item.id === sliceId || item.dir === sliceDir);
-  if (!slice) return [{ text: "" }, sectionRule("EXECUTION · INDETERMINATE", width), { text: "  slice absent from the mission execution projection" }];
-  const state = pathState(execution, slice);
-  const ladder = RUNGS.map((rung) => slice.cells[rung]!.glyph).join("");
+  if (!slice) return [{ text: "" }, sectionRule("EXECUTION · not in projection", width), { text: "  slice absent from the mission execution projection" }];
   const activity = record(slice.lane?.["activity"]);
-  const problem = sliceProblem(execution, slice);
+  const problem = problemText(slice);
+  const unconfirmed = RUNGS.filter((rung) => slice.cells[rung].state === "undetermined").map((rung) => RUNG_WORD[rung]);
+  const evidence = `${evidenceText(slice.cells, slice.rank)}${unconfirmed.length ? ` · ${unconfirmed.join(" / ")} unconfirmed (${slice.cells[RUNGS.find((rung) => slice.cells[rung].state === "undetermined")!].basis})` : ""}`;
+  const liveWord = slice.lane ? str(activity["activity"], "claimed") : "no claimed lane";
+  const declaredWord = declared?.trim().toLowerCase() || "no declared status";
+  const next = declaredWord === "done" && !slice.lane
+    ? "none — declared done"
+    : nextText(slice) ?? (slice.lane ? "in progress on the lane above" : "nothing the projection can sequence");
   return [
     { text: "" },
-    sectionRule(`EXECUTION · ${pathGlyph(state)} ${state} · wave ${waveOf(slice)}`, width),
-    { text: `  ladder      ${ladder}  ${RUNG_LABEL}` },
-    { text: `  assignment  ${slice.lane ? `${str(slice.lane["seat"])} · ${str(activity["activity"], INDETERMINATE)}` : "(no claimed lane)"}`, ...(slice.lane ? { action: open(laneKey(slice.lane)) } : {}) },
-    { text: `  next unlock ${nextText(slice)}` },
+    sectionRule(`EXECUTION · ${problem ? stateWord(slice) : liveWord} · wave ${waveOf(slice)}`, width),
+    { text: `  declared    ${declaredWord} (slice file)` },
+    actionRow(`evidence    ${evidence}`, open("evidence"), width),
+    { text: `  assignment  ${slice.lane ? `${str(slice.lane["seat"])} · ${str(activity["activity"], INDETERMINATE)} (${str(activity["decided_by"], "?")})` : "none — no claimed lane"}`, ...(slice.lane ? { action: open(laneKey(slice.lane)) } : {}) },
+    { text: `  next        ${next}` },
     { text: `  problem     ${problem ?? "none on the projection's current surfaces"}` },
   ];
 }

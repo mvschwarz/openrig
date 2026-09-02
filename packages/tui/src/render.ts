@@ -680,7 +680,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       collapseReqs: state.scopesCollapseReqs,
       narrative: state.scopesNarrative,
       width: contentWidth,
-      executionStrip: detail ? executionSliceStripLines(execution, detail.id ?? detail.dirName, detail.dirName, contentWidth) : undefined,
+      executionStrip: detail ? executionSliceStripLines(execution, detail.id ?? detail.dirName, detail.dirName, contentWidth, detail.status) : undefined,
     });
   }
   return [{ text: `(${state.section})` }];
