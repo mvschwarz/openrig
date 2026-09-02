@@ -117,6 +117,10 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
       "## Intent\ngamma (no EC-1 fields — the INDETERMINATE arm)\n",
     );
     const missionDir = path.join(missionsRoot, MISSION);
+    fs.writeFileSync(
+      path.join(missionDir, "SPEC.md"),
+      "---\nid: OPR.9.9\nmission: release-9.9\n---\n\n# Fixture mission\n",
+    );
     fs.writeFileSync(path.join(missionDir, "mission.yaml"), [
       "schema: openrig.mission/v0alpha1",
       "kind: mission",
@@ -284,6 +288,30 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     const doc = result.rows[0] as Record<string, unknown>;
     expect(doc.mission).toBe(MISSION);
     expect((doc.q1_lanes as Record<string, unknown>[]).map((lane) => lane.slice)).toContain("OPR.9.9.31");
+  });
+
+  it("includes a legacy id-form mission-tagged lane when the directory form is selected", () => {
+    db.prepare(`UPDATE queue_items SET tags = ? WHERE qitem_id = 'qitem-lane-31'`).run(
+      JSON.stringify(["mission:OPR.9.9", "slice:OPR.9.9.31", `candidate:${candidateSha.slice(0, 9)}`]),
+    );
+    db.prepare(`UPDATE queue_items SET tags = ? WHERE qitem_id = 'qitem-wave-map'`).run(
+      JSON.stringify(["mission:OPR.9.9", "wave-map", "format:wave-map-v1"]),
+    );
+    const doc = show();
+    expect((doc.q1_lanes as Record<string, unknown>[]).map((lane) => lane.qitem_id)).toContain("qitem-lane-31");
+    expect(((doc.sources as Record<string, Record<string, unknown>>).wave_map).row).toBe("qitem-wave-map");
+  });
+
+  it("defaults an active legacy id-form mission tag to its canonical mission directory", () => {
+    fs.mkdirSync(path.join(missionsRoot, "release-10.0", "slices"), { recursive: true });
+    db.prepare(`UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'`).run();
+    db.prepare(`UPDATE queue_items SET tags = ? WHERE qitem_id = 'qitem-lane-31'`).run(
+      JSON.stringify(["mission:OPR.9.9", "slice:OPR.9.9.31", `candidate:${candidateSha.slice(0, 9)}`]),
+    );
+    const result = projector.show("execution");
+    const doc = result.rows[0] as Record<string, unknown>;
+    expect(doc.mission).toBe(MISSION);
+    expect((doc.q1_lanes as Record<string, unknown>[]).map((lane) => lane.qitem_id)).toContain("qitem-lane-31");
   });
 
   it("EC-3: the worktree_path field is Q1's join key; a legacy baton falls back marked fragile", () => {

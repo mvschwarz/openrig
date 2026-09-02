@@ -30,6 +30,7 @@ import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
 import { parseFrontmatter } from "./slices/slice-indexer.js";
 import { derivePickup } from "./queue-pickup.js";
+import { resolveWorkNodeDirs } from "./current-work.js";
 import { resolveLegacyTopologyRigsRoot } from "./user-settings/settings-store.js";
 import { BUILD_INFO, type BuildInfo } from "../build-info.js";
 
@@ -159,6 +160,18 @@ function compareReleaseDirs(a: string, b: string): number {
     if (d !== 0) return d;
   }
   return a.localeCompare(b);
+}
+
+function missionReferences(missionsRoot: string | null, mission: string): string[] {
+  const references = new Set([mission]);
+  if (!missionsRoot) return [...references];
+  try {
+    const fm = parseFrontmatter(fs.readFileSync(path.join(missionsRoot, mission, "SPEC.md"), "utf8"));
+    if (typeof fm["id"] === "string") references.add(fm["id"] as string);
+  } catch {
+    // A missing mission SPEC is valid legacy state; the directory name still binds.
+  }
+  return [...references];
 }
 
 interface SliceFacts {
@@ -340,14 +353,15 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
   }
 }
 
-function readWaveMap(db: Database.Database, mission: string): WaveMapData {
+function readWaveMap(db: Database.Database, missions: string[]): WaveMapData {
+  const missionWhere = missions.map(() => "tags LIKE ?").join(" OR ");
   const row = db
     .prepare(
       `SELECT qitem_id, body FROM queue_items
-        WHERE tags LIKE '%format:wave-map-v1%' AND tags LIKE ?
+        WHERE tags LIKE '%format:wave-map-v1%' AND (${missionWhere})
         ORDER BY ts_created DESC LIMIT 1`,
     )
-    .get(`%mission:${mission}%`) as { qitem_id: string; body: string | null } | undefined;
+    .get(...missions.map((mission) => `%mission:${mission}%`)) as { qitem_id: string; body: string | null } | undefined;
   if (!row?.body) return { rowId: INDETERMINATE, waves: [] };
   const block = row.body.match(WAVE_MAP_BLOCK);
   if (!block) return { rowId: INDETERMINATE, waves: [] };
@@ -450,6 +464,10 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
   // of the mission people are actually executing. Explicit `?mission=` still
   // wins, and the historical newest-directory behavior remains the fallback.
   let mission: string | Indeterminate = opts?.mission ?? INDETERMINATE;
+  if (mission !== INDETERMINATE && missionsRoot) {
+    const matches = resolveWorkNodeDirs(missionsRoot, mission);
+    if (matches.length === 1) mission = matches[0]!.dir;
+  }
   if (mission === INDETERMINATE && missionsRoot) {
     const active = deps.db
       .prepare(`SELECT tags, body FROM queue_items WHERE state = 'in-progress' ORDER BY ts_updated DESC`)
@@ -461,10 +479,9 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
         [...(row.body?.matchAll(/^Mission:[ \t]+(\S+)[ \t]*$/gm) ?? [])].map((match) => match[1]!),
       )];
       const candidate = tag?.slice("mission:".length) ?? (bodyMissions.length === 1 ? bodyMissions[0] : undefined);
-      const root = path.resolve(missionsRoot);
-      const candidatePath = candidate ? path.resolve(root, candidate) : null;
-      if (candidate && candidatePath?.startsWith(`${root}${path.sep}`) && fs.existsSync(candidatePath)) {
-        mission = candidate;
+      const matches = candidate ? resolveWorkNodeDirs(missionsRoot, candidate) : [];
+      if (matches.length === 1) {
+        mission = matches[0]!.dir;
         break;
       }
     }
@@ -484,7 +501,10 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
   const depCache = new Map<string, SliceFacts | null>();
 
   // ---- queue rows bound to this mission (tag or body mention, per the binding law) ----
-  const missionLike = mission === INDETERMINATE ? "%" : `%${mission}%`;
+  const missionLikes = mission === INDETERMINATE
+    ? ["%"]
+    : missionReferences(missionsRoot, mission).map((reference) => `%${reference}%`);
+  const missionWhere = missionLikes.map(() => "(tags LIKE ? OR body LIKE ?)").join(" OR ");
   const rows = deps.db
     .prepare(
       `SELECT qitem_id, source_session, destination_session, state, tags, body, claimed_at,
@@ -494,9 +514,9 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
                    AND t.ts > queue_items.claimed_at
                    AND t.transition_note IS NOT 'claimed') AS post_claim_motion
          FROM queue_items
-        WHERE (tags LIKE ? OR body LIKE ?)`,
+        WHERE (${missionWhere})`,
     )
-    .all(missionLike, missionLike) as QueueRowLite[];
+    .all(...missionLikes.flatMap((like) => [like, like])) as QueueRowLite[];
 
   const sliceOfRow = (r: QueueRowLite): string | null => {
     for (const t of parseTags(r.tags)) {
@@ -588,7 +608,9 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
   }
 
   // ---- arrangement authority: mission/slice YAML, with legacy EC-2 fallback ----
-  const waveMap = mission === INDETERMINATE ? { rowId: INDETERMINATE as Indeterminate, waves: [] } : readWaveMap(deps.db, mission);
+  const waveMap = mission === INDETERMINATE
+    ? { rowId: INDETERMINATE as Indeterminate, waves: [] }
+    : readWaveMap(deps.db, missionReferences(missionsRoot, mission));
   const arrangement = missionsRoot && mission !== INDETERMINATE
     ? readArrangement(missionsRoot, mission, slices)
     : null;

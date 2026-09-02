@@ -130,7 +130,7 @@ function tagValues(tags: string[], prefix: string): string[] {
  * is named that, or because its SPEC.md frontmatter `id` is that. A directory can only
  * match once, so a name hit short-circuits its own frontmatter read.
  */
-function resolveDirs(root: string, wanted: string): Match[] {
+export function resolveWorkNodeDirs(root: string, wanted: string): Match[] {
   let entries: string[];
   try {
     entries = fs.readdirSync(root);
@@ -167,7 +167,7 @@ function resolveRow(
   mission: string,
   slice: string,
 ): { ok: true; value: Candidate } | { ok: false; reason: string } {
-  const missionMatches = resolveDirs(missionsRoot, mission);
+  const missionMatches = resolveWorkNodeDirs(missionsRoot, mission);
   if (missionMatches.length !== 1) {
     return {
       ok: false,
@@ -177,7 +177,7 @@ function resolveRow(
   const missionMatch = missionMatches[0]!;
 
   const slicesRoot = path.join(missionsRoot, missionMatch.dir, "slices");
-  const sliceMatches = resolveDirs(slicesRoot, slice);
+  const sliceMatches = resolveWorkNodeDirs(slicesRoot, slice);
   if (sliceMatches.length !== 1) {
     return { ok: false, reason: `slice ${slice} resolves to ${sliceMatches.length} directories` };
   }
