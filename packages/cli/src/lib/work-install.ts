@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { readFrontmatter, resolveNodeFile } from "./scope/scope-fs.js";
 
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -110,6 +111,48 @@ function manifestProjectId(manifest: Record<string, unknown> | null): string | n
   if (typeof manifest["id"] === "string") return manifest["id"];
   const metadata = manifest["metadata"];
   return isRecord(metadata) && typeof metadata["id"] === "string" ? metadata["id"] : null;
+}
+
+function resolveExplicitSlice(
+  missionRoot: string,
+  selection: string,
+): { root: string; name: string } | WorkInstallFailure {
+  const slicesRoot = join(missionRoot, "slices");
+  const available: string[] = [];
+  const matches: Array<{ root: string; name: string }> = [];
+  if (existsSync(slicesRoot)) {
+    for (const entry of readdirSync(slicesRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      available.push(entry.name);
+      const nominalRoot = join(slicesRoot, entry.name);
+      const root = canonicalExisting(nominalRoot);
+      if (!root || !inside(missionRoot, root)) {
+        if (entry.name === selection) {
+          return failure("slice_root_escape", `slice '${selection}' resolves outside the selected mission root`);
+        }
+        continue;
+      }
+      const nodeFile = resolveNodeFile(root);
+      const frontmatter = nodeFile ? readFrontmatter(nodeFile) : {};
+      const declaredId = frontmatter["id"] ?? frontmatter["dotId"];
+      if (entry.name === selection || declaredId === selection) {
+        matches.push({ root, name: entry.name });
+      }
+    }
+  }
+  available.sort();
+  matches.sort((a, b) => a.name.localeCompare(b.name));
+  if (matches.length === 0) {
+    return failure("slice_not_found", `slice '${selection}' is not a child of the selected mission`, available);
+  }
+  if (matches.length > 1) {
+    return failure(
+      "slice_identity_ambiguous",
+      `slice '${selection}' names multiple children of the selected mission`,
+      matches.map((match) => match.name),
+    );
+  }
+  return matches[0]!;
 }
 
 export function resolveWorkPosition(opts: {
@@ -246,6 +289,7 @@ export function resolveWorkPosition(opts: {
 
   let missionRoot: string | null = null;
   let sliceRoot: string | null = null;
+  let sliceName: string | null = null;
   let frontier: WorkInstallAltitude = "project";
   if (opts.mission !== undefined) {
     missionRoot = join(missionsRoot, opts.mission);
@@ -278,40 +322,36 @@ export function resolveWorkPosition(opts: {
       pieces.push(plannedMissionProgress);
 
       if (opts.slice !== undefined) {
-        sliceRoot = join(missionRoot, "slices", opts.slice);
-        if (existsSync(sliceRoot)) {
-          const canonicalSliceRoot = canonicalExisting(sliceRoot);
-          if (!canonicalSliceRoot || !inside(missionRoot, canonicalSliceRoot)) {
-            return failure("slice_root_escape", `slice '${opts.slice}' resolves outside the selected mission root`);
+        const selectedSlice = resolveExplicitSlice(missionRoot, opts.slice);
+        if ("error" in selectedSlice) return selectedSlice;
+        sliceRoot = selectedSlice.root;
+        sliceName = selectedSlice.name;
+        frontier = "slice";
+        let sliceSpec = "SPEC.md";
+        let sliceSource: WorkInstallSource = "explicit";
+        const sliceManifestPath = join(sliceRoot, "slice.yaml");
+        if (existsSync(sliceManifestPath)) {
+          const parsed = readYaml(sliceManifestPath);
+          const composition = parsed.value?.["composition"];
+          const markdown = isRecord(composition) ? composition["slice_markdown"] : null;
+          if (isRecord(markdown) && typeof markdown["spec"] === "string" && markdownPath(markdown["spec"])) {
+            sliceSpec = markdown["spec"];
+            sliceSource = "manifest";
+          } else if (!parsed.value) {
+            warnings.push(`${parsed.error}; kept the conventional slice SPEC`);
           }
-          sliceRoot = canonicalSliceRoot;
-          frontier = "slice";
-          let sliceSpec = "SPEC.md";
-          let sliceSource: WorkInstallSource = "explicit";
-          const sliceManifestPath = join(sliceRoot, "slice.yaml");
-          if (existsSync(sliceManifestPath)) {
-            const parsed = readYaml(sliceManifestPath);
-            const composition = parsed.value?.["composition"];
-            const markdown = isRecord(composition) ? composition["slice_markdown"] : null;
-            if (isRecord(markdown) && typeof markdown["spec"] === "string" && markdownPath(markdown["spec"])) {
-              sliceSpec = markdown["spec"];
-              sliceSource = "manifest";
-            } else if (!parsed.value) {
-              warnings.push(`${parsed.error}; kept the conventional slice SPEC`);
-            }
-          }
-          const plannedSlice = piece(
-            "slice",
-            `mission:slices/${opts.slice}/${sliceSpec}`,
-            missionRoot,
-            sliceSource,
-          );
-          if ("error" in plannedSlice) return plannedSlice;
-          pieces.push(plannedSlice);
-          const plannedSliceProgress = piece("slice", `mission:slices/${opts.slice}/PROGRESS.md`, missionRoot, "default");
-          if ("error" in plannedSliceProgress) return plannedSliceProgress;
-          pieces.push(plannedSliceProgress);
         }
+        const plannedSlice = piece(
+          "slice",
+          `mission:slices/${sliceName}/${sliceSpec}`,
+          missionRoot,
+          sliceSource,
+        );
+        if ("error" in plannedSlice) return plannedSlice;
+        pieces.push(plannedSlice);
+        const plannedSliceProgress = piece("slice", `mission:slices/${sliceName}/PROGRESS.md`, missionRoot, "default");
+        if ("error" in plannedSliceProgress) return plannedSliceProgress;
+        pieces.push(plannedSliceProgress);
       }
     }
   }
@@ -324,7 +364,7 @@ export function resolveWorkPosition(opts: {
       missionRoot,
       sliceRoot,
       mission: opts.mission ?? null,
-      slice: opts.slice ?? null,
+      slice: sliceName ?? opts.slice ?? null,
       frontier,
     },
     pieces,

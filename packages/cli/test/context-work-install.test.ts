@@ -71,7 +71,11 @@ composition:
   mission_markdown:
     spec: SPEC.md
 `);
-    writeFileSync(join(alphaRoot, "missions", "alpha-active", "slices", "01-live-work", "SPEC.md"), "# Alpha slice\n");
+    writeFileSync(join(alphaRoot, "missions", "alpha-active", "slices", "01-live-work", "SPEC.md"), `---
+id: OPR.0.5.8.13
+---
+# Alpha slice
+`);
     writeFileSync(join(alphaRoot, "missions", "alpha-active", "slices", "01-live-work", "PROGRESS.md"), "# Alpha slice progress\n\n- [x] Story 3 complete\n- [ ] Public publish pending\n");
     writeFileSync(join(betaRoot, "SPEC.md"), "# Beta project\n");
     writeFileSync(join(betaRoot, "project.yaml"), `schema: openrig.project/v0alpha1
@@ -224,6 +228,57 @@ composition:
       "=== mission mission:SPEC.md ===",
       `=== mission:PROGRESS.md (absent: ${join(betaRoot, "missions", "beta-scaffold", "PROGRESS.md")}) ===`,
     ]);
+  });
+
+  it("resolves an explicit slice by directory name or unique dotted id and refuses missing or ambiguous matches", async () => {
+    const run = (slice: string) => captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install",
+        "--project", "alpha", "--mission", "alpha-active", "--slice", slice, "--json",
+      ]);
+    });
+
+    for (const selector of ["01-live-work", "OPR.0.5.8.13"]) {
+      const result = await run(selector);
+      expect(result.exitCode).toBeUndefined();
+      const body = JSON.parse(result.logs.join("")) as {
+        position: { slice: string; sliceRoot: string; frontier: string };
+        pieces: Array<{ address: string }>;
+      };
+      expect(body.position).toMatchObject({
+        slice: "01-live-work",
+        sliceRoot: join(alphaRoot, "missions", "alpha-active", "slices", "01-live-work"),
+        frontier: "slice",
+      });
+      expect(body.pieces.slice(-2).map((piece) => piece.address)).toEqual([
+        "mission:slices/01-live-work/SPEC.md",
+        "mission:slices/01-live-work/PROGRESS.md",
+      ]);
+    }
+
+    const missing = await run("OPR.0.5.8.99");
+    expect(missing.exitCode).toBe(1);
+    expect(JSON.parse(missing.logs.join(""))).toMatchObject({
+      ok: false,
+      error: { code: "slice_not_found", candidates: ["01-live-work"] },
+    });
+
+    const duplicateRoot = join(alphaRoot, "missions", "alpha-active", "slices", "02-duplicate-id");
+    mkdirSync(duplicateRoot, { recursive: true });
+    writeFileSync(join(duplicateRoot, "SPEC.md"), `---
+id: OPR.0.5.8.13
+---
+# Duplicate slice id
+`);
+    const ambiguous = await run("OPR.0.5.8.13");
+    expect(ambiguous.exitCode).toBe(1);
+    expect(JSON.parse(ambiguous.logs.join(""))).toMatchObject({
+      ok: false,
+      error: {
+        code: "slice_identity_ambiguous",
+        candidates: ["01-live-work", "02-duplicate-id"],
+      },
+    });
   });
 
   it("refuses a selected project id that names two catalog roots", async () => {
