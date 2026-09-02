@@ -9,7 +9,7 @@ import { createViewState, computeExplorerRows, emptySnapshot } from "./state.js"
 import { parseCommand } from "./grammar.js";
 import { filterPalette, paletteExecuteLine } from "./commands/palette.js";
 import { COMMAND_REGISTRY, currentCommandContext } from "./commands/registry.js";
-import { createInputDecoder, resolveKeyAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
+import { createInputDecoder, resolveEscapeAction, resolveKeyAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
 import { renderScreen } from "./render.js";
 import { createStyle, detectColorMode } from "./theme.js";
 import { stylizeLines } from "./stylize.js";
@@ -382,9 +382,9 @@ async function run(): Promise<void> {
           crashCartOpts = { ...crashCartOpts, confirm: undefined };
           view.dispatch({ type: "notice", message: "restore cancelled" });
           draw();
-        } else if (inputLine === "" && view.get().section === "scopes" && view.get().executionOpen) {
-          // EXECUTION drill: esc closes the detail page (the page advertises "esc back").
-          view.dispatch({ type: "execution-close" });
+        } else if (inputLine === "") {
+          const action = resolveEscapeAction(ev, view.get());
+          if (action) view.dispatch(action);
         }
         inputLine = "";
       } else if (ev.type === "key" && ev.key === "enter") {

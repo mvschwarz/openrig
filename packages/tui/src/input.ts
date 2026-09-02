@@ -122,6 +122,18 @@ export function sgrClick(x: number, y: number): string {
   return `\x1b[<0;${x};${y}M\x1b[<0;${x};${y}m`;
 }
 
+/** Resolve the back control advertised by SCOPES detail pages. */
+export function resolveEscapeAction(
+  event: Extract<InputEvent, { type: "key" }>,
+  state: ViewState,
+): Action | null {
+  if (event.key !== "escape" || state.section !== "scopes") return null;
+  if (state.executionOpen) return { type: "execution-close" };
+  return state.scopesSelected
+    ? { type: "scopes-mission-open", mission: state.scopesSelected.mission }
+    : null;
+}
+
 /** Resolve directional/Enter keys against the currently rendered pane. */
 export function resolveKeyAction(
   event: Extract<InputEvent, { type: "key" }>,
