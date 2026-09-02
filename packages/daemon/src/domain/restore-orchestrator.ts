@@ -112,6 +112,7 @@ interface RestoreOrchestratorDeps {
   piResume?: PiResumeAdapter;
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
+  listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
 }
 
 export class RestoreOrchestrator {
@@ -129,6 +130,7 @@ export class RestoreOrchestrator {
   private piResume: PiResumeAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
+  private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
   private appliedLaunchStore: AppliedLaunchObservationStore;
 
   constructor(deps: RestoreOrchestratorDeps) {
@@ -167,6 +169,7 @@ export class RestoreOrchestrator {
     this.piResume = deps.piResume ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
+    this.listProcesses = deps.listProcesses;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
   }
 
@@ -1238,7 +1241,7 @@ export class RestoreOrchestrator {
                 ? ((startupResult.continuityOutcome === "resumed" || nativeContinuityProved) ? "resumed" : baseStatus)
                 : baseStatus;
               if (finalStatus === "resumed") {
-                return this.finishJoinedResume(node, sessionName);
+                return this.finishJoinedResume(node, sessionName, resumeToken);
               }
               return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus };
             }
@@ -1304,7 +1307,7 @@ export class RestoreOrchestrator {
     }
 
     if (baseStatus === "resumed") {
-      return this.finishJoinedResume(node, sessionName);
+      return this.finishJoinedResume(node, sessionName, resumeToken);
     }
     return { nodeId: node.id, logicalId: node.logicalId, status: baseStatus };
   }
@@ -1314,6 +1317,7 @@ export class RestoreOrchestrator {
   private async finishJoinedResume(
     node: SnapshotData["nodes"][number],
     sessionName: string,
+    resumeToken: string | null,
   ): Promise<RestoreNodeResult> {
     const identity = await rebindAndVerifyPaneIdentity({
       db: this.db,
@@ -1322,6 +1326,8 @@ export class RestoreOrchestrator {
       nodeId: node.id,
       sessionName,
       runtime: node.runtime ?? null,
+      expectedResumeToken: resumeToken,
+      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
     });
     if (!identity.ok) {
       return {

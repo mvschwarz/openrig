@@ -9,8 +9,38 @@ import type { AgentActivity, SeatIdentityVerdict } from "./types.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
+import { defaultListProcesses } from "./resume-metadata-refresher.js";
 
 type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
+type ProcessRow = { pid: number; ppid: number; command: string };
+
+function codexResumeInPaneLineage(
+  processes: ProcessRow[],
+  panePid: number,
+  resumeToken: string,
+): ProcessRow | null {
+  const childrenByParent = new Map<number, ProcessRow[]>();
+  for (const process of processes) {
+    const children = childrenByParent.get(process.ppid) ?? [];
+    children.push(process);
+    childrenByParent.set(process.ppid, children);
+  }
+
+  const queue = [panePid];
+  while (queue.length > 0) {
+    const parentPid = queue.shift()!;
+    for (const child of childrenByParent.get(parentPid) ?? []) {
+      queue.push(child.pid);
+      const tokens = child.command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^['"]|['"]$/g, "")) ?? [];
+      const codexIndex = tokens.findIndex((token) => token.split("/").pop() === "codex");
+      const resumeIndex = tokens.indexOf("resume", codexIndex + 1);
+      if (codexIndex >= 0 && resumeIndex > codexIndex && tokens.slice(resumeIndex + 1).includes(resumeToken)) {
+        return child;
+      }
+    }
+  }
+  return null;
+}
 
 export type PaneIdentityReconcileResult =
   | { ok: true; pane: string; pid: number; command: string | null }
@@ -25,6 +55,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
   nodeId: string;
   sessionName: string;
   runtime: string | null;
+  expectedResumeToken?: string | null;
+  listProcesses?: () => Promise<ProcessRow[]>;
   now?: () => Date;
 }): Promise<PaneIdentityReconcileResult> {
   const observedAt = (input.now ?? (() => new Date()))().toISOString();
@@ -65,9 +97,27 @@ export async function rebindAndVerifyPaneIdentity(input: {
   }
   const runtimeMatch = classifyPaneRuntimeMatch(command, input.runtime);
   const normalizedCommand = command?.trim().toLowerCase() ?? "";
+  let lineageMatch: ProcessRow | null = null;
+  if (
+    pid !== null
+    && runtimeMatch === "match"
+    && input.runtime === "codex"
+    && !normalizedCommand.includes("codex")
+    && input.expectedResumeToken
+  ) {
+    try {
+      lineageMatch = codexResumeInPaneLineage(
+        await (input.listProcesses ?? defaultListProcesses)(),
+        pid,
+        input.expectedResumeToken,
+      );
+    } catch {
+      // Missing process evidence is ambiguity, never positive identity.
+    }
+  }
   const runtimeAmbiguous = runtimeMatch === "match" && (
     (input.runtime === "claude-code" && !normalizedCommand.includes("claude"))
-    || (input.runtime === "codex" && !normalizedCommand.includes("codex"))
+    || (input.runtime === "codex" && !normalizedCommand.includes("codex") && lineageMatch === null)
   );
   const verdict: SeatIdentityVerdict = {
     nodeId: input.nodeId,
@@ -86,8 +136,8 @@ export async function rebindAndVerifyPaneIdentity(input: {
         : null,
     evidence: {
       registeredPane: pane.id,
-      observedPid: pid,
-      observedCommand: command,
+      observedPid: lineageMatch?.pid ?? pid,
+      observedCommand: lineageMatch?.command ?? command,
       matchedLayer: pid === null || runtimeAmbiguous ? null : 1,
     },
     sessionName: input.sessionName,

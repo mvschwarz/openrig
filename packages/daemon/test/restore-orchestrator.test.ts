@@ -95,6 +95,7 @@ describe("RestoreOrchestrator", () => {
     claude?: ClaudeResumeAdapter;
     codex?: CodexResumeAdapter;
     pi?: PiResumeAdapter;
+    listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
   }) {
     const tmux = opts?.tmux ?? mockTmux();
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
@@ -104,6 +105,7 @@ describe("RestoreOrchestrator", () => {
       claudeResume: opts?.claude ?? mockClaudeResume(),
       codexResume: opts?.codex ?? mockCodexResume(),
       piResume: opts?.pi,
+      listProcesses: opts?.listProcesses,
     });
   }
 
@@ -795,6 +797,37 @@ describe("RestoreOrchestrator", () => {
         .get(result.result.nodes[0]!.nodeId) as { verdict: string; registered_pane: string };
       expect(verdict).toEqual({ verdict: "verified", registered_pane: "%1" });
     }
+  });
+
+  it("reports a managed Codex node wrapper resumed when its child lineage carries the saved native session", async () => {
+    const resumeToken = "01a05645-37a2-7dd0-970c-031d2f2510cb";
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }],
+      edges: [],
+      resumeType: "codex_id",
+      resumeToken,
+    });
+    const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
+    const codexCommand = `node /opt/openrig/lib/node_modules/@openai/codex/bin/codex --model gpt-5.6 resume ${resumeToken}`;
+    const result = await createOrchestrator({
+      tmux,
+      codex: mockCodexResume({ ok: true }),
+      listProcesses: async () => [
+        { pid: 1234, ppid: 1, command: "-zsh" },
+        { pid: 54776, ppid: 1234, command: codexCommand },
+      ],
+    }).restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]!.status).toBe("resumed");
+    expect(db.prepare("SELECT verdict, observed_pid, observed_command, matched_layer FROM seat_identity_verdicts WHERE node_id = ?")
+      .get(result.result.nodes[0]!.nodeId)).toEqual({
+        verdict: "verified",
+        observed_pid: 54776,
+        observed_command: codexCommand,
+        matched_layer: 1,
+      });
   });
 
   it("keeps a native resume partial when no terminal pane can be joined", async () => {
