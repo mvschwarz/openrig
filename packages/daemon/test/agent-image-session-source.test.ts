@@ -12,7 +12,6 @@ import { describe, it, expect } from "vitest";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 
 const baseRig = {
-  format: "pod_aware",
   version: "0.2",
   name: "test-rig",
   pods: [{

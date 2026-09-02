@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -15,11 +15,13 @@ import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.j
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { OUTBOUND_OP } from "../src/domain/gateway/slack/outbound-driver.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
+import { buildProductionPackage } from "./helpers/eval-ref-resolution.js";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 const PLUGIN_ROOT = join(REPO_ROOT, "packages/daemon/assets/plugins/openrig-core");
 const SPEC_ROOT = join(REPO_ROOT, "packages/daemon/specs/agents/shared/skills");
-const PACKS_ROOT = join(REPO_ROOT, "packages/daemon/context-packs");
+const BUILT_PACKS = buildProductionPackage(REPO_ROOT);
+afterAll(BUILT_PACKS.cleanup);
 const LAYOUT = JSON.parse(
   readFileSync(join(REPO_ROOT, "scripts/skill-edge-layout.generated.json"), "utf8"),
 ) as Layout;
@@ -106,7 +108,7 @@ function pluginSkills(): string[] {
 
 function builtinLibrary(): ContextPackLibraryService {
   const library = new ContextPackLibraryService({
-    roots: [{ path: PACKS_ROOT, sourceType: "builtin" }],
+    roots: [{ path: BUILT_PACKS.dir, sourceType: "builtin" }],
   });
   const scan = library.scan();
   expect(scan.errors).toEqual([]);

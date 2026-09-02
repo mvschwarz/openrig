@@ -18,7 +18,7 @@ describe("Adapter routes", () => {
   });
 
   it("GET /api/adapters/tmux/sessions -> tmux session list", async () => {
-    const tmuxExec: ExecFn = async () => "my-session\t2\t2026-03-23\t1\n";
+    const tmuxExec: ExecFn = async () => "my-session|2|2026-03-23|1\n";
     const tmux = new TmuxAdapter(tmuxExec);
 
     const { app } = createTestApp(db, { tmux });

@@ -16,7 +16,6 @@ import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
 
 const baseRig = {
-  format: "pod_aware",
   version: "0.2",
   name: "test-rig",
   pods: [{
