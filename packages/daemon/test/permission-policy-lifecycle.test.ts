@@ -116,6 +116,7 @@ describe("F1 — rig-level custom provenance is RESTART-COMPLETE", () => {
     const organic = setup1.rigRepo.addNode(rigId, "dev.organic", { runtime: "claude-code", cwd: "/w" });
     // a resumable session for the organic seat (legacy restore path)
     const session = setup1.sessionRegistry.registerSession(organic.id, "dev-organic@lifecycle-rig");
+    setup1.sessionRegistry.updateStatus(session.id, "running");
     db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-123' WHERE id = ?").run(session.id);
     const snap = setup1.snapshotCapture.captureSnapshot(rigId, "manual");
     db1.close(); // ── restart boundary ──
@@ -263,6 +264,7 @@ describe("F3 — unreadable custom content at restore uses the PERSISTED posture
     });
     db1.prepare("UPDATE nodes SET permission_policy = 'policies/operator-full.md' WHERE id = ?").run(implNode.id);
     const session = setup1.sessionRegistry.registerSession(implNode.id, "dev-impl@f3-rig");
+    setup1.sessionRegistry.updateStatus(session.id, "running");
     db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-f3' WHERE id = ?").run(session.id);
     const snap = setup1.snapshotCapture.captureSnapshot(rigId, "manual");
     db1.close(); // ── restart; the persisted target path is unreadable on this real fs ──
@@ -409,6 +411,7 @@ describe("GF1 — READABLE but malformed/unusable custom content uses the PERSIS
       });
     }
     const session = setup1.sessionRegistry.registerSession(node.id, `dev-seat@gf1-${kind}`);
+    setup1.sessionRegistry.updateStatus(session.id, "running");
     db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-gf1' WHERE id = ?").run(session.id);
     const snap = setup1.snapshotCapture.captureSnapshot(rig.id, "manual");
     db1.close();
@@ -475,6 +478,7 @@ describe("GF2 — the COMPLETE production-altitude launch/restore matrix", () =>
       const implNode = db1.prepare("SELECT id FROM nodes WHERE logical_id = 'dev.impl'").get() as { id: string };
       // pod-aware = snapshot carries podId nodes; the materialized member has one
       const session = setup1.sessionRegistry.registerSession(implNode.id, "dev-impl@lifecycle-rig");
+      setup1.sessionRegistry.updateStatus(session.id, "running");
       db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-pod' WHERE id = ?").run(session.id);
       const snap = setup1.snapshotCapture.captureSnapshot(rigId, "manual");
       // pod-aware startup replay requires nodeStartupContext (captured at original launch;
@@ -632,6 +636,7 @@ describe("ABSENCE = locked floor at every lifecycle surface (R2 HIGH at 954d97a0
       const rig = setup1.rigRepo.createRig("absent-rig");
       const node = setup1.rigRepo.addNode(rig.id, "dev.bare", { runtime: "claude-code", cwd: "/w" });
       const session = setup1.sessionRegistry.registerSession(node.id, "dev-bare@absent-rig");
+      setup1.sessionRegistry.updateStatus(session.id, "running");
       db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-abs' WHERE id = ?").run(session.id);
       const snap = setup1.snapshotCapture.captureSnapshot(rig.id, "manual");
       db1.close();
