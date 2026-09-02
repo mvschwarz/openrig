@@ -24,11 +24,12 @@ export function importCommand(depsOverride?: ImportDeps): Command {
     .argument("<path>", "Path to YAML rig spec file")
     .option("--instantiate", "Instantiate the rig after import")
     .option("--materialize-only", "Create rig topology without launching sessions")
+    .option("--workspace-only", "Apply only the workspace declaration to an existing rig")
     .option("--preflight", "Run preflight checks")
-    .option("--target-rig <rigId>", "Target existing rig for additive materialization")
+    .option("--target-rig <rigId>", "Target existing rig for materialization or workspace apply")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
     .option("--cwd <path>", "Override launch/materialization working directory for all members")
-    .action(async (filePath: string, opts: { instantiate?: boolean; materializeOnly?: boolean; preflight?: boolean; targetRig?: string; rigRoot?: string; cwd?: string }) => {
+    .action(async (filePath: string, opts: { instantiate?: boolean; materializeOnly?: boolean; workspaceOnly?: boolean; preflight?: boolean; targetRig?: string; rigRoot?: string; cwd?: string }) => {
       const deps = getDeps();
 
       // Read local file first (before daemon check — fail fast on missing file)
@@ -61,6 +62,35 @@ export function importCommand(depsOverride?: ImportDeps): Command {
       if (opts.instantiate && opts.materializeOnly) {
         console.error("Choose either --instantiate or --materialize-only, not both.");
         process.exitCode = 1;
+        return;
+      }
+      if (opts.workspaceOnly && (opts.instantiate || opts.materializeOnly || opts.preflight)) {
+        console.error("--workspace-only cannot be combined with --instantiate, --materialize-only, or --preflight.");
+        process.exitCode = 1;
+        return;
+      }
+
+      if (opts.workspaceOnly) {
+        if (!opts.targetRig) {
+          console.error("--workspace-only requires --target-rig <rigId>.");
+          process.exitCode = 1;
+          return;
+        }
+        const res = await client.postText<
+          { rigId: string; changed: boolean; workspace: unknown }
+          | { ok: false; code: string; errors?: string[]; message?: string; error?: string }
+        >("/api/rigs/import/workspace", yaml, "text/yaml", { "X-Target-Rig-Id": opts.targetRig });
+        if (res.status >= 400) {
+          const data = res.data as { errors?: string[]; message?: string; error?: string };
+          const detail = data.errors?.join("\n  ") ?? data.message ?? data.error ?? `status ${res.status}`;
+          console.error(`Workspace apply failed:\n  ${detail}\nFix: update the RigSpec workspace or target rig and retry.`);
+          process.exitCode = 1;
+          return;
+        }
+        const data = res.data as { rigId: string; changed: boolean };
+        console.log(data.changed
+          ? `Workspace applied to rig ${data.rigId}`
+          : `Workspace already matches rig ${data.rigId}`);
         return;
       }
 

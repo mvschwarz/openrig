@@ -324,6 +324,33 @@ pods:
 edges: []
 `;
 
+const WORKSPACE_ONLY_YAML = `
+version: "0.2"
+name: workspace-declaration
+workspace:
+  workspace_root: /workspace
+  repos:
+    - name: app
+      path: app
+      kind: project
+    - name: docs
+      path: /workspace/docs
+      kind: knowledge
+  default_repo: app
+  knowledge_root: /workspace/docs
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: "builtin:terminal"
+        profile: none
+        runtime: terminal
+        cwd: /workspace/app
+    edges: []
+edges: []
+`;
+
 const INVALID_POD_YAML = `
 version: "0.2"
 name: bad
@@ -392,11 +419,16 @@ edges:
 describe("Rigspec import routes (pod-aware dual-stack)", () => {
   let db: Database.Database;
   let app: Hono;
+  let rigRepo: RigRepository;
+  let sessionRegistry: SessionRegistry;
 
   beforeEach(() => {
     db = createFullTestDb();
+    migrate(db, [workspacePrimitiveSchema]);
     const setup = createTestApp(db);
     app = setup.app;
+    rigRepo = setup.rigRepo;
+    sessionRegistry = setup.sessionRegistry;
   });
 
   afterEach(() => {
@@ -476,6 +508,117 @@ describe("Rigspec import routes (pod-aware dual-stack)", () => {
     const body = await res.json();
     expect(body.rigId).toBeDefined();
     expect(body.specName).toBe("r99");
+  });
+
+  it("POST /api/rigs/import/workspace changes only workspace_json and is idempotent", async () => {
+    const rig = rigRepo.createRig("host-rig");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", {
+      runtime: "terminal",
+      podId: pod.id,
+      agentRef: "builtin:terminal",
+      profile: "none",
+      cwd: "/workspace/app",
+    });
+    sessionRegistry.registerSession(node.id, "dev-impl@host-rig");
+    sessionRegistry.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: "dev-impl@host-rig" });
+
+    const topology = () => ({
+      pods: db.prepare("SELECT * FROM pods WHERE rig_id = ? ORDER BY id").all(rig.id),
+      nodes: db.prepare("SELECT * FROM nodes WHERE rig_id = ? ORDER BY id").all(rig.id),
+      edges: db.prepare("SELECT * FROM edges WHERE rig_id = ? ORDER BY id").all(rig.id),
+      sessions: db.prepare("SELECT s.* FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE n.rig_id = ? ORDER BY s.id").all(rig.id),
+      bindings: db.prepare("SELECT b.* FROM bindings b JOIN nodes n ON n.id = b.node_id WHERE n.rig_id = ? ORDER BY b.id").all(rig.id),
+    });
+    const before = topology();
+
+    const first = await app.request("/api/rigs/import/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Target-Rig-Id": rig.id },
+      body: WORKSPACE_ONLY_YAML,
+    });
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ rigId: rig.id, changed: true });
+    expect(topology()).toEqual(before);
+    expect(rigRepo.getRigWorkspace(rig.id)).toEqual({
+      workspaceRoot: "/workspace",
+      repos: [
+        { name: "app", path: "/workspace/app", kind: "project" },
+        { name: "docs", path: "/workspace/docs", kind: "knowledge" },
+      ],
+      defaultRepo: "app",
+      knowledgeRoot: "/workspace/docs",
+    });
+    const afterFirst = db.prepare("SELECT workspace_json, updated_at FROM rigs WHERE id = ?").get(rig.id);
+
+    const second = await app.request("/api/rigs/import/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Target-Rig-Id": rig.id },
+      body: WORKSPACE_ONLY_YAML,
+    });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({ rigId: rig.id, changed: false });
+    expect(db.prepare("SELECT workspace_json, updated_at FROM rigs WHERE id = ?").get(rig.id)).toEqual(afterFirst);
+    expect(topology()).toEqual(before);
+
+    const exported = await app.request(`/api/rigs/${rig.id}/spec`);
+    expect(exported.status).toBe(200);
+    expect(PodRigSpecSchema.normalize(PodRigSpecCodec.parse(await exported.text()) as Record<string, unknown>).workspace)
+      .toEqual(rigRepo.getRigWorkspace(rig.id));
+  });
+
+  it("POST /api/rigs/import/workspace fails before mutation for invalid input or target", async () => {
+    const rig = rigRepo.createRig("host-rig");
+    const original = {
+      workspaceRoot: "/original",
+      repos: [{ name: "original", path: "/original", kind: "project" as const }],
+      defaultRepo: "original",
+    };
+    rigRepo.setRigWorkspace(rig.id, original);
+    const preimage = db.prepare("SELECT workspace_json, updated_at FROM rigs WHERE id = ?").get(rig.id);
+
+    const invalidDefault = await app.request("/api/rigs/import/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Target-Rig-Id": rig.id },
+      body: WORKSPACE_ONLY_YAML.replace("default_repo: app", "default_repo: missing"),
+    });
+    expect(invalidDefault.status).toBe(400);
+    expect(await invalidDefault.json()).toMatchObject({ code: "validation_failed" });
+
+    const invalidRepo = await app.request("/api/rigs/import/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Target-Rig-Id": rig.id },
+      body: WORKSPACE_ONLY_YAML.replace("kind: project", "kind: executable"),
+    });
+    expect(invalidRepo.status).toBe(400);
+    expect(await invalidRepo.json()).toMatchObject({ code: "validation_failed" });
+
+    const missingWorkspace = await app.request("/api/rigs/import/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Target-Rig-Id": rig.id },
+      body: POD_AWARE_YAML,
+    });
+    expect(missingWorkspace.status).toBe(400);
+    expect(await missingWorkspace.json()).toMatchObject({ code: "workspace_required" });
+
+    const missingTarget = await app.request("/api/rigs/import/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "text/yaml" },
+      body: WORKSPACE_ONLY_YAML,
+    });
+    expect(missingTarget.status).toBe(400);
+    expect(await missingTarget.json()).toMatchObject({ code: "target_rig_required" });
+
+    const unknownTarget = await app.request("/api/rigs/import/workspace", {
+      method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Target-Rig-Id": "missing" },
+      body: WORKSPACE_ONLY_YAML,
+    });
+    expect(unknownTarget.status).toBe(404);
+    expect(await unknownTarget.json()).toMatchObject({ code: "target_rig_not_found" });
+
+    expect(db.prepare("SELECT workspace_json, updated_at FROM rigs WHERE id = ?").get(rig.id)).toEqual(preimage);
+    expect(rigRepo.listRigs()).toHaveLength(1);
   });
 
   it("POST /api/rigs/import/materialize creates rig structure without launching", async () => {

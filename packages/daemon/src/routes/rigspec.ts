@@ -4,6 +4,7 @@ import type { Context } from "hono";
 import type { RigSpecExporter } from "../domain/rigspec-exporter.js";
 import type { RigInstantiator, PodRigInstantiator } from "../domain/rigspec-instantiator.js";
 import type { RigSpecPreflight } from "../domain/rigspec-preflight.js";
+import type { RigRepository } from "../domain/rig-repository.js";
 import { LegacyRigSpecCodec } from "../domain/rigspec-codec.js";
 import { RigSpecCodec } from "../domain/rigspec-codec.js";
 import { LegacyRigSpecSchema } from "../domain/rigspec-schema.js";
@@ -20,6 +21,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
     instantiator: c.get("rigInstantiator" as never) as RigInstantiator,
     preflight: c.get("rigSpecPreflight" as never) as RigSpecPreflight,
     podInstantiator: c.get("podInstantiator" as never) as PodRigInstantiator,
+    rigRepo: c.get("rigRepo" as never) as RigRepository,
   };
 }
 
@@ -121,6 +123,43 @@ rigspecImportRoutes.post("/", async (c) => {
     return c.json(body, status);
   }
   return c.json(outcome.result, 201);
+});
+
+// POST /api/rigs/import/workspace -> apply only a validated workspace declaration
+rigspecImportRoutes.post("/workspace", async (c) => {
+  const { rigRepo } = getDeps(c);
+  const targetRigId = c.req.header("X-Target-Rig-Id");
+  if (!targetRigId) {
+    return c.json({ ok: false, code: "target_rig_required", error: "X-Target-Rig-Id header required for workspace-only apply" }, 400);
+  }
+
+  const body = await c.req.text();
+  let raw: unknown;
+  try {
+    raw = RigSpecCodec.parse(body);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return c.json({ ok: false, code: "validation_failed", errors: [message] }, 400);
+  }
+
+  const validation = RigSpecSchema.validate(raw);
+  if (!validation.valid) {
+    return c.json({ ok: false, code: "validation_failed", errors: validation.errors }, 400);
+  }
+
+  const spec = RigSpecSchema.normalize(raw as Record<string, unknown>);
+  if (!spec.workspace) {
+    return c.json({ ok: false, code: "workspace_required", errors: ["workspace: required for workspace-only apply"] }, 400);
+  }
+  if (!rigRepo.getRig(targetRigId)) {
+    return c.json({ ok: false, code: "target_rig_not_found", error: `Rig not found: ${targetRigId}` }, 404);
+  }
+
+  const current = rigRepo.getRigWorkspace(targetRigId);
+  const changed = JSON.stringify(current) !== JSON.stringify(spec.workspace);
+  if (changed) rigRepo.setRigWorkspace(targetRigId, spec.workspace);
+
+  return c.json({ rigId: targetRigId, changed, workspace: spec.workspace });
 });
 
 // POST /api/rigs/import/materialize -> create rig topology without launching

@@ -74,6 +74,7 @@ function unhealthyLifecycleDeps(): LifecycleDeps {
 
 // Track captured headers for import assertions
 let capturedImportHeaders: Record<string, string | string[] | undefined> = {};
+let capturedImportPath = "";
 
 // Mock daemon for export/import
 function createMockDaemon() {
@@ -143,6 +144,7 @@ function createMockDaemon() {
 
     // POST /api/rigs/import/materialize
     if (req.method === "POST" && url.pathname === "/api/rigs/import/materialize") {
+      capturedImportPath = url.pathname;
       capturedImportHeaders = {
         "x-rig-root": req.headers["x-rig-root"],
         "x-target-rig-id": req.headers["x-target-rig-id"],
@@ -154,6 +156,19 @@ function createMockDaemon() {
         specName: "imported-rig",
         specVersion: "0.2",
         nodes: [{ logicalId: "research.scout", status: "materialized" }],
+      }));
+      return;
+    }
+
+    // POST /api/rigs/import/workspace
+    if (req.method === "POST" && url.pathname === "/api/rigs/import/workspace") {
+      capturedImportPath = url.pathname;
+      capturedImportHeaders = { "x-target-rig-id": req.headers["x-target-rig-id"] };
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        rigId: req.headers["x-target-rig-id"],
+        changed: true,
+        workspace: { workspaceRoot: "/workspace", repos: [] },
       }));
       return;
     }
@@ -309,6 +324,32 @@ describe("rig export + import", () => {
     await captureLogs(() => program.parseAsync(["node", "rig", "import", "rig.yaml", "--materialize-only", "--cwd", "relative/project", "--rig-root", "/tmp"]));
     expect(capturedImportHeaders["x-cwd-override"]).toMatch(/^\//);
     expect(String(capturedImportHeaders["x-cwd-override"])).toContain("relative/project");
+  });
+
+  it("import --workspace-only targets the workspace-only route", async () => {
+    capturedImportHeaders = {};
+    capturedImportPath = "";
+    const deps = importDeps(`version: "0.2"\nname: test\nworkspace:\n  workspace_root: /workspace\n  repos: []\npods: []\n`);
+    const program = new Command();
+    program.addCommand(importCommand(deps));
+    const logs = await captureLogs(() => program.parseAsync([
+      "node", "rig", "import", "rig.yaml", "--workspace-only", "--target-rig", "rig-123",
+    ]));
+    expect(capturedImportPath).toBe("/api/rigs/import/workspace");
+    expect(capturedImportHeaders["x-target-rig-id"]).toBe("rig-123");
+    expect(logs.join("\n")).toContain("Workspace applied to rig rig-123");
+  });
+
+  it("import --workspace-only requires --target-rig before HTTP", async () => {
+    capturedImportPath = "";
+    const deps = importDeps(`version: "0.2"\nname: test\nworkspace:\n  workspace_root: /workspace\n  repos: []\npods: []\n`);
+    const program = new Command();
+    program.addCommand(importCommand(deps));
+    const logs = await captureLogs(() => program.parseAsync([
+      "node", "rig", "import", "rig.yaml", "--workspace-only",
+    ]));
+    expect(logs.join("\n")).toMatch(/--target-rig/);
+    expect(capturedImportPath).toBe("");
   });
 
   // Test 8: import --instantiate with preflight fail (409)
