@@ -1776,8 +1776,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // SQLite workflow_instances directly via the new Phase D tables
       // (audit row 18: SQLite-source-only, no markdown read).
       // OPR.0.4.3.16: register idle-gate-qitem — joins pending gate:*
-      // qitems (queue_items) with a FRESH idle runtime signal from the
-      // shared AgentActivityStore (constructed above, before the engine)
+      // qitems (queue_items) with the shared arbitrated activity verdict
+      // rendered by public surfaces
       // into one bounded wake. Wakes/flags only; cooldown via engine throttle.
       additionalPolicies: [
         makeWorkflowKeepalivePolicy({
@@ -1787,7 +1787,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           // spec (never-lost fallback inside the helper).
           ensureStuckExceptionItem: workflowExceptionEnsurer,
         }),
-        makeIdleGateQitemPolicy({ db, agentActivityStore }),
+        makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService }),
         // OPR.0.5.6.24 F-14: the parked-owner consumer — the WHOLE shipped
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation

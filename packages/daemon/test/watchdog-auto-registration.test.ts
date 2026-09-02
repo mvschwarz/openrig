@@ -15,7 +15,6 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine, type DeliveryFn } from "../src/domain/watchdog-policy-engine.js";
 import { makeIdleGateQitemPolicy } from "../src/domain/policies/idle-gate-qitem.js";
-import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { createFullTestDb, mockTmuxAdapter } from "./helpers/test-app.js";
 
 const AUTO_POLICY = "idle-gate-qitem";
@@ -381,13 +380,18 @@ describe("W2c watchdog auto-registration — production composition", () => {
           ('q-w2c-delivery', '2026-08-08T17:00:00Z', '2026-08-08T17:00:00Z',
            'orch@delivery-rig', ?, 'pending', 'urgent', 'deep', '["gate:guard"]', 'review the gate')`,
       ).run(sessionName);
-      const activity = new AgentActivityStore({ db, eventBus: deps.eventBus, now: () => now });
-      expect(activity.recordHookEvent({
-        runtime: "codex",
-        sessionName,
-        hookEvent: "Stop",
-        occurredAt: fresh,
-      }).ok).toBe(true);
+      const seatActivity = {
+        getSeatStateBySession: () => ({
+          seatNodeId: node.id,
+          activity: "idle-at-prompt" as const,
+          needsInput: { count: 0, reason: null },
+          decidedBy: "lifecycle-hooks" as const,
+          seq: 1,
+          changedAt: fresh,
+          rungs: [],
+          lastSwap: null,
+        }),
+      };
 
       const history = new WatchdogHistoryLog(db);
       const deliveries: Array<{ targetSession: string; message: string }> = [];
@@ -401,7 +405,7 @@ describe("W2c watchdog auto-registration — production composition", () => {
         eventBus: deps.eventBus,
         deliver,
         now: () => now,
-        additionalPolicies: [makeIdleGateQitemPolicy({ db, agentActivityStore: activity })],
+        additionalPolicies: [makeIdleGateQitemPolicy({ db, seatActivity })],
         resolveTargetGeneration: (seat) => deps.sessionRegistry.currentOccupantGenerationForSession(seat),
       });
 

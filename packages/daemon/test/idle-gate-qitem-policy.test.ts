@@ -9,6 +9,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import type { ArbitratedSeatState } from "../src/domain/activity-taxonomy.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import { WatchdogPolicyEngine, type DeliveryFn } from "../src/domain/watchdog-policy-engine.js";
@@ -40,7 +41,26 @@ function makeJob(overrides: Partial<PolicyJob> = {}): PolicyJob {
 describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
   let db: Database.Database;
   let eventBus: EventBus;
-  let store: AgentActivityStore;
+  let oracleState: ArbitratedSeatState | null;
+  const seatActivity = {
+    getSeatStateBySession: () => oracleState,
+  };
+
+  function setOracleState(
+    activity: ArbitratedSeatState["activity"],
+    needsInput: ArbitratedSeatState["needsInput"] = { count: 0, reason: null },
+  ): void {
+    oracleState = {
+      seatNodeId: "node-oracle",
+      activity,
+      needsInput,
+      decidedBy: "lifecycle-hooks",
+      seq: 1,
+      changedAt: NOW.toISOString(),
+      rungs: [],
+      lastSwap: null,
+    };
+  }
 
   function seedSeat(): void {
     const rigRepo = new RigRepository(db);
@@ -53,8 +73,11 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
   }
 
   function seedActivity(hookEvent: string, occurredAt: string): void {
-    const res = store.recordHookEvent({ runtime: "claude-code", sessionName: SEAT, hookEvent, occurredAt });
-    expect(res.ok).toBe(true);
+    if (occurredAt === STALE) setOracleState("unknown");
+    else if (hookEvent === "PermissionRequest") {
+      setOracleState("idle-at-prompt", { count: 1, reason: "permission prompt" });
+    } else if (hookEvent === "Stop") setOracleState("idle-at-prompt");
+    else setOracleState("working");
   }
 
   function seedGateQitem(
@@ -74,16 +97,40 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     db = createFullTestDb();
     migrate(db, [watchdogJobsSchema, watchdogHistorySchema, idleGateFiredConditionSchema]); // idempotent; adds watchdog tables
     eventBus = new EventBus(db);
-    store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    oracleState = null;
     seedSeat();
   });
 
   afterEach(() => db.close());
 
+  it("uses the arbitrated oracle when raw hook activity disagrees", async () => {
+    seedGateQitem("q-opposed-activity");
+    const rawStore = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    expect(rawStore.recordHookEvent({
+      runtime: "claude-code",
+      sessionName: SEAT,
+      hookEvent: "Stop",
+      occurredAt: FRESH,
+    }).ok).toBe(true); // raw hook store says idle
+    setOracleState("working");
+    const policy = makeIdleGateQitemPolicy({
+      db,
+      seatActivity,
+    });
+
+    const out = await policy.evaluate(makeJob());
+
+    expect(out).toEqual({
+      action: "skip",
+      reason: "seat_active",
+      notes: { seat: SEAT, activityState: "working" },
+    });
+  });
+
   it("pending gate:guard qitem + FRESH idle → ONE send; notes record the qitem + activity signal", async () => {
     seedGateQitem("q-gate-1");
     seedActivity("Stop", FRESH); // → idle
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity });
     const out = await policy.evaluate(makeJob());
     expect(out.action).toBe("send");
     if (out.action !== "send") return;
@@ -91,8 +138,8 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     expect(out.message).toContain("q-gate-1");
     expect(out.notes?.qitemId).toBe("q-gate-1");
     expect(out.notes?.gateRoles).toEqual(["guard"]);
-    expect(out.notes?.activityState).toBe("idle");
-    expect(out.notes?.activityEvidenceSource).toBe("runtime_hook");
+    expect(out.notes?.activityState).toBe("idle-at-prompt");
+    expect(out.notes?.activityDecidedBy).toBe("lifecycle-hooks");
   });
 
   // --- OPR.0.5.8.1 S2: fire once per MATERIAL STATE of the gated set ---
@@ -118,7 +165,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     };
     const engine = new WatchdogPolicyEngine({
       jobsRepo, historyLog, eventBus, deliver, now: () => clock,
-      additionalPolicies: [makeIdleGateQitemPolicy({ db, agentActivityStore: store })],
+      additionalPolicies: [makeIdleGateQitemPolicy({ db, seatActivity })],
     });
     const registered = jobsRepo.register({
       policy: "idle-gate-qitem",
@@ -319,7 +366,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
   it("human-gate tier (no gate:* tag) + FRESH idle → send (secondary predicate, gate:human)", async () => {
     seedGateQitem("q-human-1", { tags: null, tier: "human-gate" });
     seedActivity("Stop", FRESH);
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity });
     const out = await policy.evaluate(makeJob());
     expect(out.action).toBe("send");
     if (out.action !== "send") return;
@@ -331,7 +378,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
     seedGateQitem("q-plain", { tags: ["mission:x"] });
     seedGateQitem("q-other", { destination: "someone-else@test-rig" });
     seedActivity("Stop", FRESH);
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity });
     const out = await policy.evaluate(makeJob());
     expect(out.action).toBe("skip");
     if (out.action !== "skip") return;
@@ -341,7 +388,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
   it("seat running → skip seat_active (no idle-wake)", async () => {
     seedGateQitem("q-gate-2");
     seedActivity("UserPromptSubmit", FRESH); // → running
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity });
     const out = await policy.evaluate(makeJob());
     expect(out.action).toBe("skip");
     if (out.action !== "skip") return;
@@ -351,7 +398,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
   it("seat needs_input → skip seat_needs_input (never drive a live picker)", async () => {
     seedGateQitem("q-gate-3");
     seedActivity("PermissionRequest", FRESH); // → needs_input
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity });
     const out = await policy.evaluate(makeJob());
     expect(out.action).toBe("skip");
     if (out.action !== "skip") return;
@@ -360,8 +407,8 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
 
   it("STALE idle activity → honest skip activity_stale_unknown (never fake-idle)", async () => {
     seedGateQitem("q-gate-4");
-    seedActivity("Stop", STALE); // idle but 10 min old → store degrades to unknown/stale
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    seedActivity("Stop", STALE); // stale evidence leaves the oracle honestly unknown
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity });
     const out = await policy.evaluate(makeJob());
     expect(out.action).toBe("skip");
     if (out.action !== "skip") return;
@@ -371,7 +418,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
   it("no activity signal at all → honest skip activity_stale_unknown", async () => {
     seedGateQitem("q-gate-5");
     // no seedActivity
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity });
     const out = await policy.evaluate(makeJob());
     expect(out.action).toBe("skip");
     if (out.action !== "skip") return;
@@ -381,7 +428,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
   it("gate qitem already claimed (in-progress) → does NOT fire (not-claimable → skip)", async () => {
     seedGateQitem("q-claimed", { state: "in-progress" });
     seedActivity("Stop", FRESH);
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity });
     const out = await policy.evaluate(makeJob());
     expect(out.action).toBe("skip");
     if (out.action !== "skip") return;
@@ -391,7 +438,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
   it("blocked gate qitem is claimable → fires when idle", async () => {
     seedGateQitem("q-blocked", { state: "blocked" });
     seedActivity("Stop", FRESH);
-    const policy = makeIdleGateQitemPolicy({ db, agentActivityStore: store });
+    const policy = makeIdleGateQitemPolicy({ db, seatActivity });
     const out = await policy.evaluate(makeJob());
     expect(out.action).toBe("send");
   });
@@ -411,7 +458,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
         eventBus,
         deliver,
         now: () => NOW,
-        additionalPolicies: [makeIdleGateQitemPolicy({ db, agentActivityStore: store })],
+        additionalPolicies: [makeIdleGateQitemPolicy({ db, seatActivity })],
       });
 
       // Register a REAL job — proves PHASE_D_POLICIES accepts idle-gate-qitem
@@ -480,7 +527,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
         eventBus,
         deliver,
         now: () => NOW,
-        additionalPolicies: [makeIdleGateQitemPolicy({ db, agentActivityStore: store })],
+        additionalPolicies: [makeIdleGateQitemPolicy({ db, seatActivity })],
       });
       const registered = jobsRepo.register({
         policy: "idle-gate-qitem",
@@ -517,7 +564,7 @@ describe("idle-gate-qitem policy (OPR.0.4.3.16)", () => {
 
     it("gate pending on a STALE seat across 5 scans → 0 history rows + 0 SSE + 0 deliveries", async () => {
       seedGateQitem("q-stuck-stale");
-      seedActivity("Stop", STALE); // idle but 10 min old → degrades to stale/unknown
+      seedActivity("Stop", STALE); // stale evidence leaves the oracle honestly unknown
       const { jobsRepo, historyLog, engine, registered, deliveries } = makeEngineWithCapture();
       const skippedEvents: unknown[] = [];
       eventBus.subscribe((e) => {

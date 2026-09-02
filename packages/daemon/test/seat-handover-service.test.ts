@@ -285,13 +285,6 @@ describe("SeatHandoverService", () => {
             ('q-retired-watchdog', '2026-04-24T18:00:00Z', '2026-04-24T18:00:00Z',
              'orch@seat-rig', ?, 'pending', 'urgent', 'deep', '["gate:guard"]', 'retired target')`,
         ).run(retiredSession);
-        const activity = new AgentActivityStore({ db, eventBus, now: () => now });
-        expect(activity.recordHookEvent({
-          runtime: "codex",
-          sessionName: retiredSession,
-          hookEvent: "Stop",
-          occurredAt: "2026-04-24T18:29:00.000Z",
-        }).ok).toBe(true);
         const deliveries: Array<{ targetSession: string; message: string }> = [];
         const deliver: DeliveryFn = async (request) => {
           deliveries.push(request);
@@ -303,7 +296,10 @@ describe("SeatHandoverService", () => {
           eventBus,
           deliver,
           now: () => now,
-          additionalPolicies: [makeIdleGateQitemPolicy({ db, agentActivityStore: activity })],
+          additionalPolicies: [makeIdleGateQitemPolicy({
+            db,
+            seatActivity: { getSeatStateBySession: () => null },
+          })],
         });
 
         const evaluation = await engine.evaluate(jobsRepo.getByIdOrThrow(held[0].jobId));
@@ -344,14 +340,6 @@ describe("SeatHandoverService", () => {
         ('q-retired-noncanonical', '2026-04-24T18:00:00Z', '2026-04-24T18:00:00Z',
          'orch@seat-rig', ?, 'pending', 'urgent', 'deep', '["gate:guard"]', 'retired target')`,
     ).run(retiredSession);
-    const activity = new AgentActivityStore({ db, eventBus, now: () => now });
-    expect(activity.recordHookEvent({
-      runtime: "codex",
-      sessionName: retiredSession,
-      hookEvent: "Stop",
-      occurredAt: "2026-04-24T18:29:00.000Z",
-    }).ok).toBe(true);
-
     const discovered = seedDiscovery();
     const result = await service.handover({
       seatRef: retiredSession,
@@ -375,7 +363,10 @@ describe("SeatHandoverService", () => {
       eventBus,
       deliver,
       now: () => now,
-      additionalPolicies: [makeIdleGateQitemPolicy({ db, agentActivityStore: activity })],
+      additionalPolicies: [makeIdleGateQitemPolicy({
+        db,
+        seatActivity: { getSeatStateBySession: () => null },
+      })],
     });
     for (const job of activeRoleJobs) await engine.evaluate(job);
 

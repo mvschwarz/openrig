@@ -10,27 +10,27 @@
 // sourced signals into ONE bounded, audited wake:
 //   A. a pending/claimable qitem addressed to seat X carrying a gate:* tag
 //      (predicate centralized in domain/gate-predicate.ts), and
-//   B. X has a FRESH idle runtime signal (AgentActivityStore — the single
-//      idleness source; a stale hook degrades to state:"unknown"/stale:true
-//      and is NEVER treated as idle).
+//   B. X is idle according to the shared arbitrated SeatActivityService
+//      oracle. Unknown is NEVER treated as idle, and needs-input remains a
+//      separate axis that also suppresses the wake.
 // Cooldown is FREE via the engine's active-wake throttle (configure
 // active_wake_interval_seconds on the registered job). It WAKES ONLY — it
 // never claims or acts on the gate.
 
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { AgentActivityStore } from "../agent-activity-store.js";
 import { effectiveGateRoles } from "../gate-predicate.js";
+import type { SeatActivityService } from "../seat-activity-service.js";
 import type { Policy, PolicyEvaluation, PolicyJob } from "./types.js";
 
 export interface IdleGateQitemDeps {
   db: Database.Database;
   /**
-   * Reuse the single runtime-idleness source (guard note: do NOT build a
-   * parallel idleness store). Only `getLatestForNode` is used; typed as a
-   * Pick so unit tests can inject a lightweight seam.
+   * Consume the same arbitrated activity oracle as the public surfaces. Only
+   * `getSeatStateBySession` is used; typed as a Pick so unit tests can inject
+   * a lightweight seam without constructing a second oracle.
    */
-  agentActivityStore: Pick<AgentActivityStore, "getLatestForNode">;
+  seatActivity: Pick<SeatActivityService, "getSeatStateBySession">;
 }
 
 interface PendingGateRow {
@@ -50,7 +50,7 @@ function parseTags(raw: string | null): string[] | null {
 }
 
 export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
-  const { db, agentActivityStore } = deps;
+  const { db, seatActivity } = deps;
 
   return {
     name: "idle-gate-qitem",
@@ -79,28 +79,31 @@ export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
         return { action: "skip", reason: "no_pending_gate" };
       }
 
-      // Signal B — the seat's latest runtime idleness. The store degrades a
-      // stale hook to state:"unknown"/stale:true by construction, so an
-      // unknown/stale runtime is an HONEST skip, never fake-idle.
-      const activity = agentActivityStore.getLatestForNode({ sessionName: seat });
-      if (!activity || activity.stale || activity.state === "unknown") {
+      // Signal B — the shared arbitrated activity verdict. This is the same
+      // oracle rendered by public surfaces; raw hook detail is evidence for
+      // that oracle and must never independently decide a wake.
+      const activity = seatActivity.getSeatStateBySession(seat);
+      if (!activity || activity.activity === "unknown") {
         return {
           action: "skip",
           reason: "activity_stale_unknown",
           notes: {
             seat,
-            activityState: activity?.state ?? null,
-            activityReason: activity?.reason ?? "no_activity_signal",
+            activityState: activity?.activity ?? null,
+            activityReason: activity ? "oracle_unknown" : "no_activity_signal",
           },
         };
       }
-      if (activity.state === "needs_input") {
+      if (activity.needsInput.count > 0) {
         // A live picker / approval prompt — never drive it with a wake.
-        return { action: "skip", reason: "seat_needs_input", notes: { seat, activityReason: activity.reason } };
+        return {
+          action: "skip",
+          reason: "seat_needs_input",
+          notes: { seat, activityReason: activity.needsInput.reason },
+        };
       }
-      if (activity.state !== "idle") {
-        // running (or any other live state) → no idle-wake.
-        return { action: "skip", reason: "seat_active", notes: { seat, activityState: activity.state } };
+      if (activity.activity !== "idle-at-prompt") {
+        return { action: "skip", reason: "seat_active", notes: { seat, activityState: activity.activity } };
       }
 
       // Signal C — OPR.0.5.8.1 S2. Fire once per MATERIAL STATE of the gated
@@ -159,10 +162,10 @@ export function makeIdleGateQitemPolicy(deps: IdleGateQitemDeps): Policy {
           gateRoles: primary.roles,
           pendingGateCount: gated.length,
           otherPendingGateQitems: gated.slice(1).map((g) => g.qitemId),
-          activityState: activity.state,
-          activityReason: activity.reason,
-          activityEvidenceSource: activity.evidenceSource,
-          activityEventAt: activity.eventAt ?? null,
+          activityState: activity.activity,
+          activityNeedsInput: activity.needsInput,
+          activityDecidedBy: activity.decidedBy,
+          activityChangedAt: activity.changedAt,
         },
       };
     },
