@@ -609,7 +609,11 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
       // Mocked Claude returns attention_required for one node, success for
       // another. Codex returns failed for the third. We seed three nodes
       // sharing one snapshot.
-      const tmux = mockTmuxForRestore({ hasSession: false });
+      const tmux = {
+        ...mockTmuxForRestore({ hasSession: false }),
+        listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
+        getPanePid: vi.fn(async () => 1234),
+      } as unknown as TmuxAdapter;
       const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
       // Dispatch by sessionName so test doesn't depend on iteration order.
       const claudeStub = {
