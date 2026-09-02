@@ -2635,6 +2635,17 @@ export class QueueRepository {
     return this.wakeRepo.getStatus(qitemId);
   }
 
+  /** Refuse a legacy park-generated timer only when every row bound to it is
+   *  terminal. Current exits retire these timers transactionally; this is the
+   *  delivery-seam backstop for residue persisted by an older daemon. A timer
+   *  still bound to any actionable row, and every operator-attached watchdog,
+   *  remains deliverable. */
+  resolveWatchdogPreDeliveryTerminalReason(jobId: string): string | null {
+    const targets = this.wakeRepo.findQitemsByGeneratedTimer(jobId);
+    if (targets.length === 0 || targets.some(({ state }) => !isTerminalState(state))) return null;
+    return "park_timer_target_terminal";
+  }
+
   listTransitions(qitemId: string): Array<ReturnType<QueueTransitionLog["listForQitem"]>[number] & { wake?: ReturnType<QueueWakeRepository["getForTransition"]> }> {
     return this.transitionLog.listForQitem(qitemId).map((transition) => {
       const wake = this.wakeRepo.getForTransition(transition.transitionId);

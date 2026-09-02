@@ -16,4 +16,10 @@ describe("(i-c) wiring pin — startup injects the real target-generation resolv
   it("passes resolveTargetGeneration to the WatchdogPolicyEngine, wired to the live occupant-generation", () => {
     expect(src).toMatch(/resolveTargetGeneration:\s*\(s\)\s*=>\s*sessionRegistry\.currentOccupantGenerationForSession\(s\)/);
   });
+
+  it("passes the queue's terminal-timer resolver to the pre-delivery seam", () => {
+    expect(src).toMatch(
+      /resolvePreDeliveryTerminalReason:\s*\(\{ jobId \}\)\s*=>\s*queueRepoInstance\.resolveWatchdogPreDeliveryTerminalReason\(jobId\)/,
+    );
+  });
 });

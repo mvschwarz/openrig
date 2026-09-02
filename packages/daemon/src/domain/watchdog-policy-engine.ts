@@ -93,6 +93,10 @@ interface WatchdogPolicyEngineDeps {
    * SKIPPING, so an unknown target-generation must never skip a legitimate wake (note-2 inversion).
    */
   resolveTargetGeneration?: (sessionName: string) => string | null;
+  /** Last defense before transport for persisted jobs whose owning domain can
+   *  prove they are no longer actionable. A reason terminals the job without
+   *  delivering; null preserves the existing send path. */
+  resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
   /** Queue-side observer for a wake attempt. It appends resume evidence to
    *  every HELD row armed to this job; delivery outcome is preserved. */
   onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
@@ -171,6 +175,7 @@ export class WatchdogPolicyEngine {
   private readonly now: () => Date;
   private readonly policies: Map<string, Policy>;
   private readonly resolveTargetGeneration?: (sessionName: string) => string | null;
+  private readonly resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
   private readonly onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
 
   constructor(deps: WatchdogPolicyEngineDeps) {
@@ -179,6 +184,7 @@ export class WatchdogPolicyEngine {
     this.eventBus = deps.eventBus;
     this.deliver = deps.deliver;
     this.resolveTargetGeneration = deps.resolveTargetGeneration;
+    this.resolvePreDeliveryTerminalReason = deps.resolvePreDeliveryTerminalReason;
     this.onWakeAttempt = deps.onWakeAttempt;
     this.parseSpec = deps.parseSpec ?? parseWatchdogSpec;
     this.now = deps.now ?? (() => new Date());
@@ -430,6 +436,35 @@ export class WatchdogPolicyEngine {
           meaningful: true,
         };
       }
+    }
+
+    // OPR.0.5.8.1 S1c — current queue transitions retire park timers at every
+    // exit. This narrow pre-transport guard handles only legacy persisted
+    // residue, where the row is already terminal and no transition remains to
+    // intercept. It runs after normal policy/throttle/generation decisions but
+    // before any custody or message delivery side effect.
+    const preDeliveryTerminalReason = this.resolvePreDeliveryTerminalReason?.({ jobId: job.jobId });
+    if (preDeliveryTerminalReason) {
+      this.jobsRepo.markTerminal(job.jobId, preDeliveryTerminalReason);
+      const history = this.historyLog.record({
+        jobId: job.jobId,
+        evaluatedAt,
+        outcome: "terminal",
+        skipReason: preDeliveryTerminalReason,
+      });
+      this.eventBus.emit({
+        type: "watchdog.evaluation_terminal",
+        jobId: job.jobId,
+        policy: job.policy,
+        terminalReason: preDeliveryTerminalReason,
+      });
+      return {
+        job: this.jobsRepo.getByIdOrThrow(job.jobId),
+        outcome: { action: "terminal", reason: preDeliveryTerminalReason },
+        history,
+        delivery: null,
+        meaningful: true,
+      };
     }
 
     const continuityAction = parseContinuityAction(

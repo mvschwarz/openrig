@@ -1757,6 +1757,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // UNKNOWN (null) fails open → deliver. A drop of this line disables the gate silently (gen-bound
       // wakes would fire at the successor) — pinned in watchdog-target-gen-wiring.test.ts.
       resolveTargetGeneration: (s) => sessionRegistry.currentOccupantGenerationForSession(s),
+      resolvePreDeliveryTerminalReason: ({ jobId }) =>
+        queueRepoInstance.resolveWatchdogPreDeliveryTerminalReason(jobId),
       onWakeAttempt: ({ jobId, deliveryStatus }) => {
         queueRepoInstance.recordWatchdogWakeAttempt(jobId, deliveryStatus);
       },

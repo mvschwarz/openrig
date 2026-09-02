@@ -133,6 +133,23 @@ export class QueueWakeRepository {
     });
   }
 
+  /** Queue rows bound to a park-generated timer, regardless of whether that
+   *  timer has fired before. Legacy daemons could leave a repeating timer live
+   *  after its row closed, so delivery-time defense must consult the original
+   *  armed binding rather than only the current blocked/fired projection. */
+  findQitemsByGeneratedTimer(jobId: string): Array<{ qitemId: string; state: string }> {
+    if (!this.available) return [];
+    return this.db.prepare(
+      `SELECT DISTINCT w.qitem_id, q.state
+         FROM queue_transition_wakes w
+         JOIN queue_items q ON q.qitem_id = w.qitem_id
+        WHERE w.phase = 'armed' AND w.wake_ref = ? AND w.wake_kind = 'timer'`,
+    ).all(jobId).map((row) => {
+      const r = row as { qitem_id: string; state: string };
+      return { qitemId: r.qitem_id, state: r.state };
+    });
+  }
+
   private isLive(kind: ParkWakeKind, ref: string): boolean {
     if (kind === "blocker") {
       const row = this.db.prepare("SELECT state FROM queue_items WHERE qitem_id = ?").get(ref) as

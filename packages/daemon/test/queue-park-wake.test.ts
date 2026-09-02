@@ -8,6 +8,7 @@ import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
+import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
 import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_evidence_ref.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -17,6 +18,8 @@ import { USAGE_LIMIT_BLOCKER_TAG } from "../src/domain/queue-wake-repository.js"
 import { isDue } from "../src/domain/watchdog-scheduler.js";
 import type { PersistedEvent } from "../src/domain/types.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
+import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
 
 // S03 R25 RED-FIRST fixture: this is the contract shape migration 073 will ship.
 // Keeping the table local in the RED commit lets every behavior fail on its own
@@ -55,6 +58,7 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       queueTransitionsSchema,
       outboxEntriesSchema,
       watchdogJobsSchema,
+      watchdogHistorySchema,
       queueItemSummarySchema,
       queueItemEvidenceRefSchema,
     ]);
@@ -221,6 +225,103 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(wakes(row.qitemId).some((w) => (w as { phase: string }).phase === "fired")).toBe(false);
   });
 
+  it("OPR.0.5.8.1 S1c — a legacy park timer bound to a terminal row is refused before transport", async () => {
+    const row = await item("worker@rig");
+    repo.update({
+      qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: legacy timer", wakeAfterSeconds: 90,
+    } as never);
+    const timerId = (wakes(row.qitemId)[0] as { wake_ref: string }).wake_ref;
+
+    // Exact legacy residue: an older daemon closed the row without retiring its
+    // generated timer. The current delivery seam must defend this persisted
+    // preimage even though there is no new row transition left to intercept.
+    db.prepare("UPDATE queue_items SET state = 'done', blocked_on = NULL WHERE qitem_id = ?").run(row.qitemId);
+    expect(jobs.getById(timerId)?.state).toBe("active");
+
+    const guardCalls: string[] = [];
+    const deliveries: Array<{ targetSession: string; message: string }> = [];
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo: jobs,
+      historyLog: new WatchdogHistoryLog(db),
+      eventBus: bus,
+      deliver: async (request) => {
+        deliveries.push(request);
+        return { status: "ok" };
+      },
+      resolvePreDeliveryTerminalReason: ({ jobId }: { jobId: string }) => {
+        guardCalls.push(jobId);
+        return repo.resolveWatchdogPreDeliveryTerminalReason(jobId);
+      },
+      onWakeAttempt: ({ jobId, deliveryStatus }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus),
+    });
+
+    const result = await engine.evaluate(jobs.getByIdOrThrow(timerId));
+
+    expect(guardCalls).toEqual([timerId]);
+    expect(deliveries).toEqual([]);
+    expect(result.outcome).toEqual({ action: "terminal", reason: "park_timer_target_terminal" });
+    expect(jobs.getById(timerId)).toMatchObject({
+      state: "terminal",
+      terminalReason: "park_timer_target_terminal",
+    });
+    expect(wakes(row.qitemId).some((w) => (w as { phase: string }).phase === "fired")).toBe(false);
+  });
+
+  it("OPR.0.5.8.1 S1c — the delivery guard preserves actionable timers and attached watchdogs", async () => {
+    const deliveries: Array<{ targetSession: string; message: string }> = [];
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo: jobs,
+      historyLog: new WatchdogHistoryLog(db),
+      eventBus: bus,
+      deliver: async (request) => {
+        deliveries.push(request);
+        return { status: "ok" };
+      },
+      resolvePreDeliveryTerminalReason: ({ jobId }) =>
+        repo.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      onWakeAttempt: ({ jobId, deliveryStatus }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus),
+    });
+
+    const timerRow = await item("timer-owner@rig");
+    repo.update({
+      qitemId: timerRow.qitemId, actorSession: "timer-owner@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: actionable", wakeAfterSeconds: 90,
+    } as never);
+    const timerId = (wakes(timerRow.qitemId)[0] as { wake_ref: string }).wake_ref;
+    const timerResult = await engine.evaluate(jobs.getByIdOrThrow(timerId));
+
+    expect(timerResult.outcome.action).toBe("send");
+    expect(deliveries).toEqual([
+      expect.objectContaining({ targetSession: "timer-owner@rig" }),
+    ]);
+    expect(wakes(timerRow.qitemId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: "fired", wake_kind: "timer", wake_ref: timerId }),
+    ]));
+
+    const operatorJob = jobs.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: attached-owner@rig\nmessage: operator-owned\n",
+      targetSession: "attached-owner@rig",
+      intervalSeconds: 90,
+      registeredBySession: "operator@rig",
+    });
+    const attachedRow = await item("attached-owner@rig");
+    repo.update({
+      qitemId: attachedRow.qitemId, actorSession: "attached-owner@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: attached watchdog",
+      wakeWatchdogId: operatorJob.jobId,
+    } as never);
+    const attachedResult = await engine.evaluate(jobs.getByIdOrThrow(operatorJob.jobId));
+
+    expect(attachedResult.outcome.action).toBe("send");
+    expect(deliveries).toEqual([
+      expect.objectContaining({ targetSession: "timer-owner@rig" }),
+      expect.objectContaining({ targetSession: "attached-owner@rig" }),
+    ]);
+    expect(jobs.getById(operatorJob.jobId)?.state).toBe("active");
+  });
+
   it("OPR.0.5.8.1 S1b — an unpark (blocked -> in-progress) also ends the timer", async () => {
     const row = await item("worker@rig");
     repo.update({
@@ -336,9 +437,9 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(terminalReason(ref)).toBe("park_ended:auto-unparked");
   });
 
-  it("OPR.0.5.8.1 S1b — every exit route leaves an operator's ATTACHED watchdog alone", async () => {
-    // The one way this class repair could do harm: retiring jobs it does not own,
-    // now from six call sites instead of one.
+  it("OPR.0.5.8.1 S1b — the handoff exit leaves an operator's ATTACHED watchdog alone", async () => {
+    // The shared ownership predicate is used by every exit caller; this test
+    // executes one real handoff route rather than claiming a six-route matrix.
     const job = jobs.register({
       policy: "periodic-reminder",
       specYaml: "policy: periodic-reminder\ntarget:\n  session: \"worker@rig\"\nmessage: \"operator's own\"\n",
