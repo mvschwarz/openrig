@@ -155,7 +155,7 @@ describe("mission execution story — readable rows over the shipped projections
     const lines = executionContentLines(executionFixture(), executionScopes(), [], null, 160);
     const body = text(lines);
     expect(body).toContain("release-0.5.8 EXECUTION · 4 slices");
-    expect(body).toContain("declared in slice files: 3 done, 1 active · live now: 2 working, 1 with a problem");
+    expect(body).toContain("declared in slice files: 3 done, 1 active · live now: 1 working, 1 with a problem");
     expect(body).toContain("wave active-parallel · 2 slices · 1 working, 1 needs input");
     expect(body).toContain("wave foundation · 1 slice · 1 done");
     expect(body).toContain("wave next-unlock · 1 slice · 1 done");

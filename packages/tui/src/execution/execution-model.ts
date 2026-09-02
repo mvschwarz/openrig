@@ -356,7 +356,7 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   const declared = new Map<string, number>();
   for (const slice of slices) declared.set(declaredText(slice), (declared.get(declaredText(slice)) ?? 0) + 1);
   const declaredText_ = [...declared.entries()].sort((a, b) => b[1] - a[1]).map(([word, n]) => `${n} ${word}`).join(", ");
-  const live = slices.filter((slice) => slice.lane).length;
+  const live = slices.filter((slice) => stateWord(slice) === "working").length;
   const problems = slices.filter((slice) => problemText(slice)).length;
   const build = shortSha(record(execution.sources?.["build_info"])["commit"]);
   const lines: ContentLine[] = [
