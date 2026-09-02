@@ -100,11 +100,16 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
   }
   afterEach(() => db.close());
 
-  function makeTransport(tmux: TmuxAdapter, opts?: { withBus?: boolean; now?: () => Date }) {
+  function makeTransport(tmux: TmuxAdapter, opts?: {
+    withBus?: boolean;
+    now?: () => Date;
+    activityEndpointFile?: () => { baseUrl: string; token: string } | null;
+  }) {
     return new SessionTransport({
       db, rigRepo, sessionRegistry, tmuxAdapter: tmux, agentActivityStore,
       ...(opts?.withBus === false ? {} : { eventBus }),
       ...(opts?.now ? { now: opts.now } : {}),
+      ...(opts?.activityEndpointFile ? { activityEndpointFile: opts.activityEndpointFile } : {}),
     });
   }
 
@@ -381,6 +386,51 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(r.ok).toBe(true);
     expect(r.warning).toContain("seat-env link DOWN");
     expect(r.warning).toContain("MISSING"); // names the missing var, not its value
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("uses a valid activity-endpoint file when tmux env lookup cannot prove the relay vars", async () => {
+    const { sendText } = spies();
+    const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
+    const tmux = Object.assign({}, base, { hasSessionEnv: async () => false }) as unknown as TmuxAdapter;
+    const t = makeTransport(tmux, {
+      activityEndpointFile: () => ({ baseUrl: "http://127.0.0.1:7433", token: "present-but-never-rendered" }),
+    });
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(r.warning).toContain("daemon-ingest link DOWN");
+    expect(r.warning).not.toContain("MISSING");
+    expect(r.warning).not.toContain("Relaunch");
+    expect(r.warning).not.toContain("present-but-never-rendered");
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("reports tmux session-env lookup failure as unknown when no endpoint-file fallback is confirmed", async () => {
+    const { sendText } = spies();
+    const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
+    const tmux = Object.assign({}, base, { hasSessionEnv: async () => null }) as unknown as TmuxAdapter;
+    const t = makeTransport(tmux);
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(r.warning).toContain("seat-env link UNKNOWN");
+    expect(r.warning).not.toContain("MISSING");
+    expect(r.warning).not.toContain("Relaunch");
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("recognizes the relay's supported port plus legacy-token env route", async () => {
+    const { sendText } = spies();
+    const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
+    const tmux = Object.assign({}, base, {
+      hasSessionEnv: async (_sessionName: string, varName: string) =>
+        varName === "OPENRIG_PORT" || varName === "RIGGED_ACTIVITY_HOOK_TOKEN",
+    }) as unknown as TmuxAdapter;
+    const t = makeTransport(tmux);
+    const r = await t.send("dev-impl@my-rig", "hi");
+    expect(r.ok).toBe(true);
+    expect(r.warning).toContain("daemon-ingest link DOWN");
+    expect(r.warning).not.toContain("seat-env link DOWN");
+    expect(r.warning).not.toContain("Relaunch");
     expect(sendText).toHaveBeenCalled();
   });
 

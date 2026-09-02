@@ -139,7 +139,7 @@ import { WebhookNotificationAdapter } from "./domain/mission-control/notificatio
 import type { NotificationAdapter } from "./domain/mission-control/notification-adapter-types.js";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 import { materializeBuiltinPolicyReference } from "./domain/builtin-policy-reference.js";
-import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl } from "./domain/activity-endpoint.js";
+import { ensureActivityHookToken, writeActivityEndpointFile, deriveActivityUrl, readActivityEndpointFile } from "./domain/activity-endpoint.js";
 import {
   getCompatibleOpenRigPath,
   getDefaultOpenRigPath,
@@ -1041,7 +1041,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     runtimeAdapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
     transcriptStore,
     sessionTransport: (() => {
-      const t = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter, agentActivityStore, eventBus, slowOpRecorder });
+      const t = new SessionTransport({
+        db,
+        rigRepo,
+        sessionRegistry,
+        tmuxAdapter,
+        agentActivityStore,
+        eventBus,
+        slowOpRecorder,
+        activityEndpointFile: () => readActivityEndpointFile(OPENRIG_HOME),
+      });
       // PL-004 Phase A revision (R1): wire QueueRepository's wake-path so
       // create / handoff / handoff-and-complete nudge by default.
       queueRepoInstance.attachTransport(t);

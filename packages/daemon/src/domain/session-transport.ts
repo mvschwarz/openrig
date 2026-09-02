@@ -466,6 +466,7 @@ interface SessionTransportDeps {
   // OPR.0.4.1.10 — send-readiness freshness override (default SEND_READINESS_FRESHNESS_MS). Test seam.
   sendReadinessFreshnessMs?: number;
   slowOpRecorder?: SlowOperationInstrumentation;
+  activityEndpointFile?: () => { baseUrl: string; token: string } | null;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
@@ -485,6 +486,7 @@ export class SessionTransport {
   private waitForIdlePollMs: number;
   private sendReadinessFreshnessMs: number;
   private slowOpRecorder?: SlowOperationInstrumentation;
+  private activityEndpointFile: () => { baseUrl: string; token: string } | null;
 
   constructor(deps: SessionTransportDeps) {
     this.db = deps.db;
@@ -498,6 +500,7 @@ export class SessionTransport {
     this.waitForIdlePollMs = deps.waitForIdlePollMs ?? 500;
     this.sendReadinessFreshnessMs = deps.sendReadinessFreshnessMs ?? SEND_READINESS_FRESHNESS_MS;
     this.slowOpRecorder = deps.slowOpRecorder;
+    this.activityEndpointFile = deps.activityEndpointFile ?? (() => null);
   }
 
   /**
@@ -1292,14 +1295,35 @@ export class SessionTransport {
     // Link 1 — the SEAT ENV: can the relay even reach the daemon?
     let hasUrl: boolean | null = null;
     let hasToken: boolean | null = null;
+    let inspectedEnv = false;
     if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
-      try {
-        hasUrl = await this.tmuxAdapter.hasSessionEnv(sessionName, "OPENRIG_URL");
-        hasToken = await this.tmuxAdapter.hasSessionEnv(sessionName, "OPENRIG_ACTIVITY_HOOK_TOKEN");
-      } catch { /* best-effort — fall through to the store evidence below */ }
+      inspectedEnv = true;
+      const anyPresent = async (names: string[]): Promise<boolean | null> => {
+        let unknown = false;
+        for (const name of names) {
+          try {
+            const present = await this.tmuxAdapter.hasSessionEnv(sessionName, name);
+            if (present === true) return true;
+            if (present === null) unknown = true;
+          } catch {
+            unknown = true;
+          }
+        }
+        return unknown ? null : false;
+      };
+      hasUrl = await anyPresent(["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT"]);
+      hasToken = await anyPresent(["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN"]);
     }
-    if (hasUrl === false || hasToken === false) {
-      return `seat-env link DOWN — OPENRIG_URL ${hasUrl ? "present" : "MISSING"}, OPENRIG_ACTIVITY_HOOK_TOKEN ${hasToken ? "present" : "MISSING"}; the activity relay cannot reach the daemon. Relaunch the seat, or (for a reconciled/restored seat) ensure the daemon's activity-endpoint.json is discoverable`;
+    let fileEndpoint: { baseUrl: string; token: string } | null = null;
+    try {
+      fileEndpoint = this.activityEndpointFile();
+    } catch { /* unreadable fallback remains unavailable */ }
+    if (!fileEndpoint && (hasUrl === false || hasToken === false)) {
+      const label = (value: boolean | null) => value === true ? "present" : value === false ? "MISSING" : "UNKNOWN";
+      return `seat-env link DOWN — effective relay URL ${label(hasUrl)}, activity token ${label(hasToken)}, and no valid activity-endpoint.json fallback; the activity relay cannot reach the daemon. Relaunch the seat after confirming the effective endpoint is unavailable`;
+    }
+    if (!fileEndpoint && inspectedEnv && (hasUrl === null || hasToken === null)) {
+      return `seat-env link UNKNOWN — tmux session-environment lookup failed and no valid activity-endpoint.json fallback could be confirmed; URL/token absence is unproven`;
     }
 
     // Link 2 — the DAEMON INGEST + store: did any hook actually land, and how stale?

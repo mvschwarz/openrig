@@ -227,6 +227,28 @@ describe("TmuxAdapter", () => {
     });
   });
 
+  describe("hasSessionEnv", () => {
+    it("distinguishes a present variable from one absent in the inspected environment", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue([
+        "OPENRIG_URL=http://127.0.0.1:7433",
+        "-OPENRIG_ACTIVITY_HOOK_TOKEN",
+      ].join("\n"));
+      const adapter = new TmuxAdapter(exec);
+
+      expect(await adapter.hasSessionEnv("seat@rig", "OPENRIG_URL")).toBe(true);
+      expect(await adapter.hasSessionEnv("seat@rig", "OPENRIG_ACTIVITY_HOOK_TOKEN")).toBe(false);
+      expect(exec).toHaveBeenCalledWith("tmux show-environment -t 'seat@rig'");
+    });
+
+    it("returns unknown when the session environment cannot be inspected", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "show-environment": { error: new Error("can't find session: missing") },
+      }));
+
+      expect(await adapter.hasSessionEnv("missing", "OPENRIG_URL")).toBeNull();
+    });
+  });
+
   describe("createSession", () => {
     it("calls exec with exact command (name + cwd, both quoted)", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("");
