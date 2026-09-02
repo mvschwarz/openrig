@@ -105,6 +105,40 @@ describe("refresh-managed-plugin helper", () => {
     expect(fs.existsSync(path.join(live, "skills/deleted/SKILL.md"))).toBe(false);
     expect(fs.readFileSync(path.join(live, "skills/private/SKILL.md"), "utf8")).toBe("private");
   });
+
+  it("preserves target descendants beneath unsupported live parents", () => {
+    const root = temporaryRoot();
+    const ancestor = path.join(root, "ancestor");
+    const target = path.join(root, "target");
+    const live = path.join(root, "live");
+    const external = path.join(root, "external");
+
+    fs.mkdirSync(ancestor, { recursive: true });
+    write(target, "skills/linked/SKILL.md", "new skill");
+    fs.mkdirSync(path.join(live, "skills"), { recursive: true });
+    fs.mkdirSync(external, { recursive: true });
+    fs.symlinkSync(external, path.join(live, "skills/linked"), "dir");
+
+    const planned = runJson("refresh-managed-plugin.mjs", [
+      "--ancestor", ancestor,
+      "--target", target,
+      "--live", live,
+    ]);
+    expect(planned.actions).toEqual(expect.arrayContaining([
+      { path: "skills/linked", decision: "preserve-unsupported-type" },
+      { path: "skills/linked/SKILL.md", decision: "preserve-unsupported-type" },
+    ]));
+
+    const applied = runJson("refresh-managed-plugin.mjs", [
+      "--ancestor", ancestor,
+      "--target", target,
+      "--live", live,
+      "--apply-safe",
+    ]);
+    expect(applied.written).not.toContain("skills/linked/SKILL.md");
+    expect(fs.existsSync(path.join(external, "SKILL.md"))).toBe(false);
+    expect(fs.lstatSync(path.join(live, "skills/linked")).isSymbolicLink()).toBe(true);
+  });
 });
 
 describe("backup-sqlite helper", () => {

@@ -44,6 +44,13 @@ function same(left, right) {
   return left?.kind === "file" && right?.kind === "file" && left.hash === right.hash;
 }
 
+function hasUnsupportedLiveAncestor(relative, live) {
+  const parts = relative.split("/");
+  return parts.slice(0, -1).some((_, index) => (
+    live.get(parts.slice(0, index + 1).join("/"))?.kind === "unsupported"
+  ));
+}
+
 function classify(ancestor, target, live) {
   if ([ancestor, target, live].some((item) => item?.kind === "unsupported")) return "preserve-unsupported-type";
   if (target && live && same(target, live)) return "current";
@@ -103,11 +110,13 @@ const paths = [...new Set([
 ])].sort();
 const actions = paths.map((relative) => ({
   path: relative,
-  decision: classify(
-    inventories.ancestor.get(relative),
-    inventories.target.get(relative),
-    inventories.live.get(relative),
-  ),
+  decision: hasUnsupportedLiveAncestor(relative, inventories.live)
+    ? "preserve-unsupported-type"
+    : classify(
+      inventories.ancestor.get(relative),
+      inventories.target.get(relative),
+      inventories.live.get(relative),
+    ),
 }));
 
 const written = [];
