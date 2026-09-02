@@ -11,10 +11,10 @@ export interface CurrentStateRehydrateEligibility {
  * A crash snapshot remains trustworthy only while it names every occupant that
  * durable current state still identifies as active. Boot reconciliation turns
  * rows detached after abrupt substrate loss, so detached rows must participate:
- * a different session id is positive evidence that the snapshot belongs to an
- * older occupant. Ambiguous current state is also not permission to revive a
- * historical occupant; current-state capture preserves the ambiguity and
- * restore refuses it explicitly.
+ * a different session id or native resume identity is positive evidence that
+ * the snapshot belongs to an older occupant. Ambiguous current state is also
+ * not permission to revive a historical occupant; current-state capture
+ * preserves the ambiguity and restore refuses it explicitly.
  */
 export function snapshotMatchesCurrentOccupants(
   db: Database.Database,
@@ -23,11 +23,18 @@ export function snapshotMatchesCurrentOccupants(
 ): boolean {
   if (rig.nodes.length === 0) return true;
   const rows = db.prepare(
-    `SELECT s.id, s.node_id AS nodeId, s.status
+    `SELECT s.id, s.node_id AS nodeId, s.status,
+            s.resume_type AS resumeType, s.resume_token AS resumeToken
        FROM sessions s
        JOIN nodes n ON n.id = s.node_id
        WHERE n.rig_id = ? AND s.status NOT IN ('superseded', 'exited')`
-  ).all(rig.rig.id) as Array<{ id: string; nodeId: string; status: string }>;
+  ).all(rig.rig.id) as Array<{
+    id: string;
+    nodeId: string;
+    status: string;
+    resumeType: string | null;
+    resumeToken: string | null;
+  }>;
 
   for (const node of rig.nodes) {
     const current = resolveActiveOccupantRow(rows, undefined, node.id);
@@ -38,7 +45,12 @@ export function snapshotMatchesCurrentOccupants(
       snapshot.data.activeSessionIdByNode,
       node.id,
     );
-    if (captured.kind !== "resolved" || captured.session.id !== current.session.id) {
+    if (
+      captured.kind !== "resolved"
+      || captured.session.id !== current.session.id
+      || (captured.session.resumeType ?? null) !== current.session.resumeType
+      || (captured.session.resumeToken ?? null) !== current.session.resumeToken
+    ) {
       return false;
     }
   }

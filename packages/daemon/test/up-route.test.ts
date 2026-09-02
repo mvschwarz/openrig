@@ -264,6 +264,37 @@ describe("Up API route", () => {
         }),
       ]);
     });
+
+    it("plans from current state when the same occupant row has a newer native resume identity", async () => {
+      const rig = rigRepo.createRig("stale-native-identity-rig");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+      insertStartupContextRow(db, node.id);
+
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@stale-native-identity-rig");
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, status = ? WHERE id = ?")
+        .run("claude_id", "11111111-1111-4111-8111-111111111111", "running", session.id);
+      snapshotCapture.captureSnapshot(rig.id, "auto-periodic");
+
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, status = ? WHERE id = ?")
+        .run("claude_id", "22222222-2222-4222-8222-222222222222", "detached", session.id);
+
+      const res = await app.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: "stale-native-identity-rig", plan: true }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.snapshot).toBeNull();
+      expect(body.wouldCaptureCurrentState).toBe(true);
+      expect(body.nodes).toEqual([
+        expect.objectContaining({
+          logicalId: "dev.impl",
+          intendedAction: "resume-original",
+        }),
+      ]);
+    });
   });
 
   // OPR.0.3.4.9 — Option Y: auto-periodic co-equal with auto-pre-down in restore selection.
