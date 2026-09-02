@@ -160,7 +160,7 @@ describe("inspect-upgrade helper", () => {
     fs.writeFileSync(fakeRig, `#!/bin/sh
 case "$*" in
   "--version") echo "0.5.7 (abc12345)" ;;
-  "daemon status --json") echo '{"ok":true,"pid":42}' ;;
+  "daemon status") echo 'Daemon running (pid 42)' ;;
   "ps --nodes --json") echo '[{"rigName":"demo","logicalId":"lead"}]' ;;
   "plugin list --json") echo 'plugin lookup unavailable' >&2; exit 9 ;;
   *) exit 7 ;;
