@@ -40,7 +40,6 @@ import { threadSeatMapSchema } from "../../src/db/migrations/072_thread_seat_map
 import { queueTransitionWakesSchema } from "../../src/db/migrations/073_queue_transition_wakes.js";
 import { nodeCodexConfigProfileSchema } from "../../src/db/migrations/022_node_codex_config_profile.js";
 import { nodeSessionSourceSchema } from "../../src/db/migrations/077_node_session_source.js";
-import { idleGateFiredConditionSchema } from "../../src/db/migrations/078_idle_gate_fired_condition.js";
 // PL-019: GET /api/rigs/:id/graph + GET /api/rigs/:rigId/nodes/:logicalId
 // now perform a read-side join over queue_items (in-progress qitem
 // ownership per session). The route returns 500 if the table is absent,
@@ -108,7 +107,7 @@ import fs from "node:fs";
 
 /** Seam B R6: the canonical full-fixture migration list, exported so file-backed
  *  DB-reopen tests migrate IDENTICALLY to createFullTestDb. */
-export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema, idleGateFiredConditionSchema];
+export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema];
 
 /**
  * P24 — the DECLARED exclusions for {@link migrationsForFullTestDb}. That list is deliberately a
@@ -156,6 +155,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "074_context_usage_watchdog.sql": "watchdog extension migrated inline by context-usage watchdog suites.",
   "075_context_usage_watchdog_generation.sql": "context watchdog generation-binding extension migrated inline by context-usage watchdog suites.",
   "076_owner_notification_levels.sql": "owner-notification columns extend queue transitions plus the archive table (054 is excluded); focused S14 suites use the canonical full migration list.",
+  "078_idle_gate_fired_condition.sql": "idle-gate watchdog extension migrated inline by the idle-gate policy suite.",
 };
 
 export function createFullTestDb(): Database.Database {
