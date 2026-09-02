@@ -64,17 +64,32 @@ function row(text: string, key: string, width = Number.MAX_SAFE_INTEGER): Conten
   return { text: `  ${shown}  (open ▸)`, action: open(key) };
 }
 
-function bounded(rows: ContentLine[], empty: string): ContentLine[] {
-  const shown = rows.slice(0, MAX_ROWS_PER_GROUP);
-  const overflow = rows.length - shown.length;
-  return [
-    ...(shown.length ? shown : [{ text: `  ${empty}` }]),
-    ...(overflow > 0 ? [{ text: `  +${overflow} more` }] : []),
-  ];
+/** One overview group: its rows are built once and rendered either capped (overview, with a
+ *  drillable "+N more" door) or in full (the group page). */
+interface Group {
+  key: "done" | "now" | "next" | "attention";
+  name: string;
+  title: string;
+  /** lines that sit between the rule and the rows (the DONE ladder legend) */
+  lead?: ContentLine[];
+  rows: ContentLine[];
+  empty: string;
+  /** lines that must stay visible under the cap (the DONE not-started door) */
+  trailing?: ContentLine[];
 }
 
-function group(title: string, width: number, rows: ContentLine[], empty: string): ContentLine[] {
-  return [{ text: "" }, sectionRule(title, width), ...bounded(rows, empty)];
+function groupLines(group: Group, width: number, capped: boolean): ContentLine[] {
+  const shown = capped ? group.rows.slice(0, MAX_ROWS_PER_GROUP) : group.rows;
+  const overflow = group.rows.length - shown.length;
+  return [
+    { text: "" },
+    sectionRule(group.title, width),
+    ...(group.lead ?? []),
+    ...(shown.length ? shown : [{ text: `  ${group.empty}` }]),
+    // the overflow row is a DOOR, never inert text: it opens the whole group, every row drillable
+    ...(overflow > 0 ? [row(`+${overflow} more — open all ${group.rows.length} ${group.name} rows`, `group:${group.key}`, width)] : []),
+    ...(group.trailing ?? []),
+  ];
 }
 
 // ---- ladder ----------------------------------------------------------------
@@ -225,21 +240,24 @@ function laneKey(lane: Record<string, unknown>): string {
   return `lane:${str(lane["qitem_id"], "unknown")}`;
 }
 
-function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number): ContentLine[] {
+function headerLines(execution: ExecutionViewSnap, sliceCount: number, width: number): ContentLine[] {
+  const build = shortSha(record(execution.sources?.["build_info"])["commit"]);
+  const derived = clock(execution.derived_at);
+  const sourceCount = Object.keys(execution.sources ?? {}).length;
+  const gitBasis = str(record(execution.sources?.["git"])["basis"], "");
+  return [
+    { text: `  ${execution.mission} · derived ${derived || "?"} · daemon build ${build} · ${sliceCount} slices` },
+    row(`sources: ${sourceCount} named${gitBasis ? ` · git: ${gitBasis}` : ""}`, "sources", width),
+  ];
+}
+
+function buildGroups(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number): { slices: SliceFacts[]; groups: Group[] } {
   const slices = sliceFacts(execution, scopes);
   const lanes = execution.q1_lanes ?? [];
   const q6 = record(execution.q6_parallelism);
-  const build = shortSha(record(execution.sources?.["build_info"])["commit"]);
-  const derived = clock(execution.derived_at);
-  const lines: ContentLine[] = [];
   const idWidth = Math.max(...slices.map((slice) => slice.id.length), ...lanes.map((lane) => str(lane["slice"]).length), 1);
   const id = (value: string) => value.padEnd(idWidth);
-
-  // header — the mission, when the projection was derived, and where it came from
-  lines.push({ text: `  ${execution.mission} · derived ${derived || "?"} · daemon build ${build} · ${slices.length} slices` });
-  const sourceCount = Object.keys(execution.sources ?? {}).length;
-  const gitBasis = str(record(execution.sources?.["git"])["basis"], "");
-  lines.push(row(`sources: ${sourceCount} named${gitBasis ? ` · git: ${gitBasis}` : ""}`, "sources", width));
+  const groups: Group[] = [];
 
   // DONE — highest rung first, then arrangement order; nothing-reached slices summarised
   const counts = Object.fromEntries(RUNGS.map((rung) => [rung, slices.filter((slice) => slice.cells[rung]!.glyph === "✓").length]));
@@ -249,16 +267,26 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
     const ladder = RUNGS.map((rung) => slice.cells[rung]!.glyph).join("");
     return row(`${id(slice.id)}  ${ladder}  ${reachedText(slice.cells, slice.rank)} · ${proofText(slice.scope)}${waveText(slice.care)}`, `slice:${slice.id}`, width);
   });
-  const doneTitle = `DONE  ${RUNGS.map((rung) => `${rung} ${counts[rung]}`).join(" · ")}`;
-  lines.push({ text: "" }, sectionRule(doneTitle, width), { text: `  ladder ${RUNG_LABEL} · ✓ yes ○ no ? undetermined` });
-  lines.push(...bounded(doneRows, slices.length ? "(no slice has reached a rung)" : "(no slices on this mission)"));
-  // always visible, never behind the overflow: the slices this ladder says nothing about yet
-  if (notStarted.length) lines.push(row(`${notStarted.length} slice${notStarted.length === 1 ? "" : "s"} with no rung reached`, basisKey("not-started", "no rung reached"), width));
+  groups.push({
+    key: "done",
+    name: "DONE",
+    title: `DONE  ${RUNGS.map((rung) => `${rung} ${counts[rung]}`).join(" · ")}`,
+    lead: [{ text: `  ladder ${RUNG_LABEL} · ✓ yes ○ no ? undetermined` }],
+    rows: doneRows,
+    empty: slices.length ? "(no slice has reached a rung)" : "(no slices on this mission)",
+    // always visible, never behind the overflow: the slices this ladder says nothing about yet
+    trailing: notStarted.length ? [row(`${notStarted.length} slice${notStarted.length === 1 ? "" : "s"} with no rung reached`, basisKey("not-started", "no rung reached"), width)] : [],
+  });
 
   // NOW — claimed lanes, activity verbatim
   const idle = record(q6["idle_seats_with_capacity"])["value"];
-  const nowTitle = `NOW  ${lanes.length} lane${lanes.length === 1 ? "" : "s"} live · idle seats with capacity ${idle === INDETERMINATE || idle == null ? "?" : String(idle)}`;
-  lines.push(...group(nowTitle, width, lanes.map((lane) => row(laneText(lane, id), laneKey(lane), width)), "(no claimed lanes)"));
+  groups.push({
+    key: "now",
+    name: "NOW",
+    title: `NOW  ${lanes.length} lane${lanes.length === 1 ? "" : "s"} live · idle seats with capacity ${idle === INDETERMINATE || idle == null ? "?" : String(idle)}`,
+    rows: lanes.map((lane) => row(laneText(lane, id), laneKey(lane), width)),
+    empty: "(no claimed lanes)",
+  });
 
   // NEXT — eligible in rank order; otherwise the projection's reasons, grouped and counted
   const eligible = slices
@@ -286,8 +314,13 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   const reasonRows = [...reasons.values()]
     .sort((a, b) => b.members.length - a.members.length)
     .map((entry) => row(`${entry.members.length} ${entry.label}`, basisKey("next", entry.label), width));
-  const nextTitle = `NEXT  ${eligible.length} eligible${blockedRows.length ? ` · ${blockedRows.length} blocked` : ""}${reasons.size ? ` · ${[...reasons.values()].reduce((n, e) => n + e.members.length, 0)} not eligible` : ""}`;
-  lines.push(...group(nextTitle, width, [...nextRows, ...blockedRows, ...reasonRows], "(nothing sequenced)"));
+  groups.push({
+    key: "next",
+    name: "NEXT",
+    title: `NEXT  ${eligible.length} eligible${blockedRows.length ? ` · ${blockedRows.length} blocked` : ""}${reasons.size ? ` · ${[...reasons.values()].reduce((n, e) => n + e.members.length, 0)} not eligible` : ""}`,
+    rows: [...nextRows, ...blockedRows, ...reasonRows],
+    empty: "(nothing sequenced)",
+  });
 
   // ATTENTION — needs-input first, then parked/stalled, fragile joins, then grouped INDETERMINATE
   const attention: ContentLine[] = [];
@@ -313,8 +346,32 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
     const what = item.where.startsWith("source") ? item.where : `${item.members.length} slice${item.members.length === 1 ? "" : "s"} ${item.where} undetermined`;
     attention.push(row(`? ${what} — ${item.basis}`, basisKey(item.where, item.basis), width));
   }
-  lines.push(...group(`ATTENTION  ${attention.length}`, width, attention, "(nothing needs a person right now — on the surfaces this view reads)"));
-  return lines;
+  groups.push({
+    key: "attention",
+    name: "ATTENTION",
+    title: `ATTENTION  ${attention.length}`,
+    rows: attention,
+    empty: "(nothing needs a person right now — on the surfaces this view reads)",
+  });
+  return { slices, groups };
+}
+
+function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number): ContentLine[] {
+  const { slices, groups } = buildGroups(execution, scopes, width);
+  return [...headerLines(execution, slices.length, width), ...groups.flatMap((group) => groupLines(group, width, true))];
+}
+
+/** The "+N more" door: the whole group, every row still its own drill, esc back to the overview. */
+function groupDetail(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number, key: string): ContentLine[] | null {
+  const { groups } = buildGroups(execution, scopes, width);
+  const group = groups.find((item) => `group:${item.key}` === key);
+  if (!group) return null;
+  return [
+    { text: `${execution.mission} · all ${group.rows.length} ${group.name} rows` },
+    ...groupLines(group, width, false),
+    { text: "" },
+    back(),
+  ];
 }
 
 // ---- drill pages -------------------------------------------------------------
@@ -504,6 +561,8 @@ export function executionContentLines(
     const slices = sliceFacts(execution, scopes);
     const page = opened === "sources"
       ? sourcesDetail(execution)
+      : opened.startsWith("group:")
+        ? groupDetail(execution, scopes, width, opened)
       : opened.startsWith("slice:")
         ? sliceDetail(execution, slices, opened.slice("slice:".length))
         : opened.startsWith("lane:") || opened.startsWith("park:")

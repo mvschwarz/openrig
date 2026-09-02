@@ -175,6 +175,43 @@ describe("execution overview — DONE / NOW / NEXT / ATTENTION from the shipped 
     expect(lines.some((line) => /\+\d+ more/.test(line.text))).toBe(true);
   });
 
+  it("the +N more overflow row is a door: it opens the whole group with every hidden row drillable (R2 finding)", () => {
+    // 14 slices → every even index is built → 7 reached rows in DONE, 5 shown, 2 hidden
+    const fixture = executionFixture(14);
+    const overview = executionContentLines(fixture, [], [], null, 160);
+    const door = overview.find((line) => /\+2 more/.test(line.text))!;
+    expect(door.text).toContain("+2 more — open all 7 DONE rows");
+    expect(door.action).toEqual({ type: "execution-open", key: "group:done" });
+    const doneStart = overview.findIndex((l) => l.text.includes("── DONE"));
+    const nowStart = overview.findIndex((l) => l.text.includes("── NOW"));
+    const shownIds = overview.slice(doneStart, nowStart).filter((l) => l.action?.type === "execution-open" && (l.action as { key: string }).key.startsWith("slice:")).map((l) => (l.action as { key: string }).key);
+    expect(shownIds).toHaveLength(5);
+
+    const page = executionContentLines(fixture, [], [], "group:done", 160);
+    expect(text(page)).toContain("all 7 DONE rows");
+    expect(text(page)).toContain("esc back");
+    expect(text(page)).not.toMatch(/\+\d+ more/);
+    const pageIds = page.filter((l) => l.action?.type === "execution-open" && (l.action as { key: string }).key.startsWith("slice:")).map((l) => (l.action as { key: string }).key);
+    expect(pageIds).toHaveLength(7);
+    // the two hidden slices are exactly the ones the overview did not show, and each is its own drill
+    const hidden = pageIds.filter((key) => !shownIds.includes(key));
+    expect(hidden).toEqual(["slice:OPR.0.5.8.11", "slice:OPR.0.5.8.13"]);
+    for (const key of hidden) expect(text(executionContentLines(fixture, [], [], key, 160))).toContain("ladder · reached");
+
+    // esc from the group page returns to the overview through the same close action
+    const snap = { ...demoSnapshot(), execution: fixture };
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch(parseCommand(":execution"));
+    view.dispatch(door.action!);
+    expect(view.get().executionOpen).toBe("group:done");
+    let screen = renderScreen(view.get(), snap, { cols: 160, rows: 40 });
+    expect(screen.lines.join("\n")).toContain("all 7 DONE rows");
+    view.dispatch({ type: "execution-close" });
+    screen = renderScreen(view.get(), snap, { cols: 160, rows: 40 });
+    expect(view.get().executionOpen).toBeNull();
+    expect(screen.lines.join("\n")).toContain("+2 more — open all 7 DONE rows");
+  });
+
   it("degrades a failed execution fetch to one warning instead of blanking the section", () => {
     const lines = executionContentLines(null, [], ["execution: daemon read failed: GET /api/views/execution → 500"], null, 100);
     expect(text(lines)).toContain("execution projection unavailable — execution: daemon read failed");
