@@ -532,6 +532,7 @@ export interface SeatIdentityVerdict {
   /** The specific reason for a non-verified verdict. Null for `verified`. */
   reason:
     | "process_identity_mismatch"
+    | "process_identity_ambiguous"
     | "pane_ambiguous"
     | "pane_pid_gone"
     | "session_missing"

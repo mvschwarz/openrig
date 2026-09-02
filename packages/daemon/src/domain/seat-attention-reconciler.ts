@@ -17,7 +17,7 @@ export type PaneIdentityReconcileResult =
   | { ok: false; detail: string };
 
 /** Rebind one managed seat to the sole pane currently in its named tmux
- * session and prove that pane does not contradict the declared runtime. */
+ * session and positively identify its declared agent runtime. */
 export async function rebindAndVerifyPaneIdentity(input: {
   db: Database.Database;
   sessionRegistry: SessionRegistry;
@@ -64,11 +64,16 @@ export async function rebindAndVerifyPaneIdentity(input: {
     return { ok: false, detail: `tmux pane identity lookup failed: ${(error as Error).message}` };
   }
   const runtimeMatch = classifyPaneRuntimeMatch(command, input.runtime);
+  const normalizedCommand = command?.trim().toLowerCase() ?? "";
+  const runtimeAmbiguous = runtimeMatch === "match" && (
+    (input.runtime === "claude-code" && !normalizedCommand.includes("claude"))
+    || (input.runtime === "codex" && !normalizedCommand.includes("codex"))
+  );
   const verdict: SeatIdentityVerdict = {
     nodeId: input.nodeId,
     verdict: pid === null
       ? "pane_missing"
-      : runtimeMatch === "mismatch"
+      : runtimeMatch === "mismatch" || runtimeAmbiguous
         ? "mismatch"
         : "verified",
     evidenceSource: "pane_process",
@@ -76,12 +81,14 @@ export async function rebindAndVerifyPaneIdentity(input: {
       ? "pane_pid_gone"
       : runtimeMatch === "mismatch"
         ? "process_identity_mismatch"
+        : runtimeAmbiguous
+          ? "process_identity_ambiguous"
         : null,
     evidence: {
       registeredPane: pane.id,
       observedPid: pid,
       observedCommand: command,
-      matchedLayer: pid === null ? null : 1,
+      matchedLayer: pid === null || runtimeAmbiguous ? null : 1,
     },
     sessionName: input.sessionName,
     observedAt,
@@ -100,6 +107,12 @@ export async function rebindAndVerifyPaneIdentity(input: {
     return { ok: false, detail: `tmux pane '${pane.id}' has no live process` };
   }
   if (verdict.verdict === "mismatch") {
+    if (runtimeAmbiguous) {
+      return {
+        ok: false,
+        detail: `tmux pane '${pane.id}' foreground command '${command ?? "unknown"}' does not positively identify runtime '${input.runtime}'`,
+      };
+    }
     return {
       ok: false,
       detail: `tmux pane '${pane.id}' foreground command '${command ?? "unknown"}' contradicts runtime '${input.runtime ?? "unknown"}'`,

@@ -43,7 +43,7 @@ function mockTmux(): TmuxAdapter {
     killSession: vi.fn(async () => ({ ok: true as const })),
     sendText: vi.fn(async () => ({ ok: true as const })),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
-    getPaneCommand: vi.fn(async (target: string) => target.startsWith("%") ? "node" : "claude"),
+    getPaneCommand: vi.fn(async () => "claude"),
     getPanePid: vi.fn(async () => 1234),
     capturePaneContent: vi.fn(async () => ""),
     listSessions: async () => [],
@@ -817,6 +817,28 @@ describe("RestoreOrchestrator", () => {
       .get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "pane_missing", reason: "session_missing" });
   });
 
+  it.each([null, "node"])(
+    "keeps a native resume partial when the joined pane command is ambiguous (%s)",
+    async (command) => {
+      const snap = seedRigAndSnapshot({
+        nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+        edges: [],
+        resumeType: "claude_name",
+        resumeToken: "tok",
+      });
+      const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => command) } as unknown as TmuxAdapter;
+      const result = await createOrchestrator({ tmux, claude: mockClaudeResume({ ok: true }) }).restore(snap.id);
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.rigResult).toBe("partially_restored");
+      expect(result.result.nodes[0]!.status).toBe("attention_required");
+      expect(result.result.nodes[0]!.error).toContain("does not positively identify runtime 'claude-code'");
+      expect(db.prepare("SELECT verdict, reason FROM seat_identity_verdicts WHERE node_id = ?")
+        .get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch", reason: "process_identity_ambiguous" });
+    },
+  );
+
   it("keeps a native resume partial when the joined pane contradicts the seat runtime", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
@@ -832,6 +854,8 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.rigResult).toBe("partially_restored");
     expect(result.result.nodes[0]!.status).toBe("attention_required");
     expect(result.result.nodes[0]!.error).toContain("contradicts runtime 'claude-code'");
+    expect(db.prepare("SELECT verdict, reason FROM seat_identity_verdicts WHERE node_id = ?")
+      .get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch", reason: "process_identity_mismatch" });
   });
 
   it("resume fails -> fallback to checkpoint file delivery", async () => {
