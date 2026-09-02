@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
+import { positiveIntArg } from "../cli-error.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -35,6 +36,27 @@ function printResult(json: boolean, body: unknown, status: number): void {
     console.log(JSON.stringify(body, null, 2));
   }
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function compactWatchdogJob(job: Record<string, unknown>): Record<string, unknown> {
+  return {
+    jobId: job.jobId,
+    policy: job.policy,
+    targetSession: job.targetSession,
+    intervalSeconds: job.intervalSeconds,
+    lastEvaluationAt: job.lastEvaluationAt,
+    lastFireAt: job.lastFireAt,
+    actionable: job.actionable,
+    lastActionableAt: job.lastActionableAt,
+    state: job.state,
+    registeredAt: job.registeredAt,
+    terminalReason: job.terminalReason,
+    bindingState: job.bindingState,
+  };
 }
 
 export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
@@ -160,13 +182,38 @@ export function watchdogCommand(depsOverride?: WatchdogDeps): Command {
 
   cmd
     .command("list")
-    .description("List all watchdog jobs")
-    .option("--json", "JSON output for agents")
-    .action(async (opts: { json?: boolean }) => {
+    .description("List watchdog jobs (default: active + compact + at most 100)")
+    .option("-a, --all", "Include stopped and terminal history")
+    .option("--full", "Show complete per-job fields")
+    .option("--limit <n>", "Result limit (default: 100 unless --full)", positiveIntArg)
+    .option("--json", "JSON output for agents (compact unless --full)")
+    .addHelpText("after", `
+Default: active jobs, compact fields, at most 100 records.
+Use --all for stopped/terminal history and --full for complete per-job fields.
+The pre-0.5.8 complete array remains available with: rig watchdog list --all --full`)
+    .action(async (opts: { all?: boolean; full?: boolean; limit?: number; json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>("/api/watchdog/list");
-        printResult(opts.json ?? false, res.data, res.status);
+        if (res.status >= 400 || !Array.isArray(res.data)) {
+          printResult(opts.json ?? false, res.data, res.status);
+          return;
+        }
+        const byState = opts.all
+          ? res.data
+          : res.data.filter((job) => isRecord(job) && job.state === "active");
+        const limit = opts.limit ?? (opts.full ? undefined : 100);
+        if (limit !== undefined && byState.length > limit) {
+          console.error(
+            `Showing ${limit} of ${byState.length} matching watchdog jobs; ` +
+            "use --full for every active job or --all --full for complete history.",
+          );
+        }
+        const bounded = limit === undefined ? byState : byState.slice(0, limit);
+        const body = opts.full
+          ? bounded
+          : bounded.map((job) => isRecord(job) ? compactWatchdogJob(job) : job);
+        printResult(opts.json ?? false, body, res.status);
       });
     });
 

@@ -249,6 +249,90 @@ describe("rig watchdog CLI (PL-004 Phase C)", () => {
     expect(calls.find((c) => c.path === "/api/watchdog/list")).toBeDefined();
   });
 
+  it("list defaults to at most 100 active compact jobs", async () => {
+    const jobs = Array.from({ length: 101 }, (_, index) => ({
+      jobId: `job-${index}`,
+      policy: "periodic-reminder",
+      specYaml: `policy: periodic-reminder\nmessage: ${"x".repeat(1_000)}`,
+      targetSession: `worker-${index}@rig`,
+      intervalSeconds: 60,
+      lastEvaluationAt: "2026-09-02T06:00:00.000Z",
+      lastFireAt: null,
+      actionable: index === 0,
+      lastActionableAt: index === 0 ? "2026-09-02T06:00:00.000Z" : null,
+      state: "active",
+      registeredBySession: "ops@rig",
+      registeredAt: "2026-09-02T05:00:00.000Z",
+    }));
+    jobs.push({
+      ...jobs[0],
+      jobId: "stopped-job",
+      state: "stopped",
+    });
+    const { deps } = makeDeps({
+      routes: { "GET /api/watchdog/list": { status: 200, data: jobs } },
+    });
+    const program = createProgram({ watchdogDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "watchdog", "list", "--json"]);
+
+    const result = JSON.parse(logs.at(-1)!) as Array<Record<string, unknown>>;
+    expect(result).toHaveLength(100);
+    expect(result.every((job) => job.state === "active")).toBe(true);
+    expect(result[0]).toEqual({
+      jobId: "job-0",
+      policy: "periodic-reminder",
+      targetSession: "worker-0@rig",
+      intervalSeconds: 60,
+      lastEvaluationAt: "2026-09-02T06:00:00.000Z",
+      lastFireAt: null,
+      actionable: true,
+      lastActionableAt: "2026-09-02T06:00:00.000Z",
+      state: "active",
+      registeredAt: "2026-09-02T05:00:00.000Z",
+    });
+    expect(result[0]).not.toHaveProperty("specYaml");
+    expect(result.some((job) => job.jobId === "stopped-job")).toBe(false);
+    expect(errors.at(-1)).toMatch(/Showing 100 of 101.*--all --full/);
+  });
+
+  it("list --all --full preserves the complete legacy record", async () => {
+    const jobs = [
+      {
+        jobId: "active-job",
+        policy: "periodic-reminder",
+        specYaml: "policy: periodic-reminder\nmessage: full record",
+        targetSession: "worker@rig",
+        intervalSeconds: 60,
+        state: "active",
+      },
+      {
+        jobId: "stopped-job",
+        policy: "periodic-reminder",
+        specYaml: "policy: periodic-reminder\nmessage: stopped history",
+        targetSession: "worker@rig",
+        intervalSeconds: 60,
+        state: "stopped",
+      },
+    ];
+    const { deps } = makeDeps({
+      routes: { "GET /api/watchdog/list": { status: 200, data: jobs } },
+    });
+    const program = createProgram({ watchdogDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node",
+      "rig",
+      "watchdog",
+      "list",
+      "--all",
+      "--full",
+      "--json",
+    ]);
+
+    expect(JSON.parse(logs.at(-1)!)).toEqual(jobs);
+  });
+
   it("show GETs /api/watchdog/:jobId", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/watchdog/job-1": { status: 200, data: { jobId: "job-1" } } },
