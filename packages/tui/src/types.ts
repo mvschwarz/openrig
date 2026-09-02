@@ -269,7 +269,9 @@ export type Action =
   | { type: "scopes-open"; mission: string; slice: string }
   | { type: "scopes-reqs" }
   | { type: "scopes-narrative" }
-  | { type: "execution-source"; source: string }
+  /** EXECUTION view: open one derived row's detail page (key = slice:/lane:/park:/basis:/sources); close returns to the overview. */
+  | { type: "execution-open"; key: string }
+  | { type: "execution-close" }
   | { type: "palette-open" }
   | { type: "palette-close" }
   | { type: "palette-query"; query: string }
@@ -295,8 +297,8 @@ export interface ViewState {
   /** SCOPES view flags: mini-reqs collapsed · narrative panel open. */
   scopesCollapseReqs: boolean;
   scopesNarrative: boolean;
-  /** EXECUTION row drill: exact source/basis selected in the content pane. */
-  executionSource: string | null;
+  /** EXECUTION drill: the opened row key (null = the four-group overview). */
+  executionOpen: string | null;
   /** REGISTRY I3 — open command palette (null = closed). */
   palette: { query: string; selection: number } | null;
   instanceId: string;

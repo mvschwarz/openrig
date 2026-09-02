@@ -83,6 +83,9 @@ function parseText(text: string, final: boolean): { events: InputEvent[]; remain
 export interface InputDecoder {
   write(bytes: string | Buffer): InputEvent[];
   flush(): InputEvent[];
+  /** true while a split escape sequence (or a lone Esc) is being held for more bytes —
+   * the caller flushes after a short quiet gap so a bare Esc keypress is delivered. */
+  hasPending(): boolean;
 }
 
 /** Stateful terminal-stream decoder: retains split escape sequences and uses
@@ -101,6 +104,9 @@ export function createInputDecoder(): InputDecoder {
       const parsed = parseText(pending, true);
       pending = parsed.remainder;
       return parsed.events;
+    },
+    hasPending() {
+      return pending.length > 0;
     },
   };
 }

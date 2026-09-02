@@ -27,6 +27,19 @@ describe("stateful stdin decoding", () => {
     }
   });
 
+  it("holds a bare Esc (an arrow/mouse prefix) and reports it pending so the caller can flush it as a keypress", () => {
+    const decoder = createInputDecoder();
+    expect(decoder.hasPending()).toBe(false);
+    expect(decoder.write("\x1b")).toEqual([]);
+    expect(decoder.hasPending()).toBe(true);
+    expect(decoder.flush()).toEqual([{ type: "key", key: "escape" }]);
+    expect(decoder.hasPending()).toBe(false);
+    // a real arrow arriving in the next chunk still decodes as one key, never as Esc + bytes
+    expect(decoder.write("\x1b")).toEqual([]);
+    expect(decoder.write("[A")).toEqual([{ type: "key", key: "up", action: { type: "select", delta: -1 } }]);
+    expect(decoder.hasPending()).toBe(false);
+  });
+
   it("defines EOF flush for an incomplete CSI prefix", () => {
     const decoder = createInputDecoder();
     expect(decoder.write("\x1b[")).toEqual([]);

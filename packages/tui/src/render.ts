@@ -674,7 +674,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     });
   }
   if (state.section === "execution") {
-    return executionContentLines(snap.execution, snap.scopes, snap.readErrors, state.executionSource);
+    return executionContentLines(snap.execution, snap.scopes, snap.readErrors, state.executionOpen, contentWidth, !snap.hydratedAt);
   }
   return [{ text: `(${state.section})` }];
 }

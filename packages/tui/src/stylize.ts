@@ -11,8 +11,8 @@ import { reducedMotion } from "./motion.js";
 const EXPL_W = 30;
 
 const STATUS_TOKENS: Array<[RegExp, "ok" | "warn" | "error" | "dim"]> = [
-  [/\b(running|active|ready|verified)\b/g, "ok"],
-  [/\b(needs-attention|attention_required|recoverable|detached|blocked|parked|degraded)\b/g, "warn"],
+  [/\b(running|active|ready|verified|working)\b/g, "ok"],
+  [/\b(needs-attention|attention_required|recoverable|detached|blocked|parked|degraded|stalled|stalled-after-claim|INDETERMINATE|undetermined)\b/g, "warn"],
   [/\b(failed|down|unreachable|crashed|rejected)\b/g, "error"],
   [/\b(unknown|idle|stopped|pending)\b/g, "dim"],
 ];

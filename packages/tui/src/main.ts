@@ -382,6 +382,9 @@ async function run(): Promise<void> {
           crashCartOpts = { ...crashCartOpts, confirm: undefined };
           view.dispatch({ type: "notice", message: "restore cancelled" });
           draw();
+        } else if (inputLine === "" && view.get().section === "execution" && view.get().executionOpen) {
+          // EXECUTION drill: esc closes the detail page (the page advertises "esc back").
+          view.dispatch({ type: "execution-close" });
         }
         inputLine = "";
       } else if (ev.type === "key" && ev.key === "enter") {
@@ -416,8 +419,17 @@ async function run(): Promise<void> {
     draw();
   }
 
+  // A bare Esc keypress is byte-identical to the START of an arrow/mouse sequence, so the
+  // decoder holds it. Flush after a short quiet gap (the terminal convention) so the Esc the
+  // screens advertise ("esc back", palette close) actually lands instead of waiting for the
+  // next keystroke.
+  let escapeFlush: NodeJS.Timeout | null = null;
   process.stdin.on("data", (bytes: Buffer) => {
+    if (escapeFlush) { clearTimeout(escapeFlush); escapeFlush = null; }
     handleInput(inputDecoder.write(bytes));
+    if (inputDecoder.hasPending()) {
+      escapeFlush = setTimeout(() => { escapeFlush = null; handleInput(inputDecoder.flush()); }, 50);
+    }
   });
   process.stdin.on("end", () => {
     handleInput(inputDecoder.flush());
