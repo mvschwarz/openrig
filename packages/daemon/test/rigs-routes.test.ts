@@ -571,8 +571,13 @@ describe("Rig CRUD routes", () => {
 
   it("POST /api/rigs/:id/up includes rigResult from restore rollup", async () => {
     const rig = repo.createRig("restore-rig");
-    repo.addNode(rig.id, "worker", { role: "worker" });
+    const node = repo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "worker@restore-rig");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "tok-restore", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
     snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
 
     const res = await app.request(`/api/rigs/${rig.id}/up`, { method: "POST" });
     expect(res.status).toBe(200);
@@ -584,8 +589,13 @@ describe("Rig CRUD routes", () => {
 
   it("POST /api/rigs/:id/up returns validation blockers as not_attempted", async () => {
     const rig = repo.createRig("restore-rig");
-    repo.addNode(rig.id, "worker", { role: "worker" });
+    const fixtureNode = repo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(fixtureNode.id, "worker@restore-rig");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "tok-blocked", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
     const snap = snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
     const data = JSON.parse(JSON.stringify(snap.data));
     const node = data.nodes[0];
     const missingPath = `/tmp/openrig-slice7-rigs-missing-${Date.now()}.md`;
@@ -680,8 +690,9 @@ describe("Rig CRUD routes", () => {
       const node = repo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
       const sess = sessionRegistry.registerSession(node.id, "worker@explorer-plan-rig");
       db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, status = ? WHERE id = ?")
-        .run("claude_name", "tok-1", "detached", sess.id);
+        .run("claude_name", "tok-1", "running", sess.id);
       snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+      sessionRegistry.updateStatus(sess.id, "detached");
       const restoreSpy = vi.spyOn(restoreOrchestrator, "restore");
       const sessionsBefore = db.prepare("SELECT * FROM sessions ORDER BY id").all();
       const snapshotsBefore = db.prepare("SELECT * FROM snapshots ORDER BY id").all();

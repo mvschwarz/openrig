@@ -328,6 +328,7 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
         resumeToken: "tok-abc",
         restorePolicy: "resume_if_possible",
       }];
+      data.activeSessionIdByNode = { [node.id]: "sess-1" };
       db.prepare("UPDATE snapshots SET data = ? WHERE id = ?")
         .run(JSON.stringify(data), snap.id);
 
@@ -469,6 +470,7 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
           resumeToken: "tok-codex",
           restorePolicy: "resume_if_possible",
         }];
+        data.activeSessionIdByNode = { [node.id]: "sess-codex-1" };
         db.prepare("UPDATE snapshots SET data = ? WHERE id = ?")
           .run(JSON.stringify(data), snap.id);
 
@@ -655,6 +657,11 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
           status: "running", resumeType: "codex_id", resumeToken: "t3",
           restorePolicy: "resume_if_possible" },
       ];
+      data.activeSessionIdByNode = {
+        [claudeOk.id]: "s-ok",
+        [claudeAtt.id]: "s-att",
+        [codexFail.id]: "s-fail",
+      };
       db.prepare("UPDATE snapshots SET data = ? WHERE id = ?")
         .run(JSON.stringify(data), snap.id);
 
@@ -720,6 +727,7 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
         { id: "s-b", nodeId: b.id, sessionName: "r66-b", status: "running",
           resumeType: "claude_name", resumeToken: "tb", restorePolicy: "resume_if_possible" },
       ];
+      data.activeSessionIdByNode = { [a.id]: "s-a", [b.id]: "s-b" };
       db.prepare("UPDATE snapshots SET data = ? WHERE id = ?")
         .run(JSON.stringify(data), snap.id);
 

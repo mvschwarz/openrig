@@ -140,11 +140,9 @@ describe("AS-T09: Continuity + snapshot/restore evolution", () => {
     // Set continuity_state to restoring
     ctx.db.prepare("INSERT INTO continuity_state (pod_id, node_id, status) VALUES (?, ?, 'restoring')").run(pod.id, node.id);
 
-    // Mark session as exited (simulate stopped rig)
-    ctx.sessionRegistry.updateStatus(session.id, "exited");
-
-    // Take a snapshot
+    // Capture the exactly-one-running occupant, then simulate the stopped rig.
     const snapshot = ctx.snapshotCapture.captureSnapshot(rig.id, "manual");
+    ctx.sessionRegistry.updateStatus(session.id, "exited");
 
     const mockTmux = { createSession: vi.fn(async () => ({ ok: true })), killSession: vi.fn(async () => ({ ok: true })), listSessions: vi.fn(async () => []), hasSession: vi.fn(async () => false), sendText: vi.fn(async () => ({ ok: true })), sendKeys: vi.fn(async () => ({ ok: true })), listWindows: vi.fn(async () => []), listPanes: vi.fn(async () => []) } as any;
     const nodeLauncher = new NodeLauncher({ db: ctx.db, rigRepo: ctx.rigRepo, sessionRegistry: ctx.sessionRegistry, eventBus: ctx.eventBus, tmuxAdapter: mockTmux });
@@ -247,15 +245,14 @@ describe("AS-T09: Continuity + snapshot/restore evolution", () => {
       "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)"
     ).run(node.id, "[]", "[]", "[]", "claude-code");
 
-    // Mark session exited (rig is stopped)
-    ctx.sessionRegistry.updateStatus(session.id, "exited");
     // FR-7: this seat has no captured token, so a resume_if_possible restore would now
     // stop-and-ask. This test exercises the DELIBERATE-fresh startup-context replay path
     // (isRestore=true), so declare relaunch_fresh — a genuine fresh launch that replays.
     ctx.db.prepare("UPDATE sessions SET restore_policy = 'relaunch_fresh' WHERE id = ?").run(session.id);
 
-    // Take snapshot
+    // Capture the exactly-one-running occupant, then simulate the stopped rig.
     const snapshot = ctx.snapshotCapture.captureSnapshot(rig.id, "manual");
+    ctx.sessionRegistry.updateStatus(session.id, "exited");
     expect(snapshot.data.nodeStartupContext![node.id]).toBeDefined();
 
     // Create mock adapter that tracks calls

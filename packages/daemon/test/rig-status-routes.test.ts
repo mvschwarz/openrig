@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Hono } from "hono";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "../src/domain/rig-repository.js";
+import type { SessionRegistry } from "../src/domain/session-registry.js";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 
 function countSessions(db: Database.Database): number {
@@ -12,12 +13,14 @@ describe("OPR.0.4.3.22 — rig-status + launch-plan routes", () => {
   let db: Database.Database;
   let app: Hono;
   let repo: RigRepository;
+  let sessionRegistry: SessionRegistry;
 
   beforeEach(() => {
     db = createFullTestDb();
     const setup = createTestApp(db);
     app = setup.app;
     repo = setup.rigRepo;
+    sessionRegistry = setup.sessionRegistry;
   });
 
   afterEach(() => {
@@ -77,7 +80,9 @@ describe("OPR.0.4.3.22 — rig-status + launch-plan routes", () => {
 
   it("POST /api/rigs/:id/launch-plan with freshLogicalIds forecasts fresh-primed for that seat (no mutation)", async () => {
     const rig = repo.createRig("r-fresh");
-    repo.addNode(rig.id, "dev", { role: "dev" });
+    const node = repo.addNode(rig.id, "dev", { role: "dev" });
+    const session = sessionRegistry.registerSession(node.id, "dev@r-fresh");
+    sessionRegistry.updateStatus(session.id, "running");
 
     const before = countSessions(db);
     const res = await app.request(`/api/rigs/${rig.id}/launch-plan`, {

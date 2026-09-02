@@ -176,8 +176,13 @@ describe("Restore routes", () => {
 
   it("POST restore returns 409 not_attempted when pre-restore validation blocks", async () => {
     const rig = rigRepo.createRig("r99");
-    rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const fixtureNode = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(fixtureNode.id, "r99-worker");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "tok-blocked", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
     const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    sessionRegistry.updateStatus(session.id, "exited");
     const data = JSON.parse(JSON.stringify(snap.data));
     const node = data.nodes[0];
     const missingPath = `/tmp/openrig-slice7-snapshot-missing-${Date.now()}.md`;

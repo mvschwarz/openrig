@@ -93,8 +93,13 @@ describe("Up API route", () => {
 
   it("POST /api/up restoring an existing rig name includes rigResult", async () => {
     const rig = rigRepo.createRig("restore-me");
-    rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "worker@restore-me");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "tok-restore", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
     snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
 
     const res = await app.request("/api/up", {
       method: "POST",
@@ -111,8 +116,13 @@ describe("Up API route", () => {
 
   it("POST /api/up restoring an existing rig name returns validation blockers", async () => {
     const rig = rigRepo.createRig("restore-blocked");
-    rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const fixtureNode = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(fixtureNode.id, "worker@restore-blocked");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "tok-blocked", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
     const snap = snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
     const data = JSON.parse(JSON.stringify(snap.data));
     const node = data.nodes[0];
     const missingPath = `/tmp/openrig-slice7-up-missing-${Date.now()}.md`;
@@ -278,8 +288,9 @@ describe("Up API route", () => {
       const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
       const sess = sessionRegistry.registerSession(node.id, "worker@plan-ro-rig");
       db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, status = ? WHERE id = ?")
-        .run("claude_name", "tok-1", "detached", sess.id);
+        .run("claude_name", "tok-1", "running", sess.id);
       snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+      sessionRegistry.updateStatus(sess.id, "detached");
       const restoreSpy = vi.spyOn(restoreOrchestrator, "restore");
       const sessionsBefore = snapshotOf(db, "sessions");
       const snapshotsBefore = snapshotOf(db, "snapshots");
@@ -314,8 +325,9 @@ describe("Up API route", () => {
       const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
       const sess = sessionRegistry.registerSession(node.id, "worker@plan-ad-rig");
       db.prepare("UPDATE sessions SET resume_type = ?, resume_token = NULL, status = ? WHERE id = ?")
-        .run("claude_name", "detached", sess.id);
+        .run("claude_name", "running", sess.id);
       snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+      sessionRegistry.updateStatus(sess.id, "detached");
 
       const res = await app.request("/api/up", {
         method: "POST",
@@ -337,8 +349,9 @@ describe("Up API route", () => {
       const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
       const sess = sessionRegistry.registerSession(node.id, "worker@plan-fresh-rig");
       db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, status = ? WHERE id = ?")
-        .run("claude_name", "tok-1", "detached", sess.id);
+        .run("claude_name", "tok-1", "running", sess.id);
       snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+      sessionRegistry.updateStatus(sess.id, "detached");
       const restoreSpy = vi.spyOn(restoreOrchestrator, "restore");
       const sessionsBefore = snapshotOf(db, "sessions");
       const snapshotsBefore = snapshotOf(db, "snapshots");
@@ -369,9 +382,10 @@ describe("Up API route", () => {
       for (const [node, name] of [[nodeA, "worker-a"], [nodeB, "worker-b"]] as const) {
         const sess = sessionRegistry.registerSession(node.id, `${name}@plan-fresh-mixed`);
         db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, status = ? WHERE id = ?")
-          .run("claude_name", "tok-1", "detached", sess.id);
+          .run("claude_name", "tok-1", "running", sess.id);
       }
       snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+      db.prepare("UPDATE sessions SET status = 'detached' WHERE node_id IN (?, ?)").run(nodeA.id, nodeB.id);
 
       const res = await app.request("/api/up", {
         method: "POST",
