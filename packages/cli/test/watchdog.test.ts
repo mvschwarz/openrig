@@ -258,8 +258,8 @@ describe("rig watchdog CLI (PL-004 Phase C)", () => {
       intervalSeconds: 60,
       lastEvaluationAt: "2026-09-02T06:00:00.000Z",
       lastFireAt: null,
-      actionable: index === 0,
-      lastActionableAt: index === 0 ? "2026-09-02T06:00:00.000Z" : null,
+      actionable: index === 100,
+      lastActionableAt: index === 100 ? "2026-09-02T06:00:00.000Z" : null,
       state: "active",
       registeredBySession: "ops@rig",
       registeredAt: "2026-09-02T05:00:00.000Z",
@@ -280,9 +280,9 @@ describe("rig watchdog CLI (PL-004 Phase C)", () => {
     expect(result).toHaveLength(100);
     expect(result.every((job) => job.state === "active")).toBe(true);
     expect(result[0]).toEqual({
-      jobId: "job-0",
+      jobId: "job-100",
       policy: "periodic-reminder",
-      targetSession: "worker-0@rig",
+      targetSession: "worker-100@rig",
       intervalSeconds: 60,
       lastEvaluationAt: "2026-09-02T06:00:00.000Z",
       lastFireAt: null,

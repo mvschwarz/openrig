@@ -209,7 +209,13 @@ The pre-0.5.8 complete array remains available with: rig watchdog list --all --f
             "use --full for every active job or --all --full for complete history.",
           );
         }
-        const bounded = limit === undefined ? byState : byState.slice(0, limit);
+        const bounded = limit === undefined
+          ? byState
+          : [...byState]
+              .sort((a, b) =>
+                Number(isRecord(b) && b.actionable === true) -
+                Number(isRecord(a) && a.actionable === true))
+              .slice(0, limit);
         const body = opts.full
           ? bounded
           : bounded.map((job) => isRecord(job) ? compactWatchdogJob(job) : job);
