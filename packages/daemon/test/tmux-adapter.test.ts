@@ -228,15 +228,19 @@ describe("TmuxAdapter", () => {
   });
 
   describe("hasSessionEnv", () => {
-    it("distinguishes a present variable from one absent in the inspected environment", async () => {
+    it("distinguishes a usable variable from absent or blank values", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue([
         "OPENRIG_URL=http://127.0.0.1:7433",
-        "-OPENRIG_ACTIVITY_HOOK_TOKEN",
+        "OPENRIG_ACTIVITY_HOOK_TOKEN=",
+        "RIGGED_URL=   ",
+        "-RIGGED_ACTIVITY_HOOK_TOKEN",
       ].join("\n"));
       const adapter = new TmuxAdapter(exec);
 
       expect(await adapter.hasSessionEnv("seat@rig", "OPENRIG_URL")).toBe(true);
       expect(await adapter.hasSessionEnv("seat@rig", "OPENRIG_ACTIVITY_HOOK_TOKEN")).toBe(false);
+      expect(await adapter.hasSessionEnv("seat@rig", "RIGGED_URL")).toBe(false);
+      expect(await adapter.hasSessionEnv("seat@rig", "RIGGED_ACTIVITY_HOOK_TOKEN")).toBe(false);
       expect(exec).toHaveBeenCalledWith("tmux show-environment -t 'seat@rig'");
     });
 

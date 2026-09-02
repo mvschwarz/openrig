@@ -537,15 +537,18 @@ export class TmuxAdapter {
     }
   }
 
-  /** OPR.0.4.3.28 Part C — presence-only check for a session-env variable.
-   *  Returns whether the var is SET, NEVER its value, and null when the session
-   *  environment cannot be inspected. Listing the environment distinguishes a
-   *  genuinely absent var from `tmux show-environment <var>`'s nonzero lookup
-   *  exit. */
+  /** OPR.0.4.3.28 Part C — usable-presence check for a session-env variable.
+   *  Returns whether the var has a nonblank value, NEVER that value, and null
+   *  when the session environment cannot be inspected. Listing the environment
+   *  distinguishes a genuinely absent var from `tmux show-environment <var>`'s
+   *  nonzero lookup exit. */
   async hasSessionEnv(sessionName: string, varName: string): Promise<boolean | null> {
     try {
       const output = await this.exec(`tmux show-environment -t ${shellQuote(sessionName)}`);
-      return output.split(/\r?\n/).some((line) => line.startsWith(`${varName}=`));
+      const prefix = `${varName}=`;
+      return output.split(/\r?\n/).some(
+        (line) => line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0,
+      );
     } catch {
       return null;
     }
