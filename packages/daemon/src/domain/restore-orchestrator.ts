@@ -29,6 +29,7 @@ import type {
   RigServicesRecord,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
+import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 
 // L3: result shape for runtime-truth reconciliation. A reconciliation that
 // does NOT meet all four evidence preconditions is a no-op with a missing
@@ -1236,6 +1237,9 @@ export class RestoreOrchestrator {
               const finalStatus = (isPodAware && resumeRequested)
                 ? ((startupResult.continuityOutcome === "resumed" || nativeContinuityProved) ? "resumed" : baseStatus)
                 : baseStatus;
+              if (finalStatus === "resumed") {
+                return this.finishJoinedResume(node, sessionName);
+              }
               return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus };
             }
             // Pod-aware attention_required: hoisted above both the
@@ -1299,7 +1303,35 @@ export class RestoreOrchestrator {
       }
     }
 
+    if (baseStatus === "resumed") {
+      return this.finishJoinedResume(node, sessionName);
+    }
     return { nodeId: node.id, logicalId: node.logicalId, status: baseStatus };
+  }
+
+  /** A native resume is only a full success after the restored terminal is
+   * rebound and its process identity agrees with the declared seat runtime. */
+  private async finishJoinedResume(
+    node: SnapshotData["nodes"][number],
+    sessionName: string,
+  ): Promise<RestoreNodeResult> {
+    const identity = await rebindAndVerifyPaneIdentity({
+      db: this.db,
+      sessionRegistry: this.sessionRegistry,
+      tmux: this.tmuxAdapter,
+      nodeId: node.id,
+      sessionName,
+      runtime: node.runtime ?? null,
+    });
+    if (!identity.ok) {
+      return {
+        nodeId: node.id,
+        logicalId: node.logicalId,
+        status: "attention_required",
+        error: `Exact native session resumed, but joined restore proof is incomplete: ${identity.detail}. The resumed session was preserved; no replacement was started.`,
+      };
+    }
+    return { nodeId: node.id, logicalId: node.logicalId, status: "resumed" };
   }
 
   private launchedSessionMatchesSnapshotResume(

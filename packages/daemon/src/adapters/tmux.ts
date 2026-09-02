@@ -103,9 +103,25 @@ export type SessionProbe =
   | { state: "absent" }
   | { state: "transport_unavailable"; cause: string };
 
-const SESSION_FORMAT = "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}";
+const TMUX_FIELD_SEPARATOR = "|";
+const SESSION_FORMAT = [
+  "#{session_name}",
+  "#{session_windows}",
+  "#{session_created}",
+  "#{session_attached}",
+].join(TMUX_FIELD_SEPARATOR);
 const WINDOW_FORMAT = "#{window_index}\t#{window_name}\t#{window_panes}\t#{window_active}";
-const PANE_FORMAT = "#{pane_id}\t#{pane_index}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_active}";
+// tmux 3.6 sanitizes literal control characters in -F output to underscores,
+// so tab-delimited session and pane rows become unparseable. Use a printable
+// delimiter for these adapter-owned formats instead.
+const PANE_FORMAT = [
+  "#{pane_id}",
+  "#{pane_index}",
+  "#{pane_current_path}",
+  "#{pane_width}",
+  "#{pane_height}",
+  "#{pane_active}",
+].join(TMUX_FIELD_SEPARATOR);
 const CLIENT_FORMAT = "#{client_name}\t#{client_session}";
 
 function isNoServerError(err: unknown): boolean {
@@ -172,7 +188,7 @@ function shellQuote(s: string): string {
 }
 
 function parseSessionLine(line: string): TmuxSession | null {
-  const parts = line.split("\t");
+  const parts = line.split(TMUX_FIELD_SEPARATOR);
   if (parts.length < 4) return null;
   const windows = parseInt(parts[1]!, 10);
   if (isNaN(windows)) return null;
@@ -210,7 +226,7 @@ function parseWindowLine(line: string): TmuxWindow | null {
 }
 
 function parsePaneLine(line: string): TmuxPane | null {
-  const parts = line.split("\t");
+  const parts = line.split(TMUX_FIELD_SEPARATOR);
   if (parts.length < 6) return null;
   const index = parseInt(parts[1]!, 10);
   const width = parseInt(parts[3]!, 10);

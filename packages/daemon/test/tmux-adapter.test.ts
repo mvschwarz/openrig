@@ -28,14 +28,14 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-sessions -F "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}"'
+        'tmux list-sessions -F "#{session_name}|#{session_windows}|#{session_created}|#{session_attached}"'
       );
     });
 
     it("parses output into typed TmuxSession objects", async () => {
       const output = [
-        "my-session\t1\t2026-03-23T01:00:00\t1",
-        "other-sess\t3\t2026-03-23T02:00:00\t0",
+        "my-session|1|2026-03-23T01:00:00|1",
+        "other-sess|3|2026-03-23T02:00:00|0",
       ].join("\n");
 
       const adapter = new TmuxAdapter(mockExec({ "list-sessions": { stdout: output } }));
@@ -116,7 +116,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t \'my-session:0\' -F "#{pane_id}\t#{pane_index}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_active}"'
+        'tmux list-panes -t \'my-session:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
       );
     });
 
@@ -128,14 +128,14 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t \'my session\'\"\'\"\'s:0\' -F "#{pane_id}\t#{pane_index}\t#{pane_current_path}\t#{pane_width}\t#{pane_height}\t#{pane_active}"'
+        'tmux list-panes -t \'my session\'\"\'\"\'s:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
       );
     });
 
     it("parses output into typed TmuxPane objects", async () => {
       const output = [
-        "%1\t0\t/home/user/code\t180\t40\t1",
-        "%2\t1\t/tmp\t180\t40\t0",
+        "%1|0|/home/user/code|180|40|1",
+        "%2|1|/tmp|180|40|0",
       ].join("\n");
 
       const adapter = new TmuxAdapter(mockExec({ "list-panes": { stdout: output } }));
@@ -640,10 +640,10 @@ describe("TmuxAdapter", () => {
   describe("malformed output", () => {
     it("bad lines skipped, valid lines returned", async () => {
       const output = [
-        "good-session\t2\t2026-03-23T01:00:00\t1",
+        "good-session|2|2026-03-23T01:00:00|1",
         "this is garbage",
         "",
-        "another-good\t1\t2026-03-23T02:00:00\t0",
+        "another-good|1|2026-03-23T02:00:00|0",
       ].join("\n");
 
       const adapter = new TmuxAdapter(mockExec({ "list-sessions": { stdout: output } }));

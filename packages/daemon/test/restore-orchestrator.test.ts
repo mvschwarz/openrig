@@ -43,11 +43,12 @@ function mockTmux(): TmuxAdapter {
     killSession: vi.fn(async () => ({ ok: true as const })),
     sendText: vi.fn(async () => ({ ok: true as const })),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
-    getPaneCommand: vi.fn(async () => "claude"),
+    getPaneCommand: vi.fn(async (target: string) => target.startsWith("%") ? "node" : "claude"),
+    getPanePid: vi.fn(async () => 1234),
     capturePaneContent: vi.fn(async () => ""),
     listSessions: async () => [],
     listWindows: async () => [],
-    listPanes: async () => [],
+    listPanes: async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }],
     hasSession: async () => false,
   } as unknown as TmuxAdapter;
 }
@@ -787,7 +788,50 @@ describe("RestoreOrchestrator", () => {
     const result = await orch.restore(snap.id);
 
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.result.nodes[0]!.status).toBe("resumed");
+    if (result.ok) {
+      expect(result.result.nodes[0]!.status).toBe("resumed");
+      expect(sessionRegistry.getBindingForNode(result.result.nodes[0]!.nodeId)?.tmuxPane).toBe("%1");
+      const verdict = db.prepare("SELECT verdict, registered_pane FROM seat_identity_verdicts WHERE node_id = ?")
+        .get(result.result.nodes[0]!.nodeId) as { verdict: string; registered_pane: string };
+      expect(verdict).toEqual({ verdict: "verified", registered_pane: "%1" });
+    }
+  });
+
+  it("keeps a native resume partial when no terminal pane can be joined", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [],
+      resumeType: "claude_name",
+      resumeToken: "tok",
+    });
+    const tmux = { ...mockTmux(), listPanes: vi.fn(async () => []) } as unknown as TmuxAdapter;
+    const result = await createOrchestrator({ tmux, claude: mockClaudeResume({ ok: true }) }).restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.rigResult).toBe("partially_restored");
+    expect(result.result.nodes[0]!.status).toBe("attention_required");
+    expect(result.result.nodes[0]!.error).toContain("no attachable pane");
+    expect(result.result.nodes[0]!.error).toContain("no replacement was started");
+    expect(db.prepare("SELECT verdict, reason FROM seat_identity_verdicts WHERE node_id = ?")
+      .get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "pane_missing", reason: "session_missing" });
+  });
+
+  it("keeps a native resume partial when the joined pane contradicts the seat runtime", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [],
+      resumeType: "claude_name",
+      resumeToken: "tok",
+    });
+    const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "codex") } as unknown as TmuxAdapter;
+    const result = await createOrchestrator({ tmux, claude: mockClaudeResume({ ok: true }) }).restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.rigResult).toBe("partially_restored");
+    expect(result.result.nodes[0]!.status).toBe("attention_required");
+    expect(result.result.nodes[0]!.error).toContain("contradicts runtime 'claude-code'");
   });
 
   it("resume fails -> fallback to checkpoint file delivery", async () => {

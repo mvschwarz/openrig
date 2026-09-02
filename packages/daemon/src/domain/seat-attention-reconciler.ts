@@ -5,7 +5,108 @@ import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivityStore } from "./agent-activity-store.js";
-import type { AgentActivity } from "./types.js";
+import type { AgentActivity, SeatIdentityVerdict } from "./types.js";
+import type { TmuxAdapter } from "../adapters/tmux.js";
+import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
+import { SeatIdentityStore } from "./seat-identity-store.js";
+
+type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
+
+export type PaneIdentityReconcileResult =
+  | { ok: true; pane: string; pid: number; command: string | null }
+  | { ok: false; detail: string };
+
+/** Rebind one managed seat to the sole pane currently in its named tmux
+ * session and prove that pane does not contradict the declared runtime. */
+export async function rebindAndVerifyPaneIdentity(input: {
+  db: Database.Database;
+  sessionRegistry: SessionRegistry;
+  tmux: PaneIdentityTmux;
+  nodeId: string;
+  sessionName: string;
+  runtime: string | null;
+  now?: () => Date;
+}): Promise<PaneIdentityReconcileResult> {
+  const observedAt = (input.now ?? (() => new Date()))().toISOString();
+  const identityStore = new SeatIdentityStore(input.db);
+  let panes: Awaited<ReturnType<PaneIdentityTmux["listPanes"]>>;
+  try {
+    panes = await input.tmux.listPanes(input.sessionName);
+  } catch (error) {
+    return { ok: false, detail: `tmux pane lookup failed: ${(error as Error).message}` };
+  }
+  if (panes.length !== 1) {
+    const registeredPane = input.sessionRegistry.getBindingForNode(input.nodeId)?.tmuxPane ?? null;
+    identityStore.upsert({
+      nodeId: input.nodeId,
+      verdict: panes.length === 0 ? "pane_missing" : "mismatch",
+      evidenceSource: "tmux_session",
+      reason: panes.length === 0 ? "session_missing" : "pane_ambiguous",
+      evidence: { registeredPane, observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: input.sessionName,
+      observedAt,
+    });
+    return {
+      ok: false,
+      detail: panes.length === 0
+        ? `tmux session '${input.sessionName}' has no attachable pane`
+        : `tmux session '${input.sessionName}' has ${panes.length} panes; exact seat pane is ambiguous`,
+    };
+  }
+
+  const pane = panes[0]!;
+  let pid: number | null;
+  let command: string | null;
+  try {
+    pid = await input.tmux.getPanePid(pane.id);
+    command = await input.tmux.getPaneCommand(pane.id);
+  } catch (error) {
+    return { ok: false, detail: `tmux pane identity lookup failed: ${(error as Error).message}` };
+  }
+  const runtimeMatch = classifyPaneRuntimeMatch(command, input.runtime);
+  const verdict: SeatIdentityVerdict = {
+    nodeId: input.nodeId,
+    verdict: pid === null
+      ? "pane_missing"
+      : runtimeMatch === "mismatch"
+        ? "mismatch"
+        : "verified",
+    evidenceSource: "pane_process",
+    reason: pid === null
+      ? "pane_pid_gone"
+      : runtimeMatch === "mismatch"
+        ? "process_identity_mismatch"
+        : null,
+    evidence: {
+      registeredPane: pane.id,
+      observedPid: pid,
+      observedCommand: command,
+      matchedLayer: pid === null ? null : 1,
+    },
+    sessionName: input.sessionName,
+    observedAt,
+  };
+
+  // Persist the replacement pane before the verdict so both records describe
+  // the same current binding. A non-green verdict remains applicable and
+  // therefore keeps the public topology in attention_required.
+  input.sessionRegistry.updateBinding(input.nodeId, {
+    tmuxSession: input.sessionName,
+    tmuxPane: pane.id,
+  });
+  identityStore.upsert(verdict);
+
+  if (verdict.verdict === "pane_missing") {
+    return { ok: false, detail: `tmux pane '${pane.id}' has no live process` };
+  }
+  if (verdict.verdict === "mismatch") {
+    return {
+      ok: false,
+      detail: `tmux pane '${pane.id}' foreground command '${command ?? "unknown"}' contradicts runtime '${input.runtime ?? "unknown"}'`,
+    };
+  }
+  return { ok: true, pane: pane.id, pid: pid!, command };
+}
 
 export interface ClearAttentionResult {
   ok: boolean;
@@ -17,7 +118,7 @@ export interface ClearAttentionResult {
   reason?: string;
   detail?: string;
   previousError?: string | null;
-  clearedClasses?: ("startup_status" | "restore_outcome")[];
+  clearedClasses?: ("startup_status" | "restore_outcome" | "pane_identity")[];
   derivedEvidence?: { source: string; kind?: string; state?: string; reason?: string; runtimeCwdVerified: boolean };
 }
 
@@ -36,6 +137,7 @@ interface ClearAttentionDeps {
   sendVerify?: SendVerifyFn;
   capture?: CaptureFn;
   db?: Database.Database;
+  tmux?: PaneIdentityTmux;
 }
 
 const POSITIVE_STATES = new Set(["running", "idle"]);
@@ -61,16 +163,54 @@ export class SeatAttentionReconciler {
 
     const startupClassActive = session.startupStatus === "attention_required" || session.startupStatus === "failed";
     const derivedOutcome = this.getDerivedAttentionOutcome(session);
+    const identityClassActive = this.getActiveIdentityVerdict(session, sessionName);
 
-    if (!startupClassActive && !!!derivedOutcome) {
-      return { ok: false, code: "not_in_attention", detail: `Session startup_status is '${session.startupStatus}' and restoreOutcome is not attention/failed — not in attention` };
+    if (!startupClassActive && !derivedOutcome && !identityClassActive) {
+      return { ok: false, code: "not_in_attention", detail: `Session startup_status is '${session.startupStatus}', restoreOutcome is not attention/failed, and pane identity is not mismatched/missing — not in attention` };
     }
 
     const previousError = session.latestError ?? null;
 
+    // A pane-identity class can be cleared only by re-resolving the current
+    // session to one concrete live pane. The same proof is strong enough to
+    // clear any coexisting historical startup/restore attention class.
+    if (identityClassActive) {
+      if (!this.deps.db || !this.deps.tmux) {
+        return {
+          ok: false,
+          code: "not_demonstrably_responsive",
+          detail: "Uncleared attention class pane_identity: tmux identity verifier is unavailable",
+        };
+      }
+      const identity = await rebindAndVerifyPaneIdentity({
+        db: this.deps.db,
+        sessionRegistry,
+        tmux: this.deps.tmux,
+        nodeId: session.nodeId,
+        sessionName,
+        runtime: session.runtime,
+      });
+      if (!identity.ok) {
+        return {
+          ok: false,
+          code: "not_demonstrably_responsive",
+          detail: `Uncleared attention class pane_identity: ${identity.detail}`,
+        };
+      }
+      return this.performEvidenceClear(
+        session,
+        sessionName,
+        startupClassActive,
+        derivedOutcome,
+        { kind: "pane_identity_reverified", state: identity.pane },
+        previousError,
+        true,
+      );
+    }
+
     // Operator attestation override (--reason).
     if (opts?.reason) {
-      const clearedClasses: ("startup_status" | "restore_outcome")[] = [];
+      const clearedClasses: ("startup_status" | "restore_outcome" | "pane_identity")[] = [];
       if (startupClassActive) {
         sessionRegistry.updateStartupStatus(session.id, "ready", new Date().toISOString());
         eventBus.emit({
@@ -160,9 +300,12 @@ export class SeatAttentionReconciler {
     derivedOutcome: "failed" | "attention_required" | null,
     evidence: { kind: string; state?: string; reason?: string },
     previousError: string | null,
+    identityClassCleared = false,
   ): ClearAttentionResult {
     const { sessionRegistry, eventBus } = this.deps;
-    const clearedClasses: ("startup_status" | "restore_outcome")[] = [];
+    const clearedClasses: ("startup_status" | "restore_outcome" | "pane_identity")[] = [];
+
+    if (identityClassCleared) clearedClasses.push("pane_identity");
 
     if (startupClassActive) {
       sessionRegistry.updateStartupStatus(session.id, "ready", new Date().toISOString());
@@ -212,13 +355,16 @@ export class SeatAttentionReconciler {
     rigId: string;
     startupStatus: string;
     sessionStatus: string;
+    runtime: string | null;
+    bindingPane: string | null;
     latestError: string | null;
   } | null {
     const row = this.deps.sessionRegistry.db.prepare(
-      `SELECT s.id, s.node_id, n.rig_id, s.startup_status, s.status,
+      `SELECT s.id, s.node_id, n.rig_id, n.runtime, b.tmux_pane, s.startup_status, s.status,
               (SELECT e.payload FROM events e WHERE e.node_id = s.node_id AND e.type IN ('node.startup_attention_required','node.startup_failed') ORDER BY e.seq DESC LIMIT 1) as latest_error_payload
        FROM sessions s
        JOIN nodes n ON n.id = s.node_id
+       LEFT JOIN bindings b ON b.node_id = s.node_id
        WHERE s.session_name = ?
        ORDER BY s.created_at DESC, s.id DESC LIMIT 1`
     ).get(sessionName) as {
@@ -227,6 +373,8 @@ export class SeatAttentionReconciler {
       rig_id: string;
       startup_status: string;
       status: string;
+      runtime: string | null;
+      tmux_pane: string | null;
       latest_error_payload: string | null;
     } | undefined;
 
@@ -248,8 +396,23 @@ export class SeatAttentionReconciler {
       rigId: row.rig_id,
       startupStatus: row.startup_status ?? "pending",
       sessionStatus: row.status ?? "unknown",
+      runtime: row.runtime,
+      bindingPane: row.tmux_pane,
       latestError,
     };
+  }
+
+  private getActiveIdentityVerdict(session: {
+    nodeId: string;
+    sessionStatus: string;
+    bindingPane: string | null;
+  }, sessionName: string): SeatIdentityVerdict | null {
+    if (!this.deps.db || session.sessionStatus !== "running") return null;
+    const verdict = new SeatIdentityStore(this.deps.db).getForNode(session.nodeId);
+    if (!verdict) return null;
+    if (verdict.sessionName !== sessionName) return null;
+    if (verdict.evidence.registeredPane !== session.bindingPane) return null;
+    return verdict.verdict === "mismatch" || verdict.verdict === "pane_missing" ? verdict : null;
   }
 
   private getDerivedAttentionOutcome(session: { nodeId: string; rigId: string; sessionStatus: string }): "failed" | "attention_required" | null {

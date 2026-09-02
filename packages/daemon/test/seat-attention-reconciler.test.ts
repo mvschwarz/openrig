@@ -7,6 +7,8 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { SeatAttentionReconciler } from "../src/domain/seat-attention-reconciler.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
 describe("SeatAttentionReconciler", () => {
@@ -148,6 +150,79 @@ describe("SeatAttentionReconciler", () => {
 
     expect(result.ok).toBe(false);
     expect(result.code).toBe("not_in_attention");
+  });
+
+  it("rebinds a healthy replacement pane and clears the pane-identity attention class", async () => {
+    const rig = rigRepo.createRig("r-pane-rebind");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "worker@r-pane-rebind");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: session.sessionName, tmuxPane: "%old" });
+    new SeatIdentityStore(db).upsert({
+      nodeId: node.id,
+      verdict: "pane_missing",
+      evidenceSource: "pane_process",
+      reason: "pane_pid_gone",
+      evidence: { registeredPane: "%old", observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: session.sessionName,
+      observedAt: "2026-09-01T00:00:00.000Z",
+    });
+    expect(getNodeInventory(db, rig.id)[0]!.lifecycleState).toBe("attention_required");
+
+    const paneReconciler = new SeatAttentionReconciler({
+      sessionRegistry,
+      eventBus,
+      agentActivityStore: activityStore,
+      db,
+      tmux: {
+        listPanes: vi.fn(async () => [{ id: "%new", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
+        getPanePid: vi.fn(async () => 4321),
+        getPaneCommand: vi.fn(async () => "claude"),
+      },
+    });
+    const result = await paneReconciler.clearAttention(session.sessionName, { reason: "reattached" });
+
+    expect(result.ok).toBe(true);
+    expect(result.clearedClasses).toEqual(["pane_identity"]);
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxPane).toBe("%new");
+    expect(new SeatIdentityStore(db).getForNode(node.id)?.verdict).toBe("verified");
+    expect(getNodeInventory(db, rig.id)[0]!.lifecycleState).toBe("running");
+  });
+
+  it("names pane_identity when the replacement terminal cannot be resolved exactly", async () => {
+    const rig = rigRepo.createRig("r-pane-ambiguous");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "worker@r-pane-ambiguous");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: session.sessionName, tmuxPane: "%old" });
+    new SeatIdentityStore(db).upsert({
+      nodeId: node.id,
+      verdict: "pane_missing",
+      evidenceSource: "pane_process",
+      reason: "pane_pid_gone",
+      evidence: { registeredPane: "%old", observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: session.sessionName,
+      observedAt: "2026-09-01T00:00:00.000Z",
+    });
+    const paneReconciler = new SeatAttentionReconciler({
+      sessionRegistry,
+      eventBus,
+      agentActivityStore: activityStore,
+      db,
+      tmux: {
+        listPanes: vi.fn(async () => []),
+        getPanePid: vi.fn(async () => null),
+        getPaneCommand: vi.fn(async () => null),
+      },
+    });
+
+    const result = await paneReconciler.clearAttention(session.sessionName, { reason: "reattached" });
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("Uncleared attention class pane_identity");
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxPane).toBe("%old");
+    expect(getNodeInventory(db, rig.id)[0]!.lifecycleState).toBe("attention_required");
   });
 
   // Audit event emitted with distinct clearedBy
