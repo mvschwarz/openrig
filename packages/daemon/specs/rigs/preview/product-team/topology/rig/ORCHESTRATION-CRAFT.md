@@ -1,9 +1,9 @@
 # Orchestration Craft — shipped defaults (product-team)
 
 <!-- Shipped by the product-team rig spec (copy-if-absent; append freely).
-     Pod-class tactical reminders, shipped at the RIG altitude by ruling (the
-     pod level is deliberately skipped; revisit someday, not now). These are
-     the reminders you need AT THE MOMENT OF ACTING on another seat. -->
+     Cross-pod tactical reminders stay at the RIG altitude; a pod directory is
+     for context that one bounded sub-team owns. These are the reminders you
+     need AT THE MOMENT OF ACTING on another seat. -->
 
 ## Reading another seat's pane
 

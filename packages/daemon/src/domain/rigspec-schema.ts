@@ -43,6 +43,36 @@ const VALID_DOWN_POLICIES = new Set(["leave_running", "down", "down_and_volumes"
 const VALID_WAIT_TARGET_CONDITIONS = new Set(["healthy"]);
 const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string[]);
 
+const RIG_KEYS = new Set([
+  "version", "name", "summary", "culture_file", "permission_policy", "docs",
+  "startup", "services", "workspace", "pods", "edges",
+]);
+const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
+const MEMBER_KEYS = new Set([
+  "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
+  "model", "role", "permission_policy", "cwd", "restore_policy",
+  "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref",
+]);
+const EDGE_KEYS = new Set(["kind", "from", "to"]);
+
+/** OPR.0.5.8.7 — the topology normalizer is an explicit literal. Reject an
+ * unknown structural key before that literal can make accepted input vanish.
+ * This stays deliberately small: one check over the four topology object
+ * levels, not a second schema framework. */
+function rejectUnknownTopologyKeys(
+  raw: unknown,
+  allowed: ReadonlySet<string>,
+  prefix: string,
+): string[] {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return [];
+  return Object.keys(raw as Record<string, unknown>)
+    .filter((key) => !allowed.has(key))
+    .map((key) => {
+      const path = prefix ? `${prefix}.${key}` : key;
+      return `${path}: unknown key "${key}"; refusing the spec because normalization would otherwise discard it and alter the requested topology`;
+    });
+}
+
 /**
  * Pod-aware RigSpec validator. Canonical contract for the AgentSpec reboot.
  */
@@ -62,6 +92,7 @@ export class RigSpecSchema {
     }
 
     const obj = raw as Record<string, unknown>;
+    errors.push(...rejectUnknownTopologyKeys(obj, RIG_KEYS, ""));
 
     // Required fields
     if (!obj["name"] || typeof obj["name"] !== "string") errors.push("name: required non-empty string");
@@ -316,6 +347,7 @@ function normalizeWorkspaceBlock(raw: unknown): WorkspaceSpec | undefined {
 function validatePod(pod: Record<string, unknown>, index: number, podIds: Set<string>, advisories: string[]): string[] {
   const errors: string[] = [];
   const prefix = `pods[${index}]`;
+  errors.push(...rejectUnknownTopologyKeys(pod, POD_KEYS, prefix));
 
   // id
   if (!pod["id"] || typeof pod["id"] !== "string") {
@@ -371,6 +403,7 @@ function validatePod(pod: Record<string, unknown>, index: number, podIds: Set<st
 function validateMember(member: Record<string, unknown>, index: number, podPrefix: string, memberIds: Set<string>, advisories: string[]): string[] {
   const errors: string[] = [];
   const prefix = `${podPrefix}.members[${index}]`;
+  errors.push(...rejectUnknownTopologyKeys(member, MEMBER_KEYS, prefix));
 
   // OPR.0.5.6.20 A5 — member-level compaction_strategy: all vocabulary decisions go
   // through the manifest's one canonical site; this leg only classifies the answer.
@@ -692,6 +725,7 @@ function validateRebuildSessionSource(ss: Record<string, unknown>, prefix: strin
 function validatePodLocalEdge(edge: Record<string, unknown>, index: number, podPrefix: string, memberIds: Set<string>): string[] {
   const errors: string[] = [];
   const prefix = `${podPrefix}.edges[${index}]`;
+  errors.push(...rejectUnknownTopologyKeys(edge, EDGE_KEYS, prefix));
   const from = edge["from"] as string;
   const to = edge["to"] as string;
   const kind = edge["kind"] as string;
@@ -720,6 +754,7 @@ function validatePodLocalEdge(edge: Record<string, unknown>, index: number, podP
 function validateCrossPodEdge(edge: Record<string, unknown>, index: number, allQualifiedIds: Set<string>): string[] {
   const errors: string[] = [];
   const prefix = `edges[${index}]`;
+  errors.push(...rejectUnknownTopologyKeys(edge, EDGE_KEYS, prefix));
   const from = edge["from"] as string;
   const to = edge["to"] as string;
   const kind = edge["kind"] as string;

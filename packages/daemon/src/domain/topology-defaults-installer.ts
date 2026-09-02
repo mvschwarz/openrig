@@ -6,11 +6,11 @@ import * as nodePath from "node:path";
  *
  * A rig spec may carry a `topology/` folder of sensible-default chain files.
  * At rig-up they install under the typed `topology.root` (see
- * docs/reference/chain-file-convention.md — the SSOT), at three altitudes
- * (founder P1: the pod level is deliberately skipped):
+ * docs/reference/chain-file-convention.md — the SSOT), at four altitudes:
  *
  *   <spec>/topology/instance/<NAME>.md      -> <topology.root>/<NAME>.md
  *   <spec>/topology/rig/<NAME>.md           -> <topology.root>/rigs/<rig>/<NAME>.md
+ *   <spec>/topology/pods/<pod>/<NAME>.md    -> <topology.root>/rigs/<rig>/pods/<pod>/<NAME>.md
  *   <spec>/topology/seats/<seat>/<NAME>.md  -> <topology.root>/rigs/<rig>/seats/<seat>/<NAME>.md
  *
  * COPY-IF-ABSENT, never overwrite: a shipped default is a starting point the
@@ -53,12 +53,32 @@ export function installTopologyDefaults(input: {
   /** The rig spec's directory (rigRoot) — `topology/` is resolved beneath it. */
   specDir: string;
   rigName: string;
+  /** Declared pod namespaces. Their canonical directories exist even when no default file ships. */
+  podIds?: string[];
   topologyRoot: string;
   fsOps?: TopologyDefaultsFsOps;
 }): TopologyDefaultsResult {
   const ops = input.fsOps ?? realFsOps;
   const result: TopologyDefaultsResult = { installed: [], preserved: [], failed: [], none: false };
   const topologyDir = nodePath.join(input.specDir, "topology");
+
+  const ensureDir = (dir: string): void => {
+    try {
+      ops.mkdirp(dir);
+    } catch (err) {
+      result.failed.push({ path: dir, error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  // S7: these directories are the engine's projection of live topology, not
+  // authored defaults. Create them on every materialization, including specs
+  // with no topology/ source folder at all.
+  ensureDir(input.topologyRoot);
+  ensureDir(nodePath.join(input.topologyRoot, "rigs", input.rigName));
+  for (const podId of input.podIds ?? []) {
+    ensureDir(nodePath.join(input.topologyRoot, "rigs", input.rigName, "pods", podId));
+  }
+
   // r2 residual: the total never-throw contract has no first-line exception —
   // even the root probe failing is a NAMED failure, not a throw and not `none`.
   try {
@@ -115,6 +135,20 @@ export function installTopologyDefaults(input: {
       copyIfAbsent(nodePath.join(rigDir, name), nodePath.join(input.topologyRoot, "rigs", input.rigName, name));
     }
   });
+
+  const podsDir = nodePath.join(topologyDir, "pods");
+  for (const podId of input.podIds ?? []) {
+    const podDir = nodePath.join(podsDir, podId);
+    section(podDir, () => {
+      if (!ops.isDirectory(podDir)) return;
+      for (const name of ops.listFiles(podDir)) {
+        copyIfAbsent(
+          nodePath.join(podDir, name),
+          nodePath.join(input.topologyRoot, "rigs", input.rigName, "pods", podId, name),
+        );
+      }
+    });
+  }
 
   const seatsDir = nodePath.join(topologyDir, "seats");
   section(seatsDir, () => {

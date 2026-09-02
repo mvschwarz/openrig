@@ -44,6 +44,49 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(result.errors).toEqual([]);
   });
 
+  it.each([
+    {
+      label: "rig root",
+      path: "operating_mod",
+      key: "operating_mod",
+      mutate: (rig: Record<string, unknown>) => { rig["operating_mod"] = "lab"; },
+    },
+    {
+      label: "pod",
+      path: "pods[0].summmary",
+      key: "summmary",
+      mutate: (rig: Record<string, unknown>) => {
+        ((rig["pods"] as Record<string, unknown>[])[0]!)["summmary"] = "typo";
+      },
+    },
+    {
+      label: "member",
+      path: "pods[0].members[0].modle",
+      key: "modle",
+      mutate: (rig: Record<string, unknown>) => {
+        ((((rig["pods"] as Record<string, unknown>[])[0]!["members"] as Record<string, unknown>[])[0]!))["modle"] = "opus";
+      },
+    },
+    {
+      label: "edge",
+      path: "pods[0].edges[0].weight",
+      key: "weight",
+      mutate: (rig: Record<string, unknown>) => {
+        ((((rig["pods"] as Record<string, unknown>[])[0]!["edges"] as Record<string, unknown>[])[0]!))["weight"] = 2;
+      },
+    },
+  ])("rejects an unknown $label key with its exact path and silent-normalization consequence", ({ path, key, mutate }) => {
+    const rig = structuredClone(VALID_RIG) as unknown as Record<string, unknown>;
+    mutate(rig);
+
+    const result = RigSpecSchema.validate(rig);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain(
+      `${path}: unknown key "${key}"; refusing the spec because normalization would otherwise discard it and alter the requested topology`,
+    );
+  });
+
   it("allows codex_config_profile for Codex members and normalizes it", () => {
     const rig = structuredClone(VALID_RIG);
     (rig.pods[0]!.members[1] as Record<string, unknown>)["codex_config_profile"] = "sysadmin";

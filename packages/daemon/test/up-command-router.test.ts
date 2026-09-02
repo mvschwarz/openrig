@@ -188,6 +188,32 @@ edges: []
     expect(result.sourceKind).toBe("rig_spec");
   });
 
+  it("keeps a pod-shaped invalid spec on the pod validator's exact diagnostic", () => {
+    const podSpecWithTypo = `
+version: "0.2"
+name: pod-rig
+operating_mod: lab
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: "local:agents/impl"
+        profile: default
+        runtime: claude-code
+        cwd: .
+    edges: []
+edges: []
+`.trim();
+    const specPath = path.join(tmpDir, "pod-rig-typo.yaml");
+    fs.writeFileSync(specPath, podSpecWithTypo);
+    const router = new UpCommandRouter({ fsOps: realFsOps() });
+
+    expect(() => router.route(specPath)).toThrow(
+      'operating_mod: unknown key "operating_mod"; refusing the spec because normalization would otherwise discard it and alter the requested topology',
+    );
+  });
+
   // AS-T08b: legacy rig spec still accepted
   it("still routes legacy rig spec as rig_spec", () => {
     const specPath = path.join(tmpDir, "legacy.yaml");

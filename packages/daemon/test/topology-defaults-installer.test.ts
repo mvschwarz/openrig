@@ -1,5 +1,5 @@
 // OPR.0.5.3.6 — shipped topology defaults install at rig-up (proof item 3).
-// The load-bearing pins: three altitudes land under topology.root with the
+// The load-bearing pins: four altitudes land under topology.root with the
 // instance file at the TOP of the root; copy-if-absent NEVER overwrites earned
 // context; a spec without topology/ is a normal no-op; failures are named,
 // never thrown (a rig launch must not die on a defaults copy).
@@ -10,11 +10,13 @@ import { installTopologyDefaults, type TopologyDefaultsFsOps } from "../src/doma
 const SPEC = "/specs/product-team";
 const ROOT = "/inst/topology";
 
-function memFs(initial: Record<string, string>): { ops: TopologyDefaultsFsOps; files: Record<string, string> } {
+function memFs(initial: Record<string, string>): { ops: TopologyDefaultsFsOps; files: Record<string, string>; dirs: Set<string> } {
   const files = { ...initial };
-  const isDir = (p: string) => Object.keys(files).some((f) => f.startsWith(p + "/"));
+  const dirs = new Set<string>();
+  const isDir = (p: string) => dirs.has(p) || Object.keys(files).some((f) => f.startsWith(p + "/"));
   return {
     files,
+    dirs,
     ops: {
       exists: (p) => p in files,
       isDirectory: isDir,
@@ -30,27 +32,29 @@ function memFs(initial: Record<string, string>): { ops: TopologyDefaultsFsOps; f
         return v;
       },
       write: (p, c) => { files[p] = c; },
-      mkdirp: () => {},
+      mkdirp: (p) => { dirs.add(p); },
     },
   };
 }
 
 describe("installTopologyDefaults", () => {
-  it("installs instance, rig, and seat defaults under topology.root — instance file at the TOP of the root", () => {
+  it("installs instance, rig, pod, and seat defaults under topology.root — instance file at the TOP of the root", () => {
     const { ops, files } = memFs({
       [join(SPEC, "topology", "instance", "CRAFT.md")]: "instance craft",
       [join(SPEC, "topology", "rig", "CRAFT.md")]: "rig craft",
       [join(SPEC, "topology", "rig", "ORCHESTRATION-CRAFT.md")]: "orch craft",
+      [join(SPEC, "topology", "pods", "delivery", "CRAFT.md")]: "pod craft",
       [join(SPEC, "topology", "seats", "orch1-lead", "CRAFT.md")]: "lead craft",
     });
-    const res = installTopologyDefaults({ specDir: SPEC, rigName: "product-team", topologyRoot: ROOT, fsOps: ops });
+    const res = installTopologyDefaults({ specDir: SPEC, rigName: "product-team", podIds: ["delivery"], topologyRoot: ROOT, fsOps: ops });
     expect(res.none).toBe(false);
     expect(res.failed).toEqual([]);
     expect(files[join(ROOT, "CRAFT.md")]).toBe("instance craft");
     expect(files[join(ROOT, "rigs", "product-team", "CRAFT.md")]).toBe("rig craft");
     expect(files[join(ROOT, "rigs", "product-team", "ORCHESTRATION-CRAFT.md")]).toBe("orch craft");
+    expect(files[join(ROOT, "rigs", "product-team", "pods", "delivery", "CRAFT.md")]).toBe("pod craft");
     expect(files[join(ROOT, "rigs", "product-team", "seats", "orch1-lead", "CRAFT.md")]).toBe("lead craft");
-    expect(res.installed).toHaveLength(4);
+    expect(res.installed).toHaveLength(5);
   });
 
   it("copy-if-absent: an existing destination is PRESERVED, never overwritten by a later rig-up", () => {
@@ -65,10 +69,15 @@ describe("installTopologyDefaults", () => {
     expect(res.installed).toEqual([]);
   });
 
-  it("a spec without topology/ is a normal no-op (none: true)", () => {
-    const { ops } = memFs({ [join(SPEC, "rig.yaml")]: "..." });
-    const res = installTopologyDefaults({ specDir: SPEC, rigName: "x", topologyRoot: ROOT, fsOps: ops });
+  it("a spec without topology/ still receives engine-managed instance, rig, and pod directories", () => {
+    const { ops, dirs } = memFs({ [join(SPEC, "rig.yaml")]: "..." });
+    const res = installTopologyDefaults({ specDir: SPEC, rigName: "x", podIds: ["ops"], topologyRoot: ROOT, fsOps: ops });
     expect(res).toMatchObject({ none: true, installed: [], preserved: [], failed: [] });
+    expect(dirs).toEqual(new Set([
+      ROOT,
+      join(ROOT, "rigs", "x"),
+      join(ROOT, "rigs", "x", "pods", "ops"),
+    ]));
   });
 
   it("r2-B2: an ENUMERATION failure (listFiles throws) is NAMED and never thrown; other sections still install", () => {

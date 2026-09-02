@@ -12,13 +12,13 @@
 - **Derive paths from configuration.** `rig config get <key>` answers where
   things live (`workspace.root`, `topology.root`, `db.path`). A literal path
   copied from another machine is wrong on this one.
-- **Two trees.** The topology tree (this file's tree: instance → rig → seat)
+- **Two trees.** The topology tree (this file's tree: instance → rig → pod → seat)
   carries how work is done; the project tree (missions → slices) carries what
   is being built. Confusing them is the most common orientation error.
 - **Verify by effect, never by success message.** Re-read from disk, run the
   consumer, count the rows. Zero is not a plausible success.
 - **A scoped search is not a global absence.** "Not in the place I looked" and
   "not anywhere" are different claims; say which one you have.
-- **Trace before trusting context**: `rig context trace --rig <rig> --seat
-  <seat> --name <NAME>.md` walks this tree from where you stand. Your reads
-  ARE the walk.
+- **Trace before trusting context**: `rig context trace --rig <rig> [--pod
+  <pod>] --seat <seat> --name <NAME>.md` walks this tree from where you stand.
+  Your reads ARE the walk.

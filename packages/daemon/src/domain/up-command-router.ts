@@ -20,6 +20,12 @@ interface RouterFsOps {
 /** Gzip magic bytes: 0x1f 0x8b */
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
 
+function isPodAwareShape(raw: unknown): boolean {
+  return raw !== null
+    && typeof raw === "object"
+    && Array.isArray((raw as Record<string, unknown>)["pods"]);
+}
+
 /**
  * Routes a source path to the correct bootstrap pipeline based on
  * file extension or content-based auto-detection.
@@ -88,6 +94,12 @@ export class UpCommandRouter {
       if (podValidation.valid) {
         return { sourceKind: "rig_spec", sourceRef };
       }
+      // S7: a pod-shaped document belongs to the pod-aware validator even
+      // when invalid. Falling through to legacy replaces an exact topology
+      // diagnostic with the unrelated "nodes is required" error.
+      if (isPodAwareShape(podRaw)) {
+        throw new Error(`Source is YAML but not a valid rig spec: ${podValidation.errors[0] ?? "unknown error"}`);
+      }
 
       // Fall back to legacy schema
       const raw = LegacyCodec.parse(content);
@@ -144,6 +156,9 @@ export class UpCommandRouter {
       const podVal = PodSchema.validate(podRaw);
       if (podVal.valid) {
         return { sourceKind: "rig_spec", sourceRef };
+      }
+      if (isPodAwareShape(podRaw)) {
+        throw new Error(`Source is YAML but not a valid rig spec: ${podVal.errors[0] ?? "unknown error"}. Use .yaml for rig specs or .rigbundle for bundles.`);
       }
 
       // Try legacy

@@ -12,7 +12,7 @@ walking from where they stand toward the root, reading the same-named file at
 each level. No pointers to follow, no branching, no per-level names. Inventing
 a level-specific name breaks every walker.
 
-Chain files sit on **nodes** (an instance, a rig, a seat; a mission, a slice)
+Chain files sit on **nodes** (an instance, a rig, a pod, a seat; a mission, a slice)
 — never on shelves (`rigs/`, `seats/`, `missions/` are containment, not
 nodes, and carry no chain file).
 
@@ -20,7 +20,7 @@ nodes, and carry no chain file).
 
 | tree | path shape | carries | ships? |
 |---|---|---|---|
-| **Topology** | instance → rig → seat | how work is done here | **yes** — generally applicable defaults ship in source |
+| **Topology** | instance → rig → pod → seat | how work is done here | **yes** — generally applicable defaults ship in source |
 | **Project** | project → mission → slice | what is being built | **no** — depends on what the user builds; see below |
 
 ### The topology tree
@@ -35,13 +35,15 @@ instance):
 ```
 <topology.root>/<NAME>.md                         # instance altitude
 <topology.root>/rigs/<rig>/<NAME>.md              # rig altitude
+<topology.root>/rigs/<rig>/pods/<pod>/<NAME>.md   # pod altitude
 <topology.root>/rigs/<rig>/seats/<seat>/<NAME>.md # seat altitude
 ```
 
-**The pod level is deliberately skipped** (design decision, March 2026: agent
-specs stay flat under the rig so any agent composes into any rig; pods felt
-too restrictive — revisit someday, not now). Pod-class tactical content ships
-as a rig-altitude file named for its audience (see "craft defaults" below).
+The engine creates the instance root, rig directory, and each declared pod
+directory when it materializes topology, even when no authored chain default
+exists. Pod context remains optional: use that altitude only for knowledge
+shared within one context domain. Cross-pod guidance still belongs at the rig
+altitude.
 
 Established chain names on the topology tree:
 
@@ -78,11 +80,13 @@ no path literal.
 
 ## The trace
 
-`rig context trace --rig <rig> [--seat <seat>] --name <NAME>.md` performs the
-walk: it prints each altitude root-first (general → specific), marks whether
-content came from `topology.root`, the legacy tree (with the advisory on
-stderr), or is absent, and needs no running daemon — orientation is exactly
-when the daemon may be down. `--json` returns the structured result.
+`rig context trace --rig <rig> [--pod <pod>] [--seat <seat>] --name <NAME>.md`
+performs the walk: it prints each selected altitude root-first (general →
+specific), marks whether content came from `topology.root`, the legacy tree
+(with the advisory on stderr), or is absent, and needs no running daemon —
+orientation is exactly when the daemon may be down. Existing rig/seat traces
+remain valid; selecting `--pod` adds that context domain between them. `--json`
+returns the structured result.
 
 Your reads ARE the walk: a trace assembled from memory is a recitation that
 reproduces the drift it was meant to catch. Run it; do not recall it.
@@ -90,7 +94,8 @@ reproduces the drift it was meant to catch. Run it; do not recall it.
 ## Shipped defaults and the curation path
 
 Included rigs (product-team first) ship sensible-default chain files at the
-rig, seat, and instance altitudes, installed under `topology.root` at rig-up.
+applicable instance, rig, pod, and seat altitudes, installed under
+`topology.root` at rig-up.
 A shipped default is a **starting point** the occupying team appends to — it
 is never overwritten by a later rig-up (existing files win).
 

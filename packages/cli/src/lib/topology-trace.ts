@@ -1,10 +1,11 @@
 // OPR.0.5.3.6 — the productized chain-file trace (CE-v2).
 //
-// The topology tree carries derived context at three shipped altitudes
-// (founder P1: skip the pod level), instance at the TOP of the root (D2):
+// The topology tree carries derived context at four shipped altitudes,
+// instance at the TOP of the root (D2):
 //
 //   <topology.root>/<NAME>                          — instance
 //   <topology.root>/rigs/<rig>/<NAME>               — rig
+//   <topology.root>/rigs/<rig>/pods/<pod>/<NAME>    — pod
 //   <topology.root>/rigs/<rig>/seats/<seat>/<NAME>  — seat
 //
 // The root comes from the typed `topology.root` config key — never a literal
@@ -18,7 +19,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveLegacyTopologyRigsRoot } from "../config-store.js";
 
-export type TraceAltitude = "instance" | "rig" | "seat";
+export type TraceAltitude = "instance" | "rig" | "pod" | "seat";
 
 export interface TraceLevel {
   altitude: TraceAltitude;
@@ -36,7 +37,7 @@ export interface TraceLevel {
 export interface TraceResult {
   name: string;
   topologyRoot: string;
-  /** Root-first: instance, rig, seat — general to specific, one file per level. */
+  /** Root-first: instance, rig, optional pod, optional seat — general to specific. */
   levels: TraceLevel[];
 }
 
@@ -51,7 +52,7 @@ export interface TraceFs {
  *  Rejection happens BEFORE any filesystem contact. Dotted filenames
  *  (a.b.c.md) and dashed/underscored ids stay valid; separators, dot-segments,
  *  empties, and NULs do not. */
-function assertSafeSegment(value: string, field: "rig" | "seat" | "name"): void {
+function assertSafeSegment(value: string, field: "rig" | "pod" | "seat" | "name"): void {
   if (
     value.trim().length === 0
     || value === "." || value === ".."
@@ -77,11 +78,13 @@ export function traceTopologyChain(input: {
   topologyRoot: string;
   name: string;
   rig: string;
+  pod?: string | null;
   seat?: string | null;
   legacyRigsRoot?: string;
   fs?: TraceFs;
 }): TraceResult {
   assertSafeSegment(input.rig, "rig");
+  if (input.pod != null) assertSafeSegment(input.pod, "pod");
   // r2 residual: an explicitly EMPTY seat is user error — only true omission
   // (undefined/null) means a rig-level trace.
   if (input.seat != null) assertSafeSegment(input.seat, "seat");
@@ -99,6 +102,13 @@ export function traceTopologyChain(input: {
       canonical: join(input.topologyRoot, "rigs", input.rig, input.name),
       legacy: join(legacyRigsRoot, input.rig, input.name),
     },
+    ...(input.pod
+      ? [{
+          altitude: "pod" as const,
+          canonical: join(input.topologyRoot, "rigs", input.rig, "pods", input.pod, input.name),
+          legacy: null,
+        }]
+      : []),
     ...(input.seat
       ? [{
           altitude: "seat" as const,

@@ -448,6 +448,20 @@ describe("Rigspec import routes (pod-aware dual-stack)", () => {
     expect(body.valid).toBe(true);
   });
 
+  it("POST /api/rigs/import/validate rejects an unknown topology key with its exact path and consequence", async () => {
+    const res = await app.request("/api/rigs/import/validate", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: POD_AWARE_YAML.replace('name: pod-rig', 'name: pod-rig\noperating_mod: lab'),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.valid).toBe(false);
+    expect(body.errors).toContain(
+      'operating_mod: unknown key "operating_mod"; refusing the spec because normalization would otherwise discard it and alter the requested topology',
+    );
+  });
+
   // T4: validate endpoint with invalid pod-aware YAML returns errors
   it("POST /api/rigs/import/validate with invalid pod-aware YAML returns errors", async () => {
     const res = await app.request("/api/rigs/import/validate", {

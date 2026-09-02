@@ -751,6 +751,7 @@ export class PodRigInstantiator {
         const defaults = installTopologyDefaults({
           specDir: rigRoot,
           rigName: rigSpec.name,
+          podIds: rigSpec.pods.map((pod) => pod.id),
           topologyRoot: this.deps.topologyRootResolver(),
         });
         for (const f of defaults.failed) {
@@ -1166,6 +1167,7 @@ export class PodRigInstantiator {
         const defaults = installTopologyDefaults({
           specDir: rigRoot,
           rigName: rigSpec.name,
+          podIds: rigSpec.pods.map((pod) => pod.id),
           topologyRoot: this.deps.topologyRootResolver(),
         });
         for (const f of defaults.failed) {

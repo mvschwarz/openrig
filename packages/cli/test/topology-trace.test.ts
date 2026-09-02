@@ -1,4 +1,4 @@
-// OPR.0.5.3.6 — the productized chain-file trace: three altitudes keyed off
+// OPR.0.5.3.6 + OPR.0.5.8.7 — the productized chain-file trace keyed off
 // topology.root (instance at the TOP, D2), per-level legacy fallback that
 // NAMES its advisory (proof-contract item 2: legacy fallback honesty).
 import { describe, it, expect } from "vitest";
@@ -36,6 +36,25 @@ describe("traceTopologyChain", () => {
       ["seat", "topology.root", "seat-level"],
     ]);
     expect(result.levels.every((l) => l.advisory === undefined)).toBe(true);
+  });
+
+  it("adds the canonical pod altitude between rig and seat when --pod is selected", () => {
+    const files = {
+      [join(ROOT, "LEARNED.md")]: "instance-level",
+      [join(ROOT, "rigs", "product-team", "LEARNED.md")]: "rig-level",
+      [join(ROOT, "rigs", "product-team", "pods", "delivery", "LEARNED.md")]: "pod-level",
+      [join(ROOT, "rigs", "product-team", "seats", "impl", "LEARNED.md")]: "seat-level",
+    };
+    const result = traceTopologyChain({
+      topologyRoot: ROOT, name: "LEARNED.md", rig: "product-team", pod: "delivery", seat: "impl",
+      legacyRigsRoot: LEGACY, fs: fsOf(files),
+    });
+    expect(result.levels.map((l) => [l.altitude, l.source, l.content])).toEqual([
+      ["instance", "topology.root", "instance-level"],
+      ["rig", "topology.root", "rig-level"],
+      ["pod", "topology.root", "pod-level"],
+      ["seat", "topology.root", "seat-level"],
+    ]);
   });
 
   it("legacy fallback honesty: a pre-convention file is READ and the advisory NAMES both locations", () => {
@@ -102,6 +121,7 @@ describe("traceTopologyChain", () => {
       { rig: "r", seat: "s", name: "../../secret" },
       { rig: "r/nested", seat: "s", name: "LEARNED.md" },
       { rig: "r", seat: "s\\evil", name: "LEARNED.md" },
+      { rig: "r", pod: "../outside-pod", seat: "s", name: "LEARNED.md" },
       { rig: ".", seat: "s", name: "LEARNED.md" },
       { rig: "", seat: "s", name: "LEARNED.md" },
     ];

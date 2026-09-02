@@ -331,6 +331,7 @@ Examples:
   rig context rm packs/compaction-restore
   rig context sync
   rig context trace --rig product-team --seat orch1-lead --name LEARNED.md
+  rig context trace --rig product-team --pod delivery --seat dev1-qa --name LEARNED.md
 `);
 
   const getDeps = (): StatusDeps => depsOverride ?? {
@@ -404,12 +405,13 @@ Examples:
   // design: the walk is a config read + filesystem reads, so it works on a
   // box whose daemon is down (orientation is exactly when that happens).
   cmd.command("trace")
-    .description("Walk the topology tree for one chain filename (instance -> rig -> seat), keyed off topology.root")
+    .description("Walk the topology tree for one chain filename (instance -> rig -> optional pod -> optional seat), keyed off topology.root")
     .requiredOption("--rig <rig>", "Rig name (the rigs/<rig> altitude)")
+    .option("--pod <pod>", "Pod id (the pods/<pod> altitude); omit when no pod context is selected")
     .option("--seat <seat>", "Seat id (the seats/<seat> altitude); omit for a rig-level trace")
     .requiredOption("--name <file>", "Chain filename, identical at every altitude (e.g. LEARNED.md, CULTURE.md)")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { rig: string; seat?: string; name: string; json?: boolean }) => {
+    .action(async (opts: { rig: string; pod?: string; seat?: string; name: string; json?: boolean }) => {
       const { ConfigStore } = await import("../config-store.js");
       const { traceTopologyChain } = await import("../lib/topology-trace.js");
       const store = new ConfigStore();
@@ -420,6 +422,7 @@ Examples:
           topologyRoot: String(resolved.value),
           name: opts.name,
           rig: opts.rig,
+          pod: opts.pod ?? null,
           seat: opts.seat ?? null,
         });
       } catch (err) {
