@@ -538,6 +538,6 @@ describe("Slice-04 C4 correction — public-altitude eligibility gate + producer
     const managedEvents = Object.keys((JSON.parse(config) as { hooks: Record<string, unknown> }).hooks);
     const interruptionTokens = ["at_limit", "rate_limit", "rate_limited", "stream_failure", "stream_fail", "stop_error"];
     expect(managedEvents.filter((event) => interruptionTokens.includes(event))).toEqual([]);
-    expect(managedEvents).toEqual(["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]);
+    expect(managedEvents).toEqual(["SessionStart", "UserPromptSubmit", "Stop", "PostCompact", "PermissionRequest"]);
   });
 });
