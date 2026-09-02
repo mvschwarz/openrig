@@ -11,7 +11,7 @@
 // only reported as would-happen), no projection writes.
 
 import type Database from "better-sqlite3";
-import { resolveActiveOccupantRow, deriveActiveSessionIdByNode, activeOccupantAmbiguityError, type ActiveOccupantResolution } from "./active-occupant.js";
+import { resolveActiveOccupantRow, deriveRehydrateSessionIdByNode, activeOccupantAmbiguityError, type ActiveOccupantResolution } from "./active-occupant.js";
 import type { RigWithRelations, Snapshot } from "./types.js";
 
 /** OPR.0.4.3.20 FR-6 — a present token whose last verification is older than this
@@ -215,7 +215,7 @@ export function buildRestorePlanPreview(
   // sibling paths cannot drift).
   const relationMap = snapshot
     ? snapshot.data.activeSessionIdByNode
-    : deriveActiveSessionIdByNode(sessionRows, rig.nodes.map((n) => n.id));
+    : deriveRehydrateSessionIdByNode(sessionRows, rig.nodes.map((n) => n.id));
   const nodes: RestorePlanPreviewNode[] = rig.nodes.map((node) => {
     const freshRequested = freshLogicalIds?.includes(node.logicalId) ?? false;
     const resolution = resolveActiveOccupantRow(sessionRows, relationMap, node.id);

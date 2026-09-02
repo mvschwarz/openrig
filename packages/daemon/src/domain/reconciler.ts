@@ -16,7 +16,10 @@ interface ReconcilerDeps {
   tmuxAdapter: TmuxAdapter;
 }
 
-const SKIP_STATUSES = new Set(["detached", "exited"]);
+// Only an active/non-terminal session can become detached. In particular,
+// superseded rows are occupant history: rewriting one to detached resurrects
+// it as a restore candidate and makes the next reboot ambiguous.
+const SKIP_STATUSES = new Set(["detached", "exited", "superseded"]);
 
 export class Reconciler {
   private db: Database.Database;

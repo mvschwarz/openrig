@@ -8,7 +8,7 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
-import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
+import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { loadTopologyManifest } from "../domain/topology/topology-manifest.js";
 import { MultiRigLauncher } from "../domain/topology/multi-rig-launcher.js";
@@ -102,12 +102,17 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
   }
 
   let snapshot = snapshotRepo.findLatestRestoreUsable(rigId);
+  let staleSnapshot = false;
+  if (snapshot && !snapshotMatchesCurrentOccupants(snapshotRepo.db, rig, snapshot)) {
+    snapshot = null;
+    staleSnapshot = true;
+  }
   let capturedCurrentState = false;
   if (!snapshot) {
     const eligibility = assessCurrentStateRehydrateEligibility(snapshotRepo.db, rig);
     if (!eligibility.ok) {
       return c.json({
-        error: `Rig exists but has no restore-usable snapshot and current DB state is insufficient for rehydrate. Start fresh with: rig up <spec-path>`,
+        error: `Rig exists but ${staleSnapshot ? "its restore snapshots name an older occupant" : "has no restore-usable snapshot"} and current DB state is insufficient for rehydrate. Start fresh with: rig up <spec-path>`,
         code: "no_snapshot",
         blockers: eligibility.blockers,
       }, 404);
@@ -171,7 +176,9 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
     warnings: capturedCurrentState
-      ? ["No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.", ...result.result.warnings]
+      ? [staleSnapshot
+          ? "Existing restore snapshots named an older occupant; captured current DB state as auto-rehydrate snapshot for reboot recovery."
+          : "No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.", ...result.result.warnings]
       : result.result.warnings,
     attachCommand,
   }, 200);

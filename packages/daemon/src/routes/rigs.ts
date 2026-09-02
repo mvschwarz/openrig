@@ -20,7 +20,7 @@ import type { AgentActivityStore } from "../domain/agent-activity-store.js";
 import type { SeatActivityService } from "../domain/seat-activity-service.js";
 import type { SeatStructuralActivityService } from "../domain/seat-structural-activity-service.js";
 import { deriveRigLifecycleState } from "../domain/ps-projection.js";
-import { assessCurrentStateRehydrateEligibility } from "../domain/rehydrate-eligibility.js";
+import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
 import { buildRestorePlanPreview, collectPreviewSessionRows } from "../domain/restore-plan-preview.js";
 import { composeRigStatus, type SeatLifecycleInput } from "../domain/rig-status-compose.js";
 import { createRestoreCheckService } from "./restore-check.js";
@@ -638,12 +638,17 @@ rigsRoutes.post("/:id/up", async (c) => {
   const snapshotRepo = c.get("snapshotRepo" as never) as SnapshotRepository;
   const snapshotCapture = c.get("snapshotCapture" as never) as SnapshotCapture;
   let snapshot = snapshotRepo.findLatestRestoreUsable(rigId);
+  let staleSnapshot = false;
+  if (snapshot && !snapshotMatchesCurrentOccupants(repo.db, rig, snapshot)) {
+    snapshot = null;
+    staleSnapshot = true;
+  }
   let capturedCurrentState = false;
   if (!snapshot) {
     const eligibility = assessCurrentStateRehydrateEligibility(repo.db, rig);
     if (!eligibility.ok) {
       return c.json({
-        error: `Rig "${rig.rig.name}" exists but has no restore-usable snapshot and current DB state is insufficient for rehydrate. Start fresh with: rig up <spec-path>`,
+        error: `Rig "${rig.rig.name}" exists but ${staleSnapshot ? "its restore snapshots name an older occupant" : "has no restore-usable snapshot"} and current DB state is insufficient for rehydrate. Start fresh with: rig up <spec-path>`,
         code: "no_snapshot",
         blockers: eligibility.blockers,
       }, 404);
@@ -704,7 +709,9 @@ rigsRoutes.post("/:id/up", async (c) => {
     rigResult: result.result.rigResult,
     nodes: result.result.nodes,
     warnings: capturedCurrentState
-      ? ["No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.", ...result.result.warnings]
+      ? [staleSnapshot
+          ? "Existing restore snapshots named an older occupant; captured current DB state as auto-rehydrate snapshot for reboot recovery."
+          : "No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.", ...result.result.warnings]
       : result.result.warnings,
     attachCommand,
   }, 200);

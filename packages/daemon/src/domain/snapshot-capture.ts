@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { deriveActiveSessionIdByNode } from "./active-occupant.js";
+import { deriveActiveSessionIdByNode, deriveRehydrateSessionIdByNode } from "./active-occupant.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
@@ -64,7 +64,9 @@ export class SnapshotCapture {
     // 2b. OPR.0.5.7.1 D1 — capture the ACTIVE-OCCUPANT relation explicitly,
     // through the ONE shared derivation (active-occupant.ts) that the live
     // no-snapshot preview also uses, so the sibling paths cannot drift.
-    const activeSessionIdByNode = deriveActiveSessionIdByNode(sessions, rig.nodes.map((n) => n.id));
+    const activeSessionIdByNode = kind === "auto-rehydrate"
+      ? deriveRehydrateSessionIdByNode(sessions, rig.nodes.map((n) => n.id))
+      : deriveActiveSessionIdByNode(sessions, rig.nodes.map((n) => n.id));
 
     // 3. Get checkpoints as map (latest per node)
     const checkpoints = this.checkpointStore.getCheckpointsForRig(rigId);

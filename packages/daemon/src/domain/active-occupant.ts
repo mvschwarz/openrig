@@ -98,3 +98,21 @@ export function deriveActiveSessionIdByNode(
   }
   return relation;
 }
+
+/** Reboot-only capture rule. Startup reconciliation has already changed the
+ * lost process's row from running to detached, so the ordinary live-capture
+ * rule cannot identify it. Reuse the legacy relation ladder over durable rows:
+ * one non-terminal row, or one uniquely-running row among several, is enough;
+ * every ambiguous shape remains explicit null and therefore fails closed. */
+export function deriveRehydrateSessionIdByNode(
+  sessions: OccupantCandidateRow[],
+  nodeIds: string[],
+): Record<string, string | null> {
+  const candidates = sessions.filter((session) => session.status !== "superseded" && session.status !== "exited");
+  const relation: Record<string, string | null> = {};
+  for (const nodeId of nodeIds) {
+    const resolved = resolveActiveOccupantRow(candidates, undefined, nodeId);
+    relation[nodeId] = resolved.kind === "resolved" ? resolved.session.id : null;
+  }
+  return relation;
+}

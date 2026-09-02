@@ -1,9 +1,48 @@
 import type Database from "better-sqlite3";
-import type { RigWithRelations } from "./types.js";
+import { resolveActiveOccupantRow } from "./active-occupant.js";
+import type { RigWithRelations, Snapshot } from "./types.js";
 
 export interface CurrentStateRehydrateEligibility {
   ok: boolean;
   blockers: string[];
+}
+
+/**
+ * A crash snapshot remains trustworthy only while it names every occupant that
+ * durable current state still identifies as active. Boot reconciliation turns
+ * rows detached after abrupt substrate loss, so detached rows must participate:
+ * a different session id is positive evidence that the snapshot belongs to an
+ * older occupant. Ambiguous current state is also not permission to revive a
+ * historical occupant; current-state capture preserves the ambiguity and
+ * restore refuses it explicitly.
+ */
+export function snapshotMatchesCurrentOccupants(
+  db: Database.Database,
+  rig: RigWithRelations,
+  snapshot: Snapshot,
+): boolean {
+  if (rig.nodes.length === 0) return true;
+  const rows = db.prepare(
+    `SELECT s.id, s.node_id AS nodeId, s.status
+       FROM sessions s
+       JOIN nodes n ON n.id = s.node_id
+       WHERE n.rig_id = ? AND s.status NOT IN ('superseded', 'exited')`
+  ).all(rig.rig.id) as Array<{ id: string; nodeId: string; status: string }>;
+
+  for (const node of rig.nodes) {
+    const current = resolveActiveOccupantRow(rows, undefined, node.id);
+    if (current.kind === "none") continue;
+    if (current.kind === "ambiguous") return false;
+    const captured = resolveActiveOccupantRow(
+      snapshot.data.sessions ?? [],
+      snapshot.data.activeSessionIdByNode,
+      node.id,
+    );
+    if (captured.kind !== "resolved" || captured.session.id !== current.session.id) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**

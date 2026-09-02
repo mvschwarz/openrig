@@ -231,6 +231,39 @@ describe("Up API route", () => {
       expect(body.snapshotKind).toBe("auto-rehydrate");
       expect(body.warnings).toContain("No restore-usable snapshot existed; captured current DB state as auto-rehydrate snapshot for reboot recovery.");
     });
+
+    it("plans from the detached current occupant when an older restore snapshot names a prior occupant", async () => {
+      const rig = rigRepo.createRig("stale-occupant-rig");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+      insertStartupContextRow(db, node.id);
+
+      const prior = sessionRegistry.registerSession(node.id, "dev-impl@stale-occupant-rig");
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, status = ? WHERE id = ?")
+        .run("claude_id", "11111111-1111-4111-8111-111111111111", "running", prior.id);
+      snapshotCapture.captureSnapshot(rig.id, "auto-periodic");
+
+      sessionRegistry.markSuperseded(prior.id);
+      const current = sessionRegistry.registerSession(node.id, "dev-impl@stale-occupant-rig");
+      db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, status = ? WHERE id = ?")
+        .run("claude_id", "22222222-2222-4222-8222-222222222222", "detached", current.id);
+
+      const res = await app.request("/api/up", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceRef: "stale-occupant-rig", plan: true }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.snapshot).toBeNull();
+      expect(body.wouldCaptureCurrentState).toBe(true);
+      expect(body.nodes).toEqual([
+        expect.objectContaining({
+          logicalId: "dev.impl",
+          intendedAction: "resume-original",
+        }),
+      ]);
+    });
   });
 
   // OPR.0.3.4.9 — Option Y: auto-periodic co-equal with auto-pre-down in restore selection.

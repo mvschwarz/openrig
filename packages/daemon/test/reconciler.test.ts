@@ -157,6 +157,20 @@ describe("Reconciler", () => {
     expect(result.detached).toBe(0);
   });
 
+  it("superseded occupant history stays terminal when its old pane is absent", async () => {
+    const { rig } = seedRigWithSessions([
+      { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "superseded" },
+    ]);
+
+    const reconciler = createReconciler(mockTmuxAdapter({}));
+    const result = await reconciler.reconcile(rig.id);
+
+    expect(result.checked).toBe(0);
+    expect(result.detached).toBe(0);
+    expect(sessionRegistry.getSessionsForRig(rig.id)[0]!.status).toBe("superseded");
+    expect(db.prepare("SELECT * FROM events WHERE type = 'session.detached'").all()).toHaveLength(0);
+  });
+
   it("multiple nodes: 3 sessions, 2 alive, 1 gone -> only gone one detached", async () => {
     const { rig } = seedRigWithSessions([
       { logicalId: "dev1-impl", sessionName: "r01-dev1-impl", status: "running" },
