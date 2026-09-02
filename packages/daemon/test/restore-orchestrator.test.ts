@@ -808,7 +808,7 @@ describe("RestoreOrchestrator", () => {
       resumeToken,
     });
     const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
-    const codexCommand = `node /opt/openrig/lib/node_modules/@openai/codex/bin/codex --model gpt-5.6 resume ${resumeToken}`;
+    const codexCommand = `node /opt/openrig/lib/node_modules/@openai/codex/bin/codex --model gpt-5.6 resume --add-dir /tmp/openrig-state ${resumeToken}`;
     const result = await createOrchestrator({
       tmux,
       codex: mockCodexResume({ ok: true }),
@@ -827,6 +827,36 @@ describe("RestoreOrchestrator", () => {
         observed_pid: 54776,
         observed_command: codexCommand,
         matched_layer: 1,
+      });
+  });
+
+  it("keeps a Codex resume partial when the saved token is only prompt text after a different session", async () => {
+    const resumeToken = "saved-thread-label";
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }],
+      edges: [],
+      resumeType: "codex_id",
+      resumeToken,
+    });
+    const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
+    const result = await createOrchestrator({
+      tmux,
+      codex: mockCodexResume({ ok: true }),
+      listProcesses: async () => [
+        { pid: 1234, ppid: 1, command: "-zsh" },
+        { pid: 54776, ppid: 1234, command: `node /opt/openrig/bin/codex resume different-thread ${resumeToken}` },
+      ],
+    }).restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]!.status).toBe("attention_required");
+    expect(db.prepare("SELECT verdict, reason, observed_pid, observed_command FROM seat_identity_verdicts WHERE node_id = ?")
+      .get(result.result.nodes[0]!.nodeId)).toEqual({
+        verdict: "mismatch",
+        reason: "process_identity_ambiguous",
+        observed_pid: 1234,
+        observed_command: "node",
       });
   });
 

@@ -34,7 +34,8 @@ function codexResumeInPaneLineage(
       const tokens = child.command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^['"]|['"]$/g, "")) ?? [];
       const codexIndex = tokens.findIndex((token) => token.split("/").pop() === "codex");
       const resumeIndex = tokens.indexOf("resume", codexIndex + 1);
-      if (codexIndex >= 0 && resumeIndex > codexIndex && tokens.slice(resumeIndex + 1).includes(resumeToken)) {
+      const sessionIndex = tokens[resumeIndex + 1] === "--add-dir" ? resumeIndex + 3 : resumeIndex + 1;
+      if (codexIndex >= 0 && resumeIndex > codexIndex && tokens[sessionIndex] === resumeToken) {
         return child;
       }
     }
