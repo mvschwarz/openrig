@@ -7,7 +7,8 @@ describe("safe-core grammar (FR-1, §4.B)", () => {
     expect(parseCommand(":topology")).toEqual({ type: "jump", section: "topology" });
     expect(parseCommand(":specs")).toEqual({ type: "jump", section: "specs" });
     expect(parseCommand(":needs")).toEqual({ type: "jump", section: "needs" });
-    expect(parseCommand(":execution")).toEqual({ type: "jump", section: "execution" });
+    expect(parseCommand(":scopes")).toEqual({ type: "jump", section: "scopes" });
+    expect(parseCommand(":execution").type).toBe("error");
   });
 
   it("names the unknown section, never a silent no-op", () => {

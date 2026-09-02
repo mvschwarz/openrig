@@ -58,10 +58,14 @@ function open(key: string): Action {
 
 /** A drillable row. The text is clamped so the open affordance always survives the pane
  *  width; the full basis lives one drill away. */
-function row(text: string, key: string, width = Number.MAX_SAFE_INTEGER): ContentLine {
+function actionRow(text: string, action: Action, width = Number.MAX_SAFE_INTEGER): ContentLine {
   const room = Math.max(width - 13, 24);
   const shown = text.length > room ? `${text.slice(0, room - 1)}…` : text;
-  return { text: `  ${shown}  (open ▸)`, action: open(key) };
+  return { text: `  ${shown}  (open ▸)`, action };
+}
+
+function row(text: string, key: string, width = Number.MAX_SAFE_INTEGER): ContentLine {
+  return actionRow(text, open(key), width);
 }
 
 /** One overview group: its rows are built once and rendered either capped (overview, with a
@@ -181,6 +185,86 @@ function proofText(scope: SliceScopeSnap | null): string {
 function waveText(care: Record<string, unknown> | null): string {
   const wave = care?.["build_wave"];
   return typeof wave === "string" && wave !== INDETERMINATE ? ` · wave ${wave}` : "";
+}
+
+function sliceAction(execution: ExecutionViewSnap, slice: SliceFacts): Action {
+  return slice.scope
+    ? { type: "scopes-open", mission: execution.mission, slice: slice.scope.dirName }
+    : open(`slice:${slice.id}`);
+}
+
+function sliceProblem(execution: ExecutionViewSnap, slice: SliceFacts): string | null {
+  const activity = record(slice.lane?.["activity"]);
+  const needs = record(activity["needs_input"]);
+  if (Number(needs["count"] ?? 0) > 0) return `needs ${str(needs["reason"], String(needs["count"]))}`;
+  const blocked = blockerText(slice.sequencing?.["blocked_on_rows"], "blocker");
+  if (blocked) return blocked.split(" · own row ")[0]!;
+  const qitem = slice.lane?.["qitem_id"];
+  const park = (execution.q5_park ?? []).find((item) => item["qitem_id"] === qitem);
+  if (park && park["pickup_state"] !== "working") return `pickup ${str(park["pickup_state"], INDETERMINATE)} · ${str(park["park_kind"], "indeterminate")}`;
+  return null;
+}
+
+type PathState = "DONE" | "NOW" | "NEXT" | "ATTENTION" | "WAITING";
+
+function pathState(execution: ExecutionViewSnap, slice: SliceFacts): PathState {
+  if (sliceProblem(execution, slice)) return "ATTENTION";
+  if (slice.lane) return "NOW";
+  if (slice.cells["folded"]?.glyph === "✓") return "DONE";
+  if (slice.sequencing?.["next_up"] === true) return "NEXT";
+  return "WAITING";
+}
+
+function pathGlyph(state: PathState): string {
+  return state === "DONE" ? "✓" : state === "NOW" ? "●" : state === "NEXT" ? "→" : state === "ATTENTION" ? "⚑" : "·";
+}
+
+function nextText(slice: SliceFacts): string {
+  if (slice.cells["adopted"]?.glyph === "✓") return "complete";
+  // The ladder can be sparse (for example BUILT with no recorded lock), so the
+  // next transition is the rung above the strongest one reached, not the first gap.
+  const nextRung = RUNGS[slice.rank] ?? RUNGS[0];
+  if (slice.lane) return nextRung ? nextRung : "complete";
+  if (slice.cells["folded"]?.glyph === "✓") return nextRung;
+  if (slice.sequencing?.["next_up"] === true) return "unlocked";
+  const blocked = blockerText(slice.sequencing?.["blocked_on_rows"], "blocker");
+  if (blocked) return "blocked";
+  const deps = slice.sequencing?.["depends_on"];
+  if (Array.isArray(deps) && deps.length > 0) return `after ${deps.map(String).join(",")}`;
+  return str(slice.sequencing?.["next_up_basis"], nextRung ?? "unknown");
+}
+
+function pathRow(execution: ExecutionViewSnap, slice: SliceFacts, width: number): ContentLine {
+  const state = pathState(execution, slice);
+  const ladder = RUNGS.map((rung) => slice.cells[rung]!.glyph).join("");
+  const proof = slice.scope ? `p${slice.scope.proof.paired}/${slice.scope.proof.total}` : "p?";
+  const assigned = slice.lane ? `@${str(slice.lane["seat"])}` : "@—";
+  const problem = sliceProblem(execution, slice);
+  // A 110-column terminal leaves the content pane under 100 columns. At that
+  // width the glyph (defined in the always-visible spine legend) carries the
+  // state name, preserving assignment + problem + next unlock on the same row.
+  const compact = width < 100;
+  const problemText = problem?.replace(/^needs /, "");
+  const tail = compact
+    ? `→${nextText(slice)}${problemText ? ` !${problemText.replace(/^waits on /, "")}` : ""}`
+    : problemText ? `!${problemText} →${nextText(slice)}` : `→${nextText(slice)}`;
+  const label = compact
+    ? `${pathGlyph(state)} ${slice.id} ${ladder} ${proof} ${assigned} ${tail}`
+    : `${pathGlyph(state)} ${slice.id} ${ladder} ${proof} ${state} ${assigned} · ${tail}`;
+  return actionRow(label, sliceAction(execution, slice), width);
+}
+
+function waveOf(slice: SliceFacts): string {
+  return str(slice.care?.["build_wave"], INDETERMINATE);
+}
+
+function waveState(execution: ExecutionViewSnap, slices: SliceFacts[]): PathState {
+  const states = slices.map((slice) => pathState(execution, slice));
+  if (states.includes("ATTENTION")) return "ATTENTION";
+  if (states.includes("NOW")) return "NOW";
+  if (states.every((state) => state === "DONE")) return "DONE";
+  if (states.includes("NEXT")) return "NEXT";
+  return "WAITING";
 }
 
 // ---- INDETERMINATE bases, grouped -------------------------------------------
@@ -357,8 +441,39 @@ function buildGroups(execution: ExecutionViewSnap, scopes: readonly MissionScope
 }
 
 function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number): ContentLine[] {
-  const { slices, groups } = buildGroups(execution, scopes, width);
-  return [...headerLines(execution, slices.length, width), ...groups.flatMap((group) => groupLines(group, width, true))];
+  const slices = sliceFacts(execution, scopes).sort((a, b) => a.order - b.order);
+  const waves = new Map<string, SliceFacts[]>();
+  for (const slice of slices) waves.set(waveOf(slice), [...(waves.get(waveOf(slice)) ?? []), slice]);
+  const lines: ContentLine[] = [
+    { text: `  ${execution.mission} EXECUTION` },
+    ...headerLines(execution, slices.length, width),
+    { text: "  spine: ✓ done · ● now · → next · ⚑ problem · ladder lock·build·review·fold·adopt" },
+  ];
+  for (const [wave, members] of waves) {
+    const state = waveState(execution, members);
+    const shown = members.slice(0, MAX_ROWS_PER_GROUP);
+    lines.push({ text: "" }, sectionRule(`${pathGlyph(state)} WAVE ${wave} · ${state} · ${members.length} slice${members.length === 1 ? "" : "s"}`, width));
+    lines.push(...shown.map((slice) => pathRow(execution, slice, width)));
+    const overflow = members.length - shown.length;
+    if (overflow > 0) lines.push(row(`+${overflow} more — open all ${members.length} rows in wave ${wave}`, `group:wave:${wave}`, width));
+  }
+  if (slices.length === 0) lines.push({ text: "  (no slices on this mission)" });
+  lines.push({ text: "" }, row("projection sources and derivation bases", "sources", width));
+  return lines;
+}
+
+function waveDetail(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number, key: string): ContentLine[] | null {
+  if (!key.startsWith("group:wave:")) return null;
+  const wave = key.slice("group:wave:".length);
+  const members = sliceFacts(execution, scopes).filter((slice) => waveOf(slice) === wave).sort((a, b) => a.order - b.order);
+  if (members.length === 0) return null;
+  return [
+    { text: `${execution.mission} · wave ${wave} · all ${members.length} rows` },
+    { text: "" },
+    ...members.map((slice) => pathRow(execution, slice, width)),
+    { text: "" },
+    back(),
+  ];
 }
 
 /** The "+N more" door: the whole group, every row still its own drill, esc back to the overview. */
@@ -561,6 +676,8 @@ export function executionContentLines(
     const slices = sliceFacts(execution, scopes);
     const page = opened === "sources"
       ? sourcesDetail(execution)
+      : opened.startsWith("group:wave:")
+        ? waveDetail(execution, scopes, width, opened)
       : opened.startsWith("group:")
         ? groupDetail(execution, scopes, width, opened)
       : opened.startsWith("slice:")
@@ -571,4 +688,29 @@ export function executionContentLines(
     return page ?? [{ text: `  ${opened} is not in the current snapshot (it may have closed or been re-derived)` }, { text: "" }, back()];
   }
   return overviewLines(execution, scopes, width);
+}
+
+/** Compact source-grounded execution strip embedded in the existing rich SCOPES
+ * slice detail. Missing projection/slice data stays explicit instead of being inferred. */
+export function executionSliceStripLines(
+  execution: ExecutionViewSnap | null | undefined,
+  sliceId: string,
+  sliceDir: string,
+  width = 96,
+): ContentLine[] {
+  if (!execution) return [{ text: "" }, sectionRule("EXECUTION · INDETERMINATE", width), { text: "  mission execution projection not loaded for this selection" }];
+  const slice = sliceFacts(execution, undefined).find((item) => item.id === sliceId || item.dir === sliceDir);
+  if (!slice) return [{ text: "" }, sectionRule("EXECUTION · INDETERMINATE", width), { text: "  slice absent from the mission execution projection" }];
+  const state = pathState(execution, slice);
+  const ladder = RUNGS.map((rung) => slice.cells[rung]!.glyph).join("");
+  const activity = record(slice.lane?.["activity"]);
+  const problem = sliceProblem(execution, slice);
+  return [
+    { text: "" },
+    sectionRule(`EXECUTION · ${pathGlyph(state)} ${state} · wave ${waveOf(slice)}`, width),
+    { text: `  ladder      ${ladder}  ${RUNG_LABEL}` },
+    { text: `  assignment  ${slice.lane ? `${str(slice.lane["seat"])} · ${str(activity["activity"], INDETERMINATE)}` : "(no claimed lane)"}`, ...(slice.lane ? { action: open(laneKey(slice.lane)) } : {}) },
+    { text: `  next unlock ${nextText(slice)}` },
+    { text: `  problem     ${problem ?? "none on the projection's current surfaces"}` },
+  ];
 }

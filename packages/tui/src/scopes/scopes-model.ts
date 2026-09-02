@@ -48,7 +48,7 @@ export function scopesExplorerRows(
   for (const m of scopes) {
     const key = `scopes-mission:${m.mission}`;
     const open = expanded.has(key);
-    rows.push({ label: `${indent}${open ? "▾" : "▸"} ${m.mission}`, action: { type: "toggle-expand", key }, key });
+    rows.push({ label: `${indent}${open ? "▾" : "▸"} ${m.mission}`, action: { type: "scopes-mission-open", mission: m.mission }, key });
     if (!open) continue;
     for (const s of m.slices) {
       rows.push({
@@ -71,11 +71,11 @@ function box(title: string, suffix: string, width: number): string {
 export function scopesContentLines(
   detail: SliceScopeSnap | null,
   mission: string | null,
-  opts: { collapseReqs: boolean; narrative: boolean; width: number },
+  opts: { collapseReqs: boolean; narrative: boolean; width: number; executionStrip?: ContentLine[] },
 ): ContentLine[] {
   const lines: ContentLine[] = [];
   if (!detail) {
-    lines.push({ text: "select a slice from the SCOPES tree (missions → slices)" });
+    lines.push({ text: "select a mission from the SCOPES tree to open its execution path" });
     return lines;
   }
   const w = Math.max(60, opts.width - 4);
@@ -91,6 +91,8 @@ export function scopesContentLines(
     : "spec: UNLOCKED (build-ahead; ratifies at PM recovery)";
   lines.push({ text: `│ ${specLock}` });
   lines.push({ text: `└${"─".repeat(Math.min(w, 78))}┘` });
+
+  if (opts.executionStrip?.length) lines.push(...opts.executionStrip);
 
   if (opts.narrative) {
     // The `n` panel: PROGRESS.md as the human LOG — display only, never a data source.

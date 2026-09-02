@@ -7,7 +7,7 @@
 import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRunningSpec, agentsRunningSpecTargets, specDetailArrowsScroll } from "./state.js";
 import { filterPalette } from "./commands/palette.js";
 import { scopesContentLines } from "./scopes/scopes-model.js";
-import { executionContentLines } from "./execution/execution-model.js";
+import { executionContentLines, executionSliceStripLines } from "./execution/execution-model.js";
 import { COMMAND_REGISTRY } from "./commands/registry.js";
 import { navigatorDisplay } from "./navigator.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
@@ -661,20 +661,27 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     return lines;
   }
   if (state.section === "scopes") {
-    // SCOPES (d64d2f5c): the opened slice rides scopesSelected; store-direct detail.
+    // SCOPES owns both levels: mission selection opens the execution story;
+    // slice selection retains the store-direct detail with a compact execution strip.
     const sel = state.scopesSelected;
-    const missionName = sel?.mission ?? null;
+    const missionName = state.scopesMission;
+    const execution = snap.execution?.mission === missionName ? snap.execution : null;
     const detail = sel
       ? (snap.scopes ?? []).find((m) => m.mission === sel.mission)?.slices.find((sl) => sl.dirName === sel.slice) ?? null
       : null;
+    if (state.executionOpen && execution) {
+      return executionContentLines(execution, snap.scopes, snap.readErrors, state.executionOpen, contentWidth, false);
+    }
+    if (!detail && missionName) {
+      const lines = executionContentLines(execution, snap.scopes, snap.readErrors, state.executionOpen, contentWidth, !snap.hydratedAt || snap.executionMission !== missionName);
+      return execution ? lines : [{ text: `  ${missionName} EXECUTION` }, ...lines];
+    }
     return scopesContentLines(detail, missionName, {
       collapseReqs: state.scopesCollapseReqs,
       narrative: state.scopesNarrative,
       width: contentWidth,
+      executionStrip: detail ? executionSliceStripLines(execution, detail.id ?? detail.dirName, detail.dirName, contentWidth) : undefined,
     });
-  }
-  if (state.section === "execution") {
-    return executionContentLines(snap.execution, snap.scopes, snap.readErrors, state.executionOpen, contentWidth, !snap.hydratedAt);
   }
   return [{ text: `(${state.section})` }];
 }

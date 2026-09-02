@@ -274,6 +274,7 @@ export type SpecReviewCache = Map<string, SpecLibraryReviewRead>;
 export async function hydrateSnapshot(
   client: DaemonClient,
   reviewCache?: SpecReviewCache,
+  executionMission?: string | null,
 ): Promise<FleetSnapshot> {
   const readErrors: string[] = [];
   async function safe<T>(label: string, fn: () => Promise<unknown>): Promise<T | null> {
@@ -299,7 +300,7 @@ export async function hydrateSnapshot(
     safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
     safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
     safe<{ missions: unknown[] }>("scopes", () => client.scopesDetailed() as Promise<{ missions: unknown[] }>),
-    safe<{ rows: unknown[] }>("execution", () => client.execution() as Promise<{ rows: unknown[] }>),
+    safe<{ rows: unknown[] }>("execution", () => client.execution(executionMission ?? undefined) as Promise<{ rows: unknown[] }>),
   ]);
 
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
@@ -505,6 +506,7 @@ export async function hydrateSnapshot(
       .map((h) => ({ hostId: h.hostId, status: h.status, ...(h.error ? { error: h.error } : {}) })),
     ...rigsDown,
   ];
+  const execution = (executionRead?.rows?.[0] ?? null) as FleetSnapshot["execution"];
 
   return {
     hosts: [localHost, ...remoteHosts],
@@ -513,7 +515,8 @@ export async function hydrateSnapshot(
     humanQueueProbed: review != null && !review.registryError && Array.isArray(review.hosts) && review.hosts.length > 0
       && review.hosts.every((host) => host.status.status === "ok"),
     scopes: (scopesRead?.missions ?? []) as FleetSnapshot["scopes"],
-    execution: (executionRead?.rows?.[0] ?? null) as FleetSnapshot["execution"],
+    execution,
+    executionMission: executionMission ?? execution?.mission ?? null,
     attention: (attention ?? []).map(toQueueRead),
     blocked: blockedResolved,
     inProgress: (inProgress ?? []).map(toQueueRead),

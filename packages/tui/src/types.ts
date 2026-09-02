@@ -190,6 +190,9 @@ export interface FleetSnapshot {
   scopes?: MissionScopesSnap[];
   /** EXECUTION view: the daemon's existing derived six-question projection. */
   execution?: ExecutionViewSnap | null;
+  /** Mission requested for this execution read. Separate from row presence so
+   * selected-mission pending, settled-empty, and failed remain distinguishable. */
+  executionMission?: string | null;
   hosts: HostNode[];
   specs: SpecEntry[];
   /** grounded composeNeedsYou union in daemon priority order, VERBATIM (PIN 3) */
@@ -266,6 +269,7 @@ export type Action =
   | { type: "style"; name: string }
   /** REGISTRY I3 — the command palette (open/query/move/close ride dispatch like all state). */
   /** SCOPES view: m collapse + n narrative toggles (dispatch-riding). */
+  | { type: "scopes-mission-open"; mission: string }
   | { type: "scopes-open"; mission: string; slice: string }
   | { type: "scopes-reqs" }
   | { type: "scopes-narrative" }
@@ -292,6 +296,8 @@ export interface SectionDef {
 }
 
 export interface ViewState {
+  /** SCOPES view: the mission whose execution story is open (null = selector only). */
+  scopesMission: string | null;
   /** SCOPES view: the opened slice (null = tree only). */
   scopesSelected: { mission: string; slice: string } | null;
   /** SCOPES view flags: mini-reqs collapsed · narrative panel open. */

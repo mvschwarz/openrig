@@ -68,7 +68,7 @@ async function run(): Promise<void> {
   // redrawing ONLY while the frame reports live motion (spinner or flash).
   const reviewCache: SpecReviewCache = new Map();
   const live = client
-    ? createLiveRefresh({ hydrate: () => hydrateSnapshot(client, reviewCache), onFrame: () => draw(), now: () => Date.now() })
+    ? createLiveRefresh({ hydrate: () => hydrateSnapshot(client, reviewCache, view.get().scopesMission), onFrame: () => draw(), now: () => Date.now() })
     : null;
   let motionTimer: NodeJS.Timeout | null = null;
   // S19 AM-R18 — the open view updates ITSELF: oracle pushes drive the refresh owner.
@@ -382,7 +382,7 @@ async function run(): Promise<void> {
           crashCartOpts = { ...crashCartOpts, confirm: undefined };
           view.dispatch({ type: "notice", message: "restore cancelled" });
           draw();
-        } else if (inputLine === "" && view.get().section === "execution" && view.get().executionOpen) {
+        } else if (inputLine === "" && view.get().section === "scopes" && view.get().executionOpen) {
           // EXECUTION drill: esc closes the detail page (the page advertises "esc back").
           view.dispatch({ type: "execution-close" });
         }

@@ -160,6 +160,15 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const snap = await hydrateSnapshot(fixtureClient());
     expect(snap.execution).toMatchObject({ view: "execution", mission: "release-0.5.8" });
   });
+  it("requests the currently selected mission rather than reusing the daemon default", async () => {
+    const mission = "release-next";
+    const route = `/api/views/execution?mission=${mission}`;
+    const snap = await hydrateSnapshot(fixtureClient({}, {
+      [route]: { rowCount: 1, rows: [{ view: "execution", mission, q1_lanes: [], q2_sequencing: [], q4_ladder: [], q5_park: [], sources: {} }] },
+    }), undefined, mission);
+    expect(snap.execution).toMatchObject({ view: "execution", mission });
+    expect(snap.executionMission).toBe(mission);
+  });
   it("maps topology: pods grouped, agent rows VERBATIM from the maintained projection (PIN 2)", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
     const local = snap.hosts.find((h) => h.name === "local");

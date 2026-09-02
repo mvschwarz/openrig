@@ -23,7 +23,7 @@ export function defaultSections(): SectionDef[] {
 }
 
 export function emptySnapshot(): FleetSnapshot {
-  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, execution: null, attention: [], blocked: [], inProgress: [], seatActivity: [], pending: [], recentlyFinished: [], hostsDown: [], stream: [], readErrors: [] };
+  return { hosts: [], specs: [], needs: [], humanQueueProbed: false, execution: null, executionMission: null, attention: [], blocked: [], inProgress: [], seatActivity: [], pending: [], recentlyFinished: [], hostsDown: [], stream: [], readErrors: [] };
 }
 
 export interface CreateViewStateOptions {
@@ -60,6 +60,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     notice: null,
     lastError: null,
     palette: null,
+    scopesMission: null,
     scopesSelected: null,
     scopesCollapseReqs: false,
     scopesNarrative: false,
@@ -93,6 +94,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       return { ...next, lastError: action.message };
     case "jump": {
       // scopes: jumping anywhere (incl. back to :scopes) closes the opened slice.
+      next.scopesMission = null;
       next.scopesSelected = null;
       next.executionOpen = null;
       if (!state.sections.some((s) => s.name === action.section))
@@ -102,14 +104,19 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
         snap,
       );
     }
+    case "scopes-mission-open": {
+      const key = `scopes-mission:${action.mission}`;
+      const expanded = state.expanded.includes(key) ? state.expanded : [...state.expanded, key];
+      return resetContent({ ...next, section: "scopes", scopesMission: action.mission, scopesSelected: null, executionOpen: null, expanded });
+    }
     case "scopes-open":
-      return resetContent({ ...next, section: "scopes", scopesSelected: { mission: action.mission, slice: action.slice }, scopesNarrative: false });
+      return resetContent({ ...next, section: "scopes", scopesMission: action.mission, scopesSelected: { mission: action.mission, slice: action.slice }, scopesNarrative: false, executionOpen: null });
     case "scopes-reqs":
       return { ...next, scopesCollapseReqs: !next.scopesCollapseReqs };
     case "scopes-narrative":
       return { ...next, scopesNarrative: !next.scopesNarrative };
     case "execution-open":
-      return resetContent({ ...next, section: "execution", executionOpen: action.key });
+      return resetContent({ ...next, executionOpen: action.key });
     case "execution-close":
       return resetContent({ ...next, executionOpen: null });
     case "palette-open":

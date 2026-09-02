@@ -10,21 +10,34 @@ function openGateway() {
   const snap = demoSnapshot();
   const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
   view.dispatch(parseCommand(":scopes"));
-  view.dispatch({ type: "toggle-expand", key: "scopes-mission:release-0.5.2" });
+  view.dispatch({ type: "scopes-mission-open", mission: "release-0.5.2" });
   view.dispatch({ type: "scopes-open", mission: "release-0.5.2", slice: "gateway-m1" });
   return { snap, view };
 }
 
 describe("scopes view (store-direct render, v4 mock contract)", () => {
-  it("explorer: SCOPES section lists missions; expanding shows slice glyphs (● building, ✓ delivery-locked)", () => {
+  it("explorer: selecting a mission atomically opens it and reveals its slices", () => {
     const snap = demoSnapshot();
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch(parseCommand(":scopes"));
-    view.dispatch({ type: "toggle-expand", key: "scopes-mission:release-0.5.2" });
+    view.dispatch({ type: "scopes-mission-open", mission: "release-0.5.2" });
+    expect(view.get().scopesMission).toBe("release-0.5.2");
+    expect(view.get().expanded).toContain("scopes-mission:release-0.5.2");
     const labels = computeExplorerRows(view.get(), snap).map((r) => r.label);
     expect(labels.some((l) => l.includes("release-0.5.2"))).toBe(true);
     expect(labels.some((l) => l.includes("● gateway-m1"))).toBe(true);
     expect(labels.some((l) => l.includes("✓ crash-cart"))).toBe(true);
+  });
+
+  it("never renders a prior mission's execution data under the newly selected mission heading", () => {
+    const snap = { ...demoSnapshot(), execution: { view: "execution" as const, mission: "older-release", sources: {}, q1_lanes: [], q2_sequencing: [], q4_ladder: [], q5_park: [] } };
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch(parseCommand(":scopes"));
+    view.dispatch({ type: "scopes-mission-open", mission: "release-0.5.2" });
+    const out = renderScreen(view.get(), snap, { cols: 160, rows: 40 }).lines.join("\n");
+    expect(out).toContain("release-0.5.2 EXECUTION");
+    expect(out).toContain("read pending");
+    expect(out).not.toContain("older-release");
   });
 
   it("detail renders the mock structure: header card w/ proof N/M, spec-lock line, INTENT, MINI-REQUIREMENTS, PROOF CONTRACT with ✓/○ + C1 drop lines", () => {

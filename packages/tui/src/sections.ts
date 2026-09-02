@@ -14,13 +14,8 @@ export const SECTION_REGISTRY: readonly SectionDef[] = [
   },
   {
     name: "scopes",
-    sourceRead: "GET /api/scopes?detail=1 (store-direct: locks + C1 proof drops)",
-    drillShape: "mission>slice",
-  },
-  {
-    name: "execution",
-    sourceRead: "GET /api/views/execution?mission= (existing generic view route)",
-    drillShape: "group>derived-row>source",
+    sourceRead: "GET /api/scopes?detail=1 + /api/views/execution?mission= (existing projections)",
+    drillShape: "mission>execution-row>slice/source",
   },
   {
     name: "needs",

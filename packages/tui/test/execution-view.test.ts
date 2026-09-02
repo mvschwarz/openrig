@@ -52,7 +52,12 @@ function executionFixture(count = 4): NonNullable<FleetSnapshot["execution"]> {
       next_up_rank: index === 3 ? 1 : null,
       source: { spec_path: `/work/${slice}/SPEC.md`, arrangement_path: `/work/${slice}/slice.yaml`, wave_map_row: "INDETERMINATE" },
     })),
-    q3_care: ids.map((slice) => ({ slice_id: slice, build_wave: "first-parallel", review_model: "INDETERMINATE", planning_dial: "INDETERMINATE" })),
+    q3_care: ids.map((slice, index) => ({
+      slice_id: slice,
+      build_wave: index === 2 ? "foundation" : index === 3 ? "next-unlock" : "active-parallel",
+      review_model: "INDETERMINATE",
+      planning_dial: "INDETERMINATE",
+    })),
     q4_ladder: ids.map((slice, index) => ({
       slice_id: slice,
       dir: `${String(index + 1).padStart(2, "0")}-slice`,
@@ -72,154 +77,107 @@ function executionFixture(count = 4): NonNullable<FleetSnapshot["execution"]> {
   };
 }
 
+function executionScopes(count = 4): NonNullable<FleetSnapshot["scopes"]> {
+  const template = demoSnapshot().scopes![0]!.slices[0]!;
+  return [{
+    mission: "release-0.5.8",
+    slices: Array.from({ length: count }, (_, index) => ({
+      ...template,
+      id: `OPR.0.5.8.${index + 1}`,
+      dirName: `${String(index + 1).padStart(2, "0")}-slice`,
+      displayName: `${index + 1}-slice`,
+    })),
+  }];
+}
+
 function text(lines: ReturnType<typeof executionContentLines>): string {
   return lines.map((line) => line.text).join("\n");
 }
 
-describe("execution overview — DONE / NOW / NEXT / ATTENTION from the shipped projection", () => {
-  it("renders the four groups with a header naming the mission, derivation time and daemon build", () => {
-    const lines = executionContentLines(executionFixture(), demoSnapshot().scopes, [], null, 100);
+describe("mission execution story — one wave/dependency spine from the shipped projection", () => {
+  it("shows each slice exactly once, grouped in wave order, with done/now/next/problem and real assignments", () => {
+    const lines = executionContentLines(executionFixture(), executionScopes(), [], null, 160);
     const body = text(lines);
-    expect(body).toContain("release-0.5.8 · derived 21:00:00Z · daemon build 257f47e93 · 4 slices");
-    for (const group of ["DONE", "NOW", "NEXT", "ATTENTION"]) expect(body).toContain(`── ${group}`);
-    expect(body).not.toContain("qitem body");
-    const actions = lines.filter((line) => line.action);
-    expect(actions.length).toBeGreaterThan(0);
-    expect(actions.every((line) => line.action?.type === "execution-open")).toBe(true);
+    expect(body).toContain("release-0.5.8 EXECUTION");
+    expect(body).toContain("WAVE active-parallel · ATTENTION · 2 slices");
+    expect(body).toContain("WAVE foundation · DONE · 1 slice");
+    expect(body).toContain("WAVE next-unlock · NEXT · 1 slice");
+    for (const id of ["OPR.0.5.8.1", "OPR.0.5.8.2", "OPR.0.5.8.3", "OPR.0.5.8.4"])
+      expect(body.split(id).length - 1, id).toBe(1);
+    expect(body).toContain("● OPR.0.5.8.1 ○✓??? p2/9 NOW @dev-1@rig · →reviewed");
+    expect(body).toContain("⚑ OPR.0.5.8.2 ○???? p2/9 ATTENTION @dev-2@rig · !permission prompt →locked");
+    expect(body).toContain("✓ OPR.0.5.8.3 ○✓✓✓○ p2/9 DONE @— · →adopted");
+    expect(body).toContain("→ OPR.0.5.8.4 ○???? p2/9 NEXT @— · →unlocked");
+    expect(lines.filter((line) => line.action?.type === "scopes-open")).toHaveLength(4);
   });
 
-  it("DONE counts true rungs only, lists the highest rung first, and summarises not-started slices in one line", () => {
-    const body = text(executionContentLines(executionFixture(), [], [], null, 160));
-    expect(body).toContain("DONE  locked 0 · built 2 · reviewed 1 · folded 1 · adopted 0");
-    expect(body).toContain("ladder lock·build·review·fold·adopt · ✓ yes ○ no ? undetermined");
-    const done = body.slice(body.indexOf("── DONE"), body.indexOf("── NOW"));
-    const rows = done.split("\n").filter((line) => line.includes("(open ▸)"));
-    expect(rows[0]).toContain("OPR.0.5.8.3");
-    expect(rows[0]).toContain("○✓✓✓○");
-    expect(rows[0]).toContain("folded");
-    expect(rows[1]).toContain("OPR.0.5.8.1");
-    expect(rows[1]).toContain("built sha000000");
-    expect(rows[1]).toContain("wave first-parallel");
-    expect(done).toContain("2 slices with no rung reached");
-    // the not-started slices are NOT listed as ladder rows
-    expect(rows.some((line) => line.includes("OPR.0.5.8.2 "))).toBe(false);
+  it("keeps the path legible and every drill affordance in bounds at 110 and 160 columns", () => {
+    for (const width of [110, 160]) {
+      const lines = executionContentLines(executionFixture(), [], [], null, width);
+      const drillable = lines.filter((line) => line.action);
+      expect(drillable.length).toBeGreaterThan(4);
+      expect(text(lines)).toContain("spine: ✓ done · ● now · → next · ⚑ problem");
+      for (const line of drillable) {
+        expect(line.text.endsWith("(open ▸)")).toBe(true);
+        expect(line.text.length).toBeLessThanOrEqual(width);
+      }
+    }
   });
 
-  it("NOW passes the arbitrated activity and its decider through verbatim, with the needs-input reason", () => {
-    const body = text(executionContentLines(executionFixture(), [], [], null, 160));
-    const now = body.slice(body.indexOf("── NOW"), body.indexOf("── NEXT"));
-    expect(now).toContain("2 lanes live · idle seats with capacity 7");
-    expect(now).toContain("● OPR.0.5.8.1  dev-1@rig  working · by self-report 20:58:12Z");
-    expect(now).toContain("⚑ OPR.0.5.8.2  dev-2@rig  idle-at-prompt · by window-sampling 20:58:12Z · needs input: permission prompt");
+  it("keeps path, real assignment, next unlock, and inline problem visible in full 110/160-column screens", () => {
+    const demo = demoSnapshot();
+    const snap = { ...demo, scopes: [...demo.scopes!, ...executionScopes()], execution: executionFixture() };
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch(parseCommand(":scopes"));
+    view.dispatch({ type: "scopes-mission-open", mission: "release-0.5.8" });
+    for (const cols of [110, 160]) {
+      const body = renderScreen(view.get(), snap, { cols, rows: 50 }).lines.join("\n");
+      expect(body).toContain("release-0.5.8 EXECUTION");
+      expect(body).toContain("OPR.0.5.8.1");
+      expect(body).toContain("dev-1@rig");
+      expect(body).toContain("p2/9");
+      expect(body).toContain("reviewed");
+      expect(body).toContain("permission prompt");
+      expect(body).toContain("unlocked");
+    }
   });
 
-  it("NEXT lists eligible slices with their met dependencies and groups every not-eligible reason with a count", () => {
-    const body = text(executionContentLines(executionFixture(), [], [], null, 160));
-    const next = body.slice(body.indexOf("── NEXT"), body.indexOf("── ATTENTION"));
-    expect(next).toContain("NEXT  1 eligible · 3 not eligible");
-    expect(next).toContain("→ OPR.0.5.8.4  after OPR.0.5.8.3 (met) · wave first-parallel");
-    expect(next).toContain("2 · already claimed in-progress");
-    expect(next).toContain(`1 ? undetermined — own completion rung INDETERMINATE (${REPO_BASIS})`);
-  });
-
-  it("ATTENTION lists needs-input and parked rows individually and names each blind spot once, at the first undetermined rung", () => {
-    const body = text(executionContentLines(executionFixture(), [], [], null, 160));
-    const attention = body.slice(body.indexOf("── ATTENTION"));
-    expect(attention).toContain("ATTENTION  5");
-    expect(attention).toContain("⚑ OPR.0.5.8.2  dev-2@rig  needs input: permission prompt");
-    expect(attention).toContain("⚑ OPR.0.5.8.2  pickup parked · indeterminate · 41m since claim");
-    expect(attention).toContain("△ 2 lanes on a fragile join — row/branch naming only (EC-3 field absent — legacy baton) · OPR.0.5.8.1, OPR.0.5.8.2");
-    // slices 2 and 4 have no candidate: the blind spot is BUILD, and fold/adopt are not repeated
-    expect(attention).toContain("? 2 slices build undetermined — no candidate:* tag on any row bound to this slice");
-    // slice 1 is built, so its first undetermined rung is REVIEWED; slice 3 is fully determined
-    expect(attention).toContain(`? 1 slice reviewed undetermined — ${REPO_BASIS}`);
-    expect(attention.split(REPO_BASIS).length - 1).toBe(1);
-    expect(attention).not.toContain("folded undetermined");
-    expect(attention).not.toContain("OPR.0.5.8.1 · INDETERMINATE");
-  });
-
-  it("renders structured blocked_on_rows as the row → blocker relation, never [object Object] (QA finding)", () => {
+  it("renders structured blockers inline with the blocker first and never [object Object]", () => {
     const fixture = executionFixture();
     const blocked = fixture.q2_sequencing[3]!;
     blocked["next_up"] = false;
     blocked["next_up_basis"] = "blocked rows present (qitem-20260902074725-404326e1)";
     blocked["blocked_on_rows"] = [{ qitem_id: "qitem-20260902074725-404326e1", blocked_on: "qitem-20260902074704-b1a445fa" }];
     const body = text(executionContentLines(fixture, [], [], null, 160));
-    const next = body.slice(body.indexOf("── NEXT"), body.indexOf("── ATTENTION"));
-    expect(next).toContain("NEXT  0 eligible · 1 blocked · 3 not eligible");
-    expect(next).toContain("⧗ OPR.0.5.8.4  waits on qitem-20260902074704-b1a445fa · own row qitem-20260902074725-404326e1");
+    expect(body).toContain("⚑ OPR.0.5.8.4 ○???? p? ATTENTION @— · !waits on qitem-20260902074704-b1a445fa →blocked");
     expect(body).not.toContain("[object Object]");
-    // at 110 columns the blocker id itself must survive the clamp
-    const narrow = text(executionContentLines(fixture, [], [], null, 78));
-    expect(narrow).toContain("⧗ OPR.0.5.8.4  waits on qitem-20260902074704-b1a445fa");
-    expect(narrow).not.toContain("[object Object]");
+    const demo = demoSnapshot();
+    const snap = { ...demo, scopes: [...demo.scopes!, ...executionScopes()], execution: fixture };
+    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+    view.dispatch(parseCommand(":scopes"));
+    view.dispatch({ type: "scopes-mission-open", mission: "release-0.5.8" });
+    const narrow = renderScreen(view.get(), snap, { cols: 110, rows: 50 }).lines.join("\n");
+    expect(narrow).toContain("→blocked");
+    expect(narrow).toContain("!qitem-20260902074704");
     const page = text(executionContentLines(fixture, [], [], "slice:OPR.0.5.8.4", 160));
     expect(page).toContain("blocked on:  qitem-20260902074725-404326e1 waits on qitem-20260902074704-b1a445fa");
-    expect(page).not.toContain("[object Object]");
   });
 
-  it("clamps long rows to the pane width so the open affordance always survives", () => {
-    const lines = executionContentLines(executionFixture(), [], [], null, 80);
-    const drillable = lines.filter((line) => line.action);
-    expect(drillable.length).toBeGreaterThan(3);
-    for (const line of drillable) {
-      expect(line.text.endsWith("(open ▸)")).toBe(true);
-      expect(line.text.length).toBeLessThanOrEqual(80);
-    }
-    expect(drillable.some((line) => line.text.includes("…"))).toBe(true);
-  });
-
-  it("caps a 40-slice projection to one glance with explicit plus-N overflow rows", () => {
-    const lines = executionContentLines(executionFixture(40), [], [], null, 100);
-    expect(lines.length).toBeLessThanOrEqual(34);
-    expect(lines.some((line) => /\+\d+ more/.test(line.text))).toBe(true);
-  });
-
-  it("the +N more overflow row is a door: it opens the whole group with every hidden row drillable (R2 finding)", () => {
-    // 14 slices → every even index is built → 7 reached rows in DONE, 5 shown, 2 hidden
+  it("bounds a large wave behind one door and keeps every hidden slice selectable", () => {
     const fixture = executionFixture(14);
     const overview = executionContentLines(fixture, [], [], null, 160);
-    const door = overview.find((line) => /\+2 more/.test(line.text))!;
-    expect(door.text).toContain("+2 more — open all 7 DONE rows");
-    expect(door.action).toEqual({ type: "execution-open", key: "group:done" });
-    const doneStart = overview.findIndex((l) => l.text.includes("── DONE"));
-    const nowStart = overview.findIndex((l) => l.text.includes("── NOW"));
-    const shownIds = overview.slice(doneStart, nowStart).filter((l) => l.action?.type === "execution-open" && (l.action as { key: string }).key.startsWith("slice:")).map((l) => (l.action as { key: string }).key);
-    expect(shownIds).toHaveLength(5);
-
-    const page = executionContentLines(fixture, [], [], "group:done", 160);
-    expect(text(page)).toContain("all 7 DONE rows");
-    expect(text(page)).toContain("esc back");
-    expect(text(page)).not.toMatch(/\+\d+ more/);
-    const pageIds = page.filter((l) => l.action?.type === "execution-open" && (l.action as { key: string }).key.startsWith("slice:")).map((l) => (l.action as { key: string }).key);
-    expect(pageIds).toHaveLength(7);
-    // the two hidden slices are exactly the ones the overview did not show, and each is its own drill
-    const hidden = pageIds.filter((key) => !shownIds.includes(key));
-    expect(hidden).toEqual(["slice:OPR.0.5.8.11", "slice:OPR.0.5.8.13"]);
-    for (const key of hidden) expect(text(executionContentLines(fixture, [], [], key, 160))).toContain("ladder · reached");
-
-    // esc from the group page returns to the overview through the same close action
-    const snap = { ...demoSnapshot(), execution: fixture };
-    const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
-    view.dispatch(parseCommand(":execution"));
-    view.dispatch(door.action!);
-    expect(view.get().executionOpen).toBe("group:done");
-    let screen = renderScreen(view.get(), snap, { cols: 160, rows: 40 });
-    expect(screen.lines.join("\n")).toContain("all 7 DONE rows");
-    view.dispatch({ type: "execution-close" });
-    screen = renderScreen(view.get(), snap, { cols: 160, rows: 40 });
-    expect(view.get().executionOpen).toBeNull();
-    expect(screen.lines.join("\n")).toContain("+2 more — open all 7 DONE rows");
+    const door = overview.find((line) => line.text.includes("open all 12 rows in wave active-parallel"))!;
+    expect(door.action).toEqual({ type: "execution-open", key: "group:wave:active-parallel" });
+    expect(overview.length).toBeLessThanOrEqual(20);
+    const page = executionContentLines(fixture, [], [], "group:wave:active-parallel", 160);
+    expect(text(page)).toContain("wave active-parallel · all 12 rows");
+    expect(page.filter((line) => line.action?.type === "scopes-open" || line.action?.type === "execution-open")).toHaveLength(12);
   });
 
-  it("degrades a failed execution fetch to one warning instead of blanking the section", () => {
-    const lines = executionContentLines(null, [], ["execution: daemon read failed: GET /api/views/execution → 500"], null, 100);
-    expect(text(lines)).toContain("execution projection unavailable — execution: daemon read failed");
-  });
-
-  it("tells pending, failed, and served-empty apart instead of calling all three unavailable", () => {
+  it("tells pending, failed, and served-empty projection reads apart", () => {
+    const failure = text(executionContentLines(null, [], ["execution: daemon read failed: GET /api/views/execution → 500"], null, 100));
+    expect(failure).toContain("execution projection unavailable — execution: daemon read failed");
     expect(text(executionContentLines(null, [], [], null, 100, true))).toContain("read pending");
-    expect(text(executionContentLines(null, [], [], null, 100, true))).not.toContain("unavailable");
     expect(text(executionContentLines(null, [], [], null, 100, false))).toContain("served no row");
   });
 });
@@ -260,20 +218,30 @@ describe("execution drill — one page from source, esc back", () => {
     expect(body).toContain("esc back");
   });
 
-  it("renders through the public :execution section, opens the selected row, and execution-close returns to the overview", () => {
-    const snap = { ...demoSnapshot(), execution: executionFixture() };
+  it("renders through a SCOPES mission selection, opens rich slice detail, and preserves source drills", () => {
+    const demo = demoSnapshot();
+    const scopes = [...demo.scopes!, ...executionScopes()];
+    const snap = { ...demo, scopes, execution: executionFixture() };
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
-    expect(view.dispatch(parseCommand(":execution")).lastError).toBeNull();
+    view.dispatch(parseCommand(":scopes"));
+    view.dispatch({ type: "scopes-mission-open", mission: "release-0.5.8" });
     let screen = renderScreen(view.get(), snap, { cols: 160, rows: 40 });
-    expect(screen.lines.join("\n")).toContain("ATTENTION");
-    const target = screen.contentTargets.find((t) => (t.action as { key?: string }).key?.startsWith("slice:"))!;
+    expect(screen.lines.join("\n")).toContain("release-0.5.8 EXECUTION");
+    const target = screen.contentTargets.find((t) => t.action.type === "scopes-open")!;
     view.dispatch(target.action);
     screen = renderScreen(view.get(), snap, { cols: 160, rows: 40 });
-    expect(screen.lines.join("\n")).toContain("ladder · reached");
-    expect(screen.lines.join("\n")).toContain("esc back");
+    expect(screen.lines.join("\n")).toContain("INTENT (verbatim)");
+    expect(screen.lines.join("\n")).toContain("EXECUTION · ● NOW");
+    expect(screen.lines.join("\n")).toContain("assignment");
+    view.dispatch({ type: "scopes-mission-open", mission: "release-0.5.8" });
+    screen = renderScreen(view.get(), snap, { cols: 160, rows: 40 });
+    const sources = screen.contentTargets.find((t) => (t.action as { key?: string }).key === "sources")!;
+    view.dispatch(sources.action);
+    screen = renderScreen(view.get(), snap, { cols: 160, rows: 40 });
+    expect(screen.lines.join("\n")).toContain("sources behind release-0.5.8");
     view.dispatch({ type: "execution-close" });
     screen = renderScreen(view.get(), snap, { cols: 160, rows: 40 });
-    expect(screen.lines.join("\n")).toContain("── DONE");
+    expect(screen.lines.join("\n")).toContain("WAVE active-parallel");
     expect(view.get().executionOpen).toBeNull();
   });
 });

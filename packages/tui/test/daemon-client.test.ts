@@ -26,6 +26,7 @@ const SPEC_4A_ROUTES = [
   "/api/stream/list?limit=100&afterSortKey=k1",
   "/api/stream/list?limit=5&direction=latest",
   "/api/views/execution",
+  "/api/views/execution?mission=release-0.5.8",
 ];
 
 describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)", () => {
@@ -54,6 +55,7 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await c.streamList(100, "k1");
     await c.streamLatest();
     await c.execution();
+    await c.execution("release-0.5.8");
 
     expect(seen.sort()).toEqual([...SPEC_4A_ROUTES].sort());
   });
