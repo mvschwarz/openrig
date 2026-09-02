@@ -150,6 +150,26 @@ export class QueueWakeRepository {
     });
   }
 
+  /** Rows that attached an OPERATOR watchdog to this job, whatever their state.
+   *  A park-generated timer and an operator attachment can share one job id:
+   *  `--wake-watchdog` accepts any active job whose target matches the parked
+   *  owner, including the job another row's `--wake-after` produced, and that
+   *  second binding persists as wake_kind = 'watchdog' against the same
+   *  wake_ref. This lookup is how the timer backstop learns the job is not
+   *  solely its own to retire. */
+  findQitemsByAttachedWatchdog(jobId: string): Array<{ qitemId: string; state: string }> {
+    if (!this.available) return [];
+    return this.db.prepare(
+      `SELECT DISTINCT w.qitem_id, q.state
+         FROM queue_transition_wakes w
+         JOIN queue_items q ON q.qitem_id = w.qitem_id
+        WHERE w.phase = 'armed' AND w.wake_ref = ? AND w.wake_kind = 'watchdog'`,
+    ).all(jobId).map((row) => {
+      const r = row as { qitem_id: string; state: string };
+      return { qitemId: r.qitem_id, state: r.state };
+    });
+  }
+
   private isLive(kind: ParkWakeKind, ref: string): boolean {
     if (kind === "blocker") {
       const row = this.db.prepare("SELECT state FROM queue_items WHERE qitem_id = ?").get(ref) as

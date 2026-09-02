@@ -322,6 +322,98 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(jobs.getById(operatorJob.jobId)?.state).toBe("active");
   });
 
+  it("OPR.0.5.8.1 S1c — ONE SHARED JOB: a terminal timer row must not terminal an attached watchdog", async () => {
+    // R2 blocking finding at ea0e80d2. The control above uses two DIFFERENT job
+    // ids, so it cannot see the composition that actually ships: --wake-watchdog
+    // accepts any active job whose target matches the parked owner, including
+    // the job another row's --wake-after just created. Both bindings then hang
+    // off ONE wake_ref. The timer lookup selects wake_kind='timer' only, so a
+    // legacy-terminal timer row made the resolver claim the whole job — and the
+    // engine terminals it before transport, so the still-blocked operator
+    // attachment can never wake.
+    const deliveries: Array<{ targetSession: string; message: string }> = [];
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo: jobs,
+      historyLog: new WatchdogHistoryLog(db),
+      eventBus: bus,
+      deliver: async (request) => {
+        deliveries.push(request);
+        return { status: "ok" };
+      },
+      resolvePreDeliveryTerminalReason: ({ jobId }) =>
+        repo.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      onWakeAttempt: ({ jobId, deliveryStatus }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus),
+    });
+
+    // Row A parks with --wake-after, producing job J and a timer binding.
+    const timerRow = await item("shared-owner@rig");
+    repo.update({
+      qitemId: timerRow.qitemId, actorSession: "shared-owner@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: timer", wakeAfterSeconds: 90,
+    } as never);
+    const sharedJobId = (db.prepare(
+      "SELECT wake_ref FROM queue_transition_wakes WHERE qitem_id = ? AND wake_kind = 'timer'",
+    ).get(timerRow.qitemId) as { wake_ref: string }).wake_ref;
+
+    // Row B parks against THE SAME job with the supported --wake-watchdog path.
+    const attachedRow = await item("shared-owner@rig");
+    repo.update({
+      qitemId: attachedRow.qitemId, actorSession: "shared-owner@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: attached watchdog",
+      wakeWatchdogId: sharedJobId,
+    } as never);
+
+    // The exact legacy residue S1c exists to guard, written the way R2's probe
+    // writes it: DIRECT SQL, deliberately bypassing repo.update. Closing the row
+    // through the normal path would fire S1b's transition-time retirement and
+    // there would be no residue left to guard against — the fixture has to
+    // model an OLDER daemon that closed the row without that hook.
+    db.prepare("UPDATE queue_items SET state = 'done', blocked_on = NULL WHERE qitem_id = ?")
+      .run(timerRow.qitemId);
+    expect(repo.getById(attachedRow.qitemId)?.state).toBe("blocked");
+
+    const result = await engine.evaluate(jobs.getByIdOrThrow(sharedJobId));
+
+    // The attachment is actionable work; the job must survive and deliver.
+    expect(result.outcome).not.toMatchObject({ reason: "park_timer_target_terminal" });
+    expect(result.outcome.action).toBe("send");
+    expect(jobs.getById(sharedJobId)?.state).toBe("active");
+    expect(deliveries).toEqual([
+      expect.objectContaining({ targetSession: "shared-owner@rig" }),
+    ]);
+  });
+
+  it("OPR.0.5.8.1 S1c — a solely-park-generated timer with a terminal row is still refused", async () => {
+    // The other side of the ownership boundary: adding the watchdog check must
+    // not disarm the guard S1c exists for. With no attachment sharing the job,
+    // a terminal timer row still retires the legacy residue.
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo: jobs,
+      historyLog: new WatchdogHistoryLog(db),
+      eventBus: bus,
+      deliver: async () => ({ status: "ok" }),
+      resolvePreDeliveryTerminalReason: ({ jobId }) =>
+        repo.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      onWakeAttempt: ({ jobId, deliveryStatus }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus),
+    });
+
+    const row = await item("lone-owner@rig");
+    repo.update({
+      qitemId: row.qitemId, actorSession: "lone-owner@rig", state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "continuation: timer", wakeAfterSeconds: 90,
+    } as never);
+    const jobId = (db.prepare(
+      "SELECT wake_ref FROM queue_transition_wakes WHERE qitem_id = ? AND wake_kind = 'timer'",
+    ).get(row.qitemId) as { wake_ref: string }).wake_ref;
+    // Same legacy-residue shape as above, and for the same reason.
+    db.prepare("UPDATE queue_items SET state = 'done', blocked_on = NULL WHERE qitem_id = ?")
+      .run(row.qitemId);
+
+    const result = await engine.evaluate(jobs.getByIdOrThrow(jobId));
+
+    expect(result.outcome).toMatchObject({ action: "terminal", reason: "park_timer_target_terminal" });
+  });
+
   it("OPR.0.5.8.1 S1b — an unpark (blocked -> in-progress) also ends the timer", async () => {
     const row = await item("worker@rig");
     repo.update({

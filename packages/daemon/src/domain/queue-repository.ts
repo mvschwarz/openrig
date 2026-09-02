@@ -2643,6 +2643,14 @@ export class QueueRepository {
   resolveWatchdogPreDeliveryTerminalReason(jobId: string): string | null {
     const targets = this.wakeRepo.findQitemsByGeneratedTimer(jobId);
     if (targets.length === 0 || targets.some(({ state }) => !isTerminalState(state))) return null;
+    // Ownership, not just staleness. This backstop may retire a job only when
+    // the job is SOLELY a park-generated timer. `--wake-watchdog` can attach an
+    // operator row to the very job another row's `--wake-after` produced, and
+    // that is a supported path — so a shared job carries a second, watchdog-kind
+    // binding this reason has no authority over. The timer's rows being terminal
+    // says nothing about the attachment; claiming the job anyway terminals it
+    // before transport and the attachment can never wake.
+    if (this.wakeRepo.findQitemsByAttachedWatchdog(jobId).length > 0) return null;
     return "park_timer_target_terminal";
   }
 
