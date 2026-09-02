@@ -73,6 +73,12 @@ should almost never see something that doesn't match what was planned — QA cat
 kicks them back. When the human looks, they map intent → plan → delivered at a glance, mostly by
 scanning screenshots down a single column, and give the final 1% approval.
 
+For a release mission, `mission.yaml` also names the Git strategy before build
+work starts: the branch/ref that is cumulative integration truth, its base, and
+when that truth is reconciled to main. Continuous integration to main and a
+release-line fold followed by one explicit merge are both valid; leaving the
+choice implicit is not.
+
 **The heavier flow — proof contracts, plan-lock, C1 drops, proof-lock — is PART B and is not in
 force unless assigned.**
 
