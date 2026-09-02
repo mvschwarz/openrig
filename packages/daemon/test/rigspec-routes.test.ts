@@ -343,7 +343,8 @@ pods:
     label: Dev
     members:
       - id: impl
-        agent_ref: "builtin:terminal"
+        # Deliberately invalid unrelated topology: workspace-only apply ignores it.
+        agent_ref: ""
         profile: none
         runtime: terminal
         cwd: /workspace/app

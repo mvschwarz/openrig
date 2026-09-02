@@ -113,7 +113,7 @@ export class RigSpecSchema {
     // stay valid for back-compat; whoami/node-inventory return null
     // workspace when not declared.
     if (obj["workspace"] !== undefined && obj["workspace"] !== null) {
-      errors.push(...validateWorkspaceBlock(obj["workspace"], "workspace"));
+      errors.push(...this.validateWorkspace(obj["workspace"]).errors);
     }
 
     // OPR.0.4.8.3 Seam B: optional rig-level permission_policy REF (builtin:<name> or a
@@ -195,10 +195,21 @@ export class RigSpecSchema {
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
       services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,
-      workspace: raw["workspace"] ? normalizeWorkspaceBlock(raw["workspace"]) : undefined,
+      workspace: raw["workspace"] ? this.normalizeWorkspace(raw["workspace"]) : undefined,
       pods,
       edges,
     };
+  }
+
+  /** Validate only a RigSpec workspace block through the canonical schema. */
+  static validateWorkspace(raw: unknown): ValidationResult {
+    const errors = validateWorkspaceBlock(raw, "workspace");
+    return { valid: errors.length === 0, errors };
+  }
+
+  /** Normalize only a validated RigSpec workspace block. */
+  static normalizeWorkspace(raw: unknown): WorkspaceSpec | undefined {
+    return normalizeWorkspaceBlock(raw);
   }
 }
 

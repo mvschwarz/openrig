@@ -142,24 +142,28 @@ rigspecImportRoutes.post("/workspace", async (c) => {
     return c.json({ ok: false, code: "validation_failed", errors: [message] }, 400);
   }
 
-  const validation = RigSpecSchema.validate(raw);
+  const workspace = raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)["workspace"]
+    : undefined;
+  if (workspace === undefined || workspace === null) {
+    return c.json({ ok: false, code: "workspace_required", errors: ["workspace: required for workspace-only apply"] }, 400);
+  }
+
+  const validation = RigSpecSchema.validateWorkspace(workspace);
   if (!validation.valid) {
     return c.json({ ok: false, code: "validation_failed", errors: validation.errors }, 400);
   }
 
-  const spec = RigSpecSchema.normalize(raw as Record<string, unknown>);
-  if (!spec.workspace) {
-    return c.json({ ok: false, code: "workspace_required", errors: ["workspace: required for workspace-only apply"] }, 400);
-  }
+  const normalizedWorkspace = RigSpecSchema.normalizeWorkspace(workspace)!;
   if (!rigRepo.getRig(targetRigId)) {
     return c.json({ ok: false, code: "target_rig_not_found", error: `Rig not found: ${targetRigId}` }, 404);
   }
 
   const current = rigRepo.getRigWorkspace(targetRigId);
-  const changed = JSON.stringify(current) !== JSON.stringify(spec.workspace);
-  if (changed) rigRepo.setRigWorkspace(targetRigId, spec.workspace);
+  const changed = JSON.stringify(current) !== JSON.stringify(normalizedWorkspace);
+  if (changed) rigRepo.setRigWorkspace(targetRigId, normalizedWorkspace);
 
-  return c.json({ rigId: targetRigId, changed, workspace: spec.workspace });
+  return c.json({ rigId: targetRigId, changed, workspace: normalizedWorkspace });
 });
 
 // POST /api/rigs/import/materialize -> create rig topology without launching
