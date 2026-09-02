@@ -143,6 +143,22 @@ function sliceFacts(execution: ExecutionViewSnap, scopes: readonly MissionScopes
   });
 }
 
+/** blocked_on_rows entries are `{ qitem_id, blocked_on }` — the slice's own row and the row it
+ *  waits on. Render the relation, never the object. */
+function blockerText(rows: unknown, lead: "blocker" | "row" = "row"): string {
+  if (!Array.isArray(rows) || rows.length === 0) return "";
+  return rows
+    .map((entry) => {
+      if (typeof entry === "string") return entry;
+      const r = record(entry);
+      const own = str(r["qitem_id"], "?");
+      const blocker = str(r["blocked_on"], "?");
+      // the overview leads with the BLOCKER so it survives a narrow pane; the page has room for both
+      return lead === "blocker" ? `waits on ${blocker} · own row ${own}` : `${own} waits on ${blocker}`;
+    })
+    .join("; ");
+}
+
 function proofText(scope: SliceScopeSnap | null): string {
   return scope ? `proof ${scope.proof.paired}/${scope.proof.total}` : "proof ?";
 }
@@ -255,7 +271,7 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   });
   const blockedRows = slices
     .filter((slice) => Array.isArray(slice.sequencing?.["blocked_on_rows"]) && (slice.sequencing!["blocked_on_rows"] as unknown[]).length > 0)
-    .map((slice) => row(`⧗ ${id(slice.id)}  blocked on ${(slice.sequencing!["blocked_on_rows"] as unknown[]).map(String).join(", ")}`, `slice:${slice.id}`, width));
+    .map((slice) => row(`⧗ ${id(slice.id)}  ${blockerText(slice.sequencing!["blocked_on_rows"], "blocker")}`, `slice:${slice.id}`, width));
   const reasons = new Map<string, { label: string; members: string[] }>();
   for (const slice of slices) {
     const seq = slice.sequencing;
@@ -328,14 +344,14 @@ function sliceDetail(execution: ExecutionViewSnap, slices: SliceFacts[], id: str
   const seq = slice.sequencing;
   if (seq) {
     const deps = Array.isArray(seq["depends_on"]) ? seq["depends_on"].map(String) : [];
-    const blocked = Array.isArray(seq["blocked_on_rows"]) ? seq["blocked_on_rows"].map(String) : [];
+    const blocked = blockerText(seq["blocked_on_rows"]);
     sections.push({
       title: "sequencing",
       fields: [
         { label: "depends on", value: deps.join(", ") || "(none)" },
         { label: "next up", value: `${str(seq["next_up"], INDETERMINATE)} — ${str(seq["next_up_basis"], "no basis given")}` },
         { label: "rank", value: str(seq["next_up_rank"], "—") },
-        { label: "blocked on", value: blocked.join(", ") || "(no rows)" },
+        { label: "blocked on", value: blocked || "(no rows)" },
         ...(slice.care ? [{ label: "wave", value: str(slice.care["build_wave"], INDETERMINATE) }] : []),
       ],
     });

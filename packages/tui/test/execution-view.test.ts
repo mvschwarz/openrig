@@ -138,6 +138,26 @@ describe("execution overview — DONE / NOW / NEXT / ATTENTION from the shipped 
     expect(attention).not.toContain("OPR.0.5.8.1 · INDETERMINATE");
   });
 
+  it("renders structured blocked_on_rows as the row → blocker relation, never [object Object] (QA finding)", () => {
+    const fixture = executionFixture();
+    const blocked = fixture.q2_sequencing[3]!;
+    blocked["next_up"] = false;
+    blocked["next_up_basis"] = "blocked rows present (qitem-20260902074725-404326e1)";
+    blocked["blocked_on_rows"] = [{ qitem_id: "qitem-20260902074725-404326e1", blocked_on: "qitem-20260902074704-b1a445fa" }];
+    const body = text(executionContentLines(fixture, [], [], null, 160));
+    const next = body.slice(body.indexOf("── NEXT"), body.indexOf("── ATTENTION"));
+    expect(next).toContain("NEXT  0 eligible · 1 blocked · 3 not eligible");
+    expect(next).toContain("⧗ OPR.0.5.8.4  waits on qitem-20260902074704-b1a445fa · own row qitem-20260902074725-404326e1");
+    expect(body).not.toContain("[object Object]");
+    // at 110 columns the blocker id itself must survive the clamp
+    const narrow = text(executionContentLines(fixture, [], [], null, 78));
+    expect(narrow).toContain("⧗ OPR.0.5.8.4  waits on qitem-20260902074704-b1a445fa");
+    expect(narrow).not.toContain("[object Object]");
+    const page = text(executionContentLines(fixture, [], [], "slice:OPR.0.5.8.4", 160));
+    expect(page).toContain("blocked on:  qitem-20260902074725-404326e1 waits on qitem-20260902074704-b1a445fa");
+    expect(page).not.toContain("[object Object]");
+  });
+
   it("clamps long rows to the pane width so the open affordance always survives", () => {
     const lines = executionContentLines(executionFixture(), [], [], null, 80);
     const drillable = lines.filter((line) => line.action);
