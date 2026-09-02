@@ -32,6 +32,7 @@ import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
+import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 
 function setupDb(): Database.Database {
   return createFullTestDb();
@@ -809,6 +810,37 @@ describe("RestoreOrchestrator", () => {
     });
     const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
     const codexCommand = `node /opt/openrig/lib/node_modules/@openai/codex/bin/codex --model gpt-5.6 resume --add-dir /tmp/openrig-state ${resumeToken}`;
+    const result = await createOrchestrator({
+      tmux,
+      codex: mockCodexResume({ ok: true }),
+      listProcesses: async () => [
+        { pid: 1234, ppid: 1, command: "-zsh" },
+        { pid: 54776, ppid: 1234, command: codexCommand },
+      ],
+    }).restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]!.status).toBe("resumed");
+    expect(db.prepare("SELECT verdict, observed_pid, observed_command, matched_layer FROM seat_identity_verdicts WHERE node_id = ?")
+      .get(result.result.nodes[0]!.nodeId)).toEqual({
+        verdict: "verified",
+        observed_pid: 54776,
+        observed_command: codexCommand,
+        matched_layer: 1,
+      });
+  });
+
+  it("reports a Codex resume when a preceding profile is also named resume", async () => {
+    const resumeToken = "saved-thread-label";
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "codex" }],
+      edges: [],
+      resumeType: "codex_id",
+      resumeToken,
+    });
+    const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "node") } as unknown as TmuxAdapter;
+    const codexCommand = buildCodexResumeCore(resumeToken, "resume", false, "--add-dir /tmp/openrig-state");
     const result = await createOrchestrator({
       tmux,
       codex: mockCodexResume({ ok: true }),
