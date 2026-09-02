@@ -58,6 +58,7 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
   const tmpHomes: string[] = [];
   const tmpSrcs: string[] = [];
   const origHome = process.env["OPENRIG_HOME"];
+  const origPacksRoot = process.env["OPENRIG_CONTEXT_PACKS_ROOT"];
 
   afterEach(() => {
     for (const d of [...tmpHomes, ...tmpSrcs]) rmSync(d, { recursive: true, force: true });
@@ -65,12 +66,15 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     tmpSrcs.length = 0;
     if (origHome === undefined) delete process.env["OPENRIG_HOME"];
     else process.env["OPENRIG_HOME"] = origHome;
+    if (origPacksRoot === undefined) delete process.env["OPENRIG_CONTEXT_PACKS_ROOT"];
+    else process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = origPacksRoot;
   });
 
   function isolatedHome(): string {
     const home = mkdtempSync(join(tmpdir(), "ctx-add-home-"));
     tmpHomes.push(home);
     process.env["OPENRIG_HOME"] = home;
+    process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = join(home, "context-packs");
     return home;
   }
 

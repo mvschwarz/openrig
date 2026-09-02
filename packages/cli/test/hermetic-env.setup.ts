@@ -30,8 +30,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// (1) Scrub the six connection-redirect vars (desk-authoritative set).
-for (const key of ["OPENRIG_URL", "OPENRIG_PORT", "RIGGED_URL", "RIGGED_PORT", "OPENRIG_HOST_SELECTED", "OPENRIG_HOST"]) {
+// (1) Scrub the connection-redirect vars (desk-authoritative set).
+for (const key of ["OPENRIG_URL", "OPENRIG_PORT", "RIGGED_URL", "RIGGED_PORT", "OPENRIG_HOST_SELECTED", "OPENRIG_HOST", "OPENRIG_BIND_HOST"]) {
   delete process.env[key];
 }
 

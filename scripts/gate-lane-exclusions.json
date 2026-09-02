@@ -2,13 +2,5 @@
   "version": 1,
   "note": "F1 exclusion-ledger \u2014 base-health suites EXCLUDED from the gate. EMPTY by design: the named-6 were KILLED (E/C/D/A + B), not excluded, so main is truly green. Any resident MUST carry suite+reason+receipt(A/B)+owner+expiry, expiry MUST NOT outlive cutCeiling, and a past-expiry resident flips the gate RED (mechanical, self-dying). See scripts/gate-lane-ledger.mjs.",
   "cutCeiling": "2026-09-30",
-  "entries": [
-    {
-      "suite": "vitest",
-      "reason": "Pre-existing load-margin timing pin: ps-summary-stall-red D2 (250ms /healthz budget under N=24 burst) flips under gate+wave contention (loadavg 9-11, 26 foreign procs). Not candidate-attributable: green 3/3 uncontended in three environments including single-file at this tip; mechanism-independence from the B12/overlay/parity changes proven by call-graph grep. The condition it measures is the disease the interim cut medicates (B12).",
-      "receipt": "A: base 562192e2c green 3/3 in two envs (dev50-planner 01:00Z, orch-advisor primary 01:01Z) + dev-driver uncontended green at 3324f6811. B: tip b8d446069 single-file green 3/3 (01:29Z gate worktree) vs gate-suite red under load (verdict foreignLoad recorded).",
-      "owner": "qitem-20260721000001-ps-stall-driver",
-      "expiry": "2026-08-28"
-    }
-  ]
+  "entries": []
 }
