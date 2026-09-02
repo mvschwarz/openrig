@@ -44,10 +44,10 @@ function same(left, right) {
   return left?.kind === "file" && right?.kind === "file" && left.hash === right.hash;
 }
 
-function hasUnsupportedLiveAncestor(relative, live) {
+function hasNonDirectoryLiveAncestor(relative, live) {
   const parts = relative.split("/");
   return parts.slice(0, -1).some((_, index) => (
-    live.get(parts.slice(0, index + 1).join("/"))?.kind === "unsupported"
+    live.has(parts.slice(0, index + 1).join("/"))
   ));
 }
 
@@ -110,7 +110,7 @@ const paths = [...new Set([
 ])].sort();
 const actions = paths.map((relative) => ({
   path: relative,
-  decision: hasUnsupportedLiveAncestor(relative, inventories.live)
+  decision: hasNonDirectoryLiveAncestor(relative, inventories.live)
     ? "preserve-unsupported-type"
     : classify(
       inventories.ancestor.get(relative),
