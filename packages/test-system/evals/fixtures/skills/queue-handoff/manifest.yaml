@@ -1,0 +1,7 @@
+name: queue-handoff
+version: "1"
+taxonomy: skills
+purpose: "(eval fixture) pass active work durably before a turn ends"
+files:
+  - path: content.md
+    role: source

@@ -24,7 +24,8 @@ const ENTRIES = [
   { ref: "skills/core/rig-bundles-and-shareable-artifacts", purpose: "package a rig for a machine that never had the source", teaches: "Build a portable rig with `rig bundle create`; install with `rig bundle install`." },
   { ref: "skills/core/openrig-upgrade", purpose: "upgrade a running daemon without downtime", teaches: "Use the sidecar-operator upgrade path so the rig stays up while the daemon upgrades." },
   { ref: "skills/process/systematic-debugging", purpose: "chase a failure methodically", teaches: "Instrument every boundary once and read where it actually breaks — one run beats five hypotheses." },
-  { ref: "skills/process/writing-plans", purpose: "write a plan before building", teaches: "State the problem and intent, not the steps; separate DECIDED from OPEN." },
+  { ref: "skills/openrig-operating-model", purpose: "place durable knowledge at the right context altitude", teaches: "Put context at the narrowest scope that needs it, and trace one filename toward the root." },
+  { ref: "skills/queue-handoff", purpose: "pass active work durably before a turn ends", teaches: "Active work ends by handing off a queue baton, not by going idle at the prompt." },
   // distractors — present so selection is a real choice, not a singleton
   { ref: "skills/core/human-in-the-loop", purpose: "when and how to reach the human", teaches: "Reach the human by exception; orchestrators use discretion, others route through them." },
   { ref: "skills/pm/requirements-writer", purpose: "turn intent into requirements", teaches: "Proportional structured requirements — three capture points, elastic middle." },
@@ -36,7 +37,7 @@ for (const e of ENTRIES) {
   const dir = join(ROOT, e.ref);
   mkdirSync(dir, { recursive: true });
   const name = e.ref.split("/").pop();
-  const manifest = `name: ${name}\nversion: "1"\npurpose: "(eval fixture) ${e.purpose}"\nfiles:\n  - path: content.md\n    role: source\n`;
+  const manifest = `name: ${name}\nversion: "1"\ntaxonomy: skills\npurpose: "(eval fixture) ${e.purpose}"\nfiles:\n  - path: content.md\n    role: source\n`;
   writeFileSync(join(dir, "manifest.yaml"), manifest);
   writeFileSync(join(dir, "content.md"), `# ${e.ref}\n\n${e.purpose}\n\n${e.teaches}\n`);
 }
