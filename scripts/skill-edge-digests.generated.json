@@ -54,8 +54,8 @@
     "plugin": {
       "applying-a-permission-policy/SKILL.md": "7fde2a1220bae9cc5b912c297890a749b4e2ef2e5ace6ecfc3f71f87d141bc1a",
       "claude-compaction-restore/SKILL.md": "6f64609f32bcb4f115287eb13be00dfb787de0117cd597c75f29aa950e1773ed",
-      "claude-compaction-restore/scripts/precompact-hook.mjs": "3b739a39210985e6aa2da493bfcda58a1587b258440444188e65133b9450ebac",
-      "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "0495afbc6fad3a4d262f25971795c583f55e39a3dc6a11fe40aa88129cf8592f",
+      "claude-compaction-restore/scripts/precompact-hook.mjs": "ae740e18a00102a66e7f1cd90834148d29649341acaf46b88d6b47ea72429956",
+      "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "5584cff4ab36cd843e14c81bd201e4a2f8e498e995abacc4f81ec6c1fc556b10",
       "claude-compaction-restore/templates/compact-instruction.md": "682c778464517b831902ddc2678c055545899b4751a1d32391ce965d5eb7061d",
       "claude-compaction-restore/templates/post-compact-restore-instruction.md": "10a5a7e5e052f3aa000a4209f386dc4eb90a3c2bba449ca685f124714f59e47a",
       "delegating-work/SKILL.md": "9809781b3ee8d0ffcb411af3ebd3b48257f9dbd9eac652350c0e30d000c0d236",

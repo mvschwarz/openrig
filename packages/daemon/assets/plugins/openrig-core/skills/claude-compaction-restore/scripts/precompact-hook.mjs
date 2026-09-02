@@ -6,7 +6,12 @@ import { spawnSync } from "node:child_process";
 
 const skillRoot = path.resolve(new URL("..", import.meta.url).pathname);
 const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
-const outRoot = "/tmp/claude-compaction-restore";
+// P6(C) injectable output-root: the packet base defaults to the shared
+// /tmp/claude-compaction-restore (production), but becomes per-run isolated when the
+// hermetic env-var OPENRIG_COMPACTION_OUT_ROOT is set — so concurrent writers with the
+// same injected clock + sessionId no longer collide on the same `${sessionId}-${stamp}`
+// dir. Mirrors the injectable-clock seam (OPENRIG_TEST_CLOCK_NOW). Empty/absent = /tmp.
+const outRoot = process.env.OPENRIG_COMPACTION_OUT_ROOT || "/tmp/claude-compaction-restore";
 const defaultRestoreInstruction =
   "Read the claude-compaction-restore skill and follow its \"If You Just Compacted\" protocol.";
 
@@ -22,6 +27,14 @@ function readHookInput() {
 
 function getOpenRigHome() {
   return process.env.OPENRIG_HOME || process.env.RIGGED_HOME || path.join(os.homedir(), ".openrig");
+}
+
+// A3-R3 injectable clock (slice 51-01): marker.createdAt defaults to real wall-clock,
+// but becomes deterministic when the shared hermetic env-var OPENRIG_TEST_CLOCK_NOW is
+// set (an ISO instant). Empty/absent = production real-time.
+function nowIso() {
+  const injected = process.env.OPENRIG_TEST_CLOCK_NOW;
+  return typeof injected === "string" && injected.trim().length > 0 ? injected : new Date().toISOString();
 }
 
 function expandInstructionPath(filePath) {
@@ -41,6 +54,50 @@ function readInstructionFile(filePath) {
   return fs.readFileSync(expanded, "utf8");
 }
 
+// OPR.0.4.1.09 / R5 marker-lifecycle (foreign-content-in-marker face): the hook
+// path must apply the SAME seat-check the daemon enforcer's resolvePostCompactExtra
+// applies (rev1-r2 dcd95bd9), or a FOREIGN seat's global messageFilePath leaks into
+// THIS seat's marker. Parse a WELL-FORMED leading `---` frontmatter for a declared
+// seat (target_seat / seat / session); body text is never scanned; a broken/absent
+// fence is GENERIC (valid for any seat). Byte-mirrors the enforcer regexes.
+function declaredSeatOf(content) {
+  const fm = /^\s*---\s*\n([\s\S]*?)\n---/.exec(content);
+  if (!fm) return null;
+  const m = /^[ \t]*(?:target[_-]?seat|seat|session(?:[_-]?name)?)[ \t]*:[ \t]*["']?([^"'\n#]+?)["']?[ \t]*$/im.exec(fm[1]);
+  return m ? m[1].trim() : null;
+}
+
+function sanitizeSeat(value) {
+  return value.replace(/[^a-zA-Z0-9_.@-]/g, "_");
+}
+
+// Resolve the post-compaction extra FOR THIS SEAT (mirror of the enforcer): (1) prefer
+// a per-seat compaction/post-compact-extra/<seat>.md — no cross-seat contamination
+// possible; (2) fall back to the global ONLY when it does not declare a DIFFERENT seat
+// (a wrong-seat global is REFUSED). Generic/undeclared/configured-but-absent stay
+// allowed. Returns the path to read, or null when nothing valid for this seat.
+function resolveSeatSafeExtraPath(globalFilePathRaw) {
+  const rawSeat = process.env.OPENRIG_SESSION_NAME || process.env.RIGGED_SESSION_NAME || "";
+  const seatKey = rawSeat ? sanitizeSeat(rawSeat) : "";
+  if (seatKey) {
+    const perSeatPath = path.join(getOpenRigHome(), "compaction", "post-compact-extra", `${seatKey}.md`);
+    if (fs.existsSync(perSeatPath)) {
+      const declared = declaredSeatOf(fs.readFileSync(perSeatPath, "utf8"));
+      if (declared && sanitizeSeat(declared) !== seatKey) return null; // wrong-seat per-seat file
+      return perSeatPath;
+    }
+  }
+  const trimmed = (globalFilePathRaw || "").trim();
+  if (!trimmed) return null;
+  const expanded = expandInstructionPath(trimmed);
+  // configured-but-absent: keep the path (an absent file cannot be a wrong-seat leak;
+  // readInstructionFile returns "" so nothing is appended).
+  if (!fs.existsSync(expanded)) return trimmed;
+  const declared = declaredSeatOf(fs.readFileSync(expanded, "utf8"));
+  if (declared && sanitizeSeat(declared) !== seatKey) return null; // foreign-seat global REFUSED
+  return trimmed;
+}
+
 function sessionKey(input) {
   const raw = [
     process.env.OPENRIG_SESSION_NAME,
@@ -58,12 +115,28 @@ function pendingMarkerPath(input) {
   return path.join(getOpenRigHome(), "compaction", "restore-pending", `${sessionKey(input)}.json`);
 }
 
+// R5 absent-when-needed: drop a lightweight EXPECTED sentinel FIRST (before the packet is
+// generated + the marker is written), carrying the SAME identity binding the marker gets.
+// Its presence-without-a-marker is what lets the bridge be LOUD about a missing packet
+// (hook died partway / write failed); policy off = no hook = no sentinel = silent.
+function writeExpectedSentinel(input) {
+  const p = path.join(getOpenRigHome(), "compaction", "restore-pending", `${sessionKey(input)}.expected.json`);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, `${JSON.stringify({
+    version: 1,
+    sessionName: process.env.OPENRIG_SESSION_NAME || process.env.RIGGED_SESSION_NAME || null,
+    sessionId: input.session_id || input.sessionId || null,
+    transcriptPath: input.transcript_path || null,
+    createdAt: nowIso(),
+  }, null, 2)}\n`, "utf8");
+}
+
 function writePendingRestoreMarker(input, parsed, restoreInstruction, customMessage) {
   const markerPath = pendingMarkerPath(input);
   fs.mkdirSync(path.dirname(markerPath), { recursive: true });
   const payload = {
     version: 1,
-    createdAt: new Date().toISOString(),
+    createdAt: nowIso(),
     sessionName: process.env.OPENRIG_SESSION_NAME || process.env.RIGGED_SESSION_NAME || null,
     sessionId: input.session_id || input.sessionId || null,
     transcriptPath: input.transcript_path || null,
@@ -118,13 +191,18 @@ function readClaudeCompactionMessage() {
     parts.push(`Inline restore instruction:\n${inline}`);
   }
   if (filePath && filePath.length > 0) {
-    try {
-      const fileText = readInstructionFile(filePath);
-      if (fileText) {
-        parts.push(`Additional restore instruction file (${filePath}):\n${fileText}`);
+    // R5 seat-check: resolve to the per-seat extra or a seat-safe global; a
+    // foreign-seat global resolves to null and is never injected into this marker.
+    const resolved = resolveSeatSafeExtraPath(filePath);
+    if (resolved) {
+      try {
+        const fileText = readInstructionFile(resolved);
+        if (fileText) {
+          parts.push(`Additional restore instruction file (${resolved}):\n${fileText}`);
+        }
+      } catch {
+        // Keep any inline instruction; unreadable extra files degrade quietly.
       }
-    } catch {
-      // Keep any inline instruction; unreadable extra files degrade quietly.
     }
   }
   if (parts.length > 0) return parts.join("\n\n");
@@ -140,7 +218,16 @@ function buildSystemMessage(restoreInstruction, customMessage) {
 }
 
 try {
+  // Slice 51-01 RIDER (leak-visibility, review-r1 escalation): OPENRIG_TEST_CLOCK_NOW is
+  // read by nowIso() to make createdAt deterministic in tests — but a LEAKED var in a
+  // real seat would silently FREEZE production createdAt. Announce loudly on stderr when
+  // active so any leak is visible in seat logs; absence stays silent (production path).
+  // MUST stay byte-identical to STUB_CLOCK_ANNOUNCEMENT in stub-runner.ts.
+  if (typeof process.env.OPENRIG_TEST_CLOCK_NOW === "string" && process.env.OPENRIG_TEST_CLOCK_NOW.trim().length > 0) {
+    process.stderr.write("OPENRIG_TEST_CLOCK_NOW active — timestamps are injected\n");
+  }
   const input = readHookInput();
+  writeExpectedSentinel(input); // R5: sentinel FIRST, before the packet + marker (catches hook-died-partway)
   const args = [restoreScript, "--out", outRoot, "--json"];
   if (input.cwd) args.push("--cwd", input.cwd);
   if (input.transcript_path && input.transcript_path.endsWith(".jsonl") && fs.existsSync(input.transcript_path)) {
