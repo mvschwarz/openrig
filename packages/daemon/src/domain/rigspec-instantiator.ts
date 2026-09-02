@@ -429,6 +429,7 @@ export type AddMemberOutcome =
   | { ok: false; code: "pod_not_found"; message: string }
   | { ok: false; code: "member_conflict"; message: string }
   | { ok: false; code: "edge_unresolved"; message: string }
+  | { ok: false; code: "materialize_error"; message: string }
   | { ok: false; code: "validation_failed"; errors: string[] }
   | { ok: false; code: "preflight_failed"; errors: string[]; warnings: string[] };
 
@@ -568,7 +569,13 @@ export class PodRigInstantiator {
     rigSpec: PodRigSpec,
     rigRoot: string,
     preflightWarnings: string[],
-    opts?: { targetRigId?: string; suppressSummaryEvent?: boolean; cwdOverride?: string },
+    opts?: {
+      targetRigId?: string;
+      suppressSummaryEvent?: boolean;
+      cwdOverride?: string;
+      /** S9: ordinary member growth targets this already-persisted pod. */
+      existingPodNamespace?: string;
+    },
   ): Promise<MaterializeOutcome> {
     const persistedEvents: Array<ReturnType<EventBus["persistWithinTransaction"]>> = [];
     const nodeResults: Array<{ logicalId: string; status: "materialized" }> = [];
@@ -626,7 +633,7 @@ export class PodRigInstantiator {
         );
 
         for (const pod of rigSpec.pods) {
-          if (existingPodIds.has(pod.id)) {
+          if (existingPodIds.has(pod.id) && opts?.existingPodNamespace !== pod.id) {
             throw { code: "materialize_conflict", message: `Pod id '${pod.id}' already exists in rig '${currentRig.rig.name}'` };
           }
           for (const member of pod.members) {
@@ -639,18 +646,31 @@ export class PodRigInstantiator {
 
         const podIdMap: Record<string, string> = {};
         for (const pod of rigSpec.pods) {
-          const podRecord = this.deps.podRepo.createPod(materializedRigId, pod.id, pod.label, {
-            summary: pod.summary,
-            continuityPolicyJson: pod.continuityPolicy ? JSON.stringify(pod.continuityPolicy) : undefined,
-          });
+          const existingPod = opts?.existingPodNamespace === pod.id
+            ? this.deps.podRepo.getPodByNamespace(materializedRigId, pod.id)
+            : null;
+          if (opts?.existingPodNamespace === pod.id && !existingPod) {
+            throw { code: "materialize_conflict", message: `Existing pod '${pod.id}' not found in rig '${currentRig.rig.name}'` };
+          }
+          const podRecord = existingPod ?? this.deps.podRepo.createPod(
+            materializedRigId,
+            pod.id,
+            pod.label,
+            {
+              summary: pod.summary,
+              continuityPolicyJson: pod.continuityPolicy ? JSON.stringify(pod.continuityPolicy) : undefined,
+            },
+          );
           podIdMap[pod.id] = podRecord.id;
-          persistedEvents.push(this.deps.eventBus.persistWithinTransaction({
-            type: "pod.created",
-            rigId: materializedRigId,
-            podId: podRecord.id,
-            namespace: podRecord.namespace,
-            label: pod.label,
-          }));
+          if (!existingPod) {
+            persistedEvents.push(this.deps.eventBus.persistWithinTransaction({
+              type: "pod.created",
+              rigId: materializedRigId,
+              podId: podRecord.id,
+              namespace: podRecord.namespace,
+              label: pod.label,
+            }));
+          }
 
           for (const member of pod.members) {
             const qualifiedId = `${pod.id}.${member.id}`;
@@ -727,7 +747,7 @@ export class PodRigInstantiator {
       // overwritten). Best-effort AFTER the persistence tx: a rig never fails
       // to materialize over a defaults copy, but failures are surfaced as
       // named warnings, never swallowed.
-      if (this.deps.topologyRootResolver) {
+      if (this.deps.topologyRootResolver && !opts?.existingPodNamespace) {
         const defaults = installTopologyDefaults({
           specDir: rigRoot,
           rigName: rigSpec.name,
@@ -861,9 +881,10 @@ export class PodRigInstantiator {
 
   /**
    * add_member converge op (OPR.0.3.3.24): add a single MEMBER to an EXISTING
-   * pod in a live rig, composing the two extracted primitives — createMemberNode
-   * (create-node) + launchBinding (launch-binding) — WITHOUT createPod and
-   * WITHOUT fabricating a synthetic rig spec.
+   * pod in a live rig. S9 makes this the ordinary-growth front over the same
+   * materializeValidatedSpec + launchValidatedSpec effect ingress used by pod
+   * expansion; this method owns validation and result shaping, not a sibling
+   * create/launch transaction.
    *
    * Identity-migration-FREE: the new node mints a fresh node id + fresh logical
    * id + fresh `@rigged_*` at launch; no existing seat's logical id,
@@ -871,11 +892,10 @@ export class PodRigInstantiator {
    * source-visible fault line that lets add_member ship while move/fork wait for
    * the 0.4.0 identity stack.
    *
-   * Versus materialize: this does NOT call materializeValidatedSpec (which always
-   * createPods and carries the pod-exists conflict guard). It resolves the
-   * EXISTING pod's DB id via `podRepo.getPodByNamespace` and creates the one node
-   * directly under it. The pod-exists guard is lifted (adding to a live pod is
-   * not a conflict); the per-member duplicate-logical-id guard is KEPT (AC-3).
+   * It resolves the EXISTING pod's DB id via `podRepo.getPodByNamespace`, then
+   * explicitly tells the shared materializer to reuse that pod. The pod-exists
+   * guard is lifted only for this named target; the per-member duplicate-logical-
+   * id guard is KEPT (AC-3).
    */
   async addMemberToPod(
     rigId: string,
@@ -996,69 +1016,43 @@ export class PodRigInstantiator {
       resolvedEdges.push({ from, to, kind: edge.kind });
     }
 
-    // 8. create-node into the EXISTING pod (pod_id = resolved pod.id) + persist
-    // the resolved pod-local edges, all in one tx so the node row, the
-    // node.added event, and the edges commit atomically (mirroring the
-    // materialize core); subscribers notified after commit.
-    let createdNodeId = "";
-    let createdEvent: ReturnType<EventBus["persistWithinTransaction"]> | undefined;
-    const tx = this.db.transaction(() => {
-      const { node, event } = this.createMemberNode({
-        rigId,
-        qualifiedId,
-        member,
-        podId: pod.id,
-        rigRoot,
-        cwdOverride: opts?.cwdOverride,
-      });
-      createdNodeId = node.id;
-      createdEvent = event;
-      // Seam B Guard-F1: add_member runs under the CURRENT operation's root, which may
-      // differ from the ORIGINAL declaring RigSpec dir. A member OVERRIDE resolves against
-      // this operation's root (it is declared HERE); an INHERITED rig policy must reuse the
-      // PERSISTED rig attachment (original declaring root) — never re-resolve the raw rig
-      // ref against an unrelated root. STRICT persistence (load-bearing).
-      if (member.permissionPolicy) {
-        const memberAttachment = resolvePermissionPolicyAttachment(member.permissionPolicy, rigRoot, {
-          readFile: (p) => this.deps.fsOps.readFile(p),
-        });
-        this.persistNodePolicyProvenanceStrict(node.id, memberAttachment);
-      } else {
-        const rigProv = this.deps.rigRepo.getRigPolicyProvenance(rigId);
-        if (rigProv) {
-          this.deps.rigRepo.setNodePolicyProvenance(node.id, {
-            origin: rigProv.origin,
-            resolvedTarget: rigProv.resolvedTarget,
-            declaringDir: rigProv.declaringDir,
-            launchPosture: rigProv.launchPosture,
-          });
-        }
-      }
-      if (resolvedEdges.length > 0) {
-        const logicalIdToNodeId = new Map(rig.nodes.map((n) => [n.logicalId, n.id]));
-        logicalIdToNodeId.set(qualifiedId, node.id);
-        for (const edge of resolvedEdges) {
-          this.deps.rigRepo.addEdge(rigId, logicalIdToNodeId.get(edge.from)!, logicalIdToNodeId.get(edge.to)!, edge.kind);
-        }
-      }
-    });
-    tx();
-    if (createdEvent) this.deps.eventBus.notifySubscribers(createdEvent);
-
-    // 9. launch-binding for the one new node (startup projection + delivery +
-    // readiness + `@rigged_*`). The minimal spec supplies the member/pod/rig
-    // context launchBinding needs; the derived session name is
-    // `${podNamespace}-${member.id}@${rig.name}` — queue-addressable immediately.
-    const launched = await this.launchBinding({
-      rigId,
-      rigSpec,
-      rigRoot,
-      pod: rigSpec.pods[0]!,
-      member,
-      qualifiedId,
-      nodeId: createdNodeId,
+    // 8. Feed the already-validated member and edges to the ONE creation
+    // effect. Pod-local edges may name existing pod-mates, so they are checked
+    // above against the live topology, then attached after schema validation.
+    rigSpec.pods[0]!.edges = declaredEdges;
+    const materialized = await this.materializeValidatedSpec(rigSpec, rigRoot, preflight.warnings, {
+      targetRigId: rigId,
+      suppressSummaryEvent: true,
       cwdOverride: opts?.cwdOverride,
+      existingPodNamespace: podNamespace,
     });
+    if (!materialized.ok) {
+      const message = "message" in materialized
+        ? materialized.message
+        : "errors" in materialized
+          ? materialized.errors.join("; ")
+          : "member materialization failed";
+      if (materialized.code === "materialize_conflict") {
+        return { ok: false, code: "member_conflict", message };
+      }
+      return { ok: false, code: "materialize_error", message };
+    }
+
+    // 9. The shared launch effect owns startup projection + delivery +
+    // readiness + `@rigged_*` for both expansion and ordinary growth.
+    const launchOutcome = await this.launchValidatedSpec(rigSpec, rigRoot, rigId);
+    if (!launchOutcome.ok) {
+      const message = "message" in launchOutcome
+        ? launchOutcome.message
+        : "errors" in launchOutcome
+          ? launchOutcome.errors.join("; ")
+          : "member launch failed";
+      return { ok: false, code: "materialize_error", message };
+    }
+    const launched = launchOutcome.result.nodes.find((node) => node.logicalId === qualifiedId);
+    if (!launched) {
+      return { ok: false, code: "materialize_error", message: `No launch outcome returned for member "${qualifiedId}".` };
+    }
 
     return {
       ok: true,
@@ -1067,13 +1061,13 @@ export class PodRigInstantiator {
         podNamespace,
         node: {
           logicalId: qualifiedId,
-          nodeId: createdNodeId,
+          nodeId: launched.nodeId,
           status: launched.status,
           error: launched.error,
           sessionName: launched.sessionName,
         },
         edges: resolvedEdges,
-        warnings: [...preflight.warnings, ...(launched.warnings ?? [])],
+        warnings: [...(materialized.result.warnings ?? []), ...(launchOutcome.result.warnings ?? [])],
       },
     };
   }
