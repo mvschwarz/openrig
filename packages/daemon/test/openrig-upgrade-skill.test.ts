@@ -154,14 +154,14 @@ describe("backup-sqlite helper", () => {
 });
 
 describe("inspect-upgrade helper", () => {
-  it("keeps partial evidence and teaches the next probe when a surface is unavailable", () => {
+  it("keeps all-rig node evidence and teaches the next probe when a surface is unavailable", () => {
     const root = temporaryRoot();
     const fakeRig = path.join(root, "rig");
     fs.writeFileSync(fakeRig, `#!/bin/sh
 case "$*" in
   "--version") echo "0.5.7 (abc12345)" ;;
   "daemon status") echo 'Daemon running (pid 42)' ;;
-  "ps --nodes --json") echo '[{"rigName":"demo","logicalId":"lead"}]' ;;
+  "ps --nodes -A --json") echo '[{"rigName":"demo","logicalId":"lead"},{"rigName":"other","logicalId":"worker"}]' ;;
   "plugin list --json") echo 'plugin lookup unavailable' >&2; exit 9 ;;
   *) exit 7 ;;
 esac
@@ -171,6 +171,11 @@ esac
     expect(report.rigVersion.ok).toBe(true);
     expect(report.daemonStatus.ok).toBe(true);
     expect(report.nodes.ok).toBe(true);
+    expect(report.nodes.command).toEqual([fakeRig, "ps", "--nodes", "-A", "--json"]);
+    expect(report.nodes.value).toEqual([
+      { rigName: "demo", logicalId: "lead" },
+      { rigName: "other", logicalId: "worker" },
+    ]);
     expect(report.plugins.ok).toBe(false);
     expect(report.plugins.next).toMatch(/run .*plugin list --json/i);
     expect(report.ready).toBe(false);

@@ -32,7 +32,7 @@ const report = {
   generatedAt: new Date().toISOString(),
   rigVersion: probe("rigVersion", ["--version"], `run ${rig} --version directly and verify the installed wrapper`),
   daemonStatus: probe("daemonStatus", ["daemon", "status"], `run ${rig} daemon status and inspect daemon state and logs`),
-  nodes: probe("nodes", ["ps", "--nodes", "--json"], `run ${rig} ps --nodes --json and resolve control-plane reachability before mutation`),
+  nodes: probe("nodes", ["ps", "--nodes", "-A", "--json"], `run ${rig} ps --nodes -A --json and resolve control-plane reachability before mutation`),
   plugins: probe("plugins", ["plugin", "list", "--json"], `run ${rig} plugin list --json and derive the installed plugin roots before refresh`),
 };
 
