@@ -14,6 +14,7 @@
 // validateHumanFragment runs on `add` and on load, so a present-but-invalid fragment
 // is a loud error, never silently projected.
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
@@ -224,6 +225,35 @@ const PROJECTION_HEADER =
   "# Projection of the human fragments under gateway/humans/<entityId>.yaml.\n" +
   "# The fragment is truth: add/edit a human via its fragment (or `rig gateway human\n" +
   "# add`), then re-project. A hand-edit here is REFUSED at load.\n";
+const PROJECTION_V2_HEADER = PROJECTION_HEADER + "# Projection format: v2 content-addressed\n";
+const PROJECTION_DIGEST_PREFIX = "# projection-body-sha256: ";
+
+function projectionBody(entities: readonly HumanFragment[]): string {
+  const entityBody = stringifyYaml({ entities });
+  const digest = createHash("sha256").update(entityBody).digest("hex");
+  return `${PROJECTION_V2_HEADER}${PROJECTION_DIGEST_PREFIX}${digest}\n${entityBody}`;
+}
+
+function validateEntityCollection(entities: readonly HumanFragment[]): string | undefined {
+  const entityIds = new Set<string>();
+  const handleOwner = new Map<string, string>();
+  for (const entity of entities) {
+    if (entityIds.has(entity.entityId)) {
+      return `duplicate human entityId "${entity.entityId}" — one fragment owns one identity`;
+    }
+    entityIds.add(entity.entityId);
+    for (const binding of entity.connectorBindings) {
+      if (binding.handle === undefined) continue;
+      const key = `${binding.kind}:${binding.handle}`;
+      const prior = handleOwner.get(key);
+      if (prior !== undefined && prior !== entity.entityId) {
+        return `${binding.kind} handle "${binding.handle}" is claimed by both "${prior}" and "${entity.entityId}" — a handle maps to exactly one human (registration conflict)`;
+      }
+      handleOwner.set(key, entity.entityId);
+    }
+  }
+  return undefined;
+}
 
 export type ProjectResult =
   | { ok: true; body: string; entities: HumanFragment[] }
@@ -257,19 +287,9 @@ export function projectHumans(home: string = getOpenRigHome()): ProjectResult {
   // A6 v3 pin-1 (cross-fragment): a handle is UNIQUE per kind across ALL humans — one platform
   // id maps to exactly one human, so the inbound resolver is unambiguous. A collision between two
   // fragments is a registration conflict, REFUSED at projection (so add/load/drift all catch it).
-  const handleOwner = new Map<string, string>();
-  for (const e of entities) {
-    for (const b of e.connectorBindings) {
-      if (b.handle === undefined) continue;
-      const key = `${b.kind}:${b.handle}`;
-      const prior = handleOwner.get(key);
-      if (prior !== undefined && prior !== e.entityId) {
-        return { ok: false, error: `${b.kind} handle "${b.handle}" is claimed by both "${prior}" and "${e.entityId}" — a handle maps to exactly one human (registration conflict)` };
-      }
-      handleOwner.set(key, e.entityId);
-    }
-  }
-  return { ok: true, body: PROJECTION_HEADER + stringifyYaml({ entities }), entities };
+  const collectionError = validateEntityCollection(entities);
+  if (collectionError) return { ok: false, error: collectionError };
+  return { ok: true, body: projectionBody(entities), entities };
 }
 
 export type SlackHandleResolution =
@@ -694,9 +714,71 @@ export type LoadResult =
   | { ok: true; entities: HumanFragment[] }
   | { ok: false; error: string };
 
+/** Recognize only projection bytes an adopted generator could have emitted. The
+ * parsed snapshot is validation evidence, never identity input; current fragments
+ * remain the registry truth and are re-projected after a compatible old format. */
+function canonicalProjectionSnapshot(body: string): { ok: true; format: "v2" | "legacy" } | { ok: false; error: string } {
+  let entityBody: string;
+  let expectedDigest: string | undefined;
+  let format: "v2" | "legacy";
+  if (body.startsWith(PROJECTION_V2_HEADER)) {
+    format = "v2";
+    const remainder = body.slice(PROJECTION_V2_HEADER.length);
+    const digestLineEnd = remainder.indexOf("\n");
+    if (digestLineEnd < 0 || !remainder.startsWith(PROJECTION_DIGEST_PREFIX)) {
+      return { ok: false, error: "the v2 projection digest line is missing or changed" };
+    }
+    expectedDigest = remainder.slice(PROJECTION_DIGEST_PREFIX.length, digestLineEnd);
+    if (!/^[a-f0-9]{64}$/.test(expectedDigest)) {
+      return { ok: false, error: "the v2 projection digest is malformed" };
+    }
+    entityBody = remainder.slice(digestLineEnd + 1);
+  } else if (body.startsWith(PROJECTION_HEADER)) {
+    format = "legacy";
+    entityBody = body.slice(PROJECTION_HEADER.length);
+  } else {
+    return { ok: false, error: "the generated header is missing or changed" };
+  }
+
+  let raw: unknown;
+  try {
+    raw = parseYaml(entityBody);
+  } catch (err) {
+    return { ok: false, error: `the generated YAML does not parse: ${(err as Error).message}` };
+  }
+  if (!isObj(raw) || Object.keys(raw).length !== 1 || !Array.isArray(raw.entities)) {
+    return { ok: false, error: "the generated body must contain exactly one entities list" };
+  }
+
+  const entities: HumanFragment[] = [];
+  for (let i = 0; i < raw.entities.length; i++) {
+    const validated = validateHumanFragment(raw.entities[i]);
+    if (!validated.ok) {
+      return { ok: false, error: `generated entities[${i}] is invalid: ${validated.error}` };
+    }
+    entities.push(validated.fragment);
+  }
+  entities.sort((a, b) => (a.entityId < b.entityId ? -1 : a.entityId > b.entityId ? 1 : 0));
+  const collectionError = validateEntityCollection(entities);
+  if (collectionError) return { ok: false, error: collectionError };
+
+  const canonicalEntityBody = stringifyYaml({ entities });
+  if (entityBody !== canonicalEntityBody) {
+    return { ok: false, error: "the generated bytes are not canonical (manual edits or extra content are present)" };
+  }
+  if (expectedDigest !== undefined) {
+    const actualDigest = createHash("sha256").update(canonicalEntityBody).digest("hex");
+    if (actualDigest !== expectedDigest) {
+      return { ok: false, error: "the v2 projection digest does not match its generated body (manual edit detected)" };
+    }
+  }
+  return { ok: true, format };
+}
+
 /** Load the registry via the projection, but REFUSE a hand-edited/drifted projection:
- *  the fragments are truth, so the on-disk projection must byte-match a fresh one.
- *  This is the drift pin's runtime half (the vitest parity pin is the CI half). */
+ *  the fragments are truth, so identities always come from a fresh fragment projection.
+ *  A canonical snapshot from an adopted projection format is compatible and is
+ *  rewritten atomically; malformed/non-canonical bytes remain a loud error. */
 export function loadHumanRegistry(home: string = getOpenRigHome()): LoadResult {
   const proj = projectHumans(home);
   if (!proj.ok) return { ok: false, error: proj.error };
@@ -704,8 +786,19 @@ export function loadHumanRegistry(home: string = getOpenRigHome()): LoadResult {
   if (!existsSync(path)) {
     return { ok: false, error: `registry projection missing at ${path} — re-project from the fragments` };
   }
-  if (readFileSync(path, "utf8") !== proj.body) {
-    return { ok: false, error: `registry projection at ${path} is HAND-EDITED or DRIFTED from the fragments — the fragment is truth; re-project, never hand-edit` };
+  const stored = readFileSync(path, "utf8");
+  if (stored !== proj.body) {
+    const snapshot = canonicalProjectionSnapshot(stored);
+    if (!snapshot.ok) {
+      return {
+        ok: false,
+        error: `registry projection HAND-EDITED or drifted at ${path}: ${snapshot.error}. The fragment files remain identity truth; repair by re-projecting them, never by re-adding an existing human or editing the generated file`,
+      };
+    }
+    const repaired = atomicWrite(path, proj.body);
+    if (!repaired.ok) {
+      return { ok: false, error: `registry projection drift at ${path}: fragment truth was valid, but atomic re-projection failed: ${repaired.error}` };
+    }
   }
   return { ok: true, entities: proj.entities };
 }

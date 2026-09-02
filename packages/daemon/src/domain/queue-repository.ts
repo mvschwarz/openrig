@@ -517,11 +517,26 @@ export function destinationRigTeaching(session: string): Record<string, unknown>
  * gateway resolver (how to register + "not an agent seat"). Loads the registry only for
  * the (rare) @external refusal path. Undefined for non-@external / registered / scheme.
  */
-export function externalAdmissionTeaching(session: string): Record<string, unknown> | undefined {
+export function externalAdmissionTeaching(
+  session: string,
+  loadRegistry: () => LoadResult = loadHumanRegistry,
+): Record<string, unknown> | undefined {
   const parsed = parseSessionName(session);
   if (parsed.kind !== "external") return undefined;
-  const reg = loadHumanRegistry();
-  const entities = reg.ok ? reg.entities.map((e) => ({ entityId: e.entityId, address: e.address })) : [];
+  if (resolveExternal(parsed.local, []).kind === "scheme") return undefined;
+  const reg = loadRegistry();
+  if (!reg.ok) {
+    return {
+      externalDomain: parsed.domain,
+      registryLoadError: true,
+      registryError: reg.error,
+      ...(/projection/i.test(reg.error) ? { registryProjectionError: true } : {}),
+      hint:
+        `human registry admission is unavailable because the registry/projection failed to load: ${reg.error}. ` +
+        "Repair the existing registry projection from its fragments; do not re-add the human or downgrade the destination to an agent seat.",
+    };
+  }
+  const entities = reg.entities.map((e) => ({ entityId: e.entityId, address: e.address }));
   const res = resolveExternal(parsed.local, entities);
   if (res.kind !== "unregistered") return undefined; // registered/scheme were admitted upstream
   return { externalDomain: parsed.domain, unregisteredEntity: parsed.local, hint: res.error };
@@ -529,8 +544,31 @@ export function externalAdmissionTeaching(session: string): Record<string, unkno
 
 /** The refusal teaching for ANY rejected destination: the @external entity teaching
  *  (A4b) OR the host-suffix teaching (4b). One helper, all four refusal sites. */
-export function destinationRefusalTeaching(session: string): Record<string, unknown> | undefined {
-  return externalAdmissionTeaching(session) ?? destinationRigTeaching(session);
+export function destinationRefusalTeaching(
+  session: string,
+  loadRegistry: () => LoadResult = loadHumanRegistry,
+): Record<string, unknown> | undefined {
+  return externalAdmissionTeaching(session, loadRegistry) ?? destinationRigTeaching(session);
+}
+
+function destinationValidationError(
+  field: "destination_session" | "to_session",
+  session: string,
+  loadRegistry: () => LoadResult,
+): QueueRepositoryError {
+  const teaching = destinationRefusalTeaching(session, loadRegistry);
+  if (teaching?.registryLoadError === true) {
+    return new QueueRepositoryError(
+      "human_registry_unavailable",
+      `${field} ${session} cannot be admitted because the human registry failed to load: ${String(teaching.registryError)}`,
+      teaching,
+    );
+  }
+  return new QueueRepositoryError(
+    "unknown_destination_rig",
+    `${field} ${session} references an unknown rig`,
+    teaching,
+  );
 }
 
 /**
@@ -1187,11 +1225,7 @@ export class QueueRepository {
     // (routes/queue.ts stamp-at-FORWARD), and a genuine origin triple arriving from a
     // forward is stored verbatim (never re-stamped, never stripped).
     if (!this.validateRig(input.destinationSession)) {
-      throw new QueueRepositoryError(
-        "unknown_destination_rig",
-        `destination_session ${input.destinationSession} references an unknown rig`,
-        destinationRefusalTeaching(input.destinationSession),
-      );
+      throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
     }
 
     const txn = this.db.transaction(() => this.createInTransactionalContext(input));
@@ -1265,11 +1299,7 @@ export class QueueRepository {
     nudge: boolean | undefined;
   } {
     if (!this.validateRig(input.destinationSession)) {
-      throw new QueueRepositoryError(
-        "unknown_destination_rig",
-        `destination_session ${input.destinationSession} references an unknown rig`,
-        destinationRefusalTeaching(input.destinationSession),
-      );
+      throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
     }
     const result = this.createInTransactionalContext(input);
     return {
@@ -1383,11 +1413,7 @@ export class QueueRepository {
       );
     }
     if (!this.validateRig(input.toSession)) {
-      throw new QueueRepositoryError(
-        "unknown_destination_rig",
-        `to_session ${input.toSession} references an unknown rig`,
-        destinationRefusalTeaching(input.toSession),
-      );
+      throw destinationValidationError("to_session", input.toSession, this.loadHumanRegistryFn);
     }
 
     const newId = newQitemId();
@@ -1564,11 +1590,7 @@ export class QueueRepository {
       );
     }
     if (!this.validateRig(input.toSession)) {
-      throw new QueueRepositoryError(
-        "unknown_destination_rig",
-        `to_session ${input.toSession} references an unknown rig`,
-        destinationRefusalTeaching(input.toSession),
-      );
+      throw destinationValidationError("to_session", input.toSession, this.loadHumanRegistryFn);
     }
 
     const newId = newQitemId();

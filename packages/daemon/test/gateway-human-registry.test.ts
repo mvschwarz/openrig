@@ -141,6 +141,19 @@ describe("A3 proof-5 — fragments -> generated projection; re-project; hand-edi
     if (!loaded.ok) expect(loaded.error).toMatch(/HAND-EDITED|DRIFT/i);
   });
 
+  it("accepts a canonical legacy projection once and rewrites it to the content-addressed format", () => {
+    addHumanFragment(fragment({ entityId: "mike" }), home);
+    const path = projectionPath(home);
+    const legacy = readFileSync(path, "utf8").replace(
+      /# Projection format: v2 content-addressed\n# projection-body-sha256: [a-f0-9]{64}\n/,
+      "",
+    );
+    writeFileSync(path, legacy);
+
+    expect(loadHumanRegistry(home).ok).toBe(true);
+    expect(readFileSync(path, "utf8")).toMatch(/Projection format: v2 content-addressed/);
+  });
+
   it("an INVALID fragment on disk fails projection LOUD (load-time == add-time)", () => {
     addHumanFragment(fragment({ entityId: "mike" }), home);
     // plant a structurally-invalid fragment beside the valid one
