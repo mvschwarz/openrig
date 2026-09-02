@@ -20,10 +20,13 @@ interface RouterFsOps {
 /** Gzip magic bytes: 0x1f 0x8b */
 const GZIP_MAGIC = Buffer.from([0x1f, 0x8b]);
 
-function isPodAwareShape(raw: unknown): boolean {
-  return raw !== null
-    && typeof raw === "object"
-    && Array.isArray((raw as Record<string, unknown>)["pods"]);
+function podSchemaOwnsDiagnostics(raw: unknown): boolean {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const obj = raw as Record<string, unknown>;
+  if ("pods" in obj) return true;
+  // Legacy owns diagnostics only when the document declares a legacy marker;
+  // otherwise a typo in the canonical root cannot silently switch schemas.
+  return !("nodes" in obj || "schema_version" in obj);
 }
 
 /**
@@ -97,7 +100,7 @@ export class UpCommandRouter {
       // S7: a pod-shaped document belongs to the pod-aware validator even
       // when invalid. Falling through to legacy replaces an exact topology
       // diagnostic with the unrelated "nodes is required" error.
-      if (isPodAwareShape(podRaw)) {
+      if (podSchemaOwnsDiagnostics(podRaw)) {
         throw new Error(`Source is YAML but not a valid rig spec: ${podValidation.errors[0] ?? "unknown error"}`);
       }
 
@@ -157,7 +160,7 @@ export class UpCommandRouter {
       if (podVal.valid) {
         return { sourceKind: "rig_spec", sourceRef };
       }
-      if (isPodAwareShape(podRaw)) {
+      if (podSchemaOwnsDiagnostics(podRaw)) {
         throw new Error(`Source is YAML but not a valid rig spec: ${podVal.errors[0] ?? "unknown error"}. Use .yaml for rig specs or .rigbundle for bundles.`);
       }
 

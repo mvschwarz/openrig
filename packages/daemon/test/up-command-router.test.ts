@@ -214,6 +214,30 @@ edges: []
     );
   });
 
+  it.each(["typo-root.yaml", "typo-root"])(
+    "keeps a misspelled pod root on the pod validator for %s",
+    (filename) => {
+      const podSpecWithMisspelledRoot = `
+version: "0.2"
+name: typo-root
+podz:
+  - id: ops
+    label: Ops
+    members: []
+    edges: []
+edges: []
+`.trim();
+      const specPath = path.join(tmpDir, filename);
+      fs.writeFileSync(specPath, podSpecWithMisspelledRoot);
+      const router = new UpCommandRouter({ fsOps: realFsOps() });
+
+      expect(() => router.route(specPath)).toThrow(
+        'podz: unknown key "podz"; refusing the spec because normalization would otherwise discard it and alter the requested topology',
+      );
+      expect(() => router.route(specPath)).not.toThrow(/nodes is required/);
+    },
+  );
+
   // AS-T08b: legacy rig spec still accepted
   it("still routes legacy rig spec as rig_spec", () => {
     const specPath = path.join(tmpDir, "legacy.yaml");
