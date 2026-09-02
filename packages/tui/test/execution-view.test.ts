@@ -134,7 +134,9 @@ describe("mission execution story — readable rows over the shipped projections
     const gap = lines.find((line) => line.text.includes("evidence gap"))!;
     expect(gap.text).toContain("evidence gap — no repository reachable; declared state shown  (open ▸)");
     expect(gap.action).toEqual({ type: "execution-open", key: "evidence" });
-    expect(body).toContain("reviewed / merged / live unconfirmed for 20 of 20 slices (unknown, not waiting)");
+    expect(lines.find((line) => line.text.includes("unconfirmed for"))?.text).toBe(
+      "    evidence unconfirmed for 20 of 20 slices (unknown, not waiting)",
+    );
     expect(body.split("evidence gap").length - 1).toBe(1);
     // every wave header counts declared words, never a work-state verdict the projection did not make
     const headers = lines.filter((l) => l.text.includes("── wave "));

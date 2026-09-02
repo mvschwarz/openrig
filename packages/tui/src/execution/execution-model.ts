@@ -320,11 +320,10 @@ function evidenceGapLines(execution: ExecutionViewSnap, slices: SliceFacts[], wi
   if (undetermined.length === 0) return [];
   const gitBasis = str(record(execution.sources?.["git"])["basis"], "");
   const noRepo = /no reachable repo|no repo/i.test(gitBasis);
-  const rungs = RUNGS.filter((rung) => undetermined.some((slice) => slice.cells[rung].state === "undetermined")).map((rung) => RUNG_WORD[rung]);
   const cause = noRepo ? "no repository reachable" : gitBasis || "evidence sources missing";
   return [
     row(`evidence gap — ${cause}; declared state shown`, "evidence", width),
-    { text: `    ${rungs.join(" / ")} unconfirmed for ${undetermined.length} of ${slices.length} slices (unknown, not waiting)` },
+    { text: `    evidence unconfirmed for ${undetermined.length} of ${slices.length} slices (unknown, not waiting)` },
   ];
 }
 
