@@ -819,6 +819,7 @@ export class PodRigInstantiator {
     rigSpec: PodRigSpec,
     rigRoot: string,
     targetRigId: string,
+    cwdOverride?: string,
   ): Promise<LaunchMaterializedOutcome> {
     const launchOrder = this.computePodLaunchOrder(rigSpec);
     const podWarnings: string[] = [];
@@ -855,6 +856,7 @@ export class PodRigInstantiator {
         member: memberContext.member,
         qualifiedId: logicalId,
         nodeId: node.id,
+        cwdOverride,
       });
 
       if (launched.warnings?.length) {
@@ -1040,7 +1042,7 @@ export class PodRigInstantiator {
 
     // 9. The shared launch effect owns startup projection + delivery +
     // readiness + `@rigged_*` for both expansion and ordinary growth.
-    const launchOutcome = await this.launchValidatedSpec(rigSpec, rigRoot, rigId);
+    const launchOutcome = await this.launchValidatedSpec(rigSpec, rigRoot, rigId, opts?.cwdOverride);
     if (!launchOutcome.ok) {
       const message = "message" in launchOutcome
         ? launchOutcome.message

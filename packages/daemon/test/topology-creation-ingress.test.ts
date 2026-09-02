@@ -61,6 +61,41 @@ describe("single topology-creation ingress (OPR.0.5.8.9)", () => {
       .toEqual(["one", "two"]);
   });
 
+  it("keeps a member cwd override identical in durable state and the runtime launch binding", async () => {
+    const rig = setup.rigRepo.createRig("cwd-override");
+    const expanded = await setup.rigExpansionService.expand({
+      rigId: rig.id,
+      pod: {
+        id: "dev",
+        label: "Development",
+        members: [{
+          id: "existing",
+          runtime: "terminal",
+          agentRef: "builtin:terminal",
+          profile: "none",
+          cwd: "/tmp",
+        }],
+        edges: [],
+      },
+    });
+    expect(expanded.ok).toBe(true);
+    const startNode = vi.spyOn(setup.startupOrchestrator, "startNode");
+
+    const added = await setup.podInstantiator.addMemberToPod(
+      rig.id,
+      "dev",
+      { ...terminalMember("worker"), cwd: "." },
+      "/",
+      { cwdOverride: "/private/tmp" },
+    );
+
+    expect(added.ok).toBe(true);
+    expect(setup.rigRepo.getRig(rig.id)?.nodes.find((node) => node.logicalId === "dev.worker")?.cwd)
+      .toBe("/private/tmp");
+    expect(startNode).toHaveBeenCalledTimes(1);
+    expect(startNode.mock.calls[0]?.[0].binding.cwd).toBe("/private/tmp");
+  });
+
   it("keeps one construction call site for each topology-creation effect", () => {
     const source = readFileSync(
       resolve(import.meta.dirname, "../src/domain/rigspec-instantiator.ts"),
