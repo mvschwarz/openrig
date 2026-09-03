@@ -231,8 +231,8 @@ Agent-actionable. Same surface as the canonical scaffold above; the
 rig config init-workspace --root /path/to/new/workspace
 ```
 
-The command creates the root dir if missing (idempotent: existing root +
-populated subdirs is a no-op). Run
+The command additively creates any missing canonical entries and preserves
+every existing one; only a complete six-entry scaffold is a no-op. Run
 `rig workspace validate /path/to/new/workspace --json` after to confirm the
 contract holds.
 

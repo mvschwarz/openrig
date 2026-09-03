@@ -68,10 +68,15 @@ describe("canonical project-workspace scaffold parity", () => {
     const skillStart = skill.indexOf("### Instantiate the canonical workspace scaffold");
     const skillEnd = skill.indexOf("### Redirect the workspace root", skillStart);
     const skillSection = skill.slice(skillStart, skillEnd);
+    const scratchStart = skill.indexOf("### Build a workspace from scratch");
+    const scratchEnd = skill.indexOf("### Create a workflow inside an existing workspace", scratchStart);
+    const scratchSection = skill.slice(scratchStart, scratchEnd);
 
     expect(cliLine).toBeDefined();
     expect(skillStart).toBeGreaterThanOrEqual(0);
     expect(skillEnd).toBeGreaterThan(skillStart);
+    expect(scratchStart).toBeGreaterThanOrEqual(0);
+    expect(scratchEnd).toBeGreaterThan(scratchStart);
     for (const entry of ["missions/", "exhaust/", "SPEC.md", "project.yaml", "workspace.yaml", ".gitignore"]) {
       expect(cliLine).toContain(entry);
       expect(skillSection).toContain(entry);
@@ -86,5 +91,8 @@ describe("canonical project-workspace scaffold parity", () => {
       expect(surface).toContain("preserves existing files");
       expect(surface).not.toMatch(/--force[^.\n]*overwrites?/i);
     }
+    expect(scratchSection).toContain("missing canonical entries");
+    expect(scratchSection).toContain("complete six-entry scaffold is a no-op");
+    expect(scratchSection).not.toContain("populated subdirs is a no-op");
   });
 });
