@@ -8,11 +8,14 @@
 //   link          trailing "(open ▸)"           → the ONE open affordance
 // The glance test is the bar: same fact type, same visual place, every page.
 import type { Action } from "./types.js";
+import type { Token } from "./theme.js";
 
 export interface ContentLine {
   text: string;
   action?: Action;
   zones?: Array<{ start: number; end: number; action: Action }>;
+  /** Explicit semantic paint runs. Their plain text must equal `text`. */
+  segs?: Array<{ text: string; token?: Token; bold?: boolean; bg?: Token; inverse?: boolean }>;
 }
 
 /** fixed label column — one rhythm across every detail page */

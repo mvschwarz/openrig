@@ -9,7 +9,7 @@ import { createViewState, computeExplorerRows, emptySnapshot } from "./state.js"
 import { parseCommand } from "./grammar.js";
 import { filterPalette, paletteExecuteLine } from "./commands/palette.js";
 import { COMMAND_REGISTRY, currentCommandContext } from "./commands/registry.js";
-import { createInputDecoder, resolveEscapeAction, resolveKeyAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
+import { createInputDecoder, resolveEscapeAction, resolveKeyAction, resolveMouseAction, MOUSE_ENABLE, MOUSE_DISABLE, ALT_SCREEN_ON, ALT_SCREEN_OFF } from "./input.js";
 import { renderScreen } from "./render.js";
 import { createStyle, detectColorMode } from "./theme.js";
 import { stylizeLines } from "./stylize.js";
@@ -27,6 +27,7 @@ import { restoreKeyAction, type RestoreInputEvent } from "./crash-cart/restore-i
 import { evaluateOneClickGate, restoreConfirmMessage } from "./crash-cart/one-click-gate.js";
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
+import { MOTION_FRAME_MS } from "./visual-layout.js";
 
 function argOf(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag);
@@ -61,14 +62,32 @@ async function run(): Promise<void> {
   let restoreScrollOffset = 0;
   const inputDecoder = createInputDecoder();
   const style = createStyle(args.includes("--no-color") ? "none" : detectColorMode());
+  let appliedCopyMode = view.get().copyMode;
+  const unsubscribeCopyMode = view.subscribe((state) => {
+    if (state.copyMode === appliedCopyMode) return;
+    appliedCopyMode = state.copyMode;
+    process.stdout.write(state.copyMode ? MOUSE_DISABLE : MOUSE_ENABLE);
+  });
 
   // S19 round-5 (guard): the refresh OWNER (live.ts) carries the honest load
   // lifecycle and the per-seat fresh-pane-output events; renderScreen stays
   // pure and takes the clock + owner state as inputs. motionTimer keeps
   // redrawing ONLY while the frame reports live motion (spinner or flash).
   const reviewCache: SpecReviewCache = new Map();
+  const selectedSliceDirectory = (): string | null => {
+    const current = view.get();
+    if (current.scopesSelected) return current.scopesSelected.slice;
+    if (!current.executionOpen?.startsWith("slice:")) return null;
+    const id = current.executionOpen.slice("slice:".length);
+    const mission = snapshot.scopes?.find((item) => item.mission === current.scopesMission);
+    return mission?.slices.find((slice) => slice.id === id || slice.dirName === id)?.dirName ?? null;
+  };
+  const selectedRigName = (): string | null =>
+    view.get().drill.find((part) => part.kind === "rig")?.name
+      ?? snapshot.hosts[0]?.rigs[0]?.name
+      ?? null;
   const live = client
-    ? createLiveRefresh({ hydrate: () => hydrateSnapshot(client, reviewCache, view.get().scopesMission), onFrame: () => draw(), now: () => Date.now() })
+    ? createLiveRefresh({ hydrate: () => hydrateSnapshot(client, reviewCache, view.get().scopesMission, selectedSliceDirectory(), selectedRigName()), onFrame: () => draw(), now: () => Date.now() })
     : null;
   let motionTimer: NodeJS.Timeout | null = null;
   // S19 AM-R18 — the open view updates ITSELF: oracle pushes drive the refresh owner.
@@ -94,7 +113,7 @@ async function run(): Promise<void> {
     // hitMap coordinates always match what is on screen
     process.stdout.write("\x1b[H" + stylizeLines(lastScreen, style).map((l) => "\x1b[2K" + l).join("\r\n"));
     if (motionTimer) clearTimeout(motionTimer);
-    motionTimer = lastScreen.motionActive ? setTimeout(draw, 120) : null;
+    motionTimer = lastScreen.motionActive ? setTimeout(draw, MOTION_FRAME_MS) : null;
   }
 
   // 5.2 crash-cart: probe the daemon-down verdict via the shipped `rig crash-cart --json` verb (its
@@ -255,6 +274,7 @@ async function run(): Promise<void> {
   async function shutdown(): Promise<void> {
     if (motionTimer) clearTimeout(motionTimer);
     live?.close();
+    unsubscribeCopyMode();
     process.stdout.write(MOUSE_DISABLE + ALT_SCREEN_OFF);
     await socket.close();
     activityEvents?.close();
@@ -345,6 +365,10 @@ async function run(): Promise<void> {
         }
       }
       if (ev.type === "char") {
+        if (ev.ch === "v" && inputLine === "") {
+          perform(parseCommand("select-text", view.get().sections));
+          continue;
+        }
         // SCOPES accelerators: m/n ride the REGISTERED commands (one path).
         if (inputLine === "" && view.get().section === "scopes" && view.get().scopesSelected) {
           if (ev.ch === "m") { perform(parseCommand("reqs", view.get().sections)); continue; }
@@ -382,8 +406,8 @@ async function run(): Promise<void> {
           crashCartOpts = { ...crashCartOpts, confirm: undefined };
           view.dispatch({ type: "notice", message: "restore cancelled" });
           draw();
-        } else if (inputLine === "") {
-          const action = resolveEscapeAction(ev, view.get());
+        } else {
+          const action = resolveEscapeAction(ev, view.get(), inputLine !== "");
           if (action) view.dispatch(action);
         }
         inputLine = "";
@@ -412,8 +436,12 @@ async function run(): Promise<void> {
           if (action) perform(action);
         }
       } else if (ev.type === "mouse" && lastScreen) {
-        const hit = lastScreen.hitMap.find((h) => h.y === ev.y && ev.x >= h.x1 && ev.x <= h.x2);
-        if (hit) perform(hit.action);
+        const wheel = resolveMouseAction(ev, view.get(), lastScreen, computeExplorerRows(view.get(), snapshot).length);
+        if (wheel) perform(wheel);
+        else {
+          const hit = lastScreen.hitMap.find((h) => h.y === ev.y && ev.x >= h.x1 && ev.x <= h.x2);
+          if (hit) perform(hit.action);
+        }
       }
     }
     draw();

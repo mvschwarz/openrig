@@ -5,28 +5,30 @@ import { computeExplorerRows, createViewState } from "../src/state.js";
 import type { FleetSnapshot } from "../src/types.js";
 
 describe("live visual regressions", () => {
-  it("renders the locked RIG column and value in the agents table", () => {
+  it("renders the approved POD/SEAT identity columns without repeating the selected rig", () => {
     const snap = demoSnapshot();
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "drill", resource: "rig", name: "openrig-build" });
 
     const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
-    const header = screen.lines.find((line) => line.includes("AGENT") && line.includes("STATUS"));
-    const row = screen.lines.find((line) => line.includes("dev50.driver"));
+    const header = screen.lines.find((line) => line.includes("SEAT") && line.includes("STATE"));
+    const row = screen.lines.find((line) => line.includes("┃ dev50") && line.includes("driver"));
 
-    expect(header).toMatch(/RIG\s+POD\s+AGENT/);
-    expect(row).toContain("openrig-build");
+    expect(header).toMatch(/POD\s+SEAT\s+RT\s+MODEL/);
+    expect(row).not.toContain("openrig-build");
   });
 
-  it("preserves the full CTX/TOKENS table at the locked 140-column size", () => {
+  it("keeps the approved operational columns at 140 columns", () => {
     const snap = demoSnapshot();
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "drill", resource: "rig", name: "openrig-build" });
 
     const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
-    const header = screen.lines.find((line) => line.includes("AGENT") && line.includes("STATUS"));
-    expect(header).toContain("CTX%");
-    expect(header).toContain("TOKENS");
+    const header = screen.lines.find((line) => line.includes("SEAT") && line.includes("STATE"));
+    expect(header).toContain("CTX");
+    expect(header).toContain("Q");
+    expect(header).toContain("WORK");
+    expect(header).toContain("NOW");
     expect(header).toContain("ACTIONS");
   });
 
@@ -49,7 +51,7 @@ describe("live visual regressions", () => {
     // pane delimiter located by its FIXED boundary (EXPL_W=30 → content at 31):
     // the slice-17 navigator's │ rails would shadow a first-│ split (guard-
     // sanctioned truthful floor update; the assertion is unchanged)
-    expect(screen.lines[screen.contentTargets[tabIndex]!.y - 1]!.slice(31)).toMatch(/^›/);
+    expect(screen.lines[screen.contentTargets[tabIndex]!.y - 1]!.slice(screen.explorerWidth + 1)).toMatch(/^›/);
 
     view.dispatch({ type: "content-select", index: termIndex });
     screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
@@ -58,7 +60,7 @@ describe("live visual regressions", () => {
     view.dispatch({ type: "content-select", index: rowIndex });
     screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
     // fixed-boundary pane delimiter (see the tab-focus pin above)
-    expect(screen.lines[screen.contentTargets[rowIndex]!.y - 1]!.slice(31)).toMatch(/^›/);
+    expect(screen.lines[screen.contentTargets[rowIndex]!.y - 1]!.slice(screen.explorerWidth + 1)).toMatch(/^›/);
   });
 
   it("never emits a composed row wider than the terminal", () => {
@@ -81,7 +83,7 @@ describe("live visual regressions", () => {
     // chrome contract (visual-polish directive): ticker · pane rule · keybind
     // hint bar · status line, bottom-anchored
     expect(screen.lines[30]).toContain("≋");
-    expect(screen.lines[31]).toMatch(/^─+┴─+$/);
+    expect(screen.lines[31]).toMatch(/^━+╋━+$/);
     expect(screen.lines[32]).toContain("q quit");
     expect(screen.lines[33]).toContain("[t] needs");
   });
@@ -99,7 +101,7 @@ describe("live visual regressions", () => {
     view.dispatch({ type: "select", index: target, rowCount: rows.length });
 
     const screen = renderScreen(view.get(), snap, { cols: 100, rows: 12 });
-    expect(screen.lines.some((line) => line.includes("›") && line.includes("spec-15"))).toBe(true);
+    expect(screen.lines.some((line) => line.includes("▶") && line.includes("spec-15"))).toBe(true);
   });
 
   it("does not advertise open on a Needs-You target that cannot navigate", () => {
@@ -239,7 +241,7 @@ describe("live visual regressions", () => {
 
     const output = renderScreen(view.get(), snap, { cols: 140, rows: 34 }).lines.join("\n");
     expect(output).toContain("/ filter agents…");
-    expect(output).toMatch(/\d+ of \d+ \/ \d+ idle/);
+    expect(output).toMatch(/\d+ seats · \d+ working · \d+ need attention · \d+ open rows/);
   });
 
   it("renders agent runtime/resources and makes each used-by rig a real reverse link", () => {

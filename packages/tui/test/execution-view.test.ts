@@ -119,7 +119,43 @@ function text(lines: ReturnType<typeof executionContentLines>): string {
   return lines.map((line) => line.text).join("\n");
 }
 
+function executionKeys(lines: ReturnType<typeof executionContentLines>): string[] {
+  const keys: string[] = [];
+  for (const line of lines) {
+    if (line.action?.type === "execution-open") keys.push(line.action.key);
+    for (const zone of line.zones ?? []) if (zone.action.type === "execution-open") keys.push(zone.action.key);
+  }
+  return [...new Set(keys)];
+}
+
 describe("mission execution story — readable rows over the shipped projections", () => {
+  it("renders the selected JRN-03 mission grammar: glance summary, wave graph, and structured detail cards", () => {
+    const overview = executionContentLines(executionFixture(), executionScopes(), [], null, 126);
+    const body = text(overview);
+    expect(body).toMatch(/NOW\s+/);
+    expect(body).toMatch(/NEEDS HUMAN\s+/);
+    expect(body).toMatch(/PROGRESS\s+/);
+    expect(body).toMatch(/NEXT\s+/);
+    expect(body).toMatch(/┌─ .*OPR\.0\.5\.8\.1/);
+    expect(body).toMatch(/[┬┴┼]/);
+    expect(body).toMatch(/^\s+▼$/m);
+    const firstSlice = overview.find((line) => line.zones?.some((zone) => zone.action.type === "execution-open"));
+    expect(firstSlice).toBeDefined();
+
+    const detail = text(executionContentLines(executionFixture(), executionScopes(), [], "slice:OPR.0.5.8.1", 126));
+    for (const title of ["OWNERSHIP", "EVIDENCE", "NEEDS YOU", "TYPED ROWS", "DEPENDENCIES"])
+      expect(detail).toContain(title);
+  });
+
+  it("stacks every mission node at narrow width and leaves overflow to the content scroller", () => {
+    const lines = executionContentLines(executionFixture(12), executionScopes(12), [], null, 58);
+    const body = text(lines);
+    expect(body).toContain("WAVE");
+    expect(body).not.toMatch(/\d+ below|\+\d+ more/);
+    expect(executionKeys(lines).filter((key) => key.startsWith("slice:"))).toHaveLength(12);
+    expect(body.split("\n").every((line) => line.length <= 58)).toBe(true);
+  });
+
   it("REGRESSION (founder journey): all slices declared done + no lanes + no repository must not render WAITING or glyph blobs", () => {
     const { execution, scopes } = installedStateFixture();
     const lines = executionContentLines(execution, scopes, [], null, 110 - 32);
@@ -129,20 +165,18 @@ describe("mission execution story — readable rows over the shipped projections
     expect(body).not.toMatch(/\bp\d+\/\d+\b/);
     expect(body).not.toContain("@—");
     expect(body).not.toMatch(/\?\?/);
-    // declared state is kept and attributed; the evidence gap is one mission-level line with a drill
-    expect(body).toContain("declared in slice files: 20 done");
-    expect(body).toContain("live now: 0 working");
+    // declared state is kept and attributed; the evidence gap is one compact mission-level drill
+    expect(body).toContain("release-0.5.8 · COMPLETE · 20 slices");
+    expect(body).toContain("PROGRESS  20/20 declared done · 0 working");
     const gap = lines.find((line) => line.text.includes("evidence gap"))!;
-    expect(gap.text).toContain("evidence gap — no repository reachable; declared state shown  (open ▸)");
+    expect(gap.text).toContain("provenance");
+    expect(gap.text).toContain("evidence gap");
     expect(gap.action).toEqual({ type: "execution-open", key: "evidence" });
-    expect(lines.find((line) => line.text.includes("unconfirmed for"))?.text).toBe(
-      "    evidence unconfirmed for 20 of 20 slices (unknown, not waiting)",
-    );
     expect(body.split("evidence gap").length - 1).toBe(1);
     // every wave header counts declared words, never a work-state verdict the projection did not make
-    const headers = lines.filter((l) => l.text.includes("── wave "));
+    const headers = lines.filter((l) => l.text.includes("WAVE "));
     expect(headers.length).toBeGreaterThan(0);
-    for (const line of headers) expect(line.text).toMatch(/\d+ done ─/);
+    for (const line of headers) expect(line.text).toMatch(/\d+ done/);
     // the gap page names the basis and lists affected slices, each its own drill
     const page = executionContentLines(execution, scopes, [], "evidence", 160);
     expect(text(page)).toContain("git:         no reachable repo context");
@@ -157,18 +191,19 @@ describe("mission execution story — readable rows over the shipped projections
   it("shows each slice once, in wave order, as ordinary words with real assignment, evidence, proof, and next", () => {
     const lines = executionContentLines(executionFixture(), executionScopes(), [], null, 160);
     const body = text(lines);
-    expect(body).toContain("release-0.5.8 EXECUTION · 4 slices");
-    expect(body).toContain("declared in slice files: 3 done, 1 active · live now: 1 working, 1 with a problem");
-    expect(body).toContain("wave active-parallel · 2 slices · 1 working, 1 needs input");
-    expect(body).toContain("wave foundation · 1 slice · 1 done");
-    expect(body).toContain("wave next-unlock · 1 slice · 1 done");
-    for (const id of ["OPR.0.5.8.1", "OPR.0.5.8.2", "OPR.0.5.8.3", "OPR.0.5.8.4"]) expect(body.split(id).length - 1, id).toBe(1);
-    expect(body).toContain("working      OPR.0.5.8.1  Readable Name 1 · dev-1 (self-report) · built sha000000 · proof 4 of 4");
-    expect(body).toContain("needs input  OPR.0.5.8.2  Readable Name 2 · dev-2 (window-sampling) · needs input: permission prompt · no candidate recorded · no proof contract");
-    expect(body).toContain("done         OPR.0.5.8.3  Readable Name 3 · merged · proof 4 of 4");
-    expect(body).toContain("done         OPR.0.5.8.4  Readable Name 4 · ready to start · no candidate recorded · proof 4 of 4");
+    expect(body).toContain("release-0.5.8 · NEEDS ATTENTION · 4 slices");
+    expect(body).toContain("PROGRESS  3/4 declared done · 1 working · 1 with a problem");
+    expect(body).toContain("WAVE active-parallel · 2 slices · 1 working, 1 needs input");
+    expect(body).toContain("WAVE foundation · 1 slice · 1 done");
+    expect(body).toContain("WAVE next-unlock · 1 slice · 1 done");
+    for (const id of ["OPR.0.5.8.1", "OPR.0.5.8.2", "OPR.0.5.8.3", "OPR.0.5.8.4"]) {
+      expect(body.split(`┌─ ${id}`).length - 1, id).toBe(1);
+    }
+    expect(body).toContain("● working · dev-1 (self-report)");
+    expect(body).toContain("◐ needs input · dev-2");
+    expect(body).toContain("✓ done");
     expect(body).not.toMatch(GLYPH_BLOB);
-    expect(lines.filter((line) => line.action?.type === "scopes-open")).toHaveLength(4);
+    expect(executionKeys(lines).filter((key) => key.startsWith("slice:"))).toHaveLength(4);
   });
 
   it("renders every lifecycle frontier packet, unresolved occurrence, and named unknown", () => {
@@ -228,11 +263,26 @@ describe("mission execution story — readable rows over the shipped projections
       view.dispatch(parseCommand(":scopes"));
       view.dispatch({ type: "scopes-mission-open", mission: fixture.mission });
 
-      const screen = renderScreen(view.get(), snap, size);
-      const content = screen.lines.map((line) => line.slice(line.indexOf("│") + 2).trimEnd());
-      let cursor = content.findIndex((line) => line.trimStart().startsWith("action rig workflow project"));
-      let action = content[cursor]!.replace(/^\s*action /, "");
-      while (action.endsWith("\\")) action += `\n${content[++cursor]!}`;
+      let screen = renderScreen(view.get(), snap, size);
+      view.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });
+      let action: string | null = null;
+      for (let offset = 0; offset <= screen.contentMaxOffset && action == null; offset++) {
+        expect(screen.lines.every((line) => line.length <= size.cols), `${size.cols}x${size.rows}`).toBe(true);
+        const content = screen.lines.map((line) => line.slice(screen.explorerWidth + 2).trimEnd());
+        let cursor = content.findIndex((line) => line.trimStart().startsWith("action rig workflow project"));
+        if (cursor >= 0) {
+          let candidate = content[cursor]!.replace(/^\s*action /, "");
+          while (candidate.endsWith("\\") && cursor + 1 < content.length && !content[cursor + 1]!.trimStart().startsWith("scroll ")) {
+            candidate += `\n${content[++cursor]!}`;
+          }
+          if (!candidate.endsWith("\\")) action = candidate;
+        }
+        if (action == null && offset < screen.contentMaxOffset) {
+          view.dispatch({ type: "content-scroll", delta: 1 });
+          screen = renderScreen(view.get(), snap, size);
+        }
+      }
+      expect(action, `${size.cols}x${size.rows}: complete action is scroll-reachable`).not.toBeNull();
       const argv = execFileSync("/bin/sh", ["-c", `set -- ${action}\nprintf '%s\\0' "$@"`])
         .toString()
         .split("\0")
@@ -248,7 +298,6 @@ describe("mission execution story — readable rows over the shipped projections
         "--acceptance-evidence-ref", evidence,
       ]);
       expect(action, `${size.cols}x${size.rows}`).not.toContain("…");
-      expect(screen.lines.every((line) => line.length <= size.cols), `${size.cols}x${size.rows}`).toBe(true);
     }
   });
 
@@ -270,23 +319,24 @@ describe("mission execution story — readable rows over the shipped projections
     expect(body).not.toContain("rig workflow resume");
   });
 
-  it("keeps every drill affordance in bounds at 110 and 160 columns and drops the name before the facts", () => {
+  it("keeps every graph drill affordance in bounds at 110 and 160 columns", () => {
     for (const width of [110 - 32, 160 - 32]) {
       const lines = executionContentLines(executionFixture(), executionScopes(), [], null, width);
       const drillable = lines.filter((line) => line.action);
-      expect(drillable.length).toBeGreaterThan(4);
+      expect(executionKeys(lines).length).toBeGreaterThan(4);
       for (const line of drillable) {
         expect(line.text.endsWith("(open ▸)")).toBe(true);
         expect(line.text.length).toBeLessThanOrEqual(width);
       }
+      for (const line of lines) for (const zone of line.zones ?? []) {
+        expect(zone.start).toBeGreaterThanOrEqual(0);
+        expect(zone.end).toBeLessThanOrEqual(width);
+      }
     }
-    // at 110 columns the assignee's decider goes first, then whole facts from the end —
-    // never a fact clipped mid-word; assignee, evidence, proof and the problem reason survive
     const narrow = text(executionContentLines(executionFixture(), executionScopes(), [], null, 110 - 32));
-    expect(narrow).toContain("working      OPR.0.5.8.1  dev-1 · built sha000000 · proof 4 of 4  (open ▸)");
-    expect(narrow).toContain("needs input  OPR.0.5.8.2  dev-2 · needs input: permission prompt  (open ▸)");
-    expect(narrow).toContain("evidence gap — no repository reachable; declared state shown  (open ▸)");
-    expect(narrow).not.toMatch(/…  \(open ▸\)/);
+    expect(narrow).toContain("● working · dev-1");
+    expect(narrow).toContain("◐ needs input · dev-2");
+    expect(narrow).toContain("evidence gap");
   });
 
   it("renders structured blockers as words with the blocker first and never [object Object]", () => {
@@ -296,23 +346,23 @@ describe("mission execution story — readable rows over the shipped projections
     blocked["next_up_basis"] = "blocked rows present (qitem-20260902074725-404326e1)";
     blocked["blocked_on_rows"] = [{ qitem_id: "qitem-20260902074725-404326e1", blocked_on: "qitem-20260902074704-b1a445fa" }];
     const body = text(executionContentLines(fixture, executionScopes(), [], null, 160));
-    expect(body).toContain("blocked      OPR.0.5.8.4  Readable Name 4 · waits on qitem-20260902074704-b1a445fa");
-    expect(body).toContain("wave next-unlock · 1 slice · 1 blocked");
+    expect(body).toContain("NEEDS HUMAN OPR.0.5.8.2, OPR.0.5.8.4");
+    expect(body).toContain("⚑ blocked");
+    expect(body).toContain("WAVE next-unlock · 1 slice · 1 blocked");
     expect(body).not.toContain("[object Object]");
     const page = text(executionContentLines(fixture, [], [], "slice:OPR.0.5.8.4", 160));
-    expect(page).toContain("blocked on:  qitem-20260902074725-404326e1 waits on qitem-20260902074704-b1a445fa");
+    expect(page).toContain("blocked on:   qitem-20260902074725-404326e1 waits on qitem-20260902074704-b1a445fa");
   });
 
-  it("bounds a large wave behind one door and keeps every hidden slice selectable", () => {
+  it("keeps every slice in a large wave directly selectable without an omission door", () => {
     const fixture = executionFixture(14);
     const overview = executionContentLines(fixture, executionScopes(14), [], null, 160);
-    const door = overview.find((line) => line.text.includes("open all 12 rows in wave active-parallel"))!;
-    expect(door.action).toEqual({ type: "execution-open", key: "group:wave:active-parallel" });
-    expect(overview.length).toBeLessThanOrEqual(20);
+    expect(text(overview)).not.toMatch(/\+\d+ more|\d+ below|open all \d+ rows/);
+    expect(executionKeys(overview).filter((key) => key.startsWith("slice:"))).toHaveLength(14);
     const page = executionContentLines(fixture, executionScopes(14), [], "group:wave:active-parallel", 160);
     expect(text(page)).toContain("wave active-parallel · all 12 rows");
     expect(text(page)).not.toMatch(/\+\d+ more/);
-    expect(page.filter((line) => line.action?.type === "scopes-open")).toHaveLength(12);
+    expect(executionKeys(page).filter((key) => key.startsWith("slice:"))).toHaveLength(12);
   });
 
   it("tells pending, failed, and served-empty projection reads apart", () => {
@@ -326,15 +376,15 @@ describe("mission execution story — readable rows over the shipped projections
 describe("execution drill — one page from source, esc back", () => {
   it("a slice page shows declared vs evidence, every rung in words with its basis, sequencing, proof, and the lane", () => {
     const body = text(executionContentLines(executionFixture(), executionScopes(), [], "slice:OPR.0.5.8.3", 100));
-    expect(body).toContain("OPR.0.5.8.3 — Readable Name 3");
-    expect(body).toContain("declared done · evidence merged");
-    expect(body).toContain("built        fold00000");
-    expect(body).toContain("merged       yes");
-    expect(body).toContain("live         no");
-    expect(body).toContain("basis: git merge-base");
-    expect(body).toContain("review leg CLEAR · rev1-r2 · /proof/review.md");
-    expect(body).toContain("next up:     INDETERMINATE — own completion rung INDETERMINATE");
-    expect(body).toContain("spec:        /work/OPR.0.5.8.3/SPEC.md");
+    expect(body).toContain("OPR.0.5.8.3 · Slice 03 — Readable Name 3");
+    expect(body).toContain("EVIDENCE · declared done · merged");
+    expect(body).toContain("built:        fold00000");
+    expect(body).toContain("merged:       yes · git merge-base");
+    expect(body).toContain("live:         no · daemon build stamp differs");
+    expect(body).toContain("review leg:   CLEAR · rev1-r2 · /proof/review.md");
+    expect(body).toContain("next:         no next transition derived");
+    expect(body).toContain("spec:         /work/OPR.0.5.8.3/SPEC.md");
+    expect(body).toContain("DEPENDENCIES");
     expect(body).not.toMatch(GLYPH_BLOB);
     expect(body).toContain("esc back");
   });
@@ -377,17 +427,28 @@ describe("execution drill — one page from source, esc back", () => {
     view.dispatch({ type: "scopes-mission-open", mission: "release-0.5.8" });
     let screen = renderScreen(view.get(), snap, { cols: 110, rows: 40 });
     let body = screen.lines.join("\n");
-    expect(body).toContain("release-0.5.8 EXECUTION");
+    expect(body).toContain("release-0.5.8 · NEEDS ATTENTION");
     expect(body).toContain("evidence gap");
     expect(body).not.toMatch(GLYPH_BLOB);
     expect(body).not.toContain("WAITING");
-    const target = screen.contentTargets.find((t) => t.action.type === "scopes-open")!;
+    const target = screen.contentTargets.find((t) => t.action.type === "execution-open" && t.action.key === "slice:OPR.0.5.8.1")!;
     view.dispatch(target.action);
     screen = renderScreen(view.get(), snap, { cols: 110, rows: 40 });
     body = screen.lines.join("\n");
-    expect(body).toContain("INTENT (verbatim)");
-    expect(body).toContain("EXECUTION · working");
-    expect(body).toContain("declared    active (slice file)");
+    expect(body).toContain("01-slice · OPR.0.5.8.1 · release-0.5.8");
+    expect(body).toContain("OWNERSHIP");
+    expect(body).toContain("EVIDENCE · declared active");
+    const reachable = [body];
+    view.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });
+    while (view.get().contentOffset < screen.contentMaxOffset) {
+      view.dispatch({ type: "content-scroll", delta: 16 });
+      screen = renderScreen(view.get(), snap, { cols: 110, rows: 40 });
+      reachable.push(screen.lines.join("\n"));
+    }
+    body = reachable.join("\n");
+    expect(body).toContain("── INTENT ");
+    expect(body).toContain("── PROOF · 4/4 paired");
+    expect(body).toContain("TYPED ROWS");
     view.dispatch({ type: "scopes-mission-open", mission: "release-0.5.8" });
     screen = renderScreen(view.get(), snap, { cols: 110, rows: 40 });
     const gap = screen.contentTargets.find((t) => (t.action as { key?: string }).key === "evidence")!;
@@ -396,7 +457,7 @@ describe("execution drill — one page from source, esc back", () => {
     expect(screen.lines.join("\n")).toContain("evidence gap · derived");
     view.dispatch({ type: "execution-close" });
     screen = renderScreen(view.get(), snap, { cols: 110, rows: 40 });
-    expect(screen.lines.join("\n")).toContain("wave active-parallel");
+    expect(screen.lines.join("\n")).toContain("WAVE active-parallel");
     expect(view.get().executionOpen).toBeNull();
   });
 });

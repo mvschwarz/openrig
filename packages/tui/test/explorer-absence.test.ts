@@ -54,7 +54,7 @@ function explorerRowsFor(view: ReturnType<typeof createViewState>, s: FleetSnaps
     expect(idx, `explorer row for ${a.name}`).toBeGreaterThan(0);
     // scope to the EXPLORER cell (left of the pane border) — the content pane
     // legitimately renders marks on drill pages
-    const border = screen.lines[idx]!.indexOf("│");
+    const border = screen.lines[idx]!.indexOf("┃");
     return { agent: a, plain: screen.lines[idx]!.slice(0, border), styledFull: styled[idx]! };
   });
 }

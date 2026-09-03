@@ -16,13 +16,13 @@ describe("active-pane emphasis (k9s chrome)", () => {
   it("brackets the focused pane's title in the top rule", () => {
     const s = createViewState({ instanceId: "t", getSnapshot: () => snap });
     let screen = renderScreen(s.get(), snap, { cols: 140, rows: 34 });
-    expect(screen.lines[1]).toContain("[ EXPLORER ]");
-    expect(screen.lines[1]).not.toContain("[ TOPOLOGY ]");
+    expect(screen.lines[1]).toContain("{ EXPLORER }");
+    expect(screen.lines[1]).not.toContain("{ TOPOLOGY }");
     s.dispatch(parseCommand("rig openrig-build"));
     s.dispatch({ type: "focus", pane: "content" });
     screen = renderScreen(s.get(), snap, { cols: 140, rows: 34 });
-    expect(screen.lines[1]).toContain("[ TOPOLOGY ]");
-    expect(screen.lines[1]).not.toContain("[ EXPLORER ]");
+    expect(screen.lines[1]).toContain("{ TOPOLOGY }");
+    expect(screen.lines[1]).not.toContain("{ EXPLORER }");
   });
 });
 
@@ -35,9 +35,9 @@ describe("content selection bar", () => {
     s.dispatch({ type: "focus", pane: "content" });
     const screen = renderScreen(s.get(), snap, { cols: 140, rows: 34 });
     const styled = stylizeLines(screen, createStyle("truecolor"));
-    const barIndex = screen.lines.findIndex((l) => l.includes("│›"));
+    const barIndex = screen.lines.findIndex((l) => l.includes("┃›"));
     expect(barIndex).toBeGreaterThan(0);
-    expect(styled[barIndex]).toContain("\x1b[1;7;38;2;77;189;178m›");
+    expect(styled[barIndex]).toContain("\x1b[1;38;2;111;168;255;48;2;34;52;82m›");
     for (let i = 0; i < styled.length; i++) expect(stripAnsi(styled[i]!)).toBe(screen.lines[i]!);
   });
 });
@@ -69,14 +69,14 @@ describe("unfocused-pane cursor dims (pm-approved nit)", () => {
     const s = createViewState({ instanceId: "t", getSnapshot: () => snap });
     s.dispatch(parseCommand("rig openrig-build"));
     let styled = stylizeLines(renderScreen(s.get(), snap, { cols: 140, rows: 34 }), createStyle("truecolor"));
-    expect(styled.join("\n")).toContain("\x1b[1;7;38;2;77;189;178m›");
+    expect(styled.join("\n")).toContain("\x1b[1;38;2;111;168;255;48;2;34;52;82m▶");
     const pre = renderScreen(s.get(), snap, { cols: 140, rows: 34 });
     s.dispatch({ type: "layout", contentMaxOffset: pre.contentMaxOffset, contentTargetCount: pre.contentTargets.length });
     s.dispatch({ type: "focus", pane: "content" });
     const screen = renderScreen(s.get(), snap, { cols: 140, rows: 34 });
     styled = stylizeLines(screen, createStyle("truecolor"));
-    const barIndex = screen.lines.findIndex((l) => /^›/.test(l));
-    expect(styled[barIndex]).toContain("\x1b[7;38;2;109;116;128m");
+    const barIndex = screen.lines.findIndex((l) => /^▶/.test(l));
+    expect(styled[barIndex]).toContain("\x1b[38;2;109;116;128;48;2;34;52;82m");
     for (let i = 0; i < styled.length; i++) expect(stripAnsi(styled[i]!)).toBe(screen.lines[i]!);
   });
 });

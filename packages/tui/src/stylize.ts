@@ -8,11 +8,9 @@ import type { Screen } from "./types.js";
 import type { Style } from "./theme.js";
 import { reducedMotion } from "./motion.js";
 
-const EXPL_W = 30;
-
 const STATUS_TOKENS: Array<[RegExp, "ok" | "warn" | "error" | "dim"]> = [
   [/\b(running|active|ready|verified|working)\b/g, "ok"],
-  [/\b(needs-attention|attention_required|recoverable|detached|blocked|parked|degraded|stalled|stalled-after-claim|INDETERMINATE|undetermined)\b/g, "warn"],
+  [/\b(needs-attention|attention_required|needs you|recoverable|detached|blocked|parked|degraded|stalled|stalled-after-claim|INDETERMINATE|undetermined)\b/g, "warn"],
   [/\b(failed|down|unreachable|crashed|rejected)\b/g, "error"],
   [/\b(unknown|idle|stopped|pending)\b/g, "dim"],
 ];
@@ -28,19 +26,14 @@ function paintInline(text: string, s: Style): string {
 
 function paintExplorer(text: string, s: Style, focused: boolean): string {
   // pm-approved: the unfocused pane's selection bar dims (k9s/editor standard)
-  if (text.startsWith("›")) {
+  if (text.startsWith("▶") || text.startsWith("◆")) {
     const token = focused ? "accent" : "dim";
-    const opts = { inverse: true, bold: focused };
-    // FOUNDER CORRECTION (style verdict, folded spec): the highlight covers
-    // the row's item TEXT only — branch-guide glyphs stay UNHIGHLIGHTED.
-    const tree = text.match(/^›( *(?:[│ ] )*(?:├─|└─) )(.*?)( *)$/);
-    if (tree) return s.paint(token, "›", opts) + s.paint("chrome", tree[1]!) + s.paint(token, tree[2]!, opts) + tree[3]!;
-    return s.paint(token, text, opts);
+    return s.paint(token, text, { bg: "selection", bold: focused });
   }
-  if (/[▾▸] (TOPOLOGY|SPECS|NEEDS-YOU)/.test(text)) return s.paint("bright", text, { bold: true });
+  if (/^[ ▶◆≈]*(TOPOLOGY|SPECS|SCOPES|NEEDS-YOU)\s*$/.test(text)) return s.paint("bright", text, { bold: true });
   // Slice-17 re-skin: branch guides paint faint (chrome), the row body keeps
   // its own rules — the tree rails read as structure, never as content.
-  const tree = text.match(/^( *(?:[│ ] )*(?:├─|└─) )(.*)$/);
+  const tree = text.match(/^( *(?:[┃ ] )*(?:┣━|┗━) )(.*)$/);
   if (tree) return s.paint("chrome", tree[1]!) + paintExplorerBody(tree[2]!, s);
   return paintExplorerBody(text, s);
 }
@@ -61,7 +54,7 @@ function paintExplorerBody(text: string, s: Style): string {
   // ROUND-3: explorer icons MONOCHROME — color is for status only
   if (text.startsWith("▦ ")) return s.paint("dim", "▦ ") + text.slice(2);
   if (text.startsWith("⊕ ")) return s.paint("dim", "⊕ ") + text.slice(2);
-  if (/^[▾▸] /.test(text)) return s.paint("chrome", text.slice(0, 2)) + s.paint("dim", text.slice(2));
+  if (/^[⌄›] /.test(text)) return s.paint("chrome", text.slice(0, 2)) + s.paint("dim", text.slice(2));
   return text;
 }
 
@@ -93,7 +86,7 @@ function paintAlertLine(text: string, token: "warn" | "error", s: Style): string
 
 function paintContent(text: string, s: Style): string {
   if (text.trim() === "") return text;
-  if (/\bRIG\b.*\bAGENT\b.*\bSTATUS\b/.test(text)) return s.paint("accentBright", text, { bold: true });
+  if (/\bPOD\b.*\bSEAT\b.*\bSTATE\b/.test(text)) return s.paint("accentBright", text, { bold: true });
   if (/\bNODE\b.*\bLABEL\b.*\bRUNTIME\b/.test(text)) return s.paint("accentBright", text, { bold: true });
   // detail vocabulary: section rule "  ── title ────"
   const rule = text.match(/^( {2})── (.+?) (─+)$/);
@@ -125,8 +118,8 @@ function paintTitleLine(text: string, s: Style): string {
 function paintRule(line: string, s: Style): string {
   // pane titles are embedded in rule lines: dim the rule, brighten title words
   return line
-    .split(/(─+|[┌┐└┘├┤┬┴┼])/)
-    .map((part) => (part === "" ? part : /^[─┌┐└┘├┤┬┴┼]+$/.test(part) ? s.paint("chrome", part) : s.paint("accentBright", part, { bold: true })))
+    .split(/([─━]+|[┌┐└┘├┤┬┴┼╋┃])/)
+    .map((part) => (part === "" ? part : /^[─━┌┐└┘├┤┬┴┼╋┃]+$/.test(part) ? s.paint("chrome", part) : s.paint("accentBright", part, { bold: true })))
     .join("");
 }
 
@@ -134,7 +127,7 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
   if (s.mode === "none") return screen.lines;
   // focus is read from the chrome itself (the bracketed pane title) — no
   // second source of truth to drift
-  const explorerFocused = (screen.lines[1] ?? "").includes("[ EXPLORER ]");
+  const explorerFocused = (screen.lines[1] ?? "").includes("{ EXPLORER }");
 
   return screen.lines.map((line, index) => {
     if (index === 0) {
@@ -143,7 +136,7 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
         return `${s.paint("accent", "cmd ▸", { bold: true })} ${s.paint("bright", m[1] ?? "")}${m[2] ? s.paint("accent", "▊", reducedMotion() ? {} : { blink: true }) : ""}${m[3] ?? ""}`;
       return line;
     }
-    if (/^[─┌┐└┘├┤┬┴┼]/.test(line) && /─{4}/.test(line)) return paintRule(line, s);
+    if (/^[─━┌┐└┘├┤┬┴┼╋]/.test(line) && /[─━]{4}/.test(line)) return paintRule(line, s);
     if (/\bq quit\b/.test(line)) {
       // keybind hint bar: keys accent, labels dim, separators chrome
       return line
@@ -182,24 +175,25 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
     // window is open (renderScreen owns event/window/reduced-motion truth;
     // this is zero-width SGR only, strip-invariant preserved)
     if (screen.flashRows?.includes(index + 1)) return s.paint("bright", line, { inverse: true });
-    // The pane border lives at the FIXED boundary column (EXPL_W) — located
+    // The pane border lives at the rendered L2 boundary — located
     // positionally, never by scanning: the navigator's │ rails would shadow
     // a first-index search (slice-17 locked-rail resolution).
-    const border = line.charAt(EXPL_W) === "│" ? EXPL_W : -1;
-    if (border >= EXPL_W - 1 && border <= EXPL_W) {
+    const explW = screen.explorerWidth;
+    const border = line.charAt(explW) === "┃" ? explW : -1;
+    if (border === explW) {
       const left = line.slice(0, border);
       const marker = line.slice(border + 1, border + 2);
       const right = line.slice(border + 2);
       if (marker === "›") {
         // content-pane selection = a real highlight bar, not just a glyph
-        return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${s.paint("accent", `›${right}`, { inverse: true, bold: true })}`;
+        return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "┃")}${s.paint("accent", `›${right}`, { bg: "selection", bold: true })}`;
       }
       // S19 MR2 (guard finding 2) + round-4 finding 4: explorer seg RUNS —
       // each run (status badge, right meta) paints its OWN tokens; the guide
       // prefix keeps the explorer chrome rules and the text between runs is
       // default ink (names). Selected rows keep the highlight bar.
       const em = screen.explorerMeta?.[index + 1];
-      if (em && em.length && !left.startsWith("›")) {
+      if (em && em.length && !left.startsWith("▶") && !left.startsWith("◆")) {
         let paintedLeft = "";
         let pos = 0;
         em.forEach((run, k) => {
@@ -217,9 +211,9 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
           const paintedC = cSegs
             .map((g) => (g.token || g.bg || g.inverse ? s.paint(g.token ?? "bright", g.text, { ...(g.bold ? { bold: true } : {}), ...(g.bg ? { bg: g.bg } : {}), ...(g.inverse ? { inverse: true } : {}) }) : g.text))
             .join("");
-          return `${paintedLeft}${s.paint("chrome", "│")}${marker}${paintedC}${right.slice(segText.length)}`;
+          return `${paintedLeft}${s.paint("chrome", "┃")}${marker}${paintedC}${right.slice(segText.length)}`;
         }
-        return `${paintedLeft}${s.paint("chrome", "│")}${marker}${paintContent(right, s)}`;
+        return `${paintedLeft}${s.paint("chrome", "┃")}${marker}${paintContent(right, s)}`;
       }
       // slice-17: canvas-rendered rows (graph view) carry token segments —
       // painted with THIS Style; plain(segs) === the content text by
@@ -233,9 +227,9 @@ export function stylizeLines(screen: Screen, s: Style): string[] {
               ? s.paint(seg.token ?? "bright", seg.text, { ...(seg.bold ? { bold: true } : {}), ...(seg.bg ? { bg: seg.bg } : {}), ...(seg.inverse ? { inverse: true } : {}) })
               : seg.text)
           .join("");
-        return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${marker}${painted}${right.slice(segText.length)}`;
+        return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "┃")}${marker}${painted}${right.slice(segText.length)}`;
       }
-      return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "│")}${marker}${paintContent(right, s)}`;
+      return `${paintExplorer(left, s, explorerFocused)}${s.paint("chrome", "┃")}${marker}${paintContent(right, s)}`;
     }
     // (The full-width segRows branch was removed with the crash-cart shell-placement rework — its only
     // caller, the full-width cockpit Screen, now renders in-pane via the split-pane │ path above.)

@@ -22,12 +22,36 @@ import type { ViewState, ViewStateStore } from "./types.js";
 export const MAX_SOCKET_PATH_BYTES = 100;
 
 export function describeState(state: ViewState) {
+  const named = new Map(state.drill.map((item) => [item.kind, item.name]));
+  const mission = state.scopesSelected?.mission ?? state.scopesMission ?? undefined;
+  const slice = state.scopesSelected?.slice
+    ?? (state.executionOpen?.startsWith("slice:") ? state.executionOpen.slice("slice:".length) : undefined);
+  const parts = [
+    `instance:${state.instanceId}`,
+    `section:${state.section}`,
+    ...state.drill.map((item) => `${item.kind}:${item.name}`),
+    ...(mission ? [`mission:${mission}`] : []),
+    ...(slice ? [`slice:${slice}`] : []),
+  ];
   return {
     ok: !state.lastError,
     screen: state.section,
     drill: state.drill.map((d) => `${d.kind}:${d.name}`),
     filter: state.filter || undefined,
     viewTab: state.viewTab,
+    address: {
+      instance: state.instanceId,
+      section: state.section,
+      ...(named.get("host") ? { host: named.get("host") } : {}),
+      ...(named.get("rig") ? { rig: named.get("rig") } : {}),
+      ...(named.get("pod") ? { pod: named.get("pod") } : {}),
+      ...(named.get("agent") ? { agent: named.get("agent") } : {}),
+      ...(named.get("spec") ? { spec: named.get("spec") } : {}),
+      ...(mission ? { mission } : {}),
+      ...(slice ? { slice } : {}),
+      path: parts.join("/"),
+    },
+    copyMode: state.copyMode,
     error: state.lastError ?? undefined,
   };
 }

@@ -62,13 +62,12 @@ describe("parity by construction (FR-7 / PIN 1)", () => {
     const s = fresh("t");
     s.dispatch(parseCommand("rig openrig-build"));
     const screen = renderScreen(s.get(), snap, { cols: 140, rows: 30 });
-    const header = screen.lines.find((l) => l.includes("AGENT") && l.includes("STATUS"));
+    const header = screen.lines.find((l) => l.includes("SEAT") && l.includes("STATE"));
     expect(header).toBeDefined();
-    const ctxCol = header!.indexOf("CTX%");
-    const rows = screen.lines.filter((l) => l.includes("openrig-build") && /\b(running|idle|needs-attention|unknown)\b/.test(l));
+    const rows = screen.lines.filter((l) => l.includes("term ▸") && /\b(working|idle|needs you|unknown)\b/.test(l));
     expect(rows.length).toBeGreaterThanOrEqual(2);
     for (const row of rows) {
-      expect(row.slice(ctxCol, ctxCol + 4)).toMatch(/^\s*(\d+%|—)$/);
+      expect(row).toMatch(/(?:\d+%[\u25aa▫]{3}|—)\s+(?:working|idle|needs you|unknown)/);
     }
   });
 
@@ -76,10 +75,10 @@ describe("parity by construction (FR-7 / PIN 1)", () => {
     const s = fresh("t");
     s.dispatch(parseCommand("rig openrig-build"));
     const screen = renderScreen(s.get(), snap, { cols: 140, rows: 30 });
-    const qaRow = screen.lines.find((l) => l.includes("dev50.qa"));
+    const qaRow = screen.lines.find((l) => /\? qa\s/.test(l));
     expect(qaRow).toBeDefined();
     expect(qaRow).toMatch(/unknown/);
-    const deadRow = screen.lines.find((l) => l.includes("orch.lead"));
-    expect(deadRow).toMatch(/needs-attention/);
+    const deadRow = screen.lines.find((l) => /\b(?:◐ )?lead\s/.test(l));
+    expect(deadRow).toMatch(/needs you/);
   });
 });

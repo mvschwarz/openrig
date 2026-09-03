@@ -55,6 +55,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     contentTargetCount: 0,
     contentSelection: 0,
     focusedPane: "explorer",
+    copyMode: false,
     footerOn: true,
     expanded: [],
     notice: null,
@@ -161,6 +162,8 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       const target = action.index ?? state.contentSelection + (action.delta ?? 0);
       return { ...next, contentSelection: Math.min(Math.max(target, 0), count - 1) };
     }
+    case "copy-mode":
+      return { ...next, copyMode: action.on ?? !state.copyMode };
     case "layout":
       return {
         ...next,
@@ -194,22 +197,30 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "drill": {
       const drilled = drillTo(next, action.resource, action.name, snap, action.target);
       if (drilled.lastError) return drilled;
+      const sectionState = clearScopeCoordinatesOnSectionChange(state, drilled);
       const spec = action.resource === "spec" ? findSpec(snap, action.name) : null;
       // filters are VIEW-scoped: a drill that crosses sections clears the old
       // section's filter (founder direct-drive catch — a specs filter leaked
       // into the topology table and blanked it)
       const filter = drilled.section === state.section ? drilled.filter : "";
-      return syncSelection(resetContent({ ...drilled, filter, viewTab: spec?.kind === "rig" ? "configuration" : "table" }), snap);
+      return syncSelection(resetContent({ ...sectionState, filter, viewTab: spec?.kind === "rig" ? "configuration" : "table" }), snap);
     }
     case "cross": {
       const crossed = crossNav(next, action.kind, action.name, snap, action.target);
       if (crossed.lastError) return crossed;
+      const sectionState = clearScopeCoordinatesOnSectionChange(state, crossed);
       const filter = crossed.section === state.section ? crossed.filter : "";
-      return syncSelection({ ...crossed, filter }, snap);
+      return syncSelection({ ...sectionState, filter }, snap);
     }
     default:
       return { ...next, lastError: "unknown action" };
   }
+}
+
+function clearScopeCoordinatesOnSectionChange(previous: ViewState, next: ViewState): ViewState {
+  return next.section === previous.section
+    ? next
+    : { ...next, scopesMission: null, scopesSelected: null, executionOpen: null };
 }
 
 function resetContent(state: ViewState): ViewState {
@@ -445,7 +456,9 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
           : section.name === "needs"
             ? "NEEDS-YOU"
             : section.name.toUpperCase();
-    rows.push({ label: `${active ? "▾" : "▸"} ${label}`, action: { type: "jump", section: section.name }, key: `section:${section.name}` });
+    // A section changes view but has no independent collapse state. Do not draw
+    // a disclosure glyph that cannot be toggled.
+    rows.push({ label, action: { type: "jump", section: section.name }, key: `section:${section.name}` });
     if (!active) continue;
     if (section.name === "scopes") {
       const expanded = new Set(state.expanded);
@@ -475,6 +488,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
             rows.push({
               label: `      ${open ? "▾" : "▸"} ${pod.name} (${pod.agents.length})`,
               action: { type: "drill", resource: "pod", name: pod.name, target: { host: host.name, rig: rig.name } },
+              disclosureAction: { type: "toggle-expand", key: podKey },
               key: podKey,
             });
             if (!open) continue;
@@ -493,7 +507,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
     } else if (section.name === "specs") {
       const kinds = ["rig", "agent", "workflow"] as const;
       rows.push({
-        label: state.filter ? `/ filter: ${state.filter}` : "/ filter specs…",
+        label: state.filter ? `/ filter: ${state.filter} · / replace · esc clear` : "/ filter specs…",
         action: { type: "filter", text: state.filter },
       });
       // ROUND-4 item 3: RIG SPECS fully expanded; AGENT SPECS collapsed to the
@@ -522,6 +536,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
             rows.push({
               label: `    ${open ? "▾" : "▸"} ${namespace}/ (${specs.length})`,
               action: { type: "toggle-expand", key: `folder:${namespace}` },
+              disclosureAction: { type: "toggle-expand", key: `folder:${namespace}` },
               key: `folder:${namespace}`,
             });
           if (!open) continue;

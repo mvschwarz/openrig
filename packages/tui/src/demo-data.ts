@@ -16,15 +16,15 @@ export function demoSnapshot(): FleetSnapshot {
               {
                 name: "dev50",
                 agents: [
-                  { name: "dev50.driver", runtime: "claude-code", spec: "driver-agent", context: 62, tokens: "118k", status: "active", live: true, canRun: false, session: "dev50-driver@openrig-build", attach: "tmux attach -t dev50-driver@openrig-build" },
-                  { name: "dev50.guard", runtime: "codex", spec: "guard-agent", context: 31, tokens: "54k", status: "idle", live: true, canRun: false, session: "dev50-guard@openrig-build" },
-                  { name: "dev50.qa", runtime: "codex", spec: "qa-agent", context: null, tokens: null, status: "unknown", live: false, canRun: true, session: "dev50-qa@openrig-build" },
+                  { name: "dev50.driver", runtime: "claude-code", model: "fable-5.1", spec: "driver-agent", context: 62, tokens: "118k", status: "active", live: true, canRun: false, session: "dev50-driver@openrig-build", attach: "tmux attach -t dev50-driver@openrig-build" },
+                  { name: "dev50.guard", runtime: "codex", model: "gpt-5.6", spec: "guard-agent", context: 31, tokens: "54k", status: "idle", live: true, canRun: false, session: "dev50-guard@openrig-build" },
+                  { name: "dev50.qa", runtime: "codex", model: "gpt-5.6", spec: "qa-agent", context: null, tokens: null, status: "unknown", live: false, canRun: true, session: "dev50-qa@openrig-build" },
                 ],
               },
               {
                 name: "orch",
                 agents: [
-                  { name: "orch.lead", runtime: "codex", spec: "lead-agent", context: 88, tokens: "203k", status: "needs-attention", live: true, canRun: false, session: "orch-lead@openrig-build" },
+                  { name: "orch.lead", runtime: "codex", model: "gpt-5.6", spec: "lead-agent", context: 88, tokens: "203k", status: "needs-attention", live: true, canRun: false, session: "orch-lead@openrig-build" },
                 ],
               },
             ],
@@ -88,6 +88,62 @@ export function demoSnapshot(): FleetSnapshot {
         ],
       },
     ],
+    // Representative execution projection for the real `--demo` journey.
+    // It is gated by --demo with the rest of this fixture and never enters the
+    // daemon hydration path.
+    executionMission: "release-0.5.2",
+    execution: {
+      view: "execution",
+      mission: "release-0.5.2",
+      derived_at: "2026-08-06T12:00:00.000Z",
+      sources: {
+        queue_db: { asof: "2026-08-06T12:00:00.000Z", basis: "demo queue rows" },
+        arrangement: { manifest: "/demo/release-0.5.2/mission.yaml", basis: "demo composition order" },
+        git: { basis: "demo candidate map" },
+        build_info: { commit: "51209941a" },
+      },
+      q1_lanes: [{
+        qitem_id: "qitem-20260806-drv0aa11",
+        slice: "OPR.0.5.2.9",
+        seat: "dev50-driver@openrig-build",
+        worktree_path: "/demo/openrig",
+        branch: "release-0.5.2-gateway",
+        head_sha: "fe92ffa9a",
+        fragile_join: false,
+        join_basis: "typed demo work node",
+        activity: { activity: "working", needs_input: { count: 0, reason: null }, decided_by: "activity oracle", changed_at: "2026-08-06T11:58:30.000Z" },
+        pickup: { state: "working" },
+        source: { qitem_id: "qitem-20260806-drv0aa11" },
+      }],
+      q2_sequencing: [
+        { slice_id: "OPR.0.5.2.5", dir: "crash-cart", depends_on: [], blocked_on_rows: [], next_up: false, next_up_basis: "declared done", next_up_rank: null, source: { spec_path: "/demo/crash-cart/SPEC.md", arrangement_path: "/demo/crash-cart/slice.yaml", wave_map_row: "foundation" } },
+        { slice_id: "OPR.0.5.2.9", dir: "gateway-m1", depends_on: ["OPR.0.5.2.5"], blocked_on_rows: [], next_up: false, next_up_basis: "claimed in progress", next_up_rank: null, source: { spec_path: "/demo/gateway-m1/SPEC.md", arrangement_path: "/demo/gateway-m1/slice.yaml", wave_map_row: "active" } },
+      ],
+      q3_care: [
+        { slice_id: "OPR.0.5.2.5", build_wave: "foundation", review_model: "independent", planning_dial: "P2" },
+        { slice_id: "OPR.0.5.2.9", build_wave: "active", review_model: "independent", planning_dial: "P2" },
+      ],
+      q4_ladder: [
+        {
+          slice_id: "OPR.0.5.2.5", dir: "crash-cart",
+          locked: { value: true, basis: "demo spec lock" },
+          built: { candidate_sha: "0a1b2c3d4", resolved_commit: "0a1b2c3d4", basis: "demo candidate" },
+          reviewed: { value: true, basis: "demo review proof", legs: [{ path: "/demo/crash-cart/proof/qa.md", verdict: "PASS", artifact_type: "qa", candidate_sha: "0a1b2c3d4" }] },
+          folded: { value: true, basis: "demo main contains candidate" },
+          adopted: { value: true, basis: "demo daemon build" },
+        },
+        {
+          slice_id: "OPR.0.5.2.9", dir: "gateway-m1",
+          locked: { value: true, basis: "demo spec lock" },
+          built: { candidate_sha: "fe92ffa9a", resolved_commit: "fe92ffa9a", basis: "demo candidate" },
+          reviewed: { value: false, basis: "review pending", legs: [] },
+          folded: { value: false, basis: "not on demo main" },
+          adopted: { value: false, basis: "candidate not live" },
+        },
+      ],
+      q5_park: [],
+      q6_parallelism: { lanes_live: 1, lanes_possible: 1, idle_seats_with_capacity: { value: 2, basis: "demo activity" } },
+    },
     attention: [
       { qitemId: "q1", state: "in-progress", destinationSession: "human-yeah@kernel", blockedOn: null, handedOffTo: null, tier: "human-gate", tags: null, summary: "0.5.0 cut packet ready · waiting on you", body: "", claimedAt: "2026-08-05T09:38:00.000Z", tsUpdated: "2026-08-05T09:38:00.000Z" },
       { qitemId: "q2", state: "pending", destinationSession: "human-yeah@kernel", blockedOn: null, handedOffTo: null, tier: "human-gate", tags: null, summary: "slice-20 routing pixels · waiting on you", body: "", claimedAt: "2026-08-05T07:00:00.000Z", tsUpdated: "2026-08-05T07:00:00.000Z" },
@@ -98,8 +154,8 @@ export function demoSnapshot(): FleetSnapshot {
     // resolves this live via GET /:qitemId). The render excludes the human-blocked
     // one (b2, a SESSION in blockedOn) — it is already surfaced under NEEDS YOU.
     blocked: [
-      { qitemId: "b1", state: "blocked", destinationSession: "dev50-driver@openrig-build", blockedOn: "qitem-20260805-review", blockerSession: "review-r1@openrig-build", handedOffTo: null, tier: null, tags: null, summary: "terminal verdict for 51209941", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
-      { qitemId: "b2", state: "blocked", destinationSession: "dev50-qa@openrig-build", blockedOn: "human-yeah@kernel", blockerSession: null, handedOffTo: null, tier: null, tags: null, summary: "human sign-off pending", body: "", claimedAt: "2026-08-05T08:00:00.000Z", tsUpdated: "2026-08-05T08:00:00.000Z" },
+      { qitemId: "b1", state: "blocked", destinationSession: "dev50-driver@openrig-build", blockedOn: "qitem-20260805-review", blockerSession: "review-r1@openrig-build", handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.4"], summary: "terminal verdict for 51209941", body: "", claimedAt: "2026-08-05T09:00:00.000Z", tsUpdated: "2026-08-05T09:00:00.000Z" },
+      { qitemId: "b2", state: "blocked", destinationSession: "dev50-qa@openrig-build", blockedOn: "human-yeah@kernel", blockerSession: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.9"], summary: "human sign-off pending", body: "", claimedAt: "2026-08-05T08:00:00.000Z", tsUpdated: "2026-08-05T08:00:00.000Z" },
     ],
     // PULSE ◌ PARKED WITH BATON + ● NOW source — shaped like the shipped
     // state=in-progress read. The guard qitem is a REALISTIC parked baton (owner
@@ -107,11 +163,11 @@ export function demoSnapshot(): FleetSnapshot {
     // owned by ACTIVE seats → they surface under NOW (running seats with work),
     // NOT parked.
     inProgress: [
-      { qitemId: "qitem-20260806-8f3a1b2c", state: "in-progress", destinationSession: "dev50-guard@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "slice 51-06 D2 atom", body: "", claimedAt: "2026-08-06T10:50:00.000Z", tsUpdated: "2026-08-06T11:13:00.000Z" },
-      { qitemId: "qitem-20260806-drv0aa11", state: "in-progress", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "pulse-view incr build", body: "", claimedAt: "2026-08-06T11:40:00.000Z", tsUpdated: "2026-08-06T11:58:00.000Z" },
+      { qitemId: "qitem-20260806-8f3a1b2c", state: "in-progress", destinationSession: "dev50-guard@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.6"], summary: "slice 51-06 D2 atom", body: "", claimedAt: "2026-08-06T10:50:00.000Z", tsUpdated: "2026-08-06T11:13:00.000Z" },
+      { qitemId: "qitem-20260806-drv0aa11", state: "in-progress", destinationSession: "dev50-driver@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.4"], summary: "pulse-view incr build", body: "", claimedAt: "2026-08-06T11:40:00.000Z", tsUpdated: "2026-08-06T11:58:00.000Z" },
       { qitemId: "qitem-20260806-pln0b220", state: "in-progress", destinationSession: "dev50-planner@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "IMPL-PLAN incr-4 drill-in", body: "", claimedAt: "2026-08-06T11:30:00.000Z", tsUpdated: "2026-08-06T11:57:00.000Z" },
       { qitemId: "qitem-20260806-r10c331", state: "in-progress", destinationSession: "review50-r1@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "review incr-3 lanes", body: "", claimedAt: "2026-08-06T11:45:00.000Z", tsUpdated: "2026-08-06T11:59:00.000Z" },
-      { qitemId: "qitem-20260806-led0d442", state: "in-progress", destinationSession: "orch-lead@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "fold receipt 0.5.2", body: "", claimedAt: "2026-08-06T11:50:00.000Z", tsUpdated: "2026-08-06T11:59:30.000Z" },
+      { qitemId: "qitem-20260806-led0d442", state: "in-progress", destinationSession: "orch-lead@openrig-build", blockedOn: null, handedOffTo: null, tier: null, tags: ["mission:release-0.5.2", "slice:OPR.0.5.2.20"], summary: "fold receipt 0.5.2", body: "", claimedAt: "2026-08-06T11:50:00.000Z", tsUpdated: "2026-08-06T11:59:30.000Z" },
     ],
     // Per-seat ps/activity — the NOW + PARKED join's right side (terminalActive
     // idle boolean + raw lastActivityAt). driver/planner/r1/lead ACTIVE → NOW;

@@ -129,6 +129,7 @@ const FIXTURES: Record<string, unknown> = {
   // PULSE ○ UP NEXT + ✓ JUST FINISHED lane sources (increment 3) — same /list route
   "/api/queue/list?state=pending&limit=50": [],
   "/api/queue/list?state=done,handed-off&limit=20": [],
+  "/api/queue/recent-transitions?rig=myrig&limit=20": [],
 };
 
 function fixtureClient(overrides: Record<string, { status: number } | undefined> = {}, responses: Record<string, unknown> = {}): DaemonClient {
@@ -169,6 +170,23 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(snap.execution).toMatchObject({ view: "execution", mission });
     expect(snap.executionMission).toBe(mission);
   });
+  it("hydrates the existing rich slice detail only for the selected slice directory", async () => {
+    const slice = "11-production-tui-composed-system";
+    const route = `/api/slices/${slice}`;
+    const detail = {
+      name: slice,
+      status: "active",
+      rawStatus: "building",
+      qitemIds: ["qitem-s11"],
+      commitRefs: ["5f7bc3c2c"],
+      lastActivityAt: "2026-09-03T22:20:25.862Z",
+      story: { events: [] },
+      decisions: { rows: [] },
+    };
+    const snap = await hydrateSnapshot(fixtureClient({}, { [route]: detail }), undefined, "release-0.5.9", slice);
+    expect(snap.sliceDetail).toEqual(detail);
+    expect(snap.sliceDetailName).toBe(slice);
+  });
   it("maps topology: pods grouped, agent rows VERBATIM from the maintained projection (PIN 2)", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
     const local = snap.hosts.find((h) => h.name === "local");
@@ -176,7 +194,11 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const dev = local?.rigs[0]?.pods.find((p) => p.name === "dev");
     expect(dev?.agents.map((a) => a.name)).toEqual(["dev.impl", "dev.qa"]);
     const impl = dev?.agents[0];
-    expect(impl).toMatchObject({ runtime: "claude-code", spec: "implementer", context: 43, tokens: "129k", status: "idle", canRun: false });
+    expect(impl).toMatchObject({
+      runtime: "claude-code", spec: "implementer", context: 43, tokens: "129k", status: "idle", canRun: false,
+      contextWindowSize: 200000, totalInputTokens: 120345, totalOutputTokens: 8422,
+      hasAssignedWork: true, pendingWorkCount: 2,
+    });
     // honest-unknown: availability "unknown" → null cells; lifecycleState verbatim
     const qa = dev?.agents[1];
     expect(qa).toMatchObject({ context: null, tokens: null, status: "unknown", canRun: true });
@@ -255,8 +277,8 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const snap = await hydrateSnapshot(fixtureClient());
     expect(snap.humanQueueProbed).toBe(true);
     expect(snap.needs.filter((item) => item.source === "agent")).toEqual([
-      { source: "agent", kind: "human-routed", target: "human@kernel", detail: "approve slice 11 proof", hostId: "local" },
-      { source: "agent", kind: "human-routed", target: "human@kernel", detail: "remote founder gate", hostId: "mm2-host" },
+      { source: "agent", kind: "human-routed", target: "human@kernel", detail: "approve slice 11 proof", hostId: "local", qitemId: "qitem-2026080201", evidenceRef: "proof/qa.md", unblocks: null },
+      { source: "agent", kind: "human-routed", target: "human@kernel", detail: "remote founder gate", hostId: "mm2-host", qitemId: "qitem-remote", evidenceRef: null, unblocks: null },
     ]);
   });
 
@@ -360,8 +382,8 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "drill", resource: "rig", name: "myrig" });
     const output = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
-    expect(output.lines.find((line) => line.includes("dev.mismatch"))).not.toContain("run ▸");
-    expect(output.lines.find((line) => line.includes("dev.missing"))).not.toContain("run ▸");
+    expect(output.lines.find((line) => /\bmismatch\s/.test(line))).not.toContain("run ▸");
+    expect(output.lines.find((line) => /\bmissing\s/.test(line))).not.toContain("run ▸");
   });
 
   it("joins Specs↔Topology over existing reads: rig agentRefs + agent usedByRigs", async () => {

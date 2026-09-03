@@ -10,7 +10,6 @@ import { createStyle, stripAnsi } from "../src/theme.js";
 // inside the standard shell: the explorer sidebar is ALWAYS present (│ at EXPL_W), ledger-fed +
 // honestly marked daemon-down; the approved content moves into the RIGHT pane verbatim. All rails stand.
 
-const EXPL_W = 30;
 const snap = emptySnapshot();
 const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
 
@@ -19,19 +18,19 @@ describe("renderScreen daemon-down — in-shell split (explorer always present)"
   const body = screen.lines.join("\n");
 
   it("has the explorer│content split (a │ border at EXPL_W on the body rows)", () => {
-    const borderRows = screen.lines.filter((l) => l.charAt(EXPL_W) === "│");
+    const borderRows = screen.lines.filter((l) => l.charAt(screen.explorerWidth) === "┃");
     expect(borderRows.length).toBeGreaterThan(3);
   });
 
   it("ledger-feeds the explorer with the rig names + an honest ledger marker (never a second read)", () => {
-    const left = screen.lines.map((l) => l.slice(0, EXPL_W)).join("\n");
+    const left = screen.lines.map((l) => l.slice(0, screen.explorerWidth)).join("\n");
     expect(left).toContain("openrig-pm");
     expect(left).toContain("kernel");
     expect(left.toLowerCase()).toContain("ledger"); // honestly marked ledger-sourced
   });
 
   it("moves the approved cockpit CONTENT into the right pane verbatim (all rails stand)", () => {
-    const right = screen.lines.map((l) => l.slice(EXPL_W + 1)).join("\n");
+    const right = screen.lines.map((l) => l.slice(screen.explorerWidth + 1)).join("\n");
     expect(right).toContain("daemon not running");
     expect(right).toContain("RESTORE EVERYTHING");
     expect(right).toContain("unavailable — no shutdown record"); // honest-null header slot preserved
@@ -73,7 +72,7 @@ describe("renderScreen — ACTIVE restore takes precedence (mid-run progress fra
     );
     const screen = renderScreen(view.get(), snap, { cols: 120, rows: 32, daemonState: "down", crashCart: demoCrashCartModel(), restore: vm });
     const body = screen.lines.join("\n");
-    expect(screen.lines.filter((l) => l.charAt(EXPL_W) === "│").length).toBeGreaterThan(3); // still in-shell
+    expect(screen.lines.filter((l) => l.charAt(screen.explorerWidth) === "┃").length).toBeGreaterThan(3); // still in-shell
     expect(body).toContain("RESTORING FLEET"); // the mid-run frame
     expect(body).toContain("kernel");
     expect(body).toContain("c cancel");
@@ -106,7 +105,7 @@ describe("renderScreen — ACTIVE restore takes precedence (mid-run progress fra
     expect(body).toContain("or skip");
     expect(body).toContain("take a snapshot"); // the not_attempted remediation survives too
     // and the wrapped continuation is hanging-indented under its row (a second visible line)
-    const paneText = screen.lines.map((l) => l.slice(EXPL_W + 1)).join("\n");
+    const paneText = screen.lines.map((l) => l.slice(screen.explorerWidth + 1)).join("\n");
     expect(paneText).toMatch(/skip/);
   });
 });
@@ -175,7 +174,7 @@ describe("renderScreen daemon-down — UNVERIFIED in-shell (explorer present, no
   });
   const body = screen.lines.join("\n");
   it("has the explorer split + the cannot-verify content, and offers NO restore", () => {
-    expect(screen.lines.filter((l) => l.charAt(EXPL_W) === "│").length).toBeGreaterThan(3);
+    expect(screen.lines.filter((l) => l.charAt(screen.explorerWidth) === "┃").length).toBeGreaterThan(3);
     expect(body).toContain("cannot verify the daemon");
     expect(body).toContain("alive (pid 7)");
     expect(body).not.toContain("RESTORE EVERYTHING");
@@ -191,11 +190,11 @@ describe("renderScreen daemon-down — first-run in-shell (onboarding, no crash 
   });
   const body = screen.lines.join("\n");
   it("has the shell + onboarding framing, no crash header/RESTORE; explorer marked ledger even with no rigs", () => {
-    expect(screen.lines.filter((l) => l.charAt(EXPL_W) === "│").length).toBeGreaterThan(3);
+    expect(screen.lines.filter((l) => l.charAt(screen.explorerWidth) === "┃").length).toBeGreaterThan(3);
     expect(body).not.toContain("daemon not running");
     expect(body).not.toContain("RESTORE EVERYTHING");
     expect(body.toLowerCase()).toContain("onboarding");
-    const left = screen.lines.map((l) => l.slice(0, EXPL_W)).join("\n");
+    const left = screen.lines.map((l) => l.slice(0, screen.explorerWidth)).join("\n");
     expect(left.toLowerCase()).toContain("ledger"); // explorer honestly marked even with no rigs
   });
 });

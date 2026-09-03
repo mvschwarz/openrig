@@ -149,6 +149,15 @@ export class DaemonClient {
   execution(mission?: string) {
     return this.get(`/api/views/execution${mission ? `?mission=${encodeURIComponent(mission)}` : ""}`);
   }
+  /** Existing six-tab slice payload; read only for the opened slice. */
+  sliceDetail(directory: string) {
+    return this.get(`/api/slices/${encodeURIComponent(directory)}`);
+  }
+
+  /** Bounded typed queue chronology for the current rig. */
+  queueRecentTransitions(rig: string, limit = 20) {
+    return this.get(`/api/queue/recent-transitions?rig=${encodeURIComponent(rig)}&limit=${limit}`);
+  }
 
   queueAttention() {
     return this.get(`/api/queue/list?attention=1`);

@@ -82,7 +82,7 @@ describe("COLD START root topology through the OWNER — guard round-6 finding 1
     const f0 = frame(0);
     const l0 = f0.lines.find((l) => l.includes("read pending"))!;
     expect(l0).toMatch(BRAILLE);
-    expect(frame(120).lines.find((l) => l.includes("read pending"))!).not.toBe(l0); // two frame phases
+    expect(frame(500).lines.find((l) => l.includes("read pending"))!).not.toBe(l0); // approved 2 fps frame phase
     expect(f0.motionActive).toBe(true);
     // 16-color fallback renders the LINE spinner on the same real path
     expect(composed(live, { colorMode: "16" })(0).lines.find((l) => l.includes("read pending"))!).toMatch(/[|/\-\\] topology read pending/);

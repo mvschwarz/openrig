@@ -3,23 +3,19 @@
 // execution view (lanes, sequencing, ladder, parks). It never reads PROGRESS text,
 // queue bodies, or transitions.
 //
-// Design (founder journey repair): a normal person reads the mission top to bottom.
-//   - The header says how many slices are DECLARED done/active (from the slice files)
-//     and how many are LIVE right now (claimed lanes). Those are two different facts.
-//   - One mission-level line names the shared EVIDENCE GAP when the daemon cannot reach a
-//     repository: reviewed / merged / live cannot be confirmed for anyone. That gap never
-//     relabels a declared-done slice as waiting work; it is stated once, with its basis one
-//     drill away.
-//   - Waves are the spine. Each slice appears once, as ordinary words: a state word
-//     (working, needs input, blocked, parked, or the declared status), the slice name, and
-//     the facts the projection actually holds — real assignee only when a lane exists,
-//     the highest confirmed evidence rung, proof pairing, and what unlocks next.
-//   - No positional glyph strings, no bare abbreviations, no placeholder cells. The full
+// Design (founder live-QA correction): a normal person reads the mission top to bottom.
+//   - Identity/state leads; NOW, NEXT, and PROGRESS are compact scan targets.
+//   - NEEDS HUMAN appears only when actionable and opens the affected slice.
+//   - Provenance and any shared evidence gap stay subordinate and drillable.
+//   - Waves remain the dominant body and include every slice; viewport scrolling, not
+//     omission rows, provides access at narrow and short geometries.
+//   - No positional glyph strings, bare abbreviations, or placeholder cells. The full
 //     rung-by-rung ladder with bases lives on the slice page.
 // Every row opens a page built from the projections' own values; `esc` returns.
-import type { Action } from "../types.js";
+import type { Action, SliceDetailSnap } from "../types.js";
+import type { Token } from "../theme.js";
 import { detailPage, listItem, sectionRule, type ContentLine, type Section } from "../detail.js";
-import type { MissionScopesSnap, SliceScopeSnap } from "../scopes/scopes-model.js";
+import { scopeContractLines, scopeIdentityLines, type MissionScopesSnap, type SliceScopeSnap } from "../scopes/scopes-model.js";
 
 export interface ExecutionViewSnap {
   view: "execution";
@@ -36,7 +32,6 @@ export interface ExecutionViewSnap {
   lifecycle_instances?: Array<Record<string, unknown>>;
 }
 
-const MAX_ROWS_PER_WAVE = 5;
 const INDETERMINATE = "INDETERMINATE";
 const RUNGS = ["locked", "built", "reviewed", "folded", "adopted"] as const;
 type Rung = (typeof RUNGS)[number];
@@ -151,6 +146,42 @@ function actionLines(action: string, width: number): ContentLine[] {
   }
   if (current) lines.push({ text: current });
   return lines;
+}
+
+type SemanticSeg = NonNullable<ContentLine["segs"]>[number];
+
+function fitSegs(parts: SemanticSeg[], width: number): SemanticSeg[] {
+  const out: SemanticSeg[] = [];
+  let room = Math.max(0, width);
+  for (const part of parts) {
+    if (room <= 0) break;
+    if (part.text.length <= room) {
+      out.push(part);
+      room -= part.text.length;
+      continue;
+    }
+    out.push({ ...part, text: room === 1 ? "…" : `${part.text.slice(0, room - 1)}…` });
+    room = 0;
+  }
+  return out;
+}
+
+function semantic(parts: SemanticSeg[], width: number, action?: Action): ContentLine {
+  const segs = fitSegs(parts, width);
+  return { text: segs.map((part) => part.text).join(""), segs, ...(action ? { action } : {}) };
+}
+
+function semanticAction(parts: SemanticSeg[], action: Action, width: number): ContentLine {
+  const suffix: SemanticSeg = { text: "  (open ▸)", token: "accent", bold: true };
+  const body = fitSegs(parts, Math.max(0, width - suffix.text.length));
+  return semantic([...body, suffix], width, action);
+}
+
+function stateToken(word: string): Token {
+  if (word === "working" || word === "done" || word === "active") return "ok";
+  if (word === "needs input" || word === "blocked" || word === "parked") return "warn";
+  if (word === "failed") return "error";
+  return "dim";
 }
 
 function open(key: string): Action {
@@ -327,33 +358,8 @@ function waveOf(slice: SliceFacts): string {
 // ---- rows ----------------------------------------------------------------------
 
 function sliceAction(execution: ExecutionViewSnap, slice: SliceFacts): Action {
-  return slice.scope
-    ? { type: "scopes-open", mission: execution.mission, slice: slice.scope.dirName }
-    : open(`slice:${slice.id}`);
-}
-
-function sliceRow(execution: ExecutionViewSnap, slice: SliceFacts, width: number, stateWidth: number, idWidth: number): ContentLine {
-  // facts in priority order; a narrow pane drops from the END (proof, evidence, next…) and
-  // the assignee's decider before it ever clips a fact mid-word
-  const facts = [
-    assigneeText(slice),
-    problemText(slice),
-    slice.lane ? null : nextText(slice),
-    evidenceText(slice.cells, slice.rank),
-    proofText(slice.scope),
-  ].filter((fact): fact is string => !!fact);
-  const prefix = `${stateWord(slice).padEnd(stateWidth)}  ${slice.id.padEnd(idWidth)}  `;
-  const budget = Math.max(width - 13, 24) - prefix.length;
-  let shown = facts;
-  while (shown.join(" · ").length > budget && shown.length > 1) {
-    const decider = shown.findIndex((fact) => / \(.+\)$/.test(fact) && fact === assigneeText(slice));
-    shown = decider >= 0 ? shown.map((fact, i) => (i === decider ? fact.replace(/ \(.+\)$/, "") : fact)) : shown.slice(0, -1);
-  }
-  const factsText = shown.join(" · ");
-  const room = budget - factsText.length - 3;
-  // the name gets whatever room the facts leave; below twelve cells it is dropped, not stubbed
-  const name = room >= 12 ? `${clip(slice.name, room)} · ` : "";
-  return actionRow(`${prefix}${name}${factsText}`, sliceAction(execution, slice), width);
+  void execution;
+  return open(`slice:${slice.id}`);
 }
 
 function countWords(slices: SliceFacts[]): string {
@@ -363,17 +369,111 @@ function countWords(slices: SliceFacts[]): string {
 }
 
 function waveTitle(wave: string, members: SliceFacts[]): string {
-  return `wave ${wave} · ${members.length} slice${members.length === 1 ? "" : "s"} · ${countWords(members)}`;
+  return `WAVE ${wave} · ${members.length} slice${members.length === 1 ? "" : "s"} · ${countWords(members)}`;
 }
 
-function waveRows(execution: ExecutionViewSnap, wave: string, members: SliceFacts[], width: number, stateWidth: number, idWidth: number, capped: boolean): ContentLine[] {
-  const shown = capped ? members.slice(0, MAX_ROWS_PER_WAVE) : members;
-  const overflow = members.length - shown.length;
+function stateMark(word: string): string {
+  if (word === "working") return "●";
+  if (word === "needs input") return "◐";
+  if (word === "blocked") return "⚑";
+  if (word === "done") return "✓";
+  if (word === "failed") return "✕";
+  return "○";
+}
+
+function padCell(text: string, width: number): string {
+  const value = clip(text, width);
+  return value + " ".repeat(Math.max(0, width - value.length));
+}
+
+function graphNode(slice: SliceFacts, width: number): ContentLine[] {
+  const inside = width - 2;
+  const title = ` ${slice.id} `;
+  const topTail = `${"─".repeat(Math.max(0, inside - title.length - 1))}┐`;
+  const nameText = padCell(` ${slice.name}`, inside);
+  const state = `${stateMark(stateWord(slice))} ${stateWord(slice)}`;
+  const owner = assigneeText(slice);
+  const ownerRoom = Math.max(0, inside - 1 - state.length);
+  const rawOwner = owner ? ` · ${owner}` : "";
+  const ownerText = ownerRoom > 0 ? clip(rawOwner, ownerRoom) : "";
+  const statusPad = " ".repeat(Math.max(0, inside - 1 - state.length - ownerText.length));
   return [
-    { text: "" },
-    sectionRule(waveTitle(wave, members), width),
-    ...shown.map((slice) => sliceRow(execution, slice, width, stateWidth, idWidth)),
-    ...(overflow > 0 ? [row(`+${overflow} more — open all ${members.length} rows in wave ${wave}`, `group:wave:${wave}`, width)] : []),
+    semantic([{ text: "┌─", token: "chrome" }, { text: title, token: "accentBright", bold: true }, { text: topTail, token: "chrome" }], width),
+    semantic([{ text: "│", token: "chrome" }, { text: nameText, token: "bright" }, { text: "│", token: "chrome" }], width),
+    semantic([
+      { text: "│ ", token: "chrome" },
+      { text: state, token: stateToken(stateWord(slice)), bold: true },
+      { text: ownerText, token: "dim" },
+      { text: statusPad },
+      { text: "│", token: "chrome" },
+    ], width),
+    semantic([{ text: `└${"─".repeat(inside)}┘`, token: "chrome" }], width),
+  ];
+}
+
+function graphChunk(execution: ExecutionViewSnap, members: SliceFacts[], width: number): ContentLine[] {
+  const gap = 2;
+  const perRow = width >= 108 ? 3 : 2;
+  const nodeWidth = Math.min(34, Math.max(18, Math.floor((width - gap * (Math.min(perRow, members.length) - 1)) / Math.min(perRow, members.length))));
+  const out: ContentLine[] = [];
+  for (let start = 0; start < members.length; start += perRow) {
+    const chunk = members.slice(start, start + perRow);
+    const boxes = chunk.map((slice) => graphNode(slice, nodeWidth));
+    const zones = chunk.map((slice, index) => ({
+      start: index * (nodeWidth + gap),
+      end: index * (nodeWidth + gap) + nodeWidth,
+      action: sliceAction(execution, slice),
+    }));
+    for (let line = 0; line < 4; line += 1) {
+      const segs = boxes.flatMap((box, index) => [
+        ...(index > 0 ? [{ text: " ".repeat(gap) }] : []),
+        ...(box[line]!.segs ?? [{ text: box[line]!.text }]),
+      ]);
+      out.push({ text: segs.map((seg) => seg.text).join(""), segs, zones });
+    }
+    const centers = chunk.map((_, index) => index * (nodeWidth + gap) + Math.floor(nodeWidth / 2));
+    const busWidth = Math.min(width, chunk.length * nodeWidth + Math.max(0, chunk.length - 1) * gap);
+    const stubs = Array.from({ length: busWidth }, () => " ");
+    for (const center of centers) if (center < stubs.length) stubs[center] = "│";
+    out.push({ text: stubs.join("").trimEnd() });
+    if (chunk.length === 1) {
+      const arrow = Array.from({ length: busWidth }, () => " ");
+      if (centers[0]! < arrow.length) arrow[centers[0]!] = "▼";
+      out.push(semantic([{ text: arrow.join("").trimEnd(), token: "chrome" }], width));
+      continue;
+    }
+    const bus = Array.from({ length: busWidth }, () => " ");
+    const lo = centers[0] ?? 0;
+    const hi = centers.at(-1) ?? lo;
+    for (let x = lo; x <= hi && x < bus.length; x += 1) bus[x] = "━";
+    for (const center of centers) if (center < bus.length) bus[center] = "┴";
+    const mid = Math.floor((lo + hi) / 2);
+    if (mid < bus.length) bus[mid] = centers.includes(mid) ? "┼" : "┬";
+    out.push(semantic([{ text: bus.join("").trimEnd(), token: "chrome" }], width));
+    const arrow = Array.from({ length: busWidth }, () => " ");
+    if (mid < arrow.length) arrow[mid] = "▼";
+    out.push(semantic([{ text: arrow.join("").trimEnd(), token: "chrome" }], width));
+  }
+  return out;
+}
+
+function waveRows(execution: ExecutionViewSnap, wave: string, members: SliceFacts[], width: number): ContentLine[] {
+  const title = waveTitle(wave, members);
+  const header = semantic([
+    { text: "━ ", token: "chrome" },
+    { text: title, token: "bright", bold: true },
+    { text: ` ${"━".repeat(width)}`, token: "chrome" },
+  ], width);
+  if (width < 70) return [
+    { text: "" }, header,
+    ...members.map((slice) => semanticAction([
+      { text: `${stateMark(stateWord(slice))} ${stateWord(slice).padEnd(11)}`, token: stateToken(stateWord(slice)), bold: true },
+      { text: `${slice.id}  `, token: "accentBright" },
+      { text: slice.name, token: "bright" },
+    ], sliceAction(execution, slice), width)),
+  ];
+  return [
+    { text: "" }, header, ...graphChunk(execution, members, width),
   ];
 }
 
@@ -403,20 +503,6 @@ function collectIndeterminate(execution: ExecutionViewSnap, slices: SliceFacts[]
   return [...groups.values()].sort((a, b) => b.members.length - a.members.length);
 }
 
-/** The mission-level gap, stated once as two short lines (the first is the drill), or
- *  nothing when every rung is determined for every slice. */
-function evidenceGapLines(execution: ExecutionViewSnap, slices: SliceFacts[], width: number): ContentLine[] {
-  const undetermined = slices.filter((slice) => RUNGS.some((rung) => slice.cells[rung].state === "undetermined"));
-  if (undetermined.length === 0) return [];
-  const gitBasis = str(record(execution.sources?.["git"])["basis"], "");
-  const noRepo = /no reachable repo|no repo/i.test(gitBasis);
-  const cause = noRepo ? "no repository reachable" : gitBasis || "evidence sources missing";
-  return [
-    row(`evidence gap — ${cause}; declared state shown`, "evidence", width),
-    { text: `    evidence unconfirmed for ${undetermined.length} of ${slices.length} slices (unknown, not waiting)` },
-  ];
-}
-
 function evidenceDetail(execution: ExecutionViewSnap, slices: SliceFacts[], width: number): ContentLine[] {
   const gitBasis = str(record(execution.sources?.["git"])["basis"], "(no git source cell)");
   const lines: ContentLine[] = [
@@ -442,25 +528,69 @@ function evidenceDetail(execution: ExecutionViewSnap, slices: SliceFacts[], widt
 
 function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionScopesSnap[] | undefined, width: number): ContentLine[] {
   const slices = sliceFacts(execution, scopes);
-  const declared = new Map<string, number>();
-  for (const slice of slices) declared.set(declaredText(slice), (declared.get(declaredText(slice)) ?? 0) + 1);
-  const declaredText_ = [...declared.entries()].sort((a, b) => b[1] - a[1]).map(([word, n]) => `${n} ${word}`).join(", ");
   const live = slices.filter((slice) => stateWord(slice) === "working").length;
   const problems = slices.filter((slice) => problemText(slice)).length;
   const build = shortSha(record(execution.sources?.["build_info"])["commit"]);
-  const lines: ContentLine[] = [
-    { text: `  ${execution.mission} EXECUTION · ${slices.length} slice${slices.length === 1 ? "" : "s"}` },
-    { text: `  declared in slice files: ${declaredText_ || "none"} · live now: ${live} working${problems ? `, ${problems} with a problem` : ""}` },
-    row(`sources · derived ${clock(execution.derived_at) || "?"} · daemon build ${build}`, "sources", width),
-    ...evidenceGapLines(execution, slices, width),
-    ...lifecycleLines(execution, width),
+  const now = slices.filter((slice) => stateWord(slice) === "working").map((slice) => slice.id);
+  const needsHuman = slices.filter((slice) => problemText(slice));
+  const done = slices.filter((slice) => declaredText(slice) === "done").length;
+  const next = slices.find((slice) => nextText(slice) === "ready to start");
+  const unknown = slices.filter((slice) => RUNGS.some((rung) => slice.cells[rung].state === "undetermined")).length;
+  const missionState = problems > 0 ? "NEEDS ATTENTION" : live > 0 ? "ACTIVE" : done === slices.length && slices.length > 0 ? "COMPLETE" : "QUIET";
+  const missionToken: Token = problems > 0 ? "warn" : live > 0 || missionState === "COMPLETE" ? "ok" : "dim";
+  const nowText = now.length ? now.join(", ") : "no live slice";
+  const nextValue = next ? `${next.id} · ready to start` : "no sequenced next transition";
+  const progress = `${done}/${slices.length} declared done · ${live} working${problems ? ` · ${problems} with a problem` : ""}`;
+  const fact = (label: string, value: string, token: Token): ContentLine => semantic([
+    { text: `  ${label.padEnd(10)}`, token: "dim", bold: true },
+    { text: value, token },
+  ], width);
+  const narrowFact = (label: string, value: string, token: Token): ContentLine[] => [
+    semantic([{ text: `  ${label}`, token: "dim", bold: true }], width),
+    semantic([{ text: `    ${value}`, token }], width),
   ];
+  const lines: ContentLine[] = [semantic([
+    { text: execution.mission, token: "accentBright", bold: true },
+    { text: " · ", token: "chrome" },
+    { text: missionState, token: missionToken, bold: true },
+    { text: " · ", token: "chrome" },
+    { text: `${slices.length} slice${slices.length === 1 ? "" : "s"}`, token: "bright" },
+  ], width)];
+
+  if (width < 70) {
+    lines.push(...narrowFact("NOW", nowText, now.length ? "ok" : "dim"));
+    lines.push(...narrowFact("NEXT", nextValue, next ? "accentBright" : "dim"));
+    lines.push(...narrowFact("PROGRESS", progress, "bright"));
+  } else {
+    lines.push(fact("NOW", nowText, now.length ? "ok" : "dim"));
+    lines.push(fact("NEXT", nextValue, next ? "accentBright" : "dim"));
+    lines.push(fact("PROGRESS", progress, "bright"));
+  }
+  if (needsHuman.length) {
+    const first = needsHuman[0]!;
+    lines.push(semanticAction([
+      { text: "  ⚑ NEEDS HUMAN ", token: "warn", bold: true },
+      { text: `${needsHuman.map((slice) => slice.id).join(", ")} · ${problemText(first)}`, token: "bright" },
+    ], sliceAction(execution, first), width));
+  }
+  const provenanceAction = unknown > 0 ? open("evidence") : open("sources");
+  const provenance: SemanticSeg[] = width < 70 && unknown > 0
+    ? [{ text: "  provenance · ", token: "dim" }, { text: `evidence gap ${unknown}/${slices.length}`, token: "warn" }]
+    : [
+        { text: "  provenance ", token: "dim" },
+        { text: "·", token: "chrome" },
+        { text: ` ${clock(execution.derived_at) || "?"} · build ${build}`, token: "dim" },
+        ...(unknown > 0 ? [
+          { text: " · ", token: "chrome" as Token },
+          { text: `evidence gap ${unknown}/${slices.length} unknown`, token: "warn" as Token },
+        ] : []),
+      ];
+  lines.push(semanticAction(provenance, provenanceAction, width));
+  lines.push(...lifecycleLines(execution, width));
 
   const waves = new Map<string, SliceFacts[]>();
   for (const slice of slices) waves.set(waveOf(slice), [...(waves.get(waveOf(slice)) ?? []), slice]);
-  const stateWidth = Math.max(...slices.map((slice) => stateWord(slice).length), 4);
-  const idWidth = Math.max(...slices.map((slice) => slice.id.length), 1);
-  for (const [wave, members] of waves) lines.push(...waveRows(execution, wave, members, width, stateWidth, idWidth, true));
+  for (const [wave, members] of waves) lines.push(...waveRows(execution, wave, members, width));
   if (slices.length === 0) lines.push({ text: "  (no slices on this mission)" });
   return lines;
 }
@@ -498,11 +628,9 @@ function waveDetail(execution: ExecutionViewSnap, scopes: readonly MissionScopes
   const slices = sliceFacts(execution, scopes);
   const members = slices.filter((slice) => waveOf(slice) === wave);
   if (members.length === 0) return null;
-  const stateWidth = Math.max(...members.map((slice) => stateWord(slice).length), 4);
-  const idWidth = Math.max(...members.map((slice) => slice.id.length), 1);
   return [
     { text: `${execution.mission} · wave ${wave} · all ${members.length} rows` },
-    ...waveRows(execution, wave, members, width, stateWidth, idWidth, false),
+    ...waveRows(execution, wave, members, width),
     { text: "" },
     back(),
   ];
@@ -518,69 +646,159 @@ function laneKey(lane: Record<string, unknown>): string {
   return `lane:${str(lane["qitem_id"], "unknown")}`;
 }
 
-function sliceDetail(execution: ExecutionViewSnap, slices: SliceFacts[], id: string): ContentLine[] | null {
-  const slice = slices.find((item) => item.id === id);
+function card(title: string, rows: ContentLine[], width: number): ContentLine[] {
+  const w = Math.max(28, width);
+  const label = ` ${title} `;
+  const top = `┌─${label}${"─".repeat(Math.max(0, w - label.length - 3))}┐`;
+  return [
+    { text: clip(top, w) },
+    ...rows.map((item) => {
+      const suffix = item.action ? "  (open ▸)" : "";
+      const value = clip(item.text.trim(), Math.max(1, w - 4 - suffix.length));
+      return { ...item, text: `│ ${padCell(value + suffix, w - 4)} │` };
+    }),
+    { text: `└${"─".repeat(w - 2)}┘` },
+  ];
+}
+
+function cardField(label: string, value: string, action?: Action): ContentLine {
+  return { text: `${`${label}:`.padEnd(13)} ${value}`, ...(action ? { action } : {}) };
+}
+
+function wrapWords(text: string, width: number): string[] {
+  const room = Math.max(1, width);
+  const out: string[] = [];
+  let line = "";
+  for (const raw of text.split(/\s+/).filter(Boolean)) {
+    let word = raw;
+    while (word.length > room) {
+      if (line) { out.push(line); line = ""; }
+      out.push(word.slice(0, room));
+      word = word.slice(room);
+    }
+    if (!word) continue;
+    if (!line) line = word;
+    else if (line.length + word.length + 1 <= room) line += ` ${word}`;
+    else { out.push(line); line = word; }
+  }
+  if (line) out.push(line);
+  return out.length ? out : [""];
+}
+
+function wrappedCardField(label: string, value: string, width: number): ContentLine[] {
+  const prefix = `${`${label}:`.padEnd(13)} `;
+  const continuation = " ".repeat(prefix.length);
+  const firstRoom = Math.max(8, width - 4 - prefix.length);
+  const chunks = wrapWords(value, firstRoom);
+  return chunks.map((chunk, index) => ({ text: `${index === 0 ? prefix : continuation}${chunk}` }));
+}
+
+function touchedRows(detail: SliceDetailSnap | null, width: number): ContentLine[] {
+  if (!detail) return [cardField("served data", "slice detail not loaded for this selection")];
+  const latest = new Map<string, SliceDetailSnap["story"]["events"][number]>();
+  for (const event of detail.story.events) if (event.actorSession) latest.set(event.actorSession, event);
+  if (latest.size === 0) return [cardField("actors", "none in the served slice event history")];
+  const limit = width < 70 ? 1 : 3;
+  const shown = [...latest.entries()].sort((a, b) => b[1].ts.localeCompare(a[1].ts)).slice(0, limit);
+  return [
+    ...shown.flatMap(([actor, event]) => [
+      ...wrappedCardField("actor", actor, width),
+      ...wrappedCardField("last change", `${clock(event.ts) || event.ts} · ${event.kind}${event.qitemId ? ` · ${event.qitemId}` : ""}`, width),
+    ]),
+    cardField("history", `${latest.size} served actor${latest.size === 1 ? "" : "s"} · latest ${shown.length} shown`),
+  ];
+}
+
+function rulingRows(detail: SliceDetailSnap | null, width: number): ContentLine[] {
+  if (!detail) return [cardField("served data", "slice detail not loaded for this selection")];
+  const latest = [...detail.decisions.rows].sort((a, b) => b.ts.localeCompare(a.ts))[0];
+  if (!latest) return [cardField("decision", "none in the served slice decision history")];
+  return [
+    ...wrappedCardField("actor", `${latest.actor} · ${clock(latest.ts) || latest.ts} · ${latest.verb}`, width),
+    ...wrappedCardField("qitem", latest.qitemId, width),
+    ...wrappedCardField("decision", latest.reason ?? "no decision reason served", width),
+    cardField("history", `${detail.decisions.rows.length} served decision${detail.decisions.rows.length === 1 ? "" : "s"} · latest shown`),
+  ];
+}
+
+function sliceDetail(
+  execution: ExecutionViewSnap,
+  slices: SliceFacts[],
+  id: string,
+  width: number,
+  richDetail?: SliceDetailSnap | null,
+  scopeOpts: { collapseReqs: boolean; narrative: boolean } = { collapseReqs: false, narrative: false },
+): ContentLine[] | null {
+  const slice = slices.find((item) => item.id === id || item.dir === id);
   if (!slice) return null;
-  const sections: Section[] = [];
-  const ladderLines: ContentLine[] = [];
+  const detail = richDetail?.name === slice.dir ? richDetail : null;
+  const activity = record(slice.lane?.["activity"]);
+  const needs = problemText(slice);
+  const deps = Array.isArray(slice.sequencing?.["depends_on"]) ? (slice.sequencing!["depends_on"] as unknown[]).map(String) : [];
+  const unlocks = slices.filter((candidate) => {
+    const candidateDeps = candidate.sequencing?.["depends_on"];
+    return Array.isArray(candidateDeps) && candidateDeps.map(String).includes(slice.id);
+  }).map((candidate) => candidate.id);
+  const ownership: ContentLine[] = [
+    cardField("seat", slice.lane ? str(slice.lane["seat"]) : "none — no claimed lane", slice.lane ? open(laneKey(slice.lane)) : undefined),
+    cardField("activity", slice.lane ? str(activity["activity"], INDETERMINATE) : "not assigned"),
+    cardField("decided by", slice.lane ? str(activity["decided_by"] ?? activity["basis"], "basis unavailable") : "—"),
+    cardField("changed", slice.lane ? str(activity["changed_at"], "—") : "—"),
+  ];
+  const evidence: ContentLine[] = [];
   for (const rung of RUNGS) {
     const cell = slice.cells[rung];
     const value = rung === "built" ? (cell.state === "yes" ? shortSha(cell.value) : "undetermined") : cell.state;
-    ladderLines.push({ text: `  ${RUNG_WORD[rung].padEnd(12)} ${value}` });
-    ladderLines.push({ text: `               basis: ${cell.basis}` });
+    evidence.push(cardField(RUNG_WORD[rung], `${value} · ${cell.basis}`));
   }
   const legs = record(slice.ladder["reviewed"])["legs"];
   if (Array.isArray(legs)) for (const leg of legs) {
     const l = record(leg);
-    ladderLines.push(listItem(`review leg ${str(l["verdict"], "?")} · ${str(l["artifact_type"], "?")} · ${str(l["path"])}`, undefined, 12));
+    evidence.push(cardField("review leg", `${str(l["verdict"], "?")} · ${str(l["artifact_type"], "?")} · ${str(l["path"])}`));
   }
-  sections.push({
-    title: `declared ${declaredText(slice)} · evidence ${evidenceText(slice.cells, slice.rank)}`,
-    lines: ladderLines,
-  });
+  const typedRows: ContentLine[] = slice.lane ? [
+    cardField("qitem", str(slice.lane["qitem_id"]), open(laneKey(slice.lane))),
+    cardField("pickup", str(record(slice.lane["pickup"])["state"], str(slice.park?.["pickup_state"], INDETERMINATE))),
+    cardField("needs input", Number(record(activity["needs_input"])["count"] ?? 0) > 0 ? str(record(activity["needs_input"])["reason"], "input") : "none"),
+    cardField("repo join", `${str(slice.lane["worktree_path"], INDETERMINATE)} · ${str(slice.lane["branch"], INDETERMINATE)}`),
+  ] : [cardField("rows", "none — no typed queue row for this slice")];
+  if (slice.park) typedRows.push(cardField("park", `${str(slice.park["pickup_state"], INDETERMINATE)} · wake ${str(slice.park["wake_target"], "none armed")}`));
 
-  const seq = slice.sequencing;
-  if (seq) {
-    const deps = Array.isArray(seq["depends_on"]) ? seq["depends_on"].map(String) : [];
-    const blocked = blockerText(seq["blocked_on_rows"]);
-    sections.push({
-      title: "sequencing",
-      fields: [
-        { label: "depends on", value: deps.join(", ") || "(none)" },
-        { label: "next up", value: `${str(seq["next_up"], INDETERMINATE)} — ${str(seq["next_up_basis"], "no basis given")}` },
-        { label: "rank", value: str(seq["next_up_rank"], "—") },
-        { label: "blocked on", value: blocked || "(no rows)" },
-        { label: "wave", value: waveOf(slice) },
-      ],
-    });
-  }
-  if (slice.scope) {
-    const drops = slice.scope.proofContract.flatMap((contract) => contract.drops.map((drop) => `${drop.artifactType ?? "?"} ${drop.verdict ?? ""} · ${drop.file}`));
-    sections.push({
-      title: `proof ${slice.scope.proof.paired} of ${slice.scope.proof.total} paired`,
-      lines: drops.length ? drops.map((drop) => listItem(drop)) : [{ text: "  (no proof drops recorded)" }],
-    });
-  }
-  if (slice.lane) {
-    const activity = record(slice.lane["activity"]);
-    sections.push({
-      title: "lane",
-      fields: [
-        { label: "seat", value: str(slice.lane["seat"]) },
-        { label: "activity", value: `${str(activity["activity"], INDETERMINATE)} · by ${str(activity["decided_by"], "?")} ${clock(activity["changed_at"])}`.trim(), link: open(laneKey(slice.lane)) },
-      ],
-    });
-  }
-  const source = record(seq?.["source"]);
-  sections.push({
-    title: "sources",
-    fields: [
-      { label: "spec", value: str(source["spec_path"], "(not named)") },
-      { label: "arrangement", value: str(source["arrangement_path"], "(not named)") },
-      { label: "wave map", value: str(source["wave_map_row"], "(not named)") },
-    ],
-  });
-  return [...detailPage({ text: `${slice.id} — ${slice.name}` }, sections), { text: "" }, back()];
+  const dependencies: ContentLine[] = [
+    cardField("wave", waveOf(slice)),
+    cardField("depends on", deps.join(", ") || "none"),
+    cardField("unlocks", unlocks.join(", ") || "none"),
+    cardField("next", nextText(slice) ?? "no next transition derived"),
+    cardField("blocked on", blockerText(slice.sequencing?.["blocked_on_rows"]) || "none"),
+  ];
+
+  const source = record(slice.sequencing?.["source"]);
+  const sourceRows = [
+    cardField("spec", str(source["spec_path"], "not named")),
+    cardField("arrangement", str(source["arrangement_path"], "not named")),
+    cardField("wave map", str(source["wave_map_row"], "not named")),
+  ];
+  const identity = slice.scope
+    ? scopeIdentityLines(slice.scope, execution.mission, width)
+    : [
+      { text: clip(`${slice.id} · ${slice.name} · ${stateMark(stateWord(slice))} ${stateWord(slice)} · wave ${waveOf(slice)}`, width) },
+    ];
+  const authored = slice.scope
+    ? scopeContractLines(slice.scope, { ...scopeOpts, width })
+    : [{ text: "" }, ...card("AUTHORED CONTRACT", [cardField("state", "scope detail not served")], width)];
+  return [
+    ...identity,
+    { text: "" }, ...card("OWNERSHIP", ownership, width),
+    { text: "" }, ...card("TOUCHED", touchedRows(detail, width), width),
+    { text: "" }, ...card(`EVIDENCE · declared ${declaredText(slice)} · ${evidenceText(slice.cells, slice.rank)}`, evidence, width),
+    { text: "" }, ...card("RULING", rulingRows(detail, width), width),
+    { text: "" }, ...card("NEEDS YOU", [cardField("state", needs ?? "none on current projection")], width),
+    { text: "" }, ...card("TYPED ROWS", typedRows, width),
+    { text: "" }, ...card("DEPENDENCIES", dependencies, width),
+    ...authored,
+    { text: "" }, ...card("SOURCES", sourceRows, width),
+    { text: "" }, back(),
+  ];
 }
 
 function laneDetail(execution: ExecutionViewSnap, key: string): ContentLine[] | null {
@@ -654,6 +872,8 @@ export function executionContentLines(
   opened: string | null,
   width = 96,
   pending = false,
+  sliceDetailRead?: SliceDetailSnap | null,
+  scopeOpts: { collapseReqs: boolean; narrative: boolean } = { collapseReqs: false, narrative: false },
 ): ContentLine[] {
   if (!execution) {
     const failure = readErrors.find((entry) => entry.startsWith("execution:"));
@@ -672,7 +892,7 @@ export function executionContentLines(
       : opened.startsWith("group:wave:")
         ? waveDetail(execution, scopes, width, opened)
       : opened.startsWith("slice:")
-        ? sliceDetail(execution, slices, opened.slice("slice:".length))
+        ? sliceDetail(execution, slices, opened.slice("slice:".length), width, sliceDetailRead, scopeOpts)
         : opened.startsWith("lane:") || opened.startsWith("park:")
           ? laneDetail(execution, opened)
           : null;

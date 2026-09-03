@@ -914,6 +914,18 @@ export function queueRoutes(): Hono {
     return c.json(classified);
   });
 
+  // GET /recent-transitions — one bounded, read-only current-rig chronology
+  // over typed queue state/closure facts. MUST precede /:qitemId. The domain
+  // projection caps at 20 even when a larger value is requested.
+  app.get("/recent-transitions", (c) => {
+    const rig = c.req.query("rig")?.trim();
+    if (!rig) return c.json({ error: "rig_required", message: "rig is required for a current-rig RECENT read" }, 400);
+    const raw = c.req.query("limit");
+    const parsed = raw == null ? 20 : Number.parseInt(raw, 10);
+    const limit = Number.isInteger(parsed) && parsed > 0 ? parsed : 20;
+    return c.json(getRepo(c).listRecentTransitions(rig, limit));
+  });
+
   // ---- SSE watch over coordination events ----
   // MUST precede /:qitemId so the literal `watch` and `sse` paths win
   // over the bare-param route (otherwise GET /api/queue/sse resolves as

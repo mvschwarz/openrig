@@ -27,6 +27,8 @@ const SPEC_4A_ROUTES = [
   "/api/stream/list?limit=5&direction=latest",
   "/api/views/execution",
   "/api/views/execution?mission=release-0.5.8",
+  "/api/slices/11-production-tui-composed-system",
+  "/api/queue/recent-transitions?rig=openrig-build&limit=20",
 ];
 
 describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)", () => {
@@ -56,6 +58,8 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await c.streamLatest();
     await c.execution();
     await c.execution("release-0.5.8");
+    await c.sliceDetail("11-production-tui-composed-system");
+    await c.queueRecentTransitions("openrig-build");
 
     expect(seen.sort()).toEqual([...SPEC_4A_ROUTES].sort());
   });

@@ -58,32 +58,32 @@ describe("treatment (mockup palette semantics)", () => {
 
   it("colors STATUS semantically: active=ok-green, needs-attention=amber, unknown=dim", () => {
     const styled = stylizeLines(screenFor("rig openrig-build"), style).join("\n");
-    expect(styled).toContain("\x1b[38;2;152;195;121mactive\x1b[0m");
-    expect(styled).toContain("\x1b[38;2;230;181;110mneeds-attention\x1b[0m");
+    expect(styled).toContain("\x1b[38;2;152;195;121mworking\x1b[0m");
+    expect(styled).toContain("\x1b[38;2;244;190;92mneeds you\x1b[0m");
     expect(styled).toContain("\x1b[38;2;109;116;128munknown\x1b[0m");
   });
 
   it("paints selection as an inverse accent bar (visible highlight, not just a glyph)", () => {
     const styled = stylizeLines(screenFor(), style);
-    const bar = styled.find((l) => l.includes("\x1b[1;7;38;2;77;189;178m"));
+    const bar = styled.find((l) => l.includes("\x1b[1;38;2;111;168;255;48;2;34;52;82m"));
     expect(bar).toBeDefined();
-    expect(stripAnsi(bar!)).toMatch(/^›/);
+    expect(stripAnsi(bar!)).toMatch(/^▶/);
   });
 
-  it("links/acts get the teal accent (term ▸, open ▸, tabs)", () => {
+  it("links/acts get the G2 accent (term ▸, open ▸, tabs)", () => {
     const styled = stylizeLines(screenFor("rig openrig-build"), style).join("\n");
-    expect(styled).toContain("\x1b[1;38;2;77;189;178mterm ▸\x1b[0m");
+    expect(styled).toContain("\x1b[1;38;2;111;168;255mterm ▸\x1b[0m");
   });
 
   it("alert lines are amber with the open-link kept accent; hosts-down red", () => {
     const styled = stylizeLines(screenFor(":needs"), style).join("\n");
-    expect(styled).toMatch(/\x1b\[38;2;230;181;110m\s*⚑/);
+    expect(styled).toMatch(/\x1b\[5;38;2;244;190;92m⚑/);
     expect(styled).toContain("\x1b[38;2;224;108;117m  ✖ remote-host");
   });
 
   it("chrome rules carry pane titles; hint bar and status line are styled", () => {
     const styled = stylizeLines(screenFor("rig openrig-build"), style);
-    expect(stripAnsi(styled[1]!)).toMatch(/EXPLORER.*┬.*TOPOLOGY/);
+    expect(stripAnsi(styled[1]!)).toMatch(/EXPLORER.*╋.*TOPOLOGY/);
     const hint = styled.find((l) => stripAnsi(l).includes("q quit"));
     expect(hint).toBeDefined();
     expect(hint).toContain("\x1b[");

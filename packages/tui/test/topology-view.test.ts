@@ -132,8 +132,8 @@ describe("hatchet mainline in the SHIPPED content pane (frame-01 visual contract
     const { screen } = graphScreen();
     const styled = stylizeLines(screen, createStyle("truecolor"));
     const joined = styled.join("\n");
-    expect(joined).toMatch(/\x1b\[38;2;77;189;178m[^\x1b]*─/); // teal delegates run
-    expect(joined).toMatch(/\x1b\[38;2;230;181;110m[^\x1b]*[─│┘└▴]/); // amber escalate run
+    expect(joined).toMatch(/\x1b\[38;2;111;168;255m[^\x1b]*─/); // G2 blue delegates run
+    expect(joined).toMatch(/\x1b\[38;2;244;190;92m[^\x1b]*[─│┘└▴]/); // G2 amber escalate run
     styled.forEach((line, i) => expect(stripAnsi(line), `line ${i}`).toBe(screen.lines[i]));
   });
 });
@@ -527,9 +527,9 @@ describe("S19 MR5 — chrome: blinking cursor + guide contrast", () => {
     const s = makeStore(graphSnap());
     const screen = renderScreen(s.get(), graphSnap(), { cols: 120, rows: 30 });
     const styled = stylizeLines(screen, createStyle("truecolor"));
-    const guideLine = styled.find((l) => stripAnsi(l).includes("├─"))!;
-    expect(guideLine).toMatch(/38;2;76;84;99m[^m]*├─/); // the bumped chrome value
-    expect(guideLine).not.toMatch(/38;2;58;63;75m[^m]*├─/); // not the old faint value
+    const guideLine = styled.find((l) => stripAnsi(l).includes("┣━"))!;
+    expect(guideLine).toMatch(/38;2;78;105;145m[^m]*┣━/); // G2 restrained indigo frame
+    expect(guideLine).not.toMatch(/38;2;58;63;75m[^m]*┣━/); // not the old faint value
   });
 });
 
@@ -538,7 +538,8 @@ describe("ROUND-3 LOCKED SET (orch locked-scope GO; pins 02259adb/29a10b62)", ()
     const snap = graphSnap();
     const s = makeStore(snap);
     s.dispatch({ type: "drill", resource: "pod", name: "dev", target: { host: "vm-host", rig: FIXTURE_RIG_NAME } });
-    const pane = renderScreen(s.get(), snap, { cols: 150, rows: 40 }).lines.map((l) => l.slice(0, 30)).join("\n");
+    const explorer = renderScreen(s.get(), snap, { cols: 150, rows: 40 });
+    const pane = explorer.lines.map((l) => l.slice(0, explorer.explorerWidth)).join("\n");
     expect(pane).not.toMatch(/▐▌|>_|▝▘|▘▝|></); // no marks in the explorer (quadrant orders AND the picks-v4 eyes)
     expect(pane).toMatch(/driver\s+24%/); // name-first untruncated + bare ctx%
     // cards still carry the mark
