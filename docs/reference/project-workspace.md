@@ -23,9 +23,10 @@ The scaffold is additive: it creates missing canonical entries and never
 overwrites existing files, including with the deprecated `--force` flag.
 `exhaust/` and local `.openrig/` runtime projections are ignored; authored
 project context and mission/slice files remain versionable. `workspace.yaml`
-is the project-location catalog. A project manifest may add ordered context
-references and managed skill selectors, but neither skill source nor a System
-World belongs in this tree.
+is the project-location catalog. The project manifest exposes empty
+`install.context` and `install.skills` selectors for ordered Markdown
+addresses and stable managed-catalog skill IDs, but neither skill source nor a
+System World belongs in this tree.
 
 ## UI Mapping
 

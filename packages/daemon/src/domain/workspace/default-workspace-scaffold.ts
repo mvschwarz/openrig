@@ -21,9 +21,11 @@ const PROJECT_MANIFEST = `schema: openrig.project/v0alpha1
 kind: project
 install:
   intent: SPEC.md
+  context: []
+  skills: []
 missions:
   root: missions
-# Add ordered install.context references and managed skill selectors here.
+# Add ordered project Markdown addresses and stable catalog skill IDs above.
 # Skill source and the System World remain outside the project workspace.
 `;
 

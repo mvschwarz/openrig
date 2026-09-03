@@ -225,8 +225,9 @@ scaffold is used **idempotently by daemon startup**. It emits exactly two
 directories (`missions/`, `exhaust/`) and four files (`SPEC.md`,
 `project.yaml`, `workspace.yaml`, `.gitignore`). The catalog points its
 single default project at `.`; `project.yaml` owns project intent and mission
-discovery. The ignore file excludes `exhaust/` and local `.openrig/`
-projection state while keeping authored project context versionable.
+discovery and exposes empty `install.context` / `install.skills` selectors.
+The ignore file excludes `exhaust/` and local `.openrig/` projection state
+while keeping authored project context versionable.
 
 The initializer is additive. It never deletes or overwrites an existing file;
 the retained `--force` spelling is a compatibility no-op for overwrite

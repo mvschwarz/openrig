@@ -877,7 +877,7 @@ describe("init-workspace runner", () => {
     expect(parseYaml(readFileSync(join(workspaceRoot, "project.yaml"), "utf-8"))).toMatchObject({
       schema: "openrig.project/v0alpha1",
       kind: "project",
-      install: { intent: "SPEC.md" },
+      install: { intent: "SPEC.md", context: [], skills: [] },
       missions: { root: "missions" },
     });
     expect(parseYaml(readFileSync(join(workspaceRoot, "workspace.yaml"), "utf-8"))).toEqual({
