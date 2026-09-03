@@ -179,6 +179,7 @@ export function inspectSkillDirectory(root: string): { digest: string; files: Re
     throw new Error(`managed skill target must be a real directory, not a symlink or file: ${root}`);
   }
   const files: Record<string, string> = {};
+  const fileModes: Record<string, number> = {};
   const walk = (dir: string, prefix: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => compareBytes(a.name, b.name))) {
       const absolute = nodePath.join(dir, entry.name);
@@ -186,12 +187,17 @@ export function inspectSkillDirectory(root: string): { digest: string; files: Re
       const stat = lstatSync(absolute);
       if (stat.isSymbolicLink()) throw new Error(`symlink is not allowed in a managed skill: ${absolute}`);
       if (stat.isDirectory()) walk(absolute, relative);
-      else if (stat.isFile()) files[relative] = sha256(readFileSync(absolute));
+      else if (stat.isFile()) {
+        files[relative] = sha256(readFileSync(absolute));
+        fileModes[relative] = stat.mode & 0o777;
+      }
       else throw new Error(`unsupported filesystem entry in a managed skill: ${absolute}`);
     }
   };
   walk(root, "");
-  const digest = sha256(Object.keys(files).sort(compareBytes).map((path) => `${path}\0${files[path]}`).join("\n"));
+  const digest = sha256(Object.keys(files).sort(compareBytes)
+    .map((path) => `${path}\0${fileModes[path]!.toString(8).padStart(3, "0")}\0${files[path]}`)
+    .join("\n"));
   return { digest, files };
 }
 

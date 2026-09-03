@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -135,6 +135,50 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(switchedApply.removed).toEqual(["one"]);
     expect(() => readFileSync(join(f.project, harnessDir, "skills", "one", "SKILL.md"), "utf8")).toThrow();
     expect(readFileSync(join(f.project, harnessDir, "skills", "unrelated", "SKILL.md"), "utf8")).toContain("user-owned");
+  });
+
+  it.each([
+    ["claude-code", ".claude"],
+    ["codex", ".agents"],
+  ] as const)("preserves a %s projection after a mode-only local edit", (runtime, harnessDir) => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "executable");
+    writeFileSync(join(f.catalog, "executable", "helper.sh"), "#!/bin/sh\necho executable\n");
+    chmodSync(join(f.catalog, "executable", "helper.sh"), 0o755);
+    commit(f.root);
+
+    const selected = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["executable"] });
+    expect(selected.ok).toBe(true);
+    if (!selected.ok) return;
+    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime, cwd: f.project, apply: true }).ok).toBe(true);
+
+    const target = join(f.project, harnessDir, "skills", "executable");
+    const helper = join(target, "helper.sh");
+    chmodSync(helper, 0o644);
+    const inspection = reconcileSkillLoadout({ loadout: selected.loadout, runtime, cwd: f.project });
+
+    const empty = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: [] });
+    expect(empty.ok).toBe(true);
+    if (!empty.ok) return;
+    const deselected = reconcileSkillLoadout({ loadout: empty.loadout, runtime, cwd: f.project, apply: true });
+
+    expect({
+      inspectionStatus: inspection.receipts[0]?.status,
+      deselectionOk: deselected.ok,
+      deselectionApplied: deselected.applied,
+      removed: deselected.removed,
+      errorCodes: deselected.errors.map((error) => error.code),
+      targetExists: existsSync(target),
+      helperMode: existsSync(helper) ? lstatSync(helper).mode & 0o777 : null,
+    }).toEqual({
+      inspectionStatus: "conflicting",
+      deselectionOk: false,
+      deselectionApplied: false,
+      removed: [],
+      errorCodes: ["stale_target_modified"],
+      targetExists: true,
+      helperMode: 0o644,
+    });
   });
 
   it("protects modified owned targets and leaves an equal unowned shadow untouched", () => {
