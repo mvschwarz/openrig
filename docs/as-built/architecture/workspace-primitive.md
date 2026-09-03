@@ -217,37 +217,31 @@ walker.
 
 > Source: `docs/as-built/cli-reference.md:931-941` @HEAD.
 
-## 3. Default workspace scaffold (0.3.0 spine; 0.3.1 narrative layer)
+## 3. Default project-workspace scaffold
 
 `workspaceScaffoldDirs()` / `workspaceScaffoldFiles()` produce the
-mission-aware default workspace (`~/.openrig/workspace/` or `--root`). The
-same scaffold is used **idempotently by daemon startup** so a fresh install
-has a browsable Project workspace before the operator discovers
-`rig config init-workspace`. Canonical subdirs: `missions/`, `artifacts/`,
-`evidence/`, `progress/`, `field-notes/`, `specs/`, `dogfood-evidence/`,
-plus per-mission `missions/<id>/slices/<slice-id>` folders. Drops the workspace
-`README.md` + `STEERING.md` placeholder; each mission gets `SPEC.md`, `NOTES.md`,
-and `PROGRESS.md`; each slice gets `SPEC.md`, `PROGRESS.md`, `PROOF.md`, and
-`proof/`. CLI and daemon scaffolds are byte-parity pinned.
+repo-ready default workspace (`~/.openrig/workspace/` or `--root`). The same
+scaffold is used **idempotently by daemon startup**. It emits exactly two
+directories (`missions/`, `exhaust/`) and four files (`SPEC.md`,
+`project.yaml`, `workspace.yaml`, `.gitignore`). The catalog points its
+single default project at `.`; `project.yaml` owns project intent and mission
+discovery and exposes empty `install.context` / `install.skills` selectors.
+The ignore file excludes `exhaust/` and local `.openrig/` projection state
+while keeping authored project context versionable.
 
-> Source: `domain/workspace/default-workspace-scaffold.ts:44-59`
-> (`workspaceScaffoldDirs`), `:247-283` (`workspaceScaffoldFiles`),
-> `WORKSPACE_README` `:82-94`, `STEERING_PLACEHOLDER` `:96-120`;
-> CLI `packages/cli/src/commands/config-init-workspace.ts:1-16`
-> (idempotent; `--dry-run`/`--force`; never deletes operator
-> content L12-16); cli-reference workspace note "See `rig config
-> init-workspace`" `:939` @HEAD.
+The initializer is additive. It never deletes or overwrites an existing file;
+the retained `--force` spelling is a compatibility no-op for overwrite
+behavior. CLI and daemon scaffolds are byte-parity pinned. Mission and slice
+content is created explicitly through `rig scope`, not seeded by workspace
+initialization. Instance context, System World, skill source, runtime state,
+and the retired `artifacts/`, `evidence/`, `progress/`, `field-notes/`,
+`dogfood-evidence/`, `README.md`, and `STEERING.md` entries are not emitted.
 
-**0.3.1 narrative layer (slice 21 onboarding-conveyor).** The
-`getting-started` mission's two slices ship rich teaching content from
-`GETTING_STARTED_NARRATIVE` (the click-through-to-learn surface) including a
-`timeline.md` the slice Story tab renders via slice-06's
-`useSliceTimelineMarkdown` hook; other slices keep the boilerplate.
-
-> Source: `domain/workspace/default-workspace-scaffold.ts:1-4`
-> (slice-21 header), `:153-190` (narrative branch in `sliceReadme`),
-> `:192-200` (`sliceTimeline`), `:270-279` (timeline emit); §0 proof:
-> `getting-started-narrative.ts` ABSENT@v0.3.0 ⇒ **0.3.1** @HEAD.
+> Source: `domain/workspace/default-workspace-scaffold.ts`
+> (`workspaceScaffoldDirs`, `workspaceScaffoldFiles`); CLI
+> `packages/cli/src/commands/config-init-workspace.ts` (`runInitWorkspace`);
+> parity: `packages/daemon/test/getting-started-narrative-parity.test.ts`
+> @HEAD.
 
 ## 4. File-backed missions / slices tree
 

@@ -194,8 +194,9 @@ export function SettingsTab() {
         <SettingsRow label="Workspace root" settingKey="workspace.root" resolved={s["workspace.root"]} testIdPrefix="setting" />
         <SettingsRow label="Mission/slice root" settingKey="workspace.slices_root" resolved={s["workspace.slices_root"]} testIdPrefix="setting" />
         <SettingsRow label="Steering path" settingKey="workspace.steering_path" resolved={s["workspace.steering_path"]} testIdPrefix="setting" />
-        <SettingsRow label="Field notes root" settingKey="workspace.field_notes_root" resolved={s["workspace.field_notes_root"]} testIdPrefix="setting" />
         <SettingsRow label="Specs root" settingKey="workspace.specs_root" resolved={s["workspace.specs_root"]} testIdPrefix="setting" />
+        <SettingsRow label="Projects root" settingKey="workspace.projects_root" resolved={s["workspace.projects_root"]} testIdPrefix="setting" />
+        <SettingsRow label="Project catalog" settingKey="workspace.catalog_path" resolved={s["workspace.catalog_path"]} testIdPrefix="setting" />
         <button
           data-testid="settings-init-workspace"
           onClick={() => void onInitWorkspace()}

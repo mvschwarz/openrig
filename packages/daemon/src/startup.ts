@@ -1468,8 +1468,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   //   OPENRIG_WORKSPACE_SLICES_ROOT   typed-key env override
   //   workspace.slices_root           typed setting in ~/.openrig/config.json
   //   workspace.root                  cascade fallback (default ~/.openrig/workspace)
-  //   workspace.dogfood_evidence_root typed setting for proof packet assets
-  //   OPENRIG_DOGFOOD_EVIDENCE_ROOT   env override for compatibility
+  //   OPENRIG_DOGFOOD_EVIDENCE_ROOT   legacy proof-packet relocation override
   //
   // When the resolved slicesRoot path doesn't exist on disk, the indexer
   // is still constructed but isReady() returns false — the routes return
@@ -1484,27 +1483,23 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const legacyEnvSlicesRoot = readOpenRigEnv("OPENRIG_SLICES_ROOT", "RIGGED_SLICES_ROOT") ?? "";
     let resolvedSlicesRoot = "";
     let resolvedWorkspaceRoot = "";
-    let resolvedDogfoodRoot = "";
-    if (!legacyEnvSlicesRoot) {
-      try {
-        const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
-        const resolvedConfig = new SettingsStoreCtor().resolveConfig();
+    try {
+      const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
+      const resolvedConfig = new SettingsStoreCtor().resolveConfig();
+      if (!legacyEnvSlicesRoot) {
         resolvedSlicesRoot = resolvedConfig.workspaceSlicesRoot;
-        resolvedWorkspaceRoot = resolvedConfig.workspaceRoot;
-        resolvedDogfoodRoot = resolvedConfig.workspaceDogfoodEvidenceRoot;
-      } catch {
-        // SettingsStore unavailable — keep slicesRoot empty; routes return 503.
       }
-    } else {
-      try {
-        const { SettingsStore: SettingsStoreCtor } = await import("./domain/user-settings/settings-store.js");
-        const resolvedConfig = new SettingsStoreCtor().resolveConfig();
-        resolvedDogfoodRoot = resolvedConfig.workspaceDogfoodEvidenceRoot;
-      } catch {
-        // SettingsStore unavailable — proof packets remain disabled.
-      }
+      resolvedWorkspaceRoot = resolvedConfig.workspaceRoot;
+    } catch {
+      // SettingsStore unavailable — keep roots empty; routes return 503.
     }
     const slicesRoot = legacyEnvSlicesRoot || resolvedSlicesRoot;
+    // `workspace.dogfood_evidence_root` was retired with the eager legacy
+    // scaffold. Keep the existing proof-packet reader usable for old
+    // workspaces and explicit legacy relocations without exposing a second
+    // project-workspace setting.
+    const resolvedDogfoodRoot = readOpenRigEnv("OPENRIG_DOGFOOD_EVIDENCE_ROOT")
+      || (resolvedWorkspaceRoot ? nodePath.join(resolvedWorkspaceRoot, "dogfood-evidence") : "");
     const additionalSliceRoots = resolvedWorkspaceRoot
       ? [
           nodePath.join(resolvedWorkspaceRoot, "missions"),

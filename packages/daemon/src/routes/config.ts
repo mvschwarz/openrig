@@ -28,6 +28,7 @@ import {
 
 interface InitWorkspaceBody {
   root?: string;
+  /** Deprecated compatibility input. Existing files are always preserved. */
   force?: boolean;
   dryRun?: boolean;
 }
@@ -49,15 +50,8 @@ export function configRoutes(): Hono {
     const body = (await c.req.json<InitWorkspaceBody>().catch(() => ({}))) as InitWorkspaceBody;
     const root = body.root ?? (store.resolveOne("workspace.root").value as string);
     const dryRun = !!body.dryRun;
-    const force = !!body.force;
-
-    // FR-5e BLOCKER-1 — precompute the full scaffold file list BEFORE
-    // any filesystem mutation. workspaceScaffoldFiles() invokes
-    // renderDaemonNotes() which can throw on an invalid current or legacy
-    // notes-template override. Failing the route with a
-    // structured 400 BEFORE mkdir keeps the daemon's init surface
-    // symmetric with the CLI runner's verify-first-then-write
-    // posture (banked from FR-3 self-lesson).
+    // Precompute both sides before mutation so the daemon and CLI retain the
+    // same inspect-then-write shape.
     let scaffoldFiles: ReturnType<typeof workspaceScaffoldFiles>;
     let scaffoldDirs: ReturnType<typeof workspaceScaffoldDirs>;
     try {
@@ -84,7 +78,7 @@ export function configRoutes(): Hono {
     for (const file of scaffoldFiles) {
       const absPath = join(root, file.relPath);
       const fileExists = existsSync(absPath);
-      if (fileExists && !force) {
+      if (fileExists) {
         files.push({ relPath: file.relPath, absPath, created: false, skipped: "exists" });
       } else {
         if (!dryRun) writeFileSync(absPath, file.content, "utf-8");

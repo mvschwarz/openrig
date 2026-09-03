@@ -54,7 +54,7 @@ Examples:
   rig config set workspace.slices_root /path # configure a workspace path
   rig config reset                           # delete config file, revert all to defaults
   rig config reset workspace.slices_root     # clear one key, revert to default
-  rig config init-workspace                  # scaffold ~/.openrig/workspace/ with missions + slices
+  rig config init-workspace                  # scaffold a repo-ready project workspace
 
 Keys:
   daemon.*               port, host
@@ -66,8 +66,8 @@ Keys:
                          scrollback. OpenRig launches Claude with
                          CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 by default; set
                          OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 to opt back into fullscreen.)
-  workspace.*            root, slices_root, steering_path, field_notes_root,
-                         specs_root, dogfood_evidence_root, operator_seat_name
+  workspace.*            root, slices_root, steering_path, specs_root,
+                         projects_root, catalog_path, operator_seat_name
   topology.root          the topology tree root (instance altitude at its top; default $OPENRIG_HOME/topology)
   context.packs_root     context-pack library landing zone for 'rig context add' (default $OPENRIG_HOME/context-packs)
   onboarding.default_pack.enabled  deliver the two-part fresh-seat mental-model pack (default on)

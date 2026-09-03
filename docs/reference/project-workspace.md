@@ -11,48 +11,28 @@ without daemon-internal knowledge.
 
 ```text
 workspace/
-  README.md
-  STEERING.md
+  SPEC.md
+  project.yaml
+  workspace.yaml
+  .gitignore
   missions/
-    README.md
-    idea-ledger/
-      SPEC.md
-      NOTES.md
-      PROGRESS.md
-      slices/
-        capture-product-ideas/
-          SPEC.md
-          PROGRESS.md
-          PROOF.md
-          proof/
-        triage-product-ideas/
-          SPEC.md
-          PROGRESS.md
-          PROOF.md
-          proof/
-    handoff-loop/
-      SPEC.md
-      NOTES.md
-      PROGRESS.md
-      slices/
-        route-work-packets/
-          SPEC.md
-          PROGRESS.md
-          PROOF.md
-          proof/
-        verify-loop-evidence/
-          SPEC.md
-          PROGRESS.md
-          PROOF.md
-          proof/
-  progress/
-  field-notes/
-  specs/
+  exhaust/
 ```
+
+The scaffold is additive: it creates missing canonical entries and never
+overwrites existing files, including with the deprecated `--force` flag.
+`exhaust/` and local `.openrig/` runtime projections are ignored; authored
+project context and mission/slice files remain versionable. `workspace.yaml`
+is the project-location catalog. The project manifest exposes empty
+`install.context` and `install.skills` selectors for ordered Markdown
+addresses and stable managed-catalog skill IDs, but neither skill source nor a
+System World belongs in this tree.
 
 ## UI Mapping
 
 - `workspace.root` maps to the Project workspace.
+- `workspace.catalog_path` maps to the `workspace.yaml` project catalog.
+- `workspace.projects_root` is the default home for catalogued project worlds.
 - `workspace.root/missions/<mission-id>` maps to a Project mission.
 - `workspace.root/missions/<mission-id>/slices/<slice-id>` maps to a Project slice.
 - Mission `PROGRESS.md` frontmatter supplies the mission status badge when the
@@ -98,12 +78,13 @@ default setup contract.
 If Project shows a mission discovery warning:
 
 1. Run `rig config get workspace.root --show-source`.
-2. Run `rig config get workspace.slices_root --show-source`.
-3. Confirm `workspace.slices_root` points at a folder containing mission
+2. Run `rig config get workspace.catalog_path --show-source`.
+3. Run `rig config get workspace.slices_root --show-source`.
+4. Confirm `workspace.slices_root` points at a folder containing mission
    directories with `slices/` children.
-4. Confirm `files.allowlist` includes `workspace:<workspace.root>` so the TUI
+5. Confirm `files.allowlist` includes `workspace:<workspace.root>` so the TUI
    can read mission `PROGRESS.md`.
-5. If the workspace is missing, run `rig config init-workspace` after operator
+6. If the workspace is missing, run `rig config init-workspace` after operator
    approval.
 
 No daemon restart is required for most config reads. Restart when changing

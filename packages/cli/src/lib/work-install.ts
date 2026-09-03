@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { readFrontmatter, resolveNodeFile } from "./scope/scope-fs.js";
 
@@ -157,6 +157,7 @@ function resolveExplicitSlice(
 
 export function resolveWorkPosition(opts: {
   workspaceRoot: string;
+  catalogPath?: string;
   project?: string;
   mission?: string;
   slice?: string;
@@ -180,7 +181,7 @@ export function resolveWorkPosition(opts: {
   }
 
   const warnings: string[] = [];
-  const catalogPath = join(workspaceRoot, "workspace.yaml");
+  const catalogPath = resolve(opts.catalogPath ?? join(workspaceRoot, "workspace.yaml"));
   let projectId: string | null = null;
   let projectRoot = workspaceRoot;
   if (existsSync(catalogPath)) {
@@ -211,7 +212,7 @@ export function resolveWorkPosition(opts: {
     if (!selected) {
       return failure("project_not_found", `project '${selectedId}' is not declared in ${catalogPath}`, candidates);
     }
-    const nominalRoot = isAbsolute(selected.root) ? resolve(selected.root) : resolve(workspaceRoot, selected.root);
+    const nominalRoot = isAbsolute(selected.root) ? resolve(selected.root) : resolve(dirname(catalogPath), selected.root);
     const canonicalRoot = canonicalExisting(nominalRoot);
     if (!canonicalRoot) {
       return failure("project_root_missing", `project '${selectedId}' root does not exist: ${nominalRoot}`);

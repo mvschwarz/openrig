@@ -175,7 +175,7 @@ section.
 
 ### Instantiate the canonical workspace scaffold
 
-Agent-actionable. Idempotent on existing dirs without `--force`.
+Agent-actionable. The operation is additive and preserves existing files.
 
 ```bash
 rig config init-workspace
@@ -187,19 +187,15 @@ rig config init-workspace --dry-run --json
 configured `workspace.root` (default `~/.openrig/workspace`):
 
 - `missions/` — release missions + slices
-- `artifacts/` — work artifacts produced inside the workspace
-- `evidence/` — non-dogfood evidence (release evidence, proof packets, etc.)
-- `progress/` — progress index + per-mission rails
-- `field-notes/` — operator + agent observations
-- `specs/` — spec library (rig + agent + workflow YAML lives here)
-- `dogfood-evidence/` — dogfood proof packets + run artifacts
+- `exhaust/` — project-local coordination exhaust
+- `SPEC.md` — project intent
+- `project.yaml` — project catalog selections and mission root
+- `workspace.yaml` — project registration
+- `.gitignore` — local OpenRig state and exhaust exclusions
 
-The scaffold seeds one example mission (`getting-started`) with multiple
-slices, and drops a workspace README.md + STEERING.md so a fresh install has
-browsable Project content. `--root <path>` targets a non-default root for
-this call; `--dry-run` reports what would be created without writing.
-`--force` overwrites existing FILES but never deletes
-directories — operator content is safe.
+`--root <path>` targets a non-default root for this call; `--dry-run` reports
+what would be created without writing. `--force` is deprecated compatibility
+and still preserves existing files.
 
 ### Redirect the workspace root
 
@@ -235,8 +231,8 @@ Agent-actionable. Same surface as the canonical scaffold above; the
 rig config init-workspace --root /path/to/new/workspace
 ```
 
-The command creates the root dir if missing (idempotent: existing root +
-populated subdirs is a no-op). Run
+The command additively creates any missing canonical entries and preserves
+every existing one; only a complete six-entry scaffold is a no-op. Run
 `rig workspace validate /path/to/new/workspace --json` after to confirm the
 contract holds.
 

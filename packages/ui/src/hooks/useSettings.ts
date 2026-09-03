@@ -18,7 +18,7 @@ export type SettingsKey =
   | "daemon.port" | "daemon.host" | "db.path"
   | "transcripts.enabled" | "transcripts.path"
   | "workspace.root" | "workspace.slices_root" | "workspace.steering_path"
-  | "workspace.field_notes_root" | "workspace.specs_root"
+  | "workspace.specs_root" | "workspace.projects_root" | "workspace.catalog_path"
   | "files.allowlist" | "progress.scan_roots"
   // Preview Terminal v0 (PL-018) keys.
   | "ui.preview.refresh_interval_seconds"

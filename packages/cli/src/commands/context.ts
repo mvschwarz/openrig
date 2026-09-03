@@ -347,9 +347,12 @@ Examples:
     .option("--deliver", "Include the exact content of each extant planned file")
     .option("--json", "JSON output")
     .action((opts: { project?: string; mission?: string; slice?: string; deliver?: boolean; json?: boolean }) => {
-      const workspaceRoot = String(new ConfigStore().resolveWithSource("workspace.root").value);
+      const store = new ConfigStore();
+      const workspaceRoot = String(store.resolveWithSource("workspace.root").value);
+      const catalogPath = String(store.resolveWithSource("workspace.catalog_path").value);
       const result = resolveWorkPosition({
         workspaceRoot,
+        catalogPath,
         ...(opts.project !== undefined ? { project: opts.project } : {}),
         ...(opts.mission !== undefined ? { mission: opts.mission } : {}),
         ...(opts.slice !== undefined ? { slice: opts.slice } : {}),
