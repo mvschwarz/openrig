@@ -274,7 +274,7 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
           `You are parked (arbitrated: idle at prompt) while holding ${namedIds.length} open ` +
           `obligation${namedIds.length === 1 ? "" : "s"}: ${namedIds.join(", ")}. ` +
           `Resume the work or update each row honestly (close, park-with-wake, or hand off). ` +
-          `This is the one wake for this park episode; the S01 ladder owns anything further.`;
+          `This is the one wake for this park episode; the wake-or-escalate ladder owns anything further.`;
         return {
           action: "send",
           target: { session: seat.sessionName },

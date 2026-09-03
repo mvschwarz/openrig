@@ -165,6 +165,17 @@ describe("parked-owner-consumer policy — unit contract (OPR.0.5.6.24)", () => 
     expect(store.appended.some((a) => a.note.startsWith(RESERVE_PREFIX))).toBe(true);
   });
 
+  it("emits the stable wake-or-escalate capability name without historical slice shorthand", async () => {
+    const result = await makeParkedOwnerConsumerPolicy(
+      makeDeps([parkedSeat()], new RowStore()),
+    ).evaluate(makeJob());
+    expect(result.action).toBe("send");
+    if (result.action !== "send") return;
+    expect(result.message).toContain("wake-or-escalate");
+    expect(result.message).not.toContain("S01");
+    expect(result.message).not.toContain("OPR.0.5.5.1");
+  });
+
   it("B1 hard check: an obligation set closed between derive and the delivery boundary skips with the exact reason and ZERO reserve", async () => {
     const store = new RowStore();
     store.openIds = () => []; // the boundary read — closed after diagnosis
