@@ -41,6 +41,8 @@ export const ATOM_SITUATIONS = ["fresh", "handover", "post-compaction"] as const
 export const ATOM_PURPOSES = ["depth", "width"] as const;
 export const ATOM_RUNTIMES = ["claude", "codex", "any"] as const;
 export const ATOM_PRIORITIES = ["core", "recommended", "optional"] as const;
+export const CONTEXT_PROFILE_RUNTIMES = ["claude", "codex"] as const;
+export const CONTEXT_PROFILE_SOURCES = ["project", "mission", "seat", "slice"] as const;
 
 /** An install ATOM (OPR.0.5.3.5 mini-req 1): an ADDRESS plus composition
  *  metadata, never a new file — fresh/handover/post-compaction all compose
@@ -70,12 +72,34 @@ export interface ContextPackAtom {
   requires?: string[];
   /** What drops FIRST when a token budget binds (mini-req 9). */
   priority: (typeof ATOM_PRIORITIES)[number];
+  /** Named-profile-only atoms do not join the legacy situation profile. This
+   *  lets a coverage map point at the canonical source graph without making
+   *  the map itself another default preload. */
+  profileOnly?: boolean;
   /** Mini-req 2: acceptance is CHANGED BEHAVIOR — a natural prompt plus the
    *  expected observable behavior. Q3 bridge: the shape reconciles with the
    *  harness's EvalCase — optional compilable expectedPatterns (the
    *  deterministic door leg) and a 1-5 rubric (the judged leg); `expect`
    *  stays the required prose contract. Closed key set at ingest. */
   probe?: { prompt: string; expect: string; expectedPatterns?: string[]; rubric?: string };
+}
+
+/** One explicit delivery phase. Atom phases select bytes already owned by the
+ * pack; context phases insert the configured project/mission/seat/task sources
+ * without copying those authorities into the pack. */
+export interface ContextPackProfilePhase {
+  id: string;
+  atoms?: string[];
+  context?: Array<(typeof CONTEXT_PROFILE_SOURCES)[number]>;
+}
+
+/** A named, inspectable selection + sequence over one pack's atom graph. The
+ * runtime is an applicability check, not a new content source. */
+export interface ContextPackProfile {
+  id: string;
+  situations: Array<(typeof ATOM_SITUATIONS)[number]>;
+  runtimes: Array<(typeof CONTEXT_PROFILE_RUNTIMES)[number]>;
+  phases: ContextPackProfilePhase[];
 }
 
 export interface ContextPackManifest {
@@ -93,6 +117,9 @@ export interface ContextPackManifest {
   estimatedTokens?: number;
   /** OPR.0.5.3.5 mini-req 1 — install atoms with composition metadata. */
   atoms?: ContextPackAtom[];
+  /** Optional named install profiles. Omitted preserves the legacy
+   * situation/runtime composition exactly. */
+  profiles?: ContextPackProfile[];
 }
 
 export type ContextPackSourceType = "builtin" | "user_file" | "workspace";

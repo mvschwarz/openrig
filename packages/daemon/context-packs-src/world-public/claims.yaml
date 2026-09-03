@@ -47,6 +47,10 @@ claims:
     statement: "The eight regions are metadata on atoms, not a required folder tree."
     kind: structural
     check: atom-regions
+  - id: coverage-map-contract
+    statement: "Each coverage entry names one dimension, one exact context address, and the task moment that should trigger the read."
+    kind: structural
+    check: coverage-map-contract
   - id: retrieve-public-pack
     statement: "Use `rig context get world-public` to retrieve the assembled public pack bytes."
     kind: operational

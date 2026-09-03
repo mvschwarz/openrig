@@ -13,11 +13,14 @@ import {
   ATOM_RUNTIMES,
   ATOM_SITUATIONS,
   ATOM_TAXONOMIES,
+  CONTEXT_PROFILE_RUNTIMES,
+  CONTEXT_PROFILE_SOURCES,
   TAXONOMY_TEACHING,
   ContextPackError,
   type ContextPackAtom,
   type ContextPackManifest,
   type ContextPackManifestFile,
+  type ContextPackProfile,
 } from "./context-pack-types.js";
 import { isSafePackVersion } from "./ref-safety.js";
 import { AddressResolutionError, parseAddress } from "../markdown-address.js";
@@ -165,6 +168,7 @@ export function parseManifest(rawYaml: string, sourcePath: string): ContextPackM
     : undefined;
 
   const atoms = obj["atoms"] !== undefined ? parseAtoms(obj["atoms"], files, sourcePath) : undefined;
+  const profiles = obj["profiles"] !== undefined ? parseProfiles(obj["profiles"], atoms ?? [], sourcePath) : undefined;
 
   return {
     name,
@@ -174,6 +178,7 @@ export function parseManifest(rawYaml: string, sourcePath: string): ContextPackM
     files,
     ...(estimatedTokens !== undefined ? { estimatedTokens } : {}),
     ...(atoms !== undefined ? { atoms } : {}),
+    ...(profiles !== undefined ? { profiles } : {}),
   };
 }
 
@@ -188,7 +193,7 @@ const MARKDOWN_SUFFIXES = [".md", ".markdown"];
 const ATOM_ID = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 const ALLOWED_ATOM_KEYS = new Set([
-  "id", "address", "taxonomy", "regions", "situations", "purpose", "runtime", "order", "requires", "priority", "probe",
+  "id", "address", "taxonomy", "regions", "situations", "purpose", "runtime", "order", "requires", "priority", "profile_only", "probe",
 ]);
 // The typos worth a kindness (r1 F2): singular/plural slips on the fields whose
 // silent loss is sharpest.
@@ -277,6 +282,10 @@ function parseAtoms(raw: unknown, files: ContextPackManifestFile[], sourcePath: 
     const purpose = enumField(a["purpose"], ATOM_PURPOSES, "purpose", sourcePath, i);
     const priority = enumField(a["priority"], ATOM_PRIORITIES, "priority", sourcePath, i);
     const runtime = a["runtime"] === undefined ? "any" : enumField(a["runtime"], ATOM_RUNTIMES, "runtime", sourcePath, i);
+    if (a["profile_only"] !== undefined && typeof a["profile_only"] !== "boolean") {
+      throw atomError(sourcePath, i, `'profile_only' must be a boolean when present (got: ${JSON.stringify(a["profile_only"])})`);
+    }
+    const profileOnly = a["profile_only"] === true;
 
     const situationsRaw = a["situations"];
     if (!Array.isArray(situationsRaw) || situationsRaw.length === 0) {
@@ -360,6 +369,7 @@ function parseAtoms(raw: unknown, files: ContextPackManifestFile[], sourcePath: 
       order,
       ...(requires !== undefined ? { requires } : {}),
       priority,
+      ...(profileOnly ? { profileOnly: true } : {}),
       ...(probe !== undefined ? { probe } : {}),
     });
   }
@@ -407,4 +417,142 @@ function parseAtoms(raw: unknown, files: ContextPackManifestFile[], sourcePath: 
   }
 
   return atoms;
+}
+
+const PROFILE_ID = ATOM_ID;
+const ALLOWED_PROFILE_KEYS = new Set(["id", "situations", "runtimes", "phases"]);
+const ALLOWED_PROFILE_PHASE_KEYS = new Set(["id", "atoms", "context"]);
+
+function profileError(sourcePath: string, index: number, detail: string): ContextPackError {
+  return new ContextPackError("manifest_invalid", `manifest at ${sourcePath} profiles[${index}]: ${detail}`, { sourcePath, index });
+}
+
+function profileEnumField<T extends string>(
+  value: unknown, allowed: readonly T[], field: string, sourcePath: string, index: number,
+): T {
+  if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) {
+    throw profileError(sourcePath, index, `'${field}' must be one of ${allowed.join(" | ")} (got: ${JSON.stringify(value)})`);
+  }
+  return value as T;
+}
+
+function parseProfiles(raw: unknown, atoms: ContextPackAtom[], sourcePath: string): ContextPackProfile[] {
+  if (!Array.isArray(raw)) {
+    throw new ContextPackError("manifest_invalid", `manifest at ${sourcePath} 'profiles' must be an array`, { sourcePath });
+  }
+  if (atoms.length === 0 && raw.length > 0) {
+    throw new ContextPackError("manifest_invalid", `manifest at ${sourcePath} declares profiles but no atoms — atom phases need one canonical source graph`, { sourcePath });
+  }
+
+  const atomsById = new Map(atoms.map((atom) => [atom.id, atom]));
+  const seenProfileIds = new Set<string>();
+  const profiles: ContextPackProfile[] = [];
+
+  for (let i = 0; i < raw.length; i++) {
+    const entry = raw[i];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw profileError(sourcePath, i, "must be an object");
+    }
+    const profile = entry as Record<string, unknown>;
+    for (const key of Object.keys(profile)) {
+      if (!ALLOWED_PROFILE_KEYS.has(key)) {
+        throw profileError(sourcePath, i, `unknown field '${key}' (allowed: ${[...ALLOWED_PROFILE_KEYS].join(", ")})`);
+      }
+    }
+    const id = profile["id"];
+    if (typeof id !== "string" || !PROFILE_ID.test(id)) {
+      throw profileError(sourcePath, i, `'id' must be a stable slug matching [a-z0-9][a-z0-9-]{0,63} (got: ${JSON.stringify(id)})`);
+    }
+    if (seenProfileIds.has(id)) throw profileError(sourcePath, i, `duplicate profile id '${id}'`);
+    seenProfileIds.add(id);
+
+    const situationsRaw = profile["situations"];
+    if (!Array.isArray(situationsRaw) || situationsRaw.length === 0) {
+      throw profileError(sourcePath, i, `'situations' must be a non-empty array of ${ATOM_SITUATIONS.join(" | ")}`);
+    }
+    const situations = situationsRaw.map((value) => profileEnumField(value, ATOM_SITUATIONS, "situations", sourcePath, i));
+    if (new Set(situations).size !== situations.length) throw profileError(sourcePath, i, "'situations' must not repeat values");
+
+    const runtimesRaw = profile["runtimes"];
+    if (!Array.isArray(runtimesRaw) || runtimesRaw.length === 0) {
+      throw profileError(sourcePath, i, `'runtimes' must be a non-empty array of ${CONTEXT_PROFILE_RUNTIMES.join(" | ")}`);
+    }
+    const runtimes = runtimesRaw.map((value) => profileEnumField(value, CONTEXT_PROFILE_RUNTIMES, "runtimes", sourcePath, i));
+    if (new Set(runtimes).size !== runtimes.length) throw profileError(sourcePath, i, "'runtimes' must not repeat values");
+
+    const phasesRaw = profile["phases"];
+    if (!Array.isArray(phasesRaw) || phasesRaw.length === 0) {
+      throw profileError(sourcePath, i, "'phases' must be a non-empty array");
+    }
+    const phases: ContextPackProfile["phases"] = [];
+    const seenPhaseIds = new Set<string>();
+    const selectedAtoms = new Set<string>();
+    const selectedContext = new Set<string>();
+
+    for (let j = 0; j < phasesRaw.length; j++) {
+      const phaseRaw = phasesRaw[j];
+      if (!phaseRaw || typeof phaseRaw !== "object" || Array.isArray(phaseRaw)) {
+        throw profileError(sourcePath, i, `phases[${j}] must be an object`);
+      }
+      const phase = phaseRaw as Record<string, unknown>;
+      for (const key of Object.keys(phase)) {
+        if (!ALLOWED_PROFILE_PHASE_KEYS.has(key)) {
+          throw profileError(sourcePath, i, `phases[${j}] has unknown field '${key}' (allowed: ${[...ALLOWED_PROFILE_PHASE_KEYS].join(", ")})`);
+        }
+      }
+      const phaseId = phase["id"];
+      if (typeof phaseId !== "string" || !PROFILE_ID.test(phaseId)) {
+        throw profileError(sourcePath, i, `phases[${j}].id must be a stable slug (got: ${JSON.stringify(phaseId)})`);
+      }
+      if (seenPhaseIds.has(phaseId)) throw profileError(sourcePath, i, `duplicate phase id '${phaseId}'`);
+      seenPhaseIds.add(phaseId);
+
+      const hasAtoms = phase["atoms"] !== undefined;
+      const hasContext = phase["context"] !== undefined;
+      if (hasAtoms === hasContext) {
+        throw profileError(sourcePath, i, `phases[${j}] '${phaseId}' must declare exactly one of atoms or context`);
+      }
+      if (hasAtoms) {
+        const atomIds = phase["atoms"];
+        if (!Array.isArray(atomIds) || atomIds.length === 0 || atomIds.some((value) => typeof value !== "string")) {
+          throw profileError(sourcePath, i, `phases[${j}].atoms must be a non-empty array of atom ids`);
+        }
+        for (const atomId of atomIds as string[]) {
+          const atom = atomsById.get(atomId);
+          if (!atom) throw profileError(sourcePath, i, `phase '${phaseId}' references missing atom '${atomId}'`);
+          if (selectedAtoms.has(atomId)) throw profileError(sourcePath, i, `atom '${atomId}' appears more than once in profile '${id}'`);
+          for (const situation of situations) {
+            if (!atom.situations.includes(situation)) {
+              throw profileError(sourcePath, i, `atom '${atomId}' is not eligible for profile situation '${situation}'`);
+            }
+          }
+          for (const runtime of runtimes) {
+            if (atom.runtime !== "any" && atom.runtime !== runtime) {
+              throw profileError(sourcePath, i, `atom '${atomId}' is runtime=${atom.runtime}, incompatible with profile runtime '${runtime}'`);
+            }
+          }
+          for (const required of atom.requires ?? []) {
+            if (!selectedAtoms.has(required) && !(atomIds as string[]).includes(required)) {
+              throw profileError(sourcePath, i, `atom '${atomId}' requires '${required}', which must appear in the same or an earlier phase`);
+            }
+          }
+          selectedAtoms.add(atomId);
+        }
+        phases.push({ id: phaseId, atoms: [...(atomIds as string[])] });
+      } else {
+        const contextRaw = phase["context"];
+        if (!Array.isArray(contextRaw) || contextRaw.length === 0) {
+          throw profileError(sourcePath, i, `phases[${j}].context must be a non-empty array of ${CONTEXT_PROFILE_SOURCES.join(" | ")}`);
+        }
+        const context = contextRaw.map((value) => profileEnumField(value, CONTEXT_PROFILE_SOURCES, "context", sourcePath, i));
+        for (const source of context) {
+          if (selectedContext.has(source)) throw profileError(sourcePath, i, `context source '${source}' appears more than once in profile '${id}'`);
+          selectedContext.add(source);
+        }
+        phases.push({ id: phaseId, context });
+      }
+    }
+    profiles.push({ id, situations, runtimes, phases });
+  }
+  return profiles;
 }

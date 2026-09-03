@@ -47,7 +47,7 @@ fi
 
 manifest_comments_ok=1
 for manifest in "$root/manifest.yaml" "$example/manifest.yaml"; do
-  grep -Fq '#' "$manifest" && manifest_comments_ok=0
+  grep -Eq '(^|[[:space:]])#[[:space:]]' "$manifest" && manifest_comments_ok=0
 done
 if [ "$manifest_comments_ok" -eq 1 ]; then
   pass manifest-authored-comments 'both shipped manifests contain no uncensused authored prose comments'
@@ -68,6 +68,21 @@ else
   fail atom-regions 'one or more world regions are absent from atom metadata'
 fi
 
+coverage_map_ok=1
+grep -Fq 'Each coverage entry names one dimension, one exact context address, and the task moment that should trigger the read.' "$root/build-your-world.md" || coverage_map_ok=0
+for dimension in product topology context skill 'queue/custody' 'source/worktree' 'proof/review' 'lifecycle/release' 'continuity/recovery' 'host-boundary'; do
+  awk -F'|' -v wanted="$dimension" '
+    function trim(value) { sub(/^[[:space:]]+/, "", value); sub(/[[:space:]]+$/, "", value); return value }
+    trim($2) == wanted && trim($3) ~ /^`[^`]+`$/ && length(trim($4)) > 0 && length(trim($5)) > 0 { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$root/build-your-world.md" || coverage_map_ok=0
+done
+if [ "$coverage_map_ok" -eq 1 ]; then
+  pass coverage-map-contract 'all ten dimensions carry one exact address and one task-language trigger'
+else
+  fail coverage-map-contract 'the ten-dimension address/trigger map is incomplete or malformed'
+fi
+
 prose=$(cat "$root/start-here.md" "$root/build-your-world.md" "$root/boundaries.md" "$example/your-world.md")
 manifest_prose=$(cat "$root/manifest.yaml" "$example/manifest.yaml")
 claim_ids=$(sed -n 's/^[[:space:]]*- id:[[:space:]]*//p' "$root/claims.yaml")
@@ -83,6 +98,7 @@ minimal-world-layout
 authoring-convention
 context-kinds
 regions-are-tags
+coverage-map-contract
 retrieve-public-pack
 compose-fresh-profile
 region-metadata
@@ -141,7 +157,7 @@ done
 for id in $expected_markdown_claim_ids; do
   printf '%s\n' "$prose" | grep -Fq "<!-- world-claim: $id -->" || claims_ok=0
 done
-known_checks=' author-derive-rule derive-identity derive-topology rig-command-surface trust-source-table agents-md-complement authoring-convention taxonomy-layout atom-regions retrieve-public-pack compose-fresh-profile no-region-selector derived-reading-cost retrieve-world-example derive-pack-path run-public-verifier boundary-coverage boundary-exclusions private-ref-boundary world-example-install world-example-consistency public-manifest-authored-claims example-manifest-authored-claims '
+known_checks=' author-derive-rule derive-identity derive-topology rig-command-surface trust-source-table agents-md-complement authoring-convention taxonomy-layout atom-regions coverage-map-contract retrieve-public-pack compose-fresh-profile no-region-selector derived-reading-cost retrieve-world-example derive-pack-path run-public-verifier boundary-coverage boundary-exclusions private-ref-boundary world-example-install world-example-consistency public-manifest-authored-claims example-manifest-authored-claims '
 check_ids=$(sed -n 's/^[[:space:]]*check:[[:space:]]*//p' "$root/claims.yaml")
 for check_id in $check_ids; do
   case "$known_checks" in *" $check_id "*) ;; *) claims_ok=0 ;; esac

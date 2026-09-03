@@ -21,7 +21,7 @@ import type { ContextPackLibraryService } from "../domain/context-packs/context-
 import { assembleBundle, assemblePlainFiles } from "../domain/context-packs/bundle-assembler.js";
 import { ContextPackError, type ContextPackAtom, type ContextPackEntry } from "../domain/context-packs/context-pack-types.js";
 import { parseManifest } from "../domain/context-packs/manifest-parser.js";
-import { composeProfile, ProfileComposeError, type ComposeRuntime, type ComposeSituation } from "../domain/context-packs/profile-composer.js";
+import { composeNamedProfile, composeProfile, ProfileComposeError, type ComposeInput, type ComposeRuntime, type ComposeSituation } from "../domain/context-packs/profile-composer.js";
 import { makeProfileReadFile, sourceKindForAddress, SourceResolutionError, type ProfileSourceRoots, type SourceReadRecord } from "../domain/context-packs/profile-source-resolver.js";
 import { AddressResolutionError, parseAddress, resolveAddress } from "../domain/markdown-address.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
@@ -360,6 +360,22 @@ export function contextPacksRoutes(): Hono {
     if (!manifest.atoms || manifest.atoms.length === 0) {
       return c.json({ error: "no_atoms", message: `pack '${entry.relativePath}' declares no atoms — a profile composes from atom metadata (mini-req 1); add an atoms: section to its manifest` }, 422);
     }
+    const requestedProfileId = c.req.query("profile");
+    const selectedProfile = requestedProfileId === undefined
+      ? undefined
+      : manifest.profiles?.find((profile) => profile.id === requestedProfileId);
+    if (requestedProfileId !== undefined && !selectedProfile) {
+      return c.json({
+        error: "profile_not_found",
+        message: `pack '${entry.relativePath}' declares no profile '${requestedProfileId}' — available: ${manifest.profiles?.map((profile) => profile.id).join(", ") || "(none)"}`,
+      }, 400);
+    }
+    if (selectedProfile && !selectedProfile.situations.includes(situation)) {
+      return c.json({ error: "profile_situation_mismatch", message: `profile '${selectedProfile.id}' does not apply to situation '${situation}'` }, 400);
+    }
+    if (selectedProfile && !selectedProfile.runtimes.includes(runtime)) {
+      return c.json({ error: "profile_runtime_mismatch", message: `profile '${selectedProfile.id}' does not apply to runtime '${runtime}'` }, 400);
+    }
 
     // Seat root from CONFIG when the caller names its seat. rig/seat are path
     // SEGMENTS — the bounded token check keeps a query string from walking the
@@ -372,7 +388,8 @@ export function contextPacksRoutes(): Hono {
     // did not grant nor deliver bytes whose origin is hidden.
     const roots: ProfileSourceRoots = {};
     let atoms: ContextPackAtom[] = manifest.atoms;
-    const workMeta = new Map<string, { altitude: "project" | "mission" | "slice"; source: "default" | "manifest" }>();
+    const contextAtoms: Partial<Record<"project" | "mission" | "seat" | "slice", ContextPackAtom[]>> = {};
+    const workMeta = new Map<string, { altitude: "project" | "mission" | "seat" | "slice"; source: "default" | "manifest" }>();
     const warnings: string[] = [];
     const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
     const rig = c.req.query("rig");
@@ -383,6 +400,17 @@ export function contextPacksRoutes(): Hono {
       }
       const topologyRoot = String(new SettingsStore().resolveOne("topology.root").value);
       roots.seat = join(topologyRoot, "rigs", rig, "seats", seat);
+      contextAtoms.seat = [{
+        id: "profile-seat-learned",
+        address: "seat:LEARNED.md",
+        taxonomy: "lore",
+        situations: ["fresh"],
+        purpose: "width",
+        runtime: "any",
+        order: 1,
+        priority: "core",
+      }];
+      workMeta.set("profile-seat-learned", { altitude: "seat", source: "default" });
     }
     // Mission root on the RULED existing key (desk row 2675535d: reuse
     // workspace.slices_root, never mint a sibling): mission root =
@@ -391,6 +419,13 @@ export function contextPacksRoutes(): Hono {
     // mission directory subtree.
     const mission = c.req.query("mission");
     const slice = c.req.query("slice");
+    const requiredProfileContext = new Set(selectedProfile?.phases.flatMap((phase) => phase.context ?? []) ?? []);
+    if (requiredProfileContext.has("seat") && (!rig || !seat)) {
+      return c.json({ error: "profile_context_missing", message: `profile '${selectedProfile!.id}' needs seat context; pass both rig and seat` }, 400);
+    }
+    if (["project", "mission", "slice"].some((source) => requiredProfileContext.has(source as "project" | "mission" | "slice")) && (!mission || !slice)) {
+      return c.json({ error: "profile_context_missing", message: `profile '${selectedProfile!.id}' needs situated project/mission/task context; pass both mission and slice` }, 400);
+    }
     if (slice !== undefined && mission === undefined) {
       return c.json({ error: "mission_required", message: "slice requires an exact mission selection; the legacy work hierarchy is project -> mission -> slice" }, 400);
     }
@@ -409,7 +444,7 @@ export function contextPacksRoutes(): Hono {
         const kind = sourceKindForAddress(atom.address);
         return kind === "project" || kind === "mission";
       });
-      if (slice === undefined && !hasAuthoredWorkAtom) {
+      if (slice === undefined && !hasAuthoredWorkAtom && !selectedProfile) {
         return c.json({
           error: "slice_required",
           message: `pack '${entry.relativePath}' declares no project: or mission: atoms, so --mission alone would be a no-op; pass the exact --slice to request the legacy default work walk`,
@@ -433,6 +468,7 @@ export function contextPacksRoutes(): Hono {
         }
         roots.project = workspaceRoot;
         const maxOrder = atoms.reduce((max, atom) => Math.max(max, atom.order), Number.MIN_SAFE_INTEGER);
+        const idPrefix = selectedProfile ? "profile" : "legacy-default";
         let projectIntent = "SPEC.md";
         let projectIntentSource: "default" | "manifest" = "default";
         let projectContext: string[] = [];
@@ -457,7 +493,7 @@ export function contextPacksRoutes(): Hono {
         }
         const projectAtoms: ContextPackAtom[] = [
           {
-            id: "legacy-default-project-spec",
+            id: `${idPrefix}-project-spec`,
             address: `project:${projectIntent}`,
             taxonomy: "mission",
             situations: ["fresh"],
@@ -467,14 +503,14 @@ export function contextPacksRoutes(): Hono {
             priority: "core",
           },
           ...projectContext.map((address, index): ContextPackAtom => ({
-            id: `legacy-manifest-project-context-${index + 1}`,
+            id: `${idPrefix}-project-context-${index + 1}`,
             address: `project:${address}`,
             taxonomy: "mission",
             situations: ["fresh"],
             purpose: "depth",
             runtime: "any",
             order: maxOrder + index + 2,
-            requires: [index === 0 ? "legacy-default-project-spec" : `legacy-manifest-project-context-${index}`],
+            requires: [index === 0 ? `${idPrefix}-project-spec` : `${idPrefix}-project-context-${index}`],
             priority: "core",
           })),
         ];
@@ -482,7 +518,7 @@ export function contextPacksRoutes(): Hono {
         const defaultAtoms: ContextPackAtom[] = [
           ...projectAtoms,
           {
-            id: "legacy-default-mission-spec",
+            id: `${idPrefix}-mission-spec`,
             address: "mission:SPEC.md",
             taxonomy: "mission",
             situations: ["fresh"],
@@ -493,14 +529,14 @@ export function contextPacksRoutes(): Hono {
             priority: "core",
           },
           {
-            id: "legacy-default-slice-spec",
+            id: `${idPrefix}-slice-spec`,
             address: `mission:slices/${slice}/SPEC.md`,
             taxonomy: "mission",
             situations: ["fresh"],
             purpose: "depth",
             runtime: "any",
             order: finalProjectAtom.order + 2,
-            requires: ["legacy-default-mission-spec"],
+            requires: [`${idPrefix}-mission-spec`],
             priority: "core",
           },
         ];
@@ -508,13 +544,60 @@ export function contextPacksRoutes(): Hono {
         if (collision) {
           return c.json({ error: "default_atom_conflict", message: `pack '${entry.relativePath}' already declares reserved atom id '${collision.id}'` }, 422);
         }
-        atoms = [...atoms, ...defaultAtoms];
-        workMeta.set("legacy-default-project-spec", { altitude: "project", source: projectIntentSource });
+        if (selectedProfile) {
+          contextAtoms.project = projectAtoms;
+          const missionSpec = defaultAtoms[projectAtoms.length]!;
+          const sliceSpec = defaultAtoms[projectAtoms.length + 1]!;
+          contextAtoms.mission = [
+            missionSpec,
+            {
+              id: "profile-mission-arrangement",
+              address: "mission:mission.yaml",
+              taxonomy: "mission",
+              situations: ["fresh"],
+              purpose: "width",
+              runtime: "any",
+              order: missionSpec.order + 1,
+              priority: "core",
+            },
+            {
+              id: "profile-mission-progress",
+              address: "mission:PROGRESS.md",
+              taxonomy: "mission",
+              situations: ["fresh"],
+              purpose: "width",
+              runtime: "any",
+              order: missionSpec.order + 2,
+              priority: "core",
+            },
+          ];
+          contextAtoms.slice = [
+            sliceSpec,
+            {
+              id: "profile-slice-progress",
+              address: `mission:slices/${slice}/PROGRESS.md`,
+              taxonomy: "mission",
+              situations: ["fresh"],
+              purpose: "width",
+              runtime: "any",
+              order: sliceSpec.order + 1,
+              priority: "core",
+            },
+          ];
+        } else {
+          atoms = [...atoms, ...defaultAtoms];
+        }
+        workMeta.set(`${idPrefix}-project-spec`, { altitude: "project", source: projectIntentSource });
         projectContext.forEach((_, index) => {
-          workMeta.set(`legacy-manifest-project-context-${index + 1}`, { altitude: "project", source: "manifest" });
+          workMeta.set(`${idPrefix}-project-context-${index + 1}`, { altitude: "project", source: "manifest" });
         });
-        workMeta.set("legacy-default-mission-spec", { altitude: "mission", source: "default" });
-        workMeta.set("legacy-default-slice-spec", { altitude: "slice", source: "default" });
+        workMeta.set(`${idPrefix}-mission-spec`, { altitude: "mission", source: "default" });
+        workMeta.set(`${idPrefix}-slice-spec`, { altitude: "slice", source: "default" });
+        if (selectedProfile) {
+          workMeta.set("profile-mission-arrangement", { altitude: "mission", source: "default" });
+          workMeta.set("profile-mission-progress", { altitude: "mission", source: "default" });
+          workMeta.set("profile-slice-progress", { altitude: "slice", source: "default" });
+        }
       }
     }
 
@@ -522,7 +605,7 @@ export function contextPacksRoutes(): Hono {
       // Byte provenance per read (r1 rider 1): the source label must be
       // CHECKABLE. Keyed by ref — every piece with that ref shares the read.
       const readsByRef = new Map<string, SourceReadRecord>();
-      const profile = composeProfile({
+      const composeInput: ComposeInput = {
         atoms,
         situation: situation as ComposeSituation,
         runtime: runtime as ComposeRuntime,
@@ -533,7 +616,10 @@ export function contextPacksRoutes(): Hono {
           onRead: (record) => readsByRef.set(record.ref, record),
         }),
         sourceKindFor: (a) => sourceKindForAddress(a.address),
-      });
+      };
+      const profile = selectedProfile
+        ? composeNamedProfile({ ...composeInput, profile: selectedProfile, contextAtoms })
+        : composeProfile(composeInput);
       const pieces = profile.pieces.map((p) => {
         const record = readsByRef.get(parseAddress(p.address).ref);
         // Per-piece sha256: the Test-A door compares the profile's selected
@@ -553,7 +639,18 @@ export function contextPacksRoutes(): Hono {
           const prov = (p as { provenance: { realPath: string } }).provenance;
           return `piece '${p.atomId}' (${p.address}): bytes came from OUTSIDE its ${p.sourceKind} root — real path ${prov.realPath}`;
         });
-      return c.json({ ref: entry.relativePath, ...profile, pieces, warnings, provenanceWarnings });
+      const phases = profile.phases?.map((phase) => ({
+        ...phase,
+        pieces: pieces.filter((piece) => piece.phaseId === phase.id),
+      }));
+      return c.json({
+        ref: entry.relativePath,
+        ...profile,
+        pieces,
+        ...(phases ? { phases } : {}),
+        warnings,
+        provenanceWarnings,
+      });
     } catch (err) {
       if (err instanceof ProfileComposeError || err instanceof SourceResolutionError) {
         return c.json({ error: "profile_compose_failed", message: err.message }, 422);

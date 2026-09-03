@@ -664,13 +664,14 @@ Examples:
     // an unrecognized env value falls back to claude rather than erroring a
     // surface the env owner may not control.
     .option("--runtime <runtime>", "claude | codex (default: $OPENRIG_RUNTIME, else claude)")
+    .option("--profile <profile>", "Named install profile declared by the pack (selection + ordered phases)")
     .option("--budget <tokens>", "Situation token budget — overage is REPORTED, never truncated")
     .option("--rig <rig>", "With --seat: grant read access to that seat's tree (seat: atoms)")
     .option("--seat <seat>", "With --rig: the seat whose tree seat: atoms may read")
     .option("--mission <mission>", "Grant read access to that mission's tree (mission: atoms)")
     .option("--slice <slice>", "With --mission: compose the legacy default project/mission/slice SPEC walk")
     .option("--json", "JSON output (the full composed profile)")
-    .action(async (nameOrRef: string, opts: { situation: string; runtime?: string; budget?: string; rig?: string; seat?: string; mission?: string; slice?: string; json?: boolean }) => {
+    .action(async (nameOrRef: string, opts: { situation: string; runtime?: string; profile?: string; budget?: string; rig?: string; seat?: string; mission?: string; slice?: string; json?: boolean }) => {
       try {
         const client = await getClient();
         const entry = await resolvePack(client, nameOrRef);
@@ -690,12 +691,15 @@ Examples:
           }
         }
         const params = new URLSearchParams({ ref: entry.relativePath, situation: opts.situation, runtime });
+        if (opts.profile !== undefined) params.set("profile", opts.profile);
         if (opts.budget !== undefined) params.set("budget", opts.budget);
         if (opts.rig !== undefined) params.set("rig", opts.rig);
         if (opts.seat !== undefined) params.set("seat", opts.seat);
         if (opts.mission !== undefined) params.set("mission", opts.mission);
         if (opts.slice !== undefined) params.set("slice", opts.slice);
         const res = await client.get<{
+          profileId?: string;
+          phases?: Array<{ id: string; kind: string; sources?: string[]; estimatedTokens: number }>;
           pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number }>;
           totalEstimatedTokens?: number;
           budget?: { limitTokens: number; overageTokens: number; dropCandidates: Array<{ atomId: string; priority: string; estimatedTokens: number }> };
@@ -710,6 +714,13 @@ Examples:
         if (opts.json) {
           console.log(JSON.stringify(profile, null, 2));
           return;
+        }
+        if (profile.profileId) {
+          console.error(`PROFILE ${profile.profileId}`);
+          for (const phase of profile.phases ?? []) {
+            const sources = phase.sources ? ` [${phase.sources.join(", ")}]` : "";
+            console.error(`PHASE ${phase.id} (${phase.kind}${sources}, ~${phase.estimatedTokens} tokens)`);
+          }
         }
         // Warnings and the budget report ride stderr so stdout is exactly the
         // composed walk an agent consumes.

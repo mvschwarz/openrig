@@ -187,9 +187,19 @@ The layers compose from surfaces that already exist; no new mechanism is require
   situation says which composition menu applies (fresh boot, occupant handover,
   post-compaction restore); FULL vs HIGH-ALTITUDE says how much of each layer the
   seat class receives. Choose both, independently.
+- Named install profiles make that independent depth/ordering choice explicit.
+  `rig context profile world-public --situation fresh --runtime codex --profile codex-coverage
+  --rig <rig> --seat <seat> --mission <mission> --slice <slice> --json` is
+  delivery-free inspection: it reports the selected profile, ordered phases,
+  exact pieces, token estimates, hashes, and source provenance before anything
+  reaches a seat. The `codex-coverage` profile orders bootstrap → concrete
+  project/mission/role/task → coverage map; `guided` keeps the fuller authored
+  walk separately selectable. Both select from the same source graph.
 - Position: the `--rig`/`--seat` grant serves the seat's lessons and recap.
-- Delivery: `rig walk <seat> --through <files> --pace <interval>` for byte-walks;
-  paced sends naming addressed reads for pointer-walks.
+- Delivery: `rig walk <seat> --through-profile world-public --profile <profile>
+  --situation <situation> ...` applies the already-inspected profile;
+  `--through <files> --pace <interval>` remains the raw byte-walk path. Paced
+  sends naming addressed reads serve pointer-walks.
 - The delta: a dated markdown file beside the seat's recap; verified by reading it.
 
 Where these verbs are unavailable (a different toolchain, a plain filesystem), the

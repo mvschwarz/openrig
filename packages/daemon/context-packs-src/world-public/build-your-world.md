@@ -33,6 +33,25 @@ copies.
 
 ## Carry an honest coverage map
 
+<!-- world-claim: coverage-map-contract -->
+Each coverage entry names one dimension, one exact context address, and the task moment that should trigger the read.
+The address is the source: retrieve it with `rig context get <address>` before making a load-bearing decision in that dimension.
+
+| Dimension | Exact address | What it contains | Read it when the task asks you to… |
+|---|---|---|---|
+| product | `project-world/identity/product-identity-and-instincts.md#current-position` | The current product position and the instincts the team protects. | choose what OpenRig should optimize or trade one product quality against another. |
+| topology | `project-world/craft/topology-design-judgment.md#judgment-rules` | Judgment rules for cutting seats, pods, edges, and responsibility boundaries. | add, split, merge, or assign a seat, pod, edge, or responsibility boundary. |
+| context | `world-public/build-your-world.md#separate-kinds-tag-regions` | The World/Lore/Skills/Mission separation and region-tagging rule. | decide where knowledge belongs or whether it should be preloaded. |
+| skill | `onboarding-width/public-reference-material.md#the-one-you-read-rather-than-consult` | The operating-model entry point and how it differs from lookup references. | choose an operating model or repeatable procedure instead of improvising one. |
+| queue/custody | `onboarding-width/public-what-you-can-do.md#making-work-outlive-you` | Durable queue ownership, state, blocking, and transactional handoff. | assign, claim, block, hand off, or close work that must survive a turn or occupant. |
+| source/worktree | `onboarding-width/public-reference-material.md#the-command-surface-docs-as-built-in-the-source-repo` | The maintained as-built source map and its trust metadata. | locate the source owner, choose authoritative documentation, or separate branch state from running behavior. |
+| proof/review | `project-world/craft/seam-first-negative-proof.md#the-discipline` | The seam-first negative-proof discipline and causal RED rule. | decide what evidence proves a cross-component change or design its negative control. |
+| lifecycle/release | `project-world/project-authority/release-ownership.md` | The release manager's public-release ownership and operator boundary. | adopt a runtime, fold a candidate, or decide who may perform public release mechanics. |
+| continuity/recovery | `onboarding-width/public-what-you-can-do.md#when-something-is-broken` | Recovery, handover, compaction, snapshot, and restore capabilities. | restore, hand over, compact, or recover a seat, rig, daemon, or host without losing continuity. |
+| host-boundary | `project-world/project-authority/lifecycle-authority.md` | The asymmetric VM versus parent-host lifecycle authority. | move an operation between the recoverable VM and parent host or infer authority across that boundary. |
+
+The map reveals where a question lives. It does not replace the source, preload its answer, or make an unavailable local authority public.
+
 Inspect the public pack and compose it for a fresh session:
 
 ```bash

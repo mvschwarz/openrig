@@ -57,3 +57,42 @@ atoms:
     probe:
       prompt: "Which gaps can this public world answer, and which still require local sources or human judgment?"
       expect: "The agent distinguishes public structure from rig-local facts, current state, mission context, and irreversible judgment."
+  - id: codex-bootstrap
+    address: start-here.md#you-just-arrived
+    taxonomy: world
+    regions: [identity, ontology, terrain, actors, state]
+    situations: [fresh]
+    purpose: width
+    runtime: codex
+    order: 40
+    priority: core
+    profile_only: true
+  - id: coverage-map
+    address: build-your-world.md#carry-an-honest-coverage-map
+    taxonomy: world
+    regions: [identity, ontology, terrain, actors, laws, history, state, affordances]
+    situations: [fresh]
+    purpose: width
+    runtime: any
+    order: 50
+    priority: core
+    profile_only: true
+profiles:
+  - id: codex-coverage
+    situations: [fresh]
+    runtimes: [codex]
+    phases:
+      - id: bootstrap
+        atoms: [codex-bootstrap]
+      - id: project-mission-role-task
+        context: [project, mission, seat, slice]
+      - id: coverage-map
+        atoms: [coverage-map]
+  - id: guided
+    situations: [fresh]
+    runtimes: [claude, codex]
+    phases:
+      - id: guided-world
+        atoms: [enter-the-world, author-a-world, know-the-edges]
+      - id: project-mission-role-task
+        context: [project, mission, seat, slice]

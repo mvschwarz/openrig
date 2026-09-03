@@ -40,6 +40,7 @@ const EXPECTED_PUBLIC_CLAIM_IDS = [
   "authoring-convention",
   "context-kinds",
   "regions-are-tags",
+  "coverage-map-contract",
   "retrieve-public-pack",
   "compose-fresh-profile",
   "region-metadata",
@@ -63,6 +64,19 @@ const EXPECTED_PUBLIC_CLAIM_IDS = [
   "world-example-book-exercise",
   "world-example-regions",
   "world-example-checks",
+] as const;
+
+const EXPECTED_COVERAGE_MAP_ROWS = [
+  "| product | `project-world/identity/product-identity-and-instincts.md#current-position` |",
+  "| topology | `project-world/craft/topology-design-judgment.md#judgment-rules` |",
+  "| context | `world-public/build-your-world.md#separate-kinds-tag-regions` |",
+  "| skill | `onboarding-width/public-reference-material.md#the-one-you-read-rather-than-consult` |",
+  "| queue/custody | `onboarding-width/public-what-you-can-do.md#making-work-outlive-you` |",
+  "| source/worktree | `onboarding-width/public-reference-material.md#the-command-surface-docs-as-built-in-the-source-repo` |",
+  "| proof/review | `project-world/craft/seam-first-negative-proof.md#the-discipline` |",
+  "| lifecycle/release | `project-world/project-authority/release-ownership.md` |",
+  "| continuity/recovery | `onboarding-width/public-what-you-can-do.md#when-something-is-broken` |",
+  "| host-boundary | `project-world/project-authority/lifecycle-authority.md` |",
 ] as const;
 
 const EXPECTED_MANIFEST_CLAIMS = [
@@ -106,7 +120,7 @@ function authoredManifestClaims(packDir: string, prefix: "public" | "example") {
       id: `${prefix}-manifest-summary-${file.path.replace(/\.[^.]+$/, "")}`,
       value: file.summary,
     })),
-    ...manifest.atoms.flatMap((atom) => [
+    ...manifest.atoms.filter((atom) => atom.probe).flatMap((atom) => [
       { id: `${prefix}-manifest-probe-${atom.id}-prompt`, value: atom.probe.prompt },
       { id: `${prefix}-manifest-probe-${atom.id}-expect`, value: atom.probe.expect },
     ]),
@@ -266,6 +280,12 @@ describe("public world pack", () => {
     expect(new Set(manifest.atoms?.flatMap((atom) => atom.regions ?? []))).toEqual(
       new Set(["identity", "ontology", "terrain", "actors", "laws", "history", "state", "affordances"]),
     );
+    expect(manifest.profiles?.map((profile) => profile.id)).toEqual(["codex-coverage", "guided"]);
+    expect(manifest.profiles?.find((profile) => profile.id === "codex-coverage")?.phases).toEqual([
+      { id: "bootstrap", atoms: ["codex-bootstrap"] },
+      { id: "project-mission-role-task", context: ["project", "mission", "seat", "slice"] },
+      { id: "coverage-map", atoms: ["coverage-map"] },
+    ]);
     expect(files).toEqual([
       "boundaries.md",
       "build-your-world.md",
@@ -279,8 +299,10 @@ describe("public world pack", () => {
       expect(atom.address).toMatch(/\.md(?:#|$)/);
       expect(atom.situations.length).toBeGreaterThan(0);
       expect(atom.order).toEqual(expect.any(Number));
-      expect(atom.probe?.prompt).toEqual(expect.any(String));
-      expect(atom.probe?.expect).toEqual(expect.any(String));
+      if (!atom.profileOnly) {
+        expect(atom.probe?.prompt).toEqual(expect.any(String));
+        expect(atom.probe?.expect).toEqual(expect.any(String));
+      }
     }
 
     const profile = composeProfile({
@@ -290,10 +312,16 @@ describe("public world pack", () => {
       budgetTokens: 0,
       readFile: (ref) => readFileSync(join(packDir, ref), "utf8"),
     });
-    expect(profile.pieces.map((piece) => piece.atomId)).toEqual((manifest.atoms ?? []).map((atom) => atom.id));
+    expect(profile.pieces.map((piece) => piece.atomId)).toEqual((manifest.atoms ?? []).filter((atom) => !atom.profileOnly).map((atom) => atom.id));
     expect(profile.totalEstimatedTokens).toBeGreaterThan(0);
     expect(profile.budget?.overageTokens).toBe(profile.totalEstimatedTokens);
-    expect(profile.pieces).toHaveLength(manifest.atoms?.length ?? 0);
+    expect(profile.pieces).toHaveLength(manifest.atoms?.filter((atom) => !atom.profileOnly).length ?? 0);
+  });
+
+  it("keeps the Codex coverage map bound to the ten exact authoritative addresses", () => {
+    const prose = readFileSync(join(publicWorldDir(), "build-your-world.md"), "utf8");
+    for (const row of EXPECTED_COVERAGE_MAP_ROWS) expect(prose).toContain(row);
+    expect(prose.match(/^\| (?:product|topology|context|skill|queue\/custody|source\/worktree|proof\/review|lifecycle\/release|continuity\/recovery|host-boundary) \|/gm)).toHaveLength(10);
   });
 
   it("keeps the complete judgment-owned authored claim census checked or explicitly flagged", () => {
@@ -368,7 +396,7 @@ describe("public world pack", () => {
     ].flatMap(([pack, manifestPath]) =>
       readFileSync(manifestPath, "utf8")
         .split("\n")
-        .filter((line) => line.includes("#"))
+        .filter((line) => /(^|\s)#\s/.test(line))
         .map((line) => ({ pack, line })),
     );
 

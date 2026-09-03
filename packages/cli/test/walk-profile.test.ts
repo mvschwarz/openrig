@@ -127,6 +127,16 @@ describe("rig walk --through-profile — the walk/profile join (Test-A)", () => 
     expect(request.searchParams.get("slice")).toBe("10-work-install");
   });
 
+  it("forwards the named install profile that owns the ordered phases", async () => {
+    const { exitCode, profileRequestUrls } = await runWalk(0, [
+      ...ARGS,
+      "--profile", "codex-coverage",
+    ]);
+    expect(exitCode ?? 0).toBe(0);
+    const request = new URL(profileRequestUrls[0]!, "http://localhost");
+    expect(request.searchParams.get("profile")).toBe("codex-coverage");
+  });
+
   it("MISMATCH VISIBLE: a mid-walk failure reports the delivered PREFIX vs the expected set, by identity", async () => {
     const { errLogs, logs, exitCode } = await runWalk(0, ARGS, 2);
     expect(exitCode).toBe(1);

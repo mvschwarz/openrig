@@ -117,6 +117,117 @@ files:
     const m = parseManifest("name: x\nversion: 1\ntaxonomy: world\nfiles: []\nestimated_tokens: 'not-a-number'", "/x.yaml");
     expect(m.estimatedTokens).toBeUndefined();
   });
+
+  it("parses named install profiles as ordered atom and situated-context phases", () => {
+    const manifest = parseManifest(`
+name: world
+version: 1
+taxonomy: world
+files:
+  - { path: world.md, role: world }
+atoms:
+  - id: bootstrap
+    address: world.md
+    taxonomy: world
+    situations: [fresh]
+    purpose: width
+    runtime: any
+    order: 10
+    priority: core
+  - id: coverage-map
+    address: world.md#coverage-map
+    taxonomy: world
+    situations: [fresh]
+    purpose: width
+    runtime: any
+    order: 20
+    priority: core
+    profile_only: true
+profiles:
+  - id: codex-coverage
+    situations: [fresh]
+    runtimes: [codex]
+    phases:
+      - id: bootstrap
+        atoms: [bootstrap]
+      - id: situated-work
+        context: [project, mission, seat, slice]
+      - id: coverage-map
+        atoms: [coverage-map]
+`, "/world/manifest.yaml");
+
+    expect(manifest.atoms?.find((atom) => atom.id === "coverage-map")?.profileOnly).toBe(true);
+    expect(manifest.profiles).toEqual([
+      {
+        id: "codex-coverage",
+        situations: ["fresh"],
+        runtimes: ["codex"],
+        phases: [
+          { id: "bootstrap", atoms: ["bootstrap"] },
+          { id: "situated-work", context: ["project", "mission", "seat", "slice"] },
+          { id: "coverage-map", atoms: ["coverage-map"] },
+        ],
+      },
+    ]);
+  });
+
+  it("rejects a named profile that references an undeclared atom", () => {
+    const bad = `
+name: world
+version: 1
+taxonomy: world
+files: []
+atoms:
+  - id: declared
+    address: project:SPEC.md
+    taxonomy: mission
+    situations: [fresh]
+    purpose: width
+    runtime: any
+    order: 10
+    priority: core
+profiles:
+  - id: codex-coverage
+    situations: [fresh]
+    runtimes: [codex]
+    phases:
+      - id: bootstrap
+        atoms: [missing]
+`;
+    expect(() => parseManifest(bad, "/world/manifest.yaml")).toThrow(/profile.*missing|missing.*atom/i);
+  });
+
+  it("rejects a named profile that repeats an atom or a context source", () => {
+    const prefix = `
+name: world
+version: 1
+taxonomy: world
+files:
+  - { path: world.md, role: world }
+atoms:
+  - id: bootstrap
+    address: world.md
+    taxonomy: world
+    situations: [fresh]
+    purpose: width
+    runtime: any
+    order: 10
+    priority: core
+profiles:
+  - id: codex-coverage
+    situations: [fresh]
+    runtimes: [codex]
+    phases:
+`;
+    expect(() => parseManifest(prefix + `
+      - { id: first, atoms: [bootstrap] }
+      - { id: second, atoms: [bootstrap] }
+`, "/world/manifest.yaml")).toThrow(/bootstrap.*more than once|duplicate/i);
+    expect(() => parseManifest(prefix + `
+      - { id: first, context: [project] }
+      - { id: second, context: [project] }
+`, "/world/manifest.yaml")).toThrow(/project.*more than once|duplicate/i);
+  });
 });
 
 // Slice-03 lineage repair (R2 terminal HIGH-2): the bounded, delimiter-free

@@ -83,7 +83,11 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
         }
       } else if (url.startsWith("/api/context-packs/library/by-ref/profile")) {
         res.end(JSON.stringify({
-          ref: "packs/smoke", situation: "handover", runtime: "claude",
+          ref: "packs/smoke", situation: "handover", runtime: "claude", profileId: "codex-coverage",
+          phases: [
+            { id: "bootstrap", kind: "atoms", estimatedTokens: 2 },
+            { id: "project-mission-role-task", kind: "context", sources: ["project", "mission", "seat", "slice"], estimatedTokens: 3 },
+          ],
           pieces: [
             { atomId: "welcome", address: "notes.md#welcome", sourceKind: "library", order: 1, priority: "core", text: "hello", estimatedTokens: 2, provenance: { nominalPath: "/p/notes.md", realPath: "/p/notes.md", escapesRoot: false } },
             { atomId: "recap", address: "seat:RECAP.md#d", sourceKind: "seat", order: 9, priority: "core", text: "decisions", estimatedTokens: 3, provenance: { nominalPath: "/s/RECAP.md", realPath: "/x", escapesRoot: true } },
@@ -198,10 +202,10 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
 
   it("PROFILE VERB: composes by situation with the grant params threaded, pieces labeled on stdout, budget + provenance warnings on stderr", async () => {
     hits.length = 0;
-    const out = await run(port, ["profile", "packs/smoke", "--situation", "handover", "--runtime", "claude", "--rig", "r1", "--seat", "s1", "--mission", "release-x", "--slice", "slice-y", "--budget", "4"]);
+    const out = await run(port, ["profile", "packs/smoke", "--situation", "handover", "--runtime", "claude", "--profile", "codex-coverage", "--rig", "r1", "--seat", "s1", "--mission", "release-x", "--slice", "slice-y", "--budget", "4"]);
     const profileHit = hits.find((h) => h.startsWith("/api/context-packs/library/by-ref/profile"))!;
     expect(profileHit).toBeDefined();
-    for (const frag of ["situation=handover", "runtime=claude", "rig=r1", "seat=s1", "mission=release-x", "slice=slice-y", "budget=4"]) {
+    for (const frag of ["situation=handover", "runtime=claude", "profile=codex-coverage", "rig=r1", "seat=s1", "mission=release-x", "slice=slice-y", "budget=4"]) {
       expect(profileHit).toContain(frag);
     }
     const stdout = out.logs.join("\n");
@@ -211,6 +215,9 @@ describe("rig context — address fork + profile verb (Atom 4d)", () => {
     // (the r1-obs-1 self-describing framing) — updated deliberately with it.
     expect(stdout).toContain("[seat !ESCAPED-ROOT]");
     const stderr = out.errLogs.join("\n");
+    expect(stderr).toContain("PROFILE codex-coverage");
+    expect(stderr).toContain("PHASE bootstrap (atoms, ~2 tokens)");
+    expect(stderr).toContain("PHASE project-mission-role-task (context [project, mission, seat, slice], ~3 tokens)");
     expect(stderr).toMatch(/budget/i);
     expect(stderr).toContain("OUTSIDE its seat root");
   });
