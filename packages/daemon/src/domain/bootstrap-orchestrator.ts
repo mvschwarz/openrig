@@ -601,7 +601,14 @@ export class BootstrapOrchestrator {
         const execFn = async (cmd: string) => runSyncSite("bootstrap.plan.preflight", () =>
           execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 })
         );
-        const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts.cwdOverride, fsOps: podInstantiator["deps"].fsOps, exec: execFn });
+        const preflight = await rigPreflight({
+          rigSpecYaml,
+          rigRoot,
+          cwdOverride: opts.cwdOverride,
+          fsOps: podInstantiator["deps"].fsOps,
+          skillsRoot: podInstantiator.resolveSkillsRoot?.(),
+          exec: execFn,
+        });
 
         stages.push({
           stage: "preflight",

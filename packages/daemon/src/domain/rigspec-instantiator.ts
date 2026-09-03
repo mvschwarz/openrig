@@ -462,6 +462,11 @@ export class PodRigInstantiator {
     this.deps = deps;
   }
 
+  /** One configured catalog root for preflight, materialization, and launch. */
+  resolveSkillsRoot(): string | undefined {
+    return this.deps.skillsRootResolver?.();
+  }
+
   private inheritedPermissionPolicy(targetRigId: string | undefined): PreflightSpecContext["inheritedPermissionPolicy"] {
     if (!targetRigId) return undefined;
     const provenance = this.deps.rigRepo.getRigPolicyProvenance(targetRigId);
@@ -505,6 +510,7 @@ export class PodRigInstantiator {
       rigRoot,
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
+      skillsRoot: this.resolveSkillsRoot(),
       rigNameOverride: targetRig?.rig.name,
       externalQualifiedIds: targetRig?.nodes.map((node) => node.logicalId),
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
@@ -555,6 +561,7 @@ export class PodRigInstantiator {
       rigRoot,
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
+      skillsRoot: this.resolveSkillsRoot(),
       rigNameOverride: targetRig?.rig.name,
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
       exec: this.deps.exec,
@@ -984,6 +991,7 @@ export class PodRigInstantiator {
       rigRoot,
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
+      skillsRoot: this.resolveSkillsRoot(),
       rigNameOverride: rig.rig.name,
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId),
       exec: this.deps.exec,
@@ -1112,7 +1120,7 @@ export class PodRigInstantiator {
     if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
-    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
@@ -1264,7 +1272,7 @@ export class PodRigInstantiator {
           member,
           pod,
           rig: rigSpec,
-          skillsRoot: this.deps.skillsRootResolver?.(),
+          skillsRoot: this.resolveSkillsRoot(),
         });
         if (!configResult.ok) {
           nodeResults.push({ logicalId: qualifiedId, status: "failed", error: configResult.errors.join("; ") });
@@ -1724,7 +1732,7 @@ export class PodRigInstantiator {
       member: input.member,
       pod: input.pod,
       rig: input.rigSpec,
-      skillsRoot: this.deps.skillsRootResolver?.(),
+      skillsRoot: this.resolveSkillsRoot(),
     });
     if (!configResult.ok) {
       return { status: "failed", error: configResult.errors.join("; ") };

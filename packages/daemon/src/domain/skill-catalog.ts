@@ -623,6 +623,35 @@ function restoreGitIgnore(plan: GitIgnorePlan): void {
   else rmSync(plan.path, { force: true });
 }
 
+function classifySkillProjectionTarget(
+  skill: Pick<CatalogSkill, "digest">,
+  prior: Pick<OwnedSkill, "digest"> | undefined,
+  target: string,
+): Pick<SkillProjectionReceipt, "status" | "detail"> {
+  if (!pathEntryExists(target)) {
+    return { status: "missing", detail: "selected skill is not projected" };
+  }
+  try {
+    const actual = inspectSkillDirectory(target);
+    if (actual.digest === skill.digest) {
+      return prior
+        ? { status: "current", detail: "owned target matches catalog bytes" }
+        : { status: "shadowed", detail: "equal unowned target already supplies these bytes" };
+    }
+    if (prior && actual.digest === prior.digest) {
+      return { status: "stale", detail: "owned target still matches the prior projection and can be refreshed safely" };
+    }
+    return {
+      status: "conflicting",
+      detail: prior
+        ? "target differs from both the catalog and OpenRig's last owned projection; refusing to overwrite an operator edit"
+        : "unowned target differs from the selected catalog skill; move it aside or reconcile its bytes explicitly",
+    };
+  } catch (err) {
+    return { status: "conflicting", detail: (err as Error).message };
+  }
+}
+
 export function reconcileSkillLoadout(input: {
   loadout: SkillLoadout;
   runtime: SkillRuntime;
@@ -747,31 +776,7 @@ export function reconcileSkillLoadout(input: {
   for (const skill of effectiveEntries) {
     const target = nodePath.join(targetRoot, skill.id);
     const prior = owned.get(skill.id);
-    let status: SkillProjectionStatus;
-    let detail: string;
-    if (!pathEntryExists(target)) {
-      status = "missing";
-      detail = "selected skill is not projected";
-    } else {
-      try {
-        const actual = inspectSkillDirectory(target);
-        if (actual.digest === skill.digest) {
-          status = prior ? "current" : "shadowed";
-          detail = prior ? "owned target matches catalog bytes" : "equal unowned target already supplies these bytes";
-        } else if (prior && actual.digest === prior.digest) {
-          status = "stale";
-          detail = "owned target still matches the prior projection and can be refreshed safely";
-        } else {
-          status = "conflicting";
-          detail = prior
-            ? "target differs from both the catalog and OpenRig's last owned projection; refusing to overwrite an operator edit"
-            : "unowned target differs from the selected catalog skill; move it aside or reconcile its bytes explicitly";
-        }
-      } catch (err) {
-        status = "conflicting";
-        detail = (err as Error).message;
-      }
-    }
+    let { status, detail } = classifySkillProjectionTarget(skill, prior, target);
     receipts.push({
       id: skill.id,
       selectedBy: skill.selectedBy,
@@ -934,6 +939,12 @@ export function reconcileSkillLoadout(input: {
     }
     for (const plan of appliedGitIgnores.reverse()) {
       try { restoreGitIgnore(plan); } catch { /* retain the original failure; rollback is best-effort */ }
+    }
+    for (const receipt of changed) {
+      const skill = effectiveEntries.find((entry) => entry.id === receipt.id)!;
+      const restored = classifySkillProjectionTarget(skill, owned.get(receipt.id), receipt.target);
+      receipt.status = restored.status;
+      receipt.detail = restored.detail;
     }
     if (stagingRoot) rmSync(stagingRoot, { recursive: true, force: true });
     return {

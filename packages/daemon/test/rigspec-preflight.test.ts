@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import nodePath from "node:path";
+import os from "node:os";
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -285,6 +287,87 @@ function makeRigYaml(overrides?: Partial<PodRigSpec>): string {
 const RIG_ROOT = "/project/rigs/my-rig";
 
 describe("Rebooted rig preflight", () => {
+  it("resolves a selector-only profile from the configured managed skill catalog", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-preflight-skill-catalog-"));
+    try {
+      const rigRoot = nodePath.join(root, "rig");
+      const catalog = nodePath.join(root, "managed-skills");
+      const project = nodePath.join(root, "project");
+      fs.mkdirSync(nodePath.join(rigRoot, "agents", "impl"), { recursive: true });
+      fs.mkdirSync(nodePath.join(rigRoot, "agents", "shared"), { recursive: true });
+      fs.mkdirSync(nodePath.join(catalog, "topology-skill"), { recursive: true });
+      fs.mkdirSync(project, { recursive: true });
+      fs.writeFileSync(
+        nodePath.join(rigRoot, "agents", "impl", "agent.yaml"),
+        `name: impl
+version: "1.0.0"
+imports:
+  - ref: local:../shared
+resources:
+  skills: []
+profiles:
+  default:
+    uses:
+      skills: [topology-skill]
+  missing:
+    uses:
+      skills: [absent-skill]
+`,
+      );
+      fs.writeFileSync(
+        nodePath.join(rigRoot, "agents", "shared", "agent.yaml"),
+        "name: shared\nversion: \"1.0.0\"\nresources:\n  skills: []\nprofiles: {}\n",
+      );
+      fs.writeFileSync(nodePath.join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
+      fs.writeFileSync(
+        nodePath.join(catalog, "topology-skill", "SKILL.md"),
+        "---\nname: topology-skill\ndescription: Use when testing selector-only preflight.\n---\n\n# Topology skill\n",
+      );
+      execFileSync("git", ["-C", root, "init", "-q"]);
+      execFileSync("git", ["-C", root, "config", "user.email", "test@openrig.invalid"]);
+      execFileSync("git", ["-C", root, "config", "user.name", "OpenRig Test"]);
+      execFileSync("git", ["-C", root, "add", "."]);
+      execFileSync("git", ["-C", root, "commit", "-qm", "fixture"]);
+
+      const rigSpecYaml = makeRigYaml({
+        pods: [{
+          id: "dev", label: "Dev",
+          members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: project }],
+          edges: [],
+        }],
+      });
+      const input: RigPreflightInput = {
+        rigSpecYaml,
+        rigRoot,
+        fsOps: {
+          readFile: (path: string) => fs.readFileSync(path, "utf-8"),
+          exists: (path: string) => fs.existsSync(path),
+        },
+        skillsRoot: catalog,
+      };
+
+      const result = await rigPreflight(input);
+
+      expect(result.ready, JSON.stringify(result.errors)).toBe(true);
+      expect(result.errors).toEqual([]);
+
+      const missingResult = await rigPreflight({
+        ...input,
+        rigSpecYaml: makeRigYaml({
+          pods: [{
+            id: "dev", label: "Dev",
+            members: [{ id: "impl", agentRef: "local:agents/impl", profile: "missing", runtime: "codex", cwd: project }],
+            edges: [],
+          }],
+        }),
+      });
+      expect(missingResult.ready).toBe(false);
+      expect(missingResult.errors).toContain('dev.impl: Profile uses skills: "absent-skill" not found in resource pool');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   // T5: resolves all agent refs
   it("resolves all agent refs successfully", async () => {
     const files: Record<string, string> = {

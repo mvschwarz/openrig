@@ -154,6 +154,8 @@ export interface RigPreflightInput {
   rigRoot: string;
   cwdOverride?: string;
   fsOps: AgentResolverFsOps;
+  /** Config-resolved managed skill catalog root. Must match runtime resolution. */
+  skillsRoot?: string;
   rigNameOverride?: string;
   externalQualifiedIds?: Iterable<string>;
   claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
@@ -168,6 +170,8 @@ export interface PreflightSpecContext {
   rigRoot: string;
   cwdOverride?: string;
   fsOps: AgentResolverFsOps;
+  /** Config-resolved managed skill catalog root. Must match runtime resolution. */
+  skillsRoot?: string;
   rigNameOverride?: string;
   /** Effective persisted target-rig attachment for structured expansion.
    * Explicit member/fragment refs still win; this is the inherited fallback. */
@@ -249,6 +253,7 @@ export async function rigPreflight(input: RigPreflightInput & { exec?: (cmd: str
     rigRoot: input.rigRoot,
     cwdOverride: input.cwdOverride,
     fsOps: input.fsOps,
+    skillsRoot: input.skillsRoot,
     rigNameOverride: input.rigNameOverride,
     inheritedPermissionPolicy: input.inheritedPermissionPolicy,
     exec: input.exec,
@@ -330,6 +335,7 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
         profileName: member.profile,
         specRoot: preflightCtx.rigRoot,
         cwdOverride: preflightCtx.cwdOverride,
+        skillsRoot: preflightCtx.skillsRoot,
         member,
         pod,
         rig: rigSpec,
