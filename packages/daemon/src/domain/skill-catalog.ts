@@ -90,6 +90,14 @@ interface OwnershipManifest {
   skills: OwnedSkill[];
 }
 
+interface GitExcludePlan {
+  path: string;
+  originalExists: boolean;
+  originalContent: string;
+  nextContent: string;
+  changed: boolean;
+}
+
 export interface ReconcileSkillLoadoutResult {
   ok: boolean;
   applied: boolean;
@@ -448,6 +456,106 @@ function copyDirectoryExact(source: string, target: string): void {
   }
 }
 
+function gitIgnorePattern(repoRoot: string, path: string, directory: boolean): string {
+  const relative = nodePath.relative(repoRoot, path);
+  if (!relative || relative === ".." || relative.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(relative)) {
+    throw new Error(`managed skill projection path is outside its Git working tree: ${path}`);
+  }
+  const escaped = relative
+    .split(nodePath.sep)
+    .join("/")
+    .replace(/([\\*?\[\] !#])/g, "\\$1");
+  return `/${escaped}${directory ? "/" : ""}`;
+}
+
+function replaceGitExcludeBlock(original: string, begin: string, end: string, patterns: string[]): string {
+  const beginAt = original.indexOf(begin);
+  const endAt = original.indexOf(end);
+  if ((beginAt === -1) !== (endAt === -1)) {
+    throw new Error(`managed Git exclusion block is incomplete (${begin})`);
+  }
+  if (beginAt !== -1) {
+    if (
+      original.indexOf(begin, beginAt + begin.length) !== -1
+      || original.indexOf(end, endAt + end.length) !== -1
+      || (beginAt > 0 && original[beginAt - 1] !== "\n")
+      || endAt < beginAt
+      || (original[endAt + end.length] !== undefined && original[endAt + end.length] !== "\n")
+    ) {
+      throw new Error(`managed Git exclusion block is ambiguous (${begin})`);
+    }
+    const after = original[endAt + end.length] === "\n" ? endAt + end.length + 1 : endAt + end.length;
+    const block = `${begin}\n${patterns.join("\n")}\n${end}\n`;
+    return `${original.slice(0, beginAt)}${block}${original.slice(after)}`;
+  }
+  const separator = original.length > 0 && !original.endsWith("\n") ? "\n" : "";
+  return `${original}${separator}${begin}\n${patterns.join("\n")}\n${end}\n`;
+}
+
+function planGitExclusions(input: {
+  cwd: string;
+  runtime: SkillRuntime;
+  targetRoot: string;
+  manifestPath: string;
+  owned: OwnedSkill[];
+}): GitExcludePlan | null {
+  let repoRoot: string;
+  try {
+    repoRoot = execFileSync("git", ["-C", input.cwd, "rev-parse", "--show-toplevel"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+  const rawExcludePath = execFileSync("git", ["-C", input.cwd, "rev-parse", "--git-path", "info/exclude"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  }).trim();
+  if (!rawExcludePath) throw new Error(`Git returned no local exclusion path for ${input.cwd}`);
+  const excludePath = nodePath.isAbsolute(rawExcludePath)
+    ? rawExcludePath
+    : nodePath.resolve(input.cwd, rawExcludePath);
+  const canonicalRepoRoot = realpathSync(repoRoot);
+  const canonicalCwd = realpathSync(input.cwd);
+  const fromCanonicalCwd = (path: string): string => {
+    const relative = nodePath.relative(input.cwd, path);
+    if (!relative || relative === ".." || relative.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(relative)) {
+      throw new Error(`managed skill projection path is outside its working directory: ${path}`);
+    }
+    return nodePath.join(canonicalCwd, relative);
+  };
+  const originalExists = existsSync(excludePath);
+  const originalContent = originalExists ? readFileSync(excludePath, "utf8") : "";
+  const key = sha256(`${input.cwd}\0${input.runtime}`).slice(0, 16);
+  const begin = `# BEGIN OpenRig managed skill loadout ${key}`;
+  const end = `# END OpenRig managed skill loadout ${key}`;
+  const patterns = [
+    ...input.owned.map((skill) => gitIgnorePattern(canonicalRepoRoot, fromCanonicalCwd(skill.target), true)),
+    gitIgnorePattern(canonicalRepoRoot, fromCanonicalCwd(input.manifestPath), false),
+  ].sort(compareBytes);
+  const nextContent = replaceGitExcludeBlock(originalContent, begin, end, patterns);
+  return { path: excludePath, originalExists, originalContent, nextContent, changed: nextContent !== originalContent };
+}
+
+function writeFileAtomic(path: string, content: string): void {
+  mkdirSync(nodePath.dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, content, "utf8");
+    if (existsSync(path)) chmodSync(temporary, lstatSync(path).mode & 0o777);
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+function restoreGitExclusions(plan: GitExcludePlan): void {
+  if (!existsSync(plan.path) || readFileSync(plan.path, "utf8") !== plan.nextContent) return;
+  if (plan.originalExists) writeFileAtomic(plan.path, plan.originalContent);
+  else rmSync(plan.path, { force: true });
+}
+
 export function reconcileSkillLoadout(input: {
   loadout: SkillLoadout;
   runtime: SkillRuntime;
@@ -662,18 +770,36 @@ export function reconcileSkillLoadout(input: {
       selectedBy: skill.selectedBy,
     }))
     .sort((a, b) => compareBytes(a.id, b.id));
+  let gitExcludePlan: GitExcludePlan | null;
+  try {
+    gitExcludePlan = planGitExclusions({ cwd, runtime: input.runtime, targetRoot, manifestPath, owned: nextOwned });
+  } catch (err) {
+    return {
+      ok: false,
+      applied: false,
+      freshLaunchRequired: false,
+      runtime: input.runtime,
+      targetRoot,
+      manifestPath,
+      receipts,
+      removed: [],
+      errors: [{ code: "git_exclusion_failed", message: `skill projection could not preserve clean Git state: ${(err as Error).message}` }],
+    };
+  }
   if (
     changed.length === 0
     && safeRemovals.length === 0
     && JSON.stringify(manifest.skills) === JSON.stringify(nextOwned)
     && JSON.stringify(manifest.topologySelections) === JSON.stringify(canonicalTopologySelections)
     && JSON.stringify(manifest.projectSelection) === JSON.stringify(projectSelection)
+    && !gitExcludePlan?.changed
   ) {
     return { ok: true, applied: false, freshLaunchRequired: false, runtime: input.runtime, targetRoot, manifestPath, receipts, removed: [], errors: [] };
   }
   const removed: string[] = [];
   const rollback: Array<{ target: string; backup: string | null }> = [];
   let stagingRoot: string | null = null;
+  let gitExclusionsApplied = false;
   try {
     mkdirSync(nodePath.dirname(targetRoot), { recursive: true });
     stagingRoot = nodePath.join(nodePath.dirname(targetRoot), `.openrig-skill-stage-${randomUUID()}`);
@@ -686,6 +812,10 @@ export function reconcileSkillLoadout(input: {
     for (const receipt of changed) {
       const skill = effectiveEntries.find((entry) => entry.id === receipt.id)!;
       copyDirectoryExact(skill.sourceDir, nodePath.join(staged, skill.id));
+    }
+    if (gitExcludePlan?.changed) {
+      writeFileAtomic(gitExcludePlan.path, gitExcludePlan.nextContent);
+      gitExclusionsApplied = true;
     }
     mkdirSync(targetRoot, { recursive: true });
     for (const receipt of changed) {
@@ -734,6 +864,9 @@ export function reconcileSkillLoadout(input: {
         if (pathEntryExists(action.target)) rmSync(action.target, { recursive: true, force: true });
         if (action.backup && pathEntryExists(action.backup)) renameSync(action.backup, action.target);
       } catch { /* retain the original failure; rollback is best-effort */ }
+    }
+    if (gitExclusionsApplied && gitExcludePlan) {
+      try { restoreGitExclusions(gitExcludePlan); } catch { /* retain the original failure; rollback is best-effort */ }
     }
     if (stagingRoot) rmSync(stagingRoot, { recursive: true, force: true });
     return {

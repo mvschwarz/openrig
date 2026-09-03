@@ -111,17 +111,16 @@ composition:
     execFileSync("git", ["-C", root, "add", "managed-skills"]);
     execFileSync("git", ["-C", root, "commit", "-qm", "catalog fixture"]);
 
-    writeFileSync(join(alphaRoot, ".gitignore"), ".agents/skills/\n.claude/skills/\n.openrig/skill-loadouts/\n");
     execFileSync("git", ["-C", alphaRoot, "init", "-q"]);
     execFileSync("git", ["-C", alphaRoot, "config", "user.email", "test@openrig.invalid"]);
     execFileSync("git", ["-C", alphaRoot, "config", "user.name", "OpenRig Test"]);
     execFileSync("git", ["-C", alphaRoot, "add", "."]);
     execFileSync("git", ["-C", alphaRoot, "commit", "-qm", "project fixture"]);
-    writeFileSync(join(workingRoot, ".gitignore"), ".agents/skills/\n.claude/skills/\n.openrig/skill-loadouts/\n");
+    writeFileSync(join(workingRoot, "README.md"), "# Agent working directory\n");
     execFileSync("git", ["-C", workingRoot, "init", "-q"]);
     execFileSync("git", ["-C", workingRoot, "config", "user.email", "test@openrig.invalid"]);
     execFileSync("git", ["-C", workingRoot, "config", "user.name", "OpenRig Test"]);
-    execFileSync("git", ["-C", workingRoot, "add", ".gitignore"]);
+    execFileSync("git", ["-C", workingRoot, "add", "README.md"]);
     execFileSync("git", ["-C", workingRoot, "commit", "-qm", "working directory fixture"]);
     savedWorkspaceRoot = process.env["OPENRIG_WORKSPACE_ROOT"];
     savedSkillsRoot = process.env["OPENRIG_SKILLS_ROOT"];
