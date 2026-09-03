@@ -1,4 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
@@ -224,6 +228,74 @@ describe("PodRigInstantiator", () => {
     expect(adapter.project).not.toHaveBeenCalled();
     if (!result.ok && "message" in result) expect(result.message).toContain("target_conflict: operator-owned skill differs");
     db.close();
+  });
+
+  it("uses the configured catalog for both preflight and launch resolution", async () => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-instantiator-skill-catalog-"));
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const catalog = nodePath.join(root, "managed-skills");
+      const project = nodePath.join(root, "project");
+      fs.mkdirSync(nodePath.join(catalog, "topology-skill"), { recursive: true });
+      fs.mkdirSync(project, { recursive: true });
+      fs.writeFileSync(nodePath.join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
+      fs.writeFileSync(
+        nodePath.join(catalog, "topology-skill", "SKILL.md"),
+        "---\nname: topology-skill\ndescription: Use when testing configured catalog launch resolution.\n---\n\n# Topology skill\n",
+      );
+      execFileSync("git", ["-C", catalog, "init", "-q"]);
+      execFileSync("git", ["-C", catalog, "config", "user.email", "test@openrig.invalid"]);
+      execFileSync("git", ["-C", catalog, "config", "user.name", "OpenRig Test"]);
+      execFileSync("git", ["-C", catalog, "add", "."]);
+      execFileSync("git", ["-C", catalog, "commit", "-qm", "fixture"]);
+
+      const skillReconciler = vi.fn(() => ({
+        ok: true,
+        applied: false,
+        freshLaunchRequired: false,
+        runtime: "codex",
+        targetRoot: nodePath.join(project, ".agents", "skills"),
+        manifestPath: nodePath.join(project, ".openrig", "skill-loadouts", "codex.json"),
+        receipts: [],
+        removed: [],
+        errors: [],
+      }));
+      const files = {
+        [`${RIG_ROOT}/agents/impl/agent.yaml`]: `name: impl
+version: "1.0.0"
+imports:
+  - ref: local:../shared
+resources:
+  skills: []
+profiles:
+  default:
+    uses:
+      skills: [topology-skill]`,
+        [`${RIG_ROOT}/agents/shared/agent.yaml`]: "name: shared\nversion: \"1.0.0\"\nresources:\n  skills: []\nprofiles: {}\n",
+      };
+      const setupResult = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: mockFs(files),
+        skillsRootResolver: () => catalog,
+        skillReconciler,
+      });
+      db = setupResult.db;
+      const rig = makeRigSpec({
+        pods: [{
+          id: "dev", label: "Dev",
+          members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "codex", cwd: project }],
+          edges: [],
+        }],
+      });
+
+      const result = await setupResult.inst.instantiate(RigSpecCodec.serialize(rig), RIG_ROOT);
+
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(skillReconciler).toHaveBeenCalledOnce();
+      expect(skillReconciler.mock.calls[0]?.[0].loadout.entries.map((entry: { id: string }) => entry.id)).toContain("topology-skill");
+    } finally {
+      db?.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("dedupes role guidance when the same file is referenced by resources.guidance and startup.files", async () => {

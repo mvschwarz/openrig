@@ -226,7 +226,7 @@ rigspecImportRoutes.post("/validate", async (c) => {
 
 // POST /api/rigs/import/preflight -> validate + preflight (auto-detects format)
 rigspecImportRoutes.post("/preflight", async (c) => {
-  const { preflight } = getDeps(c);
+  const { preflight, podInstantiator } = getDeps(c);
   const body = await c.req.text();
 
   let raw: unknown;
@@ -247,7 +247,14 @@ rigspecImportRoutes.post("/preflight", async (c) => {
     const exec = async (cmd: string) => runSyncSite("rigspec.import.preflight", () =>
       execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 })
     );
-    const result = await rigPreflight({ rigSpecYaml: body, rigRoot, cwdOverride, fsOps, exec });
+    const result = await rigPreflight({
+      rigSpecYaml: body,
+      rigRoot,
+      cwdOverride,
+      fsOps,
+      skillsRoot: podInstantiator.resolveSkillsRoot?.(),
+      exec,
+    });
     return c.json(result);
   }
 

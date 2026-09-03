@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -156,7 +157,7 @@ describe("BootstrapOrchestrator", () => {
     };
   }
 
-  function buildOrchestrator(opts?: { exec?: ExecFn; instantiator?: unknown }) {
+  function buildOrchestrator(opts?: { exec?: ExecFn; instantiator?: unknown; podInstantiator?: unknown }) {
     const exec = opts?.exec ?? createMockExec({
       "tmux -V": "tmux 3.4",
       "claude --version": "claude 1.0.0",
@@ -193,6 +194,7 @@ describe("BootstrapOrchestrator", () => {
       rigInstantiator: instantiator as any,
       fsOps: realFsOps(),
       bundleSourceResolver: null,
+      podInstantiator: opts?.podInstantiator as any,
     });
   }
 
@@ -209,6 +211,69 @@ describe("BootstrapOrchestrator", () => {
     const actions = db.prepare("SELECT * FROM bootstrap_actions WHERE bootstrap_id = ?")
       .all(result.runId) as Array<{ action_kind: string }>;
     expect(actions).toHaveLength(0);
+  });
+
+  it("pod-aware plan resolves selector-only skills from the configured catalog", async () => {
+    const catalog = path.join(tmpDir, "managed-skills");
+    const project = path.join(tmpDir, "project");
+    fs.mkdirSync(path.join(tmpDir, "agents", "impl"), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, "agents", "shared"), { recursive: true });
+    fs.mkdirSync(path.join(catalog, "topology-skill"), { recursive: true });
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, "agents", "impl", "agent.yaml"), `name: impl
+version: "1.0.0"
+imports:
+  - ref: local:../shared
+resources:
+  skills: []
+profiles:
+  default:
+    uses:
+      skills: [topology-skill]
+`);
+    fs.writeFileSync(
+      path.join(tmpDir, "agents", "shared", "agent.yaml"),
+      "name: shared\nversion: \"1.0.0\"\nresources:\n  skills: []\nprofiles: {}\n",
+    );
+    fs.writeFileSync(path.join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
+    fs.writeFileSync(
+      path.join(catalog, "topology-skill", "SKILL.md"),
+      "---\nname: topology-skill\ndescription: Use when testing bootstrap plan catalog resolution.\n---\n\n# Topology skill\n",
+    );
+    execFileSync("git", ["-C", catalog, "init", "-q"]);
+    execFileSync("git", ["-C", catalog, "config", "user.email", "test@openrig.invalid"]);
+    execFileSync("git", ["-C", catalog, "config", "user.name", "OpenRig Test"]);
+    execFileSync("git", ["-C", catalog, "add", "."]);
+    execFileSync("git", ["-C", catalog, "commit", "-qm", "fixture"]);
+
+    const specPath = writeSpec(`version: "0.2"
+name: selector-plan-rig
+pods:
+  - id: dev
+    label: Dev
+    members:
+      - id: impl
+        agent_ref: local:agents/impl
+        profile: default
+        runtime: codex
+        cwd: ${JSON.stringify(project)}
+    edges: []
+edges: []
+`);
+    const resolveSkillsRoot = vi.fn(() => catalog);
+    const podInstantiator = {
+      db,
+      deps: { fsOps: realFsOps() },
+      resolveSkillsRoot,
+      instantiate: vi.fn(),
+    };
+    const orch = buildOrchestrator({ podInstantiator });
+
+    const result = await orch.bootstrap({ mode: "plan", sourceRef: specPath, sourceKind: "rig_spec" });
+
+    expect(result.status, JSON.stringify(result.errors)).toBe("planned");
+    expect(result.stages.find((stage) => stage.stage === "preflight")?.status).toBe("ok");
+    expect(resolveSkillsRoot).toHaveBeenCalledOnce();
   });
 
   // T2: Apply --yes executes all stages
