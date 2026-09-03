@@ -82,13 +82,20 @@ export async function runWorkflowBootSweep(
       .map((id) => deps.queueRepo.getById(id))
       .filter((p): p is NonNullable<typeof p> => p != null);
 
-    // 1. Re-arm the keepalive (idempotent; heals pre-WF-1 instances).
-    const fallbackOwner =
-      packets[0]?.destinationSession ?? instance.createdBySession;
-    if (fallbackOwner && fallbackOwner.includes("@")) {
+    // 1. Re-arm liveness. Packet-addressed graphs get one job per live
+    // frontier packet; legacy serial instances retain one instance job.
+    const boundPackets = packets.filter((packet) =>
+      deps.instanceStore.getFrontierBinding(instance.instanceId, packet.qitemId) !== null,
+    );
+    const keepaliveTargets = boundPackets.length > 0
+      ? boundPackets.map((packet) => ({ owner: packet.destinationSession, packetId: packet.qitemId }))
+      : [{ owner: packets[0]?.destinationSession ?? instance.createdBySession, packetId: undefined }];
+    for (const target of keepaliveTargets) {
+      if (!target.owner || !target.owner.includes("@")) continue;
       const armed = ensureWorkflowKeepaliveArmed(deps.watchdogJobsRepo, {
         instanceId: instance.instanceId,
-        targetSession: fallbackOwner,
+        packetId: target.packetId,
+        targetSession: target.owner,
         registeredBySession: instance.createdBySession,
       });
       if (armed.newlyArmed) result.keepalivesArmed += 1;
@@ -110,8 +117,18 @@ export async function runWorkflowBootSweep(
     // 3. Deadline evaluation (derived; the unclaimed frontier is a
     // FIRST-CLASS case here — never invisible to an in-progress-only
     // scan like findOverdue).
-    const verdict = evaluateStepDeadline(instance, packets, now);
-    if (verdict.state !== "healthy" && verdict.evidence) {
+    const verdicts = packets.length > 0
+      ? packets.map((packet) => {
+          const binding = deps.instanceStore.getFrontierBinding(instance.instanceId, packet.qitemId);
+          return evaluateStepDeadline(
+            { ...instance, currentFrontier: [packet.qitemId], currentStepId: binding?.stepId ?? instance.currentStepId },
+            [packet],
+            now,
+          );
+        })
+      : [evaluateStepDeadline(instance, packets, now)];
+    for (const verdict of verdicts) {
+      if (verdict.state === "healthy" || !verdict.evidence) continue;
       result.stuckSurfaced += 1;
       log(
         `workflow boot sweep: instance ${instance.instanceId} STUCK (${verdict.state}) — step ${verdict.evidence.stepId ?? "?"}, packet ${verdict.evidence.packetId}, owner ${verdict.evidence.ownerSession}, anchor ${verdict.evidence.anchor}@${verdict.evidence.anchorAt}, overdue ${verdict.evidence.overdueBySeconds}s`,

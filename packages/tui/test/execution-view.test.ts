@@ -170,6 +170,32 @@ describe("mission execution story — readable rows over the shipped projections
     expect(lines.filter((line) => line.action?.type === "scopes-open")).toHaveLength(4);
   });
 
+  it("renders every lifecycle frontier packet, unresolved occurrence, and named unknown", () => {
+    const fixture = executionFixture();
+    fixture.lifecycle_instances = [{
+      instance_id: "WF-LIFE",
+      status: "active",
+      operation_key: "release-op",
+      frontier_packets: [
+        { packet_id: "Q-LEFT", step_id: "left", owner: "left@rig", queue_state: "in-progress", blocked_on: null, targeted_action: "rig workflow project --instance WF-LIFE --current-packet Q-LEFT" },
+        { packet_id: "Q-RIGHT", step_id: "right", owner: "right@rig", queue_state: "blocked", blocked_on: "gate-2", targeted_action: "rig workflow project --instance WF-LIFE --current-packet Q-RIGHT" },
+      ],
+      failure_occurrences: [
+        { occurrence_id: "Q-FAILED", step_id: "build", status: "unresolved", failure_reason: "fixture red", targeted_action: "rig workflow resume WF-LIFE --occurrence Q-FAILED --actor-session <you>" },
+      ],
+      unknowns: ["frontier packet Q-GHOST has no queue row"],
+    }];
+    const body = text(executionContentLines(fixture, executionScopes(), [], null, 200));
+    expect(body).toContain("LIFECYCLE · 1 instance");
+    expect(body).toContain("WF-LIFE · active · key release-op");
+    expect(body).toContain("left · left@rig · in-progress · packet Q-LEFT");
+    expect(body).toContain("right · right@rig · blocked · packet Q-RIGHT");
+    expect(body).toContain("blocked on gate-2");
+    expect(body).toContain("occurrence Q-FAILED · fixture red");
+    expect(body).toContain("--occurrence Q-FAILED");
+    expect(body).toContain("? frontier packet Q-GHOST has no queue row");
+  });
+
   it("keeps every drill affordance in bounds at 110 and 160 columns and drops the name before the facts", () => {
     for (const width of [110 - 32, 160 - 32]) {
       const lines = executionContentLines(executionFixture(), executionScopes(), [], null, width);

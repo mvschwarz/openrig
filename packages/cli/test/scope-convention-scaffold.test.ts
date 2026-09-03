@@ -69,6 +69,11 @@ function seedSubstrate(): { root: string; missionsRoot: string } {
     "---\nid: OPR.0.4.4\nstage: wip\n---\n# release-0.4.4\n",
     "utf8",
   );
+  fs.writeFileSync(
+    path.join(missionsRoot, "release-0.4.4", "mission.yaml"),
+    "schema: openrig.mission/v0alpha1\nkind: mission\ncomposition:\n  mission_markdown:\n    spec: README.md\n  slices: []\n",
+    "utf8",
+  );
   return { root, missionsRoot };
 }
 
@@ -206,6 +211,10 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
         },
       });
     }
+    const mission = parseYaml(fs.readFileSync(path.join(substrate.missionsRoot, "release-0.4.4", "mission.yaml"), "utf8"));
+    expect(mission.composition.slices).toHaveLength(SLICE_TEMPLATE_KINDS.length);
+    expect(mission.composition.slices.map((member: { order: number }) => member.order))
+      .toEqual(SLICE_TEMPLATE_KINDS.map((_, index) => (index + 1) * 10));
   });
 
   it("scaffolds exactly intent-bearing SPEC.md + NOTES.md + PROGRESS.md + slices/ for each MissionTemplateKind", async () => {
@@ -225,7 +234,7 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
       expect(parseYaml(fs.readFileSync(path.join(missionPath, "mission.yaml"), "utf8"))).toEqual({
         schema: "openrig.mission/v0alpha1",
         kind: "mission",
-        composition: { mission_markdown: { spec: "SPEC.md" } },
+        composition: { mission_markdown: { spec: "SPEC.md" }, slices: [] },
       });
     }
   });

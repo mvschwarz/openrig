@@ -77,7 +77,7 @@ const COMPLETED = { instanceId: "WF-C", workflowName: "conveyor", status: "compl
 describe("composeAttentionRollup (WF3 FR-3b)", () => {
   it("mixed fixture: every attention-worthy instance appears exactly once with class + reason + affordance; healthy only in counts", () => {
     const rollup = composeAttentionRollup([HEALTHY, FAILED, STUCK, WAITING, COMPLETED]);
-    expect(rollup.counts).toEqual({ total: 5, active: 2, waiting: 1, completed: 1, failed: 1 });
+    expect(rollup.counts).toEqual({ total: 5, active: 2, waiting: 1, completed: 1, failed: 1, aborted: 0 });
     expect(rollup.attention).toHaveLength(3);
     const ids = rollup.attention.map((r) => r.instanceId);
     expect(ids).toEqual(expect.arrayContaining(["WF-F", "WF-S", "WF-W"]));
@@ -113,8 +113,18 @@ describe("composeAttentionRollup (WF3 FR-3b)", () => {
 
   it("proven-empty: clean fleet renders counts + the explicit empty statement, never blank", () => {
     const lines = renderStatus(composeAttentionRollup([HEALTHY, COMPLETED]));
-    expect(lines[0]).toBe("2 instances: 1 active · 0 waiting · 1 completed · 0 failed");
+    expect(lines[0]).toBe("2 instances: 1 active · 0 waiting · 1 completed · 0 failed · 0 aborted");
     expect(lines[1]).toContain("No instances need attention");
+  });
+
+  it("keeps an unresolved branch failure visible while an independent sibling remains active", () => {
+    const activeWithFailure = {
+      ...HEALTHY,
+      failureOccurrences: [{ occurrenceId: "Q-A", stepId: "left", status: "unresolved" as const, targetedAction: "resume" as const }],
+    };
+    const rollup = composeAttentionRollup([activeWithFailure]);
+    expect(rollup.attention).toMatchObject([{ classes: ["failed-branch"], reasons: ["1 unresolved branch failure"] }]);
+    expect(attentionMarker(activeWithFailure)).toBe("▲ failed-branch");
   });
 
   it("human render: table with CLASS column and per-row affordance line", () => {

@@ -113,6 +113,9 @@ export interface ProjectStepResult {
   nextOwnerSession: string | null;
   /** null on terminal closures. */
   nextStepId: string | null;
+  /** All packets/steps projected by a dependency-graph advance. */
+  nextQitemIds?: string[];
+  nextStepIds?: string[];
   /** Composite fired events (step_closed + optional next_qitem_projected + optional completed). */
   emittedEventTypes: string[];
   /**
@@ -133,7 +136,7 @@ export class WorkflowProjector {
     private readonly trailLog: WorkflowStepTrailLog,
     private readonly specCache: WorkflowSpecCache,
     private readonly now: () => Date = () => new Date(),
-    /** OPR.0.4.6.WF1 FR-3: optional — arms/disarms the per-instance keepalive in-txn. */
+    /** OPR.0.4.6.WF1 FR-3: optional — arms/disarms packet or legacy-instance keepalives in-txn. */
     private readonly watchdogJobsRepo?: WatchdogJobsRepository,
     /** OPR.0.4.6.WF5 FR-2: the maturity-dial inputs, injected at startup
      *  (the validateRig precedent — the projector never reads config
@@ -193,7 +196,12 @@ export class WorkflowProjector {
     // R2 fix (guard blocker 1): read durable current_step_id from instance
     // rather than inferring "last_trail_step + 1". Reused-frontier packets
     // (waiting then resume) now correctly resume the SAME step.
-    const currentStep = resolveCurrentStep(spec, instance);
+    const packetBinding = this.instanceStore.getFrontierBinding(instance.instanceId, input.currentPacketId);
+    const currentStep = packetBinding
+      ? spec.steps.find((step) => step.id === packetBinding.stepId) ?? null
+      : instance.currentFrontier.length === 1
+        ? resolveCurrentStep(spec, instance)
+        : null;
     if (!currentStep) {
       throw new WorkflowProjectorError(
         "current_step_unknown",
@@ -224,6 +232,21 @@ export class WorkflowProjector {
           allowedExits: currentStep.allowed_exits,
         },
       );
+    }
+
+    validateAcceptance(currentStep, input, instance);
+
+    // A declared dependency graph opts into the S06 packet-addressed
+    // executor. Legacy specs keep the mature serial scribe below exactly.
+    if (spec.steps.some((step) => step.depends_on !== undefined)) {
+      if (!packetBinding) {
+        throw new WorkflowProjectorError(
+          "frontier_binding_indeterminate",
+          `workflow instance ${instance.instanceId} has a dependency graph but frontier packet ${input.currentPacketId} has no unique step binding; refusing to infer from current_step_id`,
+          { instanceId: instance.instanceId, currentPacketId: input.currentPacketId },
+        );
+      }
+      return this.projectDependencyGraph({ input, instance, spec, currentStep, packetBinding });
     }
 
     // Determine next step (one-hop default; multi-hop is graduation).
@@ -849,6 +872,229 @@ export class WorkflowProjector {
       emittedEventTypes: persistedEvents.map((e) => e.type),
     };
   }
+
+  private async projectDependencyGraph(args: {
+    input: ProjectStepInput;
+    instance: WorkflowInstance;
+    spec: WorkflowSpec;
+    currentStep: WorkflowStepSpec;
+    packetBinding: import("./workflow-types.js").WorkflowFrontierBinding;
+  }): Promise<ProjectStepResult> {
+    const { input, instance, spec, currentStep, packetBinding } = args;
+    if (input.exit === "waiting" && instance.status === "waiting" && matchesStoredWaitingDecision(instance, input, currentStep.id, this.trailLog)) {
+      return {
+        instance,
+        closurePriorPacketId: input.currentPacketId,
+        closureReason: "waiting",
+        nextQitemId: null,
+        nextOwnerSession: null,
+        nextStepId: null,
+        nextQitemIds: [],
+        nextStepIds: [],
+        emittedEventTypes: [],
+        absorbedReplay: true,
+      };
+    }
+
+    const mappedTarget = currentStep.next_hop?.on?.[input.exit];
+    const isFailureOccurrence = input.exit === "failed" && !mappedTarget;
+    const completesPrerequisite = input.exit === "done" || input.exit === "handoff";
+    const trail = this.trailLog.listForInstance(instance.instanceId, 100_000);
+    const completed = new Set(
+      trail
+        .filter((entry) => entry.closureReason === "done" || entry.closureReason === "handoff")
+        .map((entry) => entry.stepId),
+    );
+    if (completesPrerequisite) completed.add(currentStep.id);
+
+    const liveBindings = this.instanceStore.listFrontierBindings(instance.instanceId);
+    const liveStepIds = new Set(liveBindings.map((binding) => binding.stepId));
+    const unresolved = this.instanceStore.listFailureOccurrences(instance.instanceId, "unresolved");
+    const unresolvedStepIds = new Set(unresolved.map((occurrence) => occurrence.stepId));
+    let nextSteps: WorkflowStepSpec[] = [];
+    if (mappedTarget) {
+      const target = spec.steps.find((step) => step.id === mappedTarget);
+      if (!target) {
+        throw new WorkflowProjectorError("branch_target_missing", `step "${currentStep.id}" maps ${input.exit} to missing step "${mappedTarget}"`, { instanceId: instance.instanceId, stepId: currentStep.id, mappedTarget });
+      }
+      nextSteps = [target];
+    } else if (completesPrerequisite) {
+      nextSteps = spec.steps.filter((candidate) => {
+        const dependencies = candidate.depends_on;
+        if (!dependencies || dependencies.length === 0) return false;
+        if (!dependencies.includes(currentStep.id)) return false;
+        if (!dependencies.every((dependency) => completed.has(dependency))) return false;
+        if (completed.has(candidate.id) || liveStepIds.has(candidate.id) || unresolvedStepIds.has(candidate.id)) return false;
+        return true;
+      });
+    }
+
+    const evaluatedAt = this.now().toISOString();
+    const emitted: PersistedEvent[] = [];
+    const createdPackets: Array<{ qitemId: string; step: WorkflowStepSpec; owner: string; nudge: boolean | undefined; blocked: boolean }> = [];
+    this.eventBus.withNotifyEnvelope((register) => {
+      const addEvent = (event: PersistedEvent): void => { emitted.push(event); register(event); };
+      const ownerPlans = nextSteps.map((step) => {
+        const gate = step.gate
+          ? compileGate(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig))
+          : null;
+        const owner = gate?.destinationSession ?? resolveDefaultOwner(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig));
+        if (!owner) {
+          throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve next owner for dependency step "${step.id}"`, { instanceId: instance.instanceId, stepId: step.id });
+        }
+        return { step, gate, owner };
+      });
+
+      const closureOwner = ownerPlans.length === 1 ? ownerPlans[0]!.owner : null;
+      const closure = input.exit === "handoff" && ownerPlans.length !== 1
+        ? {
+            state: "done" as const,
+            closureReason: "no-follow-on",
+            closureTarget: null,
+            transitionNote: `workflow graph: ${input.actorSession} completed ${currentStep.id}; ${ownerPlans.length} successors projected transactionally`,
+          }
+        : workflowExitToQueueClosure(input, closureOwner);
+      const updated = this.queueRepo.updateWithinTransaction({
+        qitemId: input.currentPacketId,
+        actorSession: input.actorSession,
+        viaWorkflowVerb: true,
+        state: closure.state,
+        closureReason: closure.closureReason,
+        closureTarget: closure.closureTarget ?? undefined,
+        handedOffTo: closure.handedOffTo,
+        blockedOn: closure.blockedOn,
+        transitionNote: closure.transitionNote,
+      });
+      addEvent(updated.persistedEvent);
+
+      if (input.exit !== "waiting") {
+        this.instanceStore.removeFrontierBinding(instance.instanceId, input.currentPacketId);
+        if (this.watchdogJobsRepo) {
+          disarmWorkflowKeepalive(
+            this.watchdogJobsRepo,
+            instance.instanceId,
+            `workflow_packet_${input.exit}`,
+            input.currentPacketId,
+          );
+        }
+      }
+
+      for (const plan of ownerPlans) {
+        const created = this.queueRepo.createWithinTransaction({
+          sourceSession: input.actorSession,
+          destinationSession: plan.owner,
+          body: workflowHandoffBody({ spec, instance, currentStep, nextStep: plan.step, actorSession: input.actorSession, resultNote: input.resultNote, gate: plan.gate }),
+          priority: "routine",
+          tier: plan.gate?.tier ?? "mode2",
+          tags: ["workflow", plan.gate ? "gate" : "handoff", `workflow:${spec.id}`, `instance:${instance.instanceId}`, `step:${plan.step.id}`],
+          summary: plan.gate?.summary ?? undefined,
+          evidenceRef: plan.gate?.evidenceRef ?? undefined,
+          chainOfRecord: [input.currentPacketId],
+        });
+        addEvent(created.persistedEvent);
+        this.queueRepo.stageWakeIntent(created.qitemId, input.actorSession, created.destinationSession, null, created.nudge);
+        if (plan.gate?.parkOn) {
+          const parked = this.queueRepo.updateWithinTransaction({
+            qitemId: created.qitemId,
+            actorSession: input.actorSession,
+            state: "blocked",
+            closureReason: "blocked_on",
+            closureTarget: plan.gate.parkOn,
+            blockedOn: plan.gate.parkOn,
+            transitionNote: `workflow gate: parked on ${plan.gate.parkOn} pending sign-off`,
+          });
+          addEvent(parked.persistedEvent);
+        }
+        this.instanceStore.bindFrontierPacket({
+          instanceId: instance.instanceId,
+          packetId: created.qitemId,
+          stepId: plan.step.id,
+          branchDrive: packetBinding.branchDrive + (ownerPlans.length > 1 ? 1 : 0),
+          hopCount: packetBinding.hopCount + 1,
+          hopsBaseline: packetBinding.hopsBaseline,
+        });
+        if (this.watchdogJobsRepo) {
+          ensureWorkflowKeepaliveArmed(this.watchdogJobsRepo, {
+            instanceId: instance.instanceId,
+            packetId: created.qitemId,
+            targetSession: plan.owner,
+            registeredBySession: input.actorSession,
+          });
+        }
+        createdPackets.push({ qitemId: created.qitemId, step: plan.step, owner: plan.owner, nudge: created.nudge, blocked: Boolean(plan.gate?.parkOn) });
+        addEvent(this.eventBus.persistWithinTransaction({ type: "workflow.next_qitem_projected", instanceId: instance.instanceId, nextQitemId: created.qitemId, nextOwner: plan.owner, nextStepId: plan.step.id }));
+      }
+
+      if (isFailureOccurrence) {
+        this.instanceStore.recordFailureOccurrence({
+          instanceId: instance.instanceId,
+          failedPacketId: input.currentPacketId,
+          stepId: currentStep.id,
+          branchDrive: packetBinding.branchDrive,
+          hopCount: packetBinding.hopCount,
+          hopsBaseline: packetBinding.hopsBaseline,
+          failureReason: input.resultNote ?? null,
+        });
+      }
+
+      const remainingFrontier = instance.currentFrontier.filter((packetId) => packetId !== input.currentPacketId);
+      const nextFrontier = input.exit === "waiting"
+        ? [...remainingFrontier, input.currentPacketId]
+        : [...remainingFrontier, ...createdPackets.map((packet) => packet.qitemId)];
+      const unresolvedCount = this.instanceStore.listFailureOccurrences(instance.instanceId, "unresolved").length;
+      const packetRows = nextFrontier.map((packetId) => this.queueRepo.getById(packetId));
+      const nextStatus: WorkflowInstance["status"] = nextFrontier.length > 0
+        ? packetRows.every((packet) => packet?.state === "blocked") ? "waiting" : "active"
+        : unresolvedCount > 0 ? "failed" : "completed";
+      const nextBindings = this.instanceStore.listFrontierBindings(instance.instanceId);
+      const singletonStep = nextBindings.length === 1 ? nextBindings[0]!.stepId : null;
+      this.instanceStore.updateFrontier(instance.instanceId, nextFrontier, nextStatus, {
+        bumpHopCount: createdPackets.length > 0,
+        currentStepId: singletonStep ?? "clear",
+        expectedVersion: instance.version,
+        completedAt: nextStatus === "completed" || nextStatus === "failed" ? evaluatedAt : null,
+        lastContinuationDecision: {
+          exit: input.exit,
+          actorSession: input.actorSession,
+          closedPacket: input.currentPacketId,
+          currentStep: currentStep.id,
+          nextPackets: createdPackets.map((packet) => packet.qitemId),
+        },
+      });
+      this.trailLog.record({
+        instanceId: instance.instanceId,
+        stepId: currentStep.id,
+        stepRole: currentStep.actor_role,
+        closedAt: evaluatedAt,
+        closureReason: input.exit,
+        closureEvidence: { ...(input.closureEvidence ?? {}), next_qitem_ids: createdPackets.map((packet) => packet.qitemId) },
+        actorSession: input.actorSession,
+        nextQitemId: createdPackets[0]?.qitemId ?? null,
+        priorQitemId: input.currentPacketId,
+      });
+      addEvent(this.eventBus.persistWithinTransaction({ type: "workflow.step_closed", instanceId: instance.instanceId, stepId: currentStep.id, closureReason: input.exit, actorSession: input.actorSession, priorQitemId: input.currentPacketId }));
+      if (nextStatus === "completed") {
+        addEvent(this.eventBus.persistWithinTransaction({ type: "workflow.completed", instanceId: instance.instanceId, workflowName: instance.workflowName }));
+      } else if (nextStatus === "failed") {
+        addEvent(this.eventBus.persistWithinTransaction({ type: "workflow.failed", instanceId: instance.instanceId, workflowName: instance.workflowName, reason: input.resultNote ?? "workflow_step_failed" }));
+      }
+    });
+
+    for (const created of createdPackets) {
+      await this.queueRepo.deliverWakeForSuccessor(created.qitemId, created.owner, created.nudge, input.actorSession);
+    }
+    return {
+      instance: this.instanceStore.getByIdOrThrow(instance.instanceId),
+      closurePriorPacketId: input.currentPacketId,
+      closureReason: input.exit,
+      nextQitemId: createdPackets[0]?.qitemId ?? null,
+      nextOwnerSession: createdPackets[0]?.owner ?? null,
+      nextStepId: createdPackets[0]?.step.id ?? null,
+      nextQitemIds: createdPackets.map((packet) => packet.qitemId),
+      nextStepIds: createdPackets.map((packet) => packet.step.id),
+      emittedEventTypes: emitted.map((event) => event.type),
+    };
+  }
 }
 
 /**
@@ -1383,4 +1629,38 @@ function workflowHandoffBody(input: {
     lines.push("", `Prior step note: ${input.resultNote}`);
   }
   return lines.join("\n");
+}
+
+function validateAcceptance(
+  step: WorkflowStepSpec,
+  input: ProjectStepInput,
+  instance: WorkflowInstance,
+): void {
+  if (!step.acceptance || input.exit === "waiting") return;
+  const raw = input.closureEvidence?.acceptance;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new WorkflowProjectorError(
+      "acceptance_payload_required",
+      `step "${step.id}" is an acceptance gate; delivery, a terminal producer row, or a liveness wake cannot advance it. Supply closureEvidence.acceptance with candidate, verdict, and evidence_ref.`,
+      { instanceId: instance.instanceId, stepId: step.id },
+    );
+  }
+  const payload = raw as Record<string, unknown>;
+  const mismatches: Record<string, { expected: unknown; actual: unknown }> = {};
+  if (payload.candidate !== step.acceptance.candidate) {
+    mismatches.candidate = { expected: step.acceptance.candidate, actual: payload.candidate ?? null };
+  }
+  if (typeof payload.verdict !== "string" || !step.acceptance.verdicts.includes(payload.verdict)) {
+    mismatches.verdict = { expected: step.acceptance.verdicts, actual: payload.verdict ?? null };
+  }
+  if (payload.evidence_ref !== step.acceptance.evidence_ref) {
+    mismatches.evidence_ref = { expected: step.acceptance.evidence_ref, actual: payload.evidence_ref ?? null };
+  }
+  if (Object.keys(mismatches).length > 0) {
+    throw new WorkflowProjectorError(
+      "acceptance_payload_mismatch",
+      `step "${step.id}" acceptance payload does not match its declared candidate/verdict/evidence contract`,
+      { instanceId: instance.instanceId, stepId: step.id, mismatches },
+    );
+  }
 }

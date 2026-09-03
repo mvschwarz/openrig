@@ -145,6 +145,65 @@ Examples:
     });
 
   cmd
+    .command("compile <missionPath>")
+    .description("Compile project.yaml → mission.yaml → slice.yaml into an inspectable lifecycle graph (read-only)")
+    .option("--operation-key <key>", "Opaque replay identity to include in the compilation")
+    .option("--json", "JSON output for agents")
+    .action(async (missionPath: string, opts: { operationKey?: string; json?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<unknown>("/api/workflow/compile", {
+          missionPath,
+          operationKey: opts.operationKey,
+        });
+        printResult(opts.json ?? false, res.data, res.status);
+      });
+    });
+
+  cmd
+    .command("instantiate-lifecycle <missionPath>")
+    .description("Compile and instantiate an eligible project lifecycle with an opaque idempotency key")
+    .requiredOption("--operation-key <key>", "Opaque stable identity for exact replay")
+    .requiredOption("--root-objective <text>", "Root objective for the run")
+    .requiredOption("--created-by <session>", "Session creating the instance")
+    .option("--entry-owner <session>", "Override the compiled entry owner")
+    .option("--rig <name>", "Bind the instance to this rig")
+    .option("--json", "JSON output for agents")
+    .action(async (missionPath: string, opts: {
+      operationKey: string;
+      rootObjective: string;
+      createdBy: string;
+      entryOwner?: string;
+      rig?: string;
+      json?: boolean;
+    }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<{
+          instance?: { instanceId?: string; status?: string };
+          entryQitemId?: string;
+          replayed?: boolean;
+          compilation?: { compiledInputDigest?: string };
+          advisories?: string[];
+        }>("/api/workflow/instantiate-lifecycle", {
+          missionPath,
+          operationKey: opts.operationKey,
+          rootObjective: opts.rootObjective,
+          createdBySession: opts.createdBy,
+          entryOwnerSession: opts.entryOwner,
+          targetRig: opts.rig,
+        });
+        printResult(opts.json ?? false, res.data, res.status);
+        printWorkflowAdvisories(res.data?.advisories);
+        printOutcomeSummary(opts.json ?? false, res.status, {
+          what: `${res.data?.replayed ? "Replayed" : "Instantiated"} lifecycle ${opts.operationKey}`,
+          state: `instance ${res.data?.instance?.instanceId ?? "?"}; entry ${res.data?.entryQitemId ?? "?"}; digest ${res.data?.compilation?.compiledInputDigest ?? "?"}`,
+          next: `Inspect: rig workflow show ${res.data?.instance?.instanceId ?? "<instance>"}`,
+        });
+      });
+    });
+
+  cmd
     .command("instantiate <specPath>")
     .description("Create a workflow instance + entry-step qitem from a spec")
     .requiredOption("--root-objective <text>", "Root objective for the run")
@@ -296,7 +355,7 @@ Examples:
   cmd
     .command("list")
     .description("List workflow instances; optionally filter by status")
-    .option("--status <s>", "Filter by status (active | waiting | completed | failed)")
+    .option("--status <s>", "Filter by status (active | waiting | completed | failed | aborted)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -402,7 +461,7 @@ Examples:
     .action(async (instanceId: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.get<{ instance?: unknown; trail?: unknown[] }>(
+        const res = await client.get<{ instance?: unknown; trail?: unknown[]; frontier?: unknown[]; failures?: unknown[]; unknowns?: string[] }>(
           `/api/workflow/${encodeURIComponent(instanceId)}/trace`,
         );
         // WF3 FR-2: human mode renders the per-step tree (mini-req 2's
@@ -411,7 +470,12 @@ Examples:
           printResult(opts.json ?? false, res.data, res.status);
           return;
         }
-        const instance = res.data.instance as Parameters<typeof renderTraceTree>[0];
+        const instance = {
+          ...(res.data.instance as Parameters<typeof renderTraceTree>[0]),
+          frontierPackets: res.data.frontier,
+          failureOccurrences: res.data.failures,
+          unknowns: res.data.unknowns,
+        } as Parameters<typeof renderTraceTree>[0];
         const trail = (res.data.trail ?? []) as Parameters<typeof renderTraceTree>[1];
         for (const line of renderTraceTree(instance, trail)) console.log(line);
       });
@@ -445,19 +509,39 @@ Examples:
         const res = await client.post<{
           instance?: { status?: string; currentFrontier?: string[]; currentStepId?: string | null };
           trail?: unknown[];
+          frontier?: Array<{
+            packetId: string;
+            stepId: string | null;
+            ownerSession: string | null;
+            queueState: string | null;
+            blockedOn: string | null;
+            targetedAction: "project" | "route" | "indeterminate";
+          }>;
+          failures?: Array<{
+            occurrenceId: string;
+            stepId: string;
+            status: "unresolved" | "resolved";
+            targetedAction: "resume" | "none";
+          }>;
+          unknowns?: string[];
         }>(`/api/workflow/${encodeURIComponent(instanceId)}/continue`, {});
         printResult(opts.json ?? false, res.data, res.status);
         const body = res.data ?? {};
         const status = body.instance?.status ?? "(unknown)";
         const frontier = body.instance?.currentFrontier ?? [];
-        const stepId = body.instance?.currentStepId ?? null;
         const trailLen = body.trail?.length ?? 0;
+        const frontierRows = body.frontier ?? [];
+        const unresolved = (body.failures ?? []).filter((failure) => failure.status === "unresolved");
         printOutcomeSummary(opts.json ?? false, res.status, {
           what: `Inspected instance ${instanceId} (read-only; no state changed)`,
-          state: `status = ${status}; step = ${stepId ?? "(terminal)"}; frontier = [${frontier.join(", ")}]; trail rows = ${trailLen}`,
-          next: frontier.length > 0
-            ? `The frontier owner advances via: rig workflow project --instance ${instanceId} --current-packet ${frontier[0]} --exit <handoff|waiting|done|failed> --actor-session <owner>`
-            : `Terminal or empty frontier - see: rig workflow trace ${instanceId}`,
+          state: `status = ${status}; ${frontierRows.length} frontier packet(s); ${unresolved.length} unresolved failure(s); trail rows = ${trailLen}`,
+          next: frontierRows.length === 1 && frontierRows[0]?.targetedAction !== "indeterminate"
+            ? `The frontier owner advances packet ${frontierRows[0]!.packetId}: rig workflow project --instance ${instanceId} --current-packet ${frontierRows[0]!.packetId} --exit <handoff|waiting|done|failed> --actor-session ${frontierRows[0]!.ownerSession ?? "<owner>"}`
+            : frontierRows.length > 1 || unresolved.length > 0
+              ? `Choose the exact packet or failure occurrence shown by: rig workflow show ${instanceId}`
+              : frontier.length > 0
+                ? `Frontier binding is indeterminate; inspect: rig workflow show ${instanceId}`
+                : `Terminal or empty frontier - see: rig workflow trace ${instanceId}`,
         });
       });
     });
@@ -559,6 +643,7 @@ Examples:
     .description("Re-route the current frontier step to a new owner (same step, honest handoff closure; never advances)")
     .requiredOption("--to <session>", "New owner session (canonical <member>@<rig>)")
     .requiredOption("--actor-session <session>", "Session performing the re-route (recorded as provenance)")
+    .option("--packet <qitem-id>", "Frontier packet to route (required when more than one is live)")
     .option("--reason <text>", "Why the step is being re-routed (recorded in the audit trail)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
@@ -574,6 +659,7 @@ Examples:
     .action(async (instanceId: string, opts: {
       to: string;
       actorSession: string;
+      packet?: string;
       reason?: string;
       json?: boolean;
     }) => {
@@ -588,6 +674,7 @@ Examples:
           instanceStatus?: string;
         }>(`/api/workflow/${encodeURIComponent(instanceId)}/route`, {
           toSession: opts.to,
+          packetId: opts.packet,
           actorSession: opts.actorSession,
           reason: opts.reason,
         });
@@ -609,6 +696,7 @@ Examples:
     .command("resume <instanceId>")
     .description("Redrive a FAILED instance from its failed step (completed steps never re-run; one fresh max_hops window)")
     .requiredOption("--actor-session <session>", "Session performing the resume (recorded as provenance)")
+    .option("--occurrence <failed-qitem-id>", "Failure occurrence to redrive (required when more than one is unresolved)")
     .option("--decision <text>", "Durable instruction for the step owner (lands in the redrive packet)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
@@ -624,6 +712,7 @@ Examples:
 `)
     .action(async (instanceId: string, opts: {
       actorSession: string;
+      occurrence?: string;
       decision?: string;
       json?: boolean;
     }) => {
@@ -637,6 +726,7 @@ Examples:
           exceptionItemsClosed?: number;
         }>(`/api/workflow/${encodeURIComponent(instanceId)}/resume`, {
           actorSession: opts.actorSession,
+          occurrenceId: opts.occurrence,
           decision: opts.decision,
         });
         printResult(opts.json ?? false, res.data, res.status);
@@ -645,6 +735,28 @@ Examples:
           what: `Redrove instance ${instanceId} from step ${body.stepId ?? "?"} (redrive #${body.resumeCount ?? "?"}; packet ${body.newPacketId ?? "?"} → ${body.ownerSession ?? "?"}; ${body.exceptionItemsClosed ?? 0} exception item(s) resolved)`,
           state: `instance ${instanceId} = active, rebound to ${body.stepId ?? "?"}; completed steps untouched; fresh max_hops window`,
           next: `The owner advances via: rig workflow project --instance ${instanceId} --current-packet ${body.newPacketId ?? "<packet>"} --exit <exit> --actor-session ${body.ownerSession ?? "<owner>"}`,
+        });
+      });
+    });
+
+  cmd
+    .command("abort <instanceId>")
+    .description("Transactionally cancel every live packet and abort the whole workflow instance")
+    .requiredOption("--reason <text>", "Why the whole instance is being aborted")
+    .requiredOption("--actor-session <session>", "Session performing the abort")
+    .option("--json", "JSON output for agents")
+    .action(async (instanceId: string, opts: { reason: string; actorSession: string; json?: boolean }) => {
+      const deps = getDeps();
+      await withClient(deps, async (client) => {
+        const res = await client.post<{ closedPacketIds?: string[]; status?: string }>(
+          `/api/workflow/${encodeURIComponent(instanceId)}/abort`,
+          { reason: opts.reason, actorSession: opts.actorSession },
+        );
+        printResult(opts.json ?? false, res.data, res.status);
+        printOutcomeSummary(opts.json ?? false, res.status, {
+          what: `Aborted workflow ${instanceId}`,
+          state: `${res.data?.status ?? "unknown"}; closed ${res.data?.closedPacketIds?.length ?? 0} live packet(s)`,
+          next: `Inspect: rig workflow trace ${instanceId}`,
         });
       });
     });

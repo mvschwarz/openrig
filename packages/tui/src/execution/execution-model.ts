@@ -32,6 +32,8 @@ export interface ExecutionViewSnap {
   q4_ladder: Array<Record<string, unknown>>;
   q5_park: Array<Record<string, unknown>>;
   q6_parallelism?: Record<string, unknown>;
+  /** S06: existing workflow engine facts joined to the selected mission. */
+  lifecycle_instances?: Array<Record<string, unknown>>;
 }
 
 const MAX_ROWS_PER_WAVE = 5;
@@ -363,6 +365,7 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
     { text: `  declared in slice files: ${declaredText_ || "none"} · live now: ${live} working${problems ? `, ${problems} with a problem` : ""}` },
     row(`sources · derived ${clock(execution.derived_at) || "?"} · daemon build ${build}`, "sources", width),
     ...evidenceGapLines(execution, slices, width),
+    ...lifecycleLines(execution, width),
   ];
 
   const waves = new Map<string, SliceFacts[]>();
@@ -371,6 +374,34 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   const idWidth = Math.max(...slices.map((slice) => slice.id.length), 1);
   for (const [wave, members] of waves) lines.push(...waveRows(execution, wave, members, width, stateWidth, idWidth, true));
   if (slices.length === 0) lines.push({ text: "  (no slices on this mission)" });
+  return lines;
+}
+
+function lifecycleLines(execution: ExecutionViewSnap, width: number): ContentLine[] {
+  const instances = execution.lifecycle_instances ?? [];
+  if (instances.length === 0) return [];
+  const lines: ContentLine[] = [{ text: "" }, sectionRule(`LIFECYCLE · ${instances.length} instance${instances.length === 1 ? "" : "s"}`, width)];
+  for (const raw of instances) {
+    const instance = record(raw);
+    const instanceId = str(instance["instance_id"], INDETERMINATE);
+    lines.push({ text: `  ${instanceId} · ${str(instance["status"], INDETERMINATE)} · key ${str(instance["operation_key"], INDETERMINATE)}` });
+    const packets = Array.isArray(instance["frontier_packets"]) ? instance["frontier_packets"] as unknown[] : [];
+    for (const rawPacket of packets) {
+      const packet = record(rawPacket);
+      lines.push({ text: clip(`    ▸ ${str(packet["step_id"], INDETERMINATE)} · ${str(packet["owner"], INDETERMINATE)} · ${str(packet["queue_state"], INDETERMINATE)} · packet ${str(packet["packet_id"], INDETERMINATE)}`, width) });
+      if (packet["blocked_on"]) lines.push({ text: clip(`      blocked on ${str(packet["blocked_on"])}`, width) });
+      lines.push({ text: clip(`      action ${str(packet["targeted_action"], INDETERMINATE)}`, width) });
+    }
+    const failures = Array.isArray(instance["failure_occurrences"]) ? instance["failure_occurrences"] as unknown[] : [];
+    for (const rawFailure of failures) {
+      const failure = record(rawFailure);
+      if (failure["status"] !== "unresolved") continue;
+      lines.push({ text: clip(`    ▲ ${str(failure["step_id"], INDETERMINATE)} · occurrence ${str(failure["occurrence_id"], INDETERMINATE)}${failure["failure_reason"] ? ` · ${str(failure["failure_reason"])}` : ""}`, width) });
+      lines.push({ text: clip(`      action ${str(failure["targeted_action"], INDETERMINATE)}`, width) });
+    }
+    const unknowns = Array.isArray(instance["unknowns"]) ? instance["unknowns"] as unknown[] : [];
+    for (const unknown of unknowns) lines.push({ text: clip(`    ? ${str(unknown, INDETERMINATE)}`, width) });
+  }
   return lines;
 }
 

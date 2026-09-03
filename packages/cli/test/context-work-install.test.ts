@@ -420,6 +420,37 @@ id: OPR.0.5.8.13
     });
   });
 
+  it("uses explicit mission composition as the strict slice-selection boundary", async () => {
+    const missionRoot = join(alphaRoot, "missions", "alpha-active");
+    writeFileSync(join(missionRoot, "slices", "01-live-work", "slice.yaml"), `schema: openrig.slice/v0alpha1
+kind: slice
+metadata: { id: OPR.0.5.8.13 }
+composition: { mission: ../../mission.yaml }
+`);
+    writeFileSync(join(missionRoot, "mission.yaml"), `schema: openrig.mission/v0alpha1
+kind: mission
+composition:
+  mission_markdown: { spec: SPEC.md }
+  slices:
+    - { ref: slices/01-live-work/slice.yaml, order: 10, active: true }
+`);
+    const unlistedRoot = join(missionRoot, "slices", "02-unlisted");
+    mkdirSync(unlistedRoot, { recursive: true });
+    writeFileSync(join(unlistedRoot, "SPEC.md"), "# Unlisted slice\n");
+
+    const result = await captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install",
+        "--project", "alpha", "--mission", "alpha-active", "--slice", "02-unlisted", "--json",
+      ]);
+    });
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.logs.join(""))).toMatchObject({
+      ok: false,
+      error: { code: "slice_not_found", candidates: ["01-live-work"] },
+    });
+  });
+
   it("refuses a selected project id that names two catalog roots", async () => {
     for (const projectRoot of [alphaRoot, betaRoot]) {
       writeFileSync(join(projectRoot, "project.yaml"), `schema: openrig.project/v0alpha1

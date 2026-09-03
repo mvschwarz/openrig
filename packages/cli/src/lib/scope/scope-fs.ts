@@ -546,19 +546,32 @@ export function moveSlice(srcAbs: string, destAbs: string, opts: {
       action: "Pick a different destination, or remove the existing folder first.",
     });
   }
-  fs.mkdirSync(path.dirname(destAbs), { recursive: true });
+  const destParent = path.dirname(destAbs);
+  const destParentExisted = fs.existsSync(destParent);
+  const removeEmptyCreatedParent = (): void => {
+    if (!destParentExisted && fs.existsSync(destParent) && fs.readdirSync(destParent).length === 0) {
+      fs.rmdirSync(destParent);
+    }
+  };
   const repoRoot = gitTopLevel(srcAbs);
   if (!repoRoot) {
-    fs.renameSync(srcAbs, destAbs);
+    fs.mkdirSync(destParent, { recursive: true });
+    try {
+      fs.renameSync(srcAbs, destAbs);
+    } catch (error) {
+      removeEmptyCreatedParent();
+      throw error;
+    }
     return { usedGit: false, repoRoot: null };
   }
   // Normalize symlinks (macOS /var/folders → /private/var/folders) so
   // path.relative produces a path INSIDE the repo, not a ../../escape.
   const realSrcAbs = fs.realpathSync(srcAbs);
-  const realDestParent = fs.realpathSync(path.dirname(destAbs));
-  const realDestAbs = path.join(realDestParent, path.basename(destAbs));
   const srcRel = path.relative(repoRoot, realSrcAbs);
   assertCleanWorkingTree(repoRoot, srcRel);
+  fs.mkdirSync(destParent, { recursive: true });
+  const realDestParent = fs.realpathSync(destParent);
+  const realDestAbs = path.join(realDestParent, path.basename(destAbs));
   const destRel = path.relative(repoRoot, realDestAbs);
   try {
     execFileSync("git", ["-C", repoRoot, "mv", srcRel, destRel], {
@@ -566,6 +579,7 @@ export function moveSlice(srcAbs: string, destAbs: string, opts: {
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (err) {
+    removeEmptyCreatedParent();
     throw new ScopeCliError({
       fact: `git mv ${srcRel} ${destRel} failed: ${(err as Error).message}`,
       consequence: "Move aborted; source unchanged.",
@@ -576,6 +590,25 @@ export function moveSlice(srcAbs: string, destAbs: string, opts: {
     // Future hook; v0 doesn't auto-commit.
   }
   return { usedGit: true, repoRoot };
+}
+
+/** Best-effort inverse used only inside a failed scope composition command. */
+export function rollbackMovedSlice(
+  srcAbs: string,
+  destAbs: string,
+  move: { usedGit: boolean; repoRoot: string | null },
+): void {
+  if (!fs.existsSync(destAbs) || fs.existsSync(srcAbs)) return;
+  if (!move.usedGit || !move.repoRoot) {
+    fs.renameSync(destAbs, srcAbs);
+    return;
+  }
+  const srcRel = path.relative(move.repoRoot, fs.realpathSync(path.dirname(srcAbs)) + path.sep + path.basename(srcAbs));
+  const destRel = path.relative(move.repoRoot, fs.realpathSync(destAbs));
+  execFileSync("git", ["-C", move.repoRoot, "mv", destRel, srcRel], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
 }
 
 // ---------------------------------------------------------------------

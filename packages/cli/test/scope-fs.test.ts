@@ -303,6 +303,7 @@ describe("moveSlice — git mv preserves history (HG-5) + refuses dirty tree (HG
     fs.writeFileSync(path.join(src, "README.md"), "dirty\n", "utf8");
     const dest = path.join(missionsRoot, "release-0.3.2", "slices", "02-foo");
     expect(() => moveSlice(src, dest)).toThrow(/uncommitted/);
+    expect(fs.existsSync(path.dirname(dest))).toBe(false);
   });
 
   it("falls back to fs.rename outside a git repo", () => {

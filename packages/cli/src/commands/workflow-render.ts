@@ -43,6 +43,31 @@ export interface RenderInstance {
   };
   /** Present on waiting instances that recorded their park decision. */
   lastContinuationDecision?: { blockedOn?: string | null } | null;
+  /** S06: packet-addressed frontier facts are derived from the live queue row. */
+  frontierPackets?: RenderFrontierPacket[];
+  /** S06: unresolved branch failures remain visible even while siblings run. */
+  failureOccurrences?: RenderFailureOccurrence[];
+  /** Named broken joins; never collapse these to an apparently actionable row. */
+  unknowns?: string[];
+}
+
+export interface RenderFrontierPacket {
+  packetId: string;
+  stepId: string | null;
+  ownerSession: string | null;
+  queueState: string | null;
+  blockedOn: string | null;
+  targetedAction: "project" | "route" | "indeterminate";
+  dependsOn?: string[];
+}
+
+export interface RenderFailureOccurrence {
+  occurrenceId: string;
+  stepId: string;
+  status: "unresolved" | "resolved";
+  failureReason?: string | null;
+  redrivePacketId?: string | null;
+  targetedAction: "resume" | "none";
 }
 
 export interface RenderTrailRow {
@@ -61,6 +86,7 @@ const STATUS_GLYPH: Record<string, string> = {
   failed: "✖",
   active: "●",
   waiting: "◐",
+  aborted: "■",
 };
 
 export function statusGlyph(status: string): string {
@@ -133,12 +159,28 @@ export function renderTraceTree(
     }
     prevClosed = row.closedAt ?? prevClosed;
   }
-  if (instance.currentStepId) {
+  const packetRows = instance.frontierPackets ?? [];
+  if (packetRows.length > 0) {
+    for (let i = 0; i < packetRows.length; i++) {
+      const packet = packetRows[i]!;
+      const bar = i === packetRows.length - 1 ? "└─" : "├─";
+      const step = packet.stepId ?? "INDETERMINATE";
+      const owner = packet.ownerSession ?? "INDETERMINATE";
+      const state = packet.queueState ?? "INDETERMINATE";
+      lines.push(`  ${bar} ▸ ${fitCell(step, 20)}${fitCell(owner, 28)}${fitCell(state, 10)}packet=${packet.packetId}`);
+      if (packet.blockedOn) lines.push(`  │    ↳ blocked on: ${packet.blockedOn}`);
+    }
+  } else if (instance.currentStepId) {
     const owner = ""; // frontier owner is a queue-side fact; the frontier packet ids are what the payload carries
     lines.push(`  └─ ▸ ${fitCell(instance.currentStepId, 20)}${fitCell(owner || "(current)", 28)}${fitCell("open", 10)}frontier=[${(instance.currentFrontier ?? []).join(", ")}]`);
   } else if (trail.length === 0) {
     lines.push(`  (no steps closed yet)`);
   }
+  for (const failure of (instance.failureOccurrences ?? []).filter((item) => item.status === "unresolved")) {
+    lines.push(`  ▲ failure ${failure.occurrenceId}  step=${failure.stepId}${failure.failureReason ? `  reason=${failure.failureReason}` : ""}`);
+    lines.push(`      action: rig workflow resume ${instance.instanceId} --occurrence ${failure.occurrenceId} --actor-session <you>`);
+  }
+  for (const unknown of instance.unknowns ?? []) lines.push(`  ? ${unknown}`);
   return lines;
 }
 
@@ -152,6 +194,7 @@ export function renderTraceTree(
  */
 export function attentionMarker(instance: RenderInstance): string {
   if (instance.status === "failed") return "▲ failed";
+  if ((instance.failureOccurrences ?? []).some((failure) => failure.status === "unresolved")) return "▲ failed-branch";
   if (isStuck(instance)) return "▲ stuck";
   if (instance.status === "waiting") return "▲ waiting";
   return "";
@@ -176,7 +219,7 @@ export interface AttentionRow {
 }
 
 export interface AttentionRollup {
-  counts: { total: number; active: number; waiting: number; completed: number; failed: number };
+  counts: { total: number; active: number; waiting: number; completed: number; failed: number; aborted: number };
   attention: AttentionRow[];
 }
 
@@ -190,19 +233,25 @@ export interface AttentionRollup {
  * of them.
  */
 export function composeAttentionRollup(instances: RenderInstance[]): AttentionRollup {
-  const counts = { total: instances.length, active: 0, waiting: 0, completed: 0, failed: 0 };
+  const counts = { total: instances.length, active: 0, waiting: 0, completed: 0, failed: 0, aborted: 0 };
   const attention: AttentionRow[] = [];
   for (const inst of instances) {
     if (inst.status === "active") counts.active += 1;
     else if (inst.status === "waiting") counts.waiting += 1;
     else if (inst.status === "completed") counts.completed += 1;
     else if (inst.status === "failed") counts.failed += 1;
+    else if (inst.status === "aborted") counts.aborted += 1;
 
     const classes: string[] = [];
     const reasons: string[] = [];
     if (inst.status === "failed") {
       classes.push("failed");
       reasons.push("workflow failed");
+    }
+    const unresolved = (inst.failureOccurrences ?? []).filter((failure) => failure.status === "unresolved");
+    if (unresolved.length > 0 && inst.status !== "failed") {
+      classes.push("failed-branch");
+      reasons.push(`${unresolved.length} unresolved branch failure${unresolved.length === 1 ? "" : "s"}`);
     }
     if (isStuck(inst)) {
       classes.push("stuck");
@@ -220,7 +269,7 @@ export function composeAttentionRollup(instances: RenderInstance[]): AttentionRo
     // Affordance by highest-priority class. `route` ships in this same
     // slice (commit 6) — the verbs land together at merge (BR-1 holds
     // at the shipped boundary).
-    const affordance = classes.includes("failed")
+    const affordance = classes.includes("failed") || classes.includes("failed-branch")
       ? `inspect: rig workflow trace ${inst.instanceId}`
       : classes.includes("stuck")
         ? `re-route: rig workflow route ${inst.instanceId} --to <seat>`
@@ -241,7 +290,7 @@ export function renderStatus(rollup: AttentionRollup): string[] {
   const c = rollup.counts;
   const lines: string[] = [];
   lines.push(
-    `${c.total} instance${c.total === 1 ? "" : "s"}: ${c.active} active · ${c.waiting} waiting · ${c.completed} completed · ${c.failed} failed`,
+    `${c.total} instance${c.total === 1 ? "" : "s"}: ${c.active} active · ${c.waiting} waiting · ${c.completed} completed · ${c.failed} failed · ${c.aborted} aborted`,
   );
   if (rollup.attention.length === 0) {
     lines.push("No instances need attention (proven empty — every in-flight instance reads healthy).");
@@ -268,7 +317,7 @@ export function renderInstanceList(
   lines.push(`${fitCell("", 2)}${fitCell("INSTANCE", 30)}${fitCell("WORKFLOW", 22)}${fitCell("STATUS", 11)}${fitCell("STEP", 20)}${fitCell("AGE", 6)}ATTN`);
   for (const inst of instances) {
     lines.push(
-      `${fitCell(statusGlyph(inst.status), 2)}${fitCell(inst.instanceId, 30)}${fitCell(inst.workflowName ?? "", 22)}${fitCell(inst.status, 11)}${fitCell(inst.currentStepId ?? "-", 20)}${fitCell(humanAge(inst.createdAt, nowIso), 6)}${attentionMarker(inst)}`,
+      `${fitCell(statusGlyph(inst.status), 2)}${fitCell(inst.instanceId, 30)}${fitCell(inst.workflowName ?? "", 22)}${fitCell(inst.status, 11)}${fitCell(renderStepCell(inst), 20)}${fitCell(humanAge(inst.createdAt, nowIso), 6)}${attentionMarker(inst)}`,
     );
   }
   return lines;
@@ -285,8 +334,37 @@ export function renderInstanceShow(
   // OPR.0.4.6.FAC1: the bound rig renders when present (unbound rows unchanged).
   if (instance.boundRig) lines.push(`  rig:      ${instance.boundRig}`);
   if (instance.createdAt) lines.push(`  created:  ${instance.createdAt}${instance.createdBySession ? ` by ${instance.createdBySession}` : ""}  (age ${humanAge(instance.createdAt, nowIso)})`);
-  if (instance.currentStepId) lines.push(`  at step:  ${instance.currentStepId}  frontier=[${(instance.currentFrontier ?? []).join(", ")}]`);
+  if ((instance.frontierPackets ?? []).length > 0) {
+    lines.push("  frontier:");
+    for (const packet of instance.frontierPackets ?? []) {
+      lines.push(`    ${packet.packetId}  step=${packet.stepId ?? "INDETERMINATE"}  owner=${packet.ownerSession ?? "INDETERMINATE"}  state=${packet.queueState ?? "INDETERMINATE"}${packet.blockedOn ? `  blocked_on=${packet.blockedOn}` : ""}`);
+      const action = packet.targetedAction === "project"
+        ? `rig workflow project --instance ${instance.instanceId} --current-packet ${packet.packetId} --exit <handoff|waiting|done|failed> --actor-session ${packet.ownerSession ?? "<owner>"}`
+        : packet.targetedAction === "route"
+          ? `rig workflow route ${instance.instanceId} --packet ${packet.packetId} --to <seat> --actor-session <you>`
+          : "disabled — inspect named unknowns";
+      lines.push(`      action: ${action}`);
+    }
+  } else if (instance.currentStepId) {
+    lines.push(`  at step:  ${instance.currentStepId}  frontier=[${(instance.currentFrontier ?? []).join(", ")}]`);
+  }
+  const unresolved = (instance.failureOccurrences ?? []).filter((failure) => failure.status === "unresolved");
+  if (unresolved.length > 0) {
+    lines.push("  failures:");
+    for (const failure of unresolved) {
+      lines.push(`    ${failure.occurrenceId}  step=${failure.stepId}${failure.failureReason ? `  reason=${failure.failureReason}` : ""}`);
+      lines.push(`      action: rig workflow resume ${instance.instanceId} --occurrence ${failure.occurrenceId} --actor-session <you>`);
+    }
+  }
+  for (const unknown of instance.unknowns ?? []) lines.push(`  unknown:  ${unknown}`);
   if (instance.hopCount !== undefined) lines.push(`  hops:     ${instance.hopCount}`);
   lines.push(`  next:     rig workflow trace ${instance.instanceId}`);
   return lines;
+}
+
+function renderStepCell(instance: RenderInstance): string {
+  const packets = instance.frontierPackets ?? [];
+  if (packets.length === 1) return packets[0]!.stepId ?? "INDETERMINATE";
+  if (packets.length > 1) return `${packets.length} packets`;
+  return instance.currentStepId ?? "-";
 }

@@ -39,6 +39,13 @@ export interface WorkflowGateSpec {
   evidence_ref?: string;
 }
 
+/** A dedicated gate packet must carry all three facts before it can advance. */
+export interface WorkflowAcceptanceSpec {
+  candidate: string;
+  verdicts: string[];
+  evidence_ref: string;
+}
+
 export interface WorkflowRoleSpec {
   /** Skill identifiers that an agent in this role implements.
    *  DISPOSITION (WF-1 FR-9): explicitly-v2 — documentation-only;
@@ -87,6 +94,10 @@ export interface WorkflowStepSpec {
   /** OPR.0.4.6.WF2 FR-5: the singular structured gate declaration —
    *  see WorkflowGateSpec. Replaces the removed `gates?: string[]`. */
   gate?: WorkflowGateSpec;
+  /** Static prerequisites. Presence opts the spec into packet-addressed graph execution. */
+  depends_on?: string[];
+  /** Typed acceptance contract; ordinary delivery/liveness input cannot satisfy it. */
+  acceptance?: WorkflowAcceptanceSpec;
 }
 
 export interface WorkflowInvariants {
@@ -179,7 +190,7 @@ export interface WorkflowSpec {
   coordination_terminal_turn_rule?: string;
 }
 
-export type WorkflowInstanceStatus = "active" | "waiting" | "completed" | "failed";
+export type WorkflowInstanceStatus = "active" | "waiting" | "completed" | "failed" | "aborted";
 
 export interface WorkflowInstance {
   instanceId: string;
@@ -234,6 +245,35 @@ export interface WorkflowInstance {
    * site. null = unbound = pre-FAC-1 behavior byte-identical.
    */
   boundRig: string | null;
+  lifecycleOperationKey: string | null;
+  compiledInputDigest: string | null;
+  lifecycleBinding: Record<string, unknown> | null;
+}
+
+export interface WorkflowFrontierBinding {
+  instanceId: string;
+  packetId: string;
+  stepId: string;
+  branchDrive: number;
+  hopCount: number;
+  hopsBaseline: number;
+  createdAt: string;
+}
+
+export interface WorkflowFailureOccurrence {
+  occurrenceId: string;
+  instanceId: string;
+  failedPacketId: string;
+  stepId: string;
+  branchDrive: number;
+  hopCount: number;
+  hopsBaseline: number;
+  failureReason: string | null;
+  status: "unresolved" | "resolved";
+  redrivePacketId: string | null;
+  resumeDecision: string | null;
+  failedAt: string;
+  resolvedAt: string | null;
 }
 
 export interface WorkflowStepTrailEntry {

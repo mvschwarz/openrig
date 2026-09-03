@@ -129,6 +129,34 @@ describe("workflow-render (WF3 FR-2)", () => {
     expect(lines.join("\n")).toContain("rig workflow trace WF01ABC");
   });
 
+  it("renders every packet and failure with an exact selector, never frontier[0]", () => {
+    const lifecycle = {
+      ...INSTANCE,
+      currentStepId: null,
+      currentFrontier: ["Q-LEFT", "Q-RIGHT"],
+      frontierPackets: [
+        { packetId: "Q-LEFT", stepId: "left", ownerSession: "left@rig", queueState: "in-progress", blockedOn: null, targetedAction: "project" as const },
+        { packetId: "Q-RIGHT", stepId: "right", ownerSession: "right@rig", queueState: "blocked", blockedOn: "gate-2", targetedAction: "project" as const },
+      ],
+      failureOccurrences: [
+        { occurrenceId: "Q-FAILED", stepId: "build", status: "unresolved" as const, targetedAction: "resume" as const },
+      ],
+      unknowns: ["frontier packet Q-GHOST has no queue row"],
+    };
+    const show = renderInstanceShow(lifecycle, NOW).join("\n");
+    expect(show).toContain("Q-LEFT  step=left  owner=left@rig");
+    expect(show).toContain("Q-RIGHT  step=right  owner=right@rig  state=blocked  blocked_on=gate-2");
+    expect(show).toContain("project --instance WF01ABC --current-packet Q-LEFT --exit <handoff|waiting|done|failed> --actor-session left@rig");
+    expect(show).toContain("project --instance WF01ABC --current-packet Q-RIGHT --exit <handoff|waiting|done|failed> --actor-session right@rig");
+    expect(show).toContain("--occurrence Q-FAILED");
+    expect(show).toContain("unknown:  frontier packet Q-GHOST has no queue row");
+
+    const trace = renderTraceTree(lifecycle, TRAIL, NOW).join("\n");
+    expect(trace).toContain("packet=Q-LEFT");
+    expect(trace).toContain("packet=Q-RIGHT");
+    expect(trace).toContain("failure Q-FAILED");
+  });
+
   it("humanDuration compacts sanely", () => {
     expect(humanDuration("2026-07-06T21:00:00Z", "2026-07-06T21:00:30Z")).toBe("30s");
     expect(humanDuration("2026-07-06T21:00:00Z", "2026-07-06T22:30:00Z")).toBe("90m");

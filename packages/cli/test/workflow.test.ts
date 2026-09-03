@@ -76,7 +76,7 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     process.exitCode = undefined;
   });
 
-  it("workflow command is registered with all 7 subcommands", () => {
+  it("workflow command registers the lifecycle inspection and control verbs", () => {
     const { deps } = makeDeps();
     const program = createProgram({ workflowDeps: deps });
     const cmd = program.commands.find((c) => c.name() === "workflow");
@@ -89,6 +89,9 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     expect(subs).toContain("show");
     expect(subs).toContain("trace");
     expect(subs).toContain("continue");
+    expect(subs).toContain("compile");
+    expect(subs).toContain("instantiate-lifecycle");
+    expect(subs).toContain("abort");
   });
 
   it("validate POSTs /api/workflow/validate with specPath", async () => {
@@ -100,6 +103,40 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     await program.parseAsync(["node", "rig", "workflow", "validate", "/abs/path.yaml", "--json"]);
     const call = calls.find((c) => c.path === "/api/workflow/validate");
     expect((call!.body as { specPath: string }).specPath).toBe("/abs/path.yaml");
+  });
+
+  it("compile POSTs the mission path and optional opaque operation key", async () => {
+    const { deps, calls } = makeDeps({
+      routes: { "POST /api/workflow/compile": { status: 200, data: { eligible: false, unknowns: ["missing"] } } },
+    });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "workflow", "compile", "/workspace/missions/release", "--operation-key", "release-op", "--json"]);
+    expect(calls.find((call) => call.path === "/api/workflow/compile")?.body).toEqual({
+      missionPath: "/workspace/missions/release",
+      operationKey: "release-op",
+    });
+  });
+
+  it("instantiate-lifecycle POSTs the complete keyed lifecycle request", async () => {
+    const { deps, calls } = makeDeps({
+      routes: { "POST /api/workflow/instantiate-lifecycle": { status: 201, data: { instance: { instanceId: "wf-1" }, entryQitemId: "q-1", replayed: false } } },
+    });
+    const program = createProgram({ workflowDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "workflow", "instantiate-lifecycle", "/workspace/missions/release",
+      "--operation-key", "release-op", "--root-objective", "ship", "--created-by", "orch@rig",
+      "--entry-owner", "builder@rig", "--rig", "rig", "--json",
+    ]);
+    expect(calls.find((call) => call.path === "/api/workflow/instantiate-lifecycle")?.body).toEqual({
+      missionPath: "/workspace/missions/release",
+      operationKey: "release-op",
+      rootObjective: "ship",
+      createdBySession: "orch@rig",
+      entryOwnerSession: "builder@rig",
+      targetRig: "rig",
+    });
   });
 
   it("instantiate POSTs /api/workflow/instantiate with required fields", async () => {
@@ -185,5 +222,30 @@ describe("rig workflow CLI (PL-004 Phase D)", () => {
     program.exitOverride();
     await program.parseAsync(["node", "rig", "workflow", "continue", "inst-1", "--json"]);
     expect(calls.find((c) => c.path === "/api/workflow/inst-1/continue")).toBeDefined();
+  });
+
+  it("route, resume, and abort preserve exact packet/occurrence control selectors", async () => {
+    const { deps, calls } = makeDeps();
+    const routeProgram = createProgram({ workflowDeps: deps });
+    routeProgram.exitOverride();
+    await routeProgram.parseAsync([
+      "node", "rig", "workflow", "route", "wf-1", "--packet", "q-left", "--to", "left2@rig",
+      "--actor-session", "orch@rig", "--reason", "seat retired", "--json",
+    ]);
+    const resumeProgram = createProgram({ workflowDeps: deps });
+    resumeProgram.exitOverride();
+    await resumeProgram.parseAsync([
+      "node", "rig", "workflow", "resume", "wf-1", "--occurrence", "q-failed",
+      "--actor-session", "orch@rig", "--decision", "retry exact branch", "--json",
+    ]);
+    const abortProgram = createProgram({ workflowDeps: deps });
+    abortProgram.exitOverride();
+    await abortProgram.parseAsync([
+      "node", "rig", "workflow", "abort", "wf-1", "--reason", "operator stopped",
+      "--actor-session", "orch@rig", "--json",
+    ]);
+    expect(calls.find((call) => call.path === "/api/workflow/wf-1/route")?.body).toMatchObject({ packetId: "q-left" });
+    expect(calls.find((call) => call.path === "/api/workflow/wf-1/resume")?.body).toMatchObject({ occurrenceId: "q-failed" });
+    expect(calls.find((call) => call.path === "/api/workflow/wf-1/abort")?.body).toEqual({ reason: "operator stopped", actorSession: "orch@rig" });
   });
 });

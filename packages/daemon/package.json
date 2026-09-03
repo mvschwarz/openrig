@@ -36,6 +36,10 @@
     "./skill-loadout": {
       "types": "./dist/skill-loadout-surface.d.ts",
       "import": "./dist/skill-loadout-surface.js"
+    },
+    "./project-lifecycle": {
+      "types": "./dist/project-lifecycle-surface.d.ts",
+      "import": "./dist/project-lifecycle-surface.js"
     }
   },
   "scripts": {

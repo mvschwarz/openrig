@@ -34,6 +34,8 @@ import {
 interface WorkflowKeepaliveContext {
   /** ULID of the workflow_instances row to keep alive. Required. */
   workflow_instance_id?: string;
+  /** Optional packet selector for parallel-frontier auto-armed jobs. */
+  workflow_packet_id?: string;
   observer_session?: string;
   observer_sessions?: string[];
   /**
@@ -122,7 +124,22 @@ export function makeWorkflowKeepalivePolicy(deps: WorkflowKeepaliveDeps): Policy
         };
       }
 
-      const frontier = (JSON.parse(instance.current_frontier_json) as string[]) ?? [];
+      const wholeFrontier = (JSON.parse(instance.current_frontier_json) as string[]) ?? [];
+      const packetId = context.workflow_packet_id;
+      if (packetId && !wholeFrontier.includes(packetId)) {
+        return { action: "terminal", reason: "workflow_packet_not_live", notes: { instanceId, packetId } };
+      }
+      const frontier = packetId ? [packetId] : wholeFrontier;
+      let currentStepId = instance.current_step_id;
+      if (packetId) {
+        try {
+          currentStepId = (db.prepare(
+            `SELECT step_id FROM workflow_frontier_bindings WHERE instance_id = ? AND packet_id = ?`,
+          ).get(instanceId, packetId) as { step_id: string } | undefined)?.step_id ?? null;
+        } catch {
+          currentStepId = null;
+        }
+      }
 
       // Resolve frontier qitem owners (+ FR-2 anchor fields) from queue_items.
       const resolvedFrontierOwners: string[] = [];
@@ -147,7 +164,7 @@ export function makeWorkflowKeepalivePolicy(deps: WorkflowKeepaliveDeps): Policy
           instanceId: instance.instance_id,
           status: instance.status,
           currentFrontier: frontier,
-          currentStepId: instance.current_step_id,
+          currentStepId,
         },
         frontierRows.map((r) => ({
           qitemId: r.qitem_id,

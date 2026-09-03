@@ -99,10 +99,13 @@ export const WORKFLOW_STEP_KEYS = [
   "harness",
   "host",
   "gate",
+  "depends_on",
+  "acceptance",
 ] as const;
 export const WORKFLOW_ROLE_KEYS = ["skill_refs", "preferred_targets"] as const;
 export const WORKFLOW_NEXT_HOP_KEYS = ["mode", "suggested_roles", "on"] as const;
 export const WORKFLOW_GATE_KEYS = ["target", "summary", "evidence_ref"] as const;
+export const WORKFLOW_ACCEPTANCE_KEYS = ["candidate", "verdicts", "evidence_ref"] as const;
 export const WORKFLOW_TARGET_KEYS = ["rig"] as const;
 export const WORKFLOW_ENTRY_KEYS = ["role"] as const;
 export const WORKFLOW_INVARIANTS_KEYS = [
@@ -457,6 +460,42 @@ export function parseWorkflowSpec(rawYaml: string, sourcePath: string): Workflow
           }
         }
       }
+      if (s.depends_on !== undefined) {
+        if (!Array.isArray(s.depends_on) || s.depends_on.some((value) => typeof value !== "string" || value.length === 0)) {
+          throw new WorkflowSpecError(
+            "spec_field_invalid",
+            `workflow spec at ${sourcePath}: workflow.steps[${idx}].depends_on must be a list of non-empty step ids.`,
+            { sourcePath, path: `workflow.steps[${idx}].depends_on`, value: s.depends_on },
+          );
+        }
+        if (new Set(s.depends_on).size !== s.depends_on.length) {
+          throw new WorkflowSpecError(
+            "spec_field_invalid",
+            `workflow spec at ${sourcePath}: workflow.steps[${idx}].depends_on contains a duplicate prerequisite.`,
+            { sourcePath, path: `workflow.steps[${idx}].depends_on`, value: s.depends_on },
+          );
+        }
+      }
+      if (s.acceptance !== undefined) {
+        if (!s.acceptance || typeof s.acceptance !== "object" || Array.isArray(s.acceptance)) {
+          throw new WorkflowSpecError(
+            "spec_field_invalid",
+            `workflow spec at ${sourcePath}: workflow.steps[${idx}].acceptance must be a mapping with candidate, verdicts, and evidence_ref.`,
+            { sourcePath, path: `workflow.steps[${idx}].acceptance` },
+          );
+        }
+        rejectUnknownKeys(s.acceptance, WORKFLOW_ACCEPTANCE_KEYS, `workflow.steps[${idx}].acceptance`, sourcePath);
+        const acceptance = s.acceptance as Record<string, unknown>;
+        if (typeof acceptance.candidate !== "string" || acceptance.candidate.length === 0) {
+          throw new WorkflowSpecError("spec_field_missing", `workflow spec at ${sourcePath}: workflow.steps[${idx}].acceptance.candidate is required.`, { sourcePath, field: `workflow.steps[${idx}].acceptance.candidate` });
+        }
+        if (!Array.isArray(acceptance.verdicts) || acceptance.verdicts.length === 0 || acceptance.verdicts.some((value) => typeof value !== "string" || value.length === 0)) {
+          throw new WorkflowSpecError("spec_field_invalid", `workflow spec at ${sourcePath}: workflow.steps[${idx}].acceptance.verdicts must be a non-empty list of verdict strings.`, { sourcePath, field: `workflow.steps[${idx}].acceptance.verdicts` });
+        }
+        if (typeof acceptance.evidence_ref !== "string" || acceptance.evidence_ref.length === 0) {
+          throw new WorkflowSpecError("spec_field_missing", `workflow spec at ${sourcePath}: workflow.steps[${idx}].acceptance.evidence_ref is required.`, { sourcePath, field: `workflow.steps[${idx}].acceptance.evidence_ref` });
+        }
+      }
     }
   });
 
@@ -596,6 +635,70 @@ export class WorkflowSpecCache {
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${insertPlaceholder})`,
       )
       .run(...(insertParams as never[]));
+    return rowToWorkflowSpec({
+      spec_id: specId,
+      name: spec.id,
+      version: spec.version,
+      purpose,
+      target_rig: targetRig,
+      roles_json: rolesJson,
+      steps_json: stepsJson,
+      coordination_terminal_turn_rule: coordinationTerminalTurnRule,
+      source_path: sourcePath,
+      source_hash: sourceHash,
+      cached_at: cachedAt,
+    }, spec);
+  }
+
+  /**
+   * Cache a deterministic generated spec without manufacturing an authored
+   * workflow file.  Lifecycle compilation is read-only; this method is called
+   * only by the later instantiate boundary, where the runtime needs the normal
+   * spec-cache row for projection and restart recovery.
+   */
+  putGenerated(spec: WorkflowSpec, sourcePath: string, sourceHash: string): WorkflowSpecRow {
+    const existing = this.db
+      .prepare(`SELECT * FROM workflow_specs WHERE name = ? AND version = ?`)
+      .get(spec.id, spec.version) as SpecRow | undefined;
+    const cachedAt = this.now().toISOString();
+    const purpose = spec.objective ?? null;
+    const targetRig = spec.target?.rig ?? null;
+    const rolesJson = JSON.stringify(spec.roles);
+    const stepsJson = JSON.stringify(spec.steps);
+    const coordinationTerminalTurnRule = spec.coordination_terminal_turn_rule ?? "hot_potato";
+    if (existing) {
+      if (existing.source_hash !== sourceHash) {
+        throw new WorkflowSpecError(
+          "generated_spec_identity_collision",
+          `generated workflow ${spec.id}@${spec.version} already names different source bytes`,
+          { sourcePath, sourceHash, cachedSourcePath: existing.source_path, cachedSourceHash: existing.source_hash },
+        );
+      }
+      return rowToWorkflowSpec(existing, spec);
+    }
+    const specId = ulid();
+    const extraCols = this.hasSpecJsonColumn ? ", spec_json" : "";
+    const extraValue = this.hasSpecJsonColumn ? ", ?" : "";
+    const params: unknown[] = [
+      specId,
+      spec.id,
+      spec.version,
+      purpose,
+      targetRig,
+      rolesJson,
+      stepsJson,
+      coordinationTerminalTurnRule,
+      sourcePath,
+      sourceHash,
+      cachedAt,
+    ];
+    if (this.hasSpecJsonColumn) params.push(JSON.stringify(spec));
+    this.db.prepare(
+      `INSERT INTO workflow_specs (
+         spec_id, name, version, purpose, target_rig, roles_json, steps_json,
+         coordination_terminal_turn_rule, source_path, source_hash, cached_at${extraCols}
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${extraValue})`,
+    ).run(...(params as never[]));
     return rowToWorkflowSpec({
       spec_id: specId,
       name: spec.id,

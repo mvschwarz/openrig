@@ -144,6 +144,13 @@ export class WorkflowValidator {
           }
         }
       }
+      for (const dependency of step.depends_on ?? []) {
+        if (dependency === step.id) {
+          issues.push({ code: "dependency_self_reference", message: `step "${step.id}" cannot depend on itself.`, field: `${fieldBase}.depends_on`, severity: "error" });
+        } else if (!spec.steps.some((candidate) => candidate.id === dependency)) {
+          issues.push({ code: "dependency_step_not_found", message: `step "${step.id}" depends on missing step "${dependency}". Fix the id or remove the dead prerequisite.`, field: `${fieldBase}.depends_on`, severity: "error" });
+        }
+      }
     });
 
     // ── OPR.0.4.6.WF1 FR-7 (G7): graph validation over the REAL
@@ -203,10 +210,17 @@ export class WorkflowValidator {
     // would hop unbounded, so validation fails naming the fix).
     if (spec.steps.length > 0 && spec.steps.every((s) => s.id)) {
       const stepById = new Map(spec.steps.map((s) => [s.id, s]));
+      const dependencyGraph = spec.steps.some((step) => step.depends_on !== undefined);
       const successorsOf = (step: WorkflowStepSpec): string[] => {
         const out: string[] = [];
-        const structural = resolveNextStep(spec, step);
-        if (structural) out.push(structural.id);
+        if (dependencyGraph) {
+          for (const candidate of spec.steps) {
+            if ((candidate.depends_on ?? []).includes(step.id)) out.push(candidate.id);
+          }
+        } else {
+          const structural = resolveNextStep(spec, step);
+          if (structural) out.push(structural.id);
+        }
         for (const targetId of Object.values(step.next_hop?.on ?? {})) {
           if (targetId && stepById.has(targetId) && !out.includes(targetId)) {
             out.push(targetId);

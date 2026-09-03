@@ -3,6 +3,10 @@ import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node
 import { parse as parseYaml } from "yaml";
 import { readFrontmatter, resolveNodeFile } from "./scope/scope-fs.js";
 import { readProjectSkillSelection } from "@openrig/daemon/skill-loadout";
+import {
+  LifecycleManifestValidationError,
+  validateMissionComposition,
+} from "@openrig/daemon/project-lifecycle";
 
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -119,6 +123,7 @@ function manifestProjectId(manifest: Record<string, unknown> | null): string | n
 function resolveExplicitSlice(
   missionRoot: string,
   selection: string,
+  declaredSliceRoots?: Set<string>,
 ): { root: string; name: string } | WorkInstallFailure {
   const slicesRoot = join(missionRoot, "slices");
   const available: string[] = [];
@@ -126,7 +131,6 @@ function resolveExplicitSlice(
   if (existsSync(slicesRoot)) {
     for (const entry of readdirSync(slicesRoot, { withFileTypes: true })) {
       if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      available.push(entry.name);
       const nominalRoot = join(slicesRoot, entry.name);
       const root = canonicalExisting(nominalRoot);
       if (!root || !inside(missionRoot, root)) {
@@ -135,6 +139,8 @@ function resolveExplicitSlice(
         }
         continue;
       }
+      if (declaredSliceRoots && !declaredSliceRoots.has(root)) continue;
+      available.push(entry.name);
       const nodeFile = resolveNodeFile(root);
       const frontmatter = nodeFile ? readFrontmatter(nodeFile) : {};
       const declaredId = frontmatter["id"] ?? frontmatter["dotId"];
@@ -312,10 +318,24 @@ export function resolveWorkPosition(opts: {
       frontier = "mission";
       let missionSpec = "SPEC.md";
       let missionSource: WorkInstallSource = "default";
+      let declaredSliceRoots: Set<string> | undefined;
       const missionManifestPath = join(missionRoot, "mission.yaml");
       if (existsSync(missionManifestPath)) {
         const parsed = readYaml(missionManifestPath);
         const composition = parsed.value?.["composition"];
+        if (parsed.value && isRecord(composition) && "slices" in composition) {
+          try {
+            declaredSliceRoots = new Set(
+              validateMissionComposition(parsed.value, missionManifestPath)
+                .map((member) => dirname(member.path)),
+            );
+          } catch (error) {
+            const message = error instanceof LifecycleManifestValidationError
+              ? error.message
+              : `Mission composition validation failed: ${(error as Error).message}`;
+            return failure("mission_composition_invalid", message);
+          }
+        }
         const markdown = isRecord(composition) ? composition["mission_markdown"] : null;
         if (isRecord(markdown) && typeof markdown["spec"] === "string" && markdownPath(markdown["spec"])) {
           missionSpec = markdown["spec"];
@@ -332,7 +352,7 @@ export function resolveWorkPosition(opts: {
       pieces.push(plannedMissionProgress);
 
       if (opts.slice !== undefined) {
-        const selectedSlice = resolveExplicitSlice(missionRoot, opts.slice);
+        const selectedSlice = resolveExplicitSlice(missionRoot, opts.slice, declaredSliceRoots);
         if ("error" in selectedSlice) return selectedSlice;
         sliceRoot = selectedSlice.root;
         sliceName = selectedSlice.name;

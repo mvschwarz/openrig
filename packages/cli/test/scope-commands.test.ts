@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { Command } from "commander";
+import YAML from "yaml";
 
 import { scopeCommand } from "../src/commands/scope.js";
 import { readFrontmatter } from "../src/lib/scope/scope-fs.js";
@@ -47,6 +48,38 @@ function seedSubstrate(): { root: string; missionsRoot: string } {
   execFileSync("git", ["-C", root, "add", "."], { stdio: "ignore" });
   execFileSync("git", ["-C", root, "commit", "-m", "seed", "-q"], { stdio: "ignore" });
   return { root, missionsRoot };
+}
+
+interface CompositionMember {
+  ref: string;
+  order: number;
+  active: boolean;
+}
+
+function seedMissionComposition(
+  missionsRoot: string,
+  mission: string,
+  members: CompositionMember[],
+): string {
+  const missionPath = path.join(missionsRoot, mission);
+  for (const member of members) {
+    writeFile(path.join(missionPath, member.ref), "kind: slice\n");
+  }
+  const manifestPath = path.join(missionPath, "mission.yaml");
+  writeFile(manifestPath, YAML.stringify({ kind: "mission", composition: { slices: members } }));
+  return manifestPath;
+}
+
+function readMissionComposition(missionsRoot: string, mission: string): CompositionMember[] {
+  const manifest = YAML.parse(
+    fs.readFileSync(path.join(missionsRoot, mission, "mission.yaml"), "utf8"),
+  ) as { composition: { slices: CompositionMember[] } };
+  return manifest.composition.slices;
+}
+
+function commitFixture(root: string): void {
+  execFileSync("git", ["-C", root, "add", "."], { stdio: "ignore" });
+  execFileSync("git", ["-C", root, "commit", "-m", "composition fixture", "-q"], { stdio: "ignore" });
 }
 
 interface CaptureResult {
@@ -250,6 +283,39 @@ describe("rig scope slice create", () => {
     expect(proof).toContain("## Residue / caveats (if any)");
   });
 
+  it("adds a new slice to explicit mission composition in stable order", async () => {
+    seedMissionComposition(env.missionsRoot, "release-0.3.2", [
+      { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
+    ]);
+
+    const r = await run([
+      "slice", "create", "release-0.3.2", "composed", "--json",
+    ], env.missionsRoot);
+
+    expect(r.exitCode).toBe(0);
+    expect(readMissionComposition(env.missionsRoot, "release-0.3.2")).toEqual([
+      { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
+      { ref: "slices/02-composed/slice.yaml", order: 20, active: true },
+    ]);
+  });
+
+  it("refuses malformed explicit composition before creating any slice", async () => {
+    const manifestPath = seedMissionComposition(env.missionsRoot, "release-0.3.2", [
+      { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
+    ]);
+    const malformed = "kind: mission\ncomposition:\n  slices:\n    - ref: slices/01-existing/slice.yaml\n      order: 10\n    - ref: slices/01-existing/slice.yaml\n      order: 20\n";
+    fs.writeFileSync(manifestPath, malformed, "utf8");
+    const before = fs.readdirSync(path.join(env.missionsRoot, "release-0.3.2", "slices"));
+
+    const r = await run([
+      "slice", "create", "release-0.3.2", "must-not-exist", "--json",
+    ], env.missionsRoot);
+
+    expect(r.exitCode).toBe(1);
+    expect(fs.readFileSync(manifestPath, "utf8")).toBe(malformed);
+    expect(fs.readdirSync(path.join(env.missionsRoot, "release-0.3.2", "slices"))).toEqual(before);
+  });
+
   it("AC-1: slice create --readme-only writes marker instead of PROGRESS.md", async () => {
     const r = await run([
       "slice", "create", "release-0.3.2", "no-progress", "--readme-only", "--json",
@@ -272,12 +338,19 @@ describe("rig scope slice ship (HG-5)", () => {
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
 
   it("git mv + frontmatter status: shipped-to-release-X.Y", async () => {
+    seedMissionComposition(env.missionsRoot, "backlog", [
+      { ref: "slices/01-debt-foo/slice.yaml", order: 10, active: true },
+    ]);
+    seedMissionComposition(env.missionsRoot, "release-0.3.2", [
+      { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
+    ]);
+    commitFixture(env.root);
     const r = await run([
       "slice", "ship", "01-debt-foo", "release-0.3.2",
       "--mission", "backlog", "--json",
     ], env.missionsRoot);
     const parsed = JSON.parse(r.stdout);
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok, r.stderr || r.stdout).toBe(true);
     expect(parsed.shipped.git.usedGit).toBe(true);
     // Source removed; target present.
     expect(fs.existsSync(path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo"))).toBe(false);
@@ -285,6 +358,53 @@ describe("rig scope slice ship (HG-5)", () => {
     const fm = readFrontmatter(path.join(parsed.shipped.to.path, "README.md"));
     expect(fm.status).toBe("shipped-to-release-0.3.2");
     expect(fm.mission).toBe("release-0.3.2");
+    expect(readMissionComposition(env.missionsRoot, "backlog")).toEqual([]);
+    expect(readMissionComposition(env.missionsRoot, "release-0.3.2")).toEqual([
+      { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
+      { ref: "slices/02-debt-foo/slice.yaml", order: 20, active: true },
+    ]);
+  });
+
+  it("refuses a malformed target manifest without changing source membership or files", async () => {
+    const sourceManifest = seedMissionComposition(env.missionsRoot, "backlog", [
+      { ref: "slices/01-debt-foo/slice.yaml", order: 10, active: true },
+    ]);
+    const targetManifest = seedMissionComposition(env.missionsRoot, "release-0.3.2", [
+      { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
+    ]);
+    fs.writeFileSync(targetManifest, "kind: mission\ncomposition:\n  slices: invalid\n", "utf8");
+    const sourceBefore = fs.readFileSync(sourceManifest, "utf8");
+    const targetBefore = fs.readFileSync(targetManifest, "utf8");
+
+    const r = await run([
+      "slice", "ship", "01-debt-foo", "release-0.3.2",
+      "--mission", "backlog", "--json",
+    ], env.missionsRoot);
+
+    expect(r.exitCode).toBe(1);
+    expect(fs.readFileSync(sourceManifest, "utf8")).toBe(sourceBefore);
+    expect(fs.readFileSync(targetManifest, "utf8")).toBe(targetBefore);
+    expect(fs.existsSync(path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo"))).toBe(true);
+    expect(fs.existsSync(path.join(env.missionsRoot, "release-0.3.2", "slices", "02-debt-foo"))).toBe(false);
+  });
+
+  it("refuses an explicit source composition that does not own the slice", async () => {
+    const sourceManifest = seedMissionComposition(env.missionsRoot, "backlog", []);
+    seedMissionComposition(env.missionsRoot, "release-0.3.2", [
+      { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
+    ]);
+    const sourceBefore = fs.readFileSync(sourceManifest, "utf8");
+
+    const r = await run([
+      "slice", "ship", "01-debt-foo", "release-0.3.2",
+      "--mission", "backlog", "--json",
+    ], env.missionsRoot);
+
+    expect(r.exitCode).toBe(1);
+    expect(r.stdout).toContain("does not contain slices/01-debt-foo/slice.yaml");
+    expect(fs.readFileSync(sourceManifest, "utf8")).toBe(sourceBefore);
+    expect(fs.existsSync(path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo"))).toBe(true);
+    expect(fs.existsSync(path.join(env.missionsRoot, "release-0.3.2", "slices", "02-debt-foo"))).toBe(false);
   });
 });
 
@@ -298,6 +418,10 @@ describe("rig scope slice close (HG-6)", () => {
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
 
   it("moves to closed/ + sets status: closed-<reason>", async () => {
+    seedMissionComposition(env.missionsRoot, "backlog", [
+      { ref: "slices/01-debt-foo/slice.yaml", order: 10, active: true },
+    ]);
+    commitFixture(env.root);
     const r = await run([
       "slice", "close", "01-debt-foo",
       "--mission", "backlog",
@@ -306,12 +430,13 @@ describe("rig scope slice close (HG-6)", () => {
       "--json",
     ], env.missionsRoot);
     const parsed = JSON.parse(r.stdout);
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok, r.stderr || r.stdout).toBe(true);
     expect(fs.existsSync(path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo"))).toBe(false);
     expect(fs.existsSync(path.join(env.missionsRoot, "backlog", "closed", "01-debt-foo"))).toBe(true);
     const fm = readFrontmatter(path.join(env.missionsRoot, "backlog", "closed", "01-debt-foo", "README.md"));
     expect(fm.status).toBe("closed-wontfix");
     expect(fm["closure-note"]).toBe("obsolete by design");
+    expect(readMissionComposition(env.missionsRoot, "backlog")).toEqual([]);
   });
 
   it("rejects unknown --reason values", async () => {
@@ -337,16 +462,28 @@ describe("rig scope slice move (HG-7)", () => {
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
 
   it("moves between missions; auto-renumber; frontmatter.mission updates", async () => {
+    seedMissionComposition(env.missionsRoot, "backlog", [
+      { ref: "slices/01-debt-foo/slice.yaml", order: 10, active: true },
+    ]);
+    seedMissionComposition(env.missionsRoot, "release-0.3.2", [
+      { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
+    ]);
+    commitFixture(env.root);
     const r = await run([
       "slice", "move", "01-debt-foo", "release-0.3.2",
       "--mission", "backlog", "--json",
     ], env.missionsRoot);
     const parsed = JSON.parse(r.stdout);
-    expect(parsed.ok).toBe(true);
+    expect(parsed.ok, r.stderr || r.stdout).toBe(true);
     expect(parsed.moved.to.name).toMatch(/^02-/); // 01 was taken
     expect(parsed.moved.to.id).toBe("OPR.0.3.2.2");
     const fm = readFrontmatter(path.join(parsed.moved.to.path, "README.md"));
     expect(fm.mission).toBe("release-0.3.2");
+    expect(readMissionComposition(env.missionsRoot, "backlog")).toEqual([]);
+    expect(readMissionComposition(env.missionsRoot, "release-0.3.2")).toEqual([
+      { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
+      { ref: "slices/02-debt-foo/slice.yaml", order: 20, active: true },
+    ]);
   });
 });
 
