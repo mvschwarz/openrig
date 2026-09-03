@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Eighty-one-plus top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.5.7`). Read this once for shape, and let it make you suspicious that a thing
+`capability-delta-v0.5.8`). Read this once for shape, and let it make you suspicious that a thing
 already exists. Model-divergence proclamations are live product (trust them; pins use canonical
 model IDs).
 
@@ -32,13 +32,16 @@ one command away. Your memory of the fleet is a claim about the past.
   unless you ask for nodes.
 - **`rig discover`** — what is running on this box that OpenRig is *not* managing.
 - **`rig queue whoami`** — what the daemon thinks you are holding. Not what you remember holding.
+  When the seat's typed rows name exactly one work node, its JSON also carries `currentWork` with
+  the mission, slice, and path the refocus hook uses.
 - **`rig seat status <seat>`** — what the system already believes about a seat's handover state,
   and whether the thing you did an hour ago actually landed.
 - **`rig view list` / `rig view show <lens>`** — named lenses over coordination state: use
   `view show escalations` for owner attention, `view show pickup` for claimed-row state, and
   `view show execution` for done/now/next. An `INDETERMINATE` cell stays unknown rather than
-  being filled from memory. **`rig view register`** turns a query you keep re-running into a
-  first-class view.
+  being filled from memory. In `rig tui`, SCOPES → select a mission shows the same story as
+  DONE / NOW / NEXT / ATTENTION, with row drill-in and Escape back. **`rig view register`** turns
+  a query you keep re-running into a first-class view.
 - **`rig config`** — bare, with no arguments: every key, every current value, and where each came
   from. Most agents assume compaction thresholds, snapshot cadence and scan intervals are hardcoded
   daemon behaviour. They are configuration. **Watch one thing:** `source: default` does not mean
@@ -53,7 +56,9 @@ unseen — which makes messages the one delivery channel that never gets skipped
 - **`rig send`** — put words in front of one seat, several, a pod, or a rig. **`--verify` checks
   pane-only delivery**: the text was staged at the far end, not that the agent consumed or acted
   on it. Alternate-screen and queued-command cases can still yield false negatives, so
-  consequential delivery gets an effect check at the far end rather than a blind retry.
+  consequential delivery gets an effect check at the far end rather than a blind retry. A
+  producer-link advisory reading `no_activity_signal` means activity could not be determined;
+  confirm by effect, never relaunch on it.
 - **`rig send --raw`** / **`--dangerously-interact --reason "<why>"`** — a seat is frozen on an
   interactive prompt or a permission block. Normal `send` *refuses* to answer a prompt on purpose;
   this is the deliberate override, and it is how you unblock a peer who cannot unblock itself.
@@ -105,7 +110,8 @@ your context, your compaction and your replacement — and it is the only thing 
 - **`rig queue block` / `resolve`** — park a row on a real blocker so it stays **yours and
   visible**, with a plain-language summary and a pointer to what a human must judge; `resolve`
   writes their decision onto the durable record and wakes the owner. **Closing it would be a lie
-  and sitting on it silently is indistinguishable from a crash.**
+  and sitting on it silently is indistinguishable from a crash.** `--wake-after <duration>` arms
+  one wake for this park episode; a new park supersedes it and every exit route retires it.
 - **`rig queue overdue`** — what was claimed and never closed in time. **Defaults to the current
   rig**; ask for more if you mean more.
 - **`rig queue undelivered`** — pending create-path nudge failures only. For gateway or human
@@ -129,8 +135,9 @@ you that is still running.
   asleep, compacted or finished. For a context wall, use the exact
   `--policy context-usage-threshold` rather than a hand-rolled transcript timer.
 - **`rig watchdog list` / `show` / `status` / `stop`** — did it fire, is it still live, did someone
-  stop it. **Quiet skips are not recorded**, so a healthy idle job and a job that never ran look
-  identical in `status` — INDETERMINATE is the honest read until `show` says otherwise.
+  stop it. `list` defaults to active, compact, and 100; `--all --full` is the complete history.
+  **Quiet skips are not recorded**, so a healthy idle job and a job that never ran look identical
+  in `status` — INDETERMINATE is the honest read until `show` says otherwise.
 - **An alarm whose message has gone stale is worse than no alarm.** When the thread it refers to
   closes, kill it or rewrite it — a successor inheriting an escalation order with no thread
   attached is worse off than one with nothing.
@@ -172,7 +179,7 @@ not have to tear one down to change it, and you rarely have to start from nothin
 - **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
   rest.
 - **`rig add`** / **`rig expand`** — graft one more member, or a whole new pod, onto a rig that is
-  already running.
+  already running. `rig grow --new-pod` and `rig expand` are one ingress; choose by input shape.
 - **`rig remove`** / **`rig shrink`** — take a seat, or an entire pod, out of a running topology.
   If it holds active work, pass `--fallback <live-seat>` to reroute before mutation; without a
   valid fallback the command refuses rather than strand the rows.
@@ -201,7 +208,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
 because someone lost work once.
 
 - **`rig start`** — the box rebooted and everything is gone: bring the whole topology back in one
-  move, rather than hand-restoring rig by rig.
+  move, rather than hand-restoring rig by rig. Selected-rig recovery now demands positive runtime
+  evidence and refuses stale identity by name rather than substituting an occupant.
 - **`rig daemon start` / `stop` / `status` / `logs`** — bounce the control plane, or read what it
   actually tried and refused, in its own voice.
 - **`rig doctor`** — is the *installation* wired up correctly, or are you chasing a bug that is
@@ -218,6 +226,9 @@ because someone lost work once.
   actually come back, and for everything that would not, which check fails and what the fix is.
 - **`rig restore-packet write` / `read` / `validate`** — a seat is about to die or must move
   runtimes; capture what it knows into a portable artifact instead of losing it with the process.
+- **Upgrading is agent-led** — load the shipped `openrig-upgrade` skill for the bounded inspect,
+  backup, and plugin-refresh helpers. There is no `rig upgrade` verb, and `rig down` is not part of
+  a continuity-preserving upgrade.
 - **A seat's `compaction_strategy` is declared, not improvised at the wall.** Pair a threshold-
   managed seat with the `context-usage-threshold` watchdog above so continuity is arranged while
   the seat can still act.
@@ -230,6 +241,7 @@ because someone lost work once.
 - **`rig seat set-model` / `stop` / `clean`** — persist the model for later managed resumes, stop
   exactly one live seat, or clear a dead seat's stale binding. When the topology is right and only
   the occupant is wrong, use these seat lifecycle verbs or `rig handover`, not a rig down/up cycle.
+  A `<synthetic>` transcript record is skipped, so a PENDING model check is not a divergence.
 - **`rig compact-plan`** → **`rig compact`** — who is near the context wall, then act on it.
   **Ordering matters: running `compact` without the plan is guessing which seat needed it.**
 - **Know what compaction costs before you reach for it.** On some runtimes what comes back has
@@ -314,12 +326,17 @@ working arrangement becomes something someone else can instantiate.
 
 - **`rig spec validate` → `preflight` → `audit`** — three different questions, in order: is the
   file well-formed, would it boot *on this host*, and **will the agents it launches actually know
-  anything when they arrive**. The third is the one people skip.
+  anything when they arrive**. The third is the one people skip. Unknown structural keys refuse
+  with their path instead of being normalized away.
+- **`rig context trace --pod <pod>`** — walk the context chain through instance → rig → pod → seat
+  when the pod altitude matters.
 - **`rig specs show` / `preview` / `add` / `sync` / `rename` / `remove`** — where a spec lives,
   what you would get if you launched it, and how to put yours in the library so it is launchable
   by bare name.
 - **`rig export <rig>`** — turn a rig that is *running right now* back into a spec you can read,
   diff or hand to someone. **`rig import`** goes the other way.
+- **`rig import <workspace.yaml> --workspace-only --target-rig <id>`** — apply a validated
+  workspace declaration to an existing rig without changing topology; `rig export` preserves it.
 - **`rig bundle create` / `inspect` / `install` / `history`** — one file that rebuilds a rig on a
   machine with none of its content, what is inside one before you trust it, and what has actually
   been installed here.
@@ -374,6 +391,8 @@ your circumstances is configuration, and the ones that are not, another agent ca
   accounts, what the usage signals say, and whether a seat can be moved without stranding the
   conversation it is in the middle of. **`provider signals` reports anomalies rather than a
   listing** — unbound seats, accounts shared across several seats.
+- **Codex configuration fragments** — a `codex_config_fragment` must open with a table header and
+  never overrides a user-declared table; see `docs/reference/agent-spec.md`.
 - **`rig env`** — the real services behind a rig: are they up, what are they saying, how do you
   stop them without killing the rig.
 - **`rig setup`** — what OpenRig would change about this machine, shown before it touches anything.
