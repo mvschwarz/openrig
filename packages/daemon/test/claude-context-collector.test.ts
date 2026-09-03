@@ -186,9 +186,10 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.statusLine).toBeDefined();
     expect(settings.statusLine.type).toBe("command");
     expect(settings.statusLine.command).toContain("context-collector.cjs");
-    expect(settings.statusLine.command).toContain(join(tmpDir, "context"));
-    expect(settings.statusLine.command).toContain(join(tmpDir, "provider-usage"));
-    expect(dirsMade).toContain(join(tmpDir, "provider-usage"));
+    expect(settings.statusLine.command).toContain(join(tmpDir, "state", "context-usage"));
+    expect(settings.statusLine.command).toContain(join(tmpDir, "state", "provider-usage"));
+    expect(dirsMade).toContain(join(tmpDir, "state", "context-usage"));
+    expect(dirsMade).toContain(join(tmpDir, "state", "provider-usage"));
   });
 
   // T5: deliverStartup copies collector script to project
@@ -280,7 +281,8 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
 
     const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
     expect(settings.statusLine.type).toBe("command");
-    expect(settings.statusLine.command).toContain(join(tmpDir, "context"));
+    expect(settings.statusLine.command).toContain(join(tmpDir, "state", "context-usage"));
+    expect(settings.statusLine.command).toContain(join(tmpDir, "state", "provider-usage"));
     expect(written["/project/.openrig/context-collector.cjs"]).toBe("copied:/fake/collector.js");
   });
 
