@@ -1342,8 +1342,8 @@ describe("Bundle API routes", () => {
         expect(body.skillsRouting.routedCount).toBe(1);
         expect(body.skillsRouting.records).toHaveLength(1);
         expect(body.skillsRouting.records[0].status).toBe("routed");
-        // File actually copied to OPENRIG_HOME/skills/ tree
-        const expectedTarget = path.join(auditHome, "skills", "packages", "test-pkg", "skills", "FOO.md");
+        // Package-shaped legacy skill payload stays out of the managed catalog.
+        const expectedTarget = path.join(auditHome, "packages", "test-pkg", "skills", "FOO.md");
         expect(fs.existsSync(expectedTarget)).toBe(true);
         expect(fs.readFileSync(expectedTarget, "utf-8")).toBe("# foo skill body");
       } finally {
@@ -1419,7 +1419,7 @@ describe("Bundle API routes", () => {
         expect(body.skillsRouting).toBeDefined();
         expect(body.skillsRouting.routedCount).toBe(1);
         expect(body.skillsRouting.records[0].status).toBe("routed");
-        const expectedTarget = path.join(auditHome, "skills", "packages", "test-pkg", "skills", "DUAL.md");
+        const expectedTarget = path.join(auditHome, "packages", "test-pkg", "skills", "DUAL.md");
         expect(fs.existsSync(expectedTarget)).toBe(true);
         expect(fs.readFileSync(expectedTarget, "utf-8")).toBe("# dual-override skill body");
       } finally {

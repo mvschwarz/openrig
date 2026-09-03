@@ -31,6 +31,7 @@ function clearEnv(): () => void {
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
     "OPENRIG_WORKSPACE_STEERING_PATH", "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT",
     "OPENRIG_WORKSPACE_SPECS_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
+    "OPENRIG_SKILLS_ROOT",
     "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
     "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS",
     "OPENRIG_UI_PREVIEW_MAX_PINS", "OPENRIG_UI_PREVIEW_DEFAULT_LINES",
@@ -100,6 +101,7 @@ describe("SettingsStore (User Settings v0)", () => {
       // OPR.0.5.3.6 D1 — the topology tree root (instance at its top).
       "topology.root",
       "context.packs_root",
+      "skills.root",
       "onboarding.default_pack.enabled",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
@@ -262,6 +264,7 @@ describe("SettingsStore (User Settings v0)", () => {
   it("workspace.root cascades into per-subdir defaults", () => {
     const store = new SettingsStore(configPath);
     store.set("workspace.root", "/custom/ws");
+    store.set("skills.root", join(tmpDir, "skills"));
     const cfg = store.resolveConfig();
     expect(cfg.workspaceRoot).toBe("/custom/ws");
     expect(cfg.workspaceSlicesRoot).toBe("/custom/ws/missions");
@@ -269,6 +272,7 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(cfg.workspaceFieldNotesRoot).toBe("/custom/ws/field-notes");
     expect(cfg.workspaceSpecsRoot).toBe("/custom/ws/specs");
     expect(cfg.workspaceDogfoodEvidenceRoot).toBe("/custom/ws/dogfood-evidence");
+    expect(cfg.skillsRoot).toBe(join(tmpDir, "skills"));
     expect(cfg.filesAllowlistRaw).toBe("workspace:/custom/ws");
     expect(cfg.progressScanRootsRaw).toBe("workspace:/custom/ws");
   });

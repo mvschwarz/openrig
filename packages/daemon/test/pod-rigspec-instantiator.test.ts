@@ -68,6 +68,7 @@ describe("PodRigInstantiator", () => {
     topologyRootResolver?: () => string,
     onboardingEnabledResolver?: () => boolean,
     continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">,
+    extraDeps?: Record<string, unknown>,
   ) {
     const db = createFullTestDb();
     const rigRepo = new RigRepository(db);
@@ -89,6 +90,7 @@ describe("PodRigInstantiator", () => {
       ...(topologyRootResolver ? { topologyRootResolver } : {}),
       ...(onboardingEnabledResolver ? { onboardingEnabledResolver } : {}),
       ...(continuityPolicyMaterializer ? { continuityPolicyMaterializer } : {}),
+      ...(extraDeps ?? {}),
     };
     const inst = new PodRigInstantiator(instDeps);
 
@@ -198,6 +200,29 @@ describe("PodRigInstantiator", () => {
       const planArg = (adapter.project as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
       expect(planArg.cwd).toBe("/workspace/project");
     }
+    db.close();
+  });
+
+  it("refuses to start a harness when managed skill projection fails", async () => {
+    const skillReconciler = vi.fn(() => ({
+      ok: false,
+      applied: false,
+      freshLaunchRequired: false,
+      runtime: "claude-code",
+      targetRoot: "/project/.claude/skills",
+      manifestPath: "/project/.openrig/skill-loadouts/claude-code.json",
+      receipts: [],
+      removed: [],
+      errors: [{ code: "target_conflict", message: "operator-owned skill differs" }],
+    }));
+    const { db, inst, adapter } = setup(undefined, undefined, undefined, undefined, undefined, { skillReconciler });
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    expect(skillReconciler).toHaveBeenCalledOnce();
+    expect(adapter.project).not.toHaveBeenCalled();
+    if (!result.ok && "message" in result) expect(result.message).toContain("target_conflict: operator-owned skill differs");
     db.close();
   });
 

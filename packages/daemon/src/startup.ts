@@ -615,6 +615,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const bundleSourceResolver = new BundleSourceResolver({ fsOps: resolverFsOps });
   // Pod-aware instantiator (AgentSpec reboot)
   const { PodRigInstantiator } = await import("./domain/rigspec-instantiator.js");
+  const { reconcileSkillLoadout } = await import("./domain/skill-catalog.js");
   const { StartupOrchestrator } = await import("./domain/startup-orchestrator.js");
   const { ClaudeCodeAdapter } = await import("./adapters/claude-code-adapter.js");
   // P20 — the projection manifest: record-at-apply so the projector can later
@@ -833,6 +834,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     topologyRootResolver: () => String(new ContextPackSettingsStore().resolveOne("topology.root").value),
     onboardingEnabledResolver: () =>
       new ContextPackSettingsStore().resolveOne("onboarding.default_pack.enabled").value === true,
+    skillsRootResolver: () =>
+      String(new ContextPackSettingsStore().resolveOne("skills.root").value),
+    skillReconciler: reconcileSkillLoadout,
   });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();

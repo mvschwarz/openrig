@@ -29,6 +29,9 @@ export interface SkillDiscoveryPaths {
    *  <specInstallDir>/skills/<name>/. Optional: undefined means the
    *  rig was installed in-place and no separate install-dir applies. */
   specInstallDir?: string;
+  /** Config-resolved managed catalog root. Defaults to the legacy
+   *  <homedir>/.openrig/skills path when omitted for compatibility. */
+  skillsRoot?: string;
 }
 
 export interface SkillFrontmatter {
@@ -205,7 +208,7 @@ function listScanRoots(paths: SkillDiscoveryPaths): string[] {
 
   // 4. Shared user-spec library (cross-runtime operator install via
   // `rig specs add`).
-  roots.push(join(homedir, ".openrig", "skills"));
+  roots.push(paths.skillsRoot ?? join(homedir, ".openrig", "skills"));
 
   return roots;
 }

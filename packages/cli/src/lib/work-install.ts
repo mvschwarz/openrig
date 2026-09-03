@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { readFrontmatter, resolveNodeFile } from "./scope/scope-fs.js";
+import { readProjectSkillSelection } from "@openrig/daemon/skill-loadout";
 
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -28,6 +29,8 @@ export interface WorkInstallPlan {
     frontier: WorkInstallAltitude;
   };
   pieces: WorkInstallPiece[];
+  /** Project-world skill identities from project.yaml install.skills. */
+  skills: string[];
   derive: [];
   warnings: string[];
 }
@@ -259,6 +262,7 @@ export function resolveWorkPosition(opts: {
   let projectIntentSource: WorkInstallSource = "default";
   let projectContext: string[] = [];
   const install = projectManifest?.["install"];
+  let projectSkills: string[] = [];
   if (isRecord(install)) {
     if (install["intent"] !== undefined) {
       if (typeof install["intent"] === "string" && markdownPath(install["intent"])) {
@@ -275,6 +279,11 @@ export function resolveWorkPosition(opts: {
         warnings.push("project.yaml: optional install.context must be a list of relative Markdown addresses; ignored it");
       }
     }
+  }
+  try {
+    projectSkills = readProjectSkillSelection(projectRoot);
+  } catch (err) {
+    return failure("project_skills_invalid", (err as Error).message);
   }
 
   const pieces: WorkInstallPiece[] = [];
@@ -368,6 +377,7 @@ export function resolveWorkPosition(opts: {
       frontier,
     },
     pieces,
+    skills: projectSkills,
     derive: [],
     warnings,
   };

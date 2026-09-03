@@ -9,6 +9,7 @@ import type {
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
 import { discoverSkillsForRuntime, type SkillRuntime } from "./skill-discovery.js";
+import { inspectSkillDirectory, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
 
 // -- Types --
 
@@ -49,6 +50,9 @@ export interface ResolvedNodeConfig {
    * read per-seat windows. Retained for a future per-seat decision.
    */
   activity?: { silenceWindowSeconds?: number };
+  /** The catalog-owned portion of the effective skill selection. Runtime
+   *  projection uses this for exact-byte ownership reconciliation. */
+  skillLoadout?: SkillLoadout;
 }
 
 export interface ResolutionContext {
@@ -67,6 +71,8 @@ export interface ResolutionContext {
    *  ~/.claude/skills/, ~/.agents/skills/). Defaults to os.homedir()
    *  in production; tests inject a fixture root. */
   homedir?: string;
+  /** Config-resolved managed skill catalog root. */
+  skillsRoot?: string;
 }
 
 export type ResolutionResult =
@@ -149,6 +155,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       homedir: ctx.homedir ?? osHomedir(),
       cwd,
       specInstallDir: ctx.specRoot,
+      ...(ctx.skillsRoot ? { skillsRoot: ctx.skillsRoot } : {}),
     });
     for (const discovered of discovery.skills) {
       if (pool.skills.has(discovered.id)) continue; // rig-local-wins
@@ -186,6 +193,59 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     });
     return { ok: false, errors: enhanced };
   }
+
+  // S04 — compose independently-selected managed skills around the existing
+  // topology selector (profile.uses.skills). System comes from catalog.yaml;
+  // project comes from project.yaml install.skills. Topology resources that
+  // are not catalog-managed retain the established AgentSpec/local behavior.
+  const catalogRoot = ctx.skillsRoot ?? nodePath.join(ctx.homedir ?? osHomedir(), ".openrig", "skills");
+  const catalogResult = resolveSkillLoadout({
+    catalogRoot,
+    topologySkills: profile.uses.skills,
+    projectRoot: cwd,
+    allowMissingTopology: true,
+  });
+  if (!catalogResult.ok) {
+    return { ok: false, errors: catalogResult.errors.map((error) => `${error.code}: ${error.message}`) };
+  }
+  for (const managed of catalogResult.loadout.entries) {
+    const qualified: QualifiedResource = {
+      effectiveId: managed.id,
+      sourceSpec: `skill-catalog@${managed.revision}`,
+      sourcePath: managed.sourceRoot,
+      resource: { id: managed.id, path: nodePath.relative(managed.sourceRoot, managed.sourceDir) },
+    };
+    const index = selectedResult!.skills.findIndex((entry) => {
+      const resource = entry.resource as SkillResource;
+      return entry.effectiveId === managed.id || resource.id === managed.id;
+    });
+    if (index >= 0) {
+      const existing = selectedResult!.skills[index]!;
+      const resource = existing.resource as SkillResource;
+      const existingPath = nodePath.isAbsolute(resource.path)
+        ? resource.path
+        : nodePath.resolve(existing.sourcePath, resource.path);
+      try {
+        const existingDigest = inspectSkillDirectory(existingPath).digest;
+        if (existingDigest !== managed.digest) {
+          return {
+            ok: false,
+            errors: [
+              `skill_identity_conflict: topology selection '${managed.id}' resolves to different content at ${existingPath} than managed catalog ${managed.sourceDir}; remove the duplicate source or make the bytes identical`,
+            ],
+          };
+        }
+      } catch (err) {
+        return {
+          ok: false,
+          errors: [`skill_identity_conflict: cannot compare topology selection '${managed.id}' at ${existingPath}: ${(err as Error).message}`],
+        };
+      }
+      selectedResult!.skills[index] = qualified;
+    }
+    else selectedResult!.skills.push(qualified);
+  }
+  selectedResult!.skills.sort((a, b) => a.effectiveId < b.effectiveId ? -1 : a.effectiveId > b.effectiveId ? 1 : 0);
 
   // 7. Resolve restorePolicy with narrowing
   const restorePolicyResult = resolveRestorePolicy(spec, profile, member);
@@ -236,6 +296,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       // when the profile didn't declare one). NodeLauncher applies the
       // default 3s when this is missing.
       activity: profile.activity,
+      skillLoadout: catalogResult.loadout,
     },
   };
 }

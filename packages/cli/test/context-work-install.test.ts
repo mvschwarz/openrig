@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
@@ -36,14 +37,21 @@ describe("rig context work-install", () => {
   let catalogRoot: string;
   let alphaRoot: string;
   let betaRoot: string;
+  let skillsRoot: string;
+  let workingRoot: string;
   let savedWorkspaceRoot: string | undefined;
+  let savedSkillsRoot: string | undefined;
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "openrig-context-work-install-"));
     catalogRoot = join(root, "catalog");
     alphaRoot = join(root, "alpha-root");
     betaRoot = join(root, "unrelated-beta-tree");
+    skillsRoot = join(root, "managed-skills");
+    workingRoot = join(root, "agent-working-directory");
     mkdirSync(catalogRoot, { recursive: true });
+    mkdirSync(skillsRoot, { recursive: true });
+    mkdirSync(workingRoot, { recursive: true });
     mkdirSync(join(alphaRoot, "missions", "alpha-active", "slices", "01-live-work"), { recursive: true });
     mkdirSync(join(betaRoot, "missions", "beta-scaffold"), { recursive: true });
     catalogRoot = realpathSync(catalogRoot);
@@ -62,6 +70,7 @@ kind: project
 id: alpha
 install:
   intent: SPEC.md
+  skills: [project-skill]
 `);
     writeFileSync(join(alphaRoot, "missions", "alpha-active", "SPEC.md"), "# Alpha mission\n");
     writeFileSync(join(alphaRoot, "missions", "alpha-active", "PROGRESS.md"), "# Alpha mission progress\n\n- [x] Story 2 complete\n- [ ] Release acceptance pending\n");
@@ -91,13 +100,40 @@ composition:
   mission_markdown:
     spec: SPEC.md
 `);
+    writeFileSync(join(skillsRoot, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: [system-skill]\n");
+    for (const id of ["system-skill", "topology-skill", "project-skill"]) {
+      mkdirSync(join(skillsRoot, id));
+      writeFileSync(join(skillsRoot, id, "SKILL.md"), `---\nname: ${id}\ndescription: Use when testing ${id}.\n---\n\n# ${id}\n`);
+    }
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    execFileSync("git", ["-C", root, "config", "user.email", "test@openrig.invalid"]);
+    execFileSync("git", ["-C", root, "config", "user.name", "OpenRig Test"]);
+    execFileSync("git", ["-C", root, "add", "managed-skills"]);
+    execFileSync("git", ["-C", root, "commit", "-qm", "catalog fixture"]);
+
+    writeFileSync(join(alphaRoot, ".gitignore"), ".agents/skills/\n.claude/skills/\n.openrig/skill-loadouts/\n");
+    execFileSync("git", ["-C", alphaRoot, "init", "-q"]);
+    execFileSync("git", ["-C", alphaRoot, "config", "user.email", "test@openrig.invalid"]);
+    execFileSync("git", ["-C", alphaRoot, "config", "user.name", "OpenRig Test"]);
+    execFileSync("git", ["-C", alphaRoot, "add", "."]);
+    execFileSync("git", ["-C", alphaRoot, "commit", "-qm", "project fixture"]);
+    writeFileSync(join(workingRoot, ".gitignore"), ".agents/skills/\n.claude/skills/\n.openrig/skill-loadouts/\n");
+    execFileSync("git", ["-C", workingRoot, "init", "-q"]);
+    execFileSync("git", ["-C", workingRoot, "config", "user.email", "test@openrig.invalid"]);
+    execFileSync("git", ["-C", workingRoot, "config", "user.name", "OpenRig Test"]);
+    execFileSync("git", ["-C", workingRoot, "add", ".gitignore"]);
+    execFileSync("git", ["-C", workingRoot, "commit", "-qm", "working directory fixture"]);
     savedWorkspaceRoot = process.env["OPENRIG_WORKSPACE_ROOT"];
+    savedSkillsRoot = process.env["OPENRIG_SKILLS_ROOT"];
     process.env["OPENRIG_WORKSPACE_ROOT"] = catalogRoot;
+    process.env["OPENRIG_SKILLS_ROOT"] = skillsRoot;
   });
 
   afterEach(() => {
     if (savedWorkspaceRoot === undefined) delete process.env["OPENRIG_WORKSPACE_ROOT"];
     else process.env["OPENRIG_WORKSPACE_ROOT"] = savedWorkspaceRoot;
+    if (savedSkillsRoot === undefined) delete process.env["OPENRIG_SKILLS_ROOT"];
+    else process.env["OPENRIG_SKILLS_ROOT"] = savedSkillsRoot;
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -112,6 +148,7 @@ composition:
     const alphaPlan = JSON.parse(alpha.logs.join("")) as {
       position: { projectId: string; projectRoot: string; mission: string; slice: string; frontier: string };
       pieces: Array<{ altitude: string; address: string; path: string; exists: boolean; source: string }>;
+      skills: string[];
     };
     expect(alphaPlan.position).toMatchObject({
       projectId: "alpha",
@@ -120,6 +157,7 @@ composition:
       slice: "01-live-work",
       frontier: "slice",
     });
+    expect(alphaPlan.skills).toEqual(["project-skill"]);
     expect(alphaPlan.pieces.map(({ altitude, address, exists, source }) => ({ altitude, address, exists, source }))).toEqual([
       { altitude: "project", address: "project:SPEC.md", exists: true, source: "manifest" },
       { altitude: "mission", address: "mission:SPEC.md", exists: true, source: "manifest" },
@@ -158,6 +196,42 @@ composition:
       { altitude: "mission", address: "mission:PROGRESS.md", exists: false, source: "default" },
     ]);
     expect(betaPlan.pieces.every((piece) => piece.path.startsWith(betaRoot))).toBe(true);
+  });
+
+  it("delivers project context and reconciles the composed skill loadout in one operation without dirtying product Git", async () => {
+    const run = () => captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install",
+        "--project", "alpha", "--runtime", "codex", "--cwd", workingRoot,
+        "--topology", "topology-skill", "--apply-skills", "--json",
+      ]);
+    });
+
+    const first = await run();
+    expect(first.exitCode).toBeUndefined();
+    const installed = JSON.parse(first.logs.join("")) as {
+      pieces: Array<{ address: string; exists: boolean }>;
+      skillLoadout: { entries: Array<{ id: string; selectedBy: string[] }> };
+      skillProjection: { ok: boolean; applied: boolean; receipts: Array<{ id: string; status: string }> };
+    };
+    expect(installed.pieces).toEqual(expect.arrayContaining([expect.objectContaining({ address: "project:SPEC.md", exists: true })]));
+    expect(installed.skillLoadout.entries.map((entry) => [entry.id, entry.selectedBy])).toEqual([
+      ["project-skill", ["project"]],
+      ["system-skill", ["system"]],
+      ["topology-skill", ["topology"]],
+    ]);
+    expect(installed.skillProjection).toMatchObject({ ok: true, applied: true });
+    expect(installed.skillProjection.receipts.every((receipt) => receipt.status === "current")).toBe(true);
+    expect(readFileSync(join(workingRoot, ".agents", "skills", "project-skill", "SKILL.md"), "utf8"))
+      .toBe(readFileSync(join(skillsRoot, "project-skill", "SKILL.md"), "utf8"));
+    expect(execFileSync("git", ["-C", alphaRoot, "status", "--short"], { encoding: "utf8" })).toBe("");
+    expect(execFileSync("git", ["-C", workingRoot, "status", "--short"], { encoding: "utf8" })).toBe("");
+
+    const second = await run();
+    expect(second.exitCode).toBeUndefined();
+    expect(JSON.parse(second.logs.join("")).skillProjection).toMatchObject({ ok: true, applied: false });
+    expect(execFileSync("git", ["-C", alphaRoot, "status", "--short"], { encoding: "utf8" })).toBe("");
+    expect(execFileSync("git", ["-C", workingRoot, "status", "--short"], { encoding: "utf8" })).toBe("");
   });
 
   it("delivers extant pieces byte-for-byte in plan order and marks absent pieces", async () => {
@@ -215,6 +289,7 @@ composition:
       `project project:SPEC.md [manifest] ${join(betaRoot, "SPEC.md")}`,
       `mission mission:SPEC.md [manifest] ${join(betaRoot, "missions", "beta-scaffold", "SPEC.md")}`,
       `mission mission:PROGRESS.md [default] (absent: ${join(betaRoot, "missions", "beta-scaffold", "PROGRESS.md")})`,
+      "skills  (none selected by project)",
     ]);
 
     const human = await captureLogs(async () => {

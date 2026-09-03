@@ -154,6 +154,9 @@ Supported keys:
 - `transcripts.enabled`
 - `transcripts.path`
 - `workspace.root` (and other workspace-rooted paths used by `init-workspace`)
+- `skills.root` (default `$OPENRIG_HOME/skills`; env `OPENRIG_SKILLS_ROOT`) — the
+  one authoritative Git-versioned managed skill catalog. An override replaces
+  the default; it does not add an overlay root.
 - `snapshots.periodic.enabled` (default `true`) — daemon-side periodic snapshot scheduler on/off (v0.3.4)
 - `snapshots.periodic.interval_seconds` (default `300`) — interval between periodic snapshots
 - `snapshots.periodic.retention_keep` (default `10`) — number of periodic snapshots to retain per rig
@@ -1275,6 +1278,7 @@ Notes:
 Usage: `rig context <subcommand>` — browse, preview, compose, and manage operator-authored context packs. This noun never delivers; delivery belongs to `send`, `broadcast`, `walk`, and `queue create`.
 
 Subcommands:
+- `work-install [--project <id>] [--mission <id>] [--slice <id>] [--deliver] [--runtime <claude-code|codex>] [--cwd <agent-working-directory>] [--topology <ids>] [--apply-skills] [--json]` — resolve project/mission/slice Markdown plus `project.yaml install.skills` in one plan. With `--runtime`, composes system, topology, and project selectors and reports per-skill provenance/status; `--apply-skills` safely reconciles the owned harness projection into `--cwd` (default: the caller's current working directory), not the workspace metadata directory.
 - `list [options]` — list all context packs in the library.
 - `show <name-or-ref> [options]` — show pack manifest + per-file metadata.
 - `preview <name-or-ref> [options]` — show the assembled bundle without delivering it.
@@ -1384,6 +1388,7 @@ One top-level command first shipped in v0.4.0 (slice 10 — skill / knowledge li
 Usage: `rig skill <subcommand>`
 
 Subcommands:
+- `loadout --runtime <claude-code|codex> [--cwd <path>] [--project-root <path>] [--topology <ids>] [--apply] [--json]` — inspect the deterministic managed loadout selected by `catalog.yaml` system selectors, topology/profile selectors, and `project.yaml install.skills`. Reports selector reasons, catalog Git revision/content digest, target, and current/missing/shadowed/conflicting status. `--apply` writes exact bytes plus an ownership manifest, is idempotent, and refuses to overwrite or remove locally modified/unowned content.
 - `audit [--json] [--include-cache] [--severity <level>] [--rig <name>]` — read-only audit of the skill cascade. Detects provenance + freshness issues across the canonical → product mirror → hub cwd → installed plugin chain.
 
 Audit categories surfaced:

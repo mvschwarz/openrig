@@ -32,6 +32,10 @@
     "./context-pack-taxonomy": {
       "types": "./dist/context-pack-taxonomy-surface.d.ts",
       "import": "./dist/context-pack-taxonomy-surface.js"
+    },
+    "./skill-loadout": {
+      "types": "./dist/skill-loadout-surface.d.ts",
+      "import": "./dist/skill-loadout-surface.js"
     }
   },
   "scripts": {

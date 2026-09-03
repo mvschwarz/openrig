@@ -156,4 +156,20 @@ describe("routeSkills", () => {
     expect(result.routedCount).toBe(1);
     expect(result.records[0]!.installedAt).toBe(`${TARGET}/custom/path/X.md`);
   });
+
+  it("can keep package-shaped bundle payloads outside the managed catalog without changing source lookup", () => {
+    const packageRoot = "/operator/.openrig/packages";
+    const source = `${BUNDLE_ROOT}/packages/test-pkg/skills/DUAL.md`;
+    const fs = mockFs({ [source]: "dual" });
+
+    const result = routeSkills(makeInput({
+      declaredSkills: ["packages/test-pkg/skills/DUAL.md"],
+      targetSkillsDir: packageRoot,
+      targetPrefixToStrip: "packages/",
+    }), fs);
+
+    expect(result).toMatchObject({ routedCount: 1, rejectedCount: 0 });
+    expect(result.records[0]!.installedAt).toBe(`${packageRoot}/test-pkg/skills/DUAL.md`);
+    expect(fs._written.get(`${packageRoot}/test-pkg/skills/DUAL.md`)).toBe("dual");
+  });
 });

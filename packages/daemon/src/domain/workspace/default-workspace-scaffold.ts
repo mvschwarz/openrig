@@ -128,6 +128,9 @@ const PROJECT_MANIFEST = `schema: openrig.project/v0alpha1
 kind: project
 missions:
   root: missions
+install:
+  context: []
+  skills: []
 # Optional enrichment is added here; absence inherits defaults.
 `;
 

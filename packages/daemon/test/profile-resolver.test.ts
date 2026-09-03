@@ -1,4 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { resolveNodeConfig, type ResolutionContext } from "../src/domain/profile-resolver.js";
 import { parseAgentSpec, normalizeAgentSpec } from "../src/domain/agent-manifest.js";
 import type { AgentSpec, RigSpec, RigSpecPod, RigSpecPodMember, StartupBlock } from "../src/domain/types.js";
@@ -703,6 +707,91 @@ profiles:
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect((result.config as unknown as { mechanic?: string }).mechanic).toBeUndefined();
+    }
+  });
+});
+
+describe("managed catalog selection composition", () => {
+  it("adds system and project skills around a topology-only profile without rebuilding the topology", () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-profile-skill-catalog-"));
+    try {
+      const catalog = join(root, "skills");
+      const project = join(root, "project");
+      mkdirSync(catalog, { recursive: true });
+      mkdirSync(project, { recursive: true });
+      execFileSync("git", ["-C", root, "init", "-q"]);
+      execFileSync("git", ["-C", root, "config", "user.email", "test@openrig.invalid"]);
+      execFileSync("git", ["-C", root, "config", "user.name", "OpenRig Test"]);
+      writeFileSync(join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: [system-skill]\n");
+      for (const id of ["system-skill", "topology-skill", "project-skill"]) {
+        mkdirSync(join(catalog, id));
+        writeFileSync(join(catalog, id, "SKILL.md"), `---\nname: ${id}\ndescription: Use when testing ${id}.\n---\n\n# ${id}\n`);
+      }
+      writeFileSync(join(project, "project.yaml"), "install:\n  skills: [project-skill]\n");
+      execFileSync("git", ["-C", root, "add", "."]);
+      execFileSync("git", ["-C", root, "commit", "-qm", "fixture"]);
+
+      const spec = makeSpec({
+        resources: { skills: [], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
+        profiles: {
+          default: { uses: { skills: ["topology-skill"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } },
+        },
+      });
+      const result = resolveNodeConfig(makeCtx({
+        baseSpec: makeResolved(spec, root),
+        member: makeMember({ cwd: project, runtime: "codex" }),
+        skillsRoot: catalog,
+        homedir: join(root, "home"),
+      }));
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.config.selectedResources.skills.map((skill) => skill.effectiveId)).toEqual([
+        "project-skill",
+        "system-skill",
+        "topology-skill",
+      ]);
+      expect(result.config.skillLoadout?.entries.map((skill) => [skill.id, skill.selectedBy])).toEqual([
+        ["project-skill", ["project"]],
+        ["system-skill", ["system"]],
+        ["topology-skill", ["topology"]],
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a topology source whose identity matches the catalog but whose bytes do not", () => {
+    const root = mkdtempSync(join(tmpdir(), "openrig-profile-skill-conflict-"));
+    try {
+      const catalog = join(root, "skills");
+      const local = join(root, "local-skill");
+      mkdirSync(join(catalog, "shared"), { recursive: true });
+      mkdirSync(local, { recursive: true });
+      execFileSync("git", ["-C", root, "init", "-q"]);
+      execFileSync("git", ["-C", root, "config", "user.email", "test@openrig.invalid"]);
+      execFileSync("git", ["-C", root, "config", "user.name", "OpenRig Test"]);
+      writeFileSync(join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
+      writeFileSync(join(catalog, "shared", "SKILL.md"), "---\nname: shared\ndescription: Use when catalog content is needed.\n---\n\n# catalog\n");
+      writeFileSync(join(local, "SKILL.md"), "---\nname: shared\ndescription: Use when local content is needed.\n---\n\n# local\n");
+      execFileSync("git", ["-C", root, "add", "."]);
+      execFileSync("git", ["-C", root, "commit", "-qm", "fixture"]);
+
+      const spec = makeSpec({
+        resources: { skills: [{ id: "shared", path: local }], guidance: [], subagents: [], plugins: [], runtimeResources: [] },
+        profiles: {
+          default: { uses: { skills: ["shared"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } },
+        },
+      });
+      const result = resolveNodeConfig(makeCtx({
+        baseSpec: makeResolved(spec, root),
+        skillsRoot: catalog,
+        homedir: join(root, "home"),
+      }));
+
+      expect(result).toMatchObject({ ok: false, errors: [expect.stringContaining("skill_identity_conflict")] });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

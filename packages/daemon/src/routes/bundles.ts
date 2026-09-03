@@ -602,8 +602,10 @@ function skillsRouterFsOps(): SkillsRouterFsOps {
 
 /**
  * Item 6 / slice-05 Checkpoint 7.3: extract the bundle safely (banked unpack
- * trust boundary) and route any declared skills to the operator skills
- * library. Returns null when bundle has no skills[] (no-op).
+ * trust boundary) and route legacy declared skill files to the package cache.
+ * S04 keeps this package-shaped payload out of the managed skill catalog;
+ * importing a complete harness skill into the catalog is a separate action.
+ * Returns null when bundle has no skills[] (no-op).
  *
  * B1 repair (qitem-20260518220247-22f5257a): takes bundlePath only and does
  * its own safe unpack + parse. Previously coupled to installMeta from the
@@ -634,7 +636,8 @@ async function routeSkillsAfterBootstrap(bundlePath: string): Promise<RouteSkill
       {
         bundleRoot: tmpDir,
         declaredSkills,
-        targetSkillsDir: getDefaultOpenRigPath("skills"),
+        targetSkillsDir: getDefaultOpenRigPath("packages"),
+        targetPrefixToStrip: "packages/",
       },
       skillsRouterFsOps(),
     );

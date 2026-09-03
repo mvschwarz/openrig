@@ -312,6 +312,7 @@ import type {
   CompactionStrategy,
   ContinuityPolicyMaterializer,
 } from "./continuity-policy-materializer.js";
+import type { ReconcileSkillLoadoutResult, SkillLoadout, SkillRuntime } from "./skill-catalog.js";
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
   const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
@@ -353,6 +354,17 @@ interface PodInstantiatorDeps {
   /** S15 — whether new seats receive the compact default mental-model pack.
    *  Resolved at materialization so config changes affect future launches. */
   onboardingEnabledResolver?: () => boolean;
+  /** S04 — live config resolver for the authoritative managed skill catalog. */
+  skillsRootResolver?: () => string;
+  /** S04 — exact-byte catalog projection before a harness starts. Optional
+   *  for old tests/embedders; production wires the shared reconciler. */
+  skillReconciler?: (input: {
+    loadout: SkillLoadout;
+    runtime: SkillRuntime;
+    cwd: string;
+    apply: true;
+    topologyOwner?: string;
+  }) => ReconcileSkillLoadoutResult;
   /** S20 P4 — materializes the selected Claude continuity policy by
    *  registering jobs in the existing watchdog engine after startup succeeds. */
   continuityPolicyMaterializer?: Pick<ContinuityPolicyMaterializer, "arm">;
@@ -1252,6 +1264,7 @@ export class PodRigInstantiator {
           member,
           pod,
           rig: rigSpec,
+          skillsRoot: this.deps.skillsRootResolver?.(),
         });
         if (!configResult.ok) {
           nodeResults.push({ logicalId: qualifiedId, status: "failed", error: configResult.errors.join("; ") });
@@ -1711,6 +1724,7 @@ export class PodRigInstantiator {
       member: input.member,
       pod: input.pod,
       rig: input.rigSpec,
+      skillsRoot: this.deps.skillsRootResolver?.(),
     });
     if (!configResult.ok) {
       return { status: "failed", error: configResult.errors.join("; ") };
@@ -1742,6 +1756,26 @@ export class PodRigInstantiator {
     }
 
     const canonicalSessionName = deriveCanonicalSessionName(input.pod.id, input.member.id, input.rigSpec.name);
+    if (
+      configResult.config.skillLoadout
+      && this.deps.skillReconciler
+      && (configResult.config.runtime === "claude-code" || configResult.config.runtime === "codex")
+    ) {
+      const projection = this.deps.skillReconciler({
+        loadout: configResult.config.skillLoadout,
+        runtime: configResult.config.runtime,
+        cwd: configResult.config.cwd,
+        apply: true,
+        topologyOwner: canonicalSessionName,
+      });
+      if (!projection.ok) {
+        return {
+          status: "failed",
+          error: projection.errors.map((error) => `${error.code}: ${error.message}`).join("; "),
+          sessionName: canonicalSessionName,
+        };
+      }
+    }
     // Forward per-seat silenceWindowSeconds from the resolved profile.
     // Currently inert: the live SeatActivityService poller uses the
     // global 3s default. Retained for a future per-seat-poller decision.

@@ -121,6 +121,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       // OPR.0.5.3.6 D1 — the topology tree root (instance at its top).
       "topology.root",
       "context.packs_root",
+      "skills.root",
       "onboarding.default_pack.enabled",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
@@ -379,6 +380,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(cfg.workspace.fieldNotesRoot).toBe(join(cfg.workspace.root, "field-notes"));
     expect(cfg.workspace.specsRoot).toBe(join(cfg.workspace.root, "specs"));
     expect(cfg.workspace.dogfoodEvidenceRoot).toBe(join(cfg.workspace.root, "dogfood-evidence"));
+    expect(cfg.skills.root).toBe(join(HOISTED_HOME, "skills"));
     expect(cfg.files.allowlist).toBe(`workspace:${cfg.workspace.root}`);
     expect(cfg.progress.scanRoots).toBe(`workspace:${cfg.workspace.root}`);
   });
@@ -870,6 +872,7 @@ describe("init-workspace runner", () => {
       schema: "openrig.project/v0alpha1",
       kind: "project",
       missions: { root: "missions" },
+      install: { context: [], skills: [] },
     });
     expect(parseYaml(readFileSync(join(workspaceRoot, "missions", "getting-started", "mission.yaml"), "utf-8"))).toEqual({
       schema: "openrig.mission/v0alpha1",
