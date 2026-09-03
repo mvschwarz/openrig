@@ -37,11 +37,10 @@ const DEFAULT_TOPOLOGY_ROOT = path.join(
   "topology",
 );
 
-// OPR.0.5.3.7 R4 — the context-pack library landing zone's derived default,
-// under $OPENRIG_HOME, matching the CLI twin's getDefaultOpenRigPath("context-packs").
-const DEFAULT_CONTEXT_PACKS_ROOT = path.join(
+// OPR.0.5.9.5 Wave B — canonical addressable context library.
+const DEFAULT_CONTEXT_ROOT = path.join(
   process.env["OPENRIG_HOME"] || process.env["RIGGED_HOME"] || path.join(os.homedir(), ".openrig"),
-  "context-packs",
+  "context",
 );
 
 const DEFAULT_SKILLS_ROOT = path.join(
@@ -102,8 +101,8 @@ export const SETTINGS_VALID_KEYS = [
   // for that literal, so walkers carry none. Lockstep with the CLI
   // config-store twin (each side's parity test pins its own list).
   "topology.root",
-  // OPR.0.5.3.7 R4 — context-pack landing zone; lockstep with the CLI twin.
-  "context.packs_root",
+  // OPR.0.5.9.5 Wave B — canonical context library; old key is refused.
+  "context.root",
   "skills.root",
   "onboarding.default_pack.enabled",
   "files.allowlist",
@@ -228,8 +227,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "workspace.projects_root": { primary: "OPENRIG_WORKSPACE_PROJECTS_ROOT" },
   "workspace.catalog_path": { primary: "OPENRIG_WORKSPACE_CATALOG_PATH" },
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
-  // OPR.0.5.3.7 R4 — new key, OPENRIG_* only (no RIGGED_* legacy).
-  "context.packs_root": { primary: "OPENRIG_CONTEXT_PACKS_ROOT" },
+  "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST" },
@@ -306,7 +304,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "workspace.projects_root": ["workspace", "projectsRoot"],
   "workspace.catalog_path": ["workspace", "catalogPath"],
   "topology.root": ["topology", "root"],
-  "context.packs_root": ["context", "packsRoot"],
+  "context.root": ["context", "root"],
   "skills.root": ["skills", "root"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "files.allowlist": ["files", "allowlist"],
@@ -369,6 +367,28 @@ export interface ResolvedSetting {
 
 export function isSettingsValidKey(key: string): key is SettingsValidKey {
   return (SETTINGS_VALID_KEYS as readonly string[]).includes(key);
+}
+
+const REMOVED_CONTEXT_KEY = "context.packs_root";
+const REMOVED_CONTEXT_ENV = "OPENRIG_CONTEXT_PACKS_ROOT";
+
+export function removedContextSettingMessage(key: string): string | null {
+  return key === REMOVED_CONTEXT_KEY
+    ? 'Config key "context.packs_root" was removed; use "context.root".'
+    : null;
+}
+
+function assertNoRemovedContextSetting(fileConfig: Record<string, unknown>): void {
+  if (process.env[REMOVED_CONTEXT_ENV]?.trim()) {
+    throw new Error(
+      "OPENRIG_CONTEXT_PACKS_ROOT was removed; use OPENRIG_CONTEXT_ROOT (config key context.root).",
+    );
+  }
+  if (getNestedValue(fileConfig, ["context", "packsRoot"]) !== undefined) {
+    throw new Error(
+      'Config file contains removed key "context.packs_root" (context.packsRoot); replace it with "context.root" (context.root).',
+    );
+  }
 }
 
 // ── OPR.0.4.4.15 (guard G15-P1 fold, arch-endorsed) ─────────────────────────
@@ -539,7 +559,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "workspace.root": return DEFAULT_WORKSPACE_ROOT;
     // OPR.0.5.3.6 D1 — derived under $OPENRIG_HOME, never a shared-docs literal.
     case "topology.root": return DEFAULT_TOPOLOGY_ROOT;
-    case "context.packs_root": return DEFAULT_CONTEXT_PACKS_ROOT;
+    case "context.root": return DEFAULT_CONTEXT_ROOT;
     case "skills.root": return DEFAULT_SKILLS_ROOT;
     case "onboarding.default_pack.enabled": return true;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
@@ -772,6 +792,8 @@ export interface ClaudeCompactionPolicy {
 
 export interface ResolvedConfig {
   skillsRoot: string;
+  contextRoot: string;
+  topologyRoot: string;
   workspaceRoot: string;
   workspaceSlicesRoot: string;
   workspaceSteeringPath: string;
@@ -802,6 +824,7 @@ export class SettingsStore {
 
   resolveOne(key: SettingsValidKey, fileConfig?: Record<string, unknown>, workspaceRoot?: string): ResolvedSetting {
     const fc = fileConfig ?? this.readConfigFile();
+    assertNoRemovedContextSetting(fc);
     const wr = workspaceRoot ?? this.resolveWorkspaceRootRaw(fc);
     const defaultValue = getDefaultValue(key, wr);
     // Slice 27 BLOCKING-FIX-2 — env override is validated; on invalid
@@ -857,6 +880,8 @@ export class SettingsStore {
     const wr = this.resolveWorkspaceRootRaw(fc);
     return {
       skillsRoot: this.resolveOne("skills.root", fc, wr).value as string,
+      contextRoot: this.resolveOne("context.root", fc, wr).value as string,
+      topologyRoot: this.resolveOne("topology.root", fc, wr).value as string,
       workspaceRoot: wr,
       workspaceSlicesRoot: this.resolveOne("workspace.slices_root", fc, wr).value as string,
       workspaceSteeringPath: this.resolveOne("workspace.steering_path", fc, wr).value as string,
@@ -916,6 +941,8 @@ export class SettingsStore {
   }
 
   set(key: string, value: string): void {
+    const removedMessage = removedContextSettingMessage(key);
+    if (removedMessage) throw new Error(removedMessage);
     // OPR.0.4.4.15: the ONE registered dynamic class is accepted here;
     // every OTHER unknown key keeps the reject-loud behavior below
     // byte-for-byte.
@@ -986,6 +1013,8 @@ export class SettingsStore {
       try { unlinkSync(this.configPath); } catch { /* missing is fine */ }
       return;
     }
+    const removedMessage = removedContextSettingMessage(key);
+    if (removedMessage) throw new Error(removedMessage);
     // OPR.0.4.4.15: dynamic-class reset removes the whole host node
     // (unsubscribe leaves no residue).
     const feedHost = parseFeedHostSubscriptionKey(key);
@@ -1019,15 +1048,19 @@ export class SettingsStore {
   }
 
   private readConfigFile(): Record<string, unknown> {
-    if (!existsSync(this.configPath)) return {};
-    const raw = readFileSync(this.configPath, "utf-8");
-    try {
-      return JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      throw new Error(
-        `Config file at ${this.configPath} is malformed. Fix the JSON or reset with: rig config reset`,
-      );
+    let parsed: Record<string, unknown> = {};
+    if (existsSync(this.configPath)) {
+      const raw = readFileSync(this.configPath, "utf-8");
+      try {
+        parsed = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        throw new Error(
+          `Config file at ${this.configPath} is malformed. Fix the JSON or reset with: rig config reset`,
+        );
+      }
     }
+    assertNoRemovedContextSetting(parsed);
+    return parsed;
   }
 }
 

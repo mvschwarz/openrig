@@ -368,19 +368,19 @@ else
   fail private-ref-boundary 'the world-public or local-world namespace projection is false'
 fi
 
-configured_packs_root=$(rig config get context.packs_root 2>/dev/null)
-configured_packs_status=$?
+configured_context_root=$(rig config get context.root 2>/dev/null)
+configured_context_status=$?
 example_install_ok=1
-[ "$configured_packs_status" -eq 0 ] || example_install_ok=0
-[ -n "$configured_packs_root" ] || example_install_ok=0
-if [ -n "${OPENRIG_CONTEXT_PACKS_ROOT:-}" ] && [ "$configured_packs_root" != "$OPENRIG_CONTEXT_PACKS_ROOT" ]; then
+[ "$configured_context_status" -eq 0 ] || example_install_ok=0
+[ -n "$configured_context_root" ] || example_install_ok=0
+if [ -n "${OPENRIG_CONTEXT_ROOT:-}" ] && [ "$configured_context_root" != "$OPENRIG_CONTEXT_ROOT" ]; then
   example_install_ok=0
 fi
 rig context add --help >/dev/null 2>&1 || example_install_ok=0
 rig context list --help >/dev/null 2>&1 || example_install_ok=0
 
 probe_ref="world-public-verify-$$"
-probe_target="$configured_packs_root/$probe_ref"
+probe_target="$configured_context_root/$probe_ref"
 probe_installed=0
 cleanup_probe() {
   [ "$probe_installed" -eq 1 ] || return 0
@@ -517,7 +517,7 @@ if [ "$example_regions_ok" -eq 1 ] &&
    grep -Fq 'rig context get world-example' "$example/your-world.md" &&
    grep -Fq 'rig context add <pack-directory>' "$example/your-world.md" &&
    grep -Fq 'rig context list' "$example/your-world.md" &&
-   grep -Fq 'rig config get context.packs_root' "$example/your-world.md" &&
+   grep -Fq 'rig config get context.root' "$example/your-world.md" &&
    grep -Fq "Copy this pack, update its manifest, and replace each prompt below with your world's facts." "$example/your-world.md" &&
    grep -Fq 'Run `rig context get world-example`, copy this pack, and make the project a book world by describing the writer, manuscript, sources, editorial rules, decisions, current draft state, and next useful actions in a few coherent files.' "$example/your-world.md" &&
    grep -Fq "Name the world and the agent's place in it." "$example/your-world.md" &&

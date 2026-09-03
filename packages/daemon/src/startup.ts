@@ -109,6 +109,7 @@ import { PluginDiscoveryService } from "./domain/plugin-discovery-service.js";
 // Slice 28 Checkpoint C-3 — skill-library discovery (SC-29 #11 cumulative).
 import { SkillLibraryDiscoveryService } from "./domain/skill-library-discovery.js";
 import { ContextPackLibraryService } from "./domain/context-packs/context-pack-library-service.js";
+import { openRigContextLibraryRoots } from "./domain/instance-initialization.js";
 import { AgentImageLibraryService } from "./domain/agent-images/agent-image-library-service.js";
 import { SnapshotCapturer } from "./domain/agent-images/snapshot-capturer.js";
 import { SettingsStore as ContextPackSettingsStore } from "./domain/user-settings/settings-store.js";
@@ -750,18 +751,21 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // routes. Startup context-pack expansion is intentionally unsupported;
   // dedicated send/broadcast/walk/queue verbs own delivery.
   const contextPackLibrary = (() => {
-    // OPR.0.5.3.7 R4 — config-resolved (env > config > $OPENRIG_HOME/context-packs),
-    // the same key `rig context add` writes to, so both agree on the landing zone.
-    const userPacksRoot = new ContextPackSettingsStore().resolveOne("context.packs_root").value as string;
-    try { fs.mkdirSync(userPacksRoot, { recursive: true }); } catch { /* best-effort */ }
+    // OPR.0.5.9.5 Wave B — config-resolved canonical context library. The
+    // shared instance initializer normally creates both roots; the mkdirs keep
+    // direct createDaemon test harnesses compatible.
+    const userPacksRoot = new ContextPackSettingsStore().resolveOne("context.root").value as string;
+    const [contextRoot, systemPacksRoot] = openRigContextLibraryRoots(userPacksRoot);
+    try { fs.mkdirSync(systemPacksRoot, { recursive: true }); } catch { /* best-effort */ }
     const roots: Array<{ path: string; sourceType: "builtin" | "user_file" | "workspace" }> = [
-      { path: userPacksRoot, sourceType: "user_file" },
+      { path: contextRoot, sourceType: "user_file" },
+      { path: systemPacksRoot, sourceType: "user_file" },
     ];
     try {
       const settingsStore = new ContextPackSettingsStore();
       const cfg = settingsStore.resolveConfig();
       const workspacePacksRoot = nodePath.join(cfg.workspaceRoot, ".openrig", "context-packs");
-      if (workspacePacksRoot !== userPacksRoot && fs.existsSync(workspacePacksRoot)) {
+      if (workspacePacksRoot !== userPacksRoot && workspacePacksRoot !== systemPacksRoot && fs.existsSync(workspacePacksRoot)) {
         roots.push({ path: workspacePacksRoot, sourceType: "workspace" });
       }
     } catch { /* settings unavailable; fall through with user-file root only */ }

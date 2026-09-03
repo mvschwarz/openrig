@@ -25,6 +25,11 @@ import {
 } from "./middleware/auth-bearer-token.js";
 import type { SlowOperationInstrumentation } from "./domain/slow-op-recorder.js";
 import type { ProviderService } from "./domain/provider/provider-service.js";
+import { SettingsStore } from "./domain/user-settings/settings-store.js";
+import {
+  ensureOpenRigInstance,
+  formatInstanceInitializationConflicts,
+} from "./domain/instance-initialization.js";
 
 /** OPR.0.4.3.21 (51elv2) — bound the graceful-shutdown recorder drain. */
 export const SLOW_OP_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
@@ -230,6 +235,17 @@ export async function startServer(port?: number) {
   // D15 — anchor the default db under OPENRIG_HOME, never a bare CWD-relative
   // filename (which could open the shared fleet db). Explicit OPENRIG_DB wins.
   const dbPath = resolveDaemonDbPath(readOpenRigEnv("OPENRIG_DB", "RIGGED_DB"), OPENRIG_HOME);
+  const instanceConfig = new SettingsStore().resolveConfig();
+  const initialization = ensureOpenRigInstance({
+    home: OPENRIG_HOME,
+    workspaceRoot: instanceConfig.workspaceRoot,
+    contextRoot: instanceConfig.contextRoot,
+    skillsRoot: instanceConfig.skillsRoot,
+    topologyRoot: instanceConfig.topologyRoot,
+  });
+  if (!initialization.ok) {
+    throw new Error(`OpenRig instance initialization blocked: ${formatInstanceInitializationConflicts(initialization)}`);
+  }
 
   // bug-fix slice auth-bearer-tailscale-trust: distinguish "explicit
   // operator opt-in" from "default" by treating an undefined env as

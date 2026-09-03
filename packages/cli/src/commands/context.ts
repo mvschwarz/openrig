@@ -7,7 +7,7 @@
 //
 // Each delegates to /api/context-packs/library/* against the daemon.
 // The `add` verb installs a pack from a directory at
-// ~/.openrig/context-packs/<name>/ — host-symlink-free contract,
+// $OPENRIG_HOME/context/<name>/ — host-symlink-free contract,
 // matches `rig specs add` shape (regular files only; no symlinks).
 
 import { Command } from "commander";
@@ -571,7 +571,7 @@ Examples:
           return;
         }
         if (entries.length === 0) {
-          console.log("No context packs in library. Author one at ~/.openrig/context-packs/<name>/ then run: rig context sync");
+          console.log("No context packs in library. Author one under `rig config get context.root`, then run: rig context sync");
           return;
         }
         for (const e of entries) {
@@ -883,14 +883,14 @@ Examples:
 
   cmd.command("add")
     .argument("<source>", "Local directory OR http(s):// URL of a context pack (manifest.yaml + files)")
-    .description("Install a context pack from a local directory or a URL into the context-packs landing zone")
+    .description("Install a context pack from a local directory or a URL into the configured context library")
     .option("--name <name>", "Override the install name (defaults to the manifest name / source basename)")
     .option("--json", "JSON output")
     .action(async (source: string, opts: { name?: string; json?: boolean }) => {
       try {
-        // OPR.0.5.3.7 R4 — config-resolved landing zone (env > config > $OPENRIG_HOME/context-packs),
+        // OPR.0.5.9.5 Wave B — config-resolved context library,
         // never a hardcoded ~/.openrig literal; the daemon resolves the same key.
-        const targetRoot = new ConfigStore().resolve().context.packsRoot;
+        const targetRoot = new ConfigStore().resolve().context.root;
         let targetDir: string;
         if (isHttpUrl(source)) {
           // R4 — URL install: fetch → validate → atomic stage+rename (no partial pack).
