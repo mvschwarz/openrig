@@ -168,7 +168,7 @@ Precedence:
 
 Notes:
 - `--with-source` (top-level) and `--show-source` (`get`) report per-key source/default for honest provenance.
-- `init-workspace` scaffolds the default workspace at `~/.openrig/workspace/` (or the `--root` override) with mission/slice folders. `--force` overwrites scaffolded files (does NOT remove directories); `--dry-run` previews without writing. New in v0.3.0.
+- `init-workspace` additively scaffolds `missions/`, `exhaust/`, `SPEC.md`, `project.yaml`, `workspace.yaml`, and `.gitignore` at `~/.openrig/workspace/` (or the `--root` override). `--dry-run` previews without writing. `--force` is deprecated compatibility and preserves existing files. New in v0.3.0.
 - `snapshots.periodic.*` (v0.3.4): the daemon-side scheduler takes periodic snapshots per rig at `interval_seconds` and retains the newest `retention_keep`. At restore time, newest-wins between `auto-periodic` and `auto-pre-down` snapshots.
 
 Legacy env compatibility: the original runtime keys still accept deprecated
