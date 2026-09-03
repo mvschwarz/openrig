@@ -7,6 +7,12 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { startTmuxTranscriptCapture } from "./transcript-capture.js";
 import { deriveResumeToken } from "./resume-token-capture.js";
+import {
+  observeSolePane,
+  paneObservationVerdict,
+  type PaneBindingObservation,
+} from "./pane-binding-observation.js";
+import { SeatIdentityStore } from "./seat-identity-store.js";
 
 export type ClaimResult =
   | { ok: true; nodeId: string; sessionId: string }
@@ -124,6 +130,37 @@ export class ClaimService {
     this.contextUsageStore = deps.contextUsageStore ?? null;
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
     this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
+  }
+
+  private async observeBindingPane(
+    sessionName: string,
+    knownPane?: string | null,
+  ): Promise<PaneBindingObservation> {
+    if (knownPane) return { ok: true, pane: knownPane };
+    if (!this.tmuxAdapter) {
+      return { ok: false, code: "tmux_unavailable", detail: "tmux adapter unavailable" };
+    }
+    return observeSolePane(this.tmuxAdapter, sessionName);
+  }
+
+  private persistPaneBinding(
+    nodeId: string,
+    sessionName: string,
+    observation: PaneBindingObservation,
+    tmuxWindow?: string | null,
+  ): void {
+    this.sessionRegistry.updateBinding(nodeId, {
+      tmuxSession: sessionName,
+      ...(tmuxWindow ? { tmuxWindow } : {}),
+      ...(observation.ok ? { tmuxPane: observation.pane } : {}),
+    });
+    if (!observation.ok) {
+      new SeatIdentityStore(this.db).upsert(paneObservationVerdict({
+        nodeId,
+        sessionName,
+        observation,
+      }));
+    }
   }
 
   /** Best-effort: set OpenRig-owned tmux metadata on an adopted session. */
@@ -273,12 +310,18 @@ export class ClaimService {
       };
     }
 
+    const paneObservation = await this.observeBindingPane(
+      discovered.tmuxSession,
+      discovered.tmuxPane,
+    );
+
     const bindTx = this.db.transaction(() => {
-      this.sessionRegistry.updateBinding(node.id, {
-        tmuxSession: discovered.tmuxSession,
-        tmuxWindow: discovered.tmuxWindow ?? undefined,
-        tmuxPane: discovered.tmuxPane ?? undefined,
-      });
+      this.persistPaneBinding(
+        node.id,
+        discovered.tmuxSession,
+        paneObservation,
+        discovered.tmuxWindow,
+      );
 
       const session = this.sessionRegistry.registerClaimedSession(node.id, discovered.tmuxSession);
       this.discoveryRepo.markClaimed(discovered.id, node.id);
@@ -437,9 +480,13 @@ export class ClaimService {
     // 3. Read-only pane facts for the honest drift report. Reading never
     // injects input; failures degrade to drift entries, not errors.
     const projectionDrift: string[] = [];
+    const paneObservation = await this.observeBindingPane(sessionName);
+    if (!paneObservation.ok) projectionDrift.push(paneObservation.detail);
     let paneCommand: string | null = null;
     try {
-      paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
+      paneCommand = await this.tmuxAdapter.getPaneCommand(
+        paneObservation.ok ? paneObservation.pane : sessionName,
+      );
     } catch { paneCommand = null; }
     if (nodeRow.runtime) {
       const expectation: Record<string, string[]> = {
@@ -471,7 +518,7 @@ export class ClaimService {
         for (const row of stale) {
           this.sessionRegistry.markSuperseded(row.id);
         }
-        this.sessionRegistry.updateBinding(nodeRow!.id, { tmuxSession: sessionName });
+        this.persistPaneBinding(nodeRow!.id, sessionName, paneObservation);
         const session = this.sessionRegistry.registerClaimedSession(nodeRow!.id, sessionName);
         sessionId = session.id;
         persistedEvent = this.eventBus.persistWithinTransaction({
@@ -598,6 +645,11 @@ export class ClaimService {
       ? undefined
       : discovered.runtimeHint;
 
+    const paneObservation = await this.observeBindingPane(
+      discovered.tmuxSession,
+      discovered.tmuxPane,
+    );
+
     const claimTx = this.db.transaction(() => {
       const node = this.rigRepo.addNode(opts.rigId, logicalId, {
         runtime: discoveredRuntime,
@@ -605,11 +657,12 @@ export class ClaimService {
         podId: opts.podId,
       });
 
-      this.sessionRegistry.updateBinding(node.id, {
-        tmuxSession: discovered.tmuxSession,
-        tmuxWindow: discovered.tmuxWindow ?? undefined,
-        tmuxPane: discovered.tmuxPane ?? undefined,
-      });
+      this.persistPaneBinding(
+        node.id,
+        discovered.tmuxSession,
+        paneObservation,
+        discovered.tmuxWindow,
+      );
 
       const session = this.sessionRegistry.registerClaimedSession(node.id, discovered.tmuxSession);
       this.discoveryRepo.markClaimed(discovered.id, node.id);

@@ -24,13 +24,14 @@ function setupDb(): Database.Database {
 function mockTmuxAdapter(overrides?: {
   createSession?: (name: string, cwd?: string, env?: Record<string, string>) => Promise<TmuxResult>;
   killSession?: (name: string) => Promise<TmuxResult>;
+  listPanes?: (target: string) => Promise<Array<{ id: string }>>;
 }): TmuxAdapter {
   return {
     createSession: overrides?.createSession ?? (async () => ({ ok: true as const })),
     killSession: overrides?.killSession ?? (async () => ({ ok: true as const })),
     listSessions: async () => [],
     listWindows: async () => [],
-    listPanes: async () => [],
+    listPanes: overrides?.listPanes ?? (async () => []),
     hasSession: async () => false,
     sendText: async () => ({ ok: true as const }),
     sendKeys: async () => ({ ok: true as const }),
@@ -112,6 +113,19 @@ describe("NodeLauncher", () => {
     // Subscriber notified
     expect(notifications).toHaveLength(1);
     expect(notifications[0]!.type).toBe("node.launched");
+  });
+
+  it("launchNode commits the created session's sole live pane with its session and binding", async () => {
+    const { rig, node } = seedRigWithNode();
+    const listPanes = vi.fn(async () => [{ id: "%fresh" }]);
+    const launcher = createLauncher(mockTmuxAdapter({ listPanes }));
+
+    const result = await launcher.launchNode(rig.id, "dev1-impl", { occupantKind: "fresh" });
+
+    expect(result.ok).toBe(true);
+    expect(listPanes).toHaveBeenCalledWith(result.ok ? result.sessionName : "");
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxPane).toBe("%fresh");
+    expect(sessionRegistry.currentOccupantTenure(node.id)?.kind).toBe("fresh");
   });
 
   it("derived session name is correct (rig.name + '-' + logicalId)", async () => {
@@ -259,6 +273,7 @@ describe("NodeLauncher", () => {
 
   it("tmux createSession fails -> no DB rows", async () => {
     const { rig } = seedRigWithNode();
+    const killSpy = vi.fn(async () => ({ ok: true as const }));
     const launcher = createLauncher(
       mockTmuxAdapter({
         createSession: async () => ({
@@ -266,6 +281,7 @@ describe("NodeLauncher", () => {
           code: "duplicate_session",
           message: "duplicate session",
         }),
+        killSession: killSpy,
       })
     );
 
@@ -283,6 +299,7 @@ describe("NodeLauncher", () => {
       .prepare("SELECT * FROM events WHERE type = 'node.launched'")
       .all();
     expect(events).toHaveLength(0);
+    expect(killSpy).not.toHaveBeenCalled();
   });
 
   it("DB transaction fails after session+binding but before event -> rollback all, killSession attempted", async () => {

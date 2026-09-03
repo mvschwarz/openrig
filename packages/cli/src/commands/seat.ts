@@ -401,7 +401,7 @@ Examples:
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "stop" | "clean",
+    path: "set-model" | "launch" | "stop" | "clean",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -450,6 +450,37 @@ resume/successor launch reads it at call time. Examples:
         }
         console.log(`Model for ${s?.logicalId}@${s?.rigName}: ${String(data["from"] ?? "none")} -> ${String(data["to"])} (audited).`);
         console.log("The next managed resume/successor launch composes the new model.");
+      });
+    });
+
+  cmd
+    .command("launch")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .requiredOption("--fresh", "Explicitly create a blank native occupant; no continuity source is used")
+    .requiredOption("--reason <text>", "Audit reason recorded on the seat.fresh_launched event")
+    .option("--stop", "Stop the current live managed occupant before launching fresh")
+    .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--json", "JSON output for agents")
+    .description("Launch a deliberate fresh occupant for exactly one existing seat")
+    .addHelpText("after", `
+No resume, fork, rebuild, snapshot, checkpoint, or restore packet is used.
+A live managed seat requires --stop; adopted and unmanaged sessions are refused.
+Examples:
+  rig seat launch dev-impl@my-rig --fresh --reason "deliberate blank restart"
+  rig seat launch dev.impl --fresh --stop --reason "replace managed occupant" --json`)
+    .action(async (seat: string, opts: { fresh: boolean; reason: string; stop?: boolean; operator?: string; json?: boolean }) => {
+      await runLifecycleVerb("launch", seat, {
+        fresh: opts.fresh === true,
+        reason: opts.reason,
+        stop: opts.stop === true,
+        operator: opts.operator,
+      }, opts, (data) => {
+        const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+        const superseded = data["supersededSessionIds"] as string[] | undefined;
+        console.log(`Fresh occupant ready: ${s?.logicalId}@${s?.rigName} (${String(data["sessionName"])}).`);
+        console.log(`Generation: ${String(data["generation"])}; model: ${String(data["model"] ?? "none")}.`);
+        console.log(`Startup policy: ${String(data["startupPolicyHash"])}; superseded sessions: ${superseded?.length ?? 0}.`);
+        console.log("No continuity source was used; siblings and durable work were preserved.");
       });
     });
 

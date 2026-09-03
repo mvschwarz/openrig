@@ -11,6 +11,9 @@ import {
   getTranscriptRotationOptionsFromEnv,
 } from "./transcript-rotation.js";
 import type { TmuxOptionDefaultsApplier } from "./tmux-option-defaults.js";
+import { observeSolePane, paneObservationVerdict } from "./pane-binding-observation.js";
+import { SeatIdentityStore } from "./seat-identity-store.js";
+import type { OccupantKind } from "./session-registry.js";
 
 import type { Session, Binding } from "./types.js";
 
@@ -28,6 +31,8 @@ interface LaunchOpts {
    * decision. Caller plumbs from AgentSpec.profile.activity.
    */
   silenceWindowSeconds?: number;
+  /** A deliberate fresh occupant is distinct from initial rig boot in the tenure ledger. */
+  occupantKind?: OccupantKind;
 }
 
 interface NodeLauncherDeps {
@@ -122,7 +127,8 @@ export class NodeLauncher {
     // side-effect-free and fail-open: an unavailable ledger yields null and the launch remains valid.
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
 
-    // Create tmux session with OpenRig identity env vars (handle stale duplicate by killing and retrying)
+    // Create tmux session with OpenRig identity env vars. A duplicate is a
+    // collision, never authority to kill an unmanaged same-name session.
     const openRigEnv = compactEnv({
       OPENRIG_NODE_ID: node.id,
       OPENRIG_SESSION_NAME: sessionName,
@@ -131,16 +137,17 @@ export class NodeLauncher {
       OPENRIG_OCCUPANT_GENERATION: occupantGeneration ?? undefined,
     });
     const sessionCwd = opts?.cwd ?? node.cwd ?? undefined;
-    let tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
-    if (!tmuxResult.ok && tmuxResult.code === "duplicate_session") {
-      await this.tmuxAdapter.killSession(sessionName);
-      tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
-    }
+    const tmuxResult = await this.tmuxAdapter.createSession(sessionName, sessionCwd, openRigEnv);
     if (!tmuxResult.ok) {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
     }
 
     const launchWarnings: string[] = [];
+
+    // Observe the pane before the DB transaction. A concrete pane is committed
+    // with session+binding; an unresolved pane gets a durable named verdict in
+    // that same transaction rather than carrying an unexplained NULL forward.
+    const paneObservation = await observeSolePane(this.tmuxAdapter, sessionName);
 
     // 3a2. OPR.0.4.6.02 S1 — apply the daemon's tmux option defaults to the
     // JUST-CREATED session via the shared applier (mouse/status session-scope
@@ -176,10 +183,25 @@ export class NodeLauncher {
     let createdSessionId: string | null = null;
     try {
       const txn = this.db.transaction(() => {
-        const session = this.sessionRegistry.registerSession(node.id, sessionName, "initial", occupantGeneration);
+        const session = this.sessionRegistry.registerSession(
+          node.id,
+          sessionName,
+          opts?.occupantKind ?? "initial",
+          occupantGeneration,
+        );
         createdSessionId = session.id;
         this.sessionRegistry.updateStatus(session.id, "running");
-        this.sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
+        this.sessionRegistry.updateBinding(node.id, {
+          tmuxSession: sessionName,
+          ...(paneObservation.ok ? { tmuxPane: paneObservation.pane } : {}),
+        });
+        if (!paneObservation.ok) {
+          new SeatIdentityStore(this.db).upsert(paneObservationVerdict({
+            nodeId: node.id,
+            sessionName,
+            observation: paneObservation,
+          }));
+        }
         return this.eventBus.persistWithinTransaction({
           type: "node.launched",
           rigId,

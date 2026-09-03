@@ -12,6 +12,8 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { ExpansionRequest } from "../src/domain/types.js";
 import { convergeOp, SUPPORTED_OP_KINDS, isSupportedOpKind } from "../src/domain/topology-converge.js";
+import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 
 /** Fully-instrumented tmux adapter: records every call by method name. */
 function spyTmux(overrides?: Partial<Record<string, unknown>>) {
@@ -104,6 +106,35 @@ describe("ClaimService.reconcileSession (OPR.0.3.4.3)", () => {
     const nodes = setup.rigRepo.getRig(rig.id)!.nodes;
     expect(nodes).toHaveLength(1);
     expect(nodes[0]!.id).toBe(node.id);
+  });
+
+  it("reconcileSession replaces a NULL binding pane with the live pane and the next identity pass verifies it", async () => {
+    const localDb = createFullTestDb();
+    const panes = [{ id: "%refreshed", index: 0, cwd: "/tmp", width: 80, height: 24, active: true }];
+    const spy = spyTmux({
+      listSessions: vi.fn(async () => [{ name: "infra-server@test-rig" }] as never),
+      listPanes: vi.fn(async () => panes),
+      getPanePid: vi.fn(async () => 4242),
+      getPaneCommand: vi.fn(async () => "zsh"),
+    });
+    const local = createTestApp(localDb, { tmux: spy.adapter });
+    const rig = local.rigRepo.createRig("test-rig");
+    const expanded = await local.rigExpansionService.expand({ rigId: rig.id, pod: terminalPodFragment() });
+    expect(expanded.ok).toBe(true);
+    const node = local.rigRepo.getRig(rig.id)!.nodes.find((candidate) => candidate.logicalId === "infra.server")!;
+    const sessions = local.sessionRegistry.getSessionsForRig(rig.id).filter((session) => session.nodeId === node.id);
+    for (const session of sessions) local.sessionRegistry.markDetached(session.id);
+    localDb.prepare("UPDATE bindings SET tmux_pane = NULL WHERE node_id = ?").run(node.id);
+
+    const result = await local.claimService.reconcileSession({ sessionName: "infra-server@test-rig" });
+
+    expect(result.ok).toBe(true);
+    expect(local.sessionRegistry.getBindingForNode(node.id)?.tmuxPane).toBe("%refreshed");
+    await new SeatIdentityReconciler({ db: localDb, tmux: spy.adapter }).reconcileAll();
+    const verdict = new SeatIdentityStore(localDb).getForNode(node.id);
+    expect(verdict?.verdict).toBe("verified");
+    expect(verdict?.evidence.registeredPane).toBe("%refreshed");
+    localDb.close();
   });
 
   it("NO-INPUT DISCRIMINATOR: reconcile calls no launch/kill/create/sendText/sendKeys on the target", async () => {

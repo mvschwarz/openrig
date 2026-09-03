@@ -985,6 +985,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     daemonBootEpoch,
     eventBus,
     nodeLauncher,
+    startupOrchestrator,
     tmuxAdapter,
     tmuxOptionDefaults,
     sessionEnv: launchSessionEnv,

@@ -174,15 +174,24 @@ export class SeatIdentityReconciler {
       observedAt,
     };
 
-    // No registered pane to reconcile against — we cannot verify identity.
-    // Non-down-ranking (unknown), so a missing binding pane never flips a live
-    // seat non-green.
+    // A null binding pane has two distinct causes. When the target session is
+    // absent, that is a down-ranking missing-session fact. When it is live,
+    // only the binding is absent: named, but non-down-ranking.
     if (!seat.tmux_pane) {
+      if (!liveSessions.has(seat.session_name)) {
+        return {
+          ...base,
+          verdict: "pane_missing",
+          evidenceSource: "tmux_session",
+          reason: "session_missing",
+          evidence: { registeredPane: null, observedPid: null, observedCommand: null, matchedLayer: null },
+        };
+      }
       return {
         ...base,
-        verdict: "tmux_unavailable",
-        evidenceSource: null,
-        reason: "tmux_unavailable",
+        verdict: "binding_absent",
+        evidenceSource: "tmux_session",
+        reason: "binding_pane_missing",
         evidence: { registeredPane: null, observedPid: null, observedCommand: null, matchedLayer: null },
       };
     }

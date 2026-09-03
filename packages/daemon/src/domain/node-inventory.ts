@@ -181,6 +181,8 @@ function deriveNodeKind(runtime: string | null): "agent" | "infrastructure" {
  */
 export function deriveNodeLifecycleState(input: {
   sessionStatus: string | null;
+  /** Startup attention is live seat state, independent of restore history. */
+  startupStatus?: string | null;
   restoreOutcome: NodeRestoreOutcome;
   nodeId: string;
   usableSnapshot: Snapshot | null;
@@ -194,7 +196,8 @@ export function deriveNodeLifecycleState(input: {
   // prompt) and the L2 proxy (failed + alive tmux session) both surface as
   // lifecycleState=attention_required.
   if (
-    input.restoreOutcome === "attention_required"
+    input.startupStatus === "attention_required"
+    || input.restoreOutcome === "attention_required"
     || (input.restoreOutcome === "failed" && input.sessionStatus === "running")
   ) {
     return "attention_required";
@@ -560,6 +563,7 @@ function buildInventoryEntry(
   const identityVerdict = applicableVerdict(identityVerdicts.get(row.node_id) ?? null, row);
   const lifecycleState = deriveNodeLifecycleState({
     sessionStatus: row.session_status,
+    startupStatus: row.startup_status,
     restoreOutcome,
     nodeId: row.node_id,
     usableSnapshot,

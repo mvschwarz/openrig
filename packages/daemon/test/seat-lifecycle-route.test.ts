@@ -4,6 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 
 describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
   let db: Database.Database;
@@ -14,7 +15,10 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     setup = createTestApp(db);
   });
 
-  afterEach(() => { db.close(); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    db.close();
+  });
 
   function seedSeat(logicalId = "dev.impl", model = "fable") {
     const rig = setup.rigRepo.findRigsByName("seat-rig")[0] ?? setup.rigRepo.createRig("seat-rig");
@@ -114,5 +118,43 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     const again = await post("clean", sessionName, { reason: "x" });
     expect(again.status).toBe(409);
     expect((await again.json() as { code: string }).code).toBe("nothing_to_clean");
+  });
+
+  it("launch requires explicit fresh=true", async () => {
+    const { sessionName } = seedSeat();
+    const res = await post("launch", sessionName, { reason: "deliberate blank restart" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false, code: "fresh_required" });
+  });
+
+  it("launch route forwards the explicit fresh/stop/reason contract and returns the service result", async () => {
+    const launchFresh = vi.spyOn(SeatLifecycleService.prototype, "launchFresh").mockResolvedValue({
+      ok: true,
+      seat: { ref: "dev-impl@seat-rig", rigId: "rig-1", rigName: "seat-rig", logicalId: "dev.impl", podId: null, podNamespace: null, runtime: "codex" },
+      status: "ready",
+      sessionName: "dev-impl@seat-rig",
+      sessionId: "sess-fresh",
+      generation: "gen-fresh",
+      model: "gpt-5.6-codex",
+      startupPolicyHash: "policy-hash",
+      supersededSessionIds: ["sess-old"],
+    });
+
+    const res = await post("launch", "dev-impl@seat-rig", {
+      fresh: true,
+      stop: true,
+      reason: "deliberate blank restart",
+      operator: "orch-lead@seat-rig",
+    });
+
+    expect(res.status).toBe(200);
+    expect(launchFresh).toHaveBeenCalledWith({
+      seatRef: "dev-impl@seat-rig",
+      fresh: true,
+      stop: true,
+      reason: "deliberate blank restart",
+      operator: "orch-lead@seat-rig",
+    });
+    expect(await res.json()).toMatchObject({ status: "ready", generation: "gen-fresh" });
   });
 });

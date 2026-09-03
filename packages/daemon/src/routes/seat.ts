@@ -171,13 +171,19 @@ function seatLifecycleService(c: { get(key: never): unknown }): SeatLifecycleSer
     sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry,
     eventBus: c.get("eventBus" as never) as EventBus,
     tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
+    nodeLauncher: c.get("nodeLauncher" as never) as import("../domain/node-launcher.js").NodeLauncher,
+    startupOrchestrator: (c.get("startupOrchestrator" as never) as import("../domain/startup-orchestrator.js").StartupOrchestrator | undefined) ?? undefined,
+    runtimeAdapters: (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? undefined,
+    occupantInvalidator: (c.get("occupantInvalidator" as never) as import("../domain/occupant-invalidator.js").OccupantInvalidator | undefined) ?? undefined,
+    activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
   });
 }
 
-function seatLifecycleStatus(code: SeatRefusal["code"]): 400 | 404 | 409 | 502 {
-  if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason") return 400;
+function seatLifecycleStatus(code: SeatRefusal["code"]): 400 | 404 | 409 | 500 | 502 {
+  if (code === "seat_ref_required" || code === "missing_model" || code === "missing_reason" || code === "fresh_required") return 400;
   if (code === "seat_not_found") return 404;
   if (code === "tmux_probe_failed") return 502;
+  if (code === "launch_unavailable" || code === "runtime_adapter_missing" || code === "launch_failed" || code === "startup_failed") return 500;
   // seat_ambiguous / session_live / session_not_live / no_session / claimed_session /
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
@@ -189,6 +195,19 @@ seatRoutes.post("/set-model/:seatRef", async (c) => {
     seatRef: decodeURIComponent(c.req.param("seatRef")!),
     model: typeof body["model"] === "string" ? body["model"] : "",
     reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    operator: typeof body["operator"] === "string" ? body["operator"] : null,
+  });
+  if (result.ok) return c.json(result);
+  return c.json(result, seatLifecycleStatus(result.code));
+});
+
+seatRoutes.post("/launch/:seatRef", async (c) => {
+  const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const result = await seatLifecycleService(c).launchFresh({
+    seatRef: decodeURIComponent(c.req.param("seatRef")!),
+    fresh: body["fresh"] === true,
+    reason: typeof body["reason"] === "string" ? body["reason"] : "",
+    stop: body["stop"] === true,
     operator: typeof body["operator"] === "string" ? body["operator"] : null,
   });
   if (result.ok) return c.json(result);

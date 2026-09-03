@@ -170,6 +170,36 @@ describe("SeatIdentityReconciler.reconcileAll", () => {
     db.close();
   });
 
+  it("NULL pane + live target → named binding_absent, not tmux_unavailable", async () => {
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: null, runtime: "claude-code" });
+    const tmux = makeTmux({ sessions: ["s1@rig"] });
+    const rec = new SeatIdentityReconciler({ db, tmux, now: NOW });
+
+    await rec.reconcileAll();
+
+    const v = new SeatIdentityStore(db).getForNode("n1");
+    expect(v?.verdict).toBe("binding_absent");
+    expect(v?.reason).toBe("binding_pane_missing");
+    expect(v?.evidence.registeredPane).toBeNull();
+    db.close();
+  });
+
+  it("NULL pane + absent target while tmux has another session → down-ranking session_missing", async () => {
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: null, runtime: "claude-code" });
+    const tmux = makeTmux({ sessions: ["other@rig"] });
+    const rec = new SeatIdentityReconciler({ db, tmux, now: NOW });
+
+    await rec.reconcileAll();
+
+    const v = new SeatIdentityStore(db).getForNode("n1");
+    expect(v?.verdict).toBe("pane_missing");
+    expect(v?.reason).toBe("session_missing");
+    expect(v?.evidence.registeredPane).toBeNull();
+    db.close();
+  });
+
   it("TMUX BLIP GUARD — listSessions throws → tmux_unavailable, never down-ranks", async () => {
     const db = createFullTestDb();
     seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime: "claude-code" });

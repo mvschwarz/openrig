@@ -13,6 +13,7 @@ import { getNodeInventory, deriveNodeLifecycleState } from "../src/domain/node-i
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { projectRigToGraph, type InventoryOverlay } from "../src/domain/graph-projection.js";
 import type { SeatIdentityVerdict, SeatIdentityVerdictKind } from "../src/domain/types.js";
+import { identityVerdictDownranksRunning } from "../src/domain/types.js";
 
 function seedRunningSeat(db: Database.Database): void {
   db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1','test-rig')").run();
@@ -45,6 +46,13 @@ describe("deriveNodeLifecycleState identity gate (unit)", () => {
   });
   it("running + tmux_unavailable → running (transient blip is not a mismatch)", () => {
     expect(deriveNodeLifecycleState({ ...base, sessionStatus: "running", identityVerdict: "tmux_unavailable" })).toBe("running");
+  });
+  it("running + binding_absent → running (live target with missing binding is named but non-down-ranking)", () => {
+    expect(identityVerdictDownranksRunning("binding_absent")).toBe(false);
+    expect(deriveNodeLifecycleState({ ...base, sessionStatus: "running", identityVerdict: "binding_absent" })).toBe("running");
+  });
+  it("running + startup attention → attention_required", () => {
+    expect(deriveNodeLifecycleState({ ...base, sessionStatus: "running", startupStatus: "attention_required" })).toBe("attention_required");
   });
   it("running + mismatch → attention_required", () => {
     expect(deriveNodeLifecycleState({ ...base, sessionStatus: "running", identityVerdict: "mismatch" })).toBe("attention_required");
@@ -97,6 +105,38 @@ describe("getNodeInventory identity gating", () => {
     expect(n.lifecycleState).toBe("attention_required");
     expect(n.occupantLifecycle).toBe("unknown");
     expect(n.identityVerdict?.reason).toBe("session_missing");
+    db.close();
+  });
+
+  it("matching NULL-pane binding_absent verdict is visible but leaves running/active unchanged", () => {
+    const db = createFullTestDb();
+    seedRunningSeat(db);
+    db.prepare("UPDATE bindings SET tmux_pane = NULL WHERE node_id = 'n1'").run();
+    new SeatIdentityStore(db).upsert({
+      ...verdict("binding_absent", "binding_pane_missing"),
+      evidence: { registeredPane: null, observedPid: null, observedCommand: null, matchedLayer: null },
+    });
+    const [n] = getNodeInventory(db, "rig-1");
+    expect(n.identityVerdict?.verdict).toBe("binding_absent");
+    expect(n.identityVerdict?.reason).toBe("binding_pane_missing");
+    expect(n.lifecycleState).toBe("running");
+    expect(n.occupantLifecycle).toBe("active");
+    db.close();
+  });
+
+  it("matching NULL-pane session_missing verdict down-ranks to attention_required", () => {
+    const db = createFullTestDb();
+    seedRunningSeat(db);
+    db.prepare("UPDATE bindings SET tmux_pane = NULL WHERE node_id = 'n1'").run();
+    expect(identityVerdictDownranksRunning("pane_missing")).toBe(true);
+    new SeatIdentityStore(db).upsert({
+      ...verdict("pane_missing", "session_missing"),
+      evidence: { registeredPane: null, observedPid: null, observedCommand: null, matchedLayer: null },
+    });
+    const [n] = getNodeInventory(db, "rig-1");
+    expect(n.identityVerdict?.verdict).toBe("pane_missing");
+    expect(n.lifecycleState).toBe("attention_required");
+    expect(n.occupantLifecycle).toBe("unknown");
     db.close();
   });
 

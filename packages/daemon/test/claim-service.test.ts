@@ -103,6 +103,19 @@ describe("ClaimService", () => {
     expect(updated?.claimedNodeId).toBe(node.id);
   });
 
+  it("bind replaces an existing NULL pane with the discovered live pane", async () => {
+    const rig = seedRig();
+    const node = rigRepo.addNode(rig.id, "orch.lead", { runtime: "claude-code", cwd: "/projects/myapp" });
+    sessionRegistry.updateBinding(node.id, {});
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxPane).toBeNull();
+    const discovered = seedDiscovery({ tmuxSession: "orch-lead@host", tmuxPane: "%discovered" });
+
+    const result = await claimService.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "orch.lead" });
+
+    expect(result.ok).toBe(true);
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxPane).toBe("%discovered");
+  });
+
   it("bind rejects runtime mismatch against the target node", async () => {
     const rig = seedRig();
     rigRepo.addNode(rig.id, "orch.lead", { runtime: "codex", cwd: "/projects/myapp" });

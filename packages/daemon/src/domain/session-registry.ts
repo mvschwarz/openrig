@@ -8,7 +8,7 @@ import { validateSessionName } from "./session-name.js";
 import { formatWatchdogRegistrationError } from "./watchdog-auto-registration.js";
 
 // GHOST-STAGE atom-B (P12 3548d8eb) — the occupant-generation tenure.
-export type OccupantKind = "initial" | "handover" | "adopt";
+export type OccupantKind = "initial" | "handover" | "adopt" | "fresh";
 export interface OccupantTenure {
   id: string;
   nodeId: string;

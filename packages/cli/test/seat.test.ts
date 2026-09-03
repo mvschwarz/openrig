@@ -24,7 +24,11 @@ function mockLifecycleDeps(): LifecycleDeps {
   };
 }
 
-function makeDeps(response: { status: number; data: unknown }, paths: string[]): StatusDeps {
+function makeDeps(
+  response: { status: number; data: unknown },
+  paths: string[],
+  postBodies?: unknown[],
+): StatusDeps {
   return {
     lifecycleDeps: mockLifecycleDeps(),
     clientFactory: () => ({
@@ -32,8 +36,9 @@ function makeDeps(response: { status: number; data: unknown }, paths: string[]):
         paths.push(path);
         return response;
       }),
-      post: vi.fn(async (path: string) => {
+      post: vi.fn(async (path: string, body?: unknown) => {
         paths.push(path);
+        postBodies?.push(body);
         return response;
       }),
     }) as unknown as StatusDeps["clientFactory"] extends (url: string) => infer T ? T : never,
@@ -189,6 +194,18 @@ const HANDOVER_RESULT_FRESH = {
   },
 };
 
+const FRESH_LAUNCH_RESULT = {
+  ok: true,
+  seat: HANDOVER_PLAN.seat,
+  status: "ready",
+  sessionName: "dev-impl@seat-rig",
+  sessionId: "sess-fresh",
+  generation: "gen-fresh",
+  model: "gpt-5.6-codex",
+  startupPolicyHash: "policy-hash",
+  supersededSessionIds: ["sess-old"],
+};
+
 describe("rig seat status", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -249,6 +266,77 @@ describe("rig seat status", () => {
     expect(exitCode).toBe(1);
     expect(errors.join("\n")).toContain("Seat \"missing@seat-rig\" not found");
     expect(errors.join("\n")).toContain("List seats with: rig ps --nodes");
+  });
+
+  it("launch --fresh posts the explicit no-continuity contract and prints stable JSON", async () => {
+    const paths: string[] = [];
+    const bodies: unknown[] = [];
+    const deps = makeDeps({ status: 200, data: FRESH_LAUNCH_RESULT }, paths, bodies);
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync([
+        "node", "rig", "seat", "launch", "dev-impl@seat-rig",
+        "--fresh", "--stop", "--reason", "deliberate blank restart",
+        "--operator", "orch-lead@seat-rig", "--json",
+      ]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    expect(paths).toEqual(["/api/seat/launch/dev-impl%40seat-rig"]);
+    expect(bodies).toEqual([{
+      fresh: true,
+      reason: "deliberate blank restart",
+      stop: true,
+      operator: "orch-lead@seat-rig",
+    }]);
+    expect(JSON.parse(logs.join("\n"))).toMatchObject({
+      status: "ready",
+      generation: "gen-fresh",
+      startupPolicyHash: "policy-hash",
+    });
+  });
+
+  it("launch requires --fresh before contacting the daemon", async () => {
+    const paths: string[] = [];
+    const deps = makeDeps({ status: 200, data: FRESH_LAUNCH_RESULT }, paths);
+    let refusal: unknown;
+
+    await captureLogs(async () => {
+      const command = makeCommand(deps);
+      const seat = command.commands.find((candidate) => candidate.name() === "seat")!;
+      seat.commands.find((candidate) => candidate.name() === "launch")!.exitOverride();
+      try {
+        await command.parseAsync([
+          "node", "rig", "seat", "launch", "dev-impl@seat-rig",
+          "--reason", "deliberate blank restart",
+        ]);
+      } catch (error) {
+        refusal = error;
+      }
+    });
+
+    expect(paths).toEqual([]);
+    expect(refusal).toMatchObject({
+      code: "commander.missingMandatoryOptionValue",
+      message: expect.stringContaining("required option '--fresh' not specified"),
+    });
+  });
+
+  it("launch human output states fresh identity and preserved durable work", async () => {
+    const deps = makeDeps({ status: 200, data: FRESH_LAUNCH_RESULT }, []);
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync([
+        "node", "rig", "seat", "launch", "dev-impl@seat-rig",
+        "--fresh", "--reason", "deliberate blank restart",
+      ]);
+    });
+
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("Fresh occupant ready: dev.impl@seat-rig (dev-impl@seat-rig)");
+    expect(output).toContain("Generation: gen-fresh; model: gpt-5.6-codex");
+    expect(output).toContain("No continuity source was used; siblings and durable work were preserved.");
   });
 
   it("handover --dry-run --json prints the stable planner shape", async () => {

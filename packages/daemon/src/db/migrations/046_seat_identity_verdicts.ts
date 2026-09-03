@@ -18,15 +18,18 @@ import type { Migration } from "../migrate.js";
  *
  * Columns:
  * - `node_id` (PK) — the managed node; stable across session churn.
- * - `verdict` — verified | mismatch | pane_missing | tmux_unavailable.
+ * - `verdict` — verified | mismatch | pane_missing | binding_absent |
+ *   tmux_unavailable.
  *   Only `mismatch` and `pane_missing` down-rank a `running` projection;
- *   `verified` and `tmux_unavailable` (a transient/unknown observation) leave
- *   the projection unchanged, and an ABSENT row (never polled) also leaves it
+ *   `verified`, `binding_absent` (target session live, binding pane missing),
+ *   and `tmux_unavailable` (a transient/unknown observation) leave the
+ *   projection unchanged, and an ABSENT row (never polled) also leaves it
  *   unchanged (fail-open on unknown — never flip a live fleet non-green on a
  *   missing observation).
  * - `evidence_source` — pane_process | tmux_session (which axis produced it).
- * - `reason` — process_identity_mismatch | pane_pid_gone | session_missing |
- *   tmux_unavailable. Mirrors the AgentActivity evidence vocabulary so
+ * - `reason` — process_identity_mismatch | pane_pid_gone |
+ *   binding_pane_missing | session_missing | tmux_unavailable. Mirrors the
+ *   AgentActivity evidence vocabulary so
  *   consumers stay uniform.
  * - `registered_pane` / `observed_pid` / `observed_command` / `matched_layer`
  *   — the evidence payload (cf. FingerprintEvidence).

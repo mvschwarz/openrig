@@ -130,6 +130,8 @@ export type RigEvent =
   | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null }
   | { type: "session.cleaned"; rigId: string; nodeId: string; sessionName: string | null; reason: string; operator: string | null; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | { type: "node.launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
+  | { type: "seat.fresh_launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string; nativeSessionId: string | null; nativeSessionIdReason?: string; model: string | null; startupPolicyHash: string; reason: string; operator: string | null; status: "ready" | "attention_required" }
+  | { type: "seat.fresh_launch_failed"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string | null; model: string | null; startupPolicyHash: string; reason: string; operator: string | null; errors: string[] }
   | { type: "snapshot.created"; rigId: string; snapshotId: string; kind: string }
   | { type: "restore.started"; rigId: string; snapshotId: string }
   | { type: "restore.completed"; rigId: string; snapshotId: string; result: RestoreResult }
@@ -519,10 +521,10 @@ export type NodeLifecycleState = "running" | "detached" | "recoverable" | "atten
  * Computed by the periodic SeatIdentityReconciler from the pane PID/command vs
  * the registered `bindings.tmux_pane`, NEVER from queue/classifier/hook
  * heartbeats. Only `mismatch` and `pane_missing` down-rank a `running`
- * projection; `verified` and `tmux_unavailable` (and an absent verdict) leave
- * it unchanged.
+ * projection; `verified`, `binding_absent`, and `tmux_unavailable` (and an
+ * absent verdict) leave it unchanged.
  */
-export type SeatIdentityVerdictKind = "verified" | "mismatch" | "pane_missing" | "tmux_unavailable";
+export type SeatIdentityVerdictKind = "verified" | "mismatch" | "pane_missing" | "binding_absent" | "tmux_unavailable";
 
 export interface SeatIdentityVerdict {
   nodeId: string;
@@ -535,6 +537,7 @@ export interface SeatIdentityVerdict {
     | "process_identity_ambiguous"
     | "pane_ambiguous"
     | "pane_pid_gone"
+    | "binding_pane_missing"
     | "session_missing"
     | "tmux_unavailable"
     | null;
