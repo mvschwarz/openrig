@@ -159,11 +159,12 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(first.errors).toEqual([]);
     expect(first).toMatchObject({ ok: true, applied: true });
     expect(git(f.root, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
-    expect(readFileSync(excludePath, "utf8")).toContain("# operator-owned rule\n/private-cache/\n");
-    expect(git(f.root, "check-ignore", "--no-index", join(f.project, harnessDir, "skills", "managed", "SKILL.md"))).not.toBe("");
+    expect(readFileSync(excludePath, "utf8")).toBe(operatorExclude);
+    expect(git(f.root, "check-ignore", "-v", "--no-index", join(f.project, harnessDir, "skills", "managed", "SKILL.md")))
+      .toContain(`${harnessDir}/skills/.gitignore`);
     expect(() => git(f.root, "check-ignore", "--no-index", localSkill)).toThrow();
 
-    writeFileSync(excludePath, operatorExclude);
+    rmSync(join(f.project, harnessDir, "skills", ".gitignore"));
     expect(git(f.root, "status", "--porcelain=v1", "--untracked-files=all")).not.toBe("");
     const healed = reconcileSkillLoadout({ loadout: selected.loadout, runtime, cwd: f.project, apply: true });
     expect(healed).toMatchObject({ ok: true, applied: true, freshLaunchRequired: false });
@@ -179,6 +180,52 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(reconcileSkillLoadout({ loadout: empty.loadout, runtime, cwd: f.project, apply: true }))
       .toMatchObject({ ok: true, removed: ["managed"] });
     expect(() => git(f.root, "check-ignore", "--no-index", join(f.project, harnessDir, "skills", "managed", "SKILL.md"))).toThrow();
+    expect(readFileSync(excludePath, "utf8")).toBe(operatorExclude);
+    expect(git(f.root, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+  });
+
+  it("does not hide an unowned same-path skill in a sibling linked worktree", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "managed");
+    commit(f.root);
+    const sibling = mkdtempSync(join(tmpdir(), "openrig-skill-loadout-linked-"));
+    roots.push(sibling);
+    rmSync(sibling, { recursive: true, force: true });
+    git(f.root, "worktree", "add", "-q", "--detach", sibling, "HEAD");
+    const foreignSkill = join(sibling, "project", ".agents", "skills", "managed", "SKILL.md");
+    mkdirSync(join(foreignSkill, ".."), { recursive: true });
+    writeFileSync(foreignSkill, "# unowned sibling skill\n");
+    const visible = "?? project/.agents/skills/managed/SKILL.md";
+    expect(git(sibling, "status", "--porcelain=v1", "--untracked-files=all")).toBe(visible);
+
+    const selected = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["managed"] });
+    expect(selected.ok).toBe(true);
+    if (!selected.ok) return;
+    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime: "codex", cwd: f.project, apply: true }))
+      .toMatchObject({ ok: true, applied: true });
+
+    expect(git(f.root, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+    expect(git(sibling, "status", "--porcelain=v1", "--untracked-files=all")).toBe(visible);
+  });
+
+  it("composes both runtime projections in one Git working tree", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "managed");
+    commit(f.root);
+    const selected = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["managed"] });
+    expect(selected.ok).toBe(true);
+    if (!selected.ok) return;
+
+    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime: "codex", cwd: f.project, apply: true }))
+      .toMatchObject({ ok: true, applied: true });
+    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime: "claude-code", cwd: f.project, apply: true }))
+      .toMatchObject({ ok: true, applied: true });
+    expect(reconcileSkillLoadout({ loadout: selected.loadout, runtime: "codex", cwd: f.project, apply: true }))
+      .toMatchObject({ ok: true, applied: false });
+
+    const manifestIgnore = readFileSync(join(f.project, ".openrig", "skill-loadouts", ".gitignore"), "utf8");
+    expect(manifestIgnore).toContain("# BEGIN OpenRig managed skill loadout codex");
+    expect(manifestIgnore).toContain("# BEGIN OpenRig managed skill loadout claude-code");
     expect(git(f.root, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
   });
 
@@ -376,12 +423,14 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(linked).toMatchObject({ ok: false, applied: false, errors: [{ code: "target_conflict" }] });
 
     rmSync(join(f.project, ".agents"), { recursive: true, force: true });
-    writeFileSync(join(f.project, ".agents"), "not a directory\n");
+    mkdirSync(join(f.project, ".agents", "skills"), { recursive: true });
+    mkdirSync(join(f.project, ".openrig"), { recursive: true });
+    writeFileSync(join(f.project, ".openrig", "skill-loadouts"), "not a directory\n");
     const failed = reconcileSkillLoadout({ loadout: selected.loadout, runtime: "codex", cwd: f.project, apply: true });
     expect(failed).toMatchObject({ ok: false, applied: false, errors: [{ code: "projection_failed" }] });
     expect(existsSync(join(f.project, ".openrig", "skill-loadouts", "codex.json"))).toBe(false);
-    expect(readFileSync(join(f.project, ".agents"), "utf8")).toBe("not a directory\n");
-    expect(readFileSync(join(f.root, ".git", "info", "exclude"), "utf8")).not.toContain("OpenRig managed skill loadout");
+    expect(readFileSync(join(f.project, ".openrig", "skill-loadouts"), "utf8")).toBe("not a directory\n");
+    expect(existsSync(join(f.project, ".agents", "skills", ".gitignore"))).toBe(false);
   });
 
   it("unions topology selections from seats that share one runtime working directory", () => {

@@ -90,7 +90,7 @@ interface OwnershipManifest {
   skills: OwnedSkill[];
 }
 
-interface GitExcludePlan {
+interface GitIgnorePlan {
   path: string;
   originalExists: boolean;
   originalContent: string;
@@ -456,8 +456,8 @@ function copyDirectoryExact(source: string, target: string): void {
   }
 }
 
-function gitIgnorePattern(repoRoot: string, path: string, directory: boolean): string {
-  const relative = nodePath.relative(repoRoot, path);
+function gitIgnorePattern(base: string, path: string, directory: boolean): string {
+  const relative = nodePath.relative(base, path);
   if (!relative || relative === ".." || relative.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(relative)) {
     throw new Error(`managed skill projection path is outside its Git working tree: ${path}`);
   }
@@ -468,7 +468,7 @@ function gitIgnorePattern(repoRoot: string, path: string, directory: boolean): s
   return `/${escaped}${directory ? "/" : ""}`;
 }
 
-function replaceGitExcludeBlock(original: string, begin: string, end: string, patterns: string[]): string {
+function replaceGitIgnoreBlock(original: string, begin: string, end: string, patterns: string[] | null): string {
   const beginAt = original.indexOf(begin);
   const endAt = original.indexOf(end);
   if ((beginAt === -1) !== (endAt === -1)) {
@@ -485,20 +485,74 @@ function replaceGitExcludeBlock(original: string, begin: string, end: string, pa
       throw new Error(`managed Git exclusion block is ambiguous (${begin})`);
     }
     const after = original[endAt + end.length] === "\n" ? endAt + end.length + 1 : endAt + end.length;
-    const block = `${begin}\n${patterns.join("\n")}\n${end}\n`;
+    const block = patterns === null ? "" : `${begin}\n${patterns.join("\n")}\n${end}\n`;
     return `${original.slice(0, beginAt)}${block}${original.slice(after)}`;
   }
+  if (patterns === null) return original;
   const separator = original.length > 0 && !original.endsWith("\n") ? "\n" : "";
   return `${original}${separator}${begin}\n${patterns.join("\n")}\n${end}\n`;
 }
 
-function planGitExclusions(input: {
+function isGitIgnored(repoRoot: string, path: string, directory: boolean): boolean {
+  const probe = directory ? nodePath.join(path, "SKILL.md") : path;
+  try {
+    execFileSync("git", ["-C", repoRoot, "check-ignore", "-q", "--no-index", "--", probe], { stdio: "ignore" });
+    return true;
+  } catch (err) {
+    if ((err as { status?: number | null }).status === 1) return false;
+    throw err;
+  }
+}
+
+function isGitTracked(repoRoot: string, path: string): boolean {
+  const relative = nodePath.relative(repoRoot, path);
+  try {
+    execFileSync("git", ["-C", repoRoot, "ls-files", "--error-unmatch", "--", relative], { stdio: "ignore" });
+    return true;
+  } catch (err) {
+    if ((err as { status?: number | null }).status === 1) return false;
+    throw err;
+  }
+}
+
+function planGitIgnoreFile(input: {
+  repoRoot: string;
+  path: string;
+  begin: string;
+  end: string;
+  targets: Array<{ path: string; directory: boolean }>;
+}): GitIgnorePlan | null {
+  const originalExists = existsSync(input.path);
+  const originalContent = originalExists ? readFileSync(input.path, "utf8") : "";
+  const hasManagedBlock = originalContent.includes(input.begin) || originalContent.includes(input.end);
+  const hasOtherManagedBlock = (["claude-code", "codex"] as const).some((runtime) =>
+    originalContent.includes(`# BEGIN OpenRig managed skill loadout ${runtime}`)
+    && originalContent.includes(`# END OpenRig managed skill loadout ${runtime}`));
+  if (!hasManagedBlock && !hasOtherManagedBlock) {
+    if (input.targets.every((target) => isGitIgnored(input.repoRoot, target.path, target.directory))) return null;
+    if (originalExists) {
+      throw new Error(`refusing to modify an existing unmanaged Git ignore file at ${input.path}`);
+    }
+  }
+  const patterns = input.targets.length === 0
+    ? null
+    : ["/.gitignore", ...input.targets
+      .map((target) => gitIgnorePattern(nodePath.dirname(input.path), target.path, target.directory))
+      .sort(compareBytes)];
+  const nextContent = replaceGitIgnoreBlock(originalContent, input.begin, input.end, patterns);
+  if (nextContent !== originalContent && isGitTracked(input.repoRoot, input.path)) {
+    throw new Error(`refusing to modify a tracked Git ignore file at ${input.path}`);
+  }
+  return { path: input.path, originalExists, originalContent, nextContent, changed: nextContent !== originalContent };
+}
+
+function planGitIgnores(input: {
   cwd: string;
   runtime: SkillRuntime;
   targetRoot: string;
   manifestPath: string;
   owned: OwnedSkill[];
-}): GitExcludePlan | null {
+}): GitIgnorePlan[] {
   let repoRoot: string;
   try {
     repoRoot = execFileSync("git", ["-C", input.cwd, "rev-parse", "--show-toplevel"], {
@@ -506,16 +560,8 @@ function planGitExclusions(input: {
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
   } catch {
-    return null;
+    return [];
   }
-  const rawExcludePath = execFileSync("git", ["-C", input.cwd, "rev-parse", "--git-path", "info/exclude"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
-  if (!rawExcludePath) throw new Error(`Git returned no local exclusion path for ${input.cwd}`);
-  const excludePath = nodePath.isAbsolute(rawExcludePath)
-    ? rawExcludePath
-    : nodePath.resolve(input.cwd, rawExcludePath);
   const canonicalRepoRoot = realpathSync(repoRoot);
   const canonicalCwd = realpathSync(input.cwd);
   const fromCanonicalCwd = (path: string): string => {
@@ -525,17 +571,28 @@ function planGitExclusions(input: {
     }
     return nodePath.join(canonicalCwd, relative);
   };
-  const originalExists = existsSync(excludePath);
-  const originalContent = originalExists ? readFileSync(excludePath, "utf8") : "";
-  const key = sha256(`${input.cwd}\0${input.runtime}`).slice(0, 16);
+  const canonicalTargetRoot = fromCanonicalCwd(input.targetRoot);
+  const canonicalManifestPath = fromCanonicalCwd(input.manifestPath);
+  const key = input.runtime;
   const begin = `# BEGIN OpenRig managed skill loadout ${key}`;
   const end = `# END OpenRig managed skill loadout ${key}`;
-  const patterns = [
-    ...input.owned.map((skill) => gitIgnorePattern(canonicalRepoRoot, fromCanonicalCwd(skill.target), true)),
-    gitIgnorePattern(canonicalRepoRoot, fromCanonicalCwd(input.manifestPath), false),
-  ].sort(compareBytes);
-  const nextContent = replaceGitExcludeBlock(originalContent, begin, end, patterns);
-  return { path: excludePath, originalExists, originalContent, nextContent, changed: nextContent !== originalContent };
+  const plans = [
+    planGitIgnoreFile({
+      repoRoot: canonicalRepoRoot,
+      path: nodePath.join(canonicalTargetRoot, ".gitignore"),
+      begin,
+      end,
+      targets: input.owned.map((skill) => ({ path: fromCanonicalCwd(skill.target), directory: true })),
+    }),
+    planGitIgnoreFile({
+      repoRoot: canonicalRepoRoot,
+      path: nodePath.join(nodePath.dirname(canonicalManifestPath), ".gitignore"),
+      begin,
+      end,
+      targets: [{ path: canonicalManifestPath, directory: false }],
+    }),
+  ];
+  return plans.filter((plan): plan is GitIgnorePlan => plan !== null);
 }
 
 function writeFileAtomic(path: string, content: string): void {
@@ -550,8 +607,15 @@ function writeFileAtomic(path: string, content: string): void {
   }
 }
 
-function restoreGitExclusions(plan: GitExcludePlan): void {
-  if (!existsSync(plan.path) || readFileSync(plan.path, "utf8") !== plan.nextContent) return;
+function applyGitIgnore(plan: GitIgnorePlan): void {
+  if (plan.nextContent.length === 0) rmSync(plan.path, { force: true });
+  else writeFileAtomic(plan.path, plan.nextContent);
+}
+
+function restoreGitIgnore(plan: GitIgnorePlan): void {
+  if (plan.nextContent.length === 0) {
+    if (existsSync(plan.path)) return;
+  } else if (!existsSync(plan.path) || readFileSync(plan.path, "utf8") !== plan.nextContent) return;
   if (plan.originalExists) writeFileAtomic(plan.path, plan.originalContent);
   else rmSync(plan.path, { force: true });
 }
@@ -770,9 +834,9 @@ export function reconcileSkillLoadout(input: {
       selectedBy: skill.selectedBy,
     }))
     .sort((a, b) => compareBytes(a.id, b.id));
-  let gitExcludePlan: GitExcludePlan | null;
+  let gitIgnorePlans: GitIgnorePlan[];
   try {
-    gitExcludePlan = planGitExclusions({ cwd, runtime: input.runtime, targetRoot, manifestPath, owned: nextOwned });
+    gitIgnorePlans = planGitIgnores({ cwd, runtime: input.runtime, targetRoot, manifestPath, owned: nextOwned });
   } catch (err) {
     return {
       ok: false,
@@ -792,14 +856,14 @@ export function reconcileSkillLoadout(input: {
     && JSON.stringify(manifest.skills) === JSON.stringify(nextOwned)
     && JSON.stringify(manifest.topologySelections) === JSON.stringify(canonicalTopologySelections)
     && JSON.stringify(manifest.projectSelection) === JSON.stringify(projectSelection)
-    && !gitExcludePlan?.changed
+    && !gitIgnorePlans.some((plan) => plan.changed)
   ) {
     return { ok: true, applied: false, freshLaunchRequired: false, runtime: input.runtime, targetRoot, manifestPath, receipts, removed: [], errors: [] };
   }
   const removed: string[] = [];
   const rollback: Array<{ target: string; backup: string | null }> = [];
   let stagingRoot: string | null = null;
-  let gitExclusionsApplied = false;
+  const appliedGitIgnores: GitIgnorePlan[] = [];
   try {
     mkdirSync(nodePath.dirname(targetRoot), { recursive: true });
     stagingRoot = nodePath.join(nodePath.dirname(targetRoot), `.openrig-skill-stage-${randomUUID()}`);
@@ -813,9 +877,9 @@ export function reconcileSkillLoadout(input: {
       const skill = effectiveEntries.find((entry) => entry.id === receipt.id)!;
       copyDirectoryExact(skill.sourceDir, nodePath.join(staged, skill.id));
     }
-    if (gitExcludePlan?.changed) {
-      writeFileAtomic(gitExcludePlan.path, gitExcludePlan.nextContent);
-      gitExclusionsApplied = true;
+    for (const plan of gitIgnorePlans.filter((candidate) => candidate.changed)) {
+      applyGitIgnore(plan);
+      appliedGitIgnores.push(plan);
     }
     mkdirSync(targetRoot, { recursive: true });
     for (const receipt of changed) {
@@ -865,8 +929,8 @@ export function reconcileSkillLoadout(input: {
         if (action.backup && pathEntryExists(action.backup)) renameSync(action.backup, action.target);
       } catch { /* retain the original failure; rollback is best-effort */ }
     }
-    if (gitExclusionsApplied && gitExcludePlan) {
-      try { restoreGitExclusions(gitExcludePlan); } catch { /* retain the original failure; rollback is best-effort */ }
+    for (const plan of appliedGitIgnores.reverse()) {
+      try { restoreGitIgnore(plan); } catch { /* retain the original failure; rollback is best-effort */ }
     }
     if (stagingRoot) rmSync(stagingRoot, { recursive: true, force: true });
     return {
