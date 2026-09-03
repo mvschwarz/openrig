@@ -197,22 +197,30 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "drill": {
       const drilled = drillTo(next, action.resource, action.name, snap, action.target);
       if (drilled.lastError) return drilled;
+      const sectionState = clearScopeCoordinatesOnSectionChange(state, drilled);
       const spec = action.resource === "spec" ? findSpec(snap, action.name) : null;
       // filters are VIEW-scoped: a drill that crosses sections clears the old
       // section's filter (founder direct-drive catch — a specs filter leaked
       // into the topology table and blanked it)
       const filter = drilled.section === state.section ? drilled.filter : "";
-      return syncSelection(resetContent({ ...drilled, filter, viewTab: spec?.kind === "rig" ? "configuration" : "table" }), snap);
+      return syncSelection(resetContent({ ...sectionState, filter, viewTab: spec?.kind === "rig" ? "configuration" : "table" }), snap);
     }
     case "cross": {
       const crossed = crossNav(next, action.kind, action.name, snap, action.target);
       if (crossed.lastError) return crossed;
+      const sectionState = clearScopeCoordinatesOnSectionChange(state, crossed);
       const filter = crossed.section === state.section ? crossed.filter : "";
-      return syncSelection({ ...crossed, filter }, snap);
+      return syncSelection({ ...sectionState, filter }, snap);
     }
     default:
       return { ...next, lastError: "unknown action" };
   }
+}
+
+function clearScopeCoordinatesOnSectionChange(previous: ViewState, next: ViewState): ViewState {
+  return next.section === previous.section
+    ? next
+    : { ...next, scopesMission: null, scopesSelected: null, executionOpen: null };
 }
 
 function resetContent(state: ViewState): ViewState {

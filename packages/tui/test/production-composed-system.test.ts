@@ -97,4 +97,26 @@ describe("founder-approved G2/L2 production composition", () => {
     });
     expect(address.path).toContain("agent:dev50.driver");
   });
+
+  it.each([
+    ["resource drill", "rig openrig-build", {
+      instance: "production-composed",
+      section: "topology",
+      host: "vm-host",
+      rig: "openrig-build",
+      path: "instance:production-composed/section:topology/host:vm-host/rig:openrig-build",
+    }],
+    ["cross navigation", "spec-of dev50.driver", {
+      instance: "production-composed",
+      section: "specs",
+      spec: "driver-agent",
+      path: "instance:production-composed/section:specs/spec:driver-agent",
+    }],
+  ])("drops stale scope coordinates when %s leaves SCOPES", (_label, command, expected) => {
+    const { view } = factory();
+    view.dispatch({ type: "scopes-open", mission: "release-0.5.9", slice: "11-production-tui-composed-system" });
+    view.dispatch(parseCommand(command));
+
+    expect(describeState(view.get()).address).toEqual(expected);
+  });
 });
