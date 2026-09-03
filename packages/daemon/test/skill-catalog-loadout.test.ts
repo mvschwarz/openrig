@@ -184,6 +184,30 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(git(f.root, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
   });
 
+  it("refuses before projecting when a foreign ignore covers only part of a multi-file skill", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "managed");
+    mkdirSync(join(f.catalog, "managed", "scripts"), { recursive: true });
+    writeFileSync(join(f.catalog, "managed", "scripts", "helper.txt"), "managed helper\n");
+    const ignorePath = join(f.project, ".agents", "skills", ".gitignore");
+    mkdirSync(join(ignorePath, ".."), { recursive: true });
+    writeFileSync(ignorePath, "/managed/SKILL.md\n");
+    commit(f.root);
+
+    const selected = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["managed"] });
+    expect(selected.ok).toBe(true);
+    if (!selected.ok) return;
+    const result = reconcileSkillLoadout({ loadout: selected.loadout, runtime: "codex", cwd: f.project, apply: true });
+    const repeated = reconcileSkillLoadout({ loadout: selected.loadout, runtime: "codex", cwd: f.project, apply: true });
+
+    expect(result).toMatchObject({ ok: false, applied: false, errors: [{ code: "git_exclusion_failed" }] });
+    expect(repeated).toMatchObject({ ok: false, applied: false, errors: [{ code: "git_exclusion_failed" }] });
+    expect(existsSync(join(f.project, ".agents", "skills", "managed"))).toBe(false);
+    expect(existsSync(join(f.project, ".openrig", "skill-loadouts", "codex.json"))).toBe(false);
+    expect(readFileSync(ignorePath, "utf8")).toBe("/managed/SKILL.md\n");
+    expect(git(f.root, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+  });
+
   it("does not hide an unowned same-path skill in a sibling linked worktree", () => {
     const f = fixture([]);
     writeSkill(f.catalog, "managed");

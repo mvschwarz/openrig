@@ -493,10 +493,9 @@ function replaceGitIgnoreBlock(original: string, begin: string, end: string, pat
   return `${original}${separator}${begin}\n${patterns.join("\n")}\n${end}\n`;
 }
 
-function isGitIgnored(repoRoot: string, path: string, directory: boolean): boolean {
-  const probe = directory ? nodePath.join(path, "SKILL.md") : path;
+function isGitIgnored(repoRoot: string, path: string): boolean {
   try {
-    execFileSync("git", ["-C", repoRoot, "check-ignore", "-q", "--no-index", "--", probe], { stdio: "ignore" });
+    execFileSync("git", ["-C", repoRoot, "check-ignore", "-q", "--no-index", "--", path], { stdio: "ignore" });
     return true;
   } catch (err) {
     if ((err as { status?: number | null }).status === 1) return false;
@@ -521,6 +520,7 @@ function planGitIgnoreFile(input: {
   begin: string;
   end: string;
   targets: Array<{ path: string; directory: boolean }>;
+  coveragePaths: string[];
 }): GitIgnorePlan | null {
   const originalExists = existsSync(input.path);
   const originalContent = originalExists ? readFileSync(input.path, "utf8") : "";
@@ -529,7 +529,7 @@ function planGitIgnoreFile(input: {
     originalContent.includes(`# BEGIN OpenRig managed skill loadout ${runtime}`)
     && originalContent.includes(`# END OpenRig managed skill loadout ${runtime}`));
   if (!hasManagedBlock && !hasOtherManagedBlock) {
-    if (input.targets.every((target) => isGitIgnored(input.repoRoot, target.path, target.directory))) return null;
+    if (input.coveragePaths.every((path) => isGitIgnored(input.repoRoot, path))) return null;
     if (originalExists) {
       throw new Error(`refusing to modify an existing unmanaged Git ignore file at ${input.path}`);
     }
@@ -583,6 +583,8 @@ function planGitIgnores(input: {
       begin,
       end,
       targets: input.owned.map((skill) => ({ path: fromCanonicalCwd(skill.target), directory: true })),
+      coveragePaths: input.owned.flatMap((skill) => Object.keys(skill.files)
+        .map((path) => nodePath.join(fromCanonicalCwd(skill.target), path))),
     }),
     planGitIgnoreFile({
       repoRoot: canonicalRepoRoot,
@@ -590,6 +592,7 @@ function planGitIgnores(input: {
       begin,
       end,
       targets: [{ path: canonicalManifestPath, directory: false }],
+      coveragePaths: [canonicalManifestPath],
     }),
   ];
   return plans.filter((plan): plan is GitIgnorePlan => plan !== null);

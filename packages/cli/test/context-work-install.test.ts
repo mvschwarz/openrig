@@ -233,6 +233,49 @@ composition:
     expect(execFileSync("git", ["-C", workingRoot, "status", "--short"], { encoding: "utf8" })).toBe("");
   });
 
+  it("refuses work-install before projecting when a foreign ignore covers only skill entrypoints", async () => {
+    mkdirSync(join(skillsRoot, "project-skill", "scripts"), { recursive: true });
+    writeFileSync(join(skillsRoot, "project-skill", "scripts", "helper.txt"), "managed helper\n");
+    execFileSync("git", ["-C", root, "add", "managed-skills/project-skill/scripts/helper.txt"]);
+    execFileSync("git", ["-C", root, "commit", "-qm", "multi-file skill fixture"]);
+    const ignorePath = join(workingRoot, ".agents", "skills", ".gitignore");
+    mkdirSync(join(ignorePath, ".."), { recursive: true });
+    writeFileSync(ignorePath, "/*/SKILL.md\n");
+    execFileSync("git", ["-C", workingRoot, "add", ".agents/skills/.gitignore"]);
+    execFileSync("git", ["-C", workingRoot, "commit", "-qm", "foreign partial skill ignore"]);
+
+    const run = () => captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install",
+        "--project", "alpha", "--runtime", "codex", "--cwd", workingRoot,
+        "--topology", "topology-skill", "--apply-skills", "--json",
+      ]);
+    });
+    const result = await run();
+    const repeated = await run();
+    const output = JSON.parse(result.logs.join("")) as {
+      skillProjection: { ok: boolean; applied: boolean; errors: Array<{ code: string }> };
+    };
+    const repeatedOutput = JSON.parse(repeated.logs.join("")) as typeof output;
+
+    expect(result.exitCode).toBe(1);
+    expect(output.skillProjection).toMatchObject({
+      ok: false,
+      applied: false,
+      errors: [{ code: "git_exclusion_failed" }],
+    });
+    expect(repeated.exitCode).toBe(1);
+    expect(repeatedOutput.skillProjection).toMatchObject({
+      ok: false,
+      applied: false,
+      errors: [{ code: "git_exclusion_failed" }],
+    });
+    expect(readFileSync(ignorePath, "utf8")).toBe("/*/SKILL.md\n");
+    expect(execFileSync("git", ["-C", workingRoot, "status", "--short", "--untracked-files=all"], { encoding: "utf8" })).toBe("");
+    expect(() => readFileSync(join(workingRoot, ".agents", "skills", "project-skill", "SKILL.md"), "utf8")).toThrow();
+    expect(() => readFileSync(join(workingRoot, ".openrig", "skill-loadouts", "codex.json"), "utf8")).toThrow();
+  });
+
   it("delivers extant pieces byte-for-byte in plan order and marks absent pieces", async () => {
     const args = [
       "node", "rig", "context", "work-install",
