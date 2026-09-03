@@ -897,7 +897,6 @@ export class WorkflowProjector {
     }
 
     const mappedTarget = currentStep.next_hop?.on?.[input.exit];
-    const isFailureOccurrence = input.exit === "failed" && !mappedTarget;
     const completesPrerequisite = input.exit === "done" || input.exit === "handoff";
     const trail = this.trailLog.listForInstance(instance.instanceId, 100_000);
     const completed = new Set(
@@ -929,6 +928,34 @@ export class WorkflowProjector {
       });
     }
 
+    // A dependency graph advances each branch from its own durable binding,
+    // so the livelock window must be evaluated from that binding too. The
+    // serial path performs the same comparison against instance-level fields.
+    // Convert a tripped advance into the ordinary branch-local failure shape:
+    // close this packet honestly, record one resumable occurrence, create no
+    // successor, and leave unrelated frontier packets untouched.
+    const maxHops = spec.loop_guards?.max_hops;
+    const maxHopsTripped =
+      nextSteps.length > 0 &&
+      exceedsMaxHops(packetBinding.hopCount, packetBinding.hopsBaseline, maxHops);
+    const effectiveExit: WorkflowExitKind = maxHopsTripped ? "failed" : input.exit;
+    const effectiveResultNote = maxHopsTripped
+      ? `max_hops_exceeded: hop ${packetBinding.hopCount + 1} would exceed loop_guards.max_hops=${maxHops}`
+      : input.resultNote;
+    const effectiveClosureEvidence = maxHopsTripped
+      ? {
+          ...(input.closureEvidence ?? {}),
+          max_hops_guard: {
+            code: "max_hops_exceeded",
+            maxHops,
+            hopCount: packetBinding.hopCount,
+            attemptedHop: packetBinding.hopCount + 1,
+          },
+        }
+      : input.closureEvidence;
+    if (maxHopsTripped) nextSteps = [];
+    const isFailureOccurrence = effectiveExit === "failed" && (!mappedTarget || maxHopsTripped);
+
     const evaluatedAt = this.now().toISOString();
     const emitted: PersistedEvent[] = [];
     const createdPackets: Array<{ qitemId: string; step: WorkflowStepSpec; owner: string; nudge: boolean | undefined; blocked: boolean }> = [];
@@ -946,14 +973,17 @@ export class WorkflowProjector {
       });
 
       const closureOwner = ownerPlans.length === 1 ? ownerPlans[0]!.owner : null;
-      const closure = input.exit === "handoff" && ownerPlans.length !== 1
+      const closure = effectiveExit === "handoff" && ownerPlans.length !== 1
         ? {
             state: "done" as const,
             closureReason: "no-follow-on",
             closureTarget: null,
             transitionNote: `workflow graph: ${input.actorSession} completed ${currentStep.id}; ${ownerPlans.length} successors projected transactionally`,
           }
-        : workflowExitToQueueClosure(input, closureOwner);
+        : workflowExitToQueueClosure(
+            { ...input, exit: effectiveExit, resultNote: effectiveResultNote },
+            closureOwner,
+          );
       const updated = this.queueRepo.updateWithinTransaction({
         qitemId: input.currentPacketId,
         actorSession: input.actorSession,
@@ -967,13 +997,13 @@ export class WorkflowProjector {
       });
       addEvent(updated.persistedEvent);
 
-      if (input.exit !== "waiting") {
+      if (effectiveExit !== "waiting") {
         this.instanceStore.removeFrontierBinding(instance.instanceId, input.currentPacketId);
         if (this.watchdogJobsRepo) {
           disarmWorkflowKeepalive(
             this.watchdogJobsRepo,
             instance.instanceId,
-            `workflow_packet_${input.exit}`,
+            `workflow_packet_${effectiveExit}`,
             input.currentPacketId,
           );
         }
@@ -983,7 +1013,7 @@ export class WorkflowProjector {
         const created = this.queueRepo.createWithinTransaction({
           sourceSession: input.actorSession,
           destinationSession: plan.owner,
-          body: workflowHandoffBody({ spec, instance, currentStep, nextStep: plan.step, actorSession: input.actorSession, resultNote: input.resultNote, gate: plan.gate }),
+          body: workflowHandoffBody({ spec, instance, currentStep, nextStep: plan.step, actorSession: input.actorSession, resultNote: effectiveResultNote, gate: plan.gate }),
           priority: "routine",
           tier: plan.gate?.tier ?? "mode2",
           tags: ["workflow", plan.gate ? "gate" : "handoff", `workflow:${spec.id}`, `instance:${instance.instanceId}`, `step:${plan.step.id}`],
@@ -1033,12 +1063,12 @@ export class WorkflowProjector {
           branchDrive: packetBinding.branchDrive,
           hopCount: packetBinding.hopCount,
           hopsBaseline: packetBinding.hopsBaseline,
-          failureReason: input.resultNote ?? null,
+          failureReason: effectiveResultNote ?? null,
         });
       }
 
       const remainingFrontier = instance.currentFrontier.filter((packetId) => packetId !== input.currentPacketId);
-      const nextFrontier = input.exit === "waiting"
+      const nextFrontier = effectiveExit === "waiting"
         ? [...remainingFrontier, input.currentPacketId]
         : [...remainingFrontier, ...createdPackets.map((packet) => packet.qitemId)];
       const unresolvedCount = this.instanceStore.listFailureOccurrences(instance.instanceId, "unresolved").length;
@@ -1054,7 +1084,7 @@ export class WorkflowProjector {
         expectedVersion: instance.version,
         completedAt: nextStatus === "completed" || nextStatus === "failed" ? evaluatedAt : null,
         lastContinuationDecision: {
-          exit: input.exit,
+          exit: effectiveExit,
           actorSession: input.actorSession,
           closedPacket: input.currentPacketId,
           currentStep: currentStep.id,
@@ -1066,17 +1096,17 @@ export class WorkflowProjector {
         stepId: currentStep.id,
         stepRole: currentStep.actor_role,
         closedAt: evaluatedAt,
-        closureReason: input.exit,
-        closureEvidence: { ...(input.closureEvidence ?? {}), next_qitem_ids: createdPackets.map((packet) => packet.qitemId) },
+        closureReason: effectiveExit,
+        closureEvidence: { ...(effectiveClosureEvidence ?? {}), next_qitem_ids: createdPackets.map((packet) => packet.qitemId) },
         actorSession: input.actorSession,
         nextQitemId: createdPackets[0]?.qitemId ?? null,
         priorQitemId: input.currentPacketId,
       });
-      addEvent(this.eventBus.persistWithinTransaction({ type: "workflow.step_closed", instanceId: instance.instanceId, stepId: currentStep.id, closureReason: input.exit, actorSession: input.actorSession, priorQitemId: input.currentPacketId }));
+      addEvent(this.eventBus.persistWithinTransaction({ type: "workflow.step_closed", instanceId: instance.instanceId, stepId: currentStep.id, closureReason: effectiveExit, actorSession: input.actorSession, priorQitemId: input.currentPacketId }));
       if (nextStatus === "completed") {
         addEvent(this.eventBus.persistWithinTransaction({ type: "workflow.completed", instanceId: instance.instanceId, workflowName: instance.workflowName }));
       } else if (nextStatus === "failed") {
-        addEvent(this.eventBus.persistWithinTransaction({ type: "workflow.failed", instanceId: instance.instanceId, workflowName: instance.workflowName, reason: input.resultNote ?? "workflow_step_failed" }));
+        addEvent(this.eventBus.persistWithinTransaction({ type: "workflow.failed", instanceId: instance.instanceId, workflowName: instance.workflowName, reason: effectiveResultNote ?? "workflow_step_failed" }));
       }
     });
 
@@ -1086,7 +1116,7 @@ export class WorkflowProjector {
     return {
       instance: this.instanceStore.getByIdOrThrow(instance.instanceId),
       closurePriorPacketId: input.currentPacketId,
-      closureReason: input.exit,
+      closureReason: effectiveExit,
       nextQitemId: createdPackets[0]?.qitemId ?? null,
       nextOwnerSession: createdPackets[0]?.owner ?? null,
       nextStepId: createdPackets[0]?.step.id ?? null,

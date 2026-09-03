@@ -831,9 +831,12 @@ export class WorkflowRuntime {
         ),
       };
     });
+    const failureResumeAvailable = instance.status !== "completed" && instance.status !== "aborted";
     const failures = this.instanceStore.listFailureOccurrences(instanceId).map((failure) => ({
       ...failure,
-      targetedAction: failure.status === "unresolved" ? "resume" as const : "none" as const,
+      targetedAction: failure.status === "unresolved" && failureResumeAvailable
+        ? "resume" as const
+        : "none" as const,
     }));
     return { instance, frontier, failures, unknowns };
   }

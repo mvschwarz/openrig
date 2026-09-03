@@ -341,7 +341,10 @@ function readLifecycleExecutions(db: Database.Database, mission: string): Array<
           redrive_packet_id: failure["redrive_packet_id"],
           failed_at: failure["failed_at"],
           resolved_at: failure["resolved_at"],
-          targeted_action: failure["status"] === "unresolved"
+          targeted_action:
+            failure["status"] === "unresolved" &&
+            row["status"] !== "completed" &&
+            row["status"] !== "aborted"
             ? `rig workflow resume ${instanceId} --occurrence ${String(failure["occurrence_id"])} --actor-session <you>`
             : null,
         }))

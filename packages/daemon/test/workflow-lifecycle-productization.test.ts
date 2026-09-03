@@ -7,6 +7,7 @@ import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { buildExecutionView } from "../src/domain/execution-view.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
@@ -95,6 +96,33 @@ const WAITING_SPEC = PARALLEL_SPEC.replace(
   /allowed_exits: \[done, failed\]/g,
   "allowed_exits: [done, failed, waiting]",
 );
+
+const GUARDED_CYCLE_SPEC = `workflow:
+  id: lifecycle-guarded-cycle
+  version: 1
+  entry: { role: root }
+  loop_guards:
+    max_hops: 1
+  roles:
+    root: { preferred_targets: [root@rig] }
+    left: { preferred_targets: [left@rig] }
+    right: { preferred_targets: [right@rig] }
+  steps:
+    - id: root
+      actor_role: root
+      allowed_exits: [done, failed]
+    - id: left
+      actor_role: left
+      depends_on: [root]
+      allowed_exits: [done, failed]
+      next_hop:
+        on:
+          done: root
+    - id: right
+      actor_role: right
+      depends_on: [root]
+      allowed_exits: [done, failed]
+`;
 
 describe("S06 lifecycle productization", () => {
   let db: Database.Database;
@@ -326,6 +354,82 @@ describe("S06 lifecycle productization", () => {
     expect(db.prepare(`SELECT * FROM queue_items WHERE qitem_id = ?`).get(right.packetId)).toEqual(rightRowBefore);
   });
 
+  it("enforces max_hops per packet drive and resumes only the failed branch with a fresh window", async () => {
+    const created = await runtime.instantiate({
+      specPath: spec(GUARDED_CYCLE_SPEC, "guarded-cycle.yaml"),
+      rootObjective: "bounded cycle",
+      createdBySession: "orch@rig",
+    });
+    await runtime.project({
+      instanceId: created.instance.instanceId,
+      currentPacketId: created.entryQitemId,
+      exit: "done",
+      actorSession: "root@rig",
+    });
+    const before = runtime.inspect(created.instance.instanceId);
+    const left = before.frontier.find((packet) => packet.stepId === "left")!;
+    const right = before.frontier.find((packet) => packet.stepId === "right")!;
+    const rightRowBefore = db.prepare(`SELECT * FROM queue_items WHERE qitem_id = ?`).get(right.packetId);
+    const rightBindingBefore = runtime.instanceStore.getFrontierBinding(created.instance.instanceId, right.packetId);
+
+    const tripped = await runtime.project({
+      instanceId: created.instance.instanceId,
+      currentPacketId: left.packetId,
+      exit: "done",
+      actorSession: "left@rig",
+    });
+
+    expect(tripped.closureReason).toBe("failed");
+    expect(tripped.nextQitemIds).toEqual([]);
+    const failed = runtime.inspect(created.instance.instanceId);
+    expect(failed.instance.status).toBe("active");
+    expect(failed.frontier.map((packet) => packet.packetId)).toEqual([right.packetId]);
+    expect(failed.failures).toMatchObject([{
+      occurrenceId: left.packetId,
+      stepId: "left",
+      hopCount: 1,
+      hopsBaseline: 0,
+      status: "unresolved",
+      failureReason: expect.stringContaining("max_hops_exceeded"),
+      targetedAction: "resume",
+    }]);
+    expect(db.prepare(`SELECT * FROM queue_items WHERE qitem_id = ?`).get(right.packetId)).toEqual(rightRowBefore);
+    expect(runtime.instanceStore.getFrontierBinding(created.instance.instanceId, right.packetId)).toEqual(rightBindingBefore);
+    const guardTrail = runtime.trailLog.listForInstance(created.instance.instanceId)
+      .find((entry) => entry.priorQitemId === left.packetId)!;
+    expect(guardTrail.closureReason).toBe("failed");
+    expect(guardTrail.closureEvidence).toMatchObject({
+      max_hops_guard: { code: "max_hops_exceeded", maxHops: 1, hopCount: 1, attemptedHop: 2 },
+      next_qitem_ids: [],
+    });
+
+    const resumed = await runtime.resume({
+      instanceId: created.instance.instanceId,
+      occurrenceId: left.packetId,
+      decision: "retry bounded branch",
+      actorSession: "orch@rig",
+    });
+    expect(runtime.instanceStore.getFrontierBinding(created.instance.instanceId, resumed.newPacketId)).toMatchObject({
+      stepId: "left",
+      hopCount: 1,
+      hopsBaseline: 1,
+    });
+    const advanced = await runtime.project({
+      instanceId: created.instance.instanceId,
+      currentPacketId: resumed.newPacketId,
+      exit: "done",
+      actorSession: "left@rig",
+    });
+    expect(advanced.closureReason).toBe("done");
+    expect(advanced.nextStepIds).toEqual(["root"]);
+    expect(runtime.instanceStore.getFrontierBinding(created.instance.instanceId, advanced.nextQitemId!)).toMatchObject({
+      stepId: "root",
+      hopCount: 2,
+      hopsBaseline: 1,
+    });
+    expect(db.prepare(`SELECT * FROM queue_items WHERE qitem_id = ?`).get(right.packetId)).toEqual(rightRowBefore);
+  });
+
   it("derives aggregate active, waiting, failed, and completed states from all packets and failures", async () => {
     const waiting = await runtime.instantiate({
       specPath: spec(WAITING_SPEC, "waiting.yaml"),
@@ -421,6 +525,66 @@ describe("S06 lifecycle productization", () => {
     expect(aborted.closedPacketIds).toHaveLength(2);
     expect(runtime.instanceStore.getByIdOrThrow(parallel.instance.instanceId).status).toBe("aborted");
     for (const id of aborted.closedPacketIds) expect(queueRepo.getById(id)?.state).toBe("canceled");
+  });
+
+  it("keeps an aborted occurrence as history without advertising an impossible resume", async () => {
+    const created = await runtime.instantiate({
+      specPath: spec(PARALLEL_SPEC, "abort-occurrence.yaml"),
+      rootObjective: "abort after branch failure",
+      createdBySession: "orch@rig",
+      lifecycle: {
+        operationKey: "abort-occurrence",
+        compiledInputDigest: "abort-occurrence-digest",
+        binding: { identity: { mission: "release-0.5.9" } },
+      },
+    });
+    await runtime.project({
+      instanceId: created.instance.instanceId,
+      currentPacketId: created.entryQitemId,
+      exit: "done",
+      actorSession: "root@rig",
+    });
+    const before = runtime.inspect(created.instance.instanceId);
+    const left = before.frontier.find((packet) => packet.stepId === "left")!;
+    await runtime.project({
+      instanceId: created.instance.instanceId,
+      currentPacketId: left.packetId,
+      exit: "failed",
+      actorSession: "left@rig",
+    });
+    expect(runtime.inspect(created.instance.instanceId).failures[0]?.targetedAction).toBe("resume");
+
+    await runtime.abort({
+      instanceId: created.instance.instanceId,
+      reason: "operator stopped",
+      actorSession: "orch@rig",
+    });
+    const aborted = runtime.inspect(created.instance.instanceId);
+    expect(aborted.instance.status).toBe("aborted");
+    expect(aborted.failures).toMatchObject([{
+      occurrenceId: left.packetId,
+      status: "unresolved",
+      targetedAction: "none",
+    }]);
+    const execution = buildExecutionView({
+      db,
+      slicesRoot: () => null,
+      buildInfo: { semver: null, commit: null, dirty: null, builtAt: null },
+    }, { mission: "release-0.5.9" }) as { lifecycle_instances: Array<{
+      instance_id: string;
+      failure_occurrences: Array<{ occurrence_id: string; targeted_action: string | null }>;
+    }> };
+    const projected = execution.lifecycle_instances.find((item) => item.instance_id === created.instance.instanceId)!;
+    expect(projected.failure_occurrences).toMatchObject([{
+      occurrence_id: left.packetId,
+      targeted_action: null,
+    }]);
+    expect(JSON.stringify(projected)).not.toContain("rig workflow resume");
+    await expect(runtime.resume({
+      instanceId: created.instance.instanceId,
+      occurrenceId: left.packetId,
+      actorSession: "orch@rig",
+    })).rejects.toMatchObject({ code: "instance_not_resumable" });
   });
 
   it("arms and retires liveness independently for every frontier packet", async () => {

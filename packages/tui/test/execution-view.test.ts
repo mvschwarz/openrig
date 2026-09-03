@@ -196,6 +196,24 @@ describe("mission execution story — readable rows over the shipped projections
     expect(body).toContain("? frontier packet Q-GHOST has no queue row");
   });
 
+  it("keeps terminal failure history visible without rendering an impossible resume command", () => {
+    const fixture = executionFixture();
+    fixture.lifecycle_instances = [{
+      instance_id: "WF-ABORTED",
+      status: "aborted",
+      operation_key: "release-op",
+      frontier_packets: [],
+      failure_occurrences: [
+        { occurrence_id: "Q-FAILED", step_id: "build", status: "unresolved", failure_reason: "historical failure", targeted_action: null },
+      ],
+      unknowns: [],
+    }];
+    const body = text(executionContentLines(fixture, executionScopes(), [], null, 200));
+    expect(body).toContain("WF-ABORTED · aborted · key release-op");
+    expect(body).toContain("occurrence Q-FAILED · historical failure");
+    expect(body).not.toContain("rig workflow resume");
+  });
+
   it("keeps every drill affordance in bounds at 110 and 160 columns and drops the name before the facts", () => {
     for (const width of [110 - 32, 160 - 32]) {
       const lines = executionContentLines(executionFixture(), executionScopes(), [], null, width);
