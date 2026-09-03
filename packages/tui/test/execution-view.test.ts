@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { executionContentLines, executionSliceStripLines } from "../src/execution/execution-model.js";
 import { demoSnapshot } from "../src/demo-data.js";
@@ -199,7 +200,7 @@ describe("mission execution story — readable rows over the shipped projections
   it("keeps a typed acceptance action usable at every production terminal width", () => {
     const fixture = executionFixture();
     const candidate = "0123456789abcdef0123456789abcdef01234567";
-    const evidence = "proof/review.md";
+    const evidence = "missions/release-0.5.9/slices/06-project-release-lifecycle/proof/review50-r2-CLEAR-27354de779a9a7d4311b910e56115df33d26295e.md";
     fixture.lifecycle_instances = [{
       instance_id: "WF-ACCEPTANCE",
       status: "active",
@@ -228,14 +229,24 @@ describe("mission execution story — readable rows over the shipped projections
       view.dispatch({ type: "scopes-mission-open", mission: fixture.mission });
 
       const screen = renderScreen(view.get(), snap, size);
-      const action = screen.lines
-        .map((line) => line.slice(line.indexOf("│") + 1).trim())
-        .filter((line) => line.startsWith("action rig workflow project") || line.startsWith("--") || line.startsWith("'"))
-        .join(" ")
-        .replace(/\s*\\\s*/g, " ");
-      expect(action, `${size.cols}x${size.rows}`).toContain(`--acceptance-candidate '${candidate}'`);
-      expect(action, `${size.cols}x${size.rows}`).toContain("--acceptance-verdict 'CLEAR'");
-      expect(action, `${size.cols}x${size.rows}`).toContain(`--acceptance-evidence-ref '${evidence}'`);
+      const content = screen.lines.map((line) => line.slice(line.indexOf("│") + 2).trimEnd());
+      let cursor = content.findIndex((line) => line.trimStart().startsWith("action rig workflow project"));
+      let action = content[cursor]!.replace(/^\s*action /, "");
+      while (action.endsWith("\\")) action += `\n${content[++cursor]!}`;
+      const argv = execFileSync("/bin/sh", ["-c", `set -- ${action}\nprintf '%s\\0' "$@"`])
+        .toString()
+        .split("\0")
+        .filter(Boolean);
+      expect(argv, `${size.cols}x${size.rows}`).toEqual([
+        "rig", "workflow", "project",
+        "--instance", "WF-ACCEPTANCE",
+        "--current-packet", "qitem-acceptance-packet",
+        "--exit", "done",
+        "--actor-session", "review50-r2@v-openrig-build",
+        "--acceptance-candidate", candidate,
+        "--acceptance-verdict", "CLEAR",
+        "--acceptance-evidence-ref", evidence,
+      ]);
       expect(action, `${size.cols}x${size.rows}`).not.toContain("…");
       expect(screen.lines.every((line) => line.length <= size.cols), `${size.cols}x${size.rows}`).toBe(true);
     }

@@ -67,28 +67,89 @@ function clip(text: string, room: number): string {
 
 /** Keep lifecycle commands complete in the scrollable pane. Shell continuations make the
  * visual wrap usable as one command instead of turning the hidden suffix into guesswork. */
+function shellWords(command: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  for (const char of command) {
+    if (escaped) {
+      word += char;
+      escaped = false;
+    } else if (char === "\\" && quote !== "'") {
+      word += char;
+      escaped = true;
+    } else if ((char === "'" || char === '"') && (quote === null || quote === char)) {
+      word += char;
+      quote = quote === char ? null : char;
+    } else if (/\s/.test(char) && quote === null) {
+      if (word) words.push(word);
+      word = "";
+    } else {
+      word += char;
+    }
+  }
+  if (word) words.push(word);
+  return words;
+}
+
+function quoteShell(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+/** Split only words emitted by the daemon's shellQuote helper. A continuation directly
+ * between adjacent quoted chunks is one shell argument; option-to-option continuations
+ * retain a separating space. */
+function splitQuotedWord(word: string, maxWidth: number): string[] | null {
+  if (!word.startsWith("'") || !word.endsWith("'")) return null;
+  const value = word.slice(1, -1).replaceAll(`'"'"'`, "'");
+  if (quoteShell(value) !== word) return null;
+  const chunks: string[] = [];
+  let chunk = "";
+  for (const char of value) {
+    if (chunk && quoteShell(chunk + char).length > maxWidth) {
+      chunks.push(quoteShell(chunk));
+      chunk = char;
+    } else {
+      chunk += char;
+    }
+  }
+  chunks.push(quoteShell(chunk));
+  return chunks;
+}
+
 function actionLines(action: string, width: number): ContentLine[] {
   const firstIndent = "      action ";
   const nextIndent = "        ";
   const room = Math.max(width, 24);
-  const groups = action.split(/ (?=--[a-z])/);
-  const parts = groups.flatMap((group) => {
-    const split = group.indexOf(" ");
-    return split > 0 && nextIndent.length + group.length + 2 > room
-      ? [group.slice(0, split), group.slice(split + 1)]
-      : [group];
-  });
+  const parts = shellWords(action);
   const lines: ContentLine[] = [];
   let current = `${firstIndent}${parts.shift() ?? ""}`;
-  for (const part of parts) {
-    if (`${current} ${part} \\`.length <= room) {
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index]!;
+    const more = index < parts.length - 1;
+    if (current && `${current} ${part}${more ? " \\" : ""}`.length <= room) {
       current += ` ${part}`;
       continue;
     }
-    lines.push({ text: `${current} \\` });
-    current = `${nextIndent}${part}`;
+    if (current) lines.push({ text: `${current} \\` });
+    const chunks = splitQuotedWord(part, room - 2);
+    if (chunks && `${nextIndent}${part}${more ? " \\" : ""}`.length > room) {
+      for (let chunkIndex = 0; chunkIndex < chunks.length - 1; chunkIndex++) {
+        lines.push({ text: `${chunks[chunkIndex]!}\\` });
+      }
+      const last = chunks[chunks.length - 1]!;
+      if (more) {
+        lines.push({ text: `${last} \\` });
+        current = "";
+      } else {
+        current = last;
+      }
+    } else {
+      current = `${nextIndent}${part}`;
+    }
   }
-  lines.push({ text: current });
+  if (current) lines.push({ text: current });
   return lines;
 }
 
