@@ -89,7 +89,10 @@ import { wireViewEventBridge } from "./domain/view-event-bridge.js";
 import { WatchdogJobsRepository } from "./domain/watchdog-jobs-repository.js";
 import { WatchdogAutoRegistration } from "./domain/watchdog-auto-registration.js";
 import { WatchdogHistoryLog } from "./domain/watchdog-history-log.js";
-import { WatchdogPolicyEngine } from "./domain/watchdog-policy-engine.js";
+import {
+  formatWatchdogDeliveryMessage,
+  WatchdogPolicyEngine,
+} from "./domain/watchdog-policy-engine.js";
 import { WatchdogScheduler } from "./domain/watchdog-scheduler.js";
 import {
   ContinuityPolicyMaterializer,
@@ -1747,14 +1750,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       jobsRepo: watchdogJobsRepoInstance,
       historyLog: watchdogHistoryLogInstance,
       eventBus,
-      deliver: async ({ targetSession, message, continuityAction }) => {
+      deliver: async ({ targetSession, message, continuityAction }, source) => {
         let continuityActionCompleted = false;
         try {
           if (continuityAction) {
             await createContinuityCutoverBaton(continuityAction, queueRepoInstance);
             continuityActionCompleted = true;
           }
-          const result = await sessionTransport.send(targetSession, message);
+          const result = await sessionTransport.send(
+            targetSession,
+            formatWatchdogDeliveryMessage(source, message),
+          );
           return result.ok
             ? { status: "ok", continuityActionCompleted }
             : { status: "failed", error: result.error, continuityActionCompleted };

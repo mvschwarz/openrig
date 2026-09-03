@@ -105,6 +105,25 @@ describe("watchdog routes (PL-004 Phase C)", () => {
     expect(res.status).toBe(400);
   });
 
+  it.each([
+    ["malformed YAML", "message: [unterminated", "invalid YAML"],
+    ["non-string message", "message: 42\n", "message"],
+    ["non-mapping context", "context: nope\n", "context"],
+    ["non-string target", "target: 42\nmessage: ping\n", "target"],
+  ])("POST /register rejects %s before storing a job", async (_case, specYaml, messagePart) => {
+    const res = await app.request("/api/watchdog/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...validRegisterBody, specYaml }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("spec_invalid");
+    expect(body.message).toContain(messagePart);
+    expect(jobsRepo.listAll()).toHaveLength(0);
+  });
+
   it("GET /list lists all jobs", async () => {
     jobsRepo.register({ ...validRegisterBody, targetSession: "a@rig" });
     jobsRepo.register({ ...validRegisterBody, targetSession: "b@rig" });
