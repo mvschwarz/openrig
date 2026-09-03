@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
 import { ContextPackError } from "../src/domain/context-packs/context-pack-types.js";
+import { openRigContextLibraryRoots } from "../src/domain/instance-initialization.js";
 
 function writePackAt(root: string, refPath: string, name: string, version = "1") {
   const dir = join(root, refPath);
@@ -59,6 +60,33 @@ describe("ATOM 2 — recursive path-addressed discovery (spec §2 refs)", () => 
     const service = lib();
     expect(service.scan().count).toBe(2);
     expect(service.list().map((e) => e.relativePath).sort()).toEqual(["a/b/c", "flat"]);
+  });
+
+  it("assigns one identity to a System World pack through the actual overlapping startup roots", () => {
+    writePackAt(root, "system/baseline", "system-baseline");
+    const service = new ContextPackLibraryService({
+      roots: openRigContextLibraryRoots(root).map((path) => ({ path, sourceType: "user_file" })),
+    });
+
+    const result = service.scan();
+
+    expect(result).toMatchObject({ count: 1, errors: [] });
+    expect(service.list().map((entry) => entry.relativePath)).toEqual(["system/baseline"]);
+    expect(service.getByRef("baseline")).toBeNull();
+  });
+
+  it("keeps same-name top-level and System World packs distinct through the actual startup roots", () => {
+    writePackAt(root, "baseline", "operator-baseline");
+    writePackAt(root, "system/baseline", "system-baseline");
+    const service = new ContextPackLibraryService({
+      roots: openRigContextLibraryRoots(root).map((path) => ({ path, sourceType: "user_file" })),
+    });
+
+    const result = service.scan();
+
+    expect(result).toMatchObject({ count: 2, errors: [] });
+    expect(service.getByRef("baseline")?.sourcePath).toBe(join(root, "baseline"));
+    expect(service.getByRef("system/baseline")?.sourcePath).toBe(join(root, "system", "baseline"));
   });
 
   it("packs are LEAVES: a manifest below a pack dir belongs to that pack's subtree and is not indexed as its own pack", () => {

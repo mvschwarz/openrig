@@ -70,7 +70,11 @@ export function configRoutes(): Hono {
     if (!isSettingsValidKey(key)) {
       return c.json({ error: `Unknown config key '${key}'`, validKeys: SETTINGS_VALID_KEYS }, 400);
     }
-    return c.json(store.resolveOne(key));
+    try {
+      return c.json(store.resolveOne(key));
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
   });
 
   router.post("/:key", async (c) => {

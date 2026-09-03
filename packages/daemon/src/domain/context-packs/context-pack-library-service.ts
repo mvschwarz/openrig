@@ -17,7 +17,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, extname, join, relative, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import { assemblePlainFiles, type PlainFileAssembly } from "./bundle-assembler.js";
 import { assertSafePackRef } from "./ref-safety.js";
@@ -117,10 +117,17 @@ export class ContextPackLibraryService {
   /** Re-walk all roots, replace the in-memory index, return a count. */
   scan(): { count: number; errors: Array<{ source: string; error: string }> } {
     const nextByRef = new Map<string, ContextPackEntry>();
+    const claimedPackDirs = new Set<string>();
     const errors: Array<{ source: string; error: string }> = [];
 
     for (const root of this.roots) {
       for (const { packDir, ref } of this.discoverPackDirs(root.path)) {
+        // Overlapping roots share one address space. The first configured root
+        // owns each physical pack, so a nested root cannot give that pack a
+        // second ref or shadow a different pack already using that ref.
+        const physicalPackDir = resolve(packDir);
+        if (claimedPackDirs.has(physicalPackDir)) continue;
+        claimedPackDirs.add(physicalPackDir);
         // DISCOVERY trust boundary (Atom 2): every discovered ref passes the
         // sealed per-segment contract; an unsafe on-disk ref is a STRUCTURED,
         // FAIL-VISIBLE error and the pack is skipped — never indexed.

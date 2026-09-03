@@ -176,6 +176,26 @@ describe("config routes (User Settings v0)", () => {
     expect(await res.json()).toMatchObject({ error: expect.stringContaining("context.root") });
   });
 
+  it("GET /api/config/context.root preserves removed environment-setting guidance", async () => {
+    process.env.OPENRIG_CONTEXT_PACKS_ROOT = "/legacy";
+
+    const res = await buildApp().request("/api/config/context.root");
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: expect.stringContaining("OPENRIG_CONTEXT_ROOT"),
+    });
+  });
+
+  it("GET /api/config/context.root preserves removed persisted-setting guidance", async () => {
+    writeFileSync(configPath, JSON.stringify({ context: { packsRoot: "/legacy" } }));
+
+    const res = await buildApp().request("/api/config/context.root");
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("context.root") });
+  });
+
   it("POST /api/config/:key sets the value and persists to disk", async () => {
     const app = buildApp();
     const res = await app.request("/api/config/workspace.slices_root", {
