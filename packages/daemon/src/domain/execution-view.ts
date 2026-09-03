@@ -28,11 +28,13 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
+import { shellQuote } from "../adapters/shell-quote.js";
 import { parseFrontmatter } from "./slices/slice-indexer.js";
 import { derivePickup } from "./queue-pickup.js";
 import { resolveWorkNodeDirs } from "./current-work.js";
 import { resolveLegacyTopologyRigsRoot } from "./user-settings/settings-store.js";
 import { BUILD_INFO, type BuildInfo } from "../build-info.js";
+import { validateMissionComposition } from "./lifecycle-manifest.js";
 
 export const INDETERMINATE = "INDETERMINATE" as const;
 export type Indeterminate = typeof INDETERMINATE;
@@ -264,6 +266,142 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
+function hasTable(db: Database.Database, table: string): boolean {
+  return Boolean(db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(table));
+}
+
+function hasColumn(db: Database.Database, table: string, column: string): boolean {
+  if (!hasTable(db, table)) return false;
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => (row as { name?: string }).name === column);
+}
+
+function lifecycleProjectAction(input: {
+  instanceId: string;
+  packetId: string;
+  owner: string;
+  acceptance: Record<string, unknown> | null;
+}): string {
+  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed> --actor-session ${input.owner}`;
+  if (!input.acceptance) return base;
+  const verdicts = Array.isArray(input.acceptance["verdicts"])
+    ? input.acceptance["verdicts"].filter((value): value is string => typeof value === "string")
+    : [];
+  const verdict = verdicts.length === 1 ? verdicts[0]! : `<${verdicts.join("|")}>`;
+  return `${base} --acceptance-candidate ${shellQuote(String(input.acceptance["candidate"]))} --acceptance-verdict ${shellQuote(verdict)} --acceptance-evidence-ref ${shellQuote(String(input.acceptance["evidence_ref"]))}`;
+}
+
+/**
+ * S06 lifecycle projection for the existing execution view. Mutable owner,
+ * queue state, and blocker facts are joined from queue_items at read time;
+ * lifecycle_binding_json carries identity/provenance only. Older databases
+ * have no migration-079 columns and therefore return an honest empty list.
+ */
+function readLifecycleExecutions(db: Database.Database, mission: string): Array<Record<string, unknown>> {
+  if (!hasColumn(db, "workflow_instances", "lifecycle_binding_json")) return [];
+  const rows = db.prepare(
+    `SELECT wi.*, ws.spec_json
+       FROM workflow_instances wi
+       LEFT JOIN workflow_specs ws
+         ON ws.name = wi.workflow_name AND ws.version = wi.workflow_version
+      WHERE wi.lifecycle_binding_json IS NOT NULL
+      ORDER BY wi.created_at, wi.instance_id`,
+  ).all() as Array<Record<string, unknown>>;
+  const hasBindings = hasTable(db, "workflow_frontier_bindings");
+  const hasFailures = hasTable(db, "workflow_failure_occurrences");
+  const output: Array<Record<string, unknown>> = [];
+  for (const row of rows) {
+    const binding = parseJsonRecord(row["lifecycle_binding_json"]);
+    const identity = isRecord(binding["identity"]) ? binding["identity"] as Record<string, unknown> : {};
+    if (identity["mission"] !== mission) continue;
+    const instanceId = String(row["instance_id"]);
+    const frontier = parseJsonStringList(row["current_frontier_json"]);
+    const specRoot = parseJsonRecord(row["spec_json"]);
+    const steps = Array.isArray(specRoot["steps"])
+      ? (specRoot["steps"] as unknown[]).filter(isRecord)
+      : [];
+    const unknowns: string[] = [];
+    const packets = frontier.map((packetId) => {
+      const matches = hasBindings
+        ? db.prepare(`SELECT * FROM workflow_frontier_bindings WHERE instance_id = ? AND packet_id = ?`).all(instanceId, packetId) as Array<Record<string, unknown>>
+        : [];
+      const packet = db.prepare(
+        `SELECT destination_session, state, blocked_on FROM queue_items WHERE qitem_id = ?`,
+      ).get(packetId) as { destination_session?: string; state?: string; blocked_on?: string | null } | undefined;
+      if (matches.length !== 1) unknowns.push(`frontier packet ${packetId} has ${matches.length} step bindings`);
+      if (!packet) unknowns.push(`frontier packet ${packetId} has no queue row`);
+      const stepId = matches.length === 1 ? String(matches[0]!["step_id"]) : null;
+      const step = stepId ? steps.find((candidate) => candidate["id"] === stepId) : undefined;
+      const acceptance = step && isRecord(step["acceptance"]) ? step["acceptance"] : null;
+      return {
+        packet_id: packetId,
+        step_id: stepId ?? INDETERMINATE,
+        owner: packet?.destination_session ?? INDETERMINATE,
+        queue_state: packet?.state ?? INDETERMINATE,
+        blocked_on: packet?.blocked_on ?? null,
+        depends_on: step && Array.isArray(step["depends_on"]) ? step["depends_on"] : [],
+        gate: step && isRecord(step["gate"]) ? step["gate"] : null,
+        acceptance,
+        targeted_action: matches.length === 1 && packet
+          ? lifecycleProjectAction({ instanceId, packetId, owner: packet.destination_session!, acceptance })
+          : INDETERMINATE,
+      };
+    });
+    const failures = hasFailures
+      ? (db.prepare(
+          `SELECT occurrence_id, step_id, failure_reason, status, redrive_packet_id, failed_at, resolved_at
+             FROM workflow_failure_occurrences WHERE instance_id = ? ORDER BY failed_at, occurrence_id`,
+        ).all(instanceId) as Array<Record<string, unknown>>).map((failure) => ({
+          occurrence_id: failure["occurrence_id"],
+          step_id: failure["step_id"],
+          status: failure["status"],
+          failure_reason: failure["failure_reason"],
+          redrive_packet_id: failure["redrive_packet_id"],
+          failed_at: failure["failed_at"],
+          resolved_at: failure["resolved_at"],
+          targeted_action:
+            failure["status"] === "unresolved" &&
+            row["status"] !== "completed" &&
+            row["status"] !== "aborted"
+            ? `rig workflow resume ${instanceId} --occurrence ${String(failure["occurrence_id"])} --actor-session <you>`
+            : null,
+        }))
+      : [];
+    output.push({
+      instance_id: instanceId,
+      status: row["status"],
+      operation_key: row["lifecycle_operation_key"],
+      compiled_input_digest: row["compiled_input_digest"],
+      identity,
+      sources: Array.isArray(binding["sources"]) ? binding["sources"] : [],
+      dependencies: Array.isArray(binding["dependencies"]) ? binding["dependencies"] : [],
+      frontier_packets: packets,
+      failure_occurrences: failures,
+      unknowns,
+    });
+  }
+  return output;
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function parseJsonStringList(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 /** The manifest arrangement is optional. Missing means compatibility fallback;
  * malformed means the same fallback plus ONE named warning cell in `sources`.
  * A valid manifest becomes the ordering/wave/dependency authority. */
@@ -274,10 +412,7 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
   try {
     const manifest = parseYaml(fs.readFileSync(missionPath, "utf8")) as unknown;
     if (!isRecord(manifest)) throw new Error("root is not a mapping");
-    const composition = manifest["composition"];
-    if (!isRecord(composition) || !Array.isArray(composition["slices"])) {
-      throw new Error("composition.slices is not a list");
-    }
+    const compositionMembers = validateMissionComposition(manifest, missionPath);
     const waveReview = new Map<string, string>();
     const waveBySlice = new Map<string, string>();
     const arrangement = manifest["arrangement"];
@@ -306,17 +441,12 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
     }
     const byId = new Map<string, ArrangementSlice>();
     const byDir = new Map<string, ArrangementSlice>();
-    for (const rawEntry of composition["slices"]) {
-      if (!isRecord(rawEntry) || typeof rawEntry["ref"] !== "string" || typeof rawEntry["order"] !== "number") {
-        throw new Error("composition.slices contains an invalid ref/order entry");
-      }
-      if (rawEntry["active"] === false) continue;
-      const ref = rawEntry["ref"];
-      const resolved = path.resolve(missionRoot, ref);
-      if (!resolved.startsWith(`${path.resolve(missionRoot)}${path.sep}`) || path.basename(resolved) !== "slice.yaml") {
-        throw new Error(`slice ref escapes the mission root: ${ref}`);
-      }
-      const relative = path.relative(path.join(missionRoot, "slices"), resolved);
+    for (const member of compositionMembers) {
+      if (!member.active) continue;
+      const ref = member.ref;
+      const resolved = member.path;
+      if (path.basename(resolved) !== "slice.yaml") throw new Error(`slice ref must address slice.yaml: ${ref}`);
+      const relative = path.relative(fs.realpathSync(path.join(missionRoot, "slices")), resolved);
       const dir = relative.split(path.sep)[0];
       if (!dir || dir === "..") throw new Error(`slice ref is outside slices/: ${ref}`);
       const sliceManifest = parseYaml(fs.readFileSync(resolved, "utf8")) as unknown;
@@ -335,7 +465,7 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
           : undefined;
       const entry: ArrangementSlice = {
         path: resolved,
-        order: rawEntry["order"],
+        order: member.order,
         ...(wave ? { wave } : {}),
         ...(wave && waveReview.has(wave) ? { reviewModel: waveReview.get(wave)! } : {}),
         ...(dependsRaw ? { dependsOn: dependsRaw as string[] } : {}),
@@ -614,6 +744,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
   const arrangement = missionsRoot && mission !== INDETERMINATE
     ? readArrangement(missionsRoot, mission, slices)
     : null;
+  const lifecycleExecutions = mission === INDETERMINATE ? [] : readLifecycleExecutions(deps.db, mission);
   const arrangementSlice = (id: string, dir?: string): ArrangementSlice | null => {
     if (arrangement?.state !== "valid") return null;
     return arrangement.byId.get(id) ?? (dir ? arrangement.byDir.get(dir) : undefined) ?? null;
@@ -968,7 +1099,12 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
       build_info: { commit: buildInfo.commit ?? INDETERMINATE, asof: asof() },
       review_artifacts: { root: rigsRoot, asof: asof() },
       disk: { asof: asof() },
+      workflow_lifecycle: {
+        asof: asof(),
+        basis: "workflow_instances identity joined to packet bindings, failure occurrences, workflow spec, and current queue rows at read time",
+      },
     },
+    lifecycle_instances: lifecycleExecutions,
     q1_lanes: lanes,
     q2_sequencing: q2,
     q3_care: q3,

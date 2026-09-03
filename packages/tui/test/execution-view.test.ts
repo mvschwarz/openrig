@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { executionContentLines, executionSliceStripLines } from "../src/execution/execution-model.js";
 import { demoSnapshot } from "../src/demo-data.js";
@@ -168,6 +169,105 @@ describe("mission execution story — readable rows over the shipped projections
     expect(body).toContain("done         OPR.0.5.8.4  Readable Name 4 · ready to start · no candidate recorded · proof 4 of 4");
     expect(body).not.toMatch(GLYPH_BLOB);
     expect(lines.filter((line) => line.action?.type === "scopes-open")).toHaveLength(4);
+  });
+
+  it("renders every lifecycle frontier packet, unresolved occurrence, and named unknown", () => {
+    const fixture = executionFixture();
+    fixture.lifecycle_instances = [{
+      instance_id: "WF-LIFE",
+      status: "active",
+      operation_key: "release-op",
+      frontier_packets: [
+        { packet_id: "Q-LEFT", step_id: "left", owner: "left@rig", queue_state: "in-progress", blocked_on: null, targeted_action: "rig workflow project --instance WF-LIFE --current-packet Q-LEFT" },
+        { packet_id: "Q-RIGHT", step_id: "right", owner: "right@rig", queue_state: "blocked", blocked_on: "gate-2", targeted_action: "rig workflow project --instance WF-LIFE --current-packet Q-RIGHT" },
+      ],
+      failure_occurrences: [
+        { occurrence_id: "Q-FAILED", step_id: "build", status: "unresolved", failure_reason: "fixture red", targeted_action: "rig workflow resume WF-LIFE --occurrence Q-FAILED --actor-session <you>" },
+      ],
+      unknowns: ["frontier packet Q-GHOST has no queue row"],
+    }];
+    const body = text(executionContentLines(fixture, executionScopes(), [], null, 200));
+    expect(body).toContain("LIFECYCLE · 1 instance");
+    expect(body).toContain("WF-LIFE · active · key release-op");
+    expect(body).toContain("left · left@rig · in-progress · packet Q-LEFT");
+    expect(body).toContain("right · right@rig · blocked · packet Q-RIGHT");
+    expect(body).toContain("blocked on gate-2");
+    expect(body).toContain("occurrence Q-FAILED · fixture red");
+    expect(body).toContain("--occurrence Q-FAILED");
+    expect(body).toContain("? frontier packet Q-GHOST has no queue row");
+  });
+
+  it("keeps a typed acceptance action usable at every production terminal width", () => {
+    const fixture = executionFixture();
+    const candidate = "0123456789abcdef0123456789abcdef01234567";
+    const evidence = "missions/release-0.5.9/slices/06-project-release-lifecycle/proof/review50-r2-CLEAR-27354de779a9a7d4311b910e56115df33d26295e.md";
+    fixture.lifecycle_instances = [{
+      instance_id: "WF-ACCEPTANCE",
+      status: "active",
+      operation_key: "release-acceptance",
+      frontier_packets: [{
+        packet_id: "qitem-acceptance-packet",
+        step_id: "accept",
+        owner: "review50-r2@v-openrig-build",
+        queue_state: "in-progress",
+        blocked_on: null,
+        targeted_action: `rig workflow project --instance WF-ACCEPTANCE --current-packet qitem-acceptance-packet --exit done --actor-session review50-r2@v-openrig-build --acceptance-candidate '${candidate}' --acceptance-verdict 'CLEAR' --acceptance-evidence-ref '${evidence}'`,
+      }],
+      failure_occurrences: [],
+      unknowns: [],
+    }];
+    const snap = {
+      ...demoSnapshot(),
+      scopes: executionScopes(),
+      execution: fixture,
+      executionMission: fixture.mission,
+      hydratedAt: "2026-09-03T20:00:00.000Z",
+    };
+    for (const size of [{ cols: 84, rows: 28 }, { cols: 120, rows: 34 }, { cols: 160, rows: 42 }]) {
+      const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+      view.dispatch(parseCommand(":scopes"));
+      view.dispatch({ type: "scopes-mission-open", mission: fixture.mission });
+
+      const screen = renderScreen(view.get(), snap, size);
+      const content = screen.lines.map((line) => line.slice(line.indexOf("│") + 2).trimEnd());
+      let cursor = content.findIndex((line) => line.trimStart().startsWith("action rig workflow project"));
+      let action = content[cursor]!.replace(/^\s*action /, "");
+      while (action.endsWith("\\")) action += `\n${content[++cursor]!}`;
+      const argv = execFileSync("/bin/sh", ["-c", `set -- ${action}\nprintf '%s\\0' "$@"`])
+        .toString()
+        .split("\0")
+        .filter(Boolean);
+      expect(argv, `${size.cols}x${size.rows}`).toEqual([
+        "rig", "workflow", "project",
+        "--instance", "WF-ACCEPTANCE",
+        "--current-packet", "qitem-acceptance-packet",
+        "--exit", "done",
+        "--actor-session", "review50-r2@v-openrig-build",
+        "--acceptance-candidate", candidate,
+        "--acceptance-verdict", "CLEAR",
+        "--acceptance-evidence-ref", evidence,
+      ]);
+      expect(action, `${size.cols}x${size.rows}`).not.toContain("…");
+      expect(screen.lines.every((line) => line.length <= size.cols), `${size.cols}x${size.rows}`).toBe(true);
+    }
+  });
+
+  it("keeps terminal failure history visible without rendering an impossible resume command", () => {
+    const fixture = executionFixture();
+    fixture.lifecycle_instances = [{
+      instance_id: "WF-ABORTED",
+      status: "aborted",
+      operation_key: "release-op",
+      frontier_packets: [],
+      failure_occurrences: [
+        { occurrence_id: "Q-FAILED", step_id: "build", status: "unresolved", failure_reason: "historical failure", targeted_action: null },
+      ],
+      unknowns: [],
+    }];
+    const body = text(executionContentLines(fixture, executionScopes(), [], null, 200));
+    expect(body).toContain("WF-ABORTED · aborted · key release-op");
+    expect(body).toContain("occurrence Q-FAILED · historical failure");
+    expect(body).not.toContain("rig workflow resume");
   });
 
   it("keeps every drill affordance in bounds at 110 and 160 columns and drops the name before the facts", () => {

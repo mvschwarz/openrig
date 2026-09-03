@@ -60,12 +60,12 @@ const SANCTIONED: Record<string, { sites: number; why: string }> = {
     why: "P34 terminal close + successor create (route/handoff) at :160; the non-terminal resolve update at :415",
   },
   "domain/workflow-projector.ts": {
-    sites: 2,
-    why: "P34 terminal close at :405 (routes and failed branches are exclusive successors of it); the gate park at :514",
+    sites: 4,
+    why: "legacy terminal close + gate park; dependency-graph packet close + dependency-graph gate park (parallel successors remain in the same transaction)",
   },
   "domain/workflow-runtime.ts": {
-    sites: 4,
-    why: "P34 route close at :1013; the no-successor exception closes at :842; the entry-gate park at :608; the route re-park at :1087",
+    sites: 5,
+    why: "entry-gate park; explicit abort closes every live packet; no-successor exception close; packet-addressed route close; route re-park",
   },
 };
 
@@ -202,16 +202,16 @@ describe("P34 RED 3 — the enumeration guard (rev 2: call-site granularity)", (
   it("the LIVE corpus matches the sanctioned set exactly, by CALL SITE", () => {
     const result = checkCallSites(realCorpus(), SANCTIONED);
     expect(result.violations).toEqual([]);
-    // Counts SITES, not files. 8 sites across 3 files.
+    // Counts SITES, not files. 11 sites across 3 files.
     expect(result.examined).toBe(TOTAL_SITES);
-    expect(result.examined).toBe(8);
+    expect(result.examined).toBe(11);
     expect(result.vacuous).toBe(false);
   });
 
   it("HIGH-1: FIRES BY NAME on a call added inside an ALREADY-SANCTIONED file", () => {
     const result = checkCallSites(corpusWithExtraCallInSanctionedFile(), SANCTIONED);
     expect(result.violations).toEqual([
-      "count-mismatch:domain/workflow-projector.ts (sanctioned 2, found 3)",
+      "count-mismatch:domain/workflow-projector.ts (sanctioned 4, found 5)",
     ]);
   });
 
@@ -275,7 +275,7 @@ describe("P34 RED 3 — the enumeration guard (rev 2: call-site granularity)", (
         : c,
     );
     expect(checkCallSites(corpus, SANCTIONED).violations).toEqual([
-      "stale-entry:domain/workflow-projector.ts (sanctioned for 2, holds 0)",
+      "stale-entry:domain/workflow-projector.ts (sanctioned for 4, holds 0)",
     ]);
   });
 
@@ -308,6 +308,6 @@ describe("P34 RED 5 — KNOWN-NEGATIVE: a guard that examines nothing must FAIL"
   it("the LIVE run is NOT vacuous and examined the expected number of SITES", () => {
     const live = checkCallSites(realCorpus(), SANCTIONED);
     expect(live.vacuous).toBe(false);
-    expect(live.examined).toBe(8);
+    expect(live.examined).toBe(11);
   });
 });

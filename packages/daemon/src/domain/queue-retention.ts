@@ -47,10 +47,9 @@ import { TERMINAL_QUEUE_STATES } from "./queue-repository.js";
  *    behavior is identical; only the SSOT wiring is deferred.
  *  • P2 — FRONTIER-LIVENESS EXCLUSION. Add one WHERE clause (+ one named test)
  *    excluding any qitem referenced in a NON-terminal workflow instance's
- *    current frontier, regardless of state/age. VACUOUS today (single-frontier
- *    close mechanics already remove terminal packets from the frontier — the
- *    non-terminal invariant covers it); armed for the WF-6/parallel-frontier era.
- *    Authored at the merged tip where the frontier schema is final.
+ *    current frontier, regardless of state/age. This is active protection for
+ *    packet-addressed parallel frontiers; serial close mechanics remain covered
+ *    by the same predicate.
  *  • WIRING — register the retention settings keys in `SETTINGS_VALID_KEYS`
  *    (settings-store) and call `runQueueRetentionSweep` from the daemon's
  *    maintenance scheduler (where the watchdog runner is started, index.ts/
@@ -152,10 +151,8 @@ export function archiveAgedTerminalTransitions(
   // `current_frontier_json LIKE '%"<qitemId>"%'`), enforced here at the
   // ARCHIVAL-SELECTION seam instead of the close seam (orch ruling: keep this
   // maintenance module standalone/DB-scoped rather than threading the injected
-  // predicate). VACUOUS today (single-frontier close mechanics remove terminal
-  // packets from the frontier, and the terminal filter already excludes the
-  // non-terminal frontier residents); armed for WF-6/parallel-frontier, where
-  // it becomes mechanical rather than assumed. `workflow_instances` is a core
+  // predicate). It now protects packet-addressed parallel frontiers as well as
+  // the legacy serial case. `workflow_instances` is a core
   // migrated table (always present when the tick runs post-migration).
   const placeholders = terminalStates.map(() => "?").join(", ");
   const eligible = db

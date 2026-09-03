@@ -47,9 +47,10 @@ export function workflowRoutes(): Hono {
       // are operator/spec misuse — structured 400s, never 500s (the
       // same class as the FR-5 conflict mapping, on the spec branch).
       const status =
-        err.code === "spec_file_missing" ? 404
+        err.code === "spec_file_missing" || err.code === "lifecycle_manifest_missing" || err.code === "lifecycle_member_missing" ? 404
         : err.code === "spec_yaml_invalid" || err.code === "spec_shape_invalid" || err.code === "spec_field_missing" ? 400
         : err.code === "spec_unknown_key" || err.code === "spec_field_invalid" ? 400
+        : err.code.startsWith("lifecycle_") ? 400
         : err.code === "spec_not_found" ? 404
         : 500;
       return c.json({ error: err.code, message: err.message, ...(err.details ?? {}) }, status as 200);
@@ -67,6 +68,12 @@ export function workflowRoutes(): Hono {
     if (err instanceof WorkflowProjectorError) {
       const status =
         err.code === "instance_not_active" || err.code === "packet_not_on_frontier" ? 409
+        : err.code === "frontier_packet_required" || err.code === "frontier_binding_indeterminate" ? 409
+        : err.code === "failure_occurrence_required" || err.code === "failure_occurrence_not_unresolved" || err.code === "failure_occurrence_replay_indeterminate" || err.code === "failure_occurrence_replay_conflict" ? 409
+        : err.code === "instance_not_abortable" || err.code === "instance_not_resumable" ? 409
+        : err.code === "lifecycle_operation_conflict" || err.code === "lifecycle_replay_indeterminate" ? 409
+        : err.code === "lifecycle_identity_invalid" || err.code === "lifecycle_not_eligible" ? 400
+        : err.code.startsWith("acceptance_") || err.code === "abort_reason_required" ? 400
         : err.code === "spec_not_cached" || err.code === "current_step_unknown" ? 409
         : err.code === "no_next_step" || err.code === "next_owner_unresolved" ? 400
         : err.code === "spec_invalid" || err.code === "entry_owner_unresolved" || err.code === "spec_no_steps" ? 400
@@ -121,6 +128,44 @@ export function workflowRoutes(): Hono {
     try {
       const result = getRuntime(c).validate(body.specPath);
       return c.json(result);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  app.post("/compile", async (c) => {
+    const body = await c.req.json<{ missionPath?: string; operationKey?: string }>().catch(() => ({} as never));
+    if (!body.missionPath) return c.json({ error: "missionPath is required" }, 400);
+    try {
+      return c.json(getRuntime(c).compileLifecycle(body.missionPath, body.operationKey));
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  app.post("/instantiate-lifecycle", async (c) => {
+    const body = await c.req.json<{
+      missionPath?: string;
+      operationKey?: string;
+      rootObjective?: string;
+      createdBySession?: string;
+      entryOwnerSession?: string;
+      targetRig?: string;
+    }>().catch(() => ({} as never));
+    if (!body.missionPath) return c.json({ error: "missionPath is required" }, 400);
+    if (!body.operationKey) return c.json({ error: "operationKey is required" }, 400);
+    if (!body.rootObjective) return c.json({ error: "rootObjective is required" }, 400);
+    if (!body.createdBySession) return c.json({ error: "createdBySession is required" }, 400);
+    try {
+      const result = await getRuntime(c).instantiateLifecycle({
+        missionPath: body.missionPath,
+        operationKey: body.operationKey,
+        rootObjective: body.rootObjective,
+        createdBySession: body.createdBySession,
+        entryOwnerSession: body.entryOwnerSession,
+        targetRig: body.targetRig,
+      });
+      return c.json(result, result.replayed ? 200 : 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -197,7 +242,7 @@ export function workflowRoutes(): Hono {
   // runtime.continue()'s enriched instance.
   app.get("/list", (c) => {
     const status = c.req.query("status");
-    if (status === "active" || status === "waiting" || status === "completed" || status === "failed") {
+    if (status === "active" || status === "waiting" || status === "completed" || status === "failed" || status === "aborted") {
       return c.json(getRuntime(c).listInstancesWithDeadline(status));
     }
     return c.json(getRuntime(c).listInstancesWithDeadline());
@@ -260,13 +305,14 @@ export function workflowRoutes(): Hono {
   app.post("/:instance_id/route", async (c) => {
     const instanceId = c.req.param("instance_id");
     const body = await c.req
-      .json<{ toSession?: string; actorSession?: string; reason?: string }>()
+      .json<{ packetId?: string; toSession?: string; actorSession?: string; reason?: string }>()
       .catch(() => ({}) as never);
     if (!body.toSession) return c.json({ error: "toSession is required" }, 400);
     if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
     try {
       const result = await getRuntime(c).route({
         instanceId,
+        packetId: body.packetId,
         toSession: body.toSession,
         actorSession: body.actorSession,
         reason: body.reason,
@@ -280,16 +326,29 @@ export function workflowRoutes(): Hono {
   app.post("/:instance_id/resume", async (c) => {
     const instanceId = c.req.param("instance_id");
     const body = await c.req
-      .json<{ decision?: string; actorSession?: string }>()
+      .json<{ occurrenceId?: string; decision?: string; actorSession?: string }>()
       .catch(() => ({}) as never);
     if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
     try {
       const result = await getRuntime(c).resume({
         instanceId,
+        occurrenceId: body.occurrenceId,
         decision: body.decision,
         actorSession: body.actorSession,
       });
       return c.json(result);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  app.post("/:instance_id/abort", async (c) => {
+    const instanceId = c.req.param("instance_id");
+    const body = await c.req.json<{ reason?: string; actorSession?: string }>().catch(() => ({} as never));
+    if (!body.reason) return c.json({ error: "reason is required" }, 400);
+    if (!body.actorSession) return c.json({ error: "actorSession is required" }, 400);
+    try {
+      return c.json(await getRuntime(c).abort({ instanceId, reason: body.reason, actorSession: body.actorSession }));
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -321,7 +380,13 @@ export function workflowRoutes(): Hono {
     const inst = runtime.instanceStore.getById(instanceId);
     if (!inst) return c.json({ error: "instance_not_found", instanceId }, 404);
     // WF-1 FR-2 completion fixback: show carries the deadline verdict.
-    return c.json(runtime.withDeadline(inst));
+    const inspected = runtime.inspect(instanceId);
+    return c.json({
+      ...runtime.withDeadline(inst),
+      frontierPackets: inspected.frontier,
+      failureOccurrences: inspected.failures,
+      unknowns: inspected.unknowns,
+    });
   });
 
   return app;

@@ -32,6 +32,8 @@ export interface ExecutionViewSnap {
   q4_ladder: Array<Record<string, unknown>>;
   q5_park: Array<Record<string, unknown>>;
   q6_parallelism?: Record<string, unknown>;
+  /** S06: existing workflow engine facts joined to the selected mission. */
+  lifecycle_instances?: Array<Record<string, unknown>>;
 }
 
 const MAX_ROWS_PER_WAVE = 5;
@@ -61,6 +63,94 @@ function clock(iso: unknown): string {
 
 function clip(text: string, room: number): string {
   return text.length > room ? `${text.slice(0, Math.max(room - 1, 0))}…` : text;
+}
+
+/** Keep lifecycle commands complete in the scrollable pane. Shell continuations make the
+ * visual wrap usable as one command instead of turning the hidden suffix into guesswork. */
+function shellWords(command: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  for (const char of command) {
+    if (escaped) {
+      word += char;
+      escaped = false;
+    } else if (char === "\\" && quote !== "'") {
+      word += char;
+      escaped = true;
+    } else if ((char === "'" || char === '"') && (quote === null || quote === char)) {
+      word += char;
+      quote = quote === char ? null : char;
+    } else if (/\s/.test(char) && quote === null) {
+      if (word) words.push(word);
+      word = "";
+    } else {
+      word += char;
+    }
+  }
+  if (word) words.push(word);
+  return words;
+}
+
+function quoteShell(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+/** Split only words emitted by the daemon's shellQuote helper. A continuation directly
+ * between adjacent quoted chunks is one shell argument; option-to-option continuations
+ * retain a separating space. */
+function splitQuotedWord(word: string, maxWidth: number): string[] | null {
+  if (!word.startsWith("'") || !word.endsWith("'")) return null;
+  const value = word.slice(1, -1).replaceAll(`'"'"'`, "'");
+  if (quoteShell(value) !== word) return null;
+  const chunks: string[] = [];
+  let chunk = "";
+  for (const char of value) {
+    if (chunk && quoteShell(chunk + char).length > maxWidth) {
+      chunks.push(quoteShell(chunk));
+      chunk = char;
+    } else {
+      chunk += char;
+    }
+  }
+  chunks.push(quoteShell(chunk));
+  return chunks;
+}
+
+function actionLines(action: string, width: number): ContentLine[] {
+  const firstIndent = "      action ";
+  const nextIndent = "        ";
+  const room = Math.max(width, 24);
+  const parts = shellWords(action);
+  const lines: ContentLine[] = [];
+  let current = `${firstIndent}${parts.shift() ?? ""}`;
+  for (let index = 0; index < parts.length; index++) {
+    const part = parts[index]!;
+    const more = index < parts.length - 1;
+    if (current && `${current} ${part}${more ? " \\" : ""}`.length <= room) {
+      current += ` ${part}`;
+      continue;
+    }
+    if (current) lines.push({ text: `${current} \\` });
+    const chunks = splitQuotedWord(part, room - 2);
+    if (chunks && `${nextIndent}${part}${more ? " \\" : ""}`.length > room) {
+      for (let chunkIndex = 0; chunkIndex < chunks.length - 1; chunkIndex++) {
+        lines.push({ text: `${chunks[chunkIndex]!}\\` });
+      }
+      const last = chunks[chunks.length - 1]!;
+      if (more) {
+        lines.push({ text: `${last} \\` });
+        current = "";
+      } else {
+        current = last;
+      }
+    } else {
+      current = `${nextIndent}${part}`;
+    }
+  }
+  if (current) lines.push({ text: current });
+  return lines;
 }
 
 function open(key: string): Action {
@@ -363,6 +453,7 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
     { text: `  declared in slice files: ${declaredText_ || "none"} · live now: ${live} working${problems ? `, ${problems} with a problem` : ""}` },
     row(`sources · derived ${clock(execution.derived_at) || "?"} · daemon build ${build}`, "sources", width),
     ...evidenceGapLines(execution, slices, width),
+    ...lifecycleLines(execution, width),
   ];
 
   const waves = new Map<string, SliceFacts[]>();
@@ -371,6 +462,34 @@ function overviewLines(execution: ExecutionViewSnap, scopes: readonly MissionSco
   const idWidth = Math.max(...slices.map((slice) => slice.id.length), 1);
   for (const [wave, members] of waves) lines.push(...waveRows(execution, wave, members, width, stateWidth, idWidth, true));
   if (slices.length === 0) lines.push({ text: "  (no slices on this mission)" });
+  return lines;
+}
+
+function lifecycleLines(execution: ExecutionViewSnap, width: number): ContentLine[] {
+  const instances = execution.lifecycle_instances ?? [];
+  if (instances.length === 0) return [];
+  const lines: ContentLine[] = [{ text: "" }, sectionRule(`LIFECYCLE · ${instances.length} instance${instances.length === 1 ? "" : "s"}`, width)];
+  for (const raw of instances) {
+    const instance = record(raw);
+    const instanceId = str(instance["instance_id"], INDETERMINATE);
+    lines.push({ text: `  ${instanceId} · ${str(instance["status"], INDETERMINATE)} · key ${str(instance["operation_key"], INDETERMINATE)}` });
+    const packets = Array.isArray(instance["frontier_packets"]) ? instance["frontier_packets"] as unknown[] : [];
+    for (const rawPacket of packets) {
+      const packet = record(rawPacket);
+      lines.push({ text: clip(`    ▸ ${str(packet["step_id"], INDETERMINATE)} · ${str(packet["owner"], INDETERMINATE)} · ${str(packet["queue_state"], INDETERMINATE)} · packet ${str(packet["packet_id"], INDETERMINATE)}`, width) });
+      if (packet["blocked_on"]) lines.push({ text: clip(`      blocked on ${str(packet["blocked_on"])}`, width) });
+      lines.push(...actionLines(str(packet["targeted_action"], INDETERMINATE), width));
+    }
+    const failures = Array.isArray(instance["failure_occurrences"]) ? instance["failure_occurrences"] as unknown[] : [];
+    for (const rawFailure of failures) {
+      const failure = record(rawFailure);
+      if (failure["status"] !== "unresolved") continue;
+      lines.push({ text: clip(`    ▲ ${str(failure["step_id"], INDETERMINATE)} · occurrence ${str(failure["occurrence_id"], INDETERMINATE)}${failure["failure_reason"] ? ` · ${str(failure["failure_reason"])}` : ""}`, width) });
+      lines.push(...actionLines(str(failure["targeted_action"], INDETERMINATE), width));
+    }
+    const unknowns = Array.isArray(instance["unknowns"]) ? instance["unknowns"] as unknown[] : [];
+    for (const unknown of unknowns) lines.push({ text: clip(`    ? ${str(unknown, INDETERMINATE)}`, width) });
+  }
   return lines;
 }
 

@@ -13,13 +13,10 @@
 // died before nudging (FR-3 AC; the boot sweep — FR-4 — is the
 // immediate-on-restart leg of the same closure).
 //
-// ONE JOB PER INSTANCE (arch-blessed: bounded watchdog rows; the
-// single-frontier model has one owner at a time). The policy resolves
-// the CURRENT frontier owner live from SQLite at every evaluation, so
-// no per-handoff re-target is needed — the job's target_session is only
-// the registered fallback. WF-6/parallel-frontier will revisit with
-// per-packet jobs when multiple frontier packets exist (marked, not
-// built).
+// ONE JOB PER LIVE PACKET for packet-addressed dependency graphs; legacy
+// serial instances retain the original one-job-per-instance shape. The
+// policy resolves the addressed packet owner live from SQLite at every
+// evaluation, while target_session remains the registered fallback.
 //
 // AUTO-ARMED JOBS ARE DEADLINE-GATED (context.deadline_gated: true):
 // the policy stays QUIET while the instance is healthy and sends only
@@ -40,13 +37,14 @@ import type {
  */
 export const WORKFLOW_KEEPALIVE_AUTO_INTERVAL_SECONDS = 15 * 60;
 
-export function buildKeepaliveSpecYaml(instanceId: string, targetSession: string): string {
+export function buildKeepaliveSpecYaml(instanceId: string, targetSession: string, packetId?: string): string {
   return [
     "policy: workflow-keepalive",
     "target:",
     `  session: ${targetSession}`,
     "context:",
     `  workflow_instance_id: ${instanceId}`,
+    ...(packetId ? [`  workflow_packet_id: ${packetId}`] : []),
     "  deadline_gated: true",
     "",
   ].join("\n");
@@ -60,19 +58,25 @@ export function buildKeepaliveSpecYaml(instanceId: string, targetSession: string
 export function findArmedKeepaliveJob(
   repo: WatchdogJobsRepository,
   instanceId: string,
+  packetId?: string,
 ): WatchdogJob | null {
   return (
     repo
       .listActive()
       .find(
-        (j) => j.policy === "workflow-keepalive" && j.specYaml.includes(instanceId),
+        (j) => {
+          if (j.policy !== "workflow-keepalive") return false;
+          if (!j.specYaml.includes(`workflow_instance_id: ${instanceId}`)) return false;
+          const packetLine = /(?:^|\n)\s*workflow_packet_id:\s*(\S+)/.exec(j.specYaml)?.[1];
+          return packetId ? packetLine === packetId : packetLine === undefined;
+        },
       ) ?? null
   );
 }
 
 /**
- * Idempotent in-transaction arm: registers the per-instance keepalive
- * job if no active one exists. Composable inside the scribe txn
+ * Idempotent in-transaction arm: registers the addressed packet keepalive
+ * (or the legacy instance keepalive) if no active one exists. Composable inside the scribe txn
  * (register is a plain INSERT).
  */
 export function ensureWorkflowKeepaliveArmed(
@@ -81,13 +85,14 @@ export function ensureWorkflowKeepaliveArmed(
     instanceId: string;
     targetSession: string;
     registeredBySession: string;
+    packetId?: string;
   },
 ): { jobId: string; newlyArmed: boolean } {
-  const existing = findArmedKeepaliveJob(repo, input.instanceId);
+  const existing = findArmedKeepaliveJob(repo, input.instanceId, input.packetId);
   if (existing) return { jobId: existing.jobId, newlyArmed: false };
   const job = repo.register({
     policy: "workflow-keepalive",
-    specYaml: buildKeepaliveSpecYaml(input.instanceId, input.targetSession),
+    specYaml: buildKeepaliveSpecYaml(input.instanceId, input.targetSession, input.packetId),
     targetSession: input.targetSession,
     intervalSeconds: WORKFLOW_KEEPALIVE_AUTO_INTERVAL_SECONDS,
     registeredBySession: input.registeredBySession,
@@ -104,9 +109,22 @@ export function disarmWorkflowKeepalive(
   repo: WatchdogJobsRepository,
   instanceId: string,
   reason: string,
+  packetId?: string,
 ): string | null {
-  const existing = findArmedKeepaliveJob(repo, instanceId);
+  const existing = findArmedKeepaliveJob(repo, instanceId, packetId);
   if (!existing) return null;
   repo.markTerminal(existing.jobId, reason);
   return existing.jobId;
+}
+
+export function disarmAllWorkflowKeepalives(
+  repo: WatchdogJobsRepository,
+  instanceId: string,
+  reason: string,
+): string[] {
+  const jobs = repo.listActive().filter(
+    (job) => job.policy === "workflow-keepalive" && job.specYaml.includes(`workflow_instance_id: ${instanceId}`),
+  );
+  for (const job of jobs) repo.markTerminal(job.jobId, reason);
+  return jobs.map((job) => job.jobId);
 }

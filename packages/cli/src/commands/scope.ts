@@ -46,6 +46,7 @@ import {
   listMissions,
   listSlices,
   moveSlice,
+  rollbackMovedSlice,
   nextSliceNN,
   NOTES_FILE_PRECEDENCE,
   pad2,
@@ -75,6 +76,13 @@ import {
 } from "../lib/scope/progress-edit.js";
 import { deriveScopeTrust } from "../lib/scope/trust.js";
 import { capabilityDeltaExpiryFindings } from "../lib/scope/capability-delta.js";
+import {
+  applyMissionCompositionEdits,
+  nextMissionMembershipOrder,
+  planMissionMembershipAdd,
+  planMissionMembershipRemove,
+  type MissionCompositionEdit,
+} from "../lib/scope/mission-composition.js";
 
 // ---------------------------------------------------------------------
 // Shared helpers
@@ -93,6 +101,7 @@ kind: mission
 composition:
   mission_markdown:
     spec: SPEC.md
+  slices: []
 # Optional team and SDLC sections are added here.
 `;
 
@@ -142,6 +151,18 @@ function slugify(raw: string): string {
     .trim()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function sliceManifestRef(missionPath: string, slicePath: string): string {
+  return path.relative(missionPath, path.join(slicePath, "slice.yaml")).split(path.sep).join("/");
+}
+
+function rollbackComposition(edits: MissionCompositionEdit[]): void {
+  applyMissionCompositionEdits(edits.map((edit) => ({
+    manifestPath: edit.manifestPath,
+    original: edit.updated,
+    updated: edit.original,
+  })));
 }
 
 interface RootOpts {
@@ -314,11 +335,6 @@ function buildSliceCreateCommand(): Command {
         }
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
         const mission = findMission(missionsRoot, missionName);
-        // Persist the parent mission's id back into its README at the
-        // SAME moment we mint the child's id (per convention §1
-        // lazy-adoption rule + guard BC BLOCK 3 — every child-mint site
-        // must persist the parent's id, not just slice create).
-        const missionId = ensureMissionIdPersisted(mission, missionsRoot);
         const nn = nextSliceNN(mission.absPath);
         const sliceFolder = `${pad2(nn)}-${slug}`;
         const sliceAbs = path.join(mission.absPath, "slices", sliceFolder);
@@ -329,9 +345,15 @@ function buildSliceCreateCommand(): Command {
             action: "Pick a different slug, or rm -rf the existing folder first.",
           });
         }
-        const id = sliceIdFromMission(missionId, nn);
         const title = opts.title ?? titleFromSlug(slug);
         const intent = opts.intent ?? title;
+        const compositionEdit = planMissionMembershipAdd(
+          mission.absPath,
+          `slices/${sliceFolder}/slice.yaml`,
+          nextMissionMembershipOrder(mission.absPath),
+        );
+        const missionId = ensureMissionId(mission, missionsRoot);
+        const id = sliceIdFromMission(missionId, nn);
         const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
         for (const dependency of dependsOn) {
           if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
@@ -354,24 +376,35 @@ function buildSliceCreateCommand(): Command {
           depends_on: dependsOn,
         });
         const proofBody = renderSliceProofTemplate({ id, title });
-        fs.mkdirSync(sliceAbs, { recursive: true });
-        fs.mkdirSync(path.join(sliceAbs, "proof"), { recursive: true });
-        // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
+        const originalMissionNode = mission.readmePath ? fs.readFileSync(mission.readmePath, "utf8") : null;
         const readmePath = path.join(sliceAbs, "SPEC.md");
-        const readmeOnly = Boolean(opts.readmeOnly);
-        if (readmeOnly) {
-          const markerBody = body.replace(
-            /^(---\n)/,
-            `---\nprogress_rail: readme-only\n`,
-          );
-          fs.writeFileSync(readmePath, markerBody, "utf8");
-        } else {
-          fs.writeFileSync(readmePath, body, "utf8");
-          const progressPath = path.join(sliceAbs, "PROGRESS.md");
-          fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
+        try {
+          // Persist the parent id in the same rollback boundary as the child
+          // and composition membership. Validation above performs no writes.
+          ensureMissionIdPersisted(mission, missionsRoot);
+          fs.mkdirSync(sliceAbs, { recursive: true });
+          fs.mkdirSync(path.join(sliceAbs, "proof"), { recursive: true });
+          // New scaffolds author SPEC.md; existing README-backed nodes are never rewritten.
+          const readmeOnly = Boolean(opts.readmeOnly);
+          if (readmeOnly) {
+            const markerBody = body.replace(
+              /^(---\n)/,
+              `---\nprogress_rail: readme-only\n`,
+            );
+            fs.writeFileSync(readmePath, markerBody, "utf8");
+          } else {
+            fs.writeFileSync(readmePath, body, "utf8");
+            const progressPath = path.join(sliceAbs, "PROGRESS.md");
+            fs.writeFileSync(progressPath, renderSliceProgressTemplate(title), "utf8");
+          }
+          fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
+          fs.writeFileSync(path.join(sliceAbs, "PROOF.md"), proofBody, "utf8");
+          applyMissionCompositionEdits(compositionEdit ? [compositionEdit] : []);
+        } catch (error) {
+          fs.rmSync(sliceAbs, { recursive: true, force: true });
+          if (originalMissionNode !== null && mission.readmePath) fs.writeFileSync(mission.readmePath, originalMissionNode, "utf8");
+          throw error;
         }
-        fs.writeFileSync(path.join(sliceAbs, "slice.yaml"), SLICE_MANIFEST, "utf8");
-        fs.writeFileSync(path.join(sliceAbs, "PROOF.md"), proofBody, "utf8");
         const payload = {
           ok: true,
           slice: {
@@ -413,37 +446,57 @@ function buildSliceShipCommand(): Command {
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const target = findMission(missionsRoot, releaseMission);
+        if (target.name === slice.missionName) {
+          throw new ScopeCliError({ fact: "Source and release mission are the same.", consequence: "Slice not shipped.", action: "Choose a different release mission." });
+        }
         const targetSlicesDir = path.join(target.absPath, "slices");
-        fs.mkdirSync(targetSlicesDir, { recursive: true });
         const newNN = nextSliceNN(target.absPath);
         const slug = slice.slug ?? slugify(slice.name);
         const newName = `${pad2(newNN)}-${slug}`;
         const destAbs = path.join(targetSlicesDir, newName);
-        const { usedGit, repoRoot } = moveSlice(slice.absPath, destAbs);
-        const targetId = ensureMissionIdPersisted(target, missionsRoot);
-        const newSliceId = sliceIdFromMission(targetId, newNN);
-        const newReadme = resolveNodeFile(destAbs);
-        if (newReadme) {
-          updateFrontmatter(newReadme, {
-            id: newSliceId,
-            mission: target.name,
-            status: `shipped-to-${target.name}`,
-            "shipped-on": todayDateISO(),
-            "shipped-from": slice.missionName,
-          });
+        const sourceMission = findMission(missionsRoot, slice.missionName);
+        const edits = [
+          planMissionMembershipRemove(sourceMission.absPath, sliceManifestRef(sourceMission.absPath, slice.absPath)),
+          planMissionMembershipAdd(target.absPath, `slices/${newName}/slice.yaml`, nextMissionMembershipOrder(target.absPath)),
+        ].filter((edit): edit is MissionCompositionEdit => edit !== null);
+        applyMissionCompositionEdits(edits);
+        let moveResult: ReturnType<typeof moveSlice> | null = null;
+        const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
+        const originalTargetNode = target.readmePath ? fs.readFileSync(target.readmePath, "utf8") : null;
+        try {
+          moveResult = moveSlice(slice.absPath, destAbs);
+          const targetId = ensureMissionIdPersisted(target, missionsRoot);
+          const newSliceId = sliceIdFromMission(targetId, newNN);
+          const newReadme = resolveNodeFile(destAbs);
+          if (newReadme) {
+            updateFrontmatter(newReadme, {
+              id: newSliceId,
+              mission: target.name,
+              status: `shipped-to-${target.name}`,
+              "shipped-on": todayDateISO(),
+              "shipped-from": slice.missionName,
+            });
+          }
+          const { usedGit, repoRoot } = moveResult;
+          emit(out, {
+            ok: true,
+            shipped: {
+              from: { mission: slice.missionName, name: slice.name, id: slice.id },
+              to: { mission: target.name, name: newName, id: newSliceId, path: destAbs },
+              git: { usedGit, repoRoot },
+            },
+          }, json, [
+            `Shipped ${slice.missionName}/${slice.name} → ${target.name}/slices/${newName}`,
+            `  id: ${newSliceId}`,
+            `  git: ${usedGit ? "git mv" : "fs.rename (not in a git repo)"}`,
+          ]);
+        } catch (error) {
+          if (moveResult) rollbackMovedSlice(slice.absPath, destAbs, moveResult);
+          if (originalNode !== null && slice.readmePath) fs.writeFileSync(slice.readmePath, originalNode, "utf8");
+          if (originalTargetNode !== null && target.readmePath) fs.writeFileSync(target.readmePath, originalTargetNode, "utf8");
+          rollbackComposition(edits);
+          throw error;
         }
-        emit(out, {
-          ok: true,
-          shipped: {
-            from: { mission: slice.missionName, name: slice.name, id: slice.id },
-            to: { mission: target.name, name: newName, id: newSliceId, path: destAbs },
-            git: { usedGit, repoRoot },
-          },
-        }, json, [
-          `Shipped ${slice.missionName}/${slice.name} → ${target.name}/slices/${newName}`,
-          `  id: ${newSliceId}`,
-          `  git: ${usedGit ? "git mv" : "fs.rename (not in a git repo)"}`,
-        ]);
       } catch (err) {
         fail(err, json, out);
       }
@@ -478,18 +531,38 @@ function buildSliceCloseCommand(): Command {
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const mission = findMission(missionsRoot, slice.missionName);
         const closedDir = path.join(mission.absPath, "closed");
-        fs.mkdirSync(closedDir, { recursive: true });
         const destName = slice.name;
         const destAbs = path.join(closedDir, destName);
-        const { usedGit, repoRoot } = moveSlice(slice.absPath, destAbs);
+        const compositionEdit = planMissionMembershipRemove(
+          mission.absPath,
+          sliceManifestRef(mission.absPath, slice.absPath),
+        );
+        const edits = compositionEdit ? [compositionEdit] : [];
+        applyMissionCompositionEdits(edits);
+        let moveResult: ReturnType<typeof moveSlice> | null = null;
+        const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
+        try {
+          moveResult = moveSlice(slice.absPath, destAbs);
+        } catch (error) {
+          rollbackComposition(edits);
+          throw error;
+        }
+        const { usedGit, repoRoot } = moveResult;
         const newReadme = resolveNodeFile(destAbs);
-        if (newReadme) {
-          const updates: Record<string, unknown> = {
-            status: `closed-${reason}`,
-            "closed-on": todayDateISO(),
-          };
-          if (opts.note) updates["closure-note"] = opts.note;
-          updateFrontmatter(newReadme, updates);
+        try {
+          if (newReadme) {
+            const updates: Record<string, unknown> = {
+              status: `closed-${reason}`,
+              "closed-on": todayDateISO(),
+            };
+            if (opts.note) updates["closure-note"] = opts.note;
+            updateFrontmatter(newReadme, updates);
+          }
+        } catch (error) {
+          rollbackMovedSlice(slice.absPath, destAbs, moveResult);
+          if (originalNode !== null && slice.readmePath) fs.writeFileSync(slice.readmePath, originalNode, "utf8");
+          rollbackComposition(edits);
+          throw error;
         }
         emit(out, {
           ok: true,
@@ -531,36 +604,56 @@ function buildSliceMoveCommand(): Command {
         const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
         const slice = findSlice(missionsRoot, slicePath, opts.mission ?? null);
         const target = findMission(missionsRoot, destMission);
+        if (target.name === slice.missionName) {
+          throw new ScopeCliError({ fact: "Source and destination mission are the same.", consequence: "Slice not moved.", action: "Choose a different destination mission." });
+        }
         const targetSlicesDir = path.join(target.absPath, "slices");
-        fs.mkdirSync(targetSlicesDir, { recursive: true });
         const newNN = nextSliceNN(target.absPath);
         const slug = slice.slug ?? slugify(slice.name);
         const newName = `${pad2(newNN)}-${slug}`;
         const destAbs = path.join(targetSlicesDir, newName);
-        const { usedGit, repoRoot } = moveSlice(slice.absPath, destAbs);
-        const targetId = ensureMissionIdPersisted(target, missionsRoot);
-        const newSliceId = sliceIdFromMission(targetId, newNN);
-        const newReadme = resolveNodeFile(destAbs);
-        if (newReadme) {
-          updateFrontmatter(newReadme, {
-            id: newSliceId,
-            mission: target.name,
-            "moved-on": todayDateISO(),
-            "moved-from": slice.missionName,
-          });
+        const sourceMission = findMission(missionsRoot, slice.missionName);
+        const edits = [
+          planMissionMembershipRemove(sourceMission.absPath, sliceManifestRef(sourceMission.absPath, slice.absPath)),
+          planMissionMembershipAdd(target.absPath, `slices/${newName}/slice.yaml`, nextMissionMembershipOrder(target.absPath)),
+        ].filter((edit): edit is MissionCompositionEdit => edit !== null);
+        applyMissionCompositionEdits(edits);
+        let moveResult: ReturnType<typeof moveSlice> | null = null;
+        const originalNode = slice.readmePath ? fs.readFileSync(slice.readmePath, "utf8") : null;
+        const originalTargetNode = target.readmePath ? fs.readFileSync(target.readmePath, "utf8") : null;
+        try {
+          moveResult = moveSlice(slice.absPath, destAbs);
+          const targetId = ensureMissionIdPersisted(target, missionsRoot);
+          const newSliceId = sliceIdFromMission(targetId, newNN);
+          const newReadme = resolveNodeFile(destAbs);
+          if (newReadme) {
+            updateFrontmatter(newReadme, {
+              id: newSliceId,
+              mission: target.name,
+              "moved-on": todayDateISO(),
+              "moved-from": slice.missionName,
+            });
+          }
+          const { usedGit, repoRoot } = moveResult;
+          emit(out, {
+            ok: true,
+            moved: {
+              from: { mission: slice.missionName, name: slice.name, id: slice.id },
+              to: { mission: target.name, name: newName, id: newSliceId, path: destAbs },
+              git: { usedGit, repoRoot },
+            },
+          }, json, [
+            `Moved ${slice.missionName}/${slice.name} → ${target.name}/slices/${newName}`,
+            `  id: ${newSliceId}`,
+            `  git: ${usedGit ? "git mv" : "fs.rename (not in a git repo)"}`,
+          ]);
+        } catch (error) {
+          if (moveResult) rollbackMovedSlice(slice.absPath, destAbs, moveResult);
+          if (originalNode !== null && slice.readmePath) fs.writeFileSync(slice.readmePath, originalNode, "utf8");
+          if (originalTargetNode !== null && target.readmePath) fs.writeFileSync(target.readmePath, originalTargetNode, "utf8");
+          rollbackComposition(edits);
+          throw error;
         }
-        emit(out, {
-          ok: true,
-          moved: {
-            from: { mission: slice.missionName, name: slice.name, id: slice.id },
-            to: { mission: target.name, name: newName, id: newSliceId, path: destAbs },
-            git: { usedGit, repoRoot },
-          },
-        }, json, [
-          `Moved ${slice.missionName}/${slice.name} → ${target.name}/slices/${newName}`,
-          `  id: ${newSliceId}`,
-          `  git: ${usedGit ? "git mv" : "fs.rename (not in a git repo)"}`,
-        ]);
       } catch (err) {
         fail(err, json, out);
       }

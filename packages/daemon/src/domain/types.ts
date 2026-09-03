@@ -284,7 +284,7 @@ export type RigEvent =
   | { type: "workflow.next_qitem_projected"; instanceId: string; nextQitemId: string; nextOwner: string; nextStepId: string }
   | { type: "workflow.completed"; instanceId: string; workflowName: string }
   | { type: "workflow.failed"; instanceId: string; workflowName: string; reason: string }
-  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; resumedBy: string; decision: string | null; resumeCount: number }
+  | { type: "workflow.resumed"; instanceId: string; workflowName: string; stepId: string; occurrenceId?: string; resumedBy: string; decision: string | null; resumeCount: number }
   // OPR.0.4.6.WF3 FR-4 (arch R1): extended ADDITIVELY for the route
   // verb — the shipped {rigName, cause} consumers are untouched; route
   // emissions carry the re-route detail in the optional fields.

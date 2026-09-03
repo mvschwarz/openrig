@@ -42,7 +42,7 @@ import {
   WorkflowValidator,
 } from "./workflow-validator.js";
 import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
-import { disarmWorkflowKeepalive, ensureWorkflowKeepaliveArmed } from "./workflow-keepalive-arming.js";
+import { disarmAllWorkflowKeepalives, disarmWorkflowKeepalive, ensureWorkflowKeepaliveArmed } from "./workflow-keepalive-arming.js";
 import { evaluateStepDeadline, type WorkflowDeadlineVerdict } from "./workflow-deadline.js";
 import {
   rigDeclaresRole,
@@ -52,7 +52,14 @@ import {
 } from "./workflow-role-context.js";
 import { isHumanSeatSession } from "./human-route-enforcer.js";
 import { parseSessionName } from "./session-name.js";
-import type { WorkflowInstance, WorkflowSpecRow, WorkflowStepTrailEntry } from "./workflow-types.js";
+import type {
+  WorkflowFailureOccurrence,
+  WorkflowInstance,
+  WorkflowSpecRow,
+  WorkflowStepSpec,
+  WorkflowStepTrailEntry,
+} from "./workflow-types.js";
+import { compileProjectLifecycle, type LifecycleCompilation } from "./project-lifecycle-compiler.js";
 
 export interface WorkflowRuntimeDeps {
   db: Database.Database;
@@ -96,6 +103,13 @@ export interface InstantiateInput {
    * Absent AND no spec default = unbound (today's behavior).
    */
   targetRig?: string;
+  lifecycle?: {
+    operationKey: string;
+    compiledInputDigest: string;
+    binding: Record<string, unknown>;
+  };
+  /** Internal generated input from compileLifecycle; never accepted from a client. */
+  compiledLifecycle?: LifecycleCompilation;
 }
 
 export interface InstantiateResult {
@@ -117,6 +131,7 @@ export interface InstantiateResult {
    * loudly.
    */
   advisories: string[];
+  replayed?: boolean;
 }
 
 export class WorkflowRuntime {
@@ -155,6 +170,46 @@ export class WorkflowRuntime {
       this.watchdogJobsRepo,
       deps.exceptionDial,
     );
+  }
+
+  compileLifecycle(missionPath: string, operationKey?: string): LifecycleCompilation {
+    return compileProjectLifecycle({ missionPath, operationKey });
+  }
+
+  async instantiateLifecycle(input: {
+    missionPath: string;
+    operationKey: string;
+    rootObjective: string;
+    createdBySession: string;
+    entryOwnerSession?: string;
+    targetRig?: string;
+  }): Promise<InstantiateResult & { compilation: LifecycleCompilation }> {
+    const compilation = this.compileLifecycle(input.missionPath, input.operationKey);
+    if (!compilation.eligible || !compilation.workflowSpec) {
+      throw new WorkflowProjectorError(
+        "lifecycle_not_eligible",
+        "compiled lifecycle is inspectable but not eligible for instantiation",
+        { missionPath: input.missionPath, unknowns: compilation.unknowns },
+      );
+    }
+    const result = await this.instantiate({
+      specPath: input.missionPath,
+      rootObjective: input.rootObjective,
+      createdBySession: input.createdBySession,
+      entryOwnerSession: input.entryOwnerSession,
+      targetRig: input.targetRig,
+      compiledLifecycle: compilation,
+      lifecycle: {
+        operationKey: input.operationKey,
+        compiledInputDigest: compilation.compiledInputDigest,
+        binding: {
+          identity: compilation.identity,
+          sources: compilation.sources,
+          dependencies: compilation.dependencies,
+        },
+      },
+    });
+    return { ...result, compilation };
   }
 
   /**
@@ -236,6 +291,53 @@ export class WorkflowRuntime {
    * see the workflow.instantiated + queue.created events together.
    */
   async instantiate(input: InstantiateInput): Promise<InstantiateResult> {
+    // Replay/conflict classification must precede every cache or queue write.
+    // The operation key is the durable outer identity; an exact replay reads
+    // the already-cached spec and entry row, while changed bytes refuse with
+    // zero mutation.
+    if (input.lifecycle) {
+      if (!input.lifecycle.operationKey || !input.lifecycle.compiledInputDigest) {
+        throw new WorkflowProjectorError(
+          "lifecycle_identity_invalid",
+          "lifecycle instantiation requires non-empty operationKey and compiledInputDigest",
+        );
+      }
+      const existing = this.instanceStore.getByLifecycleOperationKey(input.lifecycle.operationKey);
+      if (existing) {
+        if (existing.compiledInputDigest !== input.lifecycle.compiledInputDigest) {
+          throw new WorkflowProjectorError(
+            "lifecycle_operation_conflict",
+            `lifecycle operation key ${input.lifecycle.operationKey} already binds different compiled input bytes`,
+            {
+              operationKey: input.lifecycle.operationKey,
+              expectedDigest: existing.compiledInputDigest,
+              attemptedDigest: input.lifecycle.compiledInputDigest,
+              instanceId: existing.instanceId,
+            },
+          );
+        }
+        const spec = this.specCache.getByNameVersion(existing.workflowName, existing.workflowVersion);
+        const entryQitemId = typeof existing.lifecycleBinding?.entryQitemId === "string"
+          ? existing.lifecycleBinding.entryQitemId
+          : null;
+        const entryPacket = entryQitemId ? this.queueRepo.getById(entryQitemId) : null;
+        if (!spec || !entryQitemId || !entryPacket) {
+          throw new WorkflowProjectorError(
+            "lifecycle_replay_indeterminate",
+            `lifecycle operation ${input.lifecycle.operationKey} exists but its cached spec or entry packet cannot be resolved`,
+            { operationKey: input.lifecycle.operationKey, instanceId: existing.instanceId, entryQitemId },
+          );
+        }
+        return {
+          instance: existing,
+          spec,
+          entryQitemId,
+          entryOwnerSession: entryPacket.destinationSession,
+          advisories: [],
+          replayed: true,
+        };
+      }
+    }
     // OPR.0.3.3.04.1 (AC-3 reachability): a fresh operator runs
     // `workflow instantiate <discovered-name>` (e.g. `conveyor`), not a hidden
     // file path. Resolve the identifier against the seeded spec cache BY NAME
@@ -244,7 +346,14 @@ export class WorkflowRuntime {
     // operator-authored spec at an explicit path). Before this, instantiate fed
     // the bare name straight to readThrough -> spec_file_missing.
     const resolvedSpecPath = this.specCache.resolveSourcePathByName(input.specPath) ?? input.specPath;
-    const specRow = this.specCache.readThrough(resolvedSpecPath);
+    const generatedSpec = input.compiledLifecycle?.workflowSpec;
+    const specRow = generatedSpec
+      ? this.specCache.putGenerated(
+          generatedSpec,
+          input.compiledLifecycle!.sources.find((source) => source.kind === "mission")?.path ?? resolvedSpecPath,
+          input.compiledLifecycle!.compiledInputDigest,
+        )
+      : this.specCache.readThrough(resolvedSpecPath);
     const validation = this.validator.validate(specRow.spec, this.seatLivenessCheck, this.hostRegistryLookup);
     if (!validation.ok) {
       throw new WorkflowProjectorError(
@@ -261,6 +370,7 @@ export class WorkflowRuntime {
         { specPath: input.specPath },
       );
     }
+
 
     // OPR.0.4.6.WF2 FR-3: THE v1 execution boundary (the slice-11
     // pattern). A REMOTE host pin is legal LANGUAGE (it validated
@@ -530,6 +640,7 @@ export class WorkflowRuntime {
     }
 
     const createdAt = this.now().toISOString();
+    const preallocatedEntryQitemId = newQitemId();
     let entryQitemId: string | undefined;
     let entryQitemDestinationSession: string | undefined;
     let entryQitemNudge: boolean | undefined;
@@ -547,6 +658,12 @@ export class WorkflowRuntime {
         // OPR.0.4.6.FAC1: the resolved rig binding persists with the
         // instance row (same txn as the entry packet).
         boundRig,
+        lifecycle: input.lifecycle
+          ? {
+              ...input.lifecycle,
+              binding: { ...input.lifecycle.binding, entryQitemId: preallocatedEntryQitemId },
+            }
+          : undefined,
       });
       instanceId = instance.instanceId;
 
@@ -557,7 +674,7 @@ export class WorkflowRuntime {
       // carries the class-(c) exception identity on the WF-2 item
       // itself, occurrence = the preallocated packet id. Handler-role
       // entries stay negative.
-      const entryGateQitemId = entryGate ? newQitemId() : undefined;
+      const entryGateQitemId = preallocatedEntryQitemId;
       const entryGateException =
         entryGate && entryGateQitemId
           ? classifyGateTrip({
@@ -597,6 +714,15 @@ export class WorkflowRuntime {
       entryQitemNudge = created.nudge;
       register(created.persistedEvent);
 
+      const packetAddressed = specRow.spec.steps.some((step) => step.depends_on !== undefined);
+      if (packetAddressed) {
+        this.instanceStore.bindFrontierPacket({
+          instanceId: instance.instanceId,
+          packetId: created.qitemId,
+          stepId: entryStep.id,
+        });
+      }
+
       // OPR.0.4.6.WF2 FR-5 (guard blocker 1): a HUMAN-gated ENTRY parks
       // in the same txn — the leg-1 blocked_on human-seat shape the
       // shipped resolve verb acts on (same as the projector's mid-flow
@@ -620,14 +746,15 @@ export class WorkflowRuntime {
         expectedVersion: instance.version,
       });
 
-      // FR-3: arm the per-instance keepalive INSIDE the same txn that
-      // creates the entry packet (covers commit-then-crash-before-nudge
-      // from the very first step).
+      // FR-3: arm the packet-addressed keepalive (or legacy instance job)
+      // INSIDE the same txn that creates the entry packet. This covers the
+      // commit-then-crash-before-nudge window from the very first step.
       if (this.watchdogJobsRepo) {
         ensureWorkflowKeepaliveArmed(this.watchdogJobsRepo, {
           instanceId: instance.instanceId,
           targetSession: entryOwner,
           registeredBySession: input.createdBySession,
+          packetId: packetAddressed ? created.qitemId : undefined,
         });
       }
 
@@ -652,11 +779,124 @@ export class WorkflowRuntime {
       entryQitemId: entryQitemId!,
       entryOwnerSession: entryOwner,
       advisories,
+      replayed: false,
     };
   }
 
   async project(input: ProjectStepInput): Promise<ProjectStepResult> {
     return this.projector.project(input);
+  }
+
+  inspect(instanceId: string): {
+    instance: WorkflowInstance;
+    frontier: Array<{
+      packetId: string;
+      stepId: string | null;
+      ownerSession: string | null;
+      queueState: string | null;
+      blockedOn: string | null;
+      targetedAction: "project" | "route" | "indeterminate";
+      dependsOn: string[];
+      gate: WorkflowStepSpec["gate"] | null;
+      acceptance: WorkflowStepSpec["acceptance"] | null;
+      deadline: WorkflowDeadlineVerdict;
+    }>;
+    failures: Array<WorkflowFailureOccurrence & { targetedAction: "resume" | "none" }>;
+    unknowns: string[];
+  } {
+    const instance = this.instanceStore.getByIdOrThrow(instanceId);
+    const unknowns: string[] = [];
+    const spec = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion)?.spec;
+    const frontier = instance.currentFrontier.map((packetId) => {
+      const binding = this.instanceStore.getFrontierBinding(instanceId, packetId);
+      const packet = this.queueRepo.getById(packetId);
+      const stepId = binding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null);
+      const step = stepId ? spec?.steps.find((candidate) => candidate.id === stepId) : undefined;
+      if (!binding && instance.currentFrontier.length > 1) unknowns.push(`frontier packet ${packetId} has no unique step binding`);
+      if (!packet) unknowns.push(`frontier packet ${packetId} has no queue row`);
+      return {
+        packetId,
+        stepId,
+        ownerSession: packet?.destinationSession ?? null,
+        queueState: packet?.state ?? null,
+        blockedOn: packet?.blockedOn ?? null,
+        targetedAction: stepId && packet ? "project" as const : "indeterminate" as const,
+        dependsOn: step?.depends_on ?? [],
+        gate: step?.gate ?? null,
+        acceptance: step?.acceptance ?? null,
+        deadline: evaluateStepDeadline(
+          { ...instance, currentFrontier: [packetId], currentStepId: stepId },
+          packet ? [packet] : [],
+          this.now(),
+        ),
+      };
+    });
+    const failureResumeAvailable = instance.status !== "completed" && instance.status !== "aborted";
+    const failures = this.instanceStore.listFailureOccurrences(instanceId).map((failure) => ({
+      ...failure,
+      targetedAction: failure.status === "unresolved" && failureResumeAvailable
+        ? "resume" as const
+        : "none" as const,
+    }));
+    return { instance, frontier, failures, unknowns };
+  }
+
+  async abort(input: { instanceId: string; reason: string; actorSession: string }): Promise<{
+    instanceId: string;
+    closedPacketIds: string[];
+    status: "aborted";
+  }> {
+    if (!input.reason.trim()) {
+      throw new WorkflowProjectorError("abort_reason_required", "workflow abort requires a non-empty reason");
+    }
+    const closedPacketIds: string[] = [];
+    this.eventBus.withNotifyEnvelope((register) => {
+      const instance = this.instanceStore.getByIdOrThrow(input.instanceId);
+      if (instance.status === "completed" || instance.status === "aborted") {
+        throw new WorkflowProjectorError("instance_not_abortable", `instance ${instance.instanceId} is ${instance.status}`, { instanceId: instance.instanceId, status: instance.status });
+      }
+      const spec = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion)?.spec;
+      const bindingByPacket = new Map(this.instanceStore.listFrontierBindings(instance.instanceId).map((binding) => [binding.packetId, binding]));
+      const closedAt = this.now().toISOString();
+      for (const packetId of instance.currentFrontier) {
+        const packet = this.queueRepo.getById(packetId);
+        if (!packet) throw new WorkflowProjectorError("packet_not_found", `frontier packet ${packetId} not found`, { instanceId: instance.instanceId, packetId });
+        const binding = bindingByPacket.get(packetId);
+        const stepId = binding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null);
+        if (!stepId) throw new WorkflowProjectorError("frontier_binding_indeterminate", `cannot abort: packet ${packetId} has no step binding`, { instanceId: instance.instanceId, packetId });
+        const step = spec?.steps.find((candidate) => candidate.id === stepId);
+        const closed = this.queueRepo.updateWithinTransaction({
+          qitemId: packetId,
+          actorSession: input.actorSession,
+          viaWorkflowVerb: true,
+          state: "canceled",
+          transitionNote: `workflow abort by ${input.actorSession}: ${input.reason}`,
+        });
+        register(closed.persistedEvent);
+        this.trailLog.record({
+          instanceId: instance.instanceId,
+          stepId,
+          stepRole: step?.actor_role ?? "unknown",
+          closedAt,
+          closureReason: "failed",
+          closureEvidence: { abort: { reason: input.reason, actorSession: input.actorSession } },
+          actorSession: input.actorSession,
+          nextQitemId: null,
+          priorQitemId: packetId,
+        });
+        this.instanceStore.removeFrontierBinding(instance.instanceId, packetId);
+        closedPacketIds.push(packetId);
+      }
+      this.instanceStore.updateFrontier(instance.instanceId, [], "aborted", {
+        currentStepId: "clear",
+        completedAt: closedAt,
+        expectedVersion: instance.version,
+        lastContinuationDecision: { action: "abort", actorSession: input.actorSession, reason: input.reason, closedPacketIds },
+      });
+      if (this.watchdogJobsRepo) disarmAllWorkflowKeepalives(this.watchdogJobsRepo, instance.instanceId, `workflow_aborted: ${input.reason}`);
+      register(this.eventBus.persistWithinTransaction({ type: "workflow.failed", instanceId: instance.instanceId, workflowName: instance.workflowName, reason: `aborted: ${input.reason}` }));
+    });
+    return { instanceId: input.instanceId, closedPacketIds, status: "aborted" };
   }
 
   /**
@@ -698,6 +938,7 @@ export class WorkflowRuntime {
    */
   async resume(input: {
     instanceId: string;
+    occurrenceId?: string;
     decision?: string;
     actorSession: string;
   }): Promise<{
@@ -707,7 +948,12 @@ export class WorkflowRuntime {
     ownerSession: string;
     resumeCount: number;
     exceptionItemsClosed: number;
+    absorbedReplay?: boolean;
   }> {
+    const occurrences = this.instanceStore.listFailureOccurrences(input.instanceId);
+    if (input.occurrenceId || occurrences.length > 0) {
+      return this.resumeFailureOccurrence(input);
+    }
     let result!: {
       instanceId: string;
       stepId: string;
@@ -921,8 +1167,119 @@ export class WorkflowRuntime {
     return result;
   }
 
+  private async resumeFailureOccurrence(input: {
+    instanceId: string;
+    occurrenceId?: string;
+    decision?: string;
+    actorSession: string;
+  }): Promise<{
+    instanceId: string;
+    stepId: string;
+    newPacketId: string;
+    ownerSession: string;
+    resumeCount: number;
+    exceptionItemsClosed: number;
+    absorbedReplay?: boolean;
+  }> {
+    const all = this.instanceStore.listFailureOccurrences(input.instanceId);
+    const selected = input.occurrenceId
+      ? all.find((occurrence) => occurrence.occurrenceId === input.occurrenceId)
+      : undefined;
+    if (selected?.status === "resolved" && selected.redrivePacketId) {
+      if (selected.resumeDecision !== (input.decision ?? null)) {
+        throw new WorkflowProjectorError(
+          "failure_occurrence_replay_conflict",
+          `failure occurrence ${selected.occurrenceId} was already resumed with different decision bytes`,
+          {
+            instanceId: input.instanceId,
+            occurrenceId: selected.occurrenceId,
+            expectedDecision: selected.resumeDecision,
+            attemptedDecision: input.decision ?? null,
+          },
+        );
+      }
+      const packet = this.queueRepo.getById(selected.redrivePacketId);
+      if (!packet) {
+        throw new WorkflowProjectorError("failure_occurrence_replay_indeterminate", `resolved occurrence ${selected.occurrenceId} points to missing redrive packet ${selected.redrivePacketId}`, { instanceId: input.instanceId, occurrenceId: selected.occurrenceId });
+      }
+      const instance = this.instanceStore.getByIdOrThrow(input.instanceId);
+      return { instanceId: input.instanceId, stepId: selected.stepId, newPacketId: selected.redrivePacketId, ownerSession: packet.destinationSession, resumeCount: instance.resumeCount, exceptionItemsClosed: 0, absorbedReplay: true };
+    }
+    const unresolved = all.filter((occurrence) => occurrence.status === "unresolved");
+    if (!input.occurrenceId && unresolved.length !== 1) {
+      throw new WorkflowProjectorError("failure_occurrence_required", `instance ${input.instanceId} has ${unresolved.length} unresolved failure occurrences; --occurrence is required`, { instanceId: input.instanceId, candidates: unresolved });
+    }
+    const occurrence = selected ?? unresolved[0];
+    if (!occurrence || occurrence.status !== "unresolved") {
+      throw new WorkflowProjectorError("failure_occurrence_not_unresolved", `failure occurrence ${input.occurrenceId ?? "(unspecified)"} is not unresolved`, { instanceId: input.instanceId, occurrenceId: input.occurrenceId ?? null });
+    }
+
+    let output!: {
+      instanceId: string;
+      stepId: string;
+      newPacketId: string;
+      ownerSession: string;
+      resumeCount: number;
+      exceptionItemsClosed: number;
+    };
+    let wake: { qitemId: string; session: string; nudge: boolean | undefined } | null = null;
+    this.eventBus.withNotifyEnvelope((register) => {
+      const instance = this.instanceStore.getByIdOrThrow(input.instanceId);
+      if (instance.status === "completed" || instance.status === "aborted") {
+        throw new WorkflowProjectorError("instance_not_resumable", `instance ${instance.instanceId} is ${instance.status}`, { instanceId: instance.instanceId, status: instance.status });
+      }
+      const specRow = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion);
+      if (!specRow) throw new WorkflowProjectorError("spec_not_cached", `workflow spec ${instance.workflowName}@${instance.workflowVersion} is not cached`);
+      const step = specRow.spec.steps.find((candidate) => candidate.id === occurrence.stepId);
+      if (!step) throw new WorkflowProjectorError("resume_step_missing_from_spec", `failed step "${occurrence.stepId}" no longer exists`, { instanceId: instance.instanceId, stepId: occurrence.stepId });
+      const owner = resolveDefaultOwner(specRow.spec, step, (session) => nodeRuntimeOf(this.db, session), roleResolutionContext(this.db, instance.boundRig));
+      if (!owner) throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve owner for failed step "${step.id}"`);
+      const created = this.queueRepo.createWithinTransaction({
+        sourceSession: input.actorSession,
+        destinationSession: owner,
+        body: `WORKFLOW RESUME (packet redrive)\nworkflow: ${instance.workflowName} v${instance.workflowVersion}\ninstance: ${instance.instanceId}\noccurrence: ${occurrence.occurrenceId}\nstep: ${step.id}\n${input.decision ? `decision: ${input.decision}\n` : ""}`,
+        priority: "routine",
+        tier: "mode2",
+        tags: ["workflow", "resume", `workflow:${instance.workflowName}`, `instance:${instance.instanceId}`, `occurrence:${occurrence.occurrenceId}`],
+        chainOfRecord: [occurrence.failedPacketId],
+      });
+      register(created.persistedEvent);
+      this.queueRepo.stageWakeIntent(created.qitemId, input.actorSession, created.destinationSession, null, created.nudge);
+      this.instanceStore.bindFrontierPacket({
+        instanceId: instance.instanceId,
+        packetId: created.qitemId,
+        stepId: occurrence.stepId,
+        branchDrive: occurrence.branchDrive + 1,
+        hopCount: occurrence.hopCount,
+        hopsBaseline: occurrence.hopCount,
+      });
+      this.instanceStore.resolveFailureOccurrence(instance.instanceId, occurrence.occurrenceId, created.qitemId, input.decision);
+      const nextFrontier = [...instance.currentFrontier, created.qitemId];
+      const bindings = this.instanceStore.listFrontierBindings(instance.instanceId);
+      this.instanceStore.updateFrontier(instance.instanceId, nextFrontier, "active", {
+        currentStepId: bindings.length === 1 ? bindings[0]!.stepId : "clear",
+        expectedVersion: instance.version,
+        resumeStamp: { resumeCount: instance.resumeCount + 1, hopsBaseline: instance.hopCount },
+        lastContinuationDecision: { action: "resume_occurrence", occurrenceId: occurrence.occurrenceId, redrivePacketId: created.qitemId, actorSession: input.actorSession, decision: input.decision ?? null },
+      });
+      if (this.watchdogJobsRepo) ensureWorkflowKeepaliveArmed(this.watchdogJobsRepo, {
+        instanceId: instance.instanceId,
+        packetId: created.qitemId,
+        targetSession: owner,
+        registeredBySession: input.actorSession,
+      });
+      register(this.eventBus.persistWithinTransaction({ type: "workflow.resumed", instanceId: instance.instanceId, workflowName: instance.workflowName, stepId: step.id, occurrenceId: occurrence.occurrenceId, resumedBy: input.actorSession, decision: input.decision ?? null, resumeCount: instance.resumeCount + 1 }));
+      wake = { qitemId: created.qitemId, session: created.destinationSession, nudge: created.nudge };
+      output = { instanceId: instance.instanceId, stepId: step.id, newPacketId: created.qitemId, ownerSession: owner, resumeCount: instance.resumeCount + 1, exceptionItemsClosed: 0 };
+    });
+    const nudge = wake as { qitemId: string; session: string; nudge: boolean | undefined } | null;
+    if (nudge) await this.queueRepo.deliverWakeForSuccessor(nudge.qitemId, nudge.session, nudge.nudge, input.actorSession);
+    return output;
+  }
+
   async route(input: {
     instanceId: string;
+    packetId?: string;
     toSession: string;
     actorSession: string;
     reason?: string;
@@ -955,12 +1312,41 @@ export class WorkflowRuntime {
           { instanceId: instance.instanceId, status: instance.status },
         );
       }
-      const oldPacketId = instance.currentFrontier[0];
+      let oldPacketId = input.packetId;
+      if (!oldPacketId) {
+        if (instance.currentFrontier.length !== 1) {
+          if (instance.currentFrontier.length === 0) {
+            throw new WorkflowProjectorError(
+              "packet_not_found",
+              `instance ${instance.instanceId} has an empty frontier; nothing to re-route`,
+              { instanceId: instance.instanceId },
+            );
+          }
+          const candidates = instance.currentFrontier.map((packetId) => {
+            const binding = this.instanceStore.getFrontierBinding(instance.instanceId, packetId);
+            const packet = this.queueRepo.getById(packetId);
+            return { packetId, stepId: binding?.stepId ?? null, ownerSession: packet?.destinationSession ?? null };
+          });
+          throw new WorkflowProjectorError(
+            "frontier_packet_required",
+            `instance ${instance.instanceId} has ${instance.currentFrontier.length} live packets; --packet is required`,
+            { instanceId: instance.instanceId, candidates },
+          );
+        }
+        [oldPacketId] = instance.currentFrontier;
+      }
       if (!oldPacketId) {
         throw new WorkflowProjectorError(
           "packet_not_found",
-          `instance ${instance.instanceId} has an empty frontier; nothing to re-route`,
+          `instance ${instance.instanceId} has no selectable frontier packet`,
           { instanceId: instance.instanceId },
+        );
+      }
+      if (!instance.currentFrontier.includes(oldPacketId)) {
+        throw new WorkflowProjectorError(
+          "packet_not_on_frontier",
+          `qitem ${oldPacketId} is not in workflow instance ${instance.instanceId} frontier`,
+          { instanceId: instance.instanceId, packetId: oldPacketId, frontier: instance.currentFrontier },
         );
       }
       const oldPacket = this.queueRepo.getById(oldPacketId);
@@ -977,9 +1363,11 @@ export class WorkflowRuntime {
       // to explicit --next-owner overrides — an explicit route target
       // never silently defeats a declared pin.
       const specRow = this.specCache.getByNameVersion(instance.workflowName, instance.workflowVersion);
+      const oldBinding = this.instanceStore.getFrontierBinding(instance.instanceId, oldPacketId);
+      const selectedStepId = oldBinding?.stepId ?? (instance.currentFrontier.length === 1 ? instance.currentStepId : null);
       const step =
-        instance.currentStepId && specRow
-          ? specRow.spec.steps.find((s) => s.id === instance.currentStepId) ?? null
+        selectedStepId && specRow
+          ? specRow.spec.steps.find((s) => s.id === selectedStepId) ?? null
           : null;
       if (step) {
         reconcileExplicitOwnerHarness(step, input.toSession, (session) =>
@@ -997,7 +1385,7 @@ export class WorkflowRuntime {
         closureReason: "handed_off_to",
         closureTarget: input.toSession,
         handedOffTo: input.toSession,
-        transitionNote: `workflow route: ${input.actorSession} re-routed step ${instance.currentStepId ?? "?"} from ${fromSession} to ${input.toSession}${input.reason ? ` — ${input.reason}` : ""}`,
+        transitionNote: `workflow route: ${input.actorSession} re-routed step ${selectedStepId ?? "?"} from ${fromSession} to ${input.toSession}${input.reason ? ` — ${input.reason}` : ""}`,
       });
       register(closed.persistedEvent);
 
@@ -1077,8 +1465,21 @@ export class WorkflowRuntime {
 
       // (2)+(5)+(7) frontier REBIND: same step, new packet, version
       // guard held; NO hop bump (not an advance).
-      this.instanceStore.updateFrontier(instance.instanceId, [created.qitemId], instance.status, {
-        currentStepId: "preserve",
+      const nextFrontier = instance.currentFrontier.map((packetId) => packetId === oldPacketId ? created.qitemId : packetId);
+      if (oldBinding) {
+        this.instanceStore.removeFrontierBinding(instance.instanceId, oldPacketId);
+        this.instanceStore.bindFrontierPacket({
+          instanceId: instance.instanceId,
+          packetId: created.qitemId,
+          stepId: oldBinding.stepId,
+          branchDrive: oldBinding.branchDrive,
+          hopCount: oldBinding.hopCount,
+          hopsBaseline: oldBinding.hopsBaseline,
+        });
+      }
+      const rebound = this.instanceStore.listFrontierBindings(instance.instanceId);
+      this.instanceStore.updateFrontier(instance.instanceId, nextFrontier, instance.status, {
+        currentStepId: rebound.length === 1 ? rebound[0]!.stepId : rebound.length > 1 ? "clear" : "preserve",
         expectedVersion: instance.version,
       });
 
@@ -1089,9 +1490,11 @@ export class WorkflowRuntime {
           this.watchdogJobsRepo,
           instance.instanceId,
           `workflow route: re-targeted to ${input.toSession}`,
+          oldBinding ? oldPacketId : undefined,
         );
         ensureWorkflowKeepaliveArmed(this.watchdogJobsRepo, {
           instanceId: instance.instanceId,
+          packetId: oldBinding ? created.qitemId : undefined,
           targetSession: input.toSession,
           registeredBySession: input.actorSession,
         });
@@ -1106,7 +1509,7 @@ export class WorkflowRuntime {
           rigName: instance.boundRig ?? specRow?.targetRig ?? "",
           cause: "workflow_route",
           instanceId: instance.instanceId,
-          stepId: instance.currentStepId,
+          stepId: selectedStepId,
           from: fromSession,
           to: input.toSession,
         }),
@@ -1114,7 +1517,7 @@ export class WorkflowRuntime {
 
       result = {
         instanceId: instance.instanceId,
-        stepId: instance.currentStepId,
+        stepId: selectedStepId,
         closedPacketId: oldPacketId,
         newPacketId: created.qitemId,
         fromSession,
@@ -1144,10 +1547,20 @@ export class WorkflowRuntime {
   continue(instanceId: string): {
     instance: WorkflowInstanceWithDeadline;
     trail: WorkflowStepTrailEntry[];
+    frontier: ReturnType<WorkflowRuntime["inspect"]>["frontier"];
+    failures: ReturnType<WorkflowRuntime["inspect"]>["failures"];
+    unknowns: string[];
   } {
     const instance = this.instanceStore.getByIdOrThrow(instanceId);
     const trail = this.trailLog.listForInstance(instanceId);
-    return { instance: this.withDeadline(instance), trail };
+    const inspected = this.inspect(instanceId);
+    return {
+      instance: this.withDeadline(instance),
+      trail,
+      frontier: inspected.frontier,
+      failures: inspected.failures,
+      unknowns: inspected.unknowns,
+    };
   }
 
   /**
@@ -1181,16 +1594,30 @@ export class WorkflowRuntime {
 
   /** List instances (optionally filtered) with the deadline verdict attached. */
   listInstancesWithDeadline(
-    status?: "active" | "waiting" | "completed" | "failed",
-  ): WorkflowInstanceWithDeadline[] {
+    status?: "active" | "waiting" | "completed" | "failed" | "aborted",
+  ): WorkflowInstanceWithInspection[] {
     const rows = status ? this.instanceStore.listByStatus(status) : this.instanceStore.listAll();
-    return rows.map((row) => this.withDeadline(row));
+    return rows.map((row) => {
+      const inspected = this.inspect(row.instanceId);
+      return {
+        ...this.withDeadline(row),
+        frontierPackets: inspected.frontier,
+        failureOccurrences: inspected.failures,
+        unknowns: inspected.unknowns,
+      };
+    });
   }
 }
 
 /** WorkflowInstance + the derived FR-2 deadline verdict (additive read shape). */
 export type WorkflowInstanceWithDeadline = WorkflowInstance & {
   deadline: WorkflowDeadlineVerdict;
+};
+
+export type WorkflowInstanceWithInspection = WorkflowInstanceWithDeadline & {
+  frontierPackets: ReturnType<WorkflowRuntime["inspect"]>["frontier"];
+  failureOccurrences: ReturnType<WorkflowRuntime["inspect"]>["failures"];
+  unknowns: string[];
 };
 
 function workflowInstantiateBody(input: {
