@@ -8,6 +8,7 @@ import {
   composeAttentionRollup,
   renderInstanceList,
   renderInstanceShow,
+  renderProjectAction,
   renderStatus,
   renderTraceTree,
 } from "./workflow-render.js";
@@ -272,6 +273,9 @@ Examples:
     .option("--result-note <text>", "Closure result note (audit context)")
     .option("--blocked-on <ref>", "For waiting exits: blocker reference (qitem id, gate name)")
     .option("--next-owner <session>", "Override default next-step owner")
+    .option("--acceptance-candidate <identity>", "Typed acceptance candidate identity (use with verdict and evidence-ref)")
+    .option("--acceptance-verdict <verdict>", "Typed acceptance verdict (use with candidate and evidence-ref)")
+    .option("--acceptance-evidence-ref <path>", "Typed acceptance evidence path (use with candidate and verdict)")
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
@@ -300,6 +304,9 @@ Examples:
       resultNote?: string;
       blockedOn?: string;
       nextOwner?: string;
+      acceptanceCandidate?: string;
+      acceptanceVerdict?: string;
+      acceptanceEvidenceRef?: string;
       json?: boolean;
     }) => {
       // HG-6 — runtime-validate the --exit enum BEFORE the daemon
@@ -330,6 +337,15 @@ Examples:
           actorSession: opts.actorSession,
           resultNote: opts.resultNote,
           blockedOn: opts.blockedOn,
+          closureEvidence: opts.acceptanceCandidate !== undefined || opts.acceptanceVerdict !== undefined || opts.acceptanceEvidenceRef !== undefined
+            ? {
+                acceptance: {
+                  candidate: opts.acceptanceCandidate,
+                  verdict: opts.acceptanceVerdict,
+                  evidence_ref: opts.acceptanceEvidenceRef,
+                },
+              }
+            : undefined,
           nextOwnerSession: opts.nextOwner,
         });
         printResult(opts.json ?? false, res.data, res.status);
@@ -516,6 +532,11 @@ Examples:
             queueState: string | null;
             blockedOn: string | null;
             targetedAction: "project" | "route" | "indeterminate";
+            acceptance?: {
+              candidate: string;
+              verdicts: string[];
+              evidence_ref: string;
+            } | null;
           }>;
           failures?: Array<{
             occurrenceId: string;
@@ -536,7 +557,7 @@ Examples:
           what: `Inspected instance ${instanceId} (read-only; no state changed)`,
           state: `status = ${status}; ${frontierRows.length} frontier packet(s); ${unresolved.length} unresolved failure(s); trail rows = ${trailLen}`,
           next: frontierRows.length === 1 && frontierRows[0]?.targetedAction !== "indeterminate"
-            ? `The frontier owner advances packet ${frontierRows[0]!.packetId}: rig workflow project --instance ${instanceId} --current-packet ${frontierRows[0]!.packetId} --exit <handoff|waiting|done|failed> --actor-session ${frontierRows[0]!.ownerSession ?? "<owner>"}`
+            ? `The frontier owner advances packet ${frontierRows[0]!.packetId}: ${renderProjectAction(instanceId, frontierRows[0]!)}`
             : frontierRows.length > 1 || unresolved.length > 0
               ? `Choose the exact packet or failure occurrence shown by: rig workflow show ${instanceId}`
               : frontier.length > 0

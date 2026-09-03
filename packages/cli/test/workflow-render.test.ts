@@ -157,6 +157,55 @@ describe("workflow-render (WF3 FR-2)", () => {
     expect(trace).toContain("failure Q-FAILED");
   });
 
+  it("renders the typed acceptance command shape on an acceptance frontier", () => {
+    const acceptance = {
+      ...INSTANCE,
+      currentStepId: null,
+      frontierPackets: [{
+        packetId: "Q-ACCEPT",
+        stepId: "accept",
+        ownerSession: "reviewer@rig",
+        queueState: "in-progress",
+        blockedOn: null,
+        targetedAction: "project" as const,
+        acceptance: {
+          candidate: "abc123",
+          verdicts: ["CLEAR", "BLOCKING"],
+          evidence_ref: "proof/review report.md",
+        },
+      }],
+    };
+    const show = renderInstanceShow(acceptance, NOW).join("\n");
+    expect(show).toContain("--acceptance-candidate 'abc123'");
+    expect(show).toContain("--acceptance-verdict '<CLEAR|BLOCKING>'");
+    expect(show).toContain("--acceptance-evidence-ref 'proof/review report.md'");
+  });
+
+  it("keeps an aborted unresolved occurrence as non-actionable history in show and trace", () => {
+    const aborted = {
+      ...INSTANCE,
+      status: "aborted",
+      currentStepId: null,
+      currentFrontier: [],
+      failureOccurrences: [{
+        occurrenceId: "Q-HISTORY",
+        stepId: "build",
+        status: "unresolved" as const,
+        failureReason: "stopped",
+        targetedAction: "none" as const,
+      }],
+    };
+    for (const text of [
+      renderInstanceShow(aborted, NOW).join("\n"),
+      renderTraceTree(aborted, TRAIL, NOW).join("\n"),
+    ]) {
+      expect(text).toContain("Q-HISTORY");
+      expect(text).toContain("action: none — terminal history");
+      expect(text).not.toContain("rig workflow resume");
+    }
+    expect(renderInstanceList([aborted], NOW)[1]).not.toContain("▲ failed-branch");
+  });
+
   it("humanDuration compacts sanely", () => {
     expect(humanDuration("2026-07-06T21:00:00Z", "2026-07-06T21:00:30Z")).toBe("30s");
     expect(humanDuration("2026-07-06T21:00:00Z", "2026-07-06T22:30:00Z")).toBe("90m");

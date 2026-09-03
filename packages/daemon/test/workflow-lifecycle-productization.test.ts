@@ -53,9 +53,11 @@ const ACCEPTANCE_SPEC = `workflow:
   steps:
     - id: produce
       actor_role: producer
+      depends_on: []
       allowed_exits: [handoff]
     - id: accept
       actor_role: gate
+      depends_on: [produce]
       acceptance:
         candidate: abc123
         verdicts: [CLEAR]
@@ -491,8 +493,29 @@ describe("S06 lifecycle productization", () => {
   });
 
   it("requires the dedicated acceptance payload and aborts every live packet transactionally", async () => {
-    const accepted = await runtime.instantiate({ specPath: spec(ACCEPTANCE_SPEC), rootObjective: "accept", createdBySession: "orch@rig" });
+    const accepted = await runtime.instantiate({
+      specPath: spec(ACCEPTANCE_SPEC),
+      rootObjective: "accept",
+      createdBySession: "orch@rig",
+      lifecycle: {
+        operationKey: "acceptance-cli",
+        compiledInputDigest: "acceptance-cli-digest",
+        binding: { identity: { mission: "release-0.5.9" } },
+      },
+    });
     const next = await runtime.project({ instanceId: accepted.instance.instanceId, currentPacketId: accepted.entryQitemId, exit: "handoff", actorSession: "producer@rig" });
+    const execution = buildExecutionView({
+      db,
+      slicesRoot: () => null,
+      buildInfo: { semver: null, commit: null, dirty: null, builtAt: null },
+    }, { mission: "release-0.5.9" }) as { lifecycle_instances: Array<{
+      instance_id: string;
+      frontier_packets: Array<{ targeted_action: string }>;
+    }> };
+    const acceptanceAction = execution.lifecycle_instances.find((item) => item.instance_id === accepted.instance.instanceId)!.frontier_packets[0]!.targeted_action;
+    expect(acceptanceAction).toContain("--acceptance-candidate 'abc123'");
+    expect(acceptanceAction).toContain("--acceptance-verdict 'CLEAR'");
+    expect(acceptanceAction).toContain("--acceptance-evidence-ref 'proof/review.md'");
     await expect(runtime.project({ instanceId: accepted.instance.instanceId, currentPacketId: next.nextQitemId!, exit: "done", actorSession: "gate@rig" }))
       .rejects.toMatchObject({ code: "acceptance_payload_required" });
     const beforeMismatch = mutationCounts();

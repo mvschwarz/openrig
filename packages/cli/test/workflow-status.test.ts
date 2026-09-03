@@ -127,6 +127,19 @@ describe("composeAttentionRollup (WF3 FR-3b)", () => {
     expect(attentionMarker(activeWithFailure)).toBe("▲ failed-branch");
   });
 
+  it("does not classify terminal unresolved history with targetedAction=none as live attention", () => {
+    const abortedWithHistory = {
+      instanceId: "WF-A",
+      workflowName: "conveyor",
+      status: "aborted",
+      failureOccurrences: [{ occurrenceId: "Q-HISTORY", stepId: "build", status: "unresolved" as const, targetedAction: "none" as const }],
+    };
+    const rollup = composeAttentionRollup([abortedWithHistory]);
+    expect(rollup.counts.aborted).toBe(1);
+    expect(rollup.attention).toEqual([]);
+    expect(attentionMarker(abortedWithHistory)).toBe("");
+  });
+
   it("human render: table with CLASS column and per-row affordance line", () => {
     const lines = renderStatus(composeAttentionRollup([WAITING_AND_STUCK, FAILED]));
     const text = lines.join("\n");

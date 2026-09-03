@@ -28,6 +28,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import type Database from "better-sqlite3";
+import { shellQuote } from "../adapters/shell-quote.js";
 import { parseFrontmatter } from "./slices/slice-indexer.js";
 import { derivePickup } from "./queue-pickup.js";
 import { resolveWorkNodeDirs } from "./current-work.js";
@@ -274,6 +275,21 @@ function hasColumn(db: Database.Database, table: string, column: string): boolea
   return db.prepare(`PRAGMA table_info(${table})`).all().some((row) => (row as { name?: string }).name === column);
 }
 
+function lifecycleProjectAction(input: {
+  instanceId: string;
+  packetId: string;
+  owner: string;
+  acceptance: Record<string, unknown> | null;
+}): string {
+  const base = `rig workflow project --instance ${input.instanceId} --current-packet ${input.packetId} --exit <handoff|waiting|done|failed> --actor-session ${input.owner}`;
+  if (!input.acceptance) return base;
+  const verdicts = Array.isArray(input.acceptance["verdicts"])
+    ? input.acceptance["verdicts"].filter((value): value is string => typeof value === "string")
+    : [];
+  const verdict = verdicts.length === 1 ? verdicts[0]! : `<${verdicts.join("|")}>`;
+  return `${base} --acceptance-candidate ${shellQuote(String(input.acceptance["candidate"]))} --acceptance-verdict ${shellQuote(verdict)} --acceptance-evidence-ref ${shellQuote(String(input.acceptance["evidence_ref"]))}`;
+}
+
 /**
  * S06 lifecycle projection for the existing execution view. Mutable owner,
  * queue state, and blocker facts are joined from queue_items at read time;
@@ -315,6 +331,7 @@ function readLifecycleExecutions(db: Database.Database, mission: string): Array<
       if (!packet) unknowns.push(`frontier packet ${packetId} has no queue row`);
       const stepId = matches.length === 1 ? String(matches[0]!["step_id"]) : null;
       const step = stepId ? steps.find((candidate) => candidate["id"] === stepId) : undefined;
+      const acceptance = step && isRecord(step["acceptance"]) ? step["acceptance"] : null;
       return {
         packet_id: packetId,
         step_id: stepId ?? INDETERMINATE,
@@ -323,9 +340,9 @@ function readLifecycleExecutions(db: Database.Database, mission: string): Array<
         blocked_on: packet?.blocked_on ?? null,
         depends_on: step && Array.isArray(step["depends_on"]) ? step["depends_on"] : [],
         gate: step && isRecord(step["gate"]) ? step["gate"] : null,
-        acceptance: step && isRecord(step["acceptance"]) ? step["acceptance"] : null,
+        acceptance,
         targeted_action: matches.length === 1 && packet
-          ? `rig workflow project --instance ${instanceId} --current-packet ${packetId} --exit <handoff|waiting|done|failed> --actor-session ${packet.destination_session}`
+          ? lifecycleProjectAction({ instanceId, packetId, owner: packet.destination_session!, acceptance })
           : INDETERMINATE,
       };
     });

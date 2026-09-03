@@ -15,6 +15,8 @@
  * WF-2).
  */
 
+import { shellQuote } from "../cross-host-executor.js";
+
 export interface RenderInstance {
   instanceId: string;
   workflowName?: string;
@@ -59,6 +61,11 @@ export interface RenderFrontierPacket {
   blockedOn: string | null;
   targetedAction: "project" | "route" | "indeterminate";
   dependsOn?: string[];
+  acceptance?: {
+    candidate: string;
+    verdicts: string[];
+    evidence_ref: string;
+  } | null;
 }
 
 export interface RenderFailureOccurrence {
@@ -79,6 +86,22 @@ export interface RenderTrailRow {
   actorSession: string;
   nextQitemId?: string | null;
   priorQitemId?: string;
+}
+
+/** One command-shaped owner action, including the typed acceptance contract when present. */
+export function renderProjectAction(instanceId: string, packet: RenderFrontierPacket): string {
+  const base = `rig workflow project --instance ${instanceId} --current-packet ${packet.packetId} --exit <handoff|waiting|done|failed> --actor-session ${packet.ownerSession ?? "<owner>"}`;
+  if (!packet.acceptance) return base;
+  const verdict = packet.acceptance.verdicts.length === 1
+    ? packet.acceptance.verdicts[0]!
+    : `<${packet.acceptance.verdicts.join("|")}>`;
+  return `${base} --acceptance-candidate ${shellQuote(packet.acceptance.candidate)} --acceptance-verdict ${shellQuote(verdict)} --acceptance-evidence-ref ${shellQuote(packet.acceptance.evidence_ref)}`;
+}
+
+function actionableFailures(instance: RenderInstance): RenderFailureOccurrence[] {
+  return (instance.failureOccurrences ?? []).filter(
+    (failure) => failure.status === "unresolved" && failure.targetedAction === "resume",
+  );
 }
 
 const STATUS_GLYPH: Record<string, string> = {
@@ -178,7 +201,9 @@ export function renderTraceTree(
   }
   for (const failure of (instance.failureOccurrences ?? []).filter((item) => item.status === "unresolved")) {
     lines.push(`  ▲ failure ${failure.occurrenceId}  step=${failure.stepId}${failure.failureReason ? `  reason=${failure.failureReason}` : ""}`);
-    lines.push(`      action: rig workflow resume ${instance.instanceId} --occurrence ${failure.occurrenceId} --actor-session <you>`);
+    lines.push(failure.targetedAction === "resume"
+      ? `      action: rig workflow resume ${instance.instanceId} --occurrence ${failure.occurrenceId} --actor-session <you>`
+      : "      action: none — terminal history");
   }
   for (const unknown of instance.unknowns ?? []) lines.push(`  ? ${unknown}`);
   return lines;
@@ -194,7 +219,7 @@ export function renderTraceTree(
  */
 export function attentionMarker(instance: RenderInstance): string {
   if (instance.status === "failed") return "▲ failed";
-  if ((instance.failureOccurrences ?? []).some((failure) => failure.status === "unresolved")) return "▲ failed-branch";
+  if (actionableFailures(instance).length > 0) return "▲ failed-branch";
   if (isStuck(instance)) return "▲ stuck";
   if (instance.status === "waiting") return "▲ waiting";
   return "";
@@ -248,7 +273,7 @@ export function composeAttentionRollup(instances: RenderInstance[]): AttentionRo
       classes.push("failed");
       reasons.push("workflow failed");
     }
-    const unresolved = (inst.failureOccurrences ?? []).filter((failure) => failure.status === "unresolved");
+    const unresolved = actionableFailures(inst);
     if (unresolved.length > 0 && inst.status !== "failed") {
       classes.push("failed-branch");
       reasons.push(`${unresolved.length} unresolved branch failure${unresolved.length === 1 ? "" : "s"}`);
@@ -339,7 +364,7 @@ export function renderInstanceShow(
     for (const packet of instance.frontierPackets ?? []) {
       lines.push(`    ${packet.packetId}  step=${packet.stepId ?? "INDETERMINATE"}  owner=${packet.ownerSession ?? "INDETERMINATE"}  state=${packet.queueState ?? "INDETERMINATE"}${packet.blockedOn ? `  blocked_on=${packet.blockedOn}` : ""}`);
       const action = packet.targetedAction === "project"
-        ? `rig workflow project --instance ${instance.instanceId} --current-packet ${packet.packetId} --exit <handoff|waiting|done|failed> --actor-session ${packet.ownerSession ?? "<owner>"}`
+        ? renderProjectAction(instance.instanceId, packet)
         : packet.targetedAction === "route"
           ? `rig workflow route ${instance.instanceId} --packet ${packet.packetId} --to <seat> --actor-session <you>`
           : "disabled — inspect named unknowns";
@@ -353,7 +378,9 @@ export function renderInstanceShow(
     lines.push("  failures:");
     for (const failure of unresolved) {
       lines.push(`    ${failure.occurrenceId}  step=${failure.stepId}${failure.failureReason ? `  reason=${failure.failureReason}` : ""}`);
-      lines.push(`      action: rig workflow resume ${instance.instanceId} --occurrence ${failure.occurrenceId} --actor-session <you>`);
+      lines.push(failure.targetedAction === "resume"
+        ? `      action: rig workflow resume ${instance.instanceId} --occurrence ${failure.occurrenceId} --actor-session <you>`
+        : "      action: none — terminal history");
     }
   }
   for (const unknown of instance.unknowns ?? []) lines.push(`  unknown:  ${unknown}`);
