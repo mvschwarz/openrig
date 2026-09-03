@@ -196,6 +196,51 @@ describe("mission execution story — readable rows over the shipped projections
     expect(body).toContain("? frontier packet Q-GHOST has no queue row");
   });
 
+  it("keeps a typed acceptance action usable at every production terminal width", () => {
+    const fixture = executionFixture();
+    const candidate = "0123456789abcdef0123456789abcdef01234567";
+    const evidence = "proof/review.md";
+    fixture.lifecycle_instances = [{
+      instance_id: "WF-ACCEPTANCE",
+      status: "active",
+      operation_key: "release-acceptance",
+      frontier_packets: [{
+        packet_id: "qitem-acceptance-packet",
+        step_id: "accept",
+        owner: "review50-r2@v-openrig-build",
+        queue_state: "in-progress",
+        blocked_on: null,
+        targeted_action: `rig workflow project --instance WF-ACCEPTANCE --current-packet qitem-acceptance-packet --exit done --actor-session review50-r2@v-openrig-build --acceptance-candidate '${candidate}' --acceptance-verdict 'CLEAR' --acceptance-evidence-ref '${evidence}'`,
+      }],
+      failure_occurrences: [],
+      unknowns: [],
+    }];
+    const snap = {
+      ...demoSnapshot(),
+      scopes: executionScopes(),
+      execution: fixture,
+      executionMission: fixture.mission,
+      hydratedAt: "2026-09-03T20:00:00.000Z",
+    };
+    for (const size of [{ cols: 84, rows: 28 }, { cols: 120, rows: 34 }, { cols: 160, rows: 42 }]) {
+      const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+      view.dispatch(parseCommand(":scopes"));
+      view.dispatch({ type: "scopes-mission-open", mission: fixture.mission });
+
+      const screen = renderScreen(view.get(), snap, size);
+      const action = screen.lines
+        .map((line) => line.slice(line.indexOf("│") + 1).trim())
+        .filter((line) => line.startsWith("action rig workflow project") || line.startsWith("--") || line.startsWith("'"))
+        .join(" ")
+        .replace(/\s*\\\s*/g, " ");
+      expect(action, `${size.cols}x${size.rows}`).toContain(`--acceptance-candidate '${candidate}'`);
+      expect(action, `${size.cols}x${size.rows}`).toContain("--acceptance-verdict 'CLEAR'");
+      expect(action, `${size.cols}x${size.rows}`).toContain(`--acceptance-evidence-ref '${evidence}'`);
+      expect(action, `${size.cols}x${size.rows}`).not.toContain("…");
+      expect(screen.lines.every((line) => line.length <= size.cols), `${size.cols}x${size.rows}`).toBe(true);
+    }
+  });
+
   it("keeps terminal failure history visible without rendering an impossible resume command", () => {
     const fixture = executionFixture();
     fixture.lifecycle_instances = [{

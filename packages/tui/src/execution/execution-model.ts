@@ -65,6 +65,33 @@ function clip(text: string, room: number): string {
   return text.length > room ? `${text.slice(0, Math.max(room - 1, 0))}…` : text;
 }
 
+/** Keep lifecycle commands complete in the scrollable pane. Shell continuations make the
+ * visual wrap usable as one command instead of turning the hidden suffix into guesswork. */
+function actionLines(action: string, width: number): ContentLine[] {
+  const firstIndent = "      action ";
+  const nextIndent = "        ";
+  const room = Math.max(width, 24);
+  const groups = action.split(/ (?=--[a-z])/);
+  const parts = groups.flatMap((group) => {
+    const split = group.indexOf(" ");
+    return split > 0 && nextIndent.length + group.length + 2 > room
+      ? [group.slice(0, split), group.slice(split + 1)]
+      : [group];
+  });
+  const lines: ContentLine[] = [];
+  let current = `${firstIndent}${parts.shift() ?? ""}`;
+  for (const part of parts) {
+    if (`${current} ${part} \\`.length <= room) {
+      current += ` ${part}`;
+      continue;
+    }
+    lines.push({ text: `${current} \\` });
+    current = `${nextIndent}${part}`;
+  }
+  lines.push({ text: current });
+  return lines;
+}
+
 function open(key: string): Action {
   return { type: "execution-open", key };
 }
@@ -390,14 +417,14 @@ function lifecycleLines(execution: ExecutionViewSnap, width: number): ContentLin
       const packet = record(rawPacket);
       lines.push({ text: clip(`    ▸ ${str(packet["step_id"], INDETERMINATE)} · ${str(packet["owner"], INDETERMINATE)} · ${str(packet["queue_state"], INDETERMINATE)} · packet ${str(packet["packet_id"], INDETERMINATE)}`, width) });
       if (packet["blocked_on"]) lines.push({ text: clip(`      blocked on ${str(packet["blocked_on"])}`, width) });
-      lines.push({ text: clip(`      action ${str(packet["targeted_action"], INDETERMINATE)}`, width) });
+      lines.push(...actionLines(str(packet["targeted_action"], INDETERMINATE), width));
     }
     const failures = Array.isArray(instance["failure_occurrences"]) ? instance["failure_occurrences"] as unknown[] : [];
     for (const rawFailure of failures) {
       const failure = record(rawFailure);
       if (failure["status"] !== "unresolved") continue;
       lines.push({ text: clip(`    ▲ ${str(failure["step_id"], INDETERMINATE)} · occurrence ${str(failure["occurrence_id"], INDETERMINATE)}${failure["failure_reason"] ? ` · ${str(failure["failure_reason"])}` : ""}`, width) });
-      lines.push({ text: clip(`      action ${str(failure["targeted_action"], INDETERMINATE)}`, width) });
+      lines.push(...actionLines(str(failure["targeted_action"], INDETERMINATE), width));
     }
     const unknowns = Array.isArray(instance["unknowns"]) ? instance["unknowns"] as unknown[] : [];
     for (const unknown of unknowns) lines.push({ text: clip(`    ? ${str(unknown, INDETERMINATE)}`, width) });
