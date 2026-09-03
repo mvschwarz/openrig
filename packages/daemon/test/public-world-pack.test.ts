@@ -177,7 +177,7 @@ function writeRigFixture(options: {
     { relativePath: "world/install", sourceType: "user_file", sourcePath: "/fixture/private-world" },
   ]);
   const configRoot = options.configRoot === undefined
-    ? '"${OPENRIG_CONTEXT_PACKS_ROOT:-/fixture/context-packs}"'
+    ? '"${OPENRIG_CONTEXT_ROOT:-/fixture/context}"'
     : `'${options.configRoot}'`;
   writeFileSync(
     join(fixturePath, "world-public-get.txt"),
@@ -223,13 +223,13 @@ function writeRigFixture(options: {
     "  fi",
     '  [ "$4" = "--name" ] || exit 64',
     `  if [ ${options.partialSync ? 1 : 0} -eq 1 ]; then`,
-    '    target="$OPENRIG_CONTEXT_PACKS_ROOT/$5"',
+    '    target="$OPENRIG_CONTEXT_ROOT/$5"',
     '    mkdir -p "$target"',
     '    printf \'%s\\n\' \'name: partial-sync-fixture\' > "$target/manifest.yaml"',
     '    printf \'{"installedAt":"%s","syncError":"HTTP 503"}\\n\' "$target"',
     "    exit 0",
     "  fi",
-    '  target="$OPENRIG_CONTEXT_PACKS_ROOT/$5"',
+    '  target="$OPENRIG_CONTEXT_ROOT/$5"',
     '  mkdir -p "$target"',
     '  cp -R "$3"/. "$target"/',
     '  printf \'%s\\n\' "$5" > "$install_state"',
@@ -238,7 +238,7 @@ function writeRigFixture(options: {
     '  if [ -f "$install_state" ]; then',
     '    installed_ref=$(sed -n \'1p\' "$install_state")',
     '    cat "$fixture_dir/context-list.json" | sed \'s/]$//\'',
-    "    printf ',{\"relativePath\":\"%s\",\"sourceType\":\"user_file\",\"sourcePath\":\"%s/%s\"}]\\n' \"$installed_ref\" \"$OPENRIG_CONTEXT_PACKS_ROOT\" \"$installed_ref\"",
+    "    printf ',{\"relativePath\":\"%s\",\"sourceType\":\"user_file\",\"sourcePath\":\"%s/%s\"}]\\n' \"$installed_ref\" \"$OPENRIG_CONTEXT_ROOT\" \"$installed_ref\"",
     "  else",
     '    cat "$fixture_dir/context-list.json"',
     "  fi",
@@ -246,10 +246,10 @@ function writeRigFixture(options: {
     `  [ ${options.partialSync ? 1 : 0} -eq 0 ] || exit 72`,
     '  [ -f "$install_state" ] || exit 1',
     '  [ "$(sed -n \'1p\' "$install_state")" = "$3" ] || exit 1',
-    '  rm -rf -- "$OPENRIG_CONTEXT_PACKS_ROOT/$3"',
+    '  rm -rf -- "$OPENRIG_CONTEXT_ROOT/$3"',
     '  rm -f "$install_state"',
     '  printf \'{"removed":true,"ref":"%s"}\\n\' "$3"',
-    'elif [ "$1" = "config" ] && [ "$2" = "get" ] && [ "$3" = "context.packs_root" ]; then',
+    'elif [ "$1" = "config" ] && [ "$2" = "get" ] && [ "$3" = "context.root" ]; then',
     `  printf '%s\\n' ${configRoot}`,
     'elif [ "$1" = "whoami" ]; then',
     `  printf '%s\\n' '${options.identityJson ?? '{"identity":{"rigName":"fixture","memberId":"qa","sessionName":"qa@fixture"}}'}'`,
@@ -425,7 +425,7 @@ describe("public world pack", () => {
       const result = runVerifier(redPack, {
         ...process.env,
         PATH: `${rigPath}:${process.env.PATH ?? ""}`,
-        OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+        OPENRIG_CONTEXT_ROOT: "/fixture/context",
         OPENRIG_SESSION_NAME: "qa@fixture",
         RIGGED_SESSION_NAME: "",
       });
@@ -458,7 +458,7 @@ describe("public world pack", () => {
     const result = runVerifier(redPack, {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_CONTEXT_ROOT: "/fixture/context",
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     });
@@ -505,7 +505,7 @@ describe("public world pack", () => {
     const result = runVerifier(redPack, {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_CONTEXT_ROOT: "/fixture/context",
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     });
@@ -520,7 +520,7 @@ describe("public world pack", () => {
     const fixtureEnv = {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_CONTEXT_ROOT: "/fixture/context",
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     };
@@ -547,7 +547,7 @@ describe("public world pack", () => {
     const wrongIdentity = runVerifier(packDir, {
       ...process.env,
       PATH: `${wrongIdentityPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_CONTEXT_ROOT: "/fixture/context",
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     });
@@ -559,7 +559,7 @@ describe("public world pack", () => {
     const wrongTopology = runVerifier(packDir, {
       ...process.env,
       PATH: `${wrongTopologyPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_CONTEXT_ROOT: "/fixture/context",
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     });
@@ -585,7 +585,7 @@ describe("public world pack", () => {
     const result = runVerifier(publicWorldDir(), {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_CONTEXT_ROOT: "/fixture/context",
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     });
@@ -596,11 +596,11 @@ describe("public world pack", () => {
   });
 
   it("fails when the context store projection ignores its typed override", () => {
-    const rigPath = writeRigFixture({ configRoot: "/fixture/wrong-context-packs" });
+    const rigPath = writeRigFixture({ configRoot: "/fixture/wrong-context" });
     const result = runVerifier(publicWorldDir(), {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/expected-context-packs",
+      OPENRIG_CONTEXT_ROOT: "/fixture/expected-context",
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     });
@@ -614,7 +614,7 @@ describe("public world pack", () => {
     const result = runVerifier(publicWorldDir(), {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_CONTEXT_ROOT: "/fixture/context",
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     });
@@ -632,7 +632,7 @@ describe("public world pack", () => {
     const result = runVerifier(publicWorldDir(), {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: "/fixture/context-packs",
+      OPENRIG_CONTEXT_ROOT: "/fixture/context",
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     });
@@ -648,7 +648,7 @@ describe("public world pack", () => {
     const result = runVerifier(publicWorldDir(), {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: contextRoot,
+      OPENRIG_CONTEXT_ROOT: contextRoot,
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     });
@@ -662,7 +662,7 @@ describe("public world pack", () => {
     const strangerRoot = mkdtempSync(join(tmpdir(), "public-world-stranger-"));
     temporaryRoots.push(strangerRoot);
     const openrigHome = join(strangerRoot, "openrig-home");
-    const contextRoot = join(openrigHome, "context-packs");
+    const contextRoot = join(openrigHome, "context");
     mkdirSync(openrigHome);
     expect(readdirSync(openrigHome)).toEqual([]);
 
@@ -671,7 +671,7 @@ describe("public world pack", () => {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
       OPENRIG_HOME: openrigHome,
-      OPENRIG_CONTEXT_PACKS_ROOT: contextRoot,
+      OPENRIG_CONTEXT_ROOT: contextRoot,
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     };
@@ -721,7 +721,7 @@ describe("public world pack", () => {
     const env = {
       ...process.env,
       PATH: `${rigPath}:${process.env.PATH ?? ""}`,
-      OPENRIG_CONTEXT_PACKS_ROOT: join(strangerRoot, "context-packs"),
+      OPENRIG_CONTEXT_ROOT: join(strangerRoot, "context"),
       OPENRIG_SESSION_NAME: "qa@fixture",
       RIGGED_SESSION_NAME: "",
     };
@@ -747,7 +747,7 @@ describe("public world pack", () => {
     expect(exercise).toContain("rig context get world-example");
     expect(exercise).toContain("rig context add <pack-directory>");
     expect(exercise).toContain("rig context list");
-    expect(exercise).toContain("rig config get context.packs_root");
+    expect(exercise).toContain("rig config get context.root");
     expect(exercise).not.toMatch(/identity\/|ontology\/|terrain\//);
 
     const packDir = publicWorldDir();

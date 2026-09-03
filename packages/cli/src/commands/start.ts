@@ -215,6 +215,9 @@ Examples:
             transcriptsLines: resolvedConfig.transcripts.lines,
             transcriptsPollIntervalSeconds: resolvedConfig.transcripts.pollIntervalSeconds,
             workspaceRoot: resolvedConfig.workspace.root,
+            contextRoot: resolvedConfig.context.root,
+            skillsRoot: resolvedConfig.skills.root,
+            topologyRoot: resolvedConfig.topology.root,
           }, deps.lifecycleDeps);
           status = await getDaemonStatus(deps.lifecycleDeps);
         } catch (err) {

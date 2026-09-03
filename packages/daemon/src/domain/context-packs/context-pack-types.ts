@@ -6,7 +6,7 @@
 // reviewable, sendable. Parallel to skills + workflow_specs in shape.
 //
 // MVP single-host context: storage filesystem-canonical at
-// ~/.openrig/context-packs/<name>/ (host) + workspace-local
+// <context.root>/<ref>/ (host; default $OPENRIG_HOME/context) + workspace-local
 // .openrig/context-packs/<name>/. NO new SQLite tables; library cache
 // is in-memory at the daemon scope.
 

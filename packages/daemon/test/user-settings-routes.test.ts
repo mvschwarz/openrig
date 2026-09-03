@@ -22,6 +22,7 @@ function clearEnv(): () => void {
     "OPENRIG_PORT", "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
     "OPENRIG_WORKSPACE_PROJECTS_ROOT", "OPENRIG_WORKSPACE_CATALOG_PATH",
+    "OPENRIG_CONTEXT_ROOT", "OPENRIG_CONTEXT_PACKS_ROOT",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION",
@@ -93,7 +94,7 @@ describe("config routes (User Settings v0)", () => {
     // + 2 B6 founder ruling (policies.idle_gate_qitem.auto_register /
     //   opt_in_sessions — the not-default-on gate)
     // + 1 OPR.0.5.3.6 D1 (topology.root — the topology tree root)
-    // + 1 OPR.0.5.3.7 R4 (context.packs_root)
+    // + 1 OPR.0.5.9.5 Wave B (context.root)
     // + 1 S15 (onboarding.default_pack.enabled)
     // + 1 S04 (queue.pickup_stall_threshold_minutes)
     // + 2 S02 (queue.stuck_sweep_interval_seconds /
@@ -113,6 +114,7 @@ describe("config routes (User Settings v0)", () => {
     expect(body.settings["onboarding.default_pack.enabled"]).toMatchObject({ value: true, source: "default" });
     expect(String(body.settings["workspace.projects_root"]?.value)).toMatch(/projects$/);
     expect(String(body.settings["workspace.catalog_path"]?.value)).toMatch(/workspace\.yaml$/);
+    expect(String(body.settings["context.root"]?.value)).toMatch(/context$/);
     expect(body.settings["workspace.field_notes_root"]).toBeUndefined();
     expect(body.settings["workspace.dogfood_evidence_root"]).toBeUndefined();
   });
@@ -151,6 +153,27 @@ describe("config routes (User Settings v0)", () => {
     expect(res.status).toBe(400);
     const body = await res.json() as { validKeys: string[] };
     expect(body.validKeys).toContain("workspace.root");
+  });
+
+  it.each(["GET", "POST", "DELETE"] as const)(
+    "%s /api/config/context.packs_root refuses the removed key with its replacement",
+    async (method) => {
+      const app = buildApp();
+      const res = await app.request("/api/config/context.packs_root", {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: method === "POST" ? JSON.stringify({ value: "/legacy" }) : undefined,
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ replacement: "context.root" });
+    },
+  );
+
+  it("GET /api/config refuses a persisted context.packsRoot before projecting settings", async () => {
+    writeFileSync(configPath, JSON.stringify({ context: { packsRoot: "/legacy" } }));
+    const res = await buildApp().request("/api/config");
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("context.root") });
   });
 
   it("POST /api/config/:key sets the value and persists to disk", async () => {

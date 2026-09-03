@@ -124,7 +124,7 @@ claims:
     kind: judgment
     flagged: "Authored purpose and taste; no live scan can prove it."
   - id: world-example-install
-    statement: "Use `rig context add <pack-directory>` to install a world pack, confirm its ref with `rig context list`, and derive the configured store with `rig config get context.packs_root` only when a path is needed."
+    statement: "Use `rig context add <pack-directory>` to install a world pack, confirm its ref with `rig context list`, and derive the configured store with `rig config get context.root` only when a path is needed."
     kind: operational
     check: world-example-install
   - id: world-example-authoring

@@ -13,17 +13,15 @@
 // agents stay on CLI-shell-out per the shipped openrig-user-settings skill.
 
 import { Hono } from "hono";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   SETTINGS_VALID_KEYS,
   isSettingsValidKey,
   parseFeedHostSubscriptionKey,
+  removedContextSettingMessage,
   type SettingsStore,
 } from "../domain/user-settings/settings-store.js";
 import {
-  workspaceScaffoldDirs,
-  workspaceScaffoldFiles,
+  ensureDefaultWorkspace,
 } from "../domain/workspace/default-workspace-scaffold.js";
 
 interface InitWorkspaceBody {
@@ -41,7 +39,11 @@ export function configRoutes(): Hono {
     if (!store) return c.json({ error: "settings_unavailable" }, 503);
     // OPR.0.4.4.15: dynamic-class enumeration rides ADDITIVELY beside the
     // static settings map (existing consumers of `settings` unaffected).
-    return c.json({ settings: store.resolveAllWithSource(), feedHostSubscriptions: store.listFeedHostSubscriptions() });
+    try {
+      return c.json({ settings: store.resolveAllWithSource(), feedHostSubscriptions: store.listFeedHostSubscriptions() });
+    } catch (err) {
+      return c.json({ error: (err as Error).message }, 400);
+    }
   });
 
   router.post("/init-workspace", async (c) => {
@@ -50,49 +52,17 @@ export function configRoutes(): Hono {
     const body = (await c.req.json<InitWorkspaceBody>().catch(() => ({}))) as InitWorkspaceBody;
     const root = body.root ?? (store.resolveOne("workspace.root").value as string);
     const dryRun = !!body.dryRun;
-    // Precompute both sides before mutation so the daemon and CLI retain the
-    // same inspect-then-write shape.
-    let scaffoldFiles: ReturnType<typeof workspaceScaffoldFiles>;
-    let scaffoldDirs: ReturnType<typeof workspaceScaffoldDirs>;
-    try {
-      scaffoldFiles = workspaceScaffoldFiles();
-      scaffoldDirs = workspaceScaffoldDirs();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: "init_workspace_scaffold_unavailable", message }, 400);
-    }
-
-    const subdirs: Array<{ name: string; path: string; created: boolean }> = [];
-    const files: Array<{ relPath: string; absPath: string; created: boolean; skipped: "exists" | null }> = [];
-
-    const rootExists = existsSync(root);
-    if (!rootExists && !dryRun) mkdirSync(root, { recursive: true });
-
-    for (const sub of scaffoldDirs) {
-      const subPath = join(root, sub);
-      const subExists = existsSync(subPath);
-      if (!subExists && !dryRun) mkdirSync(subPath, { recursive: true });
-      subdirs.push({ name: sub, path: subPath, created: !subExists });
-    }
-
-    for (const file of scaffoldFiles) {
-      const absPath = join(root, file.relPath);
-      const fileExists = existsSync(absPath);
-      if (fileExists) {
-        files.push({ relPath: file.relPath, absPath, created: false, skipped: "exists" });
-      } else {
-        if (!dryRun) writeFileSync(absPath, file.content, "utf-8");
-        files.push({ relPath: file.relPath, absPath, created: true, skipped: null });
-      }
-    }
-
-    return c.json({ root, rootCreated: !rootExists, subdirs, files, dryRun });
+    const result = ensureDefaultWorkspace({ root, dryRun });
+    if (!result.ok) return c.json({ error: "init_workspace_conflict", ...result }, 409);
+    return c.json(result);
   });
 
   router.get("/:key", (c) => {
     const store = c.get("settingsStore" as never) as SettingsStore | undefined;
     if (!store) return c.json({ error: "settings_unavailable" }, 503);
     const key = c.req.param("key");
+    const removedMessage = removedContextSettingMessage(key);
+    if (removedMessage) return c.json({ error: removedMessage, replacement: "context.root" }, 400);
     // OPR.0.4.4.15: the ONE registered dynamic class resolves here; every
     // other unknown key keeps the 400 below byte-for-byte.
     const dynamic = store.resolveFeedHostSubscription(key);
@@ -107,6 +77,8 @@ export function configRoutes(): Hono {
     const store = c.get("settingsStore" as never) as SettingsStore | undefined;
     if (!store) return c.json({ error: "settings_unavailable" }, 503);
     const key = c.req.param("key");
+    const removedMessage = removedContextSettingMessage(key);
+    if (removedMessage) return c.json({ error: removedMessage, replacement: "context.root" }, 400);
     const isDynamic = parseFeedHostSubscriptionKey(key) !== null;
     if (!isDynamic && !isSettingsValidKey(key)) {
       return c.json({ error: `Unknown config key '${key}'`, validKeys: SETTINGS_VALID_KEYS }, 400);
@@ -127,6 +99,8 @@ export function configRoutes(): Hono {
     const store = c.get("settingsStore" as never) as SettingsStore | undefined;
     if (!store) return c.json({ error: "settings_unavailable" }, 503);
     const key = c.req.param("key");
+    const removedMessage = removedContextSettingMessage(key);
+    if (removedMessage) return c.json({ error: removedMessage, replacement: "context.root" }, 400);
     const isDynamic = parseFeedHostSubscriptionKey(key) !== null;
     if (!isDynamic && !isSettingsValidKey(key)) {
       return c.json({ error: `Unknown config key '${key}'`, validKeys: SETTINGS_VALID_KEYS }, 400);

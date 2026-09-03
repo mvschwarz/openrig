@@ -66,6 +66,16 @@ export function realDeps(): LifecycleDeps {
     removeFile: (p) => { try { fs.unlinkSync(p); } catch { /* ignore */ } },
     exists: (p) => fs.existsSync(p),
     mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
+    pathKind: (p) => {
+      try {
+        const value = fs.lstatSync(p);
+        if (value.isDirectory()) return "directory";
+        if (value.isFile()) return "file";
+        return "other";
+      } catch {
+        return "missing";
+      }
+    },
     openForAppend: (p) => fs.openSync(p, "a"),
     isProcessAlive,
     // RULING 1ae863d2 — sibling-home scan (home-resolution honesty).
@@ -152,6 +162,9 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
             transcriptsEnabled: config.transcripts.enabled,
             transcriptsPath: config.transcripts.path,
             workspaceRoot: config.workspace.root,
+            contextRoot: config.context.root,
+            skillsRoot: config.skills.root,
+            topologyRoot: config.topology.root,
             // V1 pre-release CLI/daemon Item 1 — project the
             // ConfigStore-resolved rotation tunables into the daemon
             // process env so file-stored values

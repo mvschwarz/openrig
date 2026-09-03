@@ -2310,16 +2310,19 @@ describe("Bundle API routes", () => {
   });
 
   // Item 6 / Checkpoint 7.3f step 3: /install routes declared context_packs
-  // after successful bootstrap. Target = <openrigHome>/context-packs
+  // after successful bootstrap. Target = the configured context.root
   // (startup.ts:496 user-file root). Bundle has context_packs[] with paths
   // to context-pack manifest.yaml files; router copies the parent dir to
-  // <openrigHome>/context-packs/<dirname>/. Consumer-scan reachability
+  // <context.root>/<dirname>/. Consumer-scan reachability
   // proven via real ContextPackLibraryService.scan() against the routed
   // root (guard d491eca9 + 3cd581e3 file-vs-dir discrimination lessons).
   it("POST /api/bundles/install routes declared context_packs after successful bootstrap (completed branch) — proves consumer-scan reachability", async () => {
     const origHome = process.env.OPENRIG_HOME;
+    const origContextRoot = process.env.OPENRIG_CONTEXT_ROOT;
     const auditHome = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-context-packs-route-test-"));
+    const configuredContextRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-context-root-test-"));
     process.env.OPENRIG_HOME = auditHome;
+    process.env.OPENRIG_CONTEXT_ROOT = configuredContextRoot;
     const origBootstrap = setup.bootstrapOrchestrator.bootstrap.bind(setup.bootstrapOrchestrator);
     try {
       const { specPath } = seedPackage();
@@ -2385,7 +2388,7 @@ files:
         // Router copies the PARENT DIR of manifest.yaml: declared
         // "packages/test-pkg/context-packs/intent/manifest.yaml" → parent
         // basename "intent" → target/intent/
-        const expectedPackDir = path.join(auditHome, "context-packs", "intent");
+        const expectedPackDir = path.join(configuredContextRoot, "intent");
         expect(fs.existsSync(expectedPackDir)).toBe(true);
         expect(fs.existsSync(path.join(expectedPackDir, "manifest.yaml"))).toBe(true);
         expect(fs.existsSync(path.join(expectedPackDir, "brief.md"))).toBe(true);
@@ -2394,7 +2397,7 @@ files:
         // against the routed target root + assert the pack is visible.
         const { ContextPackLibraryService } = await import("../src/domain/context-packs/context-pack-library-service.js");
         const consumer = new ContextPackLibraryService({
-          roots: [{ path: path.join(auditHome, "context-packs"), sourceType: "user_file" }],
+          roots: [{ path: configuredContextRoot, sourceType: "user_file" }],
         });
         const scanResult = consumer.scan();
         expect(scanResult.count).toBeGreaterThanOrEqual(1);
@@ -2412,7 +2415,10 @@ files:
       (setup.bootstrapOrchestrator as unknown as { bootstrap: typeof origBootstrap }).bootstrap = origBootstrap;
       if (origHome === undefined) delete process.env.OPENRIG_HOME;
       else process.env.OPENRIG_HOME = origHome;
+      if (origContextRoot === undefined) delete process.env.OPENRIG_CONTEXT_ROOT;
+      else process.env.OPENRIG_CONTEXT_ROOT = origContextRoot;
       fs.rmSync(auditHome, { recursive: true, force: true });
+      fs.rmSync(configuredContextRoot, { recursive: true, force: true });
     }
   });
 
@@ -2421,8 +2427,10 @@ files:
   // 5f410eee decoupling lesson; PROACTIVELY shipped).
   it("POST /api/bundles/install routes declared context_packs even when both --skip-version-check and --force are set (B1 mirror)", async () => {
     const origHome = process.env.OPENRIG_HOME;
+    const origContextRoot = process.env.OPENRIG_CONTEXT_ROOT;
     const auditHome = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-cpacks-dual-override-"));
     process.env.OPENRIG_HOME = auditHome;
+    process.env.OPENRIG_CONTEXT_ROOT = path.join(auditHome, "context");
     const origBootstrap = setup.bootstrapOrchestrator.bootstrap.bind(setup.bootstrapOrchestrator);
     try {
       const { specPath } = seedPackage();
@@ -2482,7 +2490,7 @@ files:
         expect(body.contextPacksRouting).toBeDefined();
         expect(body.contextPacksRouting.routedCount).toBe(1);
         expect(body.contextPacksRouting.records[0].status).toBe("routed");
-        expect(fs.existsSync(path.join(auditHome, "context-packs", "dualcontext", "manifest.yaml"))).toBe(true);
+        expect(fs.existsSync(path.join(auditHome, "context", "dualcontext", "manifest.yaml"))).toBe(true);
       } finally {
         fs.rmSync(targetRoot, { recursive: true, force: true });
       }
@@ -2490,6 +2498,8 @@ files:
       (setup.bootstrapOrchestrator as unknown as { bootstrap: typeof origBootstrap }).bootstrap = origBootstrap;
       if (origHome === undefined) delete process.env.OPENRIG_HOME;
       else process.env.OPENRIG_HOME = origHome;
+      if (origContextRoot === undefined) delete process.env.OPENRIG_CONTEXT_ROOT;
+      else process.env.OPENRIG_CONTEXT_ROOT = origContextRoot;
       fs.rmSync(auditHome, { recursive: true, force: true });
     }
   });
@@ -2500,8 +2510,10 @@ files:
   // status=missing, NO pack copied to target.
   it("POST /api/bundles/install context_packs degenerate-input: declared manifest absent → status=missing, no false routedCount", async () => {
     const origHome = process.env.OPENRIG_HOME;
+    const origContextRoot = process.env.OPENRIG_CONTEXT_ROOT;
     const auditHome = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-cpacks-degenerate-"));
     process.env.OPENRIG_HOME = auditHome;
+    process.env.OPENRIG_CONTEXT_ROOT = path.join(auditHome, "context");
     const origBootstrap = setup.bootstrapOrchestrator.bootstrap.bind(setup.bootstrapOrchestrator);
     try {
       const { specPath } = seedPackage();
@@ -2550,7 +2562,7 @@ files:
         expect(body.contextPacksRouting.rejectedCount).toBe(1);
         expect(body.contextPacksRouting.records[0].status).toBe("missing");
         // CRUCIAL: nothing landed at target
-        expect(fs.existsSync(path.join(auditHome, "context-packs", "nonexistent"))).toBe(false);
+        expect(fs.existsSync(path.join(auditHome, "context", "nonexistent"))).toBe(false);
       } finally {
         fs.rmSync(targetRoot, { recursive: true, force: true });
       }
@@ -2558,6 +2570,8 @@ files:
       (setup.bootstrapOrchestrator as unknown as { bootstrap: typeof origBootstrap }).bootstrap = origBootstrap;
       if (origHome === undefined) delete process.env.OPENRIG_HOME;
       else process.env.OPENRIG_HOME = origHome;
+      if (origContextRoot === undefined) delete process.env.OPENRIG_CONTEXT_ROOT;
+      else process.env.OPENRIG_CONTEXT_ROOT = origContextRoot;
       fs.rmSync(auditHome, { recursive: true, force: true });
     }
   });

@@ -72,7 +72,7 @@ const FIXTURE_PACK = {
   purpose: "Smoke test pack",
   taxonomy: "mission",
   sourceType: "user_file" as const,
-  sourcePath: "/home/op/.openrig/context-packs/smoke",
+  sourcePath: "/home/op/.openrig/context/smoke",
   relativePath: "packs/smoke",
   updatedAt: "2026-05-04T00:00:00Z",
   manifestEstimatedTokens: null,
@@ -506,25 +506,25 @@ files:
     return { baseUrl: `http://127.0.0.1:${port2}/`, close: () => srv.close() };
   }
 
-  async function withPacksRoot(fn: (root: string) => Promise<void>): Promise<void> {
-    const root = mkdtempSync(join(tmpdir(), "openrig-r4-packsroot-"));
-    const saved = process.env["OPENRIG_CONTEXT_PACKS_ROOT"];
-    process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = root;
+  async function withContextRoot(fn: (root: string) => Promise<void>): Promise<void> {
+    const root = mkdtempSync(join(tmpdir(), "openrig-r4-context-root-"));
+    const saved = process.env["OPENRIG_CONTEXT_ROOT"];
+    process.env["OPENRIG_CONTEXT_ROOT"] = root;
     try {
       await fn(root);
     } finally {
-      if (saved === undefined) delete process.env["OPENRIG_CONTEXT_PACKS_ROOT"];
-      else process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = saved;
+      if (saved === undefined) delete process.env["OPENRIG_CONTEXT_ROOT"];
+      else process.env["OPENRIG_CONTEXT_ROOT"] = saved;
       rmSync(root, { recursive: true, force: true });
     }
   }
 
   const R4_MANIFEST = "name: url-pack\nversion: 1.0.0\ntaxonomy: world\nfiles:\n  - path: SKILL.md\n    role: instruction\n";
 
-  it("add <url>: installs into the OPENRIG_CONTEXT_PACKS_ROOT landing zone (config-resolved, no hardcoded path)", async () => {
+  it("add <url>: installs into the OPENRIG_CONTEXT_ROOT landing zone (config-resolved, no hardcoded path)", async () => {
     const pack = await startPackServer({ "manifest.yaml": R4_MANIFEST, "SKILL.md": "# hello\nbody\n" });
     try {
-      await withPacksRoot(async (root) => {
+      await withContextRoot(async (root) => {
         const { exitCode } = await captureLogs(async () => {
           await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`]);
         });
@@ -545,7 +545,7 @@ files:
       { "redirect-manifest": "/pack/manifest.yaml" },
     );
     try {
-      await withPacksRoot(async (root) => {
+      await withContextRoot(async (root) => {
         const { exitCode } = await captureLogs(async () => {
           await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}redirect-manifest`, "--name", "redirected-pack"]);
         });
@@ -563,7 +563,7 @@ files:
     const absManifest = "name: evil-pack\nversion: 1.0.0\ntaxonomy: world\nfiles:\n  - path: http://127.0.0.1:1/secret.md\n    role: instruction\n";
     const pack = await startPackServer({ "manifest.yaml": absManifest });
     try {
-      await withPacksRoot(async (root) => {
+      await withContextRoot(async (root) => {
         const { errLogs, exitCode } = await captureLogs(async () => {
           await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`]);
         });
@@ -577,7 +577,7 @@ files:
   });
 
   it("add <url>: unreachable URL fails loud with the reason and leaves NO partial pack", async () => {
-    await withPacksRoot(async (root) => {
+    await withContextRoot(async (root) => {
       const { errLogs, exitCode } = await captureLogs(async () => {
         await makeCmd().parseAsync(["node", "rig", "context", "add", "http://127.0.0.1:1/manifest.yaml"]);
       });
@@ -590,7 +590,7 @@ files:
   it("add <url>: malformed manifest fails loud with the reason and leaves NO partial pack", async () => {
     const pack = await startPackServer({ "manifest.yaml": "name: bad\nversion: 1.0.0\ntaxonomy: world\nfiles:\n  - path: ../escape.md\n    role: x\n" });
     try {
-      await withPacksRoot(async (root) => {
+      await withContextRoot(async (root) => {
         const { errLogs, exitCode } = await captureLogs(async () => {
           await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`]);
         });
@@ -607,7 +607,7 @@ files:
     // manifest declares SKILL.md but the server does not serve it
     const pack = await startPackServer({ "manifest.yaml": R4_MANIFEST });
     try {
-      await withPacksRoot(async (root) => {
+      await withContextRoot(async (root) => {
         const { errLogs, exitCode } = await captureLogs(async () => {
           await makeCmd().parseAsync(["node", "rig", "context", "add", `${pack.baseUrl}manifest.yaml`]);
         });
