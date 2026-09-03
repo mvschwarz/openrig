@@ -58,9 +58,9 @@ exit 7
   return fakeRig;
 }
 
-function seedLegacyTelemetry(root: string, sessionName = "dev-impl@test-rig") {
+function seedLegacyTelemetry(root: string, sessionName = "dev-impl@test-rig", cwdName = "project") {
   const home = path.join(root, "home");
-  const cwd = path.join(root, "project");
+  const cwd = path.join(root, cwdName);
   const contextDir = path.join(home, "context");
   const providerDir = path.join(home, "provider-usage");
   const settingsPath = path.join(cwd, ".claude", "settings.local.json");
@@ -539,6 +539,43 @@ describe("0.5.9 telemetry-state migration helper", () => {
     expect(planned.actions.filter((action: { decision: string }) => action.decision === "rewrite-collector")).toHaveLength(1);
     const applied = runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
     expect(applied).toEqual(expect.objectContaining({ applied: true, issues: [] }));
+  });
+
+  it("rolls back an applied collector while preserving one untouched by an interrupted multi-collector apply", () => {
+    const root = temporaryRoot();
+    const first = seedLegacyTelemetry(root, "dev-first@test-rig", "project-first");
+    const second = seedLegacyTelemetry(root, "dev-second@test-rig", "project-second");
+    const fakeRig = writeRigInventory(root, [first, second].map((fixture) => ({
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    })));
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(first.home, "backups", "before-interrupted-apply");
+    const secondSettingsDir = path.dirname(second.settingsPath);
+
+    fs.chmodSync(secondSettingsDir, 0o500);
+    try {
+      const applied = runJsonResult(helper, ["--home", first.home, "--apply-state", "--preimage", preimage], env);
+      expect(applied.status).toBe(1);
+      expect(fs.readFileSync(first.settingsPath, "utf8")).not.toBe(first.originalSettings);
+      expect(fs.readFileSync(second.settingsPath, "utf8")).toBe(second.originalSettings);
+
+      const rolledBack = runJsonResult(helper, ["--home", first.home, "--rollback", preimage], env);
+      expect(rolledBack.status).toBe(0);
+      expect(rolledBack.body).toEqual(expect.objectContaining({
+        phase: "rollback",
+        complete: true,
+        rolledBack: true,
+        restored: [first.settingsPath],
+        alreadyOriginal: [second.settingsPath],
+      }));
+      expect(fs.readFileSync(first.settingsPath, "utf8")).toBe(first.originalSettings);
+      expect(fs.readFileSync(second.settingsPath, "utf8")).toBe(second.originalSettings);
+    } finally {
+      fs.chmodSync(secondSettingsDir, 0o755);
+    }
   });
 
   it("refuses verify while a legacy collector is still writing", () => {

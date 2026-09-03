@@ -436,18 +436,38 @@ function verify(home, preimage) {
 
 function rollback(home, preimage) {
   const manifest = loadManifest(preimage, home, "rollback");
-  const issues = validatePreimage(preimage, manifest);
+  const preimageIssues = validatePreimage(preimage, manifest);
+  if (preimageIssues.length > 0) {
+    emit({ schema: SCHEMA, phase: "rollback", rolledBack: false, complete: false, preimage, issues: preimageIssues }, 1);
+  }
   const settings = manifest.files.filter((file) => file.kind === "settings");
+  const toRestore = [];
+  const alreadyOriginal = [];
+  const issues = [];
   for (const file of settings) {
-    if (!fs.existsSync(file.originalPath) || sha256(fs.readFileSync(file.originalPath)) !== file.appliedSha256) {
+    if (!fs.existsSync(file.originalPath)) {
       issues.push(issue("destination_drift", file.originalPath, "preserve the changed settings and decide the merge manually before rollback"));
+      continue;
     }
+    const digest = sha256(fs.readFileSync(file.originalPath));
+    if (digest === file.appliedSha256) toRestore.push(file);
+    else if (digest === file.sha256) alreadyOriginal.push(file.originalPath);
+    else issues.push(issue("destination_drift", file.originalPath, "preserve the changed settings and decide the merge manually before rollback"));
+  }
+  for (const file of toRestore) {
+    atomicWrite(file.originalPath, fs.readFileSync(path.join(preimage, file.storedAs)), file.mode);
   }
   if (issues.length > 0) {
-    emit({ schema: SCHEMA, phase: "rollback", rolledBack: false, complete: false, preimage, issues }, 1);
-  }
-  for (const file of settings) {
-    atomicWrite(file.originalPath, fs.readFileSync(path.join(preimage, file.storedAs)), file.mode);
+    emit({
+      schema: SCHEMA,
+      phase: "rollback",
+      rolledBack: false,
+      complete: false,
+      preimage,
+      restored: toRestore.map((file) => file.originalPath),
+      alreadyOriginal,
+      issues,
+    }, 1);
   }
   emit({
     schema: SCHEMA,
@@ -457,7 +477,8 @@ function rollback(home, preimage) {
     rolledBack: true,
     complete: true,
     preimage,
-    restored: settings.map((file) => file.originalPath),
+    restored: toRestore.map((file) => file.originalPath),
+    alreadyOriginal,
     preserved: [path.join(home, "state", "context-usage"), path.join(home, "state", "provider-usage")],
     issues: [],
     next: "the legacy collector projection is restored; migrated state copies remain preserved for inspection",
