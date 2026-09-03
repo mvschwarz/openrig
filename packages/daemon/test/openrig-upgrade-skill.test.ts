@@ -437,7 +437,11 @@ describe("0.5.9 telemetry-state migration helper", () => {
     expect(rewritten).not.toBe(fixture.originalSettings);
     const manifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
     expect(manifest.files).toEqual(expect.arrayContaining([
-      expect.objectContaining({ originalPath: fixture.settingsPath, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+      expect.objectContaining({
+        originalPath: fixture.settingsPath,
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        storedAs: expect.stringMatching(/^files\/\d{4}-[a-f0-9]{64}$/),
+      }),
     ]));
 
     const beforeFreshSample = runJsonResult(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
@@ -497,6 +501,46 @@ describe("0.5.9 telemetry-state migration helper", () => {
     expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(fixture.originalSettings);
   });
 
+  it("refuses an unwriteable target ancestor without mutation", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    write(fixture.home, "state", "not a directory");
+    const fakeRig = writeRigInventory(root, []);
+
+    const planned = runJson(helper, ["--home", fixture.home], { OPENRIG_RIG_BIN: fakeRig });
+    expect(planned.complete).toBe(false);
+    expect(planned.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "unwriteable_target", blockingPath: path.join(fixture.home, "state") }),
+    ]));
+    expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(fixture.originalSettings);
+  });
+
+  it("rewrites one shared settings file once when several Claude seats share a cwd", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [
+      {
+        runtime: "claude-code",
+        sessionStatus: "running",
+        canonicalSessionName: fixture.sessionName,
+        cwd: fixture.cwd,
+      },
+      {
+        runtime: "claude-code",
+        sessionStatus: "running",
+        canonicalSessionName: "dev-review@test-rig",
+        cwd: fixture.cwd,
+      },
+    ]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before");
+
+    const planned = runJson(helper, ["--home", fixture.home], env);
+    expect(planned.actions.filter((action: { decision: string }) => action.decision === "rewrite-collector")).toHaveLength(1);
+    const applied = runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    expect(applied).toEqual(expect.objectContaining({ applied: true, issues: [] }));
+  });
+
   it("refuses verify while a legacy collector is still writing", () => {
     const root = temporaryRoot();
     const fixture = seedLegacyTelemetry(root);
@@ -520,6 +564,30 @@ describe("0.5.9 telemetry-state migration helper", () => {
     expect(result.body.issues).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: "legacy_writer_active", sessionName: fixture.sessionName }),
       expect.objectContaining({ code: "missing_fresh_sample" }),
+    ]));
+  });
+
+  it("detects a legacy sidecar first created after apply", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before");
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    write(fixture.home, "context/new-writer@test-rig.json", JSON.stringify({
+      session_name: "new-writer@test-rig",
+      sampled_at: "2099-01-01T00:00:00.000Z",
+    }));
+
+    const result = runJsonResult(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    expect(result.status).toBe(1);
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "legacy_writer_active", sessionName: "new-writer@test-rig" }),
     ]));
   });
 

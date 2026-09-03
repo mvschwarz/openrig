@@ -15,6 +15,7 @@ import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
+import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
 
 export interface ClaudeAdapterFsOps {
   readFile(path: string): string;
@@ -699,8 +700,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    */
   private provisionContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
     if (!this.stateDir || !this.collectorAssetPath || !binding.cwd) return;
-    const contextDir = nodePath.join(this.stateDir, "context");
-    const providerUsageDir = nodePath.join(this.stateDir, "provider-usage");
+    const contextDir = contextUsageDirectory(this.stateDir);
+    const providerUsageDir = providerUsageDirectory(this.stateDir);
+    this.fs.mkdirp(contextDir);
     this.fs.mkdirp(providerUsageDir);
 
     // 1. Copy collector script to project
