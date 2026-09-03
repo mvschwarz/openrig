@@ -23,7 +23,7 @@ import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js"
 import { explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
 import type { ColorMode, Token } from "./theme.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W } from "./detail.js";
-import type { Action, FleetSnapshot, LoadState, NeedsItem, RowFlash, Screen, ViewState } from "./types.js";
+import type { Action, FleetSnapshot, LoadState, NeedsItem, RecentTransitionSnap, RowFlash, Screen, ViewState } from "./types.js";
 
 interface ContentLine {
   text: string;
@@ -142,6 +142,151 @@ function queueFacts(snap: FleetSnapshot, session: string | null | undefined): { 
   return { count: rows.length, work, now };
 }
 
+function number(value: number | null | undefined): string {
+  return value == null ? "—" : value.toLocaleString("en-US");
+}
+
+function wrapDetailValue(label: string, value: string, width: number): ContentLine[] {
+  const prefix = `  ${`${label}:`.padEnd(LABEL_W)} `;
+  const continuation = " ".repeat(prefix.length);
+  const room = Math.max(8, width - prefix.length);
+  const words = value.trim().split(/\s+/).filter(Boolean);
+  const chunks: string[] = [];
+  let line = "";
+  for (const raw of words) {
+    let word = raw;
+    while (word.length > room) {
+      if (line) { chunks.push(line); line = ""; }
+      chunks.push(word.slice(0, room));
+      word = word.slice(room);
+    }
+    if (!word) continue;
+    if (!line) line = word;
+    else if (line.length + word.length + 1 <= room) line += ` ${word}`;
+    else { chunks.push(line); line = word; }
+  }
+  if (line) chunks.push(line);
+  return (chunks.length ? chunks : [""]).map((chunk, index) => ({ text: `${index === 0 ? prefix : continuation}${chunk}` }));
+}
+
+function rowsForAgent(snap: FleetSnapshot, session: string, sources: Array<FleetSnapshot["attention"]>): FleetSnapshot["attention"] {
+  const rows: FleetSnapshot["attention"] = [];
+  const seen = new Set<string>();
+  for (const source of sources) for (const row of source) {
+    if (row.destinationSession !== session || seen.has(row.qitemId)) continue;
+    seen.add(row.qitemId);
+    rows.push(row);
+  }
+  return rows;
+}
+
+function workRows(rows: FleetSnapshot["attention"], width: number): ContentLine[] {
+  if (rows.length === 0) return [fieldLine({ label: "rows", value: "none in the served bounded lists" })];
+  return rows.flatMap((row) => {
+    const summary = row.summary?.trim() || row.body.split("\n").find((line) => line.trim())?.trim() || "no summary served";
+    return [
+      ...wrapDetailValue("qitem", `${row.qitemId} · ${row.state}`, width),
+      ...wrapDetailValue("work", summary, width),
+      ...(row.blockedOn ? wrapDetailValue("blocker", `blocked on ${row.blockedOn}`, width) : []),
+    ];
+  });
+}
+
+function agentDetailLines(
+  snap: FleetSnapshot,
+  found: NonNullable<ReturnType<typeof findAgent>>,
+  contentWidth: number,
+): ContentLine[] {
+  const { agent, rig, pod } = found;
+  const session = agent.session;
+  const specInLibrary = !!agent.spec && !!findSpec(snap, agent.spec);
+  const currentRows = session ? rowsForAgent(snap, session, [snap.attention, snap.blocked, snap.inProgress]) : [];
+  const pendingRows = session ? rowsForAgent(snap, session, [snap.pending]) : [];
+  const recentRows = session ? rowsForAgent(snap, session, [snap.recentlyFinished]) : [];
+  const needs = session ? snap.needs.filter((item) => item.target === session) : [];
+  const visibleAssigned = currentRows.length + pendingRows.length;
+  const assigned = agent.assignedWorkCount ?? visibleAssigned;
+  const pending = agent.pendingWorkCount ?? pendingRows.length;
+  const inProgress = agent.inProgressWorkCount ?? currentRows.filter((row) => row.state === "in-progress").length;
+  const blocked = agent.blockedWorkCount ?? currentRows.filter((row) => row.state === "blocked").length;
+  const context = agent.context;
+  const meterWidth = Math.max(10, Math.min(36, contentWidth - 24));
+  const rtName = agent.runtime ?? "unknown";
+  const rtSegs = [
+    { text: "  " },
+    { text: "runtime:", token: "dim" as const },
+    { text: " ".repeat(LABEL_W - "runtime:".length + 1) },
+    { text: rtName },
+    { text: "  " },
+    ...runtimeMarkSegs(agent.runtime),
+  ];
+  const runtimeLine: ContentLine = { text: rtSegs.map((segment) => segment.text).join(""), segs: rtSegs };
+  const activityReason = agent.activity?.needsInput?.reason ?? agent.activity?.signalReason ?? null;
+  const needsRows = needs.length > 0
+    ? needs.flatMap((item) => [
+      ...wrapDetailValue("qitem", item.qitemId ?? "no actionable qitem id served", contentWidth),
+      ...wrapDetailValue("reason", item.detail, contentWidth),
+      ...(item.unblocks ? wrapDetailValue("action", `unblocks ${item.unblocks}`, contentWidth) : []),
+      ...(item.evidenceRef ? wrapDetailValue("evidence", item.evidenceRef, contentWidth) : []),
+    ])
+    : agent.activity?.needsInput && agent.activity.needsInput.count > 0
+      ? wrapDetailValue("reason", agent.activity.needsInput.reason ?? "input required; no reason served", contentWidth)
+      : [fieldLine({ label: "state", value: "none on the served projections" })];
+
+  return [
+    ...detailPage({ text: `agent ${agent.name} · ${agent.status}` }, [
+      {
+        title: `CONTEXT · ${context == null ? "unknown" : `${context}%`}`,
+        lines: [
+          fieldLine({ label: "meter", value: context == null ? "— (not yet known)" : `${context}% used  ${barCells(context / 100, meterWidth)}` }),
+          fieldLine({ label: "tokens", value: `${number(agent.totalInputTokens)} input · ${number(agent.totalOutputTokens)} output · ${number(agent.contextWindowSize)} window` }),
+          runtimeLine,
+          ...(agent.attach ? [fieldLine({ label: "attach", value: agent.attach })] : []),
+          fieldLine({ label: "terminal", value: `term ▸ pod ${pod.name}`, link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` } }),
+        ],
+      },
+      {
+        title: "CURRENT ACTIVITY",
+        fields: [
+          { label: "activity", value: agent.activity?.activity ?? agent.status },
+          ...(activityReason ? [{ label: "reason", value: activityReason }] : []),
+          ...(agent.activity?.decidedBy ? [{ label: "decided by", value: agent.activity.decidedBy }] : []),
+          ...(agent.activity?.signalSource || agent.activity?.signalReason ? [{ label: "signal", value: `${agent.activity.signalSource ?? "unknown"} · ${agent.activity.signalReason ?? "no reason"}` }] : []),
+          ...(agent.activity?.eventAt ? [{ label: "changed", value: agent.activity.eventAt }] : []),
+        ],
+      },
+      { title: `CURRENT WORK · ${currentRows.length}`, lines: workRows(currentRows, contentWidth) },
+      {
+        title: "QUEUE",
+        lines: [
+          ...wrapDetailValue("depth", `${assigned} assigned · ${pending} pending · ${inProgress} in progress · ${blocked} blocked`, contentWidth),
+          ...(agent.assignedWorkCount == null ? wrapDetailValue("basis", `${visibleAssigned} rows visible in bounded list reads; complete count not served`, contentWidth) : []),
+        ],
+      },
+      { title: `UP NEXT · ${pending}`, lines: workRows(pendingRows, contentWidth) },
+      { title: `NEEDS YOU · ${needs.length || agent.activity?.needsInput?.count || 0}`, lines: needsRows },
+      ...(recentRows.length ? [{ title: "RECENTLY FINISHED · bounded window", lines: workRows(recentRows, contentWidth) }] : []),
+      {
+        title: "SEAT",
+        fields: [
+          { label: "host", value: found.host.name },
+          { label: "rig", value: rig.name },
+          { label: "pod", value: pod.name },
+        ],
+        lines: [
+          fieldLine({ label: "cwd", value: agent.cwd ?? "— (not served)" }),
+        ],
+      },
+      {
+        title: "SPEC",
+        fields: [specInLibrary
+          ? { label: "spec", value: agent.spec, link: { type: "cross", kind: "spec-of", name: agent.name, target: { host: found.host.name, rig: rig.name, pod: pod.name } } }
+          : { label: "spec", value: agent.spec ? `${agent.spec}  (not in library)` : "—" }],
+      },
+    ]),
+  ];
+}
+
 function tabsLine(state: ViewState, suffix: string): ContentLine[] {
   // slice-17: three tabs, each its own click zone (the first zone starts at
   // content col 0, preserving the focus-marker floor); `tab graph` = the
@@ -159,6 +304,52 @@ function tabsLine(state: ViewState, suffix: string): ContentLine[] {
     at += label.length;
   }
   return [{ text, zones }];
+}
+
+function localClock(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "??:??";
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function recentTargetAction(snap: FleetSnapshot, row: RecentTransitionSnap): Action | undefined {
+  if (row.targetKind === "mission") {
+    return snap.scopes?.some((mission) => mission.mission === row.target)
+      ? { type: "scopes-mission-open", mission: row.target }
+      : undefined;
+  }
+  if (row.targetKind !== "slice") return undefined;
+  for (const mission of snap.scopes ?? []) {
+    const slice = mission.slices.find((candidate) => candidate.id === row.target || candidate.dirName === row.target);
+    if (slice) return { type: "scopes-open", mission: mission.mission, slice: slice.dirName };
+  }
+  return undefined;
+}
+
+function recentRailLines(snap: FleetSnapshot, rigName: string, width: number): ContentLine[] {
+  if (width < 110 || snap.recentTransitionsRig !== rigName || snap.recentTransitions == null) return [];
+  const timeW = 5;
+  const actorW = Math.min(28, Math.max(18, Math.floor(width * 0.23)));
+  const changeW = Math.min(42, Math.max(24, Math.floor(width * 0.32)));
+  const targetW = Math.max(12, width - timeW - actorW - changeW - 3);
+  const rows = snap.recentTransitions.slice(-5);
+  const lines: ContentLine[] = [
+    { text: "" },
+    sectionRule("RECENT · material queue transitions · newest last", width),
+  ];
+  if (rows.length === 0) return [...lines, { text: "  No recorded transitions in the current window." }];
+  lines.push({ text: alignedRow([["TIME", timeW], ["ACTOR", actorW], ["CHANGE", changeW], ["TARGET", targetW]]) });
+  for (const row of rows) {
+    const action = recentTargetAction(snap, row);
+    const text = alignedRow([
+      [localClock(row.ts), timeW],
+      [pad(row.actorSession, actorW), actorW],
+      [pad(row.change, changeW), changeW],
+      [pad(row.target, targetW), targetW],
+    ]).slice(0, width);
+    lines.push({ text, ...(action ? { action } : {}) });
+  }
+  return lines;
 }
 
 function specTabsLine(state: ViewState, name: string): ContentLine {
@@ -280,76 +471,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       const podName = state.drill.find((part) => part.kind === "pod")?.name;
       const found = hostName ? findAgent(snap, leaf.name, { host: hostName, rig: rigName, pod: podName }) : findAgent(snap, leaf.name);
       if (!found) return [{ text: `agent "${leaf.name}" not in the current snapshot` }];
-      const { agent, rig, pod } = found;
-      const specInLibrary = !!agent.spec && !!findSpec(snap, agent.spec);
-      // a4c9548a — S19 FOLLOW-ON FOUNDER RULING (binding, bounds the S19 marks
-      // ruling): where there is ROOM, WRITE THE NAME — an icon NEVER replaces text
-      // as the value. The detail page has room, so the runtime NAME is the VALUE
-      // (honest placeholder when unserved); the mark's OWN token segments still ride
-      // the seg channel (ROUND-4: colors/background survive stylization) but only
-      // ACCOMPANY the name decoratively, never substitute. Topology cards remain
-      // mark-only by space (layout.ts/hatchet.ts) — the ruling is bounded, not reversed.
-      // LEG-7 LOW 2 (dead-arm cleanup, wave qitem 79159e6f): the daemon coerces a null runtime to the
-      // string "unknown" BEFORE the wire (the icon-fix QA at 5a70e200 proved the old "— (not served)"
-      // arm unreachable), so the defensive fallback matches that coercion — honest, never a misleading
-      // placeholder. (The cwd field below keeps its own "— (not served)" — a legitimately-servable value.)
-      const rtName = agent.runtime ?? "unknown";
-      const rtSegs = [
-        { text: "  " },
-        { text: "runtime:", token: "dim" as const },
-        { text: " ".repeat(LABEL_W - "runtime:".length + 1) },
-        { text: rtName },
-        { text: "  " },
-        ...runtimeMarkSegs(agent.runtime),
-      ];
-      const runtimeLine: ContentLine = { text: rtSegs.map((g) => g.text).join(""), segs: rtSegs };
-      return detailPage({ text: `agent ${agent.name}` }, [
-        {
-          title: "seat",
-          fields: [
-            { label: "state", value: agent.status },
-            { label: "host", value: found.host.name },
-            { label: "rig", value: rig.name },
-            { label: "pod", value: pod.name },
-          ],
-          lines: [
-            runtimeLine,
-            fieldLine({
-              label: "context",
-              // ROUND-3 mr7: a quiet determinate bar rides REAL fractions only
-              value: agent.context == null
-                ? "— (not yet known)"
-                : `${agent.context}% used · ${agent.tokens ?? "—"} tokens  ${barCells(agent.context / 100, 10)}`,
-            }),
-            // S19 MR4 (§D9, founder: "very important"): the FULL absolute
-            // working directory, verbatim; honest — when not served
-            fieldLine({ label: "cwd", value: agent.cwd ?? "— (not served)" }),
-          ],
-        },
-        {
-          title: "spec",
-          fields: [
-            specInLibrary
-              ? {
-                  label: "spec",
-                  value: agent.spec,
-                  link: { type: "cross", kind: "spec-of", name: agent.name, target: { host: found.host.name, rig: rig.name, pod: pod.name } },
-                }
-              : { label: "spec", value: agent.spec ? `${agent.spec}  (not in library)` : "—" },
-          ],
-        },
-        {
-          title: "actions",
-          fields: [
-            ...(agent.attach ? [{ label: "attach", value: agent.attach }] : []),
-            {
-              label: "terminal",
-              value: `term ▸ pod ${pod.name}`,
-              link: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${pod.name}` },
-            },
-          ],
-        },
-      ]);
+      return agentDetailLines(snap, found, contentWidth);
     }
     const rigName = state.drill.find((d) => d.kind === "rig")?.name ?? snap.hosts[0]?.rigs[0]?.name;
     const hostName = state.drill.find((d) => d.kind === "host")?.name;
@@ -421,7 +543,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       lines.push({ text: `  style: ${state.graphStyle} · style hatchet|braille|braille-fallback rides the command bar` });
       return lines;
     }
-    lines.push({ text: state.filter ? `/ filter agents: ${state.filter}` : "/ filter agents…" });
+    lines.push({ text: state.filter ? `/ filter agents: ${state.filter} · / replace · esc clear` : "/ filter agents…" });
     if (state.viewTab === "overview") {
       lines.push(
         ...detailPage({ text: `rig ${rig.name}` }, [
@@ -505,6 +627,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     const working = rows.filter((agent) => ["active", "working", "running"].includes(agent.status)).length;
     const attention = rows.filter((agent) => /attention|needs|blocked|unknown|failed/.test(agent.status)).length;
     lines.push({ text: `${rows.length} seats · ${working} working · ${attention} need attention · ${rows.reduce((n, agent) => n + queueFacts(snap, agent.session).count, 0)} open rows` });
+    if (!podFilter) lines.push(...recentRailLines(snap, rig.name, contentWidth));
     return lines;
   }
   if (state.section === "specs") {
@@ -644,7 +767,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       return lines;
     }
     lines.push({ text: "SPEC LIBRARY" });
-    lines.push({ text: state.filter ? `/ filter specs: ${state.filter}` : "/ filter specs…" });
+    lines.push({ text: state.filter ? `/ filter specs: ${state.filter} · / replace · esc clear` : "/ filter specs…" });
     // mirrors the explorer exactly (same grouping, same expansion state, same
     // filter-overrides-collapse rule) — glance consistency across panes
     const expandedSet = new Set(state.expanded);
@@ -729,8 +852,9 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     return lines;
   }
   if (state.section === "scopes") {
-    // SCOPES owns both levels: mission selection opens the execution story;
-    // slice selection retains the store-direct detail with a compact execution strip.
+    // SCOPES owns both levels. Both mission-graph and Explorer slice routes land
+    // on the same execution-backed canonical detail; store-direct content is
+    // composed into that page instead of surviving as a competing destination.
     const sel = state.scopesSelected;
     const missionName = state.scopesMission;
     const execution = snap.execution?.mission === missionName ? snap.execution : null;
@@ -738,7 +862,16 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       ? (snap.scopes ?? []).find((m) => m.mission === sel.mission)?.slices.find((sl) => sl.dirName === sel.slice) ?? null
       : null;
     if (state.executionOpen && execution) {
-      return executionContentLines(execution, snap.scopes, snap.readErrors, state.executionOpen, contentWidth, false);
+      return executionContentLines(execution, snap.scopes, snap.readErrors, state.executionOpen, contentWidth, false, snap.sliceDetail, {
+        collapseReqs: state.scopesCollapseReqs,
+        narrative: state.scopesNarrative,
+      });
+    }
+    if (detail && execution) {
+      return executionContentLines(execution, snap.scopes, snap.readErrors, `slice:${detail.id ?? detail.dirName}`, contentWidth, false, snap.sliceDetail, {
+        collapseReqs: state.scopesCollapseReqs,
+        narrative: state.scopesNarrative,
+      });
     }
     if (!detail && missionName) {
       const lines = executionContentLines(execution, snap.scopes, snap.readErrors, state.executionOpen, contentWidth, !snap.hydratedAt || snap.executionMission !== missionName);
@@ -748,7 +881,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       collapseReqs: state.scopesCollapseReqs,
       narrative: state.scopesNarrative,
       width: contentWidth,
-      executionStrip: detail ? executionSliceStripLines(execution, detail.id ?? detail.dirName, detail.dirName, contentWidth, detail.status) : undefined,
+      executionStrip: detail ? executionSliceStripLines(null, detail.id ?? detail.dirName, detail.dirName, contentWidth, detail.status) : undefined,
     });
   }
   return [{ text: `(${state.section})` }];
@@ -833,7 +966,8 @@ function keybindHints(state: ViewState): string {
   const arrowsScroll = specDetailArrowsScroll(state);
   const nav = arrowsScroll ? "↑↓ scroll" : "↑↓ move";
   const pageScroll = state.contentMaxOffset > 0 && !arrowsScroll ? "⇞⇟ scroll · " : "";
-  return `${nav} · ←→ pane · ⏎ open · ${pageScroll}: command · / filter · v select/copy · f footer · q quit`;
+  const filter = state.filter ? "/ replace · esc clear" : "/ filter";
+  return `${nav} · ←→ pane · ⏎ open · ${pageScroll}: command · ${filter} · v select/copy · f footer · q quit`;
 }
 
 /** The PULSE view renders FULL-WIDTH with NO explorer sidebar (increment 2). A
@@ -860,6 +994,22 @@ function truncateSegs(
     }
   }
   return out;
+}
+
+/** The disclosure cell is a distinct control from the row body. Hit lookup is
+ * first-match, so register this one-cell target before the row-wide target. */
+function pushExplorerTargets(
+  hitMap: Screen["hitMap"],
+  row: import("./types.js").ExplorerRow,
+  display: string,
+  y: number,
+  explorerWidth: number,
+): void {
+  if (row.disclosureAction) {
+    const at = display.search(/[⌄›]/);
+    if (at >= 0) hitMap.push({ y, x1: at + 2, x2: at + 2, action: row.disclosureAction });
+  }
+  hitMap.push({ y, x1: 1, x2: explorerWidth, action: row.action });
 }
 
 function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions, inputLine: string): Screen {
@@ -979,7 +1129,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
     const contentText = (citem?.text ?? "").slice(0, contentWidth);
     lines.push(pad(`${left}┃ ${contentText}`, cols));
     if (row) {
-      hitMap.push({ y, x1: 1, x2: explW, action: row.action });
+      pushExplorerTargets(hitMap, row, explorerDisplay[explorerIndex] ?? row.label, y, explW);
       explorerRows.push({ ...row, y });
       const em = explorerMetas[explorerIndex];
       if (em && em.length) explorerMeta[y] = em.map((run) => ({ start: 1 + run.start, segs: run.segs }));
@@ -1273,7 +1423,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     }
     lines.push(pad(`${left}┃${contentMarker}${contentText}`, cols));
     if (row) {
-      hitMap.push({ y, x1: 1, x2: explW, action: row.action });
+      pushExplorerTargets(hitMap, row, explorerDisplay[explorerIndex] ?? row.label, y, explW);
       explorerRows.push({ ...row, y });
       const em = explorerMetas[explorerIndex];
       if (em && em.length) explorerMeta[y] = em.map((run) => ({ start: 1 + run.start, segs: run.segs })); // +1 = marker slot

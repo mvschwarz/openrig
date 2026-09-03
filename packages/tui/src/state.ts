@@ -456,7 +456,9 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
           : section.name === "needs"
             ? "NEEDS-YOU"
             : section.name.toUpperCase();
-    rows.push({ label: `${active ? "▾" : "▸"} ${label}`, action: { type: "jump", section: section.name }, key: `section:${section.name}` });
+    // A section changes view but has no independent collapse state. Do not draw
+    // a disclosure glyph that cannot be toggled.
+    rows.push({ label, action: { type: "jump", section: section.name }, key: `section:${section.name}` });
     if (!active) continue;
     if (section.name === "scopes") {
       const expanded = new Set(state.expanded);
@@ -486,6 +488,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
             rows.push({
               label: `      ${open ? "▾" : "▸"} ${pod.name} (${pod.agents.length})`,
               action: { type: "drill", resource: "pod", name: pod.name, target: { host: host.name, rig: rig.name } },
+              disclosureAction: { type: "toggle-expand", key: podKey },
               key: podKey,
             });
             if (!open) continue;
@@ -504,7 +507,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
     } else if (section.name === "specs") {
       const kinds = ["rig", "agent", "workflow"] as const;
       rows.push({
-        label: state.filter ? `/ filter: ${state.filter}` : "/ filter specs…",
+        label: state.filter ? `/ filter: ${state.filter} · / replace · esc clear` : "/ filter specs…",
         action: { type: "filter", text: state.filter },
       });
       // ROUND-4 item 3: RIG SPECS fully expanded; AGENT SPECS collapsed to the
@@ -533,6 +536,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
             rows.push({
               label: `    ${open ? "▾" : "▸"} ${namespace}/ (${specs.length})`,
               action: { type: "toggle-expand", key: `folder:${namespace}` },
+              disclosureAction: { type: "toggle-expand", key: `folder:${namespace}` },
               key: `folder:${namespace}`,
             });
           if (!open) continue;

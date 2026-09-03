@@ -41,6 +41,21 @@ export interface QueueTransitionInput {
   ownerNotificationLevel?: OwnerNotificationLevel | null;
 }
 
+export type RecentQueueTransitionTargetKind = "qitem" | "slice" | "mission";
+
+/** A compact product event derived only from typed queue state and closure fields.
+ * It deliberately carries neither transition_note nor body: prose cannot silently
+ * become event semantics. */
+export interface RecentQueueTransition {
+  transitionId: number;
+  qitemId: string;
+  ts: string;
+  actorSession: string;
+  change: string;
+  targetKind: RecentQueueTransitionTargetKind;
+  target: string;
+}
+
 interface QueueTransitionRow {
   transition_id: number;
   qitem_id: string;
@@ -53,6 +68,48 @@ interface QueueTransitionRow {
   identity_provenance?: string | null;
   owner_notification_kind?: string | null;
   owner_notification_level?: string | null;
+}
+
+interface RecentQueueTransitionRow {
+  transition_id: number;
+  qitem_id: string;
+  ts: string;
+  state: string;
+  actor_session: string;
+  closure_reason: string | null;
+  closure_target: string | null;
+  tags: string | null;
+  previous_state: string | null;
+}
+
+function recentTarget(row: RecentQueueTransitionRow): Pick<RecentQueueTransition, "targetKind" | "target"> {
+  let tags: string[] = [];
+  try {
+    const parsed = row.tags ? JSON.parse(row.tags) : [];
+    if (Array.isArray(parsed)) tags = parsed.filter((tag): tag is string => typeof tag === "string");
+  } catch {
+    // An invalid legacy tag field cannot turn prose into a target; retain qitem identity.
+  }
+  const slice = tags.find((tag) => tag.startsWith("slice:"))?.slice("slice:".length).trim();
+  if (slice) return { targetKind: "slice", target: slice };
+  const mission = tags.find((tag) => tag.startsWith("mission:"))?.slice("mission:".length).trim();
+  if (mission) return { targetKind: "mission", target: mission };
+  return { targetKind: "qitem", target: row.qitem_id };
+}
+
+function recentChange(row: RecentQueueTransitionRow): string | null {
+  if (row.closure_reason === "handed_off_to") {
+    return row.closure_target ? `handed off to ${row.closure_target}` : "handed off";
+  }
+  if (["failed", "denied", "canceled"].includes(row.state)) return row.state;
+  if (["denied", "canceled", "escalation"].includes(row.closure_reason ?? "")) return row.closure_reason;
+  if (row.state === "done" && row.closure_reason === "no-follow-on") return "completed";
+  if (row.state === "in-progress" && row.previous_state === "blocked") return "resumed";
+  if (row.state === "in-progress" && row.previous_state === "pending") return "claimed";
+  if (row.state === "blocked" && row.previous_state != null && row.previous_state !== "blocked") {
+    return row.closure_target ? `blocked on ${row.closure_target}` : "blocked";
+  }
+  return null;
 }
 
 /**
@@ -129,6 +186,65 @@ export class QueueTransitionLog {
       )
       .all(actorSession, limit) as QueueTransitionRow[];
     return rows.map((r) => this.rowToTransition(r));
+  }
+
+  /** Latest high-signal transitions for one rig, returned chronologically with
+   * newest last. The window function observes the complete per-qitem state
+   * sequence before the allowlist is applied, so note-only same-state writes
+   * cannot masquerade as claims, resumes, or blocks. */
+  listRecentForRig(rig: string, requestedLimit = 20): RecentQueueTransition[] {
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.min(20, Math.max(1, Math.floor(requestedLimit)))
+      : 20;
+    const escaped = rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
+    const sessionPattern = `%@${escaped}`;
+    const rows = this.db.prepare(`
+      WITH rig_history AS (
+        SELECT
+          t.transition_id,
+          t.qitem_id,
+          t.ts,
+          t.state,
+          t.actor_session,
+          t.closure_reason,
+          t.closure_target,
+          q.tags,
+          LAG(t.state) OVER (
+            PARTITION BY t.qitem_id
+            ORDER BY t.transition_id
+          ) AS previous_state
+        FROM queue_transitions t
+        JOIN queue_items q ON q.qitem_id = t.qitem_id
+        WHERE q.destination_session LIKE ? ESCAPE '\\'
+           OR q.source_session LIKE ? ESCAPE '\\'
+      ), qualifying AS (
+        SELECT * FROM rig_history
+        WHERE (state = 'in-progress' AND previous_state IN ('pending', 'blocked'))
+           OR (state = 'blocked' AND previous_state IS NOT NULL AND previous_state <> 'blocked')
+           OR closure_reason = 'handed_off_to'
+           OR (state = 'done' AND closure_reason = 'no-follow-on')
+           OR state IN ('failed', 'denied', 'canceled')
+           OR closure_reason IN ('denied', 'canceled', 'escalation')
+      )
+      SELECT transition_id, qitem_id, ts, state, actor_session,
+             closure_reason, closure_target, tags, previous_state
+      FROM qualifying
+      ORDER BY ts DESC, transition_id DESC
+      LIMIT ?
+    `).all(sessionPattern, sessionPattern, limit) as RecentQueueTransitionRow[];
+
+    return rows.reverse().flatMap((row) => {
+      const change = recentChange(row);
+      if (!change) return [];
+      return [{
+        transitionId: row.transition_id,
+        qitemId: row.qitem_id,
+        ts: row.ts,
+        actorSession: row.actor_session,
+        change,
+        ...recentTarget(row),
+      }];
+    });
   }
 
   latestOwnerNotificationForQitem(qitemId: string): QueueTransition | null {

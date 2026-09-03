@@ -12,6 +12,25 @@ export interface AgentRow {
   /** null = the projection has no value → renders honest-unknown, never fabricated (PIN 2) */
   context: number | null;
   tokens: string | null;
+  /** Detailed context accounting from the same served contextUsage object. */
+  contextWindowSize?: number | null;
+  totalInputTokens?: number | null;
+  totalOutputTokens?: number | null;
+  /** Complete work counts from the node inventory; queue list reads below are bounded. */
+  hasAssignedWork?: boolean;
+  assignedWorkCount?: number;
+  pendingWorkCount?: number;
+  inProgressWorkCount?: number;
+  blockedWorkCount?: number;
+  /** Typed activity decision plus the underlying signal, kept distinct. */
+  activity?: {
+    activity: string | null;
+    needsInput: { count: number; reason: string | null } | null;
+    decidedBy: string | null;
+    signalReason: string | null;
+    signalSource: string | null;
+    eventAt: string | null;
+  };
   status: string;
   /** lifecycle truth, separate from the displayed activity status */
   live: boolean;
@@ -128,6 +147,10 @@ export interface NeedsItem {
   detail: string;
   /** fleet provenance; required to prevent a remote row opening a local twin */
   hostId?: string;
+  /** Action identity/proof carried by composeNeedsYou; never reconstructed from prose. */
+  qitemId?: string | null;
+  evidenceRef?: string | null;
+  unblocks?: string | null;
 }
 
 /** Host/rig-down rows — composed BESIDE the Needs-You items at render, never
@@ -187,6 +210,45 @@ export interface SeatActivitySummary {
 import type { MissionScopesSnap } from "./scopes/scopes-model.js";
 import type { ExecutionViewSnap } from "./execution/execution-model.js";
 
+export interface SliceDetailSnap {
+  name: string;
+  status: string;
+  rawStatus: string | null;
+  qitemIds: string[];
+  commitRefs: string[];
+  lastActivityAt: string | null;
+  story: {
+    events: Array<{
+      ts: string;
+      phase: string | null;
+      kind: string;
+      actorSession: string | null;
+      qitemId: string | null;
+      summary: string;
+    }>;
+  };
+  decisions: {
+    rows: Array<{
+      actionId: string;
+      ts: string;
+      actor: string;
+      verb: string;
+      qitemId: string;
+      reason: string | null;
+    }>;
+  };
+}
+
+export interface RecentTransitionSnap {
+  transitionId: number;
+  qitemId: string;
+  ts: string;
+  actorSession: string;
+  change: string;
+  targetKind: "qitem" | "slice" | "mission";
+  target: string;
+}
+
 export interface FleetSnapshot {
   /** SCOPES view (d64d2f5c): store-direct mission/slice projections; absent on old daemons (honest-empty). */
   scopes?: MissionScopesSnap[];
@@ -195,6 +257,13 @@ export interface FleetSnapshot {
   /** Mission requested for this execution read. Separate from row presence so
    * selected-mission pending, settled-empty, and failed remain distinguishable. */
   executionMission?: string | null;
+  /** Rich existing slice-detail read for the currently opened slice only. */
+  sliceDetail?: SliceDetailSnap | null;
+  sliceDetailName?: string | null;
+  /** Bounded typed transition tail for one explicitly named rig. Undefined
+   * means not loaded; [] means the served window is proven empty. */
+  recentTransitions?: RecentTransitionSnap[];
+  recentTransitionsRig?: string | null;
   hosts: HostNode[];
   specs: SpecEntry[];
   /** grounded composeNeedsYou union in daemon priority order, VERBATIM (PIN 3) */
@@ -347,6 +416,8 @@ export interface ViewStateStore {
 export interface ExplorerRow {
   label: string;
   action: Action;
+  /** One-cell disclosure hit. Kept separate from the row's open/drill action. */
+  disclosureAction?: Action;
   /** stable identity — selection sync finds the row for the current location */
   key?: string;
 }

@@ -121,8 +121,11 @@ export function sgrClick(x: number, y: number): string {
 export function resolveEscapeAction(
   event: Extract<InputEvent, { type: "key" }>,
   state: ViewState,
+  commandEditing = false,
 ): Action | null {
-  if (event.key !== "escape" || state.section !== "scopes") return null;
+  if (event.key !== "escape" || commandEditing) return null;
+  if (state.filter) return { type: "filter", text: "" };
+  if (state.section !== "scopes") return null;
   if (state.executionOpen) return { type: "execution-close" };
   return state.scopesSelected
     ? { type: "scopes-mission-open", mission: state.scopesSelected.mission }

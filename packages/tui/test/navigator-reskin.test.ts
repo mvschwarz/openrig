@@ -2,9 +2,8 @@
 // aesthetic. PURE re-skin: computeExplorerRows (the ONE row model) is
 // untouched; the renderer displays branch guides + right-aligned meta while
 // every action, key, and hit target stays identical (PIN-1). Collapse glyphs
-// render ONLY where collapse genuinely exists today (pods; spec folders;
-// section headers) — hosts/rigs lose their false ▾. New file; shipped floors
-// untouched.
+// render ONLY where collapse genuinely exists today (pods, missions, and spec
+// folders) — hosts, rigs, and non-collapsible section rows lose false glyphs.
 import { describe, it, expect } from "vitest";
 import { createViewState, computeExplorerRows } from "../src/state.js";
 import { renderScreen } from "../src/render.js";

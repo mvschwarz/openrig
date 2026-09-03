@@ -30,7 +30,7 @@ function paintExplorer(text: string, s: Style, focused: boolean): string {
     const token = focused ? "accent" : "dim";
     return s.paint(token, text, { bg: "selection", bold: focused });
   }
-  if (/[⌄›] (TOPOLOGY|SPECS|SCOPES|NEEDS-YOU)/.test(text)) return s.paint("bright", text, { bold: true });
+  if (/^[ ▶◆≈]*(TOPOLOGY|SPECS|SCOPES|NEEDS-YOU)\s*$/.test(text)) return s.paint("bright", text, { bold: true });
   // Slice-17 re-skin: branch guides paint faint (chrome), the row body keeps
   // its own rules — the tree rails read as structure, never as content.
   const tree = text.match(/^( *(?:[┃ ] )*(?:┣━|┗━) )(.*)$/);

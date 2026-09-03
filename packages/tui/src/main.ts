@@ -74,8 +74,20 @@ async function run(): Promise<void> {
   // pure and takes the clock + owner state as inputs. motionTimer keeps
   // redrawing ONLY while the frame reports live motion (spinner or flash).
   const reviewCache: SpecReviewCache = new Map();
+  const selectedSliceDirectory = (): string | null => {
+    const current = view.get();
+    if (current.scopesSelected) return current.scopesSelected.slice;
+    if (!current.executionOpen?.startsWith("slice:")) return null;
+    const id = current.executionOpen.slice("slice:".length);
+    const mission = snapshot.scopes?.find((item) => item.mission === current.scopesMission);
+    return mission?.slices.find((slice) => slice.id === id || slice.dirName === id)?.dirName ?? null;
+  };
+  const selectedRigName = (): string | null =>
+    view.get().drill.find((part) => part.kind === "rig")?.name
+      ?? snapshot.hosts[0]?.rigs[0]?.name
+      ?? null;
   const live = client
-    ? createLiveRefresh({ hydrate: () => hydrateSnapshot(client, reviewCache, view.get().scopesMission), onFrame: () => draw(), now: () => Date.now() })
+    ? createLiveRefresh({ hydrate: () => hydrateSnapshot(client, reviewCache, view.get().scopesMission, selectedSliceDirectory(), selectedRigName()), onFrame: () => draw(), now: () => Date.now() })
     : null;
   let motionTimer: NodeJS.Timeout | null = null;
   // S19 AM-R18 — the open view updates ITSELF: oracle pushes drive the refresh owner.
@@ -394,8 +406,8 @@ async function run(): Promise<void> {
           crashCartOpts = { ...crashCartOpts, confirm: undefined };
           view.dispatch({ type: "notice", message: "restore cancelled" });
           draw();
-        } else if (inputLine === "") {
-          const action = resolveEscapeAction(ev, view.get());
+        } else {
+          const action = resolveEscapeAction(ev, view.get(), inputLine !== "");
           if (action) view.dispatch(action);
         }
         inputLine = "";

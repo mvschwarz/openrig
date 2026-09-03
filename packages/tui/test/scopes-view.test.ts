@@ -44,19 +44,21 @@ describe("scopes view (store-direct render, v4 mock contract)", () => {
     expect(out).not.toContain("older-release");
   });
 
-  it("detail renders the mock structure: header card w/ proof N/M, spec-lock line, INTENT, MINI-REQUIREMENTS, PROOF CONTRACT with ✓/○ + C1 drop lines", () => {
+  it("detail renders a compact identity/state header and separated Intent, Requirements, and Proof regions", () => {
     const { snap, view } = openGateway();
-    const out = renderScreen(view.get(), snap, { cols: 160, rows: 48 }).lines.join("\n");
-    expect(out).toContain("gateway-m1 ── release-0.5.2 ── stage: building ── proof: 2/9");
-    expect(out).not.toContain("proof: 2/9 🔒"); // NOT delivery-locked -> no lock glyph
-    expect(out).toContain("spec🔒");
-    expect(out).toContain("INTENT (verbatim)");
+    const out = renderScreen(view.get(), snap, { cols: 160, rows: 220 }).lines.join("\n");
+    expect(out).toContain("● gateway-m1 · OPR.0.5.2.9 · release-0.5.2");
+    expect(out).toContain("STATE building · PROOF 2/9 · LOCKS spec locked · delivery open");
+    expect(out).toContain("── INTENT ");
     expect(out).toContain("Slack to the founder");
-    expect(out).toContain("MINI-REQUIREMENTS (2)");
-    expect(out).toContain("PROOF CONTRACT (2/9 paired)");
-    expect(out).toContain("✓ 1 The ack-after-delivery repair");
-    expect(out).toContain("○ 2 A registered entity");
-    expect(out).toContain("└ C1 drop · qa PASS · qa-relay.md · relay-repair-e2e.txt");
+    expect(out).toContain("── REQUIREMENTS (2)");
+    expect(out).toContain("── PROOF · 2/9 paired");
+    expect(out).toMatch(/STATE\s+#\s+REQUIREMENT\s+EVIDENCE/);
+    expect(out).toMatch(/PROVED\s+1\s+The ack-after-delivery repair/);
+    expect(out).toMatch(/OPEN\s+2\s+A registered entity/);
+    expect(out).toContain("↳ QA PASS");
+    expect(out).toContain("qa-relay.md");
+    expect(out).toContain("media relay-repair-e2e.txt");
   });
 
   it("the founder lock-glyph form: 🔒 renders ONLY when delivery-locked; the count carries the honesty", () => {
@@ -70,13 +72,13 @@ describe("scopes view (store-direct render, v4 mock contract)", () => {
   it("m collapses mini-requirements; n shows PROGRESS.md as narrative DISPLAY (never feeding counts)", () => {
     const { snap, view } = openGateway();
     view.dispatch(parseCommand("reqs"));
-    let out = renderScreen(view.get(), snap, { cols: 160, rows: 48 }).lines.join("\n");
-    expect(out).toContain("(collapsed — m expands)");
+    let out = renderScreen(view.get(), snap, { cols: 160, rows: 220 }).lines.join("\n");
+    expect(out).toContain("collapsed · m expands");
     view.dispatch(parseCommand("narrative"));
-    out = renderScreen(view.get(), snap, { cols: 160, rows: 48 }).lines.join("\n");
-    expect(out).toContain("PROGRESS (narrative — display only)");
+    out = renderScreen(view.get(), snap, { cols: 160, rows: 220 }).lines.join("\n");
+    expect(out).toContain("PROGRESS · narrative only · n closes");
     expect(out).toContain("A2 held on arch consult");
     // the data-path rule: the narrative panel does NOT change the store-derived counts
-    expect(out).toContain("proof: 2/9");
+    expect(out).toContain("PROOF 2/9");
   });
 });

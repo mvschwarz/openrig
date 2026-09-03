@@ -13,7 +13,7 @@
 //   - A failed read leaves its portion honest-empty and records a NAMED error.
 import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
-import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, QueueRead, SeatActivitySummary, SpecEntry } from "./types.js";
+import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SliceDetailSnap, SpecEntry } from "./types.js";
 import { isHumanSeatSession } from "./pulse/pulse-model.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
@@ -41,9 +41,19 @@ interface NodeInventoryRead {
   /** arch 3a947fb1: raw window_activity ISO (owner idle-age is derived at the
    * renderer). Absent/null when the seat has no observation. */
   lastActivityAt?: string | null;
-  agentActivity?: { state?: string } | null;
+  agentActivity?: {
+    state?: string;
+    reason?: string | null;
+    evidenceSource?: string | null;
+    eventAt?: string | null;
+  } | null;
   /** S19 — the served taxonomy state; display comes from the daemon's one bridge. */
-  activityState?: { display?: string } | null;
+  activityState?: {
+    activity?: string | null;
+    display?: string;
+    needsInput?: { count?: number; reason?: string | null } | null;
+    decidedBy?: string | null;
+  } | null;
   identityVerdict?: { verdict?: string } | null;
   canonicalSessionName: string | null;
   tmuxAttachCommand?: string | null;
@@ -52,9 +62,15 @@ interface NodeInventoryRead {
   contextUsage?: {
     availability: "known" | "unknown";
     usedPercentage: number | null;
+    contextWindowSize: number | null;
     totalInputTokens: number | null;
     totalOutputTokens: number | null;
   };
+  hasAssignedWork?: boolean;
+  assignedWorkCount?: number;
+  pendingWorkCount?: number;
+  inProgressWorkCount?: number;
+  blockedWorkCount?: number;
 }
 interface SpecLibraryRead {
   id: string;
@@ -112,6 +128,9 @@ interface NeedsYouItemRead {
   where: string;
   destinationSession: string | null;
   derived: { kind: string; evidence: string; threshold: string } | null;
+  qitemId: string | null;
+  evidenceRef: string | null;
+  unblocks: string | null;
 }
 interface ReviewFleetRead {
   needsYou?: { items?: NeedsYouItemRead[] };
@@ -178,6 +197,24 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
     // honest-unknown: no value in the projection → null → renders "—"
     context: known && ctx.usedPercentage != null ? Math.round(ctx.usedPercentage) : null,
     tokens: known ? fmtTokens(ctx.totalInputTokens, ctx.totalOutputTokens) : null,
+    contextWindowSize: known ? ctx.contextWindowSize : null,
+    totalInputTokens: known ? ctx.totalInputTokens : null,
+    totalOutputTokens: known ? ctx.totalOutputTokens : null,
+    hasAssignedWork: node.hasAssignedWork,
+    assignedWorkCount: node.assignedWorkCount,
+    pendingWorkCount: node.pendingWorkCount,
+    inProgressWorkCount: node.inProgressWorkCount,
+    blockedWorkCount: node.blockedWorkCount,
+    activity: {
+      activity: node.activityState?.activity ?? node.activityState?.display ?? node.agentActivity?.state ?? null,
+      needsInput: node.activityState?.needsInput
+        ? { count: node.activityState.needsInput.count ?? 0, reason: node.activityState.needsInput.reason ?? null }
+        : null,
+      decidedBy: node.activityState?.decidedBy ?? null,
+      signalReason: node.agentActivity?.reason ?? null,
+      signalSource: node.agentActivity?.evidenceSource ?? null,
+      eventAt: node.agentActivity?.eventAt ?? null,
+    },
     // Mirror the maintained web projection: lifecycle truth drives actions,
     // while session/terminal activity drives the visible status label.
     status: node.startupStatus === "failed"
@@ -228,7 +265,16 @@ function toNeedsItem(item: NeedsYouItemRead): NeedsItem {
   // session/where the daemon already names (identity prefix for derived rows)
   const target = item.source === "derived" ? (item.identity.split("|")[0] ?? item.where) : (item.destinationSession ?? item.where);
   const detail = item.derived ? `${item.summary} — ${item.derived.evidence}` : item.summary;
-  return { source: item.source, kind: item.derived?.kind ?? item.leg, target, detail, ...(item.hostId ? { hostId: item.hostId } : {}) };
+  return {
+    source: item.source,
+    kind: item.derived?.kind ?? item.leg,
+    target,
+    detail,
+    qitemId: item.qitemId,
+    evidenceRef: item.evidenceRef,
+    unblocks: item.unblocks,
+    ...(item.hostId ? { hostId: item.hostId } : {}),
+  };
 }
 
 function resolveAgentRef(ref: string, agentSpecNames: Set<string>): string {
@@ -277,6 +323,8 @@ export async function hydrateSnapshot(
   client: DaemonClient,
   reviewCache?: SpecReviewCache,
   executionMission?: string | null,
+  sliceDetailName?: string | null,
+  currentRigName?: string | null,
 ): Promise<FleetSnapshot> {
   const readErrors: string[] = [];
   async function safe<T>(label: string, fn: () => Promise<unknown>): Promise<T | null> {
@@ -288,7 +336,7 @@ export async function hydrateSnapshot(
     }
   }
 
-  const [agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead] = await Promise.all([
+  const [agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead] = await Promise.all([
     safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
     safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
     safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()),
@@ -303,10 +351,17 @@ export async function hydrateSnapshot(
     safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
     safe<{ missions: unknown[] }>("scopes", () => client.scopesDetailed() as Promise<{ missions: unknown[] }>),
     safe<{ rows: unknown[] }>("execution", () => client.execution(executionMission ?? undefined) as Promise<{ rows: unknown[] }>),
+    sliceDetailName
+      ? safe<SliceDetailSnap>(`slice-detail(${sliceDetailName})`, () => client.sliceDetail(sliceDetailName))
+      : Promise.resolve(null),
   ]);
 
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
   if (review?.registryError) readErrors.push(`review-fleet registry: ${review.registryError}`);
+  const recentTransitionsRig = currentRigName ?? summaries?.[0]?.name ?? null;
+  const recentTransitions = recentTransitionsRig
+    ? await safe<RecentTransitionSnap[]>(`queue-recent(${recentTransitionsRig})`, () => client.queueRecentTransitions(recentTransitionsRig))
+    : null;
 
   // BLOCKED ON AGENTS label==referent (r1 finding): blockedOn is a qitem POINTER
   // for agent-blocks, so the blocking AGENT is that qitem's OWNER. Resolve each
@@ -519,6 +574,9 @@ export async function hydrateSnapshot(
     scopes: (scopesRead?.missions ?? []) as FleetSnapshot["scopes"],
     execution,
     executionMission: executionMission ?? execution?.mission ?? null,
+    sliceDetail: sliceDetailRead,
+    sliceDetailName: sliceDetailName ?? null,
+    ...(recentTransitions ? { recentTransitions, recentTransitionsRig } : {}),
     attention: (attention ?? []).map(toQueueRead),
     blocked: blockedResolved,
     inProgress: (inProgress ?? []).map(toQueueRead),

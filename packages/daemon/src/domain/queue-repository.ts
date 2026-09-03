@@ -2683,6 +2683,13 @@ export class QueueRepository {
     });
   }
 
+  /** Read-only current-rig RECENT projection. Normalization and its hard cap
+   * live with the append-only transition log; the repository owns the public
+   * queue-domain door. */
+  listRecentTransitions(rig: string, limit = 20): ReturnType<QueueTransitionLog["listRecentForRig"]> {
+    return this.transitionLog.listRecentForRig(rig, limit);
+  }
+
   /** Called by the watchdog engine after the delivery attempt is durably
    *  audited. The queue transition records that attempt independently of
    *  whether the HELD row's owner consumed it. */
