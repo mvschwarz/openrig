@@ -23,15 +23,10 @@ function parseText(text: string, final: boolean): { events: InputEvent[]; remain
             const button = Number(match[1]);
             if (match[4] === "M" && (button & 3) !== 3 && button < 32)
               events.push({ type: "mouse", button: button & 3, x: Number(match[2]), y: Number(match[3]) });
-            // Wheel notches (SGR button & 64 → 64=up, 65=down) drive the SAME content-scroll as
-            // PgUp/PgDn (most keyboards lack those keys — the founder fix). Was decoded then dropped.
+            // Preserve wheel coordinates. The renderer owns the actual pane boundary,
+            // so routing before this point would make pointer-local scrolling impossible.
             else if (match[4] === "M" && (button & 64) !== 0) {
-              const down = (button & 1) !== 0;
-              events.push({
-                type: "key",
-                key: down ? "pagedown" : "pageup",
-                action: { type: "content-scroll", delta: down ? 3 : -3 },
-              });
+              events.push({ type: "mouse", button, x: Number(match[2]), y: Number(match[3]) });
             }
             i += match[0].length;
             continue;
@@ -172,6 +167,22 @@ export function resolveKeyAction(
       : { type: "activate" };
   }
   return "action" in event ? event.action : null;
+}
+
+/** Route a wheel notch using the pane actually under the pointer. Clicks keep
+ * using the renderer hit-map in the caller; this function only owns wheels. */
+export function resolveMouseAction(
+  event: Extract<InputEvent, { type: "mouse" }>,
+  state: ViewState,
+  screen: Screen,
+  explorerCount: number,
+): Action | null {
+  void state;
+  if ((event.button & 64) === 0) return null;
+  const delta = (event.button & 1) !== 0 ? 3 : -3;
+  return event.x <= screen.explorerWidth
+    ? { type: "select", delta, rowCount: explorerCount }
+    : { type: "content-scroll", delta };
 }
 
 export const MOUSE_ENABLE = "\x1b[?1000h\x1b[?1006h";

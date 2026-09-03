@@ -48,7 +48,7 @@ describe("motion wiring + region discipline", () => {
     const needsRow = styled.find((l) => stripAnsi(l).includes("⚑"))!;
     expect(needsRow, "pulse on the needs-you glyph").toMatch(/\x1b\[[0-9;]*5;[0-9;]*m⚑|\x1b\[5m⚑/);
     // discipline: the ⚑ is the only blinking cell on that row
-    expect((needsRow.match(/\[[0-9;]*5;[0-9;]*m/g) ?? []).length).toBeLessThanOrEqual(1);
+    expect((needsRow.match(/\x1b\[5;/g) ?? []).length).toBe(1);
     styled.forEach((l, i) => expect(stripAnsi(l)).toBe(screen.lines[i]));
   });
 
@@ -86,7 +86,7 @@ describe("motion rides the LOAD LIFECYCLE — guard round-5 finding 1 (spinner =
     const at = (nowMs: number) =>
       renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs, colorMode: "truecolor", load: LOADING }).lines.find((l) => l.includes("read pending"))!;
     const f0 = at(0);
-    const f1 = at(120);
+    const f1 = at(500);
     expect(f0).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] topology graph read pending/);
     expect(f1).not.toBe(f0); // frame/time transition
     const screen = renderScreen(s.get(), noGraph, { cols: 140, rows: 34, nowMs: 0, colorMode: "truecolor", load: LOADING });
@@ -183,14 +183,14 @@ describe("fresh pane-output ROW FLASH — guard round-5 finding 2 (exact agent r
     const screen = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
     expect(screen.flashRows).toHaveLength(1);
     const y = screen.flashRows![0]!;
-    expect(screen.lines[y - 1]).toContain("dev50.driver"); // exact-row targeting
+    expect(screen.explorerRows.find((row) => row.y === y)?.key).toBe(DRIVER_KEY); // exact-row targeting
     // round-6 (guard finding 2): the PLAIN layer carries the stable ack glyph
     // too — the event stays observable in NO_COLOR, never SGR-only
     expect(screen.lines[y - 1]!.startsWith("≈")).toBe(true);
     expect(screen.motionActive).toBe(true); // the expiry redraw is scheduled off this
     const styled = stylizeLines(screen, createStyle("truecolor"));
     expect(styled[y - 1]!, "flash = inverse video on the agent row").toMatch(INVERSE);
-    const guardRow = screen.lines.findIndex((l) => l.includes("dev50.guard"));
+    const guardRow = screen.explorerRows.find((row) => row.key.endsWith("/dev50.guard"))!.y - 1;
     expect(styled[guardRow]!).not.toMatch(INVERSE); // sibling rows untouched
     styled.forEach((l, i) => expect(stripAnsi(l)).toBe(screen.lines[i]));
   });
@@ -201,7 +201,7 @@ describe("fresh pane-output ROW FLASH — guard round-5 finding 2 (exact agent r
     expect(after.flashRows ?? []).toHaveLength(0);
     // the driver's OWN row is back to normal paint (the content-pane selection
     // bar legitimately uses inverse elsewhere — scope the pin to the row)
-    const driverIdx = after.lines.findIndex((l) => l.includes("dev50.driver"));
+    const driverIdx = after.explorerRows.find((row) => row.key === DRIVER_KEY)!.y - 1;
     expect(stylizeLines(after, createStyle("truecolor"))[driverIdx]!).not.toMatch(INVERSE);
     expect(after.lines[driverIdx]!.startsWith("≈")).toBe(false); // the ack expires cleanly too
   });
@@ -213,10 +213,10 @@ describe("fresh pane-output ROW FLASH — guard round-5 finding 2 (exact agent r
     try {
       const reduced = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
       expect(reduced.flashRows ?? []).toHaveLength(0); // no SGR animation under reduced motion…
-      const y = reduced.lines.findIndex((l) => l.includes("dev50.driver"));
+      const y = reduced.explorerRows.find((row) => row.key === DRIVER_KEY)!.y - 1;
       expect(reduced.lines[y]!.startsWith("≈")).toBe(true); // …but the state SIGNAL survives as the stable marker-slot glyph
       expect(reduced.lines[y]!.length).toBe(base.lines[y]!.length); // no geometry drift
-      expect(reduced.lines[y]!.slice(1)).toBe(base.lines[y]!.slice(1)); // ONLY the marker cell differs
+      expect(reduced.lines[y]!.slice(1)).toBe(base.lines[y]!.slice(1).replace(/[\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f]/, "●")); // reduced motion also freezes the approved working mark
       expect(reduced.hitMap).toEqual(base.hitMap); // no hit-map drift
       expect(reduced.motionActive).toBe(true); // one bounded expiry redraw is scheduled — the ack settles cleanly
       // NO_COLOR: the acknowledgement is glyph/text, never SGR-only
@@ -239,14 +239,14 @@ describe("fresh pane-output ROW FLASH — guard round-5 finding 2 (exact agent r
     try {
       const base = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300 });
       const ev = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1300, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
-      const y = ev.lines.findIndex((l) => l.includes("dev50.driver"));
-      expect(base.lines[y]!.startsWith("›")).toBe(true); // baseline: plain selection cue
+      const y = ev.explorerRows.find((row) => row.key === DRIVER_KEY)!.y - 1;
+      expect(base.lines[y]!.startsWith("▶")).toBe(true); // baseline: G2 selection cue
       expect(ev.lines[y]).not.toBe(base.lines[y]); // the event frame has a VISIBLE delta
-      expect(ev.lines[y]!.startsWith("»")).toBe(true); // selection-preserving chevron + ack in one cell
+      expect(ev.lines[y]!.startsWith("◆")).toBe(true); // selection-preserving fresh-output cue
       expect(ev.lines[y]!.slice(1)).toBe(base.lines[y]!.slice(1)); // ONLY the marker cell differs
       expect(ev.lines[y]!.length).toBe(base.lines[y]!.length); // no geometry drift
       expect(ev.hitMap).toEqual(base.hitMap); // no hit-map drift
-      expect(stylizeLines(ev, createStyle("none"))[y]!).toContain("»"); // NO_COLOR observable
+      expect(stylizeLines(ev, createStyle("none"))[y]!).toContain("◆"); // NO_COLOR observable
       const after = renderScreen(s.get(), snap, { cols: 140, rows: 34, nowMs: 1700, rowFlashes: [{ key: DRIVER_KEY, at: 1000 }] });
       expect(after.lines[y]).toBe(base.lines[y]); // expiry returns EXACTLY to baseline
     } finally {

@@ -33,6 +33,7 @@ interface NodeInventoryRead {
   podNamespace?: string | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  model?: string | null;
   lifecycleState: string;
   sessionStatus?: string | null;
   startupStatus?: string | null;
@@ -172,6 +173,7 @@ function toAgentRow(node: NodeInventoryRead): AgentRow {
   return {
     name: node.logicalId,
     runtime: node.runtime ?? "unknown",
+    model: node.model ?? null,
     spec: node.resolvedSpecName ?? "",
     // honest-unknown: no value in the projection → null → renders "—"
     context: known && ctx.usedPercentage != null ? Math.round(ctx.usedPercentage) : null,

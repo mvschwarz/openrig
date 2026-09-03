@@ -256,17 +256,17 @@ describe("PULSE view increment 2 — Exceptions strip LIVE", () => {
     v.dispatch({ type: "tab", tab: "pulse" });
     const s = renderScreen(v.get(), snap, { cols: 140, rows: 44, nowMs: NOW });
     const body = s.lines.join("\n");
-    // normal chrome: the EXPLORER pane title + the ┬ split joint (sidebar present)
+    // normal chrome: the EXPLORER pane title + the G2 split joint (sidebar present)
     expect(body).toContain("EXPLORER");
-    expect(body).toContain("┬");
+    expect(body).toContain("╋");
     // the sidebar is the real topology navigator — the founder navigates from it
     expect(s.explorerRows.length).toBeGreaterThan(0);
     // pulse content lives in the CONTENT column: the NEEDS YOU strip begins AFTER
-    // the 30-col sidebar + │ boundary, never at the left edge
+    // the L2 sidebar + boundary, never at the left edge
     const needsLine = body.split("\n").find((l) => l.includes("NEEDS YOU"));
     expect(needsLine).toBeDefined();
     expect(needsLine!.startsWith("▲ NEEDS YOU")).toBe(false);
-    expect(needsLine![30]).toBe("│"); // the split border at the fixed boundary column
+    expect(needsLine![s.explorerWidth]).toBe("┃");
   });
 
   it("REGRESSION: a non-pulse view (table) STILL renders the explorer sidebar", () => {
@@ -275,7 +275,7 @@ describe("PULSE view increment 2 — Exceptions strip LIVE", () => {
     // default view is the table (topology section) — explorer must remain
     const body = renderScreen(v.get(), snap, { cols: 140, rows: 44 }).lines.join("\n");
     expect(body).toContain("EXPLORER");
-    expect(body).toContain("┬");
+    expect(body).toContain("╋");
   });
 });
 

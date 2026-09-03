@@ -55,6 +55,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
     contentTargetCount: 0,
     contentSelection: 0,
     focusedPane: "explorer",
+    copyMode: false,
     footerOn: true,
     expanded: [],
     notice: null,
@@ -161,6 +162,8 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       const target = action.index ?? state.contentSelection + (action.delta ?? 0);
       return { ...next, contentSelection: Math.min(Math.max(target, 0), count - 1) };
     }
+    case "copy-mode":
+      return { ...next, copyMode: action.on ?? !state.copyMode };
     case "layout":
       return {
         ...next,

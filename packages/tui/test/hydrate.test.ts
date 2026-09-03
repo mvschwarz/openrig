@@ -360,8 +360,8 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "drill", resource: "rig", name: "myrig" });
     const output = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
-    expect(output.lines.find((line) => line.includes("dev.mismatch"))).not.toContain("run ▸");
-    expect(output.lines.find((line) => line.includes("dev.missing"))).not.toContain("run ▸");
+    expect(output.lines.find((line) => /\bmismatch\s/.test(line))).not.toContain("run ▸");
+    expect(output.lines.find((line) => /\bmissing\s/.test(line))).not.toContain("run ▸");
   });
 
   it("joins Specs↔Topology over existing reads: rig agentRefs + agent usedByRigs", async () => {

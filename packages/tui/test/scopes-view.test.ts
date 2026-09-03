@@ -30,7 +30,11 @@ describe("scopes view (store-direct render, v4 mock contract)", () => {
   });
 
   it("never renders a prior mission's execution data under the newly selected mission heading", () => {
-    const snap = { ...demoSnapshot(), execution: { view: "execution" as const, mission: "older-release", sources: {}, q1_lanes: [], q2_sequencing: [], q4_ladder: [], q5_park: [] } };
+    const snap = {
+      ...demoSnapshot(),
+      executionMission: "older-release",
+      execution: { view: "execution" as const, mission: "older-release", sources: {}, q1_lanes: [], q2_sequencing: [], q4_ladder: [], q5_park: [] },
+    };
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch(parseCommand(":scopes"));
     view.dispatch({ type: "scopes-mission-open", mission: "release-0.5.2" });

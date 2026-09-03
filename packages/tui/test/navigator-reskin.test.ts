@@ -45,8 +45,8 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     const s = makeStore();
     const screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
     const pane = explorerPane(screen.lines).join("\n");
-    expect(pane).toMatch(/├─/);
-    expect(pane).toMatch(/└─/);
+    expect(pane).toMatch(/┣━/);
+    expect(pane).toMatch(/┗━/);
   });
 
   it("hosts and rigs carry NO collapse glyph (no false affordances — no collapse exists there today)", () => {
@@ -58,16 +58,16 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     expect(rigRow).not.toMatch(/[▾▸]/);
   });
 
-  it("pods KEEP their genuine collapse glyph (▸ collapsed, ▾ expanded via drill/auto-expand)", () => {
+  it("pods KEEP their genuine collapse glyph (› collapsed, ⌄ expanded via drill/auto-expand)", () => {
     const s = makeStore();
     let screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
     const collapsed = explorerPane(screen.lines).find((l) => l.includes("dev50"))!;
-    expect(collapsed).toContain("▸");
+    expect(collapsed).toContain("›");
     // drilling the pod auto-expands it — unchanged function, re-skinned look
     s.dispatch({ type: "drill", resource: "pod", name: "dev50", target: { host: "vm-host", rig: "openrig-build" } });
     screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
     const pane = explorerPane(screen.lines);
-    expect(pane.find((l) => l.includes("dev50") && !l.includes("●"))).toContain("▾");
+    expect(pane.find((l) => l.includes("dev50") && !l.includes("●"))).toContain("⌄");
     // the agent rows appear (identity by ROW MODEL key — display names may
     // truncate under the locked meta-always policy)
     expect(screen.explorerRows.some((r) => r.key === "agent:vm-host/openrig-build/dev50/dev50.driver")).toBe(true);
@@ -214,8 +214,8 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     const pane = explorerPane(screen.lines);
     const folder = pane.find((l) => l.includes("vault/"))!;
     const child = pane.find((l) => l.includes("vault-specialist"))!;
-    const indentOf = (l: string) => (/^\s*(?:│ )*/.exec(l)?.[0] ?? "").length + (l.match(/├─|└─/)?.index ?? 0);
-    const branchCol = (l: string) => l.search(/├─|└─/);
+    const indentOf = (l: string) => (/^\s*(?:┃ )*/.exec(l)?.[0] ?? "").length + (l.match(/┣━|┗━/)?.index ?? 0);
+    const branchCol = (l: string) => l.search(/┣━|┗━/);
     expect(branchCol(child)).toBeGreaterThan(branchCol(folder)); // child branch sits deeper
     void indentOf;
     // PIN-1 untouched: the child's action is still the spec drill from the row model
@@ -253,29 +253,24 @@ describe("file-tree re-skin (Direction B navigator)", () => {
     expect(rows[s.get().selection]?.key).toBe("agent:vm-host/openrig-build/dev50/dev50.guard");
     const screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
     // the selected ROW is the drilled agent (row-model identity)…
-    const selectedRow = screen.explorerRows.find((r) => r.y === screen.lines.findIndex((l) => l.startsWith("›")) + 1);
+    const selectedRow = screen.explorerRows.find((r) => r.y === screen.lines.findIndex((l) => l.startsWith("▶")) + 1);
     expect(selectedRow?.key).toBe("agent:vm-host/openrig-build/dev50/dev50.guard");
     // …AND the line shows the agent's VISIBLE identity (pod-relative "guard")
     // plus its own locked meta at the edge (guard: visible-identity restore)
-    const selectedLine = screen.lines.find((l) => l.startsWith("›"))!;
+    const selectedLine = screen.lines.find((l) => l.startsWith("▶"))!;
     expect(selectedLine.slice(0, 30)).toMatch(/● guard/);
     expect(selectedLine.slice(0, 30).trimEnd()).toMatch(/31%$/); // demo: guard ctx 31 (round-3 bare meta)
   });
 
-  it("FOUNDER CORRECTION: the selected-row highlight covers the item TEXT ONLY — branch guides stay unhighlighted", () => {
+  it("G2 selection gives the whole selected Explorer row a bright wash", () => {
     const s = makeStore();
     s.dispatch({ type: "drill", resource: "agent", name: "dev50.guard", target: { host: "vm-host", rig: "openrig-build", pod: "dev50" } });
     const screen = renderScreen(s.get(), snap, { cols: 120, rows: 32 });
     const styled = stylizeLines(screen, createStyle("truecolor"));
-    const i = screen.lines.findIndex((l) => l.startsWith("›"));
+    const i = screen.lines.findIndex((l) => l.startsWith("▶"));
     expect(i).toBeGreaterThan(0);
     const line = styled[i]!;
-    // the guide run paints CHROME with no inverse (7) in its opening SGR…
-    expect(line).toMatch(/\x1b\[38;2;76;84;99m[^\x1b]*├─/); // S19 MR5b bumped chrome
-    // …while the item text carries the accent inverse bar…
-    expect(line).toMatch(/\x1b\[1;7;38;2;77;189;178m[^\x1b]*● guard/);
-    // …and the selection marker keeps its shipped form (floor compatibility)
-    expect(line).toContain("\x1b[1;7;38;2;77;189;178m›");
+    expect(line).toMatch(/\x1b\[1;38;2;111;168;255;48;2;34;52;82m▶[^\x1b]*┣━[^\x1b]*● guard/);
     styled.forEach((l, j) => expect(stripAnsi(l), `line ${j}`).toBe(screen.lines[j]));
   });
 

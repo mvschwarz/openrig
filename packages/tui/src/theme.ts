@@ -19,8 +19,8 @@ export function detectColorMode(env: NodeJS.ProcessEnv = process.env): ColorMode
 
 /** Semantic tokens — named for meaning, not color, so views stay honest. */
 export type Token =
-  | "accent" // selection/links/active (mockup teal #4dbdb2)
-  | "accentBright" // tree/link emphasis (mockup #7bd3ca)
+  | "accent" // G2 selection/links/active blue
+  | "accentBright" // G2 tree/link emphasis
   | "warn" // blocked/needs-you/alerts (mockup amber #e6b56e)
   | "error" // failed/error states
   | "ok" // healthy/running states
@@ -28,6 +28,7 @@ export type Token =
   | "dim" // secondary text (mockup #6d7480)
   | "bright" // primary emphasis
   | "chrome" // borders/rules
+  | "selection" // G2 selected-row wash
   // S19 MR2 — web-identical runtime-mark colors (RuntimeMark.tsx values);
   // 16-color values are the SHIPPED degrade set verified through QA at the
   // round-7 seal (superseded-comment cleanup per QA LOCKED-SCOPE-CLEAR at
@@ -46,16 +47,17 @@ export type Token =
 
 // [truecolor rgb, 256 index, 16-color SGR]
 const PALETTE: Record<Token, [[number, number, number], number, number]> = {
-  accent: [[77, 189, 178], 73, 36],
-  accentBright: [[123, 211, 202], 80, 96],
-  warn: [[230, 181, 110], 179, 33],
+  accent: [[111, 168, 255], 111, 94],
+  accentBright: [[154, 194, 255], 153, 96],
+  warn: [[244, 190, 92], 221, 33],
   error: [[224, 108, 117], 167, 31],
   ok: [[152, 195, 121], 108, 32],
   info: [[143, 184, 216], 110, 94], // #8fb8d8 exact; xterm256 110, 16-color bright-blue
   dim: [[109, 116, 128], 243, 90],
   bright: [[232, 234, 240], 254, 97],
   // S19 MR5b: one-step contrast bump (founder: 'a little more noticeable')
-  chrome: [[76, 84, 99], 244, 90],
+  chrome: [[78, 105, 145], 60, 90],
+  selection: [[34, 52, 82], 236, 40],
   actActive: [[152, 195, 121], 108, 32],
   actIdle: [[110, 142, 170], 109, 34],
   actDetached: [[109, 116, 128], 243, 90],

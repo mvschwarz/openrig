@@ -60,9 +60,9 @@ function keyDepth(row: ExplorerRow): number {
  * keep their GENUINE ▾/▸ (they really collapse), hosts/rigs lose theirs */
 function contentOf(row: ExplorerRow, parsed: KeyParts): string {
   const stripped = row.label.replace(/^\s+/, "");
-  if (parsed.kind === "host") return `⊕ ${stripped.replace(/^▾ /, "")}`;
-  if (parsed.kind === "rig") return `▦ ${stripped.replace(/^▾ /, "")}`; // round-3 rig glyph
-  if (parsed.kind === "pod") return stripped.replace(/ \(\d+\)$/, ""); // count moves to meta
+  if (parsed.kind === "host") return `⊕ ${stripped.replace(/^[▾⌄] /, "")}`;
+  if (parsed.kind === "rig") return `▦ ${stripped.replace(/^[▾⌄] /, "")}`; // round-3 rig glyph
+  if (parsed.kind === "pod") return stripped.replace(/^[▾▸] /, (m) => m.startsWith("▾") ? "⌄ " : "› ").replace(/ \(\d+\)$/, ""); // count moves to meta
   if (parsed.kind === "agent") {
     // POD-RELATIVE display (guard-ruled; the nav-flow mockup's convention —
     // "driver" under pod dev50): strip ONLY a confirmed `${pod}.` prefix so
@@ -154,10 +154,13 @@ function navigatorLabelsInner(rows: ExplorerRow[], snap: FleetSnapshot, width: n
   return rows.map((row, i) => {
     const depth = depths[i]!;
     if (depth < 0) { metasOut.push(null); return row.label; } // keyless rows untouched
-    if (depth === 0) { metasOut.push(null); return row.label; } // section headers keep their ▾/▸ identity
+    if (depth === 0) {
+      metasOut.push(null);
+      return row.label.replace(/^▾ /, "⌄ ").replace(/^▸ /, "› ");
+    }
     railOpen[depth] = !isLast[i]!;
-    const guides = Array.from({ length: depth - 1 }, (_, level) => (railOpen[level + 1] ? "│ " : "  ")).join("");
-    const branch = isLast[i] ? "└─ " : "├─ ";
+    const guides = Array.from({ length: depth - 1 }, (_, level) => (railOpen[level + 1] ? "┃ " : "  ")).join("");
+    const branch = isLast[i] ? "┗━ " : "┣━ ";
     const parsed = parseKey(row.key)!;
     const content = contentOf(row, parsed);
     const meta = metaOf(row, snap);

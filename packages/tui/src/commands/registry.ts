@@ -115,6 +115,15 @@ export const COMMAND_REGISTRY: readonly CommandEntry[] = [
         : { type: "error", message: `unknown scroll direction "${name}" — known: scroll up, scroll down` },
   },
   {
+    name: "select-text",
+    aliases: ["copy"],
+    args: "",
+    description: "toggle terminal-native drag selection and copy",
+    context: "standard",
+    sample: "select-text",
+    build: () => ({ type: "copy-mode" }),
+  },
+  {
     // TUI scroll (ruling cfec754f): jump the content pane to the extremes. Registered as a VERB
     // (`top`), NOT `:top` — `:` is the section-jump prefix (would parse as an unknown section). Reuses
     // content-scroll: the reducer clamps `contentOffset + delta` to [0, max], so an extreme negative

@@ -6,6 +6,8 @@
 export interface AgentRow {
   name: string;
   runtime: string;
+  /** effective served model; separate from runtime, null when not served */
+  model?: string | null;
   spec: string;
   /** null = the projection has no value → renders honest-unknown, never fabricated (PIN 2) */
   context: number | null;
@@ -262,6 +264,8 @@ export type Action =
   | { type: "content-scroll"; delta: number }
   | { type: "focus"; pane: "explorer" | "content" }
   | { type: "content-select"; delta?: number; index?: number }
+  /** terminal-native text selection: mouse reporting off while active */
+  | { type: "copy-mode"; on?: boolean }
   | { type: "layout"; contentMaxOffset: number; contentTargetCount: number }
   | { type: "footer"; on?: boolean }
   | { type: "toggle-expand"; key: string }
@@ -320,6 +324,8 @@ export interface ViewState {
   contentTargetCount: number;
   contentSelection: number;
   focusedPane: "explorer" | "content";
+  /** true while terminal-native drag selection/copy owns the pointer */
+  copyMode: boolean;
   /** slice-17 graph view render style (hatchet mainline per the founder verdict) */
   graphStyle: string;
   /** the rig-stream footer is ambient: toggleable, never a navigable view (FR-10) */
@@ -370,6 +376,8 @@ export interface RowFlash {
 
 export interface Screen {
   lines: string[];
+  /** actual L2 pane boundary; input and styling consume this exact value */
+  explorerWidth: number;
   hitMap: HitTarget[];
   contentTargets: HitTarget[];
   contentMaxOffset: number;

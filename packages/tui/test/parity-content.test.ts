@@ -64,7 +64,7 @@ describe("content-pane parity (Phase 3): click the surface, not a control", () =
     byCommand.dispatch(parseCommand("agent dev50.guard"));
 
     byMouse.dispatch(parseCommand("rig openrig-build"));
-    const row = findContentLine(byMouse, /dev50\.guard.*idle/);
+    const row = findContentLine(byMouse, /guard.*idle/);
     // click INSIDE the STATUS cell text (a non-label visible cell, far from the AGENT column)
     const statusX = row.text.indexOf("idle") + 1;
     expect(clickAt(byMouse, statusX, row.y)).toBe(true);

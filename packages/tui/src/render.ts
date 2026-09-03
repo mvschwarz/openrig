@@ -20,11 +20,10 @@ import type { CrashCartModel } from "./crash-cart/crash-cart-model.js";
 import type { DaemonState, DaemonUnverifiedEvidence } from "./crash-cart/contract.js";
 import { runtimeMarkSegs } from "./topology/runtime-marks.js";
 import { barCells, flashActive, reducedMotion, spinnerFrame } from "./motion.js";
+import { explorerWidth, MOTION_FRAME_MS } from "./visual-layout.js";
 import type { ColorMode, Token } from "./theme.js";
 import { detailPage, fieldLine, sectionRule, listItem, alignedRow, LABEL_W } from "./detail.js";
 import type { Action, FleetSnapshot, LoadState, NeedsItem, RowFlash, Screen, ViewState } from "./types.js";
-
-const EXPL_W = 30;
 
 interface ContentLine {
   text: string;
@@ -51,41 +50,96 @@ function padLeft(text: string | number | null | undefined, width: number): strin
 }
 
 type Align = "left" | "right";
-type AgentColumnKey = "rig" | "pod" | "agent" | "runtime" | "context" | "tokens" | "status" | "actions";
+type AgentColumnKey = "pod" | "seat" | "runtime" | "model" | "context" | "status" | "queue" | "work" | "now" | "actions";
 type AgentColumn = [key: AgentColumnKey, name: string, width: number, align: Align];
-
-const FULL_AGENT_COLS: AgentColumn[] = [
-  ["rig", "RIG", 18, "left"],
-  ["pod", "POD", 8, "left"],
-  ["agent", "AGENT", 16, "left"],
-  ["runtime", "RUNTIME", 13, "left"],
-  ["context", "CTX%", 4, "right"],
-  ["tokens", "TOKENS", 7, "right"],
-  ["status", "STATUS", 17, "left"],
-  ["actions", "ACTIONS", 14, "left"],
-];
 
 function columnsWidth(columns: AgentColumn[]): number {
   return columns.reduce((total, [, , width]) => total + width + 1, -1);
 }
 
 function agentColumns(contentWidth: number): AgentColumn[] {
-  if (columnsWidth(FULL_AGENT_COLS) <= contentWidth) return FULL_AGENT_COLS;
-  // At the 120-column fallback the content pane is 88 cells. Preserve the
-  // operable identity/status/action path; telemetry cells yield first.
-  const compactRest: AgentColumn[] = [
-    ["pod", "POD", 8, "left"],
-    ["agent", "AGENT", 16, "left"],
-    ["runtime", "RUNTIME", 13, "left"],
-    ["status", "STATUS", 17, "left"],
+  if (contentWidth >= 110) return [
+    ["pod", "POD", 8, "left"], ["seat", "SEAT", 15, "left"], ["runtime", "RT", 4, "left"],
+    ["model", "MODEL", 12, "left"], ["context", "CTX", 8, "right"], ["status", "STATE", 11, "left"],
+    ["queue", "Q", 3, "right"], ["work", "WORK", 15, "left"], ["now", "NOW", 27, "left"],
     ["actions", "ACTIONS", 14, "left"],
   ];
-  const rigWidth = Math.max(6, Math.min(18, contentWidth - columnsWidth(compactRest) - 1));
-  return [["rig", "RIG", rigWidth, "left"], ...compactRest];
+  if (contentWidth >= 88) return [
+    ["pod", "POD", 6, "left"], ["seat", "SEAT", 12, "left"], ["runtime", "RT", 3, "left"],
+    ["model", "MODEL", 8, "left"], ["context", "CTX", 6, "right"], ["status", "STATE", 9, "left"],
+    ["queue", "Q", 2, "right"], ["work", "WORK", 8, "left"], ["now", "NOW", 11, "left"],
+    ["actions", "ACTIONS", 14, "left"],
+  ];
+  // At 84x28 the L2 content pane is 58 cells. The three explicitly deferred
+  // columns (MODEL/NOW/ACTIONS) move to drill; identity, state and work remain.
+  const fixed = 6 + 12 + 3 + 5 + 9 + 2 + 6; // widths + separators, excluding WORK
+  return [
+    ["pod", "POD", 6, "left"], ["seat", "SEAT", 12, "left"], ["runtime", "RT", 3, "left"],
+    ["context", "CTX", 5, "right"], ["status", "STATE", 9, "left"], ["queue", "Q", 2, "right"],
+    ["work", "WORK", Math.max(4, contentWidth - fixed), "left"],
+  ];
 }
 
 function tableRow(columns: AgentColumn[], cells: Record<AgentColumnKey, string | number | null>): string {
   return columns.map(([key, , width, align]) => align === "right" ? padLeft(cells[key], width) : pad(cells[key], width)).join(" ");
+}
+
+function runtimeShort(runtime: string): string {
+  if (/claude/i.test(runtime)) return "cl";
+  if (/codex/i.test(runtime)) return "cx";
+  if (/terminal/i.test(runtime)) return ">_";
+  if (/human/i.test(runtime)) return "hu";
+  return runtime.slice(0, 2) || "—";
+}
+
+function contextCompact(value: number | null, narrow: boolean): string {
+  if (value == null) return "—";
+  if (narrow) return `${value}%`;
+  const filled = Math.max(0, Math.min(3, Math.round(value / 33.4)));
+  return `${value}%${"▪".repeat(filled)}${"▫".repeat(3 - filled)}`;
+}
+
+function seatName(pod: string, name: string): string {
+  for (const prefix of [`${pod}.`, `${pod}-`]) if (name.startsWith(prefix)) return name.slice(prefix.length);
+  return name;
+}
+
+function operationalState(status: string, motion: MotionCtx): { mark: string; word: string } {
+  const key = status.toLowerCase().replaceAll("_", "-");
+  if (key === "active" || key === "working" || key === "running") {
+    if (!motion.reduced) motion.used = true;
+    return { mark: motion.reduced ? "●" : motion.frame, word: "working" };
+  }
+  if (key === "attention-required" || key === "needs-attention" || key === "needs-input")
+    return { mark: "◐", word: "needs you" };
+  if (key === "blocked") return { mark: "⚑", word: "blocked" };
+  if (key === "failed" || key === "down") return { mark: "✕", word: "failed" };
+  if (key === "idle") return { mark: "·", word: "idle" };
+  if (key === "detached" || key === "stopped") return { mark: "○", word: "detached" };
+  return { mark: "?", word: "unknown" };
+}
+
+function queueFacts(snap: FleetSnapshot, session: string | null | undefined): { count: number; work: string; now: string } {
+  if (!session) return { count: 0, work: "—", now: "—" };
+  const sources: Array<["needs you" | "blocked" | "working" | "queued", FleetSnapshot["attention"]]> = [
+    ["needs you", snap.attention], ["blocked", snap.blocked], ["working", snap.inProgress], ["queued", snap.pending],
+  ];
+  const rows: Array<{ role: string; row: FleetSnapshot["attention"][number] }> = [];
+  const seen = new Set<string>();
+  for (const [role, items] of sources) for (const row of items) {
+    if (row.destinationSession !== session || seen.has(row.qitemId)) continue;
+    seen.add(row.qitemId);
+    rows.push({ role, row });
+  }
+  const primary = rows[0];
+  if (!primary) return { count: 0, work: "—", now: "—" };
+  const slice = primary.row.tags?.find((tag) => tag.startsWith("slice:"))?.slice("slice:".length);
+  const work = slice?.match(/^OPR(?:\.\d+){3}\.(\d+)$/)?.[1]
+    ? `S${slice.slice(slice.lastIndexOf(".") + 1)}`
+    : slice ?? "—";
+  const summary = primary.row.summary?.trim() || primary.row.body.split("\n").find((line) => line.trim())?.trim() || primary.row.qitemId;
+  const now = primary.role === "working" ? summary : `${primary.role} · ${summary}`;
+  return { count: rows.length, work, now };
 }
 
 function tabsLine(state: ViewState, suffix: string): ContentLine[] {
@@ -393,16 +447,22 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       return lines;
     }
     const agentCols = agentColumns(contentWidth);
+    const narrowFactory = !agentCols.some(([key]) => key === "model");
+    if (narrowFactory) lines.push({ text: "MODEL/NOW/ACTIONS on drill (enter)" });
     lines.push({
       text: tableRow(agentCols, {
-        rig: "RIG", pod: "POD", agent: "AGENT", runtime: "RUNTIME",
-        context: "CTX%", tokens: "TOKENS", status: "STATUS", actions: "ACTIONS",
+        pod: "POD", seat: "SEAT", runtime: "RT", model: "MODEL", context: "CTX",
+        status: "STATE", queue: "Q", work: "WORK", now: "NOW", actions: "ACTIONS",
       }),
     });
-    lines.push({ text: "─".repeat(columnsWidth(agentCols)) });
+    lines.push({ text: "━".repeat(columnsWidth(agentCols)) });
     const actionsIndex = agentCols.findIndex(([key]) => key === "actions");
-    const actionsColStart = agentCols.slice(0, actionsIndex).reduce((n, [, , width]) => n + width + 1, 0);
+    const actionsColStart = actionsIndex < 0 ? -1 : agentCols.slice(0, actionsIndex).reduce((n, [, , width]) => n + width + 1, 0);
+    let previousPod: string | null = null;
     for (const a of rows) {
+      const firstInPod = a.pod !== previousPod;
+      if (firstInPod && previousPod != null && !narrowFactory) lines.push({ text: "┈".repeat(columnsWidth(agentCols)) });
+      previousPod = a.pod;
       // ACTIONS = drive-structure ONLY (BR-9), each mapped to an EXISTING
       // write contract: `run ▸` = the rig-restore write (rendered only where
       // it applies — the seat is not running); `term ▸` = the terminal-open
@@ -410,25 +470,31 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       const canRun = a.canRun ?? !a.live;
       const actionsCell = canRun ? "run ▸ · term ▸" : "term ▸";
       const zones: ContentLine["zones"] = [];
-      const termOffset = actionsColStart + actionsCell.indexOf("term ▸");
-      zones.push({ start: termOffset, end: termOffset + "term ▸".length, action: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${a.pod}` } });
-      if (canRun)
+      if (actionsColStart >= 0) {
+        const termOffset = actionsColStart + actionsCell.indexOf("term ▸");
+        zones.push({ start: termOffset, end: termOffset + "term ▸".length, action: { type: "act", act: "open-terminal", view: `pod:${rig.name}/${a.pod}` } });
+      }
+      if (canRun && actionsColStart >= 0)
         zones.push({
           start: actionsColStart,
           end: actionsColStart + "run ▸".length,
           action: { type: "act", act: "run", rigId: rig.id ?? rig.name, agent: a.name },
         });
+      const stateCell = operationalState(a.status, motion);
+      const queue = queueFacts(snap, a.session);
       lines.push({
         // the WHOLE row is the hit surface (not a testid'd control): clicking
         // any visible cell opens the agent; the ACTIONS zones override.
         text: tableRow(agentCols, {
-          rig: rig.name,
-          pod: a.pod,
-          agent: a.name,
-          runtime: a.runtime,
-          context: a.context == null ? "—" : `${a.context}%`,
-          tokens: a.tokens ?? "—",
-          status: a.status,
+          pod: firstInPod ? a.pod : "",
+          seat: `${stateCell.mark} ${seatName(a.pod, a.name)}`,
+          runtime: runtimeShort(a.runtime),
+          model: a.model ?? "—",
+          context: contextCompact(a.context, narrowFactory),
+          status: stateCell.word,
+          queue: queue.count || "·",
+          work: queue.work,
+          now: queue.now,
           actions: actionsCell,
         }),
         action: { type: "drill", resource: "agent", name: a.name, target: { host: host.name, rig: rig.name, pod: a.pod } },
@@ -436,7 +502,9 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       });
     }
     lines.push({ text: "" });
-    lines.push({ text: `${rows.length} of ${all.length} / ${rows.filter((agent) => agent.status === "idle").length} idle` });
+    const working = rows.filter((agent) => ["active", "working", "running"].includes(agent.status)).length;
+    const attention = rows.filter((agent) => /attention|needs|blocked|unknown|failed/.test(agent.status)).length;
+    lines.push({ text: `${rows.length} seats · ${working} working · ${attention} need attention · ${rows.reduce((n, agent) => n + queueFacts(snap, agent.session).count, 0)} open rows` });
     return lines;
   }
   if (state.section === "specs") {
@@ -746,15 +814,17 @@ function spliceMarkerIntoSegs(
   return out;
 }
 
-function paneRule(cols: number, joint: "┬" | "┴", leftTitle?: string, rightTitle?: string): string {
-  const left = leftTitle ? `─ ${leftTitle} ` : "";
-  const right = rightTitle ? `─ ${rightTitle} ` : "";
-  const leftPart = (left + "─".repeat(EXPL_W)).slice(0, EXPL_W);
-  const rightPart = (right + "─".repeat(cols)).slice(0, Math.max(cols - EXPL_W - 1, 0));
-  return `${leftPart}${joint}${rightPart}`;
+function paneRule(cols: number, explW: number, joint: "top" | "bottom", leftTitle?: string, rightTitle?: string): string {
+  void joint;
+  const left = leftTitle ? `━ ${leftTitle} ` : "";
+  const right = rightTitle ? `━ ${rightTitle} ` : "";
+  const leftPart = (left + "━".repeat(explW)).slice(0, explW);
+  const rightPart = (right + "━".repeat(cols)).slice(0, Math.max(cols - explW - 1, 0));
+  return `${leftPart}╋${rightPart}`;
 }
 
 function keybindHints(state: ViewState): string {
+  if (state.copyMode) return "drag to select/copy · v resume mouse · q quit";
   // Affordance surfaces on REAL scrollability (contentMaxOffset), never gated
   // behind already-being-content-focused — that gate was the catch-22 (the
   // hint hid exactly where it was needed). When ↑↓ themselves scroll (a
@@ -763,7 +833,7 @@ function keybindHints(state: ViewState): string {
   const arrowsScroll = specDetailArrowsScroll(state);
   const nav = arrowsScroll ? "↑↓ scroll" : "↑↓ move";
   const pageScroll = state.contentMaxOffset > 0 && !arrowsScroll ? "⇞⇟ scroll · " : "";
-  return `${nav} · ←→ pane · ⏎ open · ${pageScroll}: command · / filter · f footer · q quit`;
+  return `${nav} · ←→ pane · ⏎ open · ${pageScroll}: command · / filter · v select/copy · f footer · q quit`;
 }
 
 /** The PULSE view renders FULL-WIDTH with NO explorer sidebar (increment 2). A
@@ -794,6 +864,7 @@ function truncateSegs(
 
 function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions, inputLine: string): Screen {
   const { cols = 120, rows = 32, nowMs = 0 } = options;
+  const explW = explorerWidth(cols);
   // FOUNDER OPTION-B (supersedes the earlier full-width ruling): PULSE renders as
   // a content-pane view INSIDE the normal chrome — the EXPLORER sidebar STAYS (it
   // is the founder's action path: from a needs-you row, mouse to the sidebar and
@@ -813,7 +884,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   const reduced = reducedMotion();
   const load = options.load ?? { inFlight: false, settled: true };
   const loading = load.inFlight || !load.settled;
-  const frame = spinnerFrame(Math.floor(nowMs / 120), options.colorMode ?? "truecolor", reduced);
+  const frame = spinnerFrame(Math.floor(nowMs / MOTION_FRAME_MS), options.colorMode ?? "truecolor", reduced);
   const liveFlashes = (options.rowFlashes ?? []).filter((f) => flashActive(f.at, nowMs, 600, reduced));
   const ackFlashes = (options.rowFlashes ?? []).filter((f) => flashActive(f.at, nowMs, 600, false));
 
@@ -842,11 +913,11 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
       lines.push(pad(`${mark} ${label}${alias}  ${tail}`, cols));
     }
   }
-  const explorerTitle = state.focusedPane === "explorer" ? "[ EXPLORER ]" : "EXPLORER";
-  const contentTitle = state.focusedPane === "content" ? "[ PULSE ]" : "PULSE";
-  lines.push(paneRule(cols, "┬", explorerTitle, contentTitle));
+  const explorerTitle = state.focusedPane === "explorer" ? "{ EXPLORER }" : "EXPLORER";
+  const contentTitle = state.focusedPane === "content" ? "{ PULSE }" : "PULSE";
+  lines.push(paneRule(cols, explW, "top", explorerTitle, contentTitle));
 
-  const contentWidth = Math.max(cols - EXPL_W - 2, 0);
+  const contentWidth = Math.max(cols - explW - 2, 0);
   const model = buildPulseModel(snap, nowMs);
   const chromeRows = 3; // bottom rule + hint bar + status line
   const bodyRows = Math.max(rows - 2 - chromeRows, 1);
@@ -889,7 +960,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
 
   // EXPLORER sidebar = the normal navigator (same helpers as every other view).
   const explorer = computeExplorerRows(state, snap);
-  const { labels: explorerDisplay, metas: explorerMetas } = navigatorDisplay(explorer, snap, EXPL_W - 1);
+  const { labels: explorerDisplay, metas: explorerMetas } = navigatorDisplay(explorer, snap, explW - 1);
   const explorerStart = Math.min(Math.max(state.selection - bodyRows + 1, 0), Math.max(explorer.length - bodyRows, 0));
 
   for (let i = 0; i < bodyRows; i++) {
@@ -899,16 +970,16 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
     const row = explorer[explorerIndex];
     const flashed = row?.key != null && ackFlashes.some((f) => f.key === row.key);
     if (flashed) flashAck = true;
-    const marker = explorerIndex === state.selection && row ? (flashed ? "»" : "›") : flashed ? "≈" : " ";
-    const left = pad(row ? `${marker}${explorerDisplay[explorerIndex] ?? row.label}` : "", EXPL_W);
+    const marker = explorerIndex === state.selection && row ? (flashed ? "◆" : "▶") : flashed ? "≈" : " ";
+    const left = pad(row ? `${marker}${explorerDisplay[explorerIndex] ?? row.label}` : "", explW);
     // CONTENT half = the pulse view, truncated to the content width. Selection is
     // the per-cell bg on the segs (mock affordance), so the content marker slot
     // stays blank — no "›" chevron (the native affordance the mock overrides).
     const citem = visiblePulse[i];
     const contentText = (citem?.text ?? "").slice(0, contentWidth);
-    lines.push(pad(`${left}│ ${contentText}`, cols));
+    lines.push(pad(`${left}┃ ${contentText}`, cols));
     if (row) {
-      hitMap.push({ y, x1: 1, x2: EXPL_W, action: row.action });
+      hitMap.push({ y, x1: 1, x2: explW, action: row.action });
       explorerRows.push({ ...row, y });
       const em = explorerMetas[explorerIndex];
       if (em && em.length) explorerMeta[y] = em.map((run) => ({ start: 1 + run.start, segs: run.segs }));
@@ -918,16 +989,16 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   }
 
   // Lane cells → content targets, x mapped into the content column (origin =
-  // EXPL_W + 3, matching the normal content zone geometry), clamped to `cols`.
+  // explorer boundary + 3, matching normal content geometry), clamped to `cols`.
   for (const t of visibleTargets) {
-    const x1 = EXPL_W + 2 + t.x1;
+    const x1 = explW + 2 + t.x1;
     if (x1 > cols) continue;
-    const target = { y: t.lineIndex - contentStart + 3, x1, x2: Math.min(EXPL_W + 2 + t.x2, cols), action: t.action };
+    const target = { y: t.lineIndex - contentStart + 3, x1, x2: Math.min(explW + 2 + t.x2, cols), action: t.action };
     contentTargets.push(target);
     hitMap.push(target);
   }
 
-  lines.push(paneRule(cols, "┴"));
+  lines.push(paneRule(cols, explW, "bottom"));
   lines.push(pad(keybindHints(state), cols));
   const drillPath = state.drill.map((d) => d.name).join(" → ");
   const readWarn = snap.readErrors.length > 0 ? `  ⚠ ${snap.readErrors.length} read(s) failed: ${snap.readErrors[0]}` : "";
@@ -947,6 +1018,7 @@ function renderPulseScreen(state: ViewState, snap: FleetSnapshot, options: Rende
   const anyFlash = model.lanes.some((l) => l.rows.some((r) => r.flashed));
   return {
     lines: lines.slice(0, rows),
+    explorerWidth: explW,
     hitMap,
     contentTargets,
     contentMaxOffset: maxContentOffset,
@@ -1008,14 +1080,15 @@ function crashCartShell(
   inputLine: string,
   opts?: { wrap?: boolean; scroll?: number },
 ): Screen {
+  const explW = explorerWidth(cols);
   const lines: string[] = [];
   const segRows: NonNullable<Screen["segRows"]> = {};
   lines.push(pad(`cmd ▸ ${inputLine}▊`, cols));
-  lines.push(paneRule(cols, "┬", "EXPLORER", contentTitle));
+  lines.push(paneRule(cols, explW, "top", "{ EXPLORER }", contentTitle));
 
   // The ledger-fed explorer column: the honest marker, then one row per rig (name + seat count).
   const leftRows: string[] = [led.note, "", ...led.rows.map((r) => `${r.label} (${r.seatCount})`)];
-  const contentWidth = Math.max(cols - EXPL_W - 2, 0);
+  const contentWidth = Math.max(cols - explW - 2, 0);
   if (opts?.wrap) content = wrapContentLines(content, contentWidth);
   const bodyRows = Math.max(rows - 2 - 3, 1); // minus cmd bar + top rule + (bottom rule, hints, status)
   // HIGH-2 — when content exceeds the viewport, it is VERTICALLY SCROLLABLE: contentMaxOffset is the
@@ -1025,19 +1098,20 @@ function crashCartShell(
   const scroll = Math.max(0, Math.min(contentMaxOffset, opts?.scroll ?? 0));
   for (let i = 0; i < bodyRows; i++) {
     const y = lines.length + 1;
-    const left = pad(leftRows[i] ?? "", EXPL_W);
+    const left = pad(leftRows[i] ?? "", explW);
     const citem = content[scroll + i];
     const contentText = (citem?.text ?? "").slice(0, contentWidth);
-    lines.push(pad(`${left}│ ${contentText}`, cols));
+    lines.push(pad(`${left}┃ ${contentText}`, cols));
     if (citem?.segs) segRows[y] = truncateSegs(citem.segs, contentWidth);
   }
-  lines.push(paneRule(cols, "┴"));
+  lines.push(paneRule(cols, explW, "bottom"));
   lines.push(pad("", cols));
   const scrollHint = contentMaxOffset > 0 ? ` · ↑↓ scroll (${scroll}/${contentMaxOffset})` : "";
   lines.push(pad(`[crash-cart] daemon down · explorer ${led.note}${scrollHint}`, cols));
   while (lines.length < rows) lines.push("");
   return {
     lines: lines.slice(0, rows),
+    explorerWidth: explW,
     hitMap: [],
     contentTargets: [],
     contentMaxOffset,
@@ -1048,6 +1122,7 @@ function crashCartShell(
 
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const { cols = 120, rows = 32, nowMs = 0 } = options;
+  const explW = explorerWidth(cols);
   // 5.2 crash-cart (shell-placement rework, ruling 3c6c2be0): daemon-DOWN renders as a CONTENT-PANE
   // view inside the standard shell — the explorer sidebar is ALWAYS present, ledger-fed + honestly
   // marked (from the SAME one-JSON discovery, never a second read). Content moves into the right pane
@@ -1087,7 +1162,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   const reduced = reducedMotion();
   const load = options.load ?? { inFlight: false, settled: true };
   const motion: MotionCtx = {
-    frame: spinnerFrame(Math.floor(nowMs / 120), options.colorMode ?? "truecolor", reduced),
+    frame: spinnerFrame(Math.floor(nowMs / MOTION_FRAME_MS), options.colorMode ?? "truecolor", reduced),
     reduced,
     used: false,
     loading: load.inFlight || !load.settled,
@@ -1117,15 +1192,15 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   }
   const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", needs: "NEEDS-YOU" }[state.section] ?? state.section.toUpperCase();
   // active-pane emphasis (k9s-class chrome): the focused pane's title is bracketed
-  const explorerTitle = state.focusedPane === "explorer" ? "[ EXPLORER ]" : "EXPLORER";
-  const contentTitle = state.focusedPane === "content" ? `[ ${sectionTitle} ]` : sectionTitle;
-  lines.push(paneRule(cols, "┬", explorerTitle, contentTitle));
+  const explorerTitle = state.focusedPane === "explorer" ? "{ EXPLORER }" : "EXPLORER";
+  const contentTitle = state.focusedPane === "content" ? `{ ${sectionTitle} }` : sectionTitle;
+  lines.push(paneRule(cols, explW, "top", explorerTitle, contentTitle));
 
   const explorer = computeExplorerRows(state, snap);
   // Slice-17: the file-tree re-skin is a DISPLAY transform only — rows, keys,
   // actions, and the hit-map all keep resolving against the row model above.
-  const { labels: explorerDisplay, metas: explorerMetas } = navigatorDisplay(explorer, snap, EXPL_W - 1);
-  const content = contentLines(state, snap, Math.max(cols - EXPL_W - 2, 0), motion);
+  const { labels: explorerDisplay, metas: explorerMetas } = navigatorDisplay(explorer, snap, explW - 1);
+  const content = contentLines(state, snap, Math.max(cols - explW - 2, 0), motion);
   const footer = state.footerOn ? snap.stream.at(-1) : undefined;
   // round-5 (guard): the tmux-style ONE-SHOT activity flash targets the
   // flashed agent's EXPLORER row — per-seat pane-output events from the
@@ -1177,8 +1252,8 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     // exact "›" baseline
     const flashed = row?.key != null && ackFlashes.some((f) => f.key === row.key);
     if (flashed) flashAck = true;
-    const marker = explorerIndex === state.selection && row ? (flashed ? "»" : "›") : flashed ? "≈" : " ";
-    const left = pad(row ? `${marker}${explorerDisplay[explorerIndex] ?? row.label}` : "", EXPL_W);
+    const marker = explorerIndex === state.selection && row ? (flashed ? "◆" : "▶") : flashed ? "≈" : " ";
+    const left = pad(row ? `${marker}${explorerDisplay[explorerIndex] ?? row.label}` : "", explW);
     const item = visibleContent[i];
     const targetIndex = contentTargets.length;
     const zones = item?.zones ?? [];
@@ -1196,9 +1271,9 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
         if (rowSegs) rowSegs = spliceMarkerIntoSegs(rowSegs, selectedZone.start - 1);
       } else contentMarker = "›";
     }
-    lines.push(pad(`${left}│${contentMarker}${contentText}`, cols));
+    lines.push(pad(`${left}┃${contentMarker}${contentText}`, cols));
     if (row) {
-      hitMap.push({ y, x1: 1, x2: EXPL_W, action: row.action });
+      hitMap.push({ y, x1: 1, x2: explW, action: row.action });
       explorerRows.push({ ...row, y });
       const em = explorerMetas[explorerIndex];
       if (em && em.length) explorerMeta[y] = em.map((run) => ({ start: 1 + run.start, segs: run.segs })); // +1 = marker slot
@@ -1206,12 +1281,12 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
     }
     // zones first: hit lookup takes the first match, so a zone wins over the row-wide action
     for (const z of zones) {
-      const target = { y, x1: EXPL_W + 3 + z.start, x2: EXPL_W + 2 + z.end, action: z.action };
+      const target = { y, x1: explW + 3 + z.start, x2: explW + 2 + z.end, action: z.action };
       hitMap.push(target);
       contentTargets.push(target);
     }
     if (item?.action) {
-      const target = { y, x1: EXPL_W + 3, x2: cols, action: item.action };
+      const target = { y, x1: explW + 3, x2: cols, action: item.action };
       hitMap.push(target);
       contentTargets.push(target);
     }
@@ -1221,7 +1296,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   if (footer) lines.push(pad(`≋ ${footer.tsEmitted.slice(11, 16)} ${footer.sourceSession}: ${footer.body}`, cols));
   const drillPath = state.drill.map((d) => d.name).join(" → ");
   const readWarn = snap.readErrors.length > 0 ? `  ⚠ ${snap.readErrors.length} read(s) failed: ${snap.readErrors[0]}` : "";
-  lines.push(paneRule(cols, "┴"));
+  lines.push(paneRule(cols, explW, "bottom"));
   lines.push(pad(keybindHints(state), cols));
   lines.push(
     pad(
@@ -1232,6 +1307,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   while (lines.length < rows) lines.push("");
   return {
     lines: lines.slice(0, rows),
+    explorerWidth: explW,
     hitMap,
     contentTargets,
     contentMaxOffset: maxContentOffset,
