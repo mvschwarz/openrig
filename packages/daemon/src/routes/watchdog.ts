@@ -48,6 +48,7 @@ export function watchdogRoutes(): Hono {
         : err.code === "policy_deferred_to_phase_d" ? 400
         : err.code === "interval_invalid" ? 400
         : err.code === "target_session_invalid" ? 400
+        : err.code === "spec_invalid" ? 400
         : err.code === "context_usage_schema_missing" ? 400
         : err.code === "threshold_invalid" ? 400
         : err.code === "watched_file_unresolved" ? 400

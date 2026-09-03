@@ -1,3 +1,4 @@
+import { parse as parseYaml } from "yaml";
 import type { EventBus } from "./event-bus.js";
 import type { Policy, PolicyEvaluation, PolicyJob } from "./policies/types.js";
 import { artifactPoolReadyPolicy } from "./policies/artifact-pool-ready.js";
@@ -5,6 +6,7 @@ import { edgeArtifactRequiredPolicy } from "./policies/edge-artifact-required.js
 import { periodicReminderPolicy } from "./policies/periodic-reminder.js";
 import { contextUsageThresholdPolicy } from "./policies/context-usage-threshold.js";
 import {
+  WatchdogJobsError,
   type WatchdogJob,
   type WatchdogJobsRepository,
 } from "./watchdog-jobs-repository.js";
@@ -55,7 +57,22 @@ export interface DeliveryOutcome {
   continuityActionCompleted?: boolean;
 }
 
-export type DeliveryFn = (req: DeliveryRequest) => Promise<DeliveryOutcome>;
+export interface WatchdogDeliverySource {
+  jobId: string;
+  policy: string;
+}
+
+export type DeliveryFn = (
+  req: DeliveryRequest,
+  source: WatchdogDeliverySource,
+) => Promise<DeliveryOutcome>;
+
+export function formatWatchdogDeliveryMessage(
+  source: WatchdogDeliverySource,
+  message: string,
+): string {
+  return `[OpenRig watchdog scheduler · policy: ${source.policy} · job: ${source.jobId}]\n${message}`;
+}
 
 export interface PolicyContextParser {
   /**
@@ -479,11 +496,14 @@ export class WatchdogPolicyEngine {
     if (isContextUsageThreshold && occupantGeneration && !continuityAction) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
-    const delivery = await this.deliver({
-      targetSession: outcome.target.session,
-      message: outcome.message,
-      ...(continuityAction ? { continuityAction } : {}),
-    });
+    const delivery = await this.deliver(
+      {
+        targetSession: outcome.target.session,
+        message: outcome.message,
+        ...(continuityAction ? { continuityAction } : {}),
+      },
+      { jobId: job.jobId, policy: job.policy },
+    );
     if (
       isContextUsageThreshold &&
       occupantGeneration &&
@@ -562,227 +582,64 @@ function parseContinuityAction(
   };
 }
 
-/**
- * Default spec_yaml parser. Extracts:
- *   - top-level `target:` block (POC contract: `{session: "..."}`)
- *   - top-level `message:` scalar (POC pattern for periodic-reminder)
- *   - nested `context:` block as Record<string, unknown>
- *
- * Uses a minimal recursive indentation-based parser sufficient for the
- * POC spec set:
- *   policy: ...
- *   target:
- *     session: ...
- *   message: "..."
- *   interval_seconds: 1800
- *   context:
- *     pools:
- *       - path: /abs/...
- *         include_statuses: [ready]
- *
- * For richer YAML, a future maintenance pass can swap in `yaml` /
- * `js-yaml`; the POC schemas are simple enough that this parser
- * handles them in-tree without an extra dependency.
- */
+/** Parse the operator-authored watchdog YAML before it reaches persistence. */
 export function parseWatchdogSpec(specYaml: string): {
   target: { session: string } | null;
   message: string | null;
   context: Record<string, unknown>;
 } {
-  const lines = specYaml.split("\n");
-  const result: { target: { session: string } | null; message: string | null; context: Record<string, unknown> } = {
-    target: null,
-    message: null,
-    context: {},
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(specYaml);
+  } catch (err) {
+    throw new WatchdogJobsError(
+      "spec_invalid",
+      `watchdog spec has invalid YAML: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!isRecord(parsed)) {
+    throw new WatchdogJobsError("spec_invalid", "watchdog spec must be a YAML mapping");
+  }
+
+  const rawMessage = parsed["message"];
+  if (rawMessage !== undefined && rawMessage !== null && typeof rawMessage !== "string") {
+    throw new WatchdogJobsError("spec_invalid", "watchdog spec field 'message' must be a string");
+  }
+
+  const rawContext = parsed["context"];
+  if (rawContext !== undefined && rawContext !== null && !isRecord(rawContext)) {
+    throw new WatchdogJobsError("spec_invalid", "watchdog spec field 'context' must be a mapping");
+  }
+  const context = isRecord(rawContext) ? rawContext : {};
+  if (
+    context["message"] !== undefined &&
+    context["message"] !== null &&
+    typeof context["message"] !== "string"
+  ) {
+    throw new WatchdogJobsError("spec_invalid", "watchdog spec field 'context.message' must be a string");
+  }
+
+  const rawTarget = parsed["target"];
+  let target: { session: string } | null = null;
+  if (typeof rawTarget === "string") {
+    target = { session: rawTarget };
+  } else if (rawTarget !== undefined && rawTarget !== null) {
+    if (!isRecord(rawTarget) || typeof rawTarget["session"] !== "string") {
+      throw new WatchdogJobsError(
+        "spec_invalid",
+        "watchdog spec field 'target' must be a session string or mapping with string 'session'",
+      );
+    }
+    target = { session: rawTarget["session"] };
+  }
+
+  return {
+    target,
+    message: typeof rawMessage === "string" ? rawMessage : null,
+    context,
   };
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i] ?? "";
-    if (line.trimStart() !== line) {
-      // Indented line at top level — skip until we re-hit indent 0.
-      i++;
-      continue;
-    }
-    const trimmed = line.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("#")) {
-      i++;
-      continue;
-    }
-    const colonIdx = trimmed.indexOf(":");
-    if (colonIdx === -1) {
-      i++;
-      continue;
-    }
-    const key = trimmed.slice(0, colonIdx).trim();
-    const value = trimmed.slice(colonIdx + 1).trim();
-    if (value.length > 0) {
-      // Inline scalar.
-      if (key === "message") {
-        result.message = stripQuotes(value);
-      }
-      i++;
-      continue;
-    }
-    // Block. Collect indented lines below.
-    i++;
-    const block: string[] = [];
-    while (i < lines.length) {
-      const sub = lines[i] ?? "";
-      if (sub.length === 0) {
-        block.push(sub);
-        i++;
-        continue;
-      }
-      if (sub.startsWith(" ") || sub.startsWith("\t")) {
-        block.push(sub);
-        i++;
-        continue;
-      }
-      break;
-    }
-    const dedented = block.map((l) => (l.startsWith("  ") ? l.slice(2) : l)).join("\n");
-    if (key === "context") {
-      result.context = parseSimpleYaml(dedented) as Record<string, unknown>;
-    } else if (key === "target") {
-      const parsed = parseSimpleYaml(dedented);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const sess = (parsed as Record<string, unknown>).session;
-        if (typeof sess === "string") result.target = { session: sess };
-      }
-    }
-  }
-  return result;
 }
 
-function stripQuotes(value: string): string {
-  if (value.startsWith('"') && value.endsWith('"')) return value.slice(1, -1);
-  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1);
-  return value;
-}
-
-function parseSimpleYaml(src: string): unknown {
-  const lines = src.split("\n").filter((l) => l.trim().length > 0 && !l.trim().startsWith("#"));
-  const idx = { i: 0 };
-  return parseYamlBlock(lines, idx, 0);
-}
-
-function indentOf(line: string): number {
-  let n = 0;
-  while (n < line.length && line[n] === " ") n++;
-  return n;
-}
-
-function parseScalar(raw: string): unknown {
-  const trimmed = raw.trim();
-  if (trimmed === "null" || trimmed === "~") return null;
-  if (trimmed === "true") return true;
-  if (trimmed === "false") return false;
-  if (/^-?\d+$/.test(trimmed)) return Number.parseInt(trimmed, 10);
-  if (/^-?\d+\.\d+$/.test(trimmed)) return Number.parseFloat(trimmed);
-  if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-    const inner = trimmed.slice(1, -1).trim();
-    if (inner === "") return [];
-    return inner.split(",").map((p) => parseScalar(p));
-  }
-  return stripQuotes(trimmed);
-}
-
-function parseYamlBlock(lines: string[], idx: { i: number }, expectedIndent: number): unknown {
-  if (idx.i >= lines.length) return null;
-  const first = lines[idx.i] ?? "";
-  const firstIndent = indentOf(first);
-  if (firstIndent < expectedIndent) return null;
-  const trimmed = first.trim();
-  if (trimmed.startsWith("- ")) {
-    return parseYamlSeq(lines, idx, firstIndent);
-  }
-  return parseYamlMap(lines, idx, firstIndent);
-}
-
-function parseYamlMap(
-  lines: string[],
-  idx: { i: number },
-  blockIndent: number,
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  while (idx.i < lines.length) {
-    const line = lines[idx.i] ?? "";
-    const ind = indentOf(line);
-    if (ind < blockIndent) break;
-    if (ind > blockIndent) break;
-    const trimmed = line.trim();
-    const colonIdx = trimmed.indexOf(":");
-    if (colonIdx === -1) break;
-    const key = trimmed.slice(0, colonIdx).trim();
-    const valuePart = trimmed.slice(colonIdx + 1).trim();
-    idx.i++;
-    if (valuePart.length > 0) {
-      result[key] = parseScalar(valuePart);
-    } else {
-      if (idx.i < lines.length) {
-        const next = lines[idx.i] ?? "";
-        const nextIndent = indentOf(next);
-        if (nextIndent > blockIndent) {
-          result[key] = parseYamlBlock(lines, idx, nextIndent);
-          continue;
-        }
-      }
-      result[key] = null;
-    }
-  }
-  return result;
-}
-
-function parseYamlSeq(
-  lines: string[],
-  idx: { i: number },
-  blockIndent: number,
-): unknown[] {
-  const result: unknown[] = [];
-  while (idx.i < lines.length) {
-    const line = lines[idx.i] ?? "";
-    const ind = indentOf(line);
-    if (ind < blockIndent) break;
-    if (ind > blockIndent) break;
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("- ")) break;
-    const rest = trimmed.slice(2).trim();
-    idx.i++;
-    if (rest.includes(":")) {
-      const colonIdx = rest.indexOf(":");
-      const k = rest.slice(0, colonIdx).trim();
-      const v = rest.slice(colonIdx + 1).trim();
-      const elem: Record<string, unknown> = {};
-      if (v.length > 0) {
-        elem[k] = parseScalar(v);
-      } else if (idx.i < lines.length && indentOf(lines[idx.i] ?? "") > blockIndent + 2) {
-        elem[k] = parseYamlBlock(lines, idx, indentOf(lines[idx.i] ?? ""));
-      } else {
-        elem[k] = null;
-      }
-      while (idx.i < lines.length) {
-        const sub = lines[idx.i] ?? "";
-        const subIndent = indentOf(sub);
-        if (subIndent !== blockIndent + 2) break;
-        const subTrim = sub.trim();
-        if (subTrim.startsWith("- ")) break;
-        const sCol = subTrim.indexOf(":");
-        if (sCol === -1) break;
-        const sk = subTrim.slice(0, sCol).trim();
-        const sv = subTrim.slice(sCol + 1).trim();
-        idx.i++;
-        if (sv.length > 0) {
-          elem[sk] = parseScalar(sv);
-        } else if (idx.i < lines.length && indentOf(lines[idx.i] ?? "") > blockIndent + 2) {
-          elem[sk] = parseYamlBlock(lines, idx, indentOf(lines[idx.i] ?? ""));
-        } else {
-          elem[sk] = null;
-        }
-      }
-      result.push(elem);
-    } else {
-      result.push(parseScalar(rest));
-    }
-  }
-  return result;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

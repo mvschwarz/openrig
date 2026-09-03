@@ -17,6 +17,8 @@ import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.j
 import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
 import {
   type DeliveryFn,
+  formatWatchdogDeliveryMessage,
+  parseWatchdogSpec,
   WatchdogPolicyEngine,
 } from "../src/domain/watchdog-policy-engine.js";
 import type { PersistedEvent } from "../src/domain/types.js";
@@ -205,6 +207,58 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
     });
     await engine.evaluate(job);
     expect(deliveryCalls).toEqual([{ targetSession: "fallback@rig", message: "ping" }]);
+  });
+
+  it.each([
+    {
+      syntax: "folded block scalar",
+      specYaml: "message: >-\n  Refresh the execution dashboard\n  and report only meaningful changes.\n",
+      expected: "Refresh the execution dashboard and report only meaningful changes.",
+    },
+    {
+      syntax: "literal block scalar",
+      specYaml: "message: |\n  First line.\n  Second line.\n",
+      expected: "First line.\nSecond line.\n",
+    },
+    {
+      syntax: "quoted scalar",
+      specYaml: 'message: "Wake: inspect the queue"\n',
+      expected: "Wake: inspect the queue",
+    },
+    {
+      syntax: "plain scalar",
+      specYaml: "message: Inspect the queue\n",
+      expected: "Inspect the queue",
+    },
+  ])("parses $syntax as its semantic reminder body", ({ specYaml, expected }) => {
+    expect(parseWatchdogSpec(specYaml).message).toBe(expected);
+  });
+
+  it("hands watchdog provenance to the delivery adapter without changing the authored payload", async () => {
+    let source: { jobId: string; policy: string } | undefined;
+    const engine = makeEngine({
+      deliver: async (request, deliverySource) => {
+        deliveryCalls.push(request);
+        source = deliverySource;
+        return { status: "ok" };
+      },
+    });
+    const job = jobsRepo.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: alice@rig\nmessage: Inspect the queue\n",
+      targetSession: "alice@rig",
+      intervalSeconds: 60,
+      registeredBySession: "ops@kernel",
+    });
+
+    await engine.evaluate(job);
+
+    expect(source).toEqual({ jobId: job.jobId, policy: "periodic-reminder" });
+    expect(deliveryCalls).toEqual([{ targetSession: "alice@rig", message: "Inspect the queue" }]);
+    expect(formatWatchdogDeliveryMessage(source!, deliveryCalls[0]!.message)).toBe(
+      `[OpenRig watchdog scheduler · policy: periodic-reminder · job: ${job.jobId}]\nInspect the queue`,
+    );
+    expect(log.listForJob(job.jobId)[0]?.deliveryMessage).toBe("Inspect the queue");
   });
 
   // R1 fix (guard blocker 1): port the POC active-wake regression.
