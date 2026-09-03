@@ -13,6 +13,7 @@ import type { ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
 import type { StartupAction } from "./types.js";
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
+import { observeSolePane } from "./pane-binding-observation.js";
 import { createHash } from "node:crypto";
 
 /**
@@ -412,6 +413,21 @@ export class SeatLifecycleService {
           code: "session_live",
           message: `Seat "${input.seatRef}" is live; fresh launch refuses without --stop.`,
           guidance: "Re-run with --stop to end exactly this managed occupant, or use rig handover to carry context.",
+        };
+      }
+      const observedPane = await observeSolePane(this.tmuxAdapter, canonicalSessionName);
+      if (!observedPane.ok && observedPane.code === "tmux_unavailable") {
+        return {
+          ok: false,
+          code: "tmux_probe_failed",
+          message: `${observedPane.detail}; fresh launch refuses rather than kill without live occupant identity.`,
+        };
+      }
+      if (!observedPane.ok || observedPane.pane !== currentBinding?.tmuxPane) {
+        return {
+          ok: false,
+          code: "unmanaged_session_collision",
+          message: `Canonical tmux session "${canonicalSessionName}" is live, but its pane does not match this seat's current managed binding; refusing to stop it.`,
         };
       }
       const stopped = await this.stopManagedTmuxSeat(

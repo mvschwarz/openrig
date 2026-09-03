@@ -30,6 +30,7 @@ describe("SeatLifecycleService.launchFresh", () => {
   let sessionRegistry: SessionRegistry;
   let eventBus: EventBus;
   let alive: Set<string>;
+  let livePanes: Map<string, string>;
   let killed: string[];
   let tmux: TmuxAdapter;
   let projectedPlan: ProjectionPlan | null;
@@ -48,6 +49,7 @@ describe("SeatLifecycleService.launchFresh", () => {
     sessionRegistry = new SessionRegistry(db);
     eventBus = new EventBus(db);
     alive = new Set();
+    livePanes = new Map();
     killed = [];
     projectedPlan = null;
     launchBinding = null;
@@ -58,20 +60,25 @@ describe("SeatLifecycleService.launchFresh", () => {
       createSession: vi.fn(async (name: string) => {
         if (alive.has(name)) return { ok: false as const, code: "duplicate_session", message: "duplicate" };
         alive.add(name);
+        livePanes.set(name, "%fresh");
         return { ok: true as const };
       }),
       killSession: vi.fn(async (name: string): Promise<TmuxResult> => {
         killed.push(name);
         alive.delete(name);
+        livePanes.delete(name);
         return { ok: true };
       }),
       probeSession: vi.fn(async (name: string) => alive.has(name) ? { state: "present" as const } : { state: "absent" as const }),
       hasSession: vi.fn(async (name: string) => alive.has(name)),
       listSessions: vi.fn(async () => [...alive].map((name) => ({ name, windows: 1, created: "", attached: false }))),
       listWindows: vi.fn(async () => []),
-      listPanes: vi.fn(async (name: string) => alive.has(name)
-        ? [{ id: "%fresh", index: 0, cwd: "/project", width: 80, height: 24, active: true }]
-        : []),
+      listPanes: vi.fn(async (name: string) => {
+        const pane = alive.has(name) ? livePanes.get(name) : undefined;
+        return pane
+          ? [{ id: pane, index: 0, cwd: "/project", width: 80, height: 24, active: true }]
+          : [];
+      }),
       getPanePid: vi.fn(async () => 4242),
       getPaneCommand: vi.fn(async () => paneCommand),
       sendText: vi.fn(async () => ({ ok: true as const })),
@@ -136,6 +143,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       sessionRegistry.updateStatus(session.id, "running");
       sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName, tmuxPane: "%old" });
       alive.add(sessionName);
+      livePanes.set(sessionName, "%old");
     }
     if (opts?.withContext !== false) {
       db.prepare(
@@ -206,6 +214,22 @@ describe("SeatLifecycleService.launchFresh", () => {
     alive.add(seat.sessionName);
 
     const result = await service.launchFresh({ seatRef: "dev.impl", fresh: true, stop: true, reason: "collision discriminator" });
+
+    expect(result).toMatchObject({ ok: false, code: "unmanaged_session_collision" });
+    expect(killed).toEqual([]);
+    expect(alive.has(seat.sessionName)).toBe(true);
+  });
+
+  it("refuses to stop a canonical session whose live pane does not match the managed binding", async () => {
+    const seat = seedSeat();
+    livePanes.set(seat.sessionName, "%unmanaged");
+
+    const result = await service.launchFresh({
+      seatRef: "dev.impl",
+      fresh: true,
+      stop: true,
+      reason: "live occupant ownership discriminator",
+    });
 
     expect(result).toMatchObject({ ok: false, code: "unmanaged_session_collision" });
     expect(killed).toEqual([]);
