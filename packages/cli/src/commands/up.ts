@@ -4,7 +4,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYamlDoc } from "yaml";
 import { Command } from "commander";
 import { DaemonClient, DaemonConnectionError } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
+import type { RiggedConfig } from "../config-store.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -133,12 +134,7 @@ Examples:
       // Run preflight before auto-start
       let status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running") {
-        let resolvedConfig: {
-          daemon: { port: number; host: string };
-          db: { path: string };
-          transcripts: { enabled: boolean; path: string; lines: number; pollIntervalSeconds: number };
-          workspace: { root: string };
-        } | null = null;
+        let resolvedConfig: RiggedConfig | null = null;
         // bug-fix slice auth-bearer-tailscale-trust: track whether
         // daemon.host was operator-explicit (env or config file) vs
         // default-fallback. The daemon's multi-bind path (loopback +
@@ -199,6 +195,9 @@ Examples:
             transcriptsLines: resolvedConfig?.transcripts.lines,
             transcriptsPollIntervalSeconds: resolvedConfig?.transcripts.pollIntervalSeconds,
             workspaceRoot: resolvedConfig?.workspace.root,
+            contextRoot: resolvedConfig?.context.root,
+            skillsRoot: resolvedConfig?.skills.root,
+            topologyRoot: resolvedConfig?.topology.root,
           }, deps.lifecycleDeps);
           status = await getDaemonStatus(deps.lifecycleDeps);
         } catch (err) {

@@ -46,11 +46,10 @@ export interface RiggedConfig {
   topology: {
     root: string;
   };
-  // OPR.0.5.3.7 R4 — the context-pack library landing zone (`rig context add`
-  // installs here). Config-resolved so a shipped verb runs unmodified on a
-  // stranger machine — never a hardcoded ~/.openrig literal. Twin of the daemon.
+  // OPR.0.5.9.5 Wave B — the addressable context library root (`rig context add`
+  // installs here). The removed packsRoot shape is refused, never bridged.
   context: {
-    packsRoot: string;
+    root: string;
   };
   skills: {
     root: string;
@@ -231,8 +230,8 @@ const DEFAULTS = {
   },
   // OPR.0.5.3.6 D1 — derived under the OpenRig home, never a shared-docs literal.
   topology: { root: getDefaultOpenRigPath("topology") },
-  // OPR.0.5.3.7 R4 — derived under the OpenRig home, never a shared-docs literal.
-  context: { packsRoot: getDefaultOpenRigPath("context-packs") },
+  // OPR.0.5.9.5 Wave B — canonical addressable context library.
+  context: { root: getDefaultOpenRigPath("context") },
   skills: { root: getDefaultOpenRigPath("skills") },
   onboarding: { defaultPack: { enabled: true } },
   files: { allowlist: "" },
@@ -362,8 +361,8 @@ export const VALID_KEYS = [
   // shared-docs/rigs location stays readable via the daemon's
   // resolveLegacyTopologyRigsRoot fallback (advisory-emitting).
   "topology.root",
-  // OPR.0.5.3.7 R4 — context-pack landing zone; lockstep with the daemon twin.
-  "context.packs_root",
+  // OPR.0.5.9.5 Wave B — canonical context library; old key is refused.
+  "context.root",
   "skills.root",
   "onboarding.default_pack.enabled",
   "files.allowlist",
@@ -454,8 +453,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "workspace.projects_root": { primary: "OPENRIG_WORKSPACE_PROJECTS_ROOT" },
   "workspace.catalog_path": { primary: "OPENRIG_WORKSPACE_CATALOG_PATH" },
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
-  // OPR.0.5.3.7 R4 — new key, OPENRIG_* only (no RIGGED_* legacy).
-  "context.packs_root": { primary: "OPENRIG_CONTEXT_PACKS_ROOT" },
+  "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
@@ -534,7 +532,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workspace.projects_root": ["workspace", "projectsRoot"],
   "workspace.catalog_path": ["workspace", "catalogPath"],
   "topology.root": ["topology", "root"],
-  "context.packs_root": ["context", "packsRoot"],
+  "context.root": ["context", "root"],
   "skills.root": ["skills", "root"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "files.allowlist": ["files", "allowlist"],
@@ -584,6 +582,28 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
 
 function isValidKey(key: string): key is ValidKey {
   return (VALID_KEYS as readonly string[]).includes(key);
+}
+
+const REMOVED_CONTEXT_KEY = "context.packs_root";
+const REMOVED_CONTEXT_ENV = "OPENRIG_CONTEXT_PACKS_ROOT";
+
+export function removedContextSettingMessage(key: string): string | null {
+  return key === REMOVED_CONTEXT_KEY
+    ? 'Config key "context.packs_root" was removed; use "context.root".'
+    : null;
+}
+
+function assertNoRemovedContextSetting(fileConfig: Record<string, unknown>): void {
+  if (process.env[REMOVED_CONTEXT_ENV]?.trim()) {
+    throw new Error(
+      "OPENRIG_CONTEXT_PACKS_ROOT was removed; use OPENRIG_CONTEXT_ROOT (config key context.root).",
+    );
+  }
+  if (getNestedValue(fileConfig, ["context", "packsRoot"]) !== undefined) {
+    throw new Error(
+      'Config file contains removed key "context.packs_root" (context.packsRoot); replace it with "context.root" (context.root).',
+    );
+  }
 }
 
 // ── OPR.0.4.4.15 (G15-P1) — TWIN of the daemon settings-store's ONE
@@ -926,7 +946,7 @@ export class ConfigStore {
         root: v("topology.root") as string,
       },
       context: {
-        packsRoot: v("context.packs_root") as string,
+        root: v("context.root") as string,
       },
       skills: {
         root: v("skills.root") as string,
@@ -1023,6 +1043,8 @@ export class ConfigStore {
    * default).
    */
   resolveWithSource(key: string): ResolvedSetting {
+    const removedMessage = removedContextSettingMessage(key);
+    if (removedMessage) throw new Error(removedMessage);
     // OPR.0.4.4.15: dynamic class resolves file-or-default (no env in v1).
     const feedHost = parseFeedHostSubscriptionKey(key);
     if (feedHost) {
@@ -1096,6 +1118,8 @@ export class ConfigStore {
   }
 
   set(key: string, value: string): void {
+    const removedMessage = removedContextSettingMessage(key);
+    if (removedMessage) throw new Error(removedMessage);
     // OPR.0.4.4.15: the registered dynamic class is accepted; every other
     // unknown key keeps the reject-loud behavior below byte-for-byte.
     const feedHost = parseFeedHostSubscriptionKey(key);
@@ -1132,6 +1156,8 @@ export class ConfigStore {
       try { unlinkSync(this.configPath); } catch { /* missing is fine */ }
       return;
     }
+    const removedMessage = removedContextSettingMessage(key);
+    if (removedMessage) throw new Error(removedMessage);
     // OPR.0.4.4.15: dynamic-class reset removes the whole host node.
     const feedHost = parseFeedHostSubscriptionKey(key);
     if (feedHost) {
@@ -1158,15 +1184,19 @@ export class ConfigStore {
   }
 
   private readConfigFile(): Record<string, unknown> {
-    if (!existsSync(this.configPath)) return {};
-    const raw = readFileSync(this.configPath, "utf-8");
-    try {
-      return JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      throw new Error(
-        `Config file at ${this.configPath} is malformed. Fix the JSON or reset with: rig config reset`
-      );
+    let parsed: Record<string, unknown> = {};
+    if (existsSync(this.configPath)) {
+      const raw = readFileSync(this.configPath, "utf-8");
+      try {
+        parsed = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        throw new Error(
+          `Config file at ${this.configPath} is malformed. Fix the JSON or reset with: rig config reset`
+        );
+      }
     }
+    assertNoRemovedContextSetting(parsed);
+    return parsed;
   }
 }
 

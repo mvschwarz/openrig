@@ -59,7 +59,7 @@ describe("51-08 A1 wiring — the series accrues from the real poll tick", () =>
     const rigRepo = new RigRepository(db);
     const sessionRegistry = new SessionRegistry(db);
     tmpDir = join(tmpdir(), `usage-samples-wiring-${process.pid}-${Math.random().toString(36).slice(2)}`);
-    mkdirSync(join(tmpDir, "context"), { recursive: true });
+    mkdirSync(join(tmpDir, "state", "context-usage"), { recursive: true });
     store = new ContextUsageStore(db, { stateDir: tmpDir, codexHomeDir: tmpDir });
     samples = new UsageSamplesStore(db);
     providerRows = [];
@@ -93,7 +93,7 @@ describe("51-08 A1 wiring — the series accrues from the real poll tick", () =>
   function writeSidecar(over: Record<string, unknown> = {}) {
     const safe = sessionName.replace(/[^a-zA-Z0-9@._-]/g, "_");
     writeFileSync(
-      join(tmpDir, "context", `${safe}.json`),
+      join(tmpDir, "state", "context-usage", `${safe}.json`),
       JSON.stringify({
         session_name: sessionName,
         sampled_at: "2026-08-07T09:00:00.000Z",

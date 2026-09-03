@@ -3,7 +3,14 @@ import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import { ConfigStore } from "./config-store.js";
 import { OPENRIG_HOME, LEGACY_RIGGED_HOME, readOpenRigEnv } from "./openrig-compat.js";
-import { workspaceScaffoldDirs, workspaceScaffoldFiles } from "./commands/config-init-workspace.js";
+import {
+  ensureDefaultWorkspace,
+  ensureOpenRigInstance,
+  formatInstanceInitializationConflicts,
+  type InitializationFsOps,
+  type InitWorkspaceResult,
+  type ManagedPathKind,
+} from "@openrig/daemon/instance-initialization";
 
 export interface DaemonState {
   pid: number;
@@ -139,6 +146,9 @@ export interface StartOptions {
   transcriptsPath?: string;
   /** When set, daemon startup idempotently ensures the default workspace exists. */
   workspaceRoot?: string;
+  contextRoot?: string;
+  skillsRoot?: string;
+  topologyRoot?: string;
   // V1 pre-release CLI/daemon Item 1 — capture-pane rotation tunables.
   // Threaded through to the daemon process env so the rotation hook
   // picks up file-stored ConfigStore values, not just shell env.
@@ -167,6 +177,9 @@ export interface LifecycleDeps {
   removeFile: (path: string) => void;
   exists: (path: string) => boolean;
   mkdirp: (path: string) => void;
+  /** Exact production path typing for additive initialization. Tests that do
+   * not exercise collisions may omit it and use the legacy exists seam. */
+  pathKind?: (path: string) => ManagedPathKind;
   openForAppend: (path: string) => number;
   isProcessAlive: (pid: number) => boolean;
   // OPR.0.4.2.1 — optional injectable delay for the status-probe bounded settle/retry.
@@ -215,43 +228,23 @@ const STATUS_PROBE_RETRY_DELAY_MS = 200;
 // restores the timeout the removed HEALTHZ_PROBE_TIMEOUT_MS supplied to them.
 const HEALTHZ_PROBE_TIMEOUT_MS = 250;
 
-export interface WorkspaceScaffoldResult {
-  root: string;
-  rootCreated: boolean;
-  subdirs: Array<{ name: string; path: string; created: boolean }>;
-  files: Array<{ relPath: string; absPath: string; created: boolean; skipped: "exists" | null }>;
+export type WorkspaceScaffoldResult = InitWorkspaceResult;
+
+const INITIALIZATION_FILE_NAMES = new Set(["config.json", "SPEC.md", "project.yaml", "workspace.yaml", ".gitignore"]);
+
+function lifecycleInitializationFs(deps: LifecycleDeps): InitializationFsOps {
+  return {
+    pathKind: deps.pathKind ?? ((candidate) => {
+      if (!deps.exists(candidate)) return "missing";
+      return INITIALIZATION_FILE_NAMES.has(path.basename(candidate)) ? "file" : "directory";
+    }),
+    mkdirp: deps.mkdirp,
+    writeFile: deps.writeFile,
+  };
 }
 
 export function ensureWorkspaceScaffold(root: string, deps: LifecycleDeps): WorkspaceScaffoldResult {
-  const rootExists = deps.exists(root);
-  if (!rootExists) deps.mkdirp(root);
-
-  const result: WorkspaceScaffoldResult = {
-    root,
-    rootCreated: !rootExists,
-    subdirs: [],
-    files: [],
-  };
-
-  for (const sub of workspaceScaffoldDirs()) {
-    const subPath = path.join(root, sub);
-    const existed = deps.exists(subPath);
-    if (!existed) deps.mkdirp(subPath);
-    result.subdirs.push({ name: sub, path: subPath, created: !existed });
-  }
-
-  for (const file of workspaceScaffoldFiles()) {
-    const absPath = path.join(root, file.relPath);
-    const existed = deps.exists(absPath);
-    if (existed) {
-      result.files.push({ relPath: file.relPath, absPath, created: false, skipped: "exists" });
-      continue;
-    }
-    deps.writeFile(absPath, file.content);
-    result.files.push({ relPath: file.relPath, absPath, created: true, skipped: null });
-  }
-
-  return result;
+  return ensureDefaultWorkspace({ root, fs: lifecycleInitializationFs(deps) });
 }
 
 class HealthProbeTimeoutError extends Error {
@@ -611,9 +604,16 @@ export async function startDaemon(opts: StartOptions, deps: LifecycleDeps): Prom
   }
   const daemonEntry = path.join(getDaemonPath(), "dist/index.js");
 
-  deps.mkdirp(OPENRIG_DIR);
-  if (opts.workspaceRoot) {
-    ensureWorkspaceScaffold(opts.workspaceRoot, deps);
+  const initialization = ensureOpenRigInstance({
+    home: OPENRIG_DIR,
+    workspaceRoot: opts.workspaceRoot,
+    contextRoot: opts.contextRoot,
+    skillsRoot: opts.skillsRoot,
+    topologyRoot: opts.topologyRoot,
+    fs: lifecycleInitializationFs(deps),
+  });
+  if (!initialization.ok) {
+    throw new Error(`OpenRig instance initialization blocked: ${formatInstanceInitializationConflicts(initialization)}`);
   }
 
   const logFd = deps.openForAppend(LOG_FILE);

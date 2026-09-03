@@ -1,7 +1,7 @@
 // Rig Context / Composable Context Injection v0 (PL-014) — manifest
 // parser.
 //
-// Parses ~/.openrig/context-packs/<name>/manifest.yaml into a typed
+// Parses <context.root>/<ref>/manifest.yaml into a typed
 // shape with structured-error rejects on malformed input. Pure
 // (no fs touches in the parser itself; caller hands in raw YAML).
 

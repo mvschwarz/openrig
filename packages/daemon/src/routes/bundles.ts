@@ -456,11 +456,9 @@ async function routeAgentImagesAfterBootstrap(bundlePath: string): Promise<Route
  * the operator context-packs library. Returns null when bundle has no
  * context_packs[] (no-op).
  *
- * Target resolution: <openrigHome>/context-packs — per startup.ts:496
- * (the user-file root the live ContextPackLibraryService is constructed
- * against). No SettingsStore complexity (unlike workflow_specs);
- * context-packs canonical path is OPENRIG_HOME-rooted per
- * context-pack-types.ts:9-10.
+ * Target resolution uses context.root, exactly like the live
+ * ContextPackLibraryService. A configured root replaces the default; bundle
+ * routing must not silently create a second writable library.
  *
  * Mirror of routeSkillsAfterBootstrap / routePluginsAfterBootstrap /
  * routeWorkflowSpecsAfterBootstrap pattern: takes bundlePath only
@@ -468,7 +466,7 @@ async function routeAgentImagesAfterBootstrap(bundlePath: string): Promise<Route
  * fire on the dual-override path too).
  */
 async function routeContextPacksAfterBootstrap(bundlePath: string): Promise<RouteContextPacksResult | null> {
-  const targetContextPacksDir = getDefaultOpenRigPath("context-packs");
+  const targetContextPacksDir = new ContextPackSettingsStore().resolveOne("context.root").value as string;
   const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-context-packs-route-"));
   try {
     await unpack(bundlePath, tmpDir);

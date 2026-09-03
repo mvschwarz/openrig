@@ -30,7 +30,7 @@ describe("ContextMonitor", () => {
     rigRepo = new RigRepository(db);
     sessionRegistry = new SessionRegistry(db);
     tmpDir = join(tmpdir(), `context-monitor-${Date.now()}`);
-    mkdirSync(join(tmpDir, "context"), { recursive: true });
+    mkdirSync(join(tmpDir, "state", "context-usage"), { recursive: true });
     codexHomeDir = join(tmpDir, "codex-home");
     mkdirSync(join(codexHomeDir, ".codex"), { recursive: true });
     store = new ContextUsageStore(db, { stateDir: tmpDir, codexHomeDir });
@@ -95,7 +95,7 @@ describe("ContextMonitor", () => {
 
   function writeSidecar(sessionName: string, data: Record<string, unknown>) {
     const safeName = sessionName.replace(/[^a-zA-Z0-9@._-]/g, "_");
-    writeFileSync(join(tmpDir, "context", `${safeName}.json`), JSON.stringify(data));
+    writeFileSync(join(tmpDir, "state", "context-usage", `${safeName}.json`), JSON.stringify(data));
   }
 
   function writeCodexTokenCount(threadId: string) {

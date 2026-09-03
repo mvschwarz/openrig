@@ -63,7 +63,7 @@ describe("run-evals --provider rig — the wired runner seam (r2 round-6 HIGH-1)
   it("the authoritative default reader REFUSES LOUD when the seat has no current-generation record (no silent degrade)", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "eval-rig-runner-"));
     try {
-      // No sidecar written at <stateDir>/context/<seat>.json => readAndNormalize resolves nothing.
+      // No sidecar written at <stateDir>/state/context-usage/<seat>.json => readAndNormalize resolves nothing.
       const reader = defaultRunnerGenerationReader({ stateDir });
       await expect(reader("dev-x@r")).rejects.toThrow(/no current-generation Claude conversation record|observation refused/);
     } finally {
@@ -74,7 +74,7 @@ describe("run-evals --provider rig — the wired runner seam (r2 round-6 HIGH-1)
   it("SESSION-LIFETIME binding through the DEFAULT sidecar reader (r2 round-7 HIGH-1): a re-prime between cases emits ONLY the first send", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "eval-rig-runner-"));
     try {
-      const ctxDir = path.join(stateDir, "context");
+      const ctxDir = path.join(stateDir, "state", "context-usage");
       fs.mkdirSync(ctxDir, { recursive: true });
       const sidecar = path.join(ctxDir, "s@r.json");
       const writeSidecar = (gen: string, jsonl: string) =>
@@ -110,7 +110,7 @@ describe("run-evals --provider rig — the wired runner seam (r2 round-6 HIGH-1)
     try {
       const jsonl = path.join(stateDir, "gen-abc.jsonl");
       fs.writeFileSync(jsonl, '{"role":"assistant","text":"rig context get skills/core/rig-lifecycle"}\n');
-      const ctxDir = path.join(stateDir, "context");
+      const ctxDir = path.join(stateDir, "state", "context-usage");
       fs.mkdirSync(ctxDir, { recursive: true });
       // Minimal Claude status-line sidecar: session id + transcript path (the append-only JSONL).
       fs.writeFileSync(path.join(ctxDir, "dev-x@r.json"), JSON.stringify({ session_id: "gen-abc", transcript_path: jsonl, context_window: { used_percentage: 10 } }));

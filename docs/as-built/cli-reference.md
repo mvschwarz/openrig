@@ -116,7 +116,11 @@ Subcommands:
 - `logs [--follow]`
 
 Notes:
-- `start` launches the daemon process and accepts runtime overrides for port, host, and DB path.
+- `start` additively reconciles the canonical instance layout before launching
+  the daemon process, then accepts runtime overrides for port, host, and DB
+  path. Direct daemon first start uses the same initializer. Existing files are
+  preserved and wrong-type managed paths are refused before any write. See
+  `docs/reference/instance-layout.md`.
 - `logs` reads daemon log output and can follow it.
 - **Deploy identity (v0.4.4, OPR.0.4.4.11 FR-6/7)**: a PACKAGED build (built via `scripts/build-package.sh`) is stamped with `{semver, commit, dirty, builtAt}`; the daemon's `/healthz` payload carries the four stamp fields additively and `rig --version` renders `<semver> (<commit8>[, dirty])`. A source/dev run has NO stamp and adds NOTHING (never an invented SHA) — `/healthz` keeps its legacy body and `--version` prints the plain semver. This is the 30-second stale-deploy diagnostic: an unstamped or old-commit `/healthz` on a long-running host means you are looking at an older deployed build, not the source tree. Source: `packages/{daemon,cli}/src/build-info.ts` (`stampFields`), `packages/daemon/src/server.ts` (`/healthz`), `packages/cli/src/version.ts`.
 
@@ -154,6 +158,10 @@ Supported keys:
 - `transcripts.enabled`
 - `transcripts.path`
 - `workspace.root` (and other workspace-rooted paths used by `init-workspace`)
+- `context.root` (default `$OPENRIG_HOME/context`; env
+  `OPENRIG_CONTEXT_ROOT`) — the single writable addressable context library.
+  The removed `context.packs_root`, config field `context.packsRoot`, and env
+  `OPENRIG_CONTEXT_PACKS_ROOT` are refused with replacement guidance.
 - `skills.root` (default `$OPENRIG_HOME/skills`; env `OPENRIG_SKILLS_ROOT`) — the
   one authoritative Git-versioned managed skill catalog. An override replaces
   the default; it does not add an overlay root.

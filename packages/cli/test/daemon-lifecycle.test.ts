@@ -91,7 +91,7 @@ describe("Daemon Lifecycle", () => {
     expect(opts.detached).toBe(true);
   });
 
-  it("start: idempotently scaffolds configured workspace before spawning", async () => {
+  it("start: initializes the canonical instance and configured workspace before spawning", async () => {
     const created = new Set<string>();
     const written = new Map<string, string>();
     const deps = startableDeps({
@@ -99,8 +99,32 @@ describe("Daemon Lifecycle", () => {
       mkdirp: vi.fn((p: string) => { created.add(p); }),
       writeFile: vi.fn((p: string, content: string) => { written.set(p, content); }),
     });
-    await startDaemon({ port: 7433, db: "openrig.sqlite", workspaceRoot: "/tmp/openrig-workspace" }, deps);
+    await startDaemon({
+      port: 7433,
+      db: "openrig.sqlite",
+      workspaceRoot: "/tmp/openrig-workspace",
+      contextRoot: "/tmp/openrig-context",
+      skillsRoot: "/tmp/openrig-skills",
+      topologyRoot: "/tmp/openrig-topology",
+    }, deps);
 
+    for (const root of [
+      path.join(OPENRIG_DIR, "state"),
+      "/tmp/openrig-context",
+      path.join("/tmp/openrig-context", "system"),
+      "/tmp/openrig-skills",
+      path.join(OPENRIG_DIR, "specs"),
+      "/tmp/openrig-topology",
+      path.join(OPENRIG_DIR, "plugins"),
+      path.join(OPENRIG_DIR, "run"),
+      path.join(OPENRIG_DIR, "logs"),
+      path.join(OPENRIG_DIR, "transcripts"),
+      path.join(OPENRIG_DIR, "backups"),
+      path.join(OPENRIG_DIR, "secrets"),
+    ]) {
+      expect(created.has(root), root).toBe(true);
+    }
+    expect(written.get(path.join(OPENRIG_DIR, "config.json"))).toBe("{}\n");
     expect(created.has("/tmp/openrig-workspace")).toBe(true);
     expect(created.has(path.join("/tmp/openrig-workspace", "missions"))).toBe(true);
     expect(created.has(path.join("/tmp/openrig-workspace", "exhaust"))).toBe(true);
@@ -108,6 +132,20 @@ describe("Daemon Lifecycle", () => {
     expect(written.get(path.join("/tmp/openrig-workspace", "project.yaml"))).toContain("schema: openrig.project/v0alpha1");
     expect(written.get(path.join("/tmp/openrig-workspace", "workspace.yaml"))).toContain("schema: openrig.workspace/v0alpha1");
     expect(written.get(path.join("/tmp/openrig-workspace", ".gitignore"))).toContain("/exhaust/");
+  });
+
+  it("start: refuses an exact user-owned type conflict before any write or spawn", async () => {
+    const conflict = "/tmp/openrig-context";
+    const deps = startableDeps({
+      pathKind: vi.fn((candidate: string) => candidate === conflict ? "file" : "missing"),
+    });
+
+    await expect(startDaemon({ contextRoot: conflict }, deps)).rejects.toThrow(
+      `${conflict}: expected directory, found file`,
+    );
+    expect(deps.mkdirp).not.toHaveBeenCalled();
+    expect(deps.writeFile).not.toHaveBeenCalled();
+    expect(deps.spawn).not.toHaveBeenCalled();
   });
 
   // Test 3: start waits for healthz, writes daemon.json with pid+port+db+startedAt

@@ -58,7 +58,7 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
   const tmpHomes: string[] = [];
   const tmpSrcs: string[] = [];
   const origHome = process.env["OPENRIG_HOME"];
-  const origPacksRoot = process.env["OPENRIG_CONTEXT_PACKS_ROOT"];
+  const origContextRoot = process.env["OPENRIG_CONTEXT_ROOT"];
 
   afterEach(() => {
     for (const d of [...tmpHomes, ...tmpSrcs]) rmSync(d, { recursive: true, force: true });
@@ -66,15 +66,15 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     tmpSrcs.length = 0;
     if (origHome === undefined) delete process.env["OPENRIG_HOME"];
     else process.env["OPENRIG_HOME"] = origHome;
-    if (origPacksRoot === undefined) delete process.env["OPENRIG_CONTEXT_PACKS_ROOT"];
-    else process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = origPacksRoot;
+    if (origContextRoot === undefined) delete process.env["OPENRIG_CONTEXT_ROOT"];
+    else process.env["OPENRIG_CONTEXT_ROOT"] = origContextRoot;
   });
 
   function isolatedHome(): string {
     const home = mkdtempSync(join(tmpdir(), "ctx-add-home-"));
     tmpHomes.push(home);
     process.env["OPENRIG_HOME"] = home;
-    process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = join(home, "context-packs");
+    process.env["OPENRIG_CONTEXT_ROOT"] = join(home, "context");
     return home;
   }
 
@@ -104,7 +104,7 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     expect(errLogs.join("\n")).toMatch(/unsafe/);
     // the REAL pin: rejection happened BEFORE any fs mutation — the target
     // store root was never created, nothing was copied anywhere under HOME
-    expect(existsSync(join(home, "context-packs")), "no store root created").toBe(false);
+    expect(existsSync(join(home, "context")), "no store root created").toBe(false);
     expect(readdirSync(home), "isolated HOME untouched").toEqual([]);
   });
 
@@ -121,7 +121,7 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     } catch { /* daemon sync may fail against the mock-less port — the WRITE has already happened */ }
     console.error = origErr;
     console.log = origLog;
-    expect(existsSync(join(home, "context-packs", "packs", "compaction-restore", "manifest.yaml"))).toBe(true);
+    expect(existsSync(join(home, "context", "packs", "compaction-restore", "manifest.yaml"))).toBe(true);
   });
 
   // Slice-03 lineage repair (R2 terminal HIGH-1): a lexically-safe path-like ref
@@ -134,7 +134,7 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     tmpSrcs.push(src);
     const outside = mkdtempSync(join(tmpdir(), "ctx-add-outside-"));
     tmpSrcs.push(outside);
-    const storeRoot = join(home, "context-packs");
+    const storeRoot = join(home, "context");
     mkdirSync(storeRoot, { recursive: true });
     symlinkSync(outside, join(storeRoot, "linked")); // attacker-planted namespace segment
     let failed = false;
@@ -159,7 +159,7 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     const home = isolatedHome();
     const src = validSourcePack();
     tmpSrcs.push(src);
-    const storeRoot = join(home, "context-packs");
+    const storeRoot = join(home, "context");
     const outside = join(home, "outside-missing");
     const leaf = join(storeRoot, "dangle");
     mkdirSync(storeRoot, { recursive: true });
@@ -201,6 +201,6 @@ describe("ATOM 2 — `context add` write boundary rejects unsafe install refs BE
     process.exitCode = origExit;
     expect(failed, "add must fail on an unsafe version").toBe(true);
     expect(errLogs.join("\n")).toMatch(/version/i);
-    expect(existsSync(join(home, "context-packs")), "no store root created — rejected before write").toBe(false);
+    expect(existsSync(join(home, "context")), "no store root created — rejected before write").toBe(false);
   });
 });

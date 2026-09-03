@@ -229,7 +229,9 @@ discovery and exposes empty `install.context` / `install.skills` selectors.
 The ignore file excludes `exhaust/` and local `.openrig/` projection state
 while keeping authored project context versionable.
 
-The initializer is additive. It never deletes or overwrites an existing file;
+The workspace owner is called by the shared instance initializer used by CLI
+daemon start and direct daemon first start. The initializer is additive. It
+never deletes or overwrites an existing file;
 the retained `--force` spelling is a compatibility no-op for overwrite
 behavior. CLI and daemon scaffolds are byte-parity pinned. Mission and slice
 content is created explicitly through `rig scope`, not seeded by workspace
@@ -239,6 +241,8 @@ and the retired `artifacts/`, `evidence/`, `progress/`, `field-notes/`,
 
 > Source: `domain/workspace/default-workspace-scaffold.ts`
 > (`workspaceScaffoldDirs`, `workspaceScaffoldFiles`); CLI
+> `domain/instance-initialization.ts`; daemon `index.ts`; CLI
+> `packages/cli/src/daemon-lifecycle.ts` and
 > `packages/cli/src/commands/config-init-workspace.ts` (`runInitWorkspace`);
 > parity: `packages/daemon/test/getting-started-narrative-parity.test.ts`
 > @HEAD.

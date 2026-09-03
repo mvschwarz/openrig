@@ -331,8 +331,8 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
   const seedSidecar = (seat: string, generationId: string, jsonlContent: string): string => {
     const jsonl = join(stateDir, `${generationId}.jsonl`);
     writeFileSync(jsonl, jsonlContent);
-    mkdirSync(join(stateDir, "context"), { recursive: true });
-    writeFileSync(join(stateDir, "context", `${seat}.json`), JSON.stringify({
+    mkdirSync(join(stateDir, "state", "context-usage"), { recursive: true });
+    writeFileSync(join(stateDir, "state", "context-usage", `${seat}.json`), JSON.stringify({
       session_id: generationId,
       session_name: seat,
       transcript_path: jsonl,
@@ -388,8 +388,8 @@ describe("GET /api/sessions/:sessionName/generation-record — the consumption-b
       authed.route("/api/sessions", sessionAdminRoutes);
       const jsonl = join(stateDir2, "gen-z.jsonl");
       writeFileSync(jsonl, '{"x":1}\n');
-      mkdirSync(join(stateDir2, "context"), { recursive: true });
-      writeFileSync(join(stateDir2, "context", "dev-z@r.json"), JSON.stringify({ session_id: "gen-z", transcript_path: jsonl, context_window: { used_percentage: 5 } }));
+      mkdirSync(join(stateDir2, "state", "context-usage"), { recursive: true });
+      writeFileSync(join(stateDir2, "state", "context-usage", "dev-z@r.json"), JSON.stringify({ session_id: "gen-z", transcript_path: jsonl, context_window: { used_percentage: 5 } }));
 
       const url = `/api/sessions/${encodeURIComponent("dev-z@r")}/generation-record`;
       const missing = await authed.request(url);

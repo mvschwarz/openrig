@@ -197,12 +197,11 @@ describe("ContextUsageStore", () => {
     expect(usage.source).toBeNull();
   });
 
-  // T8: getSidecarPath returns path under stateDir/context/
-  it("getSidecarPath returns path under stateDir/context/", () => {
+  // OPR.0.5.9.5 Wave A: runtime telemetry belongs beneath state/, leaving
+  // $OPENRIG_HOME/context available for the addressable context library.
+  it("getSidecarPath returns path under state/context-usage/", () => {
     const path = store.getSidecarPath("dev-impl@test-rig");
-    expect(path).toContain("context");
-    expect(path).toContain("dev-impl@test-rig");
-    expect(path.endsWith(".json")).toBe(true);
+    expect(path).toBe("/tmp/openrig-test/state/context-usage/dev-impl@test-rig.json");
   });
 
   // T9: Freshness threshold is centralized
@@ -275,7 +274,7 @@ describe("ContextUsageStore", () => {
   // T15: readSidecar invalid JSON file -> { ok: false, reason: 'parse_error' }
   it("readSidecar returns parse_error for invalid JSON sidecar file", () => {
     const tmpDir = join(tmpdir(), `context-test-${Date.now()}`);
-    const contextDir = join(tmpDir, "context");
+    const contextDir = join(tmpDir, "state", "context-usage");
     mkdirSync(contextDir, { recursive: true });
     writeFileSync(join(contextDir, "bad-session.json"), "this is not json {{{");
 
@@ -296,7 +295,7 @@ describe("ContextUsageStore", () => {
 
   it("readAndNormalize produces parse_error for invalid JSON file", () => {
     const tmpDir = join(tmpdir(), `context-test-parse-${Date.now()}`);
-    const contextDir = join(tmpDir, "context");
+    const contextDir = join(tmpDir, "state", "context-usage");
     mkdirSync(contextDir, { recursive: true });
     writeFileSync(join(contextDir, "corrupt.json"), "not valid json!!!");
 

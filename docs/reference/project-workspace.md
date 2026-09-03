@@ -4,6 +4,9 @@ OpenRig's Project TUI is a file-backed view over a workspace root. The folder
 shape is intentionally simple so humans and agents can create or repair it
 without daemon-internal knowledge.
 
+This subtree is part of the wider [OpenRig Instance Layout](instance-layout.md).
+The instance initializer delegates these exact workspace bytes to this owner.
+
 ## Default Shape
 
 `rig config init-workspace` creates the default workspace at

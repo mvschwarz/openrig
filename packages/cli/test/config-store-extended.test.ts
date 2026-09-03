@@ -51,6 +51,7 @@ function clearEnv(): () => void {
     "OPENRIG_WORKSPACE_STEERING_PATH", "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT",
     "OPENRIG_WORKSPACE_SPECS_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
     "OPENRIG_WORKSPACE_PROJECTS_ROOT", "OPENRIG_WORKSPACE_CATALOG_PATH",
+    "OPENRIG_CONTEXT_ROOT", "OPENRIG_CONTEXT_PACKS_ROOT",
     "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
     "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS",
     "OPENRIG_UI_PREVIEW_MAX_PINS", "OPENRIG_UI_PREVIEW_DEFAULT_LINES",
@@ -121,7 +122,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "workspace.catalog_path",
       // OPR.0.5.3.6 D1 — the topology tree root (instance at its top).
       "topology.root",
-      "context.packs_root",
+      "context.root",
       "skills.root",
       "onboarding.default_pack.enabled",
       "files.allowlist", "progress.scan_roots",
@@ -178,6 +179,29 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "queue.wake_swap_grace_seconds",
     ];
     expect([...VALID_KEYS]).toEqual(expected);
+  });
+
+  it("resolves context.root from the canonical default and OPENRIG_CONTEXT_ROOT", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("context.root")).toMatchObject({
+      value: join(HOISTED_HOME, "context"),
+      source: "default",
+    });
+
+    process.env["OPENRIG_CONTEXT_ROOT"] = join(tmpDir, "context-library");
+    expect(store.resolve().context.root).toBe(join(tmpDir, "context-library"));
+  });
+
+  it("refuses every removed context.packs_root input with context.root guidance", () => {
+    const store = new ConfigStore(configPath);
+    expect(() => store.get("context.packs_root")).toThrow(/removed.*context\.root/i);
+
+    writeFileSync(configPath, JSON.stringify({ context: { packsRoot: "/legacy" } }));
+    expect(() => store.resolve()).toThrow(/context\.packs_root.*context\.root/i);
+
+    writeFileSync(configPath, "{}\n");
+    process.env["OPENRIG_CONTEXT_PACKS_ROOT"] = "/legacy-env";
+    expect(() => store.resolve()).toThrow(/OPENRIG_CONTEXT_PACKS_ROOT.*OPENRIG_CONTEXT_ROOT/i);
   });
 
   it("W2c idle-gate-qitem cadence defaults to scan=60 and active-wake=900; B6 gate defaults off/empty", () => {

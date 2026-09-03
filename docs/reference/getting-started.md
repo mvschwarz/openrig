@@ -16,7 +16,8 @@ is no magic one-command onboarding; each step is a real, inspectable verb.
    the kernel (see "Kernel framing" below).
 2. **`rig up <rig-spec>`** - launch a rig. This **auto-starts the daemon** if it
    is not already running (the four daemon-dependent verbs below do not auto-start
-   it - they tell you to run `rig up` or `rig daemon start`).
+   it - they tell you to run `rig up` or `rig daemon start`). Daemon start first
+   reconciles the additive [OpenRig instance layout](instance-layout.md).
 3. **`rig status`** - see what is currently true: daemon up/down + port, kernel
    readiness (distinct from daemon health), and your effective workspace root
    (default vs override).

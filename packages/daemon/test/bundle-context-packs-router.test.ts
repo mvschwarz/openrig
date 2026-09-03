@@ -43,7 +43,7 @@ function packFixture(packParentDir: string): { dirs: string[]; files: string[] }
 }
 
 const BUNDLE_ROOT = "/bundle/root";
-const TARGET = "/operator/.openrig/context-packs";
+const TARGET = "/operator/.openrig/context";
 
 function makeInput(overrides?: Partial<RouteContextPacksInput>): RouteContextPacksInput {
   return {

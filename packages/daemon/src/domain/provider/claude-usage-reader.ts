@@ -12,6 +12,7 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import { claudeStatuslineSignals, type ClaudeStatuslineReading } from "./provider-signals.js";
 import type { ProviderSignal } from "./provider-types.js";
+import { telemetrySidecarFilename } from "../telemetry-state-paths.js";
 
 export interface ProviderUsageCacheFs {
   readFile(path: string): string;
@@ -122,8 +123,7 @@ export function collectClaudeSignalsFromProviderUsageDirectory(
   return collectClaudeStatuslineSignals({
     listClaudeSeats: () => [...seats.values()],
     readCacheRaw: (seatSession) => {
-      const safe = seatSession.replace(/[^a-zA-Z0-9@._-]/g, "_");
-      try { return fs.readFileSync(nodePath.join(directory, `${safe}.json`), "utf-8"); } catch { return null; }
+      try { return fs.readFileSync(nodePath.join(directory, telemetrySidecarFilename(seatSession)), "utf-8"); } catch { return null; }
     },
     now,
   });

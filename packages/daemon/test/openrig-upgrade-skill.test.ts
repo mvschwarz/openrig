@@ -34,6 +34,61 @@ function runJson(script: string, args: string[], env?: NodeJS.ProcessEnv): any {
   return JSON.parse(stdout);
 }
 
+function runJsonResult(script: string, args: string[], env?: NodeJS.ProcessEnv): { status: number | null; body: any } {
+  const result = spawnSync(process.execPath, [path.join(skillRoot, "scripts", script), ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+  const output = result.status === 0 ? result.stdout : result.stderr;
+  return { status: result.status, body: JSON.parse(output) };
+}
+
+function writeRigInventory(root: string, entries: Array<Record<string, unknown>>): string {
+  const fakeRig = path.join(root, "rig");
+  fs.writeFileSync(fakeRig, `#!/bin/sh
+if [ "$*" = "ps --nodes -A --json --full" ]; then
+  cat <<'JSON'
+${JSON.stringify({ entries, totalNodes: entries.length, truncated: false })}
+JSON
+  exit 0
+fi
+echo "unexpected rig command: $*" >&2
+exit 7
+`, { mode: 0o755 });
+  return fakeRig;
+}
+
+function seedLegacyTelemetry(root: string, sessionName = "dev-impl@test-rig", cwdName = "project") {
+  const home = path.join(root, "home");
+  const cwd = path.join(root, cwdName);
+  const contextDir = path.join(home, "context");
+  const providerDir = path.join(home, "provider-usage");
+  const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+  const collectorPath = path.join(cwd, ".openrig", "context-collector.cjs");
+  const originalSettings = JSON.stringify({
+    keep: true,
+    statusLine: {
+      type: "command",
+      command: `node ${collectorPath} ${contextDir} ${providerDir}`,
+    },
+  }, null, 2);
+
+  write(home, `context/${sessionName}.json`, JSON.stringify({
+    context_window: { context_window_size: 200_000, used_percentage: 25 },
+    session_id: "session-1",
+    session_name: sessionName,
+    sampled_at: "2026-01-01T00:00:00.000Z",
+  }));
+  write(home, `provider-usage/${sessionName}.json`, JSON.stringify({
+    seatSession: sessionName,
+    asOf: "2026-01-01T00:00:00.000Z",
+  }));
+  write(cwd, ".claude/settings.local.json", originalSettings);
+  write(cwd, ".openrig/context-collector.cjs", "collector bytes stay unchanged");
+
+  return { home, cwd, contextDir, providerDir, settingsPath, collectorPath, originalSettings, sessionName };
+}
+
 afterEach(() => {
   for (const root of temporaryRoots.splice(0)) {
     fs.rmSync(root, { recursive: true, force: true });
@@ -75,8 +130,8 @@ describe("openrig-upgrade stays agent-driven", () => {
     }
   });
 
-  it("ships three bounded helpers and mirrors them byte-for-byte", () => {
-    for (const helper of ["inspect-upgrade.mjs", "backup-sqlite.mjs", "refresh-managed-plugin.mjs"]) {
+  it("ships four bounded helpers and mirrors them byte-for-byte", () => {
+    for (const helper of ["inspect-upgrade.mjs", "backup-sqlite.mjs", "refresh-managed-plugin.mjs", "migrate-telemetry-state-0.5.9.mjs"]) {
       const source = path.join(skillRoot, "scripts", helper);
       const mirror = path.join(repoRoot, "skills/_canonical/core/openrig-upgrade/scripts", helper);
       expect(fs.existsSync(source), `missing source helper ${helper}`).toBe(true);
@@ -337,5 +392,263 @@ esac
     expect(report.plugins.ok).toBe(false);
     expect(report.plugins.next).toMatch(/run .*plugin list --json/i);
     expect(report.ready).toBe(false);
+  });
+});
+
+describe("0.5.9 telemetry-state migration helper", () => {
+  const helper = "migrate-telemetry-state-0.5.9.mjs";
+
+  it("plans read-only, copies state with byte-addressed preimages, verifies fresh dual telemetry, and rolls settings back", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "telemetry-state-before-0.5.9");
+
+    const planned = runJson(helper, ["--home", fixture.home], env);
+    expect(planned).toEqual(expect.objectContaining({
+      schema: "openrig-telemetry-state-migration/v1",
+      phase: "plan",
+      applied: false,
+      complete: true,
+    }));
+    expect(planned.actions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ decision: "copy", from: expect.stringContaining("/context/"), to: expect.stringContaining("/state/context-usage/") }),
+      expect.objectContaining({ decision: "copy", from: expect.stringContaining("/provider-usage/"), to: expect.stringContaining("/state/provider-usage/") }),
+      expect.objectContaining({ decision: "rewrite-collector", path: fixture.settingsPath }),
+    ]));
+    expect(fs.existsSync(path.join(fixture.home, "state"))).toBe(false);
+
+    const applied = runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    expect(applied).toEqual(expect.objectContaining({ phase: "apply-state", applied: true, complete: false }));
+    expect(applied.next).toMatch(/fresh sample/i);
+    expect(fs.readFileSync(path.join(fixture.home, "context", `${fixture.sessionName}.json`), "utf8"))
+      .toBe(fs.readFileSync(path.join(fixture.home, "state", "context-usage", `${fixture.sessionName}.json`), "utf8"));
+    expect(fs.readFileSync(path.join(fixture.home, "provider-usage", `${fixture.sessionName}.json`), "utf8"))
+      .toBe(fs.readFileSync(path.join(fixture.home, "state", "provider-usage", `${fixture.sessionName}.json`), "utf8"));
+    const rewritten = fs.readFileSync(fixture.settingsPath, "utf8");
+    expect(rewritten).toContain(path.join(fixture.home, "state", "context-usage"));
+    expect(rewritten).toContain(path.join(fixture.home, "state", "provider-usage"));
+    expect(rewritten).not.toBe(fixture.originalSettings);
+    const manifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    expect(manifest.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        originalPath: fixture.settingsPath,
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        storedAs: expect.stringMatching(/^files\/\d{4}-[a-f0-9]{64}$/),
+      }),
+    ]));
+
+    const beforeFreshSample = runJsonResult(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    expect(beforeFreshSample.status).toBe(1);
+    expect(beforeFreshSample.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "missing_fresh_sample" }),
+    ]));
+
+    const collector = path.join(repoRoot, "packages", "daemon", "assets", "claude-statusline-context.cjs");
+    const collected = spawnSync(process.execPath, [
+      collector,
+      path.join(fixture.home, "state", "context-usage"),
+      path.join(fixture.home, "state", "provider-usage"),
+    ], {
+      encoding: "utf8",
+      input: JSON.stringify({
+        session_id: "session-1",
+        session_name: fixture.sessionName,
+        context_window: { context_window_size: 200_000, used_percentage: 26 },
+      }),
+    });
+    expect(collected.status, collected.stderr).toBe(0);
+
+    const verified = runJson(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    expect(verified).toEqual(expect.objectContaining({ phase: "verify", complete: true, verified: true }));
+    expect(verified.freshSamples).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionName: fixture.sessionName }),
+    ]));
+
+    const rolledBack = runJson(helper, ["--home", fixture.home, "--rollback", preimage], env);
+    expect(rolledBack).toEqual(expect.objectContaining({ phase: "rollback", complete: true, rolledBack: true }));
+    expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(fixture.originalSettings);
+    expect(fs.existsSync(path.join(fixture.home, "state", "context-usage", `${fixture.sessionName}.json`))).toBe(true);
+  });
+
+  it("reports malformed, foreign, unknown-cwd, and nonempty-target inputs without mutation", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    write(fixture.home, "context/broken.json", "not json");
+    write(fixture.home, "context/foreign.txt", "leave me alone");
+    write(fixture.home, "state/context-usage/existing.json", "{}");
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: "unknown-cwd@test-rig",
+      cwd: null,
+    }]);
+
+    const planned = runJson(helper, ["--home", fixture.home], { OPENRIG_RIG_BIN: fakeRig });
+    expect(planned.complete).toBe(false);
+    expect(planned.issues.map((issue: { code: string }) => issue.code)).toEqual(expect.arrayContaining([
+      "malformed_sidecar",
+      "foreign_file",
+      "unknown_live_cwd",
+      "target_nonempty",
+    ]));
+    expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(fixture.originalSettings);
+  });
+
+  it("refuses an unwriteable target ancestor without mutation", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    write(fixture.home, "state", "not a directory");
+    const fakeRig = writeRigInventory(root, []);
+
+    const planned = runJson(helper, ["--home", fixture.home], { OPENRIG_RIG_BIN: fakeRig });
+    expect(planned.complete).toBe(false);
+    expect(planned.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "unwriteable_target", blockingPath: path.join(fixture.home, "state") }),
+    ]));
+    expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(fixture.originalSettings);
+  });
+
+  it("rewrites one shared settings file once when several Claude seats share a cwd", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [
+      {
+        runtime: "claude-code",
+        sessionStatus: "running",
+        canonicalSessionName: fixture.sessionName,
+        cwd: fixture.cwd,
+      },
+      {
+        runtime: "claude-code",
+        sessionStatus: "running",
+        canonicalSessionName: "dev-review@test-rig",
+        cwd: fixture.cwd,
+      },
+    ]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before");
+
+    const planned = runJson(helper, ["--home", fixture.home], env);
+    expect(planned.actions.filter((action: { decision: string }) => action.decision === "rewrite-collector")).toHaveLength(1);
+    const applied = runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    expect(applied).toEqual(expect.objectContaining({ applied: true, issues: [] }));
+  });
+
+  it("rolls back an applied collector while preserving one untouched by an interrupted multi-collector apply", () => {
+    const root = temporaryRoot();
+    const first = seedLegacyTelemetry(root, "dev-first@test-rig", "project-first");
+    const second = seedLegacyTelemetry(root, "dev-second@test-rig", "project-second");
+    const fakeRig = writeRigInventory(root, [first, second].map((fixture) => ({
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    })));
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(first.home, "backups", "before-interrupted-apply");
+    const secondSettingsDir = path.dirname(second.settingsPath);
+
+    fs.chmodSync(secondSettingsDir, 0o500);
+    try {
+      const applied = runJsonResult(helper, ["--home", first.home, "--apply-state", "--preimage", preimage], env);
+      expect(applied.status).toBe(1);
+      expect(fs.readFileSync(first.settingsPath, "utf8")).not.toBe(first.originalSettings);
+      expect(fs.readFileSync(second.settingsPath, "utf8")).toBe(second.originalSettings);
+
+      const rolledBack = runJsonResult(helper, ["--home", first.home, "--rollback", preimage], env);
+      expect(rolledBack.status).toBe(0);
+      expect(rolledBack.body).toEqual(expect.objectContaining({
+        phase: "rollback",
+        complete: true,
+        rolledBack: true,
+        restored: [first.settingsPath],
+        alreadyOriginal: [second.settingsPath],
+      }));
+      expect(fs.readFileSync(first.settingsPath, "utf8")).toBe(first.originalSettings);
+      expect(fs.readFileSync(second.settingsPath, "utf8")).toBe(second.originalSettings);
+    } finally {
+      fs.chmodSync(secondSettingsDir, 0o755);
+    }
+  });
+
+  it("refuses verify while a legacy collector is still writing", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before");
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    fs.writeFileSync(path.join(fixture.home, "context", `${fixture.sessionName}.json`), JSON.stringify({
+      context_window: { used_percentage: 30 },
+      session_name: fixture.sessionName,
+      sampled_at: "2099-01-01T00:00:00.000Z",
+    }));
+
+    const result = runJsonResult(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    expect(result.status).toBe(1);
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "legacy_writer_active", sessionName: fixture.sessionName }),
+      expect.objectContaining({ code: "missing_fresh_sample" }),
+    ]));
+  });
+
+  it("detects a legacy sidecar first created after apply", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before");
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    write(fixture.home, "context/new-writer@test-rig.json", JSON.stringify({
+      session_name: "new-writer@test-rig",
+      sampled_at: "2099-01-01T00:00:00.000Z",
+    }));
+
+    const result = runJsonResult(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    expect(result.status).toBe(1);
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "legacy_writer_active", sessionName: "new-writer@test-rig" }),
+    ]));
+  });
+
+  it("refuses rollback when a byte-addressed preimage no longer matches its manifest", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before");
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    const manifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    fs.writeFileSync(path.join(preimage, manifest.files[0].storedAs), "tampered");
+    const appliedSettings = fs.readFileSync(fixture.settingsPath, "utf8");
+
+    const result = runJsonResult(helper, ["--home", fixture.home, "--rollback", preimage], env);
+    expect(result.status).toBe(1);
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "preimage_mismatch" }),
+    ]));
+    expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(appliedSettings);
   });
 });

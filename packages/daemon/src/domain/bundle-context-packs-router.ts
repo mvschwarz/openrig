@@ -60,9 +60,9 @@ export interface RouteContextPacksInput {
   /** Relative paths to context-pack manifest.yaml files declared in the
    *  bundle manifest's context_packs[] block. */
   declaredContextPacks: string[];
-  /** Absolute path to the operator context-packs library (per
-   *  context-pack-types.ts:9-10: typically `<openrigHome>/context-packs`
-   *  or a workspace-local `.openrig/context-packs`). Caller resolves. */
+  /** Absolute path to the operator context library (per
+   *  context-pack-types.ts:9-10: typically `<context.root>`; the caller may
+   *  also route to a workspace-local `.openrig/context-packs`). */
   targetContextPacksDir: string;
 }
 

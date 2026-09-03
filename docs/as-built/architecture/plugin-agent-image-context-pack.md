@@ -67,9 +67,10 @@ in-memory cache at daemon scope.
 `ContextPackLibraryService.scan()` walks roots, parses each
 `manifest.yaml`, replaces the in-memory index; collisions are
 **last-wins** in discovery order (workspace > user_file > builtin).
-Startup wires three roots: builtin (`../context-packs`, first), user-file
-(`~/.openrig/context-packs`), and workspace-local
-`<workspaceRoot>/.openrig/context-packs` when present + distinct. A pack is
+Startup wires the builtin root (`../context-packs`, first), the configured
+user-file root (`context.root`, default `$OPENRIG_HOME/context`), its
+`system/` child as the canonical System World root, and the workspace-local
+`<workspaceRoot>/.openrig/context-packs` root when present + distinct. A pack is
 addressed by its path-like **ref** (e.g. `packs/compaction-restore`), which is
 its unique identity; the opaque entry id is `context-pack:<ref>` (a UI routing
 key). Colon-id `context-pack:<name>:<version>` addressing and the `/library/:id`
@@ -79,8 +80,8 @@ ordinary files only and rejects context-pack expansion; compose a durable ref
 first, then use a dedicated delivery verb when delivery is intended.
 
 > Source: `domain/context-packs/context-pack-library-service.ts:59-94`
-> (scan; last-wins L79-81), `:31-33` (id); `startup.ts:481-502` (3-root
-> IIFE; builtin `unshift` L497, workspace L491-493) @HEAD.
+> (scan; last-wins L79-81), `:31-33` (id); `startup.ts`
+> (`contextPackLibrary` construction) @HEAD.
 
 The parser is pure (no fs; caller passes raw YAML). It rejects malformed
 YAML, missing `name`/`version`, non-array `files`, per-file path traversal

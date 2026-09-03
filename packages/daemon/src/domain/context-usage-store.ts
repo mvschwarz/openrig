@@ -3,6 +3,7 @@ import { join } from "node:path";
 import os from "node:os";
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
+import { contextUsageDirectory, telemetrySidecarPath } from "./telemetry-state-paths.js";
 
 /** Freshness threshold: samples older than this are considered stale for compact displays. */
 export const FRESHNESS_THRESHOLD_MS = 600_000; // 10 minutes per PM spec
@@ -105,9 +106,7 @@ export class ContextUsageStore {
 
   /** Get the sidecar file path for a session. */
   getSidecarPath(sessionName: string): string {
-    // Sanitize session name for filesystem safety
-    const safe = sessionName.replace(/[^a-zA-Z0-9@._-]/g, "_");
-    return join(this.stateDir, "context", `${safe}.json`);
+    return telemetrySidecarPath(contextUsageDirectory(this.stateDir), sessionName);
   }
 
   /**
