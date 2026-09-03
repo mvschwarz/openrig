@@ -31,6 +31,7 @@ function clearEnv(): () => void {
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_WORKSPACE_SLICES_ROOT",
     "OPENRIG_WORKSPACE_STEERING_PATH", "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT",
     "OPENRIG_WORKSPACE_SPECS_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
+    "OPENRIG_WORKSPACE_PROJECTS_ROOT", "OPENRIG_WORKSPACE_CATALOG_PATH",
     "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
     "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS",
     "OPENRIG_UI_PREVIEW_MAX_PINS", "OPENRIG_UI_PREVIEW_DEFAULT_LINES",
@@ -95,8 +96,8 @@ describe("SettingsStore (User Settings v0)", () => {
       // V1 pre-release CLI/daemon Item 1 — capture-pane rotation tunables.
       "transcripts.lines", "transcripts.poll_interval_seconds",
       "workspace.root", "workspace.slices_root", "workspace.steering_path",
-      "workspace.field_notes_root", "workspace.specs_root",
-      "workspace.dogfood_evidence_root",
+      "workspace.specs_root", "workspace.projects_root",
+      "workspace.catalog_path",
       // OPR.0.5.3.6 D1 — the topology tree root (instance at its top).
       "topology.root",
       "context.packs_root",
@@ -266,9 +267,9 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(cfg.workspaceRoot).toBe("/custom/ws");
     expect(cfg.workspaceSlicesRoot).toBe("/custom/ws/missions");
     expect(cfg.workspaceSteeringPath).toBe("/custom/ws/STEERING.md");
-    expect(cfg.workspaceFieldNotesRoot).toBe("/custom/ws/field-notes");
     expect(cfg.workspaceSpecsRoot).toBe("/custom/ws/specs");
-    expect(cfg.workspaceDogfoodEvidenceRoot).toBe("/custom/ws/dogfood-evidence");
+    expect(cfg.workspaceProjectsRoot).toBe("/custom/ws/projects");
+    expect(cfg.workspaceCatalogPath).toBe("/custom/ws/workspace.yaml");
     expect(cfg.filesAllowlistRaw).toBe("workspace:/custom/ws");
     expect(cfg.progressScanRootsRaw).toBe("workspace:/custom/ws");
   });
@@ -294,21 +295,29 @@ describe("SettingsStore (User Settings v0)", () => {
     const cfg = store.resolveConfig();
     expect(cfg.workspaceSlicesRoot).toBe("/custom/slices");
     // Other subdirs still cascade from workspace.root:
-    expect(cfg.workspaceFieldNotesRoot).toBe("/ws/field-notes");
-    expect(cfg.workspaceDogfoodEvidenceRoot).toBe("/ws/dogfood-evidence");
+    expect(cfg.workspaceProjectsRoot).toBe("/ws/projects");
+    expect(cfg.workspaceCatalogPath).toBe("/ws/workspace.yaml");
   });
 
-  it("workspace.dogfood_evidence_root defaults from workspace.root and supports env override", () => {
+  it("workspace project paths default from workspace.root and support env overrides", () => {
     const store = new SettingsStore(configPath);
     store.set("workspace.root", "/custom/ws");
-    expect(store.resolveConfig().workspaceDogfoodEvidenceRoot).toBe("/custom/ws/dogfood-evidence");
+    expect(store.resolveConfig().workspaceProjectsRoot).toBe("/custom/ws/projects");
+    expect(store.resolveConfig().workspaceCatalogPath).toBe("/custom/ws/workspace.yaml");
 
-    process.env["OPENRIG_DOGFOOD_EVIDENCE_ROOT"] = "/proof/root";
+    store.set("workspace.projects_root", "/configured/projects");
+    store.set("workspace.catalog_path", "/configured/workspace.yaml");
+    expect(store.resolveOne("workspace.projects_root")).toMatchObject({ value: "/configured/projects", source: "file" });
+    expect(store.resolveOne("workspace.catalog_path")).toMatchObject({ value: "/configured/workspace.yaml", source: "file" });
+
+    process.env["OPENRIG_WORKSPACE_PROJECTS_ROOT"] = "/project/worlds";
+    process.env["OPENRIG_WORKSPACE_CATALOG_PATH"] = "/catalog/workspace.yaml";
     try {
-      const resolved = store.resolveOne("workspace.dogfood_evidence_root");
-      expect(resolved).toMatchObject({ value: "/proof/root", source: "env" });
+      expect(store.resolveOne("workspace.projects_root")).toMatchObject({ value: "/project/worlds", source: "env" });
+      expect(store.resolveOne("workspace.catalog_path")).toMatchObject({ value: "/catalog/workspace.yaml", source: "env" });
     } finally {
-      delete process.env["OPENRIG_DOGFOOD_EVIDENCE_ROOT"];
+      delete process.env["OPENRIG_WORKSPACE_PROJECTS_ROOT"];
+      delete process.env["OPENRIG_WORKSPACE_CATALOG_PATH"];
     }
   });
 

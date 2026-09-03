@@ -85,9 +85,9 @@ export const SETTINGS_VALID_KEYS = [
   "workspace.root",
   "workspace.slices_root",
   "workspace.steering_path",
-  "workspace.field_notes_root",
   "workspace.specs_root",
-  "workspace.dogfood_evidence_root",
+  "workspace.projects_root",
+  "workspace.catalog_path",
   // OPR.0.5.3.6 D1 — the TOPOLOGY tree root (instance altitude at its top,
   // rigs/<rig>/seats/<seat> beneath). Derived default $OPENRIG_HOME/topology;
   // keying to the home makes the ~/.openrig-vs-$OPENRIG_HOME split a
@@ -218,9 +218,9 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "workspace.root": { primary: "OPENRIG_WORKSPACE_ROOT" },
   "workspace.slices_root": { primary: "OPENRIG_WORKSPACE_SLICES_ROOT" },
   "workspace.steering_path": { primary: "OPENRIG_WORKSPACE_STEERING_PATH" },
-  "workspace.field_notes_root": { primary: "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT" },
   "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT" },
-  "workspace.dogfood_evidence_root": { primary: "OPENRIG_DOGFOOD_EVIDENCE_ROOT" },
+  "workspace.projects_root": { primary: "OPENRIG_WORKSPACE_PROJECTS_ROOT" },
+  "workspace.catalog_path": { primary: "OPENRIG_WORKSPACE_CATALOG_PATH" },
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   // OPR.0.5.3.7 R4 — new key, OPENRIG_* only (no RIGGED_* legacy).
   "context.packs_root": { primary: "OPENRIG_CONTEXT_PACKS_ROOT" },
@@ -295,9 +295,9 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "workspace.root": ["workspace", "root"],
   "workspace.slices_root": ["workspace", "slicesRoot"],
   "workspace.steering_path": ["workspace", "steeringPath"],
-  "workspace.field_notes_root": ["workspace", "fieldNotesRoot"],
   "workspace.specs_root": ["workspace", "specsRoot"],
-  "workspace.dogfood_evidence_root": ["workspace", "dogfoodEvidenceRoot"],
+  "workspace.projects_root": ["workspace", "projectsRoot"],
+  "workspace.catalog_path": ["workspace", "catalogPath"],
   "topology.root": ["topology", "root"],
   "context.packs_root": ["context", "packsRoot"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
@@ -441,9 +441,9 @@ function deriveWorkspaceDefault(key: SettingsValidKey, workspaceRoot: string): s
   switch (key) {
     case "workspace.slices_root":      return path.join(workspaceRoot, "missions");
     case "workspace.steering_path":    return path.join(workspaceRoot, "STEERING.md");
-    case "workspace.field_notes_root": return path.join(workspaceRoot, "field-notes");
     case "workspace.specs_root":       return path.join(workspaceRoot, "specs");
-    case "workspace.dogfood_evidence_root": return path.join(workspaceRoot, "dogfood-evidence");
+    case "workspace.projects_root":    return path.join(workspaceRoot, "projects");
+    case "workspace.catalog_path":     return path.join(workspaceRoot, "workspace.yaml");
     case "files.allowlist":            return `workspace:${workspaceRoot}`;
     case "progress.scan_roots":        return `workspace:${workspaceRoot}`;
     default: return "";
@@ -461,9 +461,9 @@ function deriveLegacyWorkspaceDefault(key: SettingsValidKey, workspaceRoot: stri
 const WORKSPACE_DERIVED_KEYS: ReadonlySet<SettingsValidKey> = new Set([
   "workspace.slices_root",
   "workspace.steering_path",
-  "workspace.field_notes_root",
   "workspace.specs_root",
-  "workspace.dogfood_evidence_root",
+  "workspace.projects_root",
+  "workspace.catalog_path",
   "files.allowlist",
   "progress.scan_roots",
 ]);
@@ -765,9 +765,9 @@ export interface ResolvedConfig {
   workspaceRoot: string;
   workspaceSlicesRoot: string;
   workspaceSteeringPath: string;
-  workspaceFieldNotesRoot: string;
   workspaceSpecsRoot: string;
-  workspaceDogfoodEvidenceRoot: string;
+  workspaceProjectsRoot: string;
+  workspaceCatalogPath: string;
   // V0.3.1 slice 05 — operator seat name read by mission-control read
   // layer (replacing the legacy hardcoded `DEFAULT_OPERATOR_SESSION`
   // constant) and 2 UI cosmetic sites. Default
@@ -849,9 +849,9 @@ export class SettingsStore {
       workspaceRoot: wr,
       workspaceSlicesRoot: this.resolveOne("workspace.slices_root", fc, wr).value as string,
       workspaceSteeringPath: this.resolveOne("workspace.steering_path", fc, wr).value as string,
-      workspaceFieldNotesRoot: this.resolveOne("workspace.field_notes_root", fc, wr).value as string,
       workspaceSpecsRoot: this.resolveOne("workspace.specs_root", fc, wr).value as string,
-      workspaceDogfoodEvidenceRoot: this.resolveOne("workspace.dogfood_evidence_root", fc, wr).value as string,
+      workspaceProjectsRoot: this.resolveOne("workspace.projects_root", fc, wr).value as string,
+      workspaceCatalogPath: this.resolveOne("workspace.catalog_path", fc, wr).value as string,
       workspaceOperatorSeatName: this.resolveOne("workspace.operator_seat_name", fc, wr).value as string,
       filesAllowlistRaw: this.resolveOne("files.allowlist", fc, wr).value as string,
       progressScanRootsRaw: this.resolveOne("progress.scan_roots", fc, wr).value as string,

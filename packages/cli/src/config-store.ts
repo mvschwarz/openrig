@@ -36,9 +36,9 @@ export interface RiggedConfig {
     root: string;
     slicesRoot: string;
     steeringPath: string;
-    fieldNotesRoot: string;
     specsRoot: string;
-    dogfoodEvidenceRoot: string;
+    projectsRoot: string;
+    catalogPath: string;
     operatorSeatName: string;
   };
   // OPR.0.5.3.6 D1 — the TOPOLOGY tree root (the other tree: instance at its
@@ -217,9 +217,9 @@ const DEFAULTS = {
     root: DEFAULT_WORKSPACE_ROOT,
     slicesRoot: "",
     steeringPath: "",
-    fieldNotesRoot: "",
     specsRoot: "",
-    dogfoodEvidenceRoot: "",
+    projectsRoot: "",
+    catalogPath: "",
     // V0.3.1 slice 05 — empty default; resolve() picks up the derived
     // `operator-${USER}@kernel` at read time via the deriveWorkspaceDefault
     // helper so the default tracks the OS username without caching at
@@ -350,9 +350,9 @@ export const VALID_KEYS = [
   "workspace.root",
   "workspace.slices_root",
   "workspace.steering_path",
-  "workspace.field_notes_root",
   "workspace.specs_root",
-  "workspace.dogfood_evidence_root",
+  "workspace.projects_root",
+  "workspace.catalog_path",
   // OPR.0.5.3.6 D1 — the topology tree root; lockstep with the daemon
   // settings-store twin. Derived default $OPENRIG_HOME/topology; the legacy
   // shared-docs/rigs location stays readable via the daemon's
@@ -445,9 +445,9 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "workspace.root": { primary: "OPENRIG_WORKSPACE_ROOT" },
   "workspace.slices_root": { primary: "OPENRIG_WORKSPACE_SLICES_ROOT" },
   "workspace.steering_path": { primary: "OPENRIG_WORKSPACE_STEERING_PATH" },
-  "workspace.field_notes_root": { primary: "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT" },
   "workspace.specs_root": { primary: "OPENRIG_WORKSPACE_SPECS_ROOT" },
-  "workspace.dogfood_evidence_root": { primary: "OPENRIG_DOGFOOD_EVIDENCE_ROOT" },
+  "workspace.projects_root": { primary: "OPENRIG_WORKSPACE_PROJECTS_ROOT" },
+  "workspace.catalog_path": { primary: "OPENRIG_WORKSPACE_CATALOG_PATH" },
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   // OPR.0.5.3.7 R4 — new key, OPENRIG_* only (no RIGGED_* legacy).
   "context.packs_root": { primary: "OPENRIG_CONTEXT_PACKS_ROOT" },
@@ -524,9 +524,9 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workspace.root": ["workspace", "root"],
   "workspace.slices_root": ["workspace", "slicesRoot"],
   "workspace.steering_path": ["workspace", "steeringPath"],
-  "workspace.field_notes_root": ["workspace", "fieldNotesRoot"],
   "workspace.specs_root": ["workspace", "specsRoot"],
-  "workspace.dogfood_evidence_root": ["workspace", "dogfoodEvidenceRoot"],
+  "workspace.projects_root": ["workspace", "projectsRoot"],
+  "workspace.catalog_path": ["workspace", "catalogPath"],
   "topology.root": ["topology", "root"],
   "context.packs_root": ["context", "packsRoot"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
@@ -645,9 +645,9 @@ export function deriveWorkspaceDefault(key: ValidKey, workspaceRoot: string): st
   switch (key) {
     case "workspace.slices_root":      return join(workspaceRoot, "missions");
     case "workspace.steering_path":    return join(workspaceRoot, "STEERING.md");
-    case "workspace.field_notes_root": return join(workspaceRoot, "field-notes");
     case "workspace.specs_root":       return join(workspaceRoot, "specs");
-    case "workspace.dogfood_evidence_root": return join(workspaceRoot, "dogfood-evidence");
+    case "workspace.projects_root":    return join(workspaceRoot, "projects");
+    case "workspace.catalog_path":     return join(workspaceRoot, "workspace.yaml");
     case "files.allowlist":            return `workspace:${workspaceRoot}`;
     case "progress.scan_roots":        return `workspace:${workspaceRoot}`;
     // V0.3.1 slice 05 — `operator-${USER}@kernel` derived from the
@@ -670,9 +670,9 @@ function deriveLegacyWorkspaceDefault(key: ValidKey, workspaceRoot: string): str
 const WORKSPACE_DERIVED_KEYS: ReadonlySet<ValidKey> = new Set([
   "workspace.slices_root",
   "workspace.steering_path",
-  "workspace.field_notes_root",
   "workspace.specs_root",
-  "workspace.dogfood_evidence_root",
+  "workspace.projects_root",
+  "workspace.catalog_path",
   "files.allowlist",
   "progress.scan_roots",
   "workspace.operator_seat_name",
@@ -910,9 +910,9 @@ export class ConfigStore {
         root: workspaceRoot,
         slicesRoot: v("workspace.slices_root") as string,
         steeringPath: v("workspace.steering_path") as string,
-        fieldNotesRoot: v("workspace.field_notes_root") as string,
         specsRoot: v("workspace.specs_root") as string,
-        dogfoodEvidenceRoot: v("workspace.dogfood_evidence_root") as string,
+        projectsRoot: v("workspace.projects_root") as string,
+        catalogPath: v("workspace.catalog_path") as string,
         operatorSeatName: v("workspace.operator_seat_name") as string,
       },
       topology: {

@@ -5,13 +5,13 @@
 //   - GET /api/config/:key returns one key
 //   - POST /api/config/:key sets the value, persists to disk
 //   - DELETE /api/config/:key reverts one key to default
-//   - POST /api/config/init-workspace creates mission-aware workspace files
+//   - POST /api/config/init-workspace creates a repo-ready project workspace
 //   - 503 when settingsStore is unavailable
 //   - 400 on unknown keys / missing body
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
@@ -21,6 +21,7 @@ function clearEnv(): () => void {
   const keys = [
     "OPENRIG_PORT", "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
     "OPENRIG_WORKSPACE_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
+    "OPENRIG_WORKSPACE_PROJECTS_ROOT", "OPENRIG_WORKSPACE_CATALOG_PATH",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION",
@@ -109,7 +110,10 @@ describe("config routes (User Settings v0)", () => {
     expect(body.settings["host.selected"]).toMatchObject({ value: "local", source: "default" });
     expect(body.settings["host.name"]).toMatchObject({ value: "localhost", source: "default" });
     expect(body.settings["onboarding.default_pack.enabled"]).toMatchObject({ value: true, source: "default" });
-    expect(String(body.settings["workspace.dogfood_evidence_root"]?.value)).toMatch(/dogfood-evidence$/);
+    expect(String(body.settings["workspace.projects_root"]?.value)).toMatch(/projects$/);
+    expect(String(body.settings["workspace.catalog_path"]?.value)).toMatch(/workspace\.yaml$/);
+    expect(body.settings["workspace.field_notes_root"]).toBeUndefined();
+    expect(body.settings["workspace.dogfood_evidence_root"]).toBeUndefined();
   });
 
   it("GET /api/config/:key returns the resolved value", async () => {
@@ -215,7 +219,7 @@ describe("config routes (User Settings v0)", () => {
     expect(body.resolved.source).toBe("default");
   });
 
-  it("POST /api/config/init-workspace creates mission-aware workspace files", async () => {
+  it("POST /api/config/init-workspace creates the canonical six-item workspace", async () => {
     const root = join(tmpDir, "workspace");
     const app = buildApp();
     const res = await app.request("/api/config/init-workspace", {
@@ -226,28 +230,14 @@ describe("config routes (User Settings v0)", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as { root: string; subdirs: Array<{ name: string }>; files: Array<{ relPath: string }> };
     expect(body.root).toBe(root);
-    expect(body.subdirs.map((s) => s.name)).toEqual(expect.arrayContaining([
-      "missions",
-      "artifacts",
-      "evidence",
-      "progress",
-      "field-notes",
-      "specs",
-      "dogfood-evidence",
-      "missions/getting-started/slices/first-conveyor-run",
-      "missions/getting-started/slices/inspect-project-evidence",
-    ]));
-    expect(existsSync(join(root, "missions", "README.md"))).toBe(true);
-    expect(existsSync(join(root, "artifacts", "README.md"))).toBe(true);
-    expect(existsSync(join(root, "evidence", "README.md"))).toBe(true);
-    expect(existsSync(join(root, "dogfood-evidence", "README.md"))).toBe(true);
-    expect(existsSync(join(root, "missions", "getting-started", "SPEC.md"))).toBe(true);
-    expect(existsSync(join(root, "missions", "getting-started", "NOTES.md"))).toBe(true);
-    expect(existsSync(join(root, "missions", "getting-started", "slices", "first-conveyor-run", "SPEC.md"))).toBe(true);
-    expect(existsSync(join(root, "missions", "getting-started", "slices", "first-conveyor-run", "PROGRESS.md"))).toBe(true);
-    expect(existsSync(join(root, "missions", "getting-started", "slices", "first-conveyor-run", "PROOF.md"))).toBe(true);
-    expect(existsSync(join(root, "missions", "getting-started", "slices", "first-conveyor-run", "IMPLEMENTATION-PRD.md"))).toBe(false);
-    expect(existsSync(join(root, "STEERING.md"))).toBe(true);
+    expect(body.subdirs.map((s) => s.name)).toEqual(["missions", "exhaust"]);
+    expect(body.files.map((file) => file.relPath)).toEqual(["SPEC.md", "project.yaml", "workspace.yaml", ".gitignore"]);
+    for (const path of ["SPEC.md", "project.yaml", "workspace.yaml", ".gitignore", "missions", "exhaust"]) {
+      expect(existsSync(join(root, path))).toBe(true);
+    }
+    for (const retired of ["README.md", "STEERING.md", "artifacts", "evidence", "progress", "field-notes", "specs", "dogfood-evidence", "skills", "context", "state"]) {
+      expect(existsSync(join(root, retired))).toBe(false);
+    }
   });
 
   it("POST /api/config/init-workspace --dry-run does not write", async () => {
@@ -262,6 +252,20 @@ describe("config routes (User Settings v0)", () => {
     expect(existsSync(root)).toBe(false);
   });
 
+  it("POST /api/config/init-workspace preserves existing files even with force", async () => {
+    const root = join(tmpDir, "ws-existing");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "SPEC.md"), "operator-owned", "utf-8");
+    const app = buildApp();
+    const res = await app.request("/api/config/init-workspace", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ root, force: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(readFileSync(join(root, "SPEC.md"), "utf-8")).toBe("operator-owned");
+  });
+
   it("503 when settingsStore is missing from context", async () => {
     const app = new Hono();
     app.route("/api/config", configRoutes());
@@ -269,17 +273,8 @@ describe("config routes (User Settings v0)", () => {
     expect(res.status).toBe(503);
   });
 
-  // GUARD/FR-5e BLOCKER-1 discriminator
-  // (qitem-20260602045638-1a6e964c): invalid
-  // OPENRIG_MISSION_NOTES_TEMPLATE_PATH must fail the
-  // /api/config/init-workspace route BEFORE any mkdir on the target
-  // workspace root. The pre-fix flow mkdir'd the root + subdirs
-  // first, then threw on render, leaving a half-initialized
-  // workspace. Verify-first-then-write (banked from FR-3 self-lesson)
-  // — the route now precomputes scaffoldFiles + scaffoldDirs and
-  // returns 400 on render failure with NO filesystem mutation.
-  it("invalid OPENRIG_MISSION_NOTES_TEMPLATE_PATH returns 400 BEFORE any mkdir", async () => {
-    const root = join(tmpDir, "route-leak-target-workspace");
+  it("project-only initialization does not consult mission-note overrides", async () => {
+    const root = join(tmpDir, "project-only-workspace");
     expect(existsSync(root)).toBe(false);
     const original = process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
     process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = join(tmpDir, "does-not-exist.md");
@@ -290,13 +285,9 @@ describe("config routes (User Settings v0)", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ root }),
       });
-      expect(res.status).toBe(400);
-      const body = await res.json() as { error: string; message: string };
-      expect(body.error).toBe("init_workspace_scaffold_unavailable");
-      expect(body.message).toMatch(/OPENRIG_MISSION_NOTES_TEMPLATE_PATH/);
-      // Mutation-target: if precompute were after mkdir, root would
-      // exist on disk. The fix asserts it does NOT exist.
-      expect(existsSync(root)).toBe(false);
+      expect(res.status).toBe(200);
+      expect(existsSync(root)).toBe(true);
+      expect(existsSync(join(root, "missions", "getting-started"))).toBe(false);
     } finally {
       if (original === undefined) delete process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH;
       else process.env.OPENRIG_MISSION_NOTES_TEMPLATE_PATH = original;

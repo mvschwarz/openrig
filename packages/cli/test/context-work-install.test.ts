@@ -37,6 +37,7 @@ describe("rig context work-install", () => {
   let alphaRoot: string;
   let betaRoot: string;
   let savedWorkspaceRoot: string | undefined;
+  let savedCatalogPath: string | undefined;
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "openrig-context-work-install-"));
@@ -92,13 +93,34 @@ composition:
     spec: SPEC.md
 `);
     savedWorkspaceRoot = process.env["OPENRIG_WORKSPACE_ROOT"];
+    savedCatalogPath = process.env["OPENRIG_WORKSPACE_CATALOG_PATH"];
     process.env["OPENRIG_WORKSPACE_ROOT"] = catalogRoot;
+    delete process.env["OPENRIG_WORKSPACE_CATALOG_PATH"];
   });
 
   afterEach(() => {
     if (savedWorkspaceRoot === undefined) delete process.env["OPENRIG_WORKSPACE_ROOT"];
     else process.env["OPENRIG_WORKSPACE_ROOT"] = savedWorkspaceRoot;
+    if (savedCatalogPath === undefined) delete process.env["OPENRIG_WORKSPACE_CATALOG_PATH"];
+    else process.env["OPENRIG_WORKSPACE_CATALOG_PATH"] = savedCatalogPath;
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it("honors the configured project catalog path", async () => {
+    const separateWorkspace = join(root, "workspace-without-catalog");
+    mkdirSync(separateWorkspace);
+    process.env["OPENRIG_WORKSPACE_ROOT"] = separateWorkspace;
+    process.env["OPENRIG_WORKSPACE_CATALOG_PATH"] = join(catalogRoot, "workspace.yaml");
+
+    const result = await captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install", "--project", "alpha", "--json",
+      ]);
+    });
+
+    expect(result.exitCode).toBeUndefined();
+    const plan = JSON.parse(result.logs.join("")) as { position: { projectId: string; projectRoot: string } };
+    expect(plan.position).toMatchObject({ projectId: "alpha", projectRoot: alphaRoot });
   });
 
   it("selects two declared roots and returns stable intent with current progress", async () => {

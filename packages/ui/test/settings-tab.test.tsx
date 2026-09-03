@@ -32,8 +32,9 @@ function makeSettingsResponse() {
       "workspace.root": { value: "/Users/me/.openrig/workspace", source: "default", defaultValue: "/Users/me/.openrig/workspace" },
       "workspace.slices_root": { value: "/Users/me/.openrig/workspace/missions", source: "default", defaultValue: "/Users/me/.openrig/workspace/missions" },
       "workspace.steering_path": { value: "/Users/me/.openrig/workspace/STEERING.md", source: "default", defaultValue: "/Users/me/.openrig/workspace/STEERING.md" },
-      "workspace.field_notes_root": { value: "/Users/me/.openrig/workspace/field-notes", source: "default", defaultValue: "/Users/me/.openrig/workspace/field-notes" },
       "workspace.specs_root": { value: "/Users/me/.openrig/workspace/specs", source: "default", defaultValue: "/Users/me/.openrig/workspace/specs" },
+      "workspace.projects_root": { value: "/Users/me/.openrig/workspace/projects", source: "default", defaultValue: "/Users/me/.openrig/workspace/projects" },
+      "workspace.catalog_path": { value: "/Users/me/.openrig/workspace/workspace.yaml", source: "default", defaultValue: "/Users/me/.openrig/workspace/workspace.yaml" },
       "files.allowlist": { value: "", source: "default", defaultValue: "" },
       "progress.scan_roots": { value: "ws:/Users/me/work", source: "env", defaultValue: "" },
     },
@@ -41,7 +42,7 @@ function makeSettingsResponse() {
 }
 
 describe("SettingsTab — User Settings v0", () => {
-  it("renders all 12 settings rows with source badges", async () => {
+  it("renders workspace catalog settings with source badges", async () => {
     mockFetch.mockResolvedValue(jsonResponse(makeSettingsResponse()));
     render(createTestRouter({ component: () => <SettingsTab />, path: "/" }));
 
@@ -49,6 +50,8 @@ describe("SettingsTab — User Settings v0", () => {
     expect(screen.getByTestId("setting-workspace.root")).toBeDefined();
     expect(screen.getByTestId("setting-workspace.slices_root")).toBeDefined();
     expect(screen.getByTestId("setting-workspace.steering_path")).toBeDefined();
+    expect(screen.getByTestId("setting-workspace.projects_root")).toBeDefined();
+    expect(screen.getByTestId("setting-workspace.catalog_path")).toBeDefined();
     expect(screen.getByTestId("setting-files.allowlist")).toBeDefined();
     expect(screen.getByTestId("setting-progress.scan_roots")).toBeDefined();
     expect(screen.getByTestId("setting-daemon.port")).toBeDefined();

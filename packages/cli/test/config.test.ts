@@ -377,7 +377,7 @@ describe("Config CLI", () => {
   // V0.3.1 slice 08 — HG-6: rig config --help text must enumerate every
   // top-level dotted-prefix used in VALID_KEYS. The slice 08 verification
   // pass caught a drift where ui.preview.* / agents.* / feed.subscriptions.* /
-  // runtime.codex.* + workspace.dogfood_evidence_root +
+  // runtime.codex.* + workspace.projects_root/workspace.catalog_path +
   // workspace.operator_seat_name + transcripts.lines +
   // transcripts.poll_interval_seconds were missing from the help "Keys:"
   // section. This regression test extracts every top-level prefix from
