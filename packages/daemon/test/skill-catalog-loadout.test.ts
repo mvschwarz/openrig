@@ -431,7 +431,7 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(existsSync(join(f.project, ".agents", "skills", "project-skill", "SKILL.md"))).toBe(false);
   });
 
-  it("refuses incompatible symlink targets and rolls back a projection filesystem failure", () => {
+  it("refuses incompatible symlink targets and reports restored state after a projection rollback", () => {
     const f = fixture([]);
     writeSkill(f.catalog, "selected");
     commit(f.root);
@@ -452,9 +452,46 @@ describe("managed skill catalog and composable loadouts", () => {
     writeFileSync(join(f.project, ".openrig", "skill-loadouts"), "not a directory\n");
     const failed = reconcileSkillLoadout({ loadout: selected.loadout, runtime: "codex", cwd: f.project, apply: true });
     expect(failed).toMatchObject({ ok: false, applied: false, errors: [{ code: "projection_failed" }] });
+    expect(failed.receipts).toMatchObject([{
+      id: "selected",
+      status: "missing",
+      detail: "selected skill is not projected",
+    }]);
+    expect(existsSync(join(f.project, ".agents", "skills", "selected"))).toBe(false);
     expect(existsSync(join(f.project, ".openrig", "skill-loadouts", "codex.json"))).toBe(false);
     expect(readFileSync(join(f.project, ".openrig", "skill-loadouts"), "utf8")).toBe("not a directory\n");
     expect(existsSync(join(f.project, ".agents", "skills", ".gitignore"))).toBe(false);
+
+    const prior = fixture([]);
+    writeSkill(prior.catalog, "selected", "selected", "# prior bytes\n");
+    commit(prior.root);
+    const initial = resolveSkillLoadout({ catalogRoot: prior.catalog, projectSkills: ["selected"] });
+    expect(initial.ok).toBe(true);
+    if (!initial.ok) return;
+    expect(reconcileSkillLoadout({ loadout: initial.loadout, runtime: "codex", cwd: prior.project, apply: true }).ok).toBe(true);
+
+    writeSkill(prior.catalog, "selected", "selected", "# replacement bytes\n");
+    writeSkill(prior.catalog, "new-skill");
+    commit(prior.root);
+    const replacement = resolveSkillLoadout({ catalogRoot: prior.catalog, projectSkills: ["new-skill", "selected"] });
+    expect(replacement.ok).toBe(true);
+    if (!replacement.ok) return;
+
+    const manifestDirectory = join(prior.project, ".openrig", "skill-loadouts");
+    chmodSync(manifestDirectory, 0o555);
+    let rolledBack;
+    try {
+      rolledBack = reconcileSkillLoadout({ loadout: replacement.loadout, runtime: "codex", cwd: prior.project, apply: true });
+    } finally {
+      chmodSync(manifestDirectory, 0o755);
+    }
+    expect(rolledBack).toMatchObject({ ok: false, applied: false, errors: [{ code: "projection_failed" }] });
+    expect(rolledBack.receipts).toMatchObject([
+      { id: "new-skill", status: "missing", detail: "selected skill is not projected" },
+      { id: "selected", status: "stale", detail: "owned target still matches the prior projection and can be refreshed safely" },
+    ]);
+    expect(existsSync(join(prior.project, ".agents", "skills", "new-skill"))).toBe(false);
+    expect(readFileSync(join(prior.project, ".agents", "skills", "selected", "SKILL.md"), "utf8")).toContain("prior bytes");
   });
 
   it("unions topology selections from seats that share one runtime working directory", () => {
