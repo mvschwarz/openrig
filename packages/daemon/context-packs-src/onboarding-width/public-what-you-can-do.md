@@ -39,9 +39,8 @@ one command away. Your memory of the fleet is a claim about the past.
 - **`rig view list` / `rig view show <lens>`** — named lenses over coordination state: use
   `view show escalations` for owner attention, `view show pickup` for claimed-row state, and
   `view show execution` for done/now/next. An `INDETERMINATE` cell stays unknown rather than
-  being filled from memory. In `rig tui`, SCOPES → select a mission shows the same story as
-  DONE / NOW / NEXT / ATTENTION, with row drill-in and Escape back. **`rig view register`** turns
-  a query you keep re-running into a first-class view.
+  being filled from memory. **`rig view register`** turns a query you keep re-running into a
+  first-class view.
 - **`rig config`** — bare, with no arguments: every key, every current value, and where each came
   from. Most agents assume compaction thresholds, snapshot cadence and scan intervals are hardcoded
   daemon behaviour. They are configuration. **Watch one thing:** `source: default` does not mean
@@ -262,7 +261,9 @@ the tooling already reads. An agent who does not know this exists invents a priv
 scheme, and nothing downstream can see it.
 
 - **`rig scope mission ls` / `show` / `create`** — what work exists, what a mission is for, and how
-  to open one so it gets a stable dot-ID rather than being a bare folder nothing can address.
+  to open one so it gets a stable dot-ID rather than being a bare folder nothing can address. In
+  `rig tui`, SCOPES → select a mission shows the same story as DONE / NOW / NEXT / ATTENTION, with
+  row drill-in and Escape back.
 - **`rig scope slice ls` / `show` / `create`** — the same at the altitude where work is actually
   buildable. `show` gives you intent, frontmatter and children without guessing which of five files
   to open.
