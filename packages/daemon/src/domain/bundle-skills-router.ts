@@ -35,6 +35,9 @@ export interface RouteSkillsInput {
   declaredSkills: string[];
   /** Absolute path to the operator skills library (default ~/.openrig/skills). */
   targetSkillsDir: string;
+  /** Optional package-layout prefix removed only from the destination path.
+   *  The source path always remains the exact bundle-declared path. */
+  targetPrefixToStrip?: string;
 }
 
 /** One routed skill (or one rejection). */
@@ -98,7 +101,11 @@ export function routeSkills(input: RouteSkillsInput, fs: SkillsRouterFsOps): Rou
     // declared skills (e.g., skills/foo/SKILL.md → <target>/foo/SKILL.md);
     // strip the leading "skills/" prefix if present so the target dir is the
     // root of the operator's skill tree.
-    const declaredTrimmed = declared.startsWith("skills/") ? declared.slice("skills/".length) : declared;
+    const declaredTrimmed = input.targetPrefixToStrip && declared.startsWith(input.targetPrefixToStrip)
+      ? declared.slice(input.targetPrefixToStrip.length)
+      : declared.startsWith("skills/")
+        ? declared.slice("skills/".length)
+        : declared;
     const targetAbs = nodePath.resolve(input.targetSkillsDir, declaredTrimmed);
     // Defense-in-depth path-containment on TARGET (B1 repair on
     // qitem-20260518215234-f84fff45). The leading "skills/" strip can promote

@@ -122,6 +122,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       // OPR.0.5.3.6 D1 — the topology tree root (instance at its top).
       "topology.root",
       "context.packs_root",
+      "skills.root",
       "onboarding.default_pack.enabled",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines",
@@ -380,6 +381,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(cfg.workspace.specsRoot).toBe(join(cfg.workspace.root, "specs"));
     expect(cfg.workspace.projectsRoot).toBe(join(cfg.workspace.root, "projects"));
     expect(cfg.workspace.catalogPath).toBe(join(cfg.workspace.root, "workspace.yaml"));
+    expect(cfg.skills.root).toBe(join(HOISTED_HOME, "skills"));
     expect(cfg.files.allowlist).toBe(`workspace:${cfg.workspace.root}`);
     expect(cfg.progress.scanRoots).toBe(`workspace:${cfg.workspace.root}`);
   });

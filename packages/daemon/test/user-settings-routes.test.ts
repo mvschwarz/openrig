@@ -99,8 +99,9 @@ describe("config routes (User Settings v0)", () => {
     // + 2 S02 (queue.stuck_sweep_interval_seconds /
     //   stuck_sweep_unclaimed_age_minutes)
     // + 4 S01 (queue.wake_retry_interval_seconds / wake_retry_cap /
-    //   wake_unconfirmed_window_minutes / wake_swap_grace_seconds) → 64 total.
-    expect(Object.keys(body.settings).length).toBe(64);
+    //   wake_unconfirmed_window_minutes / wake_swap_grace_seconds)
+    // + 1 OPR.0.5.9.4 (skills.root) → 65 total.
+    expect(Object.keys(body.settings).length).toBe(65);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);

@@ -52,6 +52,9 @@ export interface RiggedConfig {
   context: {
     packsRoot: string;
   };
+  skills: {
+    root: string;
+  };
   onboarding: {
     defaultPack: {
       enabled: boolean;
@@ -230,6 +233,7 @@ const DEFAULTS = {
   topology: { root: getDefaultOpenRigPath("topology") },
   // OPR.0.5.3.7 R4 — derived under the OpenRig home, never a shared-docs literal.
   context: { packsRoot: getDefaultOpenRigPath("context-packs") },
+  skills: { root: getDefaultOpenRigPath("skills") },
   onboarding: { defaultPack: { enabled: true } },
   files: { allowlist: "" },
   progress: { scanRoots: "" },
@@ -360,6 +364,7 @@ export const VALID_KEYS = [
   "topology.root",
   // OPR.0.5.3.7 R4 — context-pack landing zone; lockstep with the daemon twin.
   "context.packs_root",
+  "skills.root",
   "onboarding.default_pack.enabled",
   "files.allowlist",
   "progress.scan_roots",
@@ -451,6 +456,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   // OPR.0.5.3.7 R4 — new key, OPENRIG_* only (no RIGGED_* legacy).
   "context.packs_root": { primary: "OPENRIG_CONTEXT_PACKS_ROOT" },
+  "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
   // OPENRIG_PROGRESS_SCAN_ROOTS become the env override for the new
@@ -529,6 +535,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workspace.catalog_path": ["workspace", "catalogPath"],
   "topology.root": ["topology", "root"],
   "context.packs_root": ["context", "packsRoot"],
+  "skills.root": ["skills", "root"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
@@ -920,6 +927,9 @@ export class ConfigStore {
       },
       context: {
         packsRoot: v("context.packs_root") as string,
+      },
+      skills: {
+        root: v("skills.root") as string,
       },
       onboarding: {
         defaultPack: {

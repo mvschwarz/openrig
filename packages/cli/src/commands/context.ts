@@ -31,6 +31,13 @@ import { ConfigStore } from "../config-store.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
 import { resolveWorkPosition } from "../lib/work-install.js";
+import {
+  reconcileSkillLoadout,
+  resolveSkillLoadout,
+  type ReconcileSkillLoadoutResult,
+  type SkillLoadout,
+  type SkillRuntime,
+} from "@openrig/daemon/skill-loadout";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -340,13 +347,17 @@ Examples:
   };
 
   cmd.command("work-install")
-    .description("Resolve an ordered project, mission, and slice context plan, optionally with exact file content")
+    .description("Resolve project/mission/slice context plus the managed project skill loadout")
     .option("--project <id>", "Exact project id from workspace.yaml")
     .option("--mission <id>", "Exact mission id under the selected project")
     .option("--slice <id>", "Exact slice id under the selected mission")
     .option("--deliver", "Include the exact content of each extant planned file")
+    .option("--runtime <runtime>", "Inspect skills for claude-code or codex")
+    .option("--cwd <path>", "Agent working directory that receives skill projections (default: current directory)")
+    .option("--topology <ids>", "Comma-separated topology/profile skill identities")
+    .option("--apply-skills", "Reconcile selected skills into the runtime harness directory")
     .option("--json", "JSON output")
-    .action((opts: { project?: string; mission?: string; slice?: string; deliver?: boolean; json?: boolean }) => {
+    .action((opts: { project?: string; mission?: string; slice?: string; deliver?: boolean; runtime?: string; cwd?: string; topology?: string; applySkills?: boolean; json?: boolean }) => {
       const store = new ConfigStore();
       const workspaceRoot = String(store.resolveWithSource("workspace.root").value);
       const catalogPath = String(store.resolveWithSource("workspace.catalog_path").value);
@@ -363,6 +374,41 @@ Examples:
         process.exitCode = 1;
         return;
       }
+      let skillLoadout: SkillLoadout | undefined;
+      let skillProjection: ReconcileSkillLoadoutResult | undefined;
+      if (opts.applySkills && !opts.runtime) {
+        console.error("invalid_runtime: --apply-skills requires --runtime claude-code|codex");
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.runtime) {
+        if (opts.runtime !== "claude-code" && opts.runtime !== "codex") {
+          console.error("invalid_runtime: --runtime must be claude-code or codex");
+          process.exitCode = 1;
+          return;
+        }
+        const topologySkills = (opts.topology ?? "").split(",").map((id) => id.trim()).filter(Boolean);
+        const resolvedSkills = resolveSkillLoadout({
+          catalogRoot: String(store.resolveWithSource("skills.root").value),
+          topologySkills,
+          projectRoot: result.position.projectRoot,
+          projectSkills: result.skills,
+        });
+        if (!resolvedSkills.ok) {
+          if (opts.json) console.log(JSON.stringify({ ok: false, errors: resolvedSkills.errors }, null, 2));
+          else for (const error of resolvedSkills.errors) console.error(`${error.code}: ${error.message}`);
+          process.exitCode = 1;
+          return;
+        }
+        skillLoadout = resolvedSkills.loadout;
+        skillProjection = reconcileSkillLoadout({
+          loadout: skillLoadout,
+          runtime: opts.runtime as SkillRuntime,
+          cwd: resolve(opts.cwd ?? process.cwd()),
+          apply: opts.applySkills === true,
+        });
+        if (!skillProjection.ok) process.exitCode = 1;
+      }
       if (opts.json) {
         const output = opts.deliver
           ? {
@@ -370,8 +416,9 @@ Examples:
               pieces: result.pieces.map((piece) => piece.exists
                 ? { ...piece, content: readFileSync(piece.path, "utf8") }
                 : piece),
+              ...(skillLoadout ? { skillLoadout, skillProjection } : {}),
             }
-          : result;
+          : { ...result, ...(skillLoadout ? { skillLoadout, skillProjection } : {}) };
         console.log(JSON.stringify(output, null, 2));
         return;
       }
@@ -384,12 +431,30 @@ Examples:
           console.log(`=== ${planned.altitude} ${planned.address} ===`);
           console.log(readFileSync(planned.path, "utf8"));
         }
+        console.log(`skills  ${result.skills.length > 0 ? result.skills.join(", ") : "(none selected by project)"}`);
+        if (skillProjection) {
+          for (const receipt of skillProjection.receipts) {
+            console.log(`${receipt.status.padEnd(7)} ${receipt.id} [${receipt.selectedBy.join("+")}] ${receipt.target}`);
+          }
+          for (const id of skillProjection.removed) console.log(`removed ${id}`);
+          if (skillProjection.freshLaunchRequired) console.log("skills  fresh seat process required to observe changed ambient skills");
+          if (!opts.applySkills) console.log("skills  read-only; add --apply-skills to reconcile");
+        }
         for (const warning of result.warnings) console.error(`Warning: ${warning}`);
         return;
       }
       console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}`);
       for (const planned of result.pieces) {
         console.log(`${planned.altitude.padEnd(7)} ${planned.address} [${planned.source}] ${planned.exists ? planned.path : `(absent: ${planned.path})`}`);
+      }
+      console.log(`skills  ${result.skills.length > 0 ? result.skills.join(", ") : "(none selected by project)"}`);
+      if (skillProjection) {
+        for (const receipt of skillProjection.receipts) {
+          console.log(`${receipt.status.padEnd(7)} ${receipt.id} [${receipt.selectedBy.join("+")}] ${receipt.target}`);
+        }
+        for (const id of skillProjection.removed) console.log(`removed ${id}`);
+        if (skillProjection.freshLaunchRequired) console.log("skills  fresh seat process required to observe changed ambient skills");
+        if (!opts.applySkills) console.log("skills  read-only; add --apply-skills to reconcile");
       }
       for (const warning of result.warnings) console.error(`Warning: ${warning}`);
     });

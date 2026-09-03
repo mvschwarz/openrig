@@ -28,6 +28,48 @@ is the project-location catalog. The project manifest exposes empty
 addresses and stable managed-catalog skill IDs, but neither skill source nor a
 System World belongs in this tree.
 
+## Project-world install
+
+`project.yaml` may select project context and managed skills together:
+
+```yaml
+schema: openrig.project/v0alpha1
+kind: project
+install:
+  intent: SPEC.md
+  context:
+    - conventions.md
+  skills:
+    - repository-maintenance
+```
+
+`install.context` contains project-relative Markdown addresses. `install.skills`
+contains stable skill identities only. Skill source bytes live in the single
+configured managed catalog (`skills.root`, default `$OPENRIG_HOME/skills`),
+never under the project or workspace. `rig context work-install --runtime
+<claude-code|codex>` resolves both parts; add `--apply-skills` to reconcile the
+selected exact bytes into `.claude/skills/` or `.agents/skills/` under the
+caller's current working directory. Use `--cwd` when the receiving agent works
+somewhere else; the project-world metadata root is never assumed to be its code
+working directory.
+
+The generated harness directories and `.openrig/skill-loadouts/` ownership
+receipts are projections, not source. Product repositories should ignore them.
+Reconciliation removes a deselected entry only when its current bytes still
+match OpenRig's last owned projection; unrelated and locally modified entries
+are preserved or reported as conflicts.
+
+Seats of the same runtime commonly share one working directory. Their topology
+selectors are retained per canonical seat identity and projected as a union, so
+starting one role cannot remove another role's skill. A changed projection is
+visible only to a fresh harness process; reconciliation reports that boundary
+instead of claiming a running seat hot-reloaded it.
+
+An installed project selection is also retained in that working directory's
+ownership receipt. A later seat start with no project-world input preserves it;
+an explicit install whose `install.skills` is empty clears it. This keeps
+"project not supplied" distinct from "project deliberately selects no skills."
+
 ## UI Mapping
 
 - `workspace.root` maps to the Project workspace.

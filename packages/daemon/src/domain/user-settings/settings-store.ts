@@ -44,6 +44,11 @@ const DEFAULT_CONTEXT_PACKS_ROOT = path.join(
   "context-packs",
 );
 
+const DEFAULT_SKILLS_ROOT = path.join(
+  process.env["OPENRIG_HOME"] || process.env["RIGGED_HOME"] || path.join(os.homedir(), ".openrig"),
+  "skills",
+);
+
 /** OPR.0.5.3.6 — the LEGACY topology location, ruled an arbitrary folder
  *  (founder, 2026-08-14) but kept readable so pre-convention rigs migrate
  *  instead of flag-daying. Resolves where legacy code ACTUALLY wrote —
@@ -99,6 +104,7 @@ export const SETTINGS_VALID_KEYS = [
   "topology.root",
   // OPR.0.5.3.7 R4 — context-pack landing zone; lockstep with the CLI twin.
   "context.packs_root",
+  "skills.root",
   "onboarding.default_pack.enabled",
   "files.allowlist",
   "progress.scan_roots",
@@ -224,6 +230,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   // OPR.0.5.3.7 R4 — new key, OPENRIG_* only (no RIGGED_* legacy).
   "context.packs_root": { primary: "OPENRIG_CONTEXT_PACKS_ROOT" },
+  "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST" },
   "progress.scan_roots": { primary: "OPENRIG_PROGRESS_SCAN_ROOTS" },
@@ -300,6 +307,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "workspace.catalog_path": ["workspace", "catalogPath"],
   "topology.root": ["topology", "root"],
   "context.packs_root": ["context", "packsRoot"],
+  "skills.root": ["skills", "root"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "files.allowlist": ["files", "allowlist"],
   "progress.scan_roots": ["progress", "scanRoots"],
@@ -532,6 +540,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // OPR.0.5.3.6 D1 — derived under $OPENRIG_HOME, never a shared-docs literal.
     case "topology.root": return DEFAULT_TOPOLOGY_ROOT;
     case "context.packs_root": return DEFAULT_CONTEXT_PACKS_ROOT;
+    case "skills.root": return DEFAULT_SKILLS_ROOT;
     case "onboarding.default_pack.enabled": return true;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
     case "ui.preview.refresh_interval_seconds": return 3;
@@ -762,6 +771,7 @@ export interface ClaudeCompactionPolicy {
 }
 
 export interface ResolvedConfig {
+  skillsRoot: string;
   workspaceRoot: string;
   workspaceSlicesRoot: string;
   workspaceSteeringPath: string;
@@ -846,6 +856,7 @@ export class SettingsStore {
     const fc = this.readConfigFile();
     const wr = this.resolveWorkspaceRootRaw(fc);
     return {
+      skillsRoot: this.resolveOne("skills.root", fc, wr).value as string,
       workspaceRoot: wr,
       workspaceSlicesRoot: this.resolveOne("workspace.slices_root", fc, wr).value as string,
       workspaceSteeringPath: this.resolveOne("workspace.steering_path", fc, wr).value as string,
