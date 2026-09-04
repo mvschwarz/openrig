@@ -158,7 +158,7 @@ function targetIssue(target) {
   return null;
 }
 
-function scanLegacy(directory, kind, destination, issues) {
+function scanLegacy(directory, kind, destination, issues, managedEmptyDirectories = []) {
   if (!fs.existsSync(directory)) return [];
   if (!fs.statSync(directory).isDirectory()) {
     issues.push(issue("foreign_file", directory, "preserve the path and identify the real legacy telemetry directory"));
@@ -169,6 +169,10 @@ function scanLegacy(directory, kind, destination, issues) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const source = path.join(directory, entry.name);
     if (entry.isFile() && entry.name.endsWith(".json.tmp")) continue;
+    if (kind === "context" && entry.name === "system" && entry.isDirectory() && fs.readdirSync(source).length === 0) {
+      managedEmptyDirectories.push(source);
+      continue;
+    }
     if (!entry.isFile() || !entry.name.endsWith(".json")) {
       issues.push(issue("foreign_file", source, "move or classify the non-telemetry entry before applying this bounded migration"));
       continue;
@@ -248,6 +252,7 @@ function collectorActions(home, seats, issues) {
 
 function buildPlan(home) {
   const issues = [];
+  const managedEmptyDirectories = [];
   const roots = {
     legacyContext: path.join(home, "context"),
     legacyProvider: path.join(home, "provider-usage"),
@@ -259,7 +264,7 @@ function buildPlan(home) {
     if (found) issues.push(found);
   }
   const telemetry = [
-    ...scanLegacy(roots.legacyContext, "context", roots.contextUsage, issues),
+    ...scanLegacy(roots.legacyContext, "context", roots.contextUsage, issues, managedEmptyDirectories),
     ...scanLegacy(roots.legacyProvider, "provider", roots.providerUsage, issues),
   ];
   const seats = inventoryClaudeSeats(issues);
@@ -268,7 +273,7 @@ function buildPlan(home) {
   if (library && fs.existsSync(library.sourceRoot) && !fs.statSync(library.sourceRoot).isDirectory()) {
     issues.push(issue("library_source_invalid", library.sourceRoot, "preserve the path and identify the real legacy context library"));
   }
-  return { roots, telemetry, seats, collectors, library, issues };
+  return { roots, telemetry, seats, collectors, library, managedEmptyDirectories, issues };
 }
 
 function publicPlan(home, plan) {
@@ -283,6 +288,7 @@ function publicPlan(home, plan) {
     actions: [
       ...plan.telemetry.map((item) => ({ decision: "copy", kind: item.kind, from: item.source, to: item.destination, sha256: sha256(item.bytes) })),
       ...plan.collectors.map((item) => ({ decision: "rewrite-collector", sessionName: item.sessionName, path: item.path })),
+      ...plan.managedEmptyDirectories.map((pathValue) => ({ decision: "remove-empty-scaffold", path: pathValue })),
       ...(plan.library ? [{
         decision: plan.library.sourceRoot === plan.library.targetRoot ? "retarget-library" : "move-library",
         from: plan.library.sourceRoot,
@@ -399,7 +405,14 @@ function applyState(home, preimage) {
   ];
   const files = storePreimage(preimage, records);
   const manifestPath = path.join(preimage, "manifest.json");
-  const prepared = { schema: SCHEMA, home, status: "prepared", createdAt: new Date().toISOString(), files };
+  const prepared = {
+    schema: SCHEMA,
+    home,
+    status: "prepared",
+    createdAt: new Date().toISOString(),
+    files,
+    managedEmptyDirectories: plan.managedEmptyDirectories,
+  };
   fs.writeFileSync(manifestPath, `${JSON.stringify(prepared, null, 2)}\n`, { flag: "wx" });
 
   try {
@@ -543,9 +556,10 @@ function verificationReceipt(home, preimage, verificationPath) {
     : { issue: issue("verification_receipt_invalid", verificationPath, "rerun --verify against this exact home and preimage, capture its JSON, then retry") };
 }
 
-function validateLegacySources(preimage, manifest, root, kind, issues) {
+function validateLegacySources(preimage, manifest, root, kind, issues, allowedDirectories = []) {
   const files = manifest.files.filter((file) => file.kind === kind && path.dirname(file.originalPath) === root);
   const allowed = new Set(files.map((file) => path.basename(file.originalPath)));
+  const allowedDirectorySet = new Set(allowedDirectories);
   if (!fs.existsSync(root)) return files;
   if (!fs.statSync(root).isDirectory()) {
     issues.push(issue("legacy_source_drift", root, "restore the verified legacy telemetry directory before migrating the library"));
@@ -553,6 +567,7 @@ function validateLegacySources(preimage, manifest, root, kind, issues) {
   }
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (entry.isFile() && entry.name.endsWith(".json.tmp")) continue;
+    if (entry.isDirectory() && allowedDirectorySet.has(path.join(root, entry.name))) continue;
     if (!entry.isFile() || !allowed.has(entry.name)) {
       issues.push(issue("context_dir_not_empty_after_state_move", path.join(root, entry.name), "classify or archive the non-telemetry entry before applying the library move"));
     }
@@ -565,12 +580,28 @@ function validateLegacySources(preimage, manifest, root, kind, issues) {
   return files;
 }
 
-function removeVerifiedLegacyRoot(root, files) {
+function validateManagedEmptyDirectories(home, manifest, issues) {
+  const expected = path.join(home, "context", "system");
+  const directories = manifest.managedEmptyDirectories ?? [];
+  if (!Array.isArray(directories) || directories.some((directory) => directory !== expected)) {
+    issues.push(issue("preimage_manifest_mismatch", expected, "use the exact preimage emitted by this helper"));
+    return [];
+  }
+  for (const directory of directories) {
+    if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory() || fs.readdirSync(directory).length > 0) {
+      issues.push(issue("destination_drift", directory, "preserve the changed System World scaffold and rerun from a fresh preimage"));
+    }
+  }
+  return directories;
+}
+
+function removeVerifiedLegacyRoot(root, files, emptyDirectories = []) {
   if (!fs.existsSync(root)) return;
   for (const file of files) fs.rmSync(file.originalPath, { force: true });
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (entry.isFile() && entry.name.endsWith(".json.tmp")) fs.rmSync(path.join(root, entry.name), { force: true });
   }
+  for (const directory of emptyDirectories) fs.rmdirSync(directory);
   if (fs.readdirSync(root).length === 0) fs.rmdirSync(root);
 }
 
@@ -586,7 +617,15 @@ function applyLibrary(home, preimage, verificationPath) {
   const receipt = verificationReceipt(home, preimage, verificationPath);
   if (receipt.issue) issues.push(receipt.issue);
   const library = readLibraryConfig(home, issues);
-  const legacyContextFiles = validateLegacySources(preimage, manifest, path.join(home, "context"), "context-source", issues);
+  const managedEmptyDirectories = validateManagedEmptyDirectories(home, manifest, issues);
+  const legacyContextFiles = validateLegacySources(
+    preimage,
+    manifest,
+    path.join(home, "context"),
+    "context-source",
+    issues,
+    managedEmptyDirectories,
+  );
   const legacyProviderFiles = validateLegacySources(preimage, manifest, path.join(home, "provider-usage"), "provider-source", issues);
   if (library && fs.existsSync(library.sourceRoot) && !fs.statSync(library.sourceRoot).isDirectory()) {
     issues.push(issue("library_source_invalid", library.sourceRoot, "preserve the path and identify the real legacy context library"));
@@ -639,7 +678,7 @@ function applyLibrary(home, preimage, verificationPath) {
   atomicWrite(manifestPath, Buffer.from(`${JSON.stringify(prepared, null, 2)}\n`), 0o600);
 
   try {
-    removeVerifiedLegacyRoot(path.join(home, "context"), legacyContextFiles);
+    removeVerifiedLegacyRoot(path.join(home, "context"), legacyContextFiles, managedEmptyDirectories);
     removeVerifiedLegacyRoot(path.join(home, "provider-usage"), legacyProviderFiles);
     if (library.sourceRoot !== library.targetRoot) {
       if (fs.existsSync(library.targetRoot)) throw new Error(`library target still exists after telemetry removal: ${library.targetRoot}`);
@@ -811,6 +850,7 @@ function rollback(home, preimage) {
         atomicWrite(file.originalPath, fs.readFileSync(path.join(preimage, file.storedAs)), file.mode);
       }
     }
+    for (const directory of manifest.managedEmptyDirectories ?? []) fs.mkdirSync(directory, { recursive: true });
   }
   for (const file of toRestore) {
     atomicWrite(file.originalPath, fs.readFileSync(path.join(preimage, file.storedAs)), file.mode);

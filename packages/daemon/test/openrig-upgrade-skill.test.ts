@@ -495,6 +495,7 @@ describe("0.5.9 telemetry-state migration helper", () => {
   it("moves the legacy context library only after a verification receipt and rolls the whole layout back", () => {
     const root = temporaryRoot();
     const fixture = seedLegacyTelemetry(root);
+    fs.mkdirSync(path.join(fixture.home, "context", "system"));
     write(fixture.home, "context-packs/operator-pack/manifest.yaml", "name: operator-pack\nversion: \"1\"\ntaxonomy: world\nfiles: []\n");
     write(fixture.home, "config.json", `${JSON.stringify({ keep: true, context: { packsRoot: path.join(fixture.home, "context-packs") } }, null, 2)}\n`);
     const originalConfig = fs.readFileSync(path.join(fixture.home, "config.json"));
@@ -506,6 +507,13 @@ describe("0.5.9 telemetry-state migration helper", () => {
     }]);
     const env = { OPENRIG_RIG_BIN: fakeRig };
     const preimage = path.join(fixture.home, "backups", "before-layout");
+
+    const plan = runJson(helper, ["--home", fixture.home], env);
+    expect(plan.complete).toBe(true);
+    expect(plan.actions).toContainEqual({
+      decision: "remove-empty-scaffold",
+      path: path.join(fixture.home, "context", "system"),
+    });
 
     runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
     const collector = path.join(repoRoot, "packages", "daemon", "assets", "claude-statusline-context.cjs");
@@ -550,6 +558,7 @@ describe("0.5.9 telemetry-state migration helper", () => {
     expect(fs.existsSync(path.join(fixture.home, "context", `${fixture.sessionName}.json`))).toBe(true);
     expect(fs.existsSync(path.join(fixture.home, "provider-usage", `${fixture.sessionName}.json`))).toBe(true);
     expect(fs.existsSync(path.join(fixture.home, "state", "context-usage", `${fixture.sessionName}.json`))).toBe(true);
+    expect(fs.readdirSync(path.join(fixture.home, "context", "system"))).toEqual([]);
     expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(fixture.originalSettings);
   });
 
@@ -632,6 +641,7 @@ describe("0.5.9 telemetry-state migration helper", () => {
     const fixture = seedLegacyTelemetry(root);
     write(fixture.home, "context/broken.json", "not json");
     write(fixture.home, "context/foreign.txt", "leave me alone");
+    write(fixture.home, "context/system/user-owned.yaml", "preserve: true\n");
     write(fixture.home, "state/context-usage/existing.json", "{}");
     const fakeRig = writeRigInventory(root, [{
       runtime: "claude-code",
@@ -648,6 +658,10 @@ describe("0.5.9 telemetry-state migration helper", () => {
       "unknown_live_cwd",
       "target_nonempty",
     ]));
+    expect(planned.issues).toContainEqual(expect.objectContaining({
+      code: "foreign_file",
+      path: path.join(fixture.home, "context", "system"),
+    }));
     expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(fixture.originalSettings);
   });
 
