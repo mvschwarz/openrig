@@ -4,6 +4,8 @@
   "owner": "pm-lead@openrig-pm",
   "product_public": {
     "clean": [
+      "agent-operated-software",
+      "agent-operated-workflows",
       "mission-slice-sop",
       "openrig-cmux",
       "openrig-herdr",

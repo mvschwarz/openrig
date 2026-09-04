@@ -13,7 +13,7 @@ You're running inside OpenRig. OpenRig ships a set of **skills** — small docum
 
 ## How OpenRig context works (30 seconds)
 
-Skills are **progressive disclosure**: a skill's *name + description* sit in your context ambiently (the "hot tier"); its *body* loads only when you open it. So you don't pre-read everything — you pattern-match a skill's "when" to your moment, then open just that one. This file is the index over the whole shipped set. (For the full model of building/operating agent software, open `software-for-agents`.)
+Skills are **progressive disclosure**: a skill's *name + description* sit in your context ambiently (the "hot tier"); its *body* loads only when you open it. So you don't pre-read everything — you pattern-match a skill's "when" to your moment, then open just that one. This file is the index over the whole shipped set. (For bounded procedures, open `agent-operated-workflows`; for ongoing agent-backed applications, open `agent-operated-software`.)
 
 Every row below names **how to reach the skill** — already-hot, or an exact load path. No row is a dead end.
 
@@ -63,7 +63,9 @@ These are auto-delivered to every rig; their name+description are already in you
 - **retiring-and-inheriting-a-seat** — you're planning a seat transition and need to retire the current occupant into a fresh successor without losing continuity.
 - **mission-slice-sop** — you're working a mission/slice (the SDLC: intent → mini-requirements + proof contract → build → QA → proof). The operating manual.
 - **messaging-the-human** — composing a message to the human. Plain language, no insider jargon.
-- **software-for-agents** — you want the full first-load model of how agent software is built and operated here.
+- **agent-operated-workflows** — a bounded real-world procedure needs an agent to interpret state and operate exact tools, or you are deciding whether ordinary code should own the loop.
+- **agent-operated-software** — you are designing or operating an ongoing application whose live backend includes OpenRig agents.
+- **software-for-agents** — compatibility redirect for the former `agent-operated-software` name; remove in 0.6.0.
 - **openrig-skills** — this index (you're reading it). Always loaded; the entry point to everything below.
 
 ### Load when your role or task calls for it (repo-shipped, profile-selected)

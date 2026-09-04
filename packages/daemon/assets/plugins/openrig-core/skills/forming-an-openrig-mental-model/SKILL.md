@@ -24,8 +24,8 @@ metadata:
       - openrig-builder
       - openrig-architect
       - openrig-upgrade
-      - ai-dev-workflows
-      - software-for-agents
+      - agent-operated-workflows
+      - agent-operated-software
 ---
 
 # Forming an OpenRig Mental Model

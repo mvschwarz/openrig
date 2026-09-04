@@ -10,7 +10,7 @@
       "core/openrig-architect/SKILL.md": "b53e63d22989bb6cc2da30a79e69902ce57a109145027a4007a900fdd66ee747",
       "core/openrig-cmux/SKILL.md": "73a86eac45d68b16a38fc0a4438713c634d86061073dac96a4d9e656ea5d34dc",
       "core/openrig-herdr/SKILL.md": "37508a02f50bb69ee97c22c37ccf70aa8e37dc0784061eb2a5ad813571eebd1a",
-      "core/openrig-skills/SKILL.md": "f606f2e5008552c96c32f855a57f49a9246abb2d8cc98e1341a33e8fade604a6",
+      "core/openrig-skills/SKILL.md": "af08e74804de4f72d8ca85536f4294c5ab6050bfda7761b05e0747622ae17cca",
       "core/openrig-upgrade/SKILL.md": "31379032b4e1ab0427c4ce8abf46bc5b42cfb61bb610f77e3d949ac8c2bb47bf",
       "core/openrig-upgrade/scripts/backup-sqlite.mjs": "52fe3015a0399986b586b6603e0664f61136d2210611b1638110a7b6b06e38b4",
       "core/openrig-upgrade/scripts/inspect-upgrade.mjs": "0f9239f3f8ad75885e985433576ffba9cf155dd8616801dd73d60bf3e9990a2a",
@@ -53,6 +53,8 @@
       "process/verification-before-completion/SKILL.md": "81df2cff3590b35aeac95757b0c21d5c47ed49f1f5e9aea1d23c00da61e8c7e8"
     },
     "plugin": {
+      "agent-operated-software/SKILL.md": "d636ef9166a5f84fcd7b78bc5ca2be318ddcf80b5a6c4e1ff1d5f9294420d2bb",
+      "agent-operated-workflows/SKILL.md": "0d52c34f61446e96fb0ea372ee7a826c8e7fffc6124bc0f88fc42326170a93f0",
       "applying-a-permission-policy/SKILL.md": "7fde2a1220bae9cc5b912c297890a749b4e2ef2e5ace6ecfc3f71f87d141bc1a",
       "claude-compaction-restore/SKILL.md": "6f64609f32bcb4f115287eb13be00dfb787de0117cd597c75f29aa950e1773ed",
       "claude-compaction-restore/scripts/precompact-hook.mjs": "ae740e18a00102a66e7f1cd90834148d29649341acaf46b88d6b47ea72429956",
@@ -60,7 +62,7 @@
       "claude-compaction-restore/templates/compact-instruction.md": "682c778464517b831902ddc2678c055545899b4751a1d32391ce965d5eb7061d",
       "claude-compaction-restore/templates/post-compact-restore-instruction.md": "10a5a7e5e052f3aa000a4209f386dc4eb90a3c2bba449ca685f124714f59e47a",
       "delegating-work/SKILL.md": "9809781b3ee8d0ffcb411af3ebd3b48257f9dbd9eac652350c0e30d000c0d236",
-      "forming-an-openrig-mental-model/SKILL.md": "9199fc9c5ff58e7f4294954451f756379c113f8db521cf634acd32dacd099142",
+      "forming-an-openrig-mental-model/SKILL.md": "04353dbcf299e3907f6056dc8533a65a99efd46eacce9ae753246925b19ff07e",
       "loading-addressable-markdown/SKILL.md": "104dc6a02ae6e2d0eff519387c6839cb09803945b9ee35ec3498af8feaaa8d1e",
       "loading-addressable-markdown/scripts/resolve-markdown.mjs": "ef113af7bb297058a8c23a82a4c171232ae8c2d6b1705a89a80140000ad3bca0",
       "messaging-the-human/SKILL.md": "2ef9b44aa6f49a424c7e84e752679f608c577e3ccb2200d9b3afacabc47e1527",
@@ -76,7 +78,7 @@
       "openrig-operating-model/templates/PLAYBOOK.md": "f1e6cbac4975b1279438603c7d87b28f13c2f95aa7e66a43eb83c7126e8db8d1",
       "openrig-operating-model/templates/SOP.md": "1eaf0daf4f9bbf0715e6a5aaf0f29f030af5fe8b8a10232488ee97c507afa6dc",
       "openrig-operating-model/templates/SPEC.md": "fd593b53550f90ebd72fce1877f98b901b8610b8791d94f31baac4c549830fe0",
-      "openrig-skills/SKILL.md": "f606f2e5008552c96c32f855a57f49a9246abb2d8cc98e1341a33e8fade604a6",
+      "openrig-skills/SKILL.md": "af08e74804de4f72d8ca85536f4294c5ab6050bfda7761b05e0747622ae17cca",
       "openrig-user/SKILL.md": "f95dc9b19a5f99936998fa13e3c417e69d02be53e36519e0210dfccbe76cee9c",
       "orienting-to-an-inherited-seat/CHANGELOG.md": "fe6862cdc890fde24b8e21913bb33d6dd3be658e5f877f7370ffe35bee1a9f17",
       "orienting-to-an-inherited-seat/SKILL.md": "4d2bb1f0dd522b0b956bf2191ce2121c36590936e217121f781525f77f8229a9",
@@ -91,7 +93,7 @@
       "seat-continuity-and-handover/references/apprentice-successor-seat-cutover.md": "0c865b76c9b0908373d3cf17439ef31b08e20a769c1cef1bea2403d963887840",
       "seat-continuity-and-handover/references/orchestrator-role.md": "2ddf05125e0bf22e2dc64cb328fcc4bd94fa62eb2fcfd21d75f21c488c72ecaa",
       "session-compaction-and-restore/SKILL.md": "2e785328d6e847e931d0d4a1152b075bab4501be17336b3730fea6c14bd4b6e0",
-      "software-for-agents/SKILL.md": "7363256b005839ea067caac633ea908b39df2b58ec2ac7d324e646a0576eed51"
+      "software-for-agents/SKILL.md": "c36c6d3ae7484f477f1bd24e8ff72846f6dfbff685aef1e780f6011072a51ac7"
     },
     "spec": {
       "core/agent-starters/SKILL.md": "dd11173ea046dd7d30e23c4fdb3f5188b003ca56ea434ebcc21e14f5e8f29b15",
@@ -102,7 +104,7 @@
       "core/openrig-architect/SKILL.md": "b53e63d22989bb6cc2da30a79e69902ce57a109145027a4007a900fdd66ee747",
       "core/openrig-cmux/SKILL.md": "73a86eac45d68b16a38fc0a4438713c634d86061073dac96a4d9e656ea5d34dc",
       "core/openrig-herdr/SKILL.md": "37508a02f50bb69ee97c22c37ccf70aa8e37dc0784061eb2a5ad813571eebd1a",
-      "core/openrig-skills/SKILL.md": "f606f2e5008552c96c32f855a57f49a9246abb2d8cc98e1341a33e8fade604a6",
+      "core/openrig-skills/SKILL.md": "af08e74804de4f72d8ca85536f4294c5ab6050bfda7761b05e0747622ae17cca",
       "core/openrig-upgrade/SKILL.md": "31379032b4e1ab0427c4ce8abf46bc5b42cfb61bb610f77e3d949ac8c2bb47bf",
       "core/openrig-upgrade/scripts/backup-sqlite.mjs": "52fe3015a0399986b586b6603e0664f61136d2210611b1638110a7b6b06e38b4",
       "core/openrig-upgrade/scripts/inspect-upgrade.mjs": "0f9239f3f8ad75885e985433576ffba9cf155dd8616801dd73d60bf3e9990a2a",
