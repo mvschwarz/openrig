@@ -28,6 +28,9 @@ interface SidecarRaw {
   };
   session_id?: string;
   session_name?: string;
+  /** Managed seat generation inherited by the status-line collector. Lets consumers distinguish
+   *  a canonical occupant from a retained predecessor whose launch-time --name aliases the seat. */
+  occupant_generation?: string;
   transcript_path?: string;
   sampled_at?: string;
 }

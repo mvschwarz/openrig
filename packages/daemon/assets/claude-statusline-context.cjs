@@ -42,6 +42,7 @@ process.stdin.on("end", () => {
       },
       session_id: raw.session_id ?? null,
       session_name: raw.session_name ?? null,
+      occupant_generation: process.env.OPENRIG_OCCUPANT_GENERATION || process.env.RIGGED_OCCUPANT_GENERATION || null,
       transcript_path: raw.transcript_path ?? null,
       sampled_at: new Date().toISOString(),
     };

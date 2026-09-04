@@ -247,7 +247,7 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
     const s = sessionRegistry.registerClaimedSession(node.id, sessionName);
     sessionRegistry.markDetached(s.id);
-    return { rig, node };
+    return { rig, node, session: s };
   }
 
   it("reconcileSession captures a Codex token at the no-launch adoption boundary", async () => {
@@ -264,6 +264,29 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     expect(row.resume_token).toBe("codex-thread-reconcile");
     expect(row.resume_type).toBe("codex_id");
     expect(row.resume_provenance).toBe("adoption");
+  });
+
+  it("reconcileSession replaces a stale Claude token only on the newly bound occupant row", async () => {
+    const stale = "9e1ac0df-505a-4050-857b-a494b46dabc6";
+    const current = "f16594c5-179a-4be7-bf5e-fd759b2b87a3";
+    const { node, session } = seedDetachedManagedSeat("claude-code", "dev-driver@test-rig");
+    sessionRegistry.updateResumeToken(session.id, "claude_id", stale, "scrape");
+    readSidecar.mockReturnValue({ ok: true, data: { session_id: current } });
+
+    const result = await buildService().reconcileSession({ sessionName: "dev-driver@test-rig" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(tokenRow(node.id)).toMatchObject({
+      resume_type: "claude_id",
+      resume_token: current,
+      resume_provenance: "adoption",
+    });
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-driver@test-rig");
+    expect(sessionRegistry.getSessionsForRig(result.result.rigId).find((row) => row.id === session.id)).toMatchObject({
+      status: "detached",
+      resumeToken: stale,
+    });
   });
 
   it("reconcileSession capture is idempotent: re-reconcile refreshes to a single coherent adoption entry", async () => {
