@@ -4,7 +4,7 @@ import { CmuxAdapter } from "../src/adapters/cmux.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
-import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
 
 function unavailableCmux() {
   const factory: CmuxTransportFactory = async () => {
@@ -102,6 +102,78 @@ describe("Session routes", () => {
     const body = await res.json();
     expect(body).toHaveLength(1);
     expect(body[0].sessionName).toBe("r01-dev1-impl");
+  });
+
+  it("POST clear-attention reconciles the real restore attempt through strict native lineage", async () => {
+    const tmux = {
+      ...mockTmuxAdapter(),
+      hasSession: vi.fn(async () => true),
+      listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
+      getPanePid: vi.fn(async () => 1234),
+      getPaneCommand: vi.fn(async () => "claude"),
+      capturePaneContent: vi.fn(async () => "Claude Code v2.1.89\n ❯ accept edits on"),
+    } as unknown as TmuxAdapter;
+    const { app, rigRepo, sessionRegistry, eventBus } = createTestApp(db, {
+      tmux,
+      listProcesses: async () => [
+        { pid: 1234, ppid: 1, command: "zsh" },
+        { pid: 1235, ppid: 1234, command: "claude.exe --resume tok-abc-123" },
+      ],
+    });
+    const rig = rigRepo.createRig("r90");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    const sessionName = "r90-worker";
+    sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
+    const session = sessionRegistry.registerSession(node.id, sessionName);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    db.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = ? WHERE id = ?")
+      .run("tok-abc-123", session.id);
+    const started = eventBus.emit({
+      type: "restore.started",
+      rigId: rig.id,
+      snapshotId: "snap-1",
+      intendedRoster: [{ nodeId: node.id, logicalId: "worker" }],
+    });
+    eventBus.emit({
+      type: "restore.completed",
+      rigId: rig.id,
+      snapshotId: "snap-1",
+      result: {
+        snapshotId: "snap-1",
+        preRestoreSnapshotId: null,
+        rigResult: "partially_restored",
+        nodes: [{ nodeId: node.id, logicalId: "worker", status: "attention_required" }],
+        warnings: [],
+      },
+    });
+
+    const cleared = await app.request(`/api/sessions/${encodeURIComponent(sessionName)}/clear-attention`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({
+      ok: true,
+      clearedBy: "evidence",
+      clearedClasses: ["restore_outcome"],
+      derivedEvidence: {
+        source: "restore_runtime_truth",
+        attemptId: started.seq,
+        resumeTokenUsed: true,
+      },
+    });
+
+    const status = await app.request(`/api/rigs/${rig.id}/restore/status/${started.seq}`);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({
+      ok: true,
+      attemptId: started.seq,
+      currentIntendedSetVerdict: "fully_restored",
+      reconciliations: [{ nodeId: node.id, to: "operator_recovered" }],
+    });
   });
 
   it("POST .../launch -> 201 + sessionName + session + binding, binding.tmuxSession === sessionName", async () => {

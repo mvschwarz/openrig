@@ -102,6 +102,7 @@ import { InstallVerifier } from "../../src/domain/install-verifier.js";
 import { PodBundleSourceResolver } from "../../src/domain/bundle-source-resolver.js";
 import { NodeCmuxService } from "../../src/domain/node-cmux-service.js";
 import { AgentActivityStore } from "../../src/domain/agent-activity-store.js";
+import { SeatAttentionReconciler } from "../../src/domain/seat-attention-reconciler.js";
 import { createApp } from "../../src/server.js";
 import fs from "node:fs";
 
@@ -219,6 +220,7 @@ export function createTestApp(
     permissionDriftObserver?: {
       diagnose(nodeId: string): import("../../src/domain/permission-drift.js").PermissionDriftDiagnostic | null;
     };
+    listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
     /**
      * Agent Starter v1 vertical M2: optional real-fs upRouter for tests
      * that POST /api/up with a YAML spec on disk. Default behavior
@@ -266,6 +268,7 @@ export function createTestApp(
   const restoreOrchestrator = new RestoreOrchestrator({
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
     checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume, codexResume,
+    ...(opts?.listProcesses ? { listProcesses: opts.listProcesses } : {}),
   });
   const podRepo = new PodRepository(db);
   const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo });
@@ -355,6 +358,14 @@ export function createTestApp(
     isRegisteredOccupantGeneration: (nodeId, generation) =>
       sessionRegistry.isOccupantGenerationRegistered(nodeId, generation),
   });
+  const seatAttentionReconciler = new SeatAttentionReconciler({
+    sessionRegistry,
+    eventBus,
+    agentActivityStore,
+    db,
+    tmux,
+    reconcileRestoreOutcome: (rigId, nodeId) => restoreOrchestrator.reconcileNodeRuntimeTruth(rigId, nodeId),
+  });
 
   const podBundleSourceResolver = new PodBundleSourceResolver();
 
@@ -382,6 +393,7 @@ export function createTestApp(
     whoamiService,
     nodeCmuxService,
     agentActivityStore,
+    seatAttentionReconciler,
     seatStructuralActivityService: opts?.seatStructuralActivityService,
     activityHookToken: opts?.activityHookToken,
     eventLoopMonitor: opts?.eventLoopMonitor,

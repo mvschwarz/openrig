@@ -985,6 +985,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { SeatAttentionReconciler } = await import("./domain/seat-attention-reconciler.js");
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry, eventBus, agentActivityStore, db, tmux: tmuxAdapter,
+    reconcileRestoreOutcome: (rigId, nodeId) => restoreOrchestrator.reconcileNodeRuntimeTruth(rigId, nodeId),
     sendVerify: async (session, text, opts) => {
       const transport = deps.sessionTransport;
       if (!transport) return { ok: false, outcome: "failed" };

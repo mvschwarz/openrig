@@ -421,12 +421,13 @@ describe("SeatAttentionReconciler", () => {
   });
 
   // OPR.0.4.0.16 — derived-class tests
-  function seedDerivedAttentionSeat(rigName: string, sessionName: string): { rigId: string; nodeId: string; sessionId: string } {
+  function seedDerivedAttentionSeat(rigName: string, sessionName: string): { rigId: string; nodeId: string; sessionId: string; attemptId: number } {
     const rig = rigRepo.createRig(rigName);
     const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
     const session = sessionRegistry.registerSession(node.id, sessionName);
     sessionRegistry.updateStartupStatus(session.id, "ready");
     sessionRegistry.updateStatus(session.id, "running");
+    const started = eventBus.emit({ type: "restore.started", rigId: rig.id, snapshotId: "snap-1" });
     // Seed a failed restore outcome
     eventBus.emit({
       type: "restore.completed",
@@ -434,15 +435,94 @@ describe("SeatAttentionReconciler", () => {
       snapshotId: "snap-1",
       result: { snapshotId: "snap-1", preRestoreSnapshotId: "snap-0", rigResult: "failed", nodes: [{ nodeId: node.id, logicalId: "worker", status: "failed" }], warnings: [] },
     } as any);
-    return { rigId: rig.id, nodeId: node.id, sessionId: session.id };
+    return { rigId: rig.id, nodeId: node.id, sessionId: session.id, attemptId: started.seq };
   }
+
+  function strictDerivedReconciler() {
+    return new SeatAttentionReconciler({
+      sessionRegistry,
+      eventBus,
+      agentActivityStore: activityStore,
+      db,
+      reconcileRestoreOutcome: async (rigId, nodeId) => {
+        const started = db.prepare(
+          "SELECT seq FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1",
+        ).get(rigId) as { seq: number };
+        const completed = db.prepare(
+          "SELECT payload FROM events WHERE rig_id = ? AND type = 'restore.completed' AND seq > ? ORDER BY seq DESC LIMIT 1",
+        ).get(rigId, started.seq) as { payload: string };
+        const node = (JSON.parse(completed.payload) as { result: { nodes: Array<{ nodeId: string; status: "failed" | "attention_required" }> } })
+          .result.nodes.find((entry) => entry.nodeId === nodeId)!;
+        const evidence = { tmux: true, fgProcess: "claude", resumeTokenUsed: true, paneState: "usable" as const };
+        eventBus.emit({
+          type: "restore.outcome_reconciled",
+          rigId,
+          nodeId,
+          attemptId: started.seq,
+          from: node.status,
+          to: "operator_recovered",
+          evidence,
+        });
+        return { ok: true as const, attemptId: started.seq, from: node.status, to: "operator_recovered" as const, evidence };
+      },
+    });
+  }
+
+  it("OPR.0.5.9.14: scopes a derived clear to the real restore attempt", async () => {
+    const { rigId, nodeId, attemptId } = seedDerivedAttentionSeat("r-attempt-scoped", "worker@r-attempt-scoped");
+    emitActivity(rigId, nodeId, "worker@r-attempt-scoped", "running");
+    const derivedReconciler = strictDerivedReconciler();
+
+    const result = await derivedReconciler.clearAttention("worker@r-attempt-scoped");
+
+    expect(result.ok).toBe(true);
+    const events = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
+    expect(events).toHaveLength(1);
+    expect(JSON.parse(events[0]!.payload).attemptId).toBe(attemptId);
+  });
+
+  it("OPR.0.5.9.14: preserves generic reconciliation for a subset restore with no attempt receipt", async () => {
+    const rig = rigRepo.createRig("r-subset-derived");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "worker@r-subset-derived");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    sessionRegistry.updateStatus(session.id, "running");
+    eventBus.emit({
+      type: "restore.subset_completed",
+      rigId: rig.id,
+      snapshotId: "snap-subset",
+      result: {
+        snapshotId: "snap-subset",
+        preRestoreSnapshotId: null,
+        rigResult: "partially_restored",
+        nodes: [{ nodeId: node.id, logicalId: "worker", status: "attention_required" }],
+        warnings: [],
+      },
+    } as any);
+    emitActivity(rig.id, node.id, "worker@r-subset-derived", "running");
+    const strict = vi.fn();
+    const subsetReconciler = new SeatAttentionReconciler({
+      sessionRegistry,
+      eventBus,
+      agentActivityStore: activityStore,
+      db,
+      reconcileRestoreOutcome: strict,
+    });
+
+    const result = await subsetReconciler.clearAttention("worker@r-subset-derived");
+
+    expect(result.ok).toBe(true);
+    expect(strict).not.toHaveBeenCalled();
+    expect(result.clearedClasses).toContain("restore_outcome");
+    const events = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
+    expect(events).toHaveLength(1);
+    expect(JSON.parse(events[0]!.payload)).toMatchObject({ attemptId: 0, from: "attention_required" });
+  });
 
   it("OPR.0.4.0.16: clears derived-only class (startupStatus=ready + restoreOutcome=failed+running)", async () => {
     const { rigId, nodeId } = seedDerivedAttentionSeat("r-derived", "worker@r-derived");
     emitActivity(rigId, nodeId, "worker@r-derived", "running");
-    const derivedReconciler = new SeatAttentionReconciler({
-      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
-    });
+    const derivedReconciler = strictDerivedReconciler();
 
     const result = await derivedReconciler.clearAttention("worker@r-derived");
 
@@ -458,13 +538,13 @@ describe("SeatAttentionReconciler", () => {
     expect(payload.nodeId).toBe(nodeId);
   });
 
-  it("OPR.0.4.0.16: refuses derived-class clear without evidence (no false-green)", async () => {
+  it("OPR.0.5.9.14: refuses derived-class clear without strict evidence even with operator attestation", async () => {
     seedDerivedAttentionSeat("r-derived-refuse", "worker@r-derived-refuse");
     const derivedReconciler = new SeatAttentionReconciler({
       sessionRegistry, eventBus, agentActivityStore: activityStore, db,
     });
 
-    const result = await derivedReconciler.clearAttention("worker@r-derived-refuse");
+    const result = await derivedReconciler.clearAttention("worker@r-derived-refuse", { reason: "operator verified" });
 
     expect(result.ok).toBe(false);
     expect(result.code).toBe("not_demonstrably_responsive");
@@ -478,15 +558,14 @@ describe("SeatAttentionReconciler", () => {
     const session = sessionRegistry.registerSession(node.id, "worker@r-both");
     sessionRegistry.updateStartupStatus(session.id, "attention_required");
     sessionRegistry.updateStatus(session.id, "running");
+    eventBus.emit({ type: "restore.started", rigId: rig.id, snapshotId: "snap-1" });
     eventBus.emit({
       type: "restore.completed",
       rigId: rig.id, snapshotId: "snap-1",
       result: { snapshotId: "snap-1", preRestoreSnapshotId: "snap-0", rigResult: "failed", nodes: [{ nodeId: node.id, logicalId: "worker", status: "failed" }], warnings: [] },
     } as any);
     emitActivity(rig.id, node.id, "worker@r-both", "running");
-    const bothReconciler = new SeatAttentionReconciler({
-      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
-    });
+    const bothReconciler = strictDerivedReconciler();
 
     const result = await bothReconciler.clearAttention("worker@r-both");
 
@@ -495,57 +574,56 @@ describe("SeatAttentionReconciler", () => {
     expect(result.clearedClasses).toContain("restore_outcome");
   });
 
-  it("OPR.0.4.0.16: operator attestation clears derived class with runtimeCwdVerified=false", async () => {
-    seedDerivedAttentionSeat("r-derived-attest", "worker@r-derived-attest");
-    const derivedReconciler = new SeatAttentionReconciler({
-      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
-    });
+  it("OPR.0.5.9.14: operator attestation cannot bypass strict restore lineage", async () => {
+    const { attemptId } = seedDerivedAttentionSeat("r-derived-attest", "worker@r-derived-attest");
+    const derivedReconciler = strictDerivedReconciler();
 
     const result = await derivedReconciler.clearAttention("worker@r-derived-attest", { reason: "operator verified" });
 
     expect(result.ok).toBe(true);
+    expect(result.clearedBy).toBe("evidence");
     expect(result.clearedClasses).toContain("restore_outcome");
     const events = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
     expect(events).toHaveLength(1);
     const payload = JSON.parse(events[0]!.payload);
     expect(payload.from).toBe("failed");
-    expect(payload.evidence.runtimeCwdVerified).toBe(false);
-    expect(payload.evidence.source).toBe("operator_attestation");
+    expect(payload.attemptId).toBe(attemptId);
+    expect(payload.evidence.resumeTokenUsed).toBe(true);
   });
 
-  it("OPR.0.4.0.16: clearAttention result includes derivedEvidence with runtimeCwdVerified for JSON surface", async () => {
-    const { rigId, nodeId } = seedDerivedAttentionSeat("r-derived-surface", "worker@r-derived-surface");
+  it("OPR.0.5.9.14: clearAttention returns the strict attempt evidence on its JSON surface", async () => {
+    const { rigId, nodeId, attemptId } = seedDerivedAttentionSeat("r-derived-surface", "worker@r-derived-surface");
     emitActivity(rigId, nodeId, "worker@r-derived-surface", "running");
-    const surfaceReconciler = new SeatAttentionReconciler({
-      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
-    });
+    const surfaceReconciler = strictDerivedReconciler();
 
     const result = await surfaceReconciler.clearAttention("worker@r-derived-surface");
 
     expect(result.ok).toBe(true);
     expect(result.clearedClasses).toContain("restore_outcome");
     expect(result.derivedEvidence).toBeDefined();
-    expect(result.derivedEvidence!.runtimeCwdVerified).toBe(false);
-    expect(result.derivedEvidence!.source).toBe("clear_attention_evidence");
-    expect(result.derivedEvidence!.kind).toBe("fresh_activity");
+    expect(result.derivedEvidence).toMatchObject({
+      source: "restore_runtime_truth",
+      attemptId,
+      tmux: true,
+      fgProcess: "claude",
+      resumeTokenUsed: true,
+      paneState: "usable",
+    });
+    expect(result.derivedEvidence!.runtimeCwdVerified).toBeUndefined();
   });
 
-  it("OPR.0.4.0.16: operator attestation result includes derivedEvidence for JSON surface", async () => {
-    seedDerivedAttentionSeat("r-derived-attest-surface", "worker@r-derived-attest-surface");
-    const surfaceReconciler = new SeatAttentionReconciler({
-      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
-    });
+  it("OPR.0.5.9.14: operator attestation still returns strict attempt evidence", async () => {
+    const { attemptId } = seedDerivedAttentionSeat("r-derived-attest-surface", "worker@r-derived-attest-surface");
+    const surfaceReconciler = strictDerivedReconciler();
 
     const result = await surfaceReconciler.clearAttention("worker@r-derived-attest-surface", { reason: "verified manually" });
 
     expect(result.ok).toBe(true);
-    expect(result.derivedEvidence).toBeDefined();
-    expect(result.derivedEvidence!.runtimeCwdVerified).toBe(false);
-    expect(result.derivedEvidence!.source).toBe("operator_attestation");
+    expect(result.clearedBy).toBe("evidence");
+    expect(result.derivedEvidence).toMatchObject({ source: "restore_runtime_truth", attemptId });
   });
 
-  // REV1 REGRESSION: non-running restoreOutcome=attention_required still clears
-  it("OPR.0.4.0.16: clears derived attention_required class even when sessionStatus is not running", async () => {
+  it("OPR.0.5.9.14: refuses a non-running derived outcome when strict live lineage is absent", async () => {
     const rig = rigRepo.createRig("r-nonrun-attn");
     const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "claude-code" });
     const session = sessionRegistry.registerSession(node.id, "worker@r-nonrun-attn");
@@ -560,16 +638,23 @@ describe("SeatAttentionReconciler", () => {
         nodes: [{ nodeId: node.id, logicalId: "worker", status: "attention_required" }], warnings: [] },
     } as any);
     const nonrunReconciler = new SeatAttentionReconciler({
-      sessionRegistry, eventBus, agentActivityStore: activityStore, db,
+      sessionRegistry,
+      eventBus,
+      agentActivityStore: activityStore,
+      db,
+      reconcileRestoreOutcome: async () => ({
+        ok: false,
+        code: "tmux_session_missing",
+        detail: "Tmux session is not currently alive.",
+      }),
     });
 
     const result = await nonrunReconciler.clearAttention("worker@r-nonrun-attn", { reason: "manually verified" });
 
-    expect(result.ok).toBe(true);
-    expect(result.clearedClasses).toContain("restore_outcome");
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain("tmux_session_missing");
     const events = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
-    expect(events).toHaveLength(1);
-    expect(JSON.parse(events[0]!.payload).from).toBe("attention_required");
+    expect(events).toHaveLength(0);
   });
 
   // REV1 REGRESSION: non-running restoreOutcome=failed does NOT trigger derived class
