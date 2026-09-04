@@ -9,11 +9,12 @@ import { createStyle, stripAnsi } from "../src/theme.js";
 import { stylizeLines } from "../src/stylize.js";
 import type { AgentRow, FleetSnapshot } from "../src/types.js";
 
-function agent(name: string, session: string, status: string, context: number | null): AgentRow {
+function agent(name: string, session: string, status: string, context: number | null, model = "gpt-5.6"): AgentRow {
   return {
     name,
     session,
     runtime: "codex",
+    model,
     spec: "builder",
     context,
     tokens: null,
@@ -33,10 +34,13 @@ function multiRigSnapshot(): FleetSnapshot {
           id: "r-build",
           name: "build",
           lifecycleState: "running",
-          pods: [{ name: "dev", agents: [
-            agent("dev.driver", "dev-driver@build", "active", 41),
-            agent("dev.guard", "dev-guard@build", "attention_required", 73),
-          ] }],
+          pods: [
+            { name: "dev", agents: [
+              agent("dev.driver", "dev-driver@build", "active", 41, "claude-fable-5.1"),
+              agent("dev.guard", "dev-guard@build", "attention_required", 73),
+            ] },
+            { name: "qa", agents: [agent("qa.checker", "qa-checker@build", "idle", 22)] },
+          ],
         },
         {
           id: "r-docs",
@@ -70,8 +74,8 @@ function multiRigSnapshot(): FleetSnapshot {
     }],
     recentTransitionsScope: { kind: "instance" },
     recentTransitions: [
-      { transitionId: 1, qitemId: "q-build", ts: "2026-09-03T23:01:00.000Z", actorSession: "dev-driver@build", change: "claimed", rig: "build", targetKind: "slice", target: "OPR.0.5.9.12" },
-      { transitionId: 2, qitemId: "q-docs", ts: "2026-09-03T23:02:00.000Z", actorSession: "write-editor@docs", change: "completed", rig: "docs", targetKind: "qitem", target: "q-docs" },
+      { transitionId: 1, qitemId: "q-build", ts: "2026-09-03T23:01:00.000Z", actorSession: "dev-driver@build", change: "claimed", summary: "Build the instance mission-control hierarchy", rig: "build", targetKind: "slice", target: "OPR.0.5.9.12" },
+      { transitionId: 2, qitemId: "q-docs", ts: "2026-09-03T23:02:00.000Z", actorSession: "write-editor@docs", change: "completed", summary: "Document the operator journey", rig: "docs", targetKind: "qitem", target: "q-docs" },
     ],
     attention: [{ qitemId: "q-build", state: "blocked", destinationSession: "dev-guard@build", blockedOn: "human@kernel", handedOffTo: null, tier: null, tags: ["slice:OPR.0.5.9.12"], summary: "needs founder", body: "", claimedAt: null, tsUpdated: "2026-09-03T23:00:00Z" }],
     blocked: [],
@@ -116,8 +120,10 @@ describe("S12 instance mission control", () => {
     expect(whole).toMatch(/RIG\s+POD\s+SEAT/);
     expect(whole).toContain("recoverable");
     expect(whole).toContain("stopped");
+    expect(whole).toContain("── RIG build · running · 3 seats");
+    expect(whole).toMatch(/dev\s+[\s\S]*┈{8,}[\s\S]*qa\s+/);
     expect(whole).not.toMatch(/\+\d+|more hidden/i);
-    expect(reached).toEqual(new Set(["dev.driver", "dev.guard", "write.editor"]));
+    expect(reached).toEqual(new Set(["dev.driver", "dev.guard", "qa.checker", "write.editor"]));
     screen.lines.forEach((line) => expect(stripAnsi(line).length).toBeLessThanOrEqual(cols));
   });
 
@@ -128,6 +134,7 @@ describe("S12 instance mission control", () => {
     expect(table).toMatch(/TABLE.*RECENT.*OVERVIEW.*GRAPH/);
     expect(table.indexOf("23:01")).toBeLessThan(table.indexOf("23:02"));
     expect((table.match(/23:01/g) ?? [])).toHaveLength(1);
+    expect(table).toContain("Build the instance mission-control hierarchy");
 
     view.dispatch(parseCommand("tab recent"));
     const recent = renderScreen(view.get(), snap, { cols: 160, rows: 90 }).lines.join("\n");
@@ -136,6 +143,7 @@ describe("S12 instance mission control", () => {
     expect(recent.indexOf("23:01")).toBeLessThan(recent.indexOf("23:02"));
     expect(recent).toMatch(/build\s+dev-driver@build/);
     expect(recent).toMatch(/docs\s+write-editor@docs/);
+    expect(recent).toContain("Document the operator journey");
   });
 
   it("uses the same actions for root, tabs, rig rows, seats, and transition targets", () => {
@@ -208,6 +216,16 @@ describe("S12 instance mission control", () => {
     expect(renderScreen(view.get(), snap, { cols: 120, rows: 34, nowMs: 0 }).lines).toEqual(
       renderScreen(view.get(), snap, { cols: 120, rows: 34, nowMs: 500 }).lines,
     );
+  });
+
+  it("gives rig boundaries explicit semantic color without changing geometry", () => {
+    const snap = multiRigSnapshot();
+    const screen = renderScreen(openInstance(snap).get(), snap, { cols: 160, rows: 120, nowMs: 0, colorMode: "none" });
+    const header = screen.lines.findIndex((line) => line.includes("── RIG build · running · 3 seats"));
+    expect(header).toBeGreaterThan(0);
+    const styled = stylizeLines(screen, createStyle("truecolor"));
+    expect(styled[header]).toContain("\x1b[");
+    expect(stripAnsi(styled[header]!)).toBe(screen.lines[header]);
   });
 });
 

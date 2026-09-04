@@ -313,8 +313,8 @@ describe("founder live-QA correction — rig-wide RECENT rail", () => {
     snap.scopes = missionSnapshot().scopes;
     snap.recentTransitionsRig = "openrig-build";
     snap.recentTransitions = [
-      { transitionId: 2, ts: "2026-09-03T22:02:00.000Z", actorSession: "dev-qa@openrig-build", change: "claimed", targetKind: "slice", target: "OPR.0.5.9.11", qitemId: "q-2" },
-      { transitionId: 3, ts: "2026-09-03T22:03:00.000Z", actorSession: "review-r2@openrig-build", change: "completed", targetKind: "qitem", target: "q-3", qitemId: "q-3" },
+      { transitionId: 2, ts: "2026-09-03T22:02:00.000Z", actorSession: "dev-qa@openrig-build", change: "claimed", summary: "Recompose the production terminal dashboard without clipping its meaning", targetKind: "slice", target: "OPR.0.5.9.11", qitemId: "q-2" },
+      { transitionId: 3, ts: "2026-09-03T22:03:00.000Z", actorSession: "review-r2@openrig-build", change: "completed", summary: "Independent review cleared", targetKind: "qitem", target: "q-3", qitemId: "q-3" },
     ];
     return snap;
   }
@@ -329,6 +329,8 @@ describe("founder live-QA correction — rig-wide RECENT rail", () => {
       if (cols === 160) expect(body).toMatch(/TIME\s+ACTOR\s+CHANGE\s+TARGET/);
       expect(body.indexOf("22:02")).toBeLessThan(body.indexOf("22:03"));
       expect(body).toContain("OPR.0.5.9.11");
+      const content = screen.lines.map((line) => line.slice(screen.explorerWidth + 2)).join(" ").replace(/\s+/g, " ");
+      expect(content).toContain("Recompose the production terminal dashboard without clipping its meaning");
       expect(body).not.toContain("next event");
       expect(screen.contentTargets.some((item) => item.action.type === "scopes-open" && item.action.slice === "11-slice-11")).toBe(true);
     }
@@ -340,6 +342,19 @@ describe("founder live-QA correction — rig-wide RECENT rail", () => {
     const view = createViewState({ instanceId: "recent-empty", getSnapshot: () => snap });
     const body = renderScreen(view.get(), snap, { cols: 160, rows: 80 }).lines.join("\n");
     expect(body).toContain("No recorded transitions in the current window.");
+  });
+
+  it("shortens canonical Claude model labels in the table only", () => {
+    const snap = recentSnapshot();
+    const driver = snap.hosts[0]!.rigs[0]!.pods[0]!.agents[0]!;
+    driver.model = "claude-fable-5.1";
+    const view = createViewState({ instanceId: "model-label", getSnapshot: () => snap });
+    view.dispatch({ type: "drill", resource: "rig", name: "openrig-build", target: { host: "vm-host" } });
+    const screen = renderScreen(view.get(), snap, { cols: 160, rows: 80 });
+    expect(screen.lines.join("\n")).toContain("fable-5.1");
+    expect(screen.lines.join("\n")).not.toContain("claude-fable-5.1");
+
+    expect(driver.model).toBe("claude-fable-5.1");
   });
 });
 

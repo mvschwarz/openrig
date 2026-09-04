@@ -111,6 +111,11 @@ function runtimeShort(runtime: string): string {
   return runtime.slice(0, 2) || "—";
 }
 
+/** Tables optimize for glance width; details retain the canonical model id. */
+function tableModel(model: string | null | undefined): string {
+  return model?.replace(/^claude-/i, "") || "—";
+}
+
 function contextCompact(value: number | null, narrow: boolean): string {
   if (value == null) return "—";
   if (narrow) return `${value}%`;
@@ -392,6 +397,8 @@ function recentLines(snap: FleetSnapshot, scope: RecentScope, width: number, exp
       });
       lines.push({ text: `      ${pad(row.actorSession, Math.max(8, width - 8))}`.slice(0, width), ...(action ? { action } : {}) });
       lines.push({ text: `      → ${row.target}`.slice(0, width), ...(action ? { action } : {}) });
+      lines.push(...wrapDetailValue("work", row.summary?.trim() || "no summary served", width)
+        .map((line) => ({ ...line, ...(action ? { action } : {}) })));
     }
     return lines;
   }
@@ -410,6 +417,8 @@ function recentLines(snap: FleetSnapshot, scope: RecentScope, width: number, exp
       [pad(row.target, targetW), targetW],
     ]).slice(0, width);
     lines.push({ text, ...(action ? { action } : {}) });
+    lines.push(...wrapDetailValue("work", row.summary?.trim() || "no summary served", width)
+      .map((line) => ({ ...line, ...(action ? { action } : {}) })));
   }
   return lines;
 }
@@ -580,15 +589,21 @@ function instanceContentLines(
     const agents = rig.pods.flatMap((pod) => pod.agents.map((agent) => ({ pod: pod.name, agent })))
       .filter(({ pod, agent }) => !state.filter || rig.name.includes(state.filter) || pod.includes(state.filter) || agent.name.includes(state.filter));
     if (state.filter && agents.length === 0 && !rig.name.includes(state.filter)) continue;
-    lines.push({
-      text: `─ rig ${rig.name} · ${rig.lifecycleState ?? "unknown"} · ${agents.length} seats`,
+    const rigHeading = sectionRule(`RIG ${rig.name} · ${rig.lifecycleState ?? "unknown"} · ${agents.length} seats`, columnsWidth(columns));
+    lines.push({ text: "" }, {
+      ...rigHeading,
       action: { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } },
     });
     if (agents.length === 0) {
       lines.push({ text: "  (no seats served for this rig)" });
       continue;
     }
+    let previousPod: string | null = null;
+    let firstInRig = true;
     for (const { pod, agent } of agents) {
+      const firstInPod = pod !== previousPod;
+      if (firstInPod && previousPod != null) lines.push({ text: "┈".repeat(columnsWidth(columns)) });
+      previousPod = pod;
       const stateCell = operationalState(agent.status, motion);
       const queue = queueFacts(snap, agent.session);
       seatCount += 1;
@@ -597,8 +612,8 @@ function instanceContentLines(
       openCount += queue.count;
       lines.push({
         text: tableRow(columns, {
-          rig: rig.name,
-          pod,
+          rig: firstInRig ? rig.name : "",
+          pod: firstInPod ? pod : "",
           seat: `${stateCell.mark} ${seatName(pod, agent.name)}`,
           runtime: runtimeShort(agent.runtime),
           context: contextCompact(agent.context, contentWidth < 110),
@@ -609,6 +624,7 @@ function instanceContentLines(
         }),
         action: { type: "drill", resource: "agent", name: agent.name, target: { host: host.name, rig: rig.name, pod } },
       });
+      firstInRig = false;
     }
   }
   lines.push({ text: "" }, { text: `${host.rigs.length} rigs · ${seatCount} seats · ${workingCount} working · ${attentionCount} need attention · ${openCount} open rows` });
@@ -795,7 +811,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
           pod: firstInPod ? a.pod : "",
           seat: `${stateCell.mark} ${seatName(a.pod, a.name)}`,
           runtime: runtimeShort(a.runtime),
-          model: a.model ?? "—",
+          model: tableModel(a.model),
           context: contextCompact(a.context, narrowFactory),
           status: stateCell.word,
           queue: queue.count || "·",
