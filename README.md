@@ -53,7 +53,7 @@ while the old collector is still writing.
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME"
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-state --preimage /safe/path/layout-0.5.9-before
 
-# After the target daemon is running and one freshly launched Claude seat has written a new sample:
+# After the target daemon is running and every bounded legacy tail is followed by newer paired samples at both new state roots:
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --verify --preimage /safe/path/layout-0.5.9-before > /safe/path/layout-0.5.9-verify.json
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-library --preimage /safe/path/layout-0.5.9-before --verification /safe/path/layout-0.5.9-verify.json
 
@@ -63,7 +63,10 @@ node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOM
 
 Every phase emits JSON. Stop on any issue or incomplete receipt and follow its
 `next` action; do not continue from copied legacy telemetry or retry a partial
-mutation blindly. The helper never performs daemon, database, seat, plugin, or
+mutation blindly. Verification accepts a post-apply legacy tail only when that
+same seat has newer paired context and provider samples under `state/`; library
+apply revalidates and preserves the exact tail bytes before removing the legacy
+sources. The helper never performs daemon, database, seat, plugin, or
 release lifecycle actions—the agent-led upgrade workflow owns those separately.
 
 ## What It Does

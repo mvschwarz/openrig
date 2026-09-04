@@ -82,10 +82,12 @@ combines System World, topology, and Project World selectors with provenance.
 
 For a pre-0.5.9 home, use the `openrig-upgrade` skill's
 `migrate-telemetry-state-0.5.9.mjs` helper. Its order is plan → `--apply-state`
-→ fresh Claude sample → `--verify` → `--apply-library`; `--rollback` restores
-the preserved prior library, config, telemetry sources, and collector settings.
-The helper must stop rather than claim success if writer/reader convergence or
-any migration-owned path cannot be proved.
+→ paired new-root samples newer than any bounded legacy tail → `--verify` →
+`--apply-library`; `--rollback` restores the preserved prior library, config,
+telemetry sources, and collector settings. Verification binds accepted tail
+bytes, and library apply revalidates and preserves them before removal. The
+helper must stop rather than claim success if writer/reader convergence, resumed
+legacy writes, byte drift, or any migration-owned path cannot be proved.
 
 ## Existing spec libraries
 

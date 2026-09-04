@@ -136,9 +136,11 @@ node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
   --preimage "$OPENRIG_HOME/backups/layout-0.5.9-before"
 ```
 
-After the target daemon is running, freshly launch one Claude seat so its
-process adopts the rewritten collector setting. Capture the verification JSON;
-do not infer success from a copied old sidecar:
+After the target daemon is running, wait until every bounded post-apply legacy
+tail is followed by newer samples for that same seat at both new state roots.
+This proves temporal convergence without requiring blanket process replacement;
+a later legacy write remains a hard stop. Capture the verification JSON; do not
+infer success from a copied old sidecar:
 
 ```bash
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
@@ -160,7 +162,10 @@ node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
 
 Stop on every reported issue: malformed or foreign legacy entries, an unknown
 live Claude cwd, a nonempty target, collector drift, config drift, or a missing
-fresh dual sample all require the named repair before continuing. The helper
+fresh dual sample all require the named repair before continuing. Verification
+records the exact bounded tail bytes and their paired-newer samples; library
+apply revalidates that rule, refuses resumed legacy writes or byte drift, and
+preserves accepted tails in the protected preimage before removal. The helper
 does not stop/start the daemon, launch a seat, touch the database, or decide
 whether the upgrade proceeds.
 

@@ -90,6 +90,26 @@ function seedLegacyTelemetry(root: string, sessionName = "dev-impl@test-rig", cw
   return { home, cwd, contextDir, providerDir, settingsPath, collectorPath, originalSettings, sessionName };
 }
 
+function writeTelemetryPair(
+  fixture: ReturnType<typeof seedLegacyTelemetry>,
+  root: "legacy" | "state",
+  timestamp: string,
+  usedPercentage: number,
+): void {
+  const contextRoot = root === "legacy" ? "context" : "state/context-usage";
+  const providerRoot = root === "legacy" ? "provider-usage" : "state/provider-usage";
+  write(fixture.home, `${contextRoot}/${fixture.sessionName}.json`, JSON.stringify({
+    context_window: { context_window_size: 200_000, used_percentage: usedPercentage },
+    session_id: "session-1",
+    session_name: fixture.sessionName,
+    sampled_at: timestamp,
+  }));
+  write(fixture.home, `${providerRoot}/${fixture.sessionName}.json`, JSON.stringify({
+    seatSession: fixture.sessionName,
+    asOf: timestamp,
+  }));
+}
+
 afterEach(() => {
   for (const root of temporaryRoots.splice(0)) {
     fs.rmSync(root, { recursive: true, force: true });
@@ -144,6 +164,7 @@ describe("openrig-upgrade stays agent-driven", () => {
   it("keeps the public 0.5.9 notice and shipped skill on the proven layout-migration contract", () => {
     const readme = fs.readFileSync(path.join(repoRoot, "README.md"), "utf8");
     const skill = fs.readFileSync(skillPath, "utf8");
+    const reference = fs.readFileSync(path.join(repoRoot, "docs/reference/instance-layout.md"), "utf8");
     for (const text of [readme, skill]) {
       expect(text).toContain("migrate-telemetry-state-0.5.9.mjs");
       expect(text).toContain("--apply-state");
@@ -152,6 +173,10 @@ describe("openrig-upgrade stays agent-driven", () => {
       expect(text).toContain("--rollback");
       expect(text).toContain("state/context-usage");
       expect(text).toContain("context/system/system-world.yaml");
+    }
+    for (const text of [readme, skill, reference]) {
+      expect(text).toMatch(/paired new-root|newer paired|newer samples.*both new state roots/i);
+      expect(text).toMatch(/tail bytes|exact tail bytes|accepted tail\s+bytes|accepted tails/i);
     }
   });
 });
@@ -516,6 +541,7 @@ describe("0.5.9 telemetry-state migration helper", () => {
     });
 
     runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    write(fixture.home, "context/system/system-world.yaml", DEFAULT_SYSTEM_WORLD_MANIFEST);
     const collector = path.join(repoRoot, "packages", "daemon", "assets", "claude-statusline-context.cjs");
     const collected = spawnSync(process.execPath, [
       collector,
@@ -560,6 +586,163 @@ describe("0.5.9 telemetry-state migration helper", () => {
     expect(fs.existsSync(path.join(fixture.home, "state", "context-usage", `${fixture.sessionName}.json`))).toBe(true);
     expect(fs.readdirSync(path.join(fixture.home, "context", "system"))).toEqual([]);
     expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(fixture.originalSettings);
+  });
+
+  it.each([
+    { name: "differing", systemWorld: "operator-owned: true\n", extraFile: null },
+    { name: "additional", systemWorld: DEFAULT_SYSTEM_WORLD_MANIFEST, extraFile: "operator-note.yaml" },
+  ])("refuses $name System World content created between apply-state and verify", ({ systemWorld, extraFile }) => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    fs.mkdirSync(path.join(fixture.home, "context", "system"));
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before-layout");
+
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    const manifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    const freshAt = new Date(Date.parse(manifest.appliedAt) + 2_000).toISOString();
+    write(fixture.home, "context/system/system-world.yaml", systemWorld);
+    if (extraFile) write(fixture.home, `context/system/${extraFile}`, "operator-owned: true\n");
+    writeTelemetryPair(fixture, "state", freshAt, 26);
+
+    const result = runJsonResult(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    expect(result.status).toBe(1);
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "system_world_conflict",
+        path: expect.stringContaining(path.join(fixture.home, "context", "system")),
+      }),
+    ]));
+    expect(fs.readFileSync(path.join(fixture.home, "context", "system", "system-world.yaml"), "utf8"))
+      .toBe(systemWorld);
+    if (extraFile) {
+      expect(fs.readFileSync(path.join(fixture.home, "context", "system", extraFile), "utf8"))
+        .toBe("operator-owned: true\n");
+    }
+  });
+
+  it("accepts a bounded legacy tail followed by newer paired state samples and preserves it through apply-library", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    write(fixture.home, "context-packs/operator-pack/manifest.yaml", "name: operator-pack\nversion: \"1\"\ntaxonomy: world\nfiles: []\n");
+    const originalContext = fs.readFileSync(path.join(fixture.home, "context", `${fixture.sessionName}.json`));
+    const originalProvider = fs.readFileSync(path.join(fixture.home, "provider-usage", `${fixture.sessionName}.json`));
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before-layout");
+
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    const appliedManifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    const tailAt = new Date(Date.parse(appliedManifest.appliedAt) + 1_000).toISOString();
+    const adoptedAt = new Date(Date.parse(appliedManifest.appliedAt) + 2_000).toISOString();
+    writeTelemetryPair(fixture, "legacy", tailAt, 30);
+    writeTelemetryPair(fixture, "state", adoptedAt, 31);
+
+    const verification = runJson(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    expect(verification).toMatchObject({ phase: "verify", verified: true, complete: true, issues: [] });
+    expect(verification.legacyTails).toEqual([
+      expect.objectContaining({ kind: "context", sessionName: fixture.sessionName, observedAt: tailAt }),
+      expect.objectContaining({ kind: "provider", sessionName: fixture.sessionName, observedAt: tailAt }),
+    ]);
+    const verificationPath = path.join(root, "verification.json");
+    fs.writeFileSync(verificationPath, JSON.stringify(verification));
+
+    const migrated = runJson(helper, [
+      "--home", fixture.home,
+      "--apply-library",
+      "--preimage", preimage,
+      "--verification", verificationPath,
+    ], env);
+    expect(migrated).toMatchObject({ phase: "apply-library", applied: true, complete: true, issues: [] });
+    const completedManifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    expect(completedManifest.postApplyLegacyTails).toHaveLength(2);
+    for (const tail of completedManifest.postApplyLegacyTails) {
+      expect(fs.existsSync(path.join(preimage, tail.storedAs))).toBe(true);
+      expect(tail.sha256).toMatch(/^[a-f0-9]{64}$/);
+    }
+
+    const rolledBack = runJson(helper, ["--home", fixture.home, "--rollback", preimage], env);
+    expect(rolledBack).toMatchObject({ phase: "rollback", complete: true, rolledBack: true, issues: [] });
+    expect(fs.readFileSync(path.join(fixture.home, "context", `${fixture.sessionName}.json`))).toEqual(originalContext);
+    expect(fs.readFileSync(path.join(fixture.home, "provider-usage", `${fixture.sessionName}.json`))).toEqual(originalProvider);
+    expect(completedManifest.postApplyLegacyTails.every((tail: { storedAs: string }) => fs.existsSync(path.join(preimage, tail.storedAs))))
+      .toBe(true);
+  });
+
+  it("refuses a legacy writer whose newest write follows its paired state samples", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before");
+
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    const manifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    const adoptedAt = new Date(Date.parse(manifest.appliedAt) + 1_000).toISOString();
+    const resumedAt = new Date(Date.parse(manifest.appliedAt) + 2_000).toISOString();
+    writeTelemetryPair(fixture, "state", adoptedAt, 30);
+    writeTelemetryPair(fixture, "legacy", resumedAt, 31);
+
+    const result = runJsonResult(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    expect(result.status).toBe(1);
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "legacy_writer_active", sessionName: fixture.sessionName }),
+    ]));
+  });
+
+  it("refuses legacy-byte drift between verify and apply-library", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    write(fixture.home, "context-packs/operator-pack/manifest.yaml", "name: operator-pack\nversion: \"1\"\ntaxonomy: world\nfiles: []\n");
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before");
+
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    const manifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    const tailAt = new Date(Date.parse(manifest.appliedAt) + 1_000).toISOString();
+    const adoptedAt = new Date(Date.parse(manifest.appliedAt) + 2_000).toISOString();
+    writeTelemetryPair(fixture, "legacy", tailAt, 30);
+    writeTelemetryPair(fixture, "state", adoptedAt, 31);
+    const verification = runJson(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    const verificationPath = path.join(root, "verification.json");
+    fs.writeFileSync(verificationPath, JSON.stringify(verification));
+
+    const resumedAt = new Date(Date.parse(manifest.appliedAt) + 3_000).toISOString();
+    writeTelemetryPair(fixture, "legacy", resumedAt, 32);
+    const result = runJsonResult(helper, [
+      "--home", fixture.home,
+      "--apply-library",
+      "--preimage", preimage,
+      "--verification", verificationPath,
+    ], env);
+    expect(result.status).toBe(1);
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "legacy_source_drift" }),
+    ]));
+    expect(fs.existsSync(path.join(fixture.home, "context-packs", "operator-pack", "manifest.yaml"))).toBe(true);
+    expect(fs.existsSync(path.join(fixture.home, "context", `${fixture.sessionName}.json`))).toBe(true);
   });
 
   it("refuses library mutation without the exact successful verification receipt", () => {

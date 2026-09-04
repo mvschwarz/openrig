@@ -158,7 +158,7 @@ function targetIssue(target) {
   return null;
 }
 
-function scanLegacy(directory, kind, destination, issues, managedEmptyDirectories = []) {
+function scanLegacy(directory, kind, destination, issues, managedEmptyDirectories = [], allowedDirectories = []) {
   if (!fs.existsSync(directory)) return [];
   if (!fs.statSync(directory).isDirectory()) {
     issues.push(issue("foreign_file", directory, "preserve the path and identify the real legacy telemetry directory"));
@@ -169,9 +169,12 @@ function scanLegacy(directory, kind, destination, issues, managedEmptyDirectorie
   for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     const source = path.join(directory, entry.name);
     if (entry.isFile() && entry.name.endsWith(".json.tmp")) continue;
-    if (kind === "context" && entry.name === "system" && entry.isDirectory() && fs.readdirSync(source).length === 0) {
-      managedEmptyDirectories.push(source);
-      continue;
+    if (kind === "context" && entry.name === "system" && entry.isDirectory()) {
+      if (fs.readdirSync(source).length === 0) {
+        managedEmptyDirectories.push(source);
+        continue;
+      }
+      if (allowedDirectories.includes(source)) continue;
     }
     if (!entry.isFile() || !entry.name.endsWith(".json")) {
       issues.push(issue("foreign_file", source, "move or classify the non-telemetry entry before applying this bounded migration"));
@@ -350,7 +353,11 @@ function loadManifest(preimage, home, phase) {
 
 function validatePreimage(preimage, manifest) {
   const issues = [];
-  for (const file of manifest.files) {
+  const records = [
+    ...manifest.files,
+    ...(Array.isArray(manifest.postApplyLegacyTails) ? manifest.postApplyLegacyTails : []),
+  ];
+  for (const file of records) {
     const storedPath = path.resolve(preimage, file.storedAs);
     if (!storedPath.startsWith(`${path.resolve(preimage)}${path.sep}`) || !fs.existsSync(storedPath)
       || sha256(fs.readFileSync(storedPath)) !== file.sha256) {
@@ -454,7 +461,7 @@ function applyState(home, preimage) {
     copied: plan.telemetry.map((item) => item.destination),
     rewrittenCollectors: plan.collectors.map((item) => item.path),
     issues: [],
-    next: "restart or freshly launch one Claude process, wait for a fresh sample at both state roots, then run --verify with this --preimage",
+    next: "start the exact target daemon, wait for fresh samples at both new state roots after every bounded legacy tail, then run --verify with this --preimage",
   });
 }
 
@@ -476,6 +483,113 @@ function sampleTime(filePath, identityKey, timeKey, expectedSession, issues) {
   return time;
 }
 
+function managedSystemWorldState(home, manifest, issues, expectedArtifact = undefined) {
+  const directory = path.join(home, "context", "system");
+  const systemWorldPath = path.join(directory, "system-world.yaml");
+  const directories = manifest.managedEmptyDirectories ?? [];
+  if (!Array.isArray(directories) || directories.length > 1 || directories.some((entry) => entry !== directory)) {
+    issues.push(issue("preimage_manifest_mismatch", directory, "use the exact preimage emitted by this helper"));
+    return { directories: [], artifact: null };
+  }
+  if (directories.length === 0) {
+    if (expectedArtifact !== undefined && expectedArtifact !== null) {
+      issues.push(issue("verification_receipt_invalid", systemWorldPath, "rerun --verify against this exact home and preimage"));
+    }
+    return { directories, artifact: null };
+  }
+  if (!fs.existsSync(directory) || !fs.lstatSync(directory).isDirectory() || fs.lstatSync(directory).isSymbolicLink()) {
+    issues.push(issue("system_world_conflict", directory, "start the exact target daemon and require only its canonical default System World before retrying"));
+    return { directories, artifact: null };
+  }
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  if (entries.length !== 1 || entries[0].name !== "system-world.yaml" || !entries[0].isFile() || entries[0].isSymbolicLink()) {
+    issues.push(issue("system_world_conflict", directory, "preserve the differing or additional System World content and reconcile it manually"));
+    return { directories, artifact: null };
+  }
+  const bytes = fs.readFileSync(systemWorldPath);
+  const artifact = {
+    path: systemWorldPath,
+    sha256: sha256(bytes),
+    mode: fs.statSync(systemWorldPath).mode & 0o777,
+  };
+  if (artifact.sha256 !== sha256(DEFAULT_SYSTEM_WORLD)) {
+    issues.push(issue("system_world_conflict", systemWorldPath, "preserve the differing System World and reconcile it manually"));
+  }
+  if (expectedArtifact !== undefined && (
+    expectedArtifact === null
+    || expectedArtifact.path !== artifact.path
+    || expectedArtifact.sha256 !== artifact.sha256
+    || expectedArtifact.mode !== artifact.mode
+  )) {
+    issues.push(issue("destination_drift", systemWorldPath, "preserve the changed System World and rerun verification from the exact migration state"));
+  }
+  return { directories, artifact };
+}
+
+function telemetryPair(home, preimage, manifest, sessionName, issues) {
+  const filename = contextFilenameForSession(home, preimage, manifest, sessionName);
+  if (!filename) return null;
+  const contextPath = path.join(home, "state", "context-usage", filename);
+  const providerPath = path.join(home, "state", "provider-usage", filename);
+  const contextAt = sampleTime(contextPath, "session_name", "sampled_at", sessionName, issues);
+  const providerAt = sampleTime(providerPath, "seatSession", "asOf", sessionName, issues);
+  if (contextAt === null || providerAt === null) return null;
+  return {
+    sessionName,
+    contextPath,
+    providerPath,
+    contextAt,
+    providerAt,
+    sampledAt: new Date(Math.min(contextAt, providerAt)).toISOString(),
+  };
+}
+
+function legacyTails(manifest, telemetry, appliedAt, issues) {
+  const originalByPath = new Map(manifest.files
+    .filter((file) => file.kind === "context-source" || file.kind === "provider-source")
+    .map((file) => [file.originalPath, file]));
+  const tails = [];
+  for (const file of telemetry) {
+    const original = originalByPath.get(file.source);
+    const currentSha256 = sha256(file.bytes);
+    if (original && original.sha256 === currentSha256 && original.mode === file.mode) continue;
+    const current = readJson(file.source);
+    const timeKey = file.kind === "context" ? "sampled_at" : "asOf";
+    const identityKey = file.kind === "context" ? "session_name" : "seatSession";
+    const observedAt = Date.parse(current?.[timeKey]);
+    if (Number.isNaN(observedAt) || observedAt <= appliedAt) {
+      issues.push(issue("legacy_source_drift", file.source, "preserve the changed legacy sidecar and rerun the migration from a fresh preimage"));
+      continue;
+    }
+    tails.push({
+      kind: file.kind,
+      originalPath: file.source,
+      sessionName: current[identityKey],
+      observedAt: current[timeKey],
+      sha256: currentSha256,
+      mode: file.mode,
+    });
+  }
+  return tails;
+}
+
+function requireTailConvergence(tails, samples, issues) {
+  for (const tail of tails) {
+    const sample = samples.get(tail.sessionName);
+    const observedAt = Date.parse(tail.observedAt);
+    if (!sample || sample.contextAt <= observedAt || sample.providerAt <= observedAt) {
+      issues.push(issue("legacy_writer_active", tail.originalPath, "obtain newer samples for the named seat at both new state roots, or replace the process if legacy writes continue", {
+        sessionName: tail.sessionName,
+        observedAt: tail.observedAt,
+        ...(sample ? {
+          contextObservedAt: new Date(sample.contextAt).toISOString(),
+          providerObservedAt: new Date(sample.providerAt).toISOString(),
+        } : {}),
+      }));
+    }
+  }
+}
+
 function verify(home, preimage) {
   if (!preimage) {
     emit({ schema: SCHEMA, phase: "verify", ok: false, issues: [issue("preimage_required", null, "pass the apply-state --preimage path")] }, 1);
@@ -486,38 +600,31 @@ function verify(home, preimage) {
     issues.push(issue("preimage_manifest_mismatch", path.join(preimage, "manifest.json"), "use a completed apply-state preimage"));
   }
   const appliedAt = Date.parse(manifest.appliedAt);
-  const seats = inventoryClaudeSeats(issues);
-  const freshSamples = [];
-  for (const seat of seats) {
-    const sessionName = seat.canonicalSessionName || seat.sessionName;
-    if (typeof sessionName !== "string") continue;
-    const filename = contextFilenameForSession(home, preimage, manifest, sessionName);
-    if (!filename) continue;
-    const contextPath = path.join(home, "state", "context-usage", filename);
-    const providerPath = path.join(home, "state", "provider-usage", filename);
-    const contextAt = sampleTime(contextPath, "session_name", "sampled_at", sessionName, issues);
-    const providerAt = sampleTime(providerPath, "seatSession", "asOf", sessionName, issues);
-    if (contextAt !== null && providerAt !== null && contextAt > appliedAt && providerAt > appliedAt) {
-      freshSamples.push({ sessionName, contextPath, providerPath, sampledAt: new Date(Math.min(contextAt, providerAt)).toISOString() });
-    }
-  }
-
+  const systemWorld = managedSystemWorldState(home, manifest, issues);
   const legacyTelemetry = [
-    ...scanLegacy(path.join(home, "context"), "context", path.join(home, "state", "context-usage"), issues),
+    ...scanLegacy(path.join(home, "context"), "context", path.join(home, "state", "context-usage"), issues, [], systemWorld.directories),
     ...scanLegacy(path.join(home, "provider-usage"), "provider", path.join(home, "state", "provider-usage"), issues),
   ];
-  for (const file of legacyTelemetry) {
-    const current = readJson(file.source);
-    const timeKey = file.kind === "context" ? "sampled_at" : "asOf";
-    const identityKey = file.kind === "context" ? "session_name" : "seatSession";
-    const observedAt = Date.parse(current[timeKey]);
-    if (!Number.isNaN(observedAt) && observedAt > appliedAt) {
-      issues.push(issue("legacy_writer_active", file.source, "restart or freshly launch the named Claude process so it adopts the rewritten statusLine", {
-        sessionName: current[identityKey],
-        observedAt: current[timeKey],
-      }));
+  const tails = legacyTails(manifest, legacyTelemetry, appliedAt, issues);
+  const seats = inventoryClaudeSeats(issues);
+  const sampleSessions = new Set(tails.map((tail) => tail.sessionName));
+  for (const seat of seats) {
+    const sessionName = seat.canonicalSessionName || seat.sessionName;
+    if (typeof sessionName === "string") sampleSessions.add(sessionName);
+  }
+  const samples = new Map();
+  const freshSamples = [];
+  for (const sessionName of sampleSessions) {
+    const sample = telemetryPair(home, preimage, manifest, sessionName, issues);
+    if (sample) {
+      samples.set(sessionName, sample);
+      if (sample.contextAt > appliedAt && sample.providerAt > appliedAt) {
+        const { contextAt: _contextAt, providerAt: _providerAt, ...publicSample } = sample;
+        freshSamples.push(publicSample);
+      }
     }
   }
+  requireTailConvergence(tails, samples, issues);
   if (freshSamples.length === 0) {
     issues.push(issue("missing_fresh_sample", path.join(home, "state", "context-usage"), "obtain one post-apply Claude sample at both new telemetry roots before declaring migration complete"));
   }
@@ -531,7 +638,9 @@ function verify(home, preimage) {
     complete: issues.length === 0,
     preimage,
     preimageManifestSha256: sha256(fs.readFileSync(path.join(preimage, "manifest.json"))),
+    managedSystemWorld: systemWorld.artifact,
     freshSamples,
+    legacyTails: tails,
     issues,
     next: issues.length === 0 ? "telemetry state relocation is verified" : "resolve the named incomplete state and rerun verify",
   };
@@ -542,6 +651,8 @@ function verificationReceipt(home, preimage, verificationPath) {
   if (!verificationPath) return { issue: issue("verification_receipt_required", null, "capture a successful --verify JSON receipt and pass it with --verification") };
   const receipt = readJson(verificationPath);
   const manifestPath = path.join(preimage, "manifest.json");
+  const manifest = readJson(manifestPath);
+  const expectsSystemWorld = Array.isArray(manifest?.managedEmptyDirectories) && manifest.managedEmptyDirectories.length === 1;
   const valid = receipt?.schema === SCHEMA
     && receipt.phase === "verify"
     && receipt.verified === true
@@ -550,17 +661,38 @@ function verificationReceipt(home, preimage, verificationPath) {
     && typeof receipt.preimage === "string"
     && path.resolve(receipt.home) === home
     && path.resolve(receipt.preimage) === path.resolve(preimage)
-    && receipt.preimageManifestSha256 === sha256(fs.readFileSync(manifestPath));
+    && receipt.preimageManifestSha256 === sha256(fs.readFileSync(manifestPath))
+    && Array.isArray(receipt.legacyTails)
+    && receipt.legacyTails.every((tail) => (tail?.kind === "context" || tail?.kind === "provider")
+      && typeof tail.originalPath === "string"
+      && typeof tail.sessionName === "string"
+      && typeof tail.observedAt === "string"
+      && typeof tail.sha256 === "string"
+      && Number.isInteger(tail.mode))
+    && (expectsSystemWorld
+      ? receipt.managedSystemWorld && typeof receipt.managedSystemWorld.path === "string"
+        && typeof receipt.managedSystemWorld.sha256 === "string"
+        && Number.isInteger(receipt.managedSystemWorld.mode)
+      : receipt.managedSystemWorld === null);
   return valid
     ? { receipt }
     : { issue: issue("verification_receipt_invalid", verificationPath, "rerun --verify against this exact home and preimage, capture its JSON, then retry") };
 }
 
-function validateLegacySources(preimage, manifest, root, kind, issues, allowedDirectories = []) {
+function validateLegacySources(preimage, manifest, root, kind, issues, allowedDirectories = [], verifiedTails = []) {
   const files = manifest.files.filter((file) => file.kind === kind && path.dirname(file.originalPath) === root);
-  const allowed = new Set(files.map((file) => path.basename(file.originalPath)));
+  const telemetryKind = kind === "context-source" ? "context" : "provider";
+  const tails = verifiedTails.filter((tail) => tail.kind === telemetryKind && path.dirname(tail.originalPath) === root);
+  const expectedByPath = new Map(files.map((file) => [file.originalPath, file]));
+  for (const tail of tails) expectedByPath.set(tail.originalPath, tail);
+  const allowed = new Set([...expectedByPath.keys()].map((filePath) => path.basename(filePath)));
   const allowedDirectorySet = new Set(allowedDirectories);
-  if (!fs.existsSync(root)) return files;
+  if (!fs.existsSync(root)) {
+    for (const file of expectedByPath.values()) {
+      issues.push(issue("legacy_source_drift", file.originalPath, "restore the verified legacy telemetry source before migrating the library"));
+    }
+    return [...expectedByPath.values()];
+  }
   if (!fs.statSync(root).isDirectory()) {
     issues.push(issue("legacy_source_drift", root, "restore the verified legacy telemetry directory before migrating the library"));
     return files;
@@ -572,32 +704,37 @@ function validateLegacySources(preimage, manifest, root, kind, issues, allowedDi
       issues.push(issue("context_dir_not_empty_after_state_move", path.join(root, entry.name), "classify or archive the non-telemetry entry before applying the library move"));
     }
   }
-  for (const file of files) {
-    if (!fs.existsSync(file.originalPath) || sha256(fs.readFileSync(file.originalPath)) !== file.sha256) {
+  for (const file of expectedByPath.values()) {
+    const sourceKind = fs.existsSync(file.originalPath) ? fs.lstatSync(file.originalPath) : null;
+    if (!sourceKind?.isFile() || sourceKind.isSymbolicLink()
+      || sha256(fs.readFileSync(file.originalPath)) !== file.sha256
+      || (sourceKind.mode & 0o777) !== file.mode) {
       issues.push(issue("legacy_source_drift", file.originalPath, "rerun apply-state and verify; a legacy telemetry source changed after the receipt"));
     }
   }
-  return files;
+  return [...expectedByPath.values()];
 }
 
-function validateManagedEmptyDirectories(home, manifest, issues) {
-  const expected = path.join(home, "context", "system");
-  const directories = manifest.managedEmptyDirectories ?? [];
-  if (!Array.isArray(directories) || directories.some((directory) => directory !== expected)) {
-    issues.push(issue("preimage_manifest_mismatch", expected, "use the exact preimage emitted by this helper"));
-    return [];
-  }
-  for (const directory of directories) {
-    if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory() || fs.readdirSync(directory).length > 0) {
-      issues.push(issue("destination_drift", directory, "preserve the changed System World scaffold and rerun from a fresh preimage"));
+function preserveVerifiedLegacyTails(preimage, tails) {
+  return tails.map((tail, index) => {
+    const bytes = fs.readFileSync(tail.originalPath);
+    const storedAs = path.join("post-apply-legacy-tails", `${String(index).padStart(4, "0")}-${tail.sha256}`);
+    const storedPath = path.join(preimage, storedAs);
+    fs.mkdirSync(path.dirname(storedPath), { recursive: true });
+    if (fs.existsSync(storedPath)) {
+      if (sha256(fs.readFileSync(storedPath)) !== tail.sha256) throw new Error(`preserved legacy tail changed: ${storedPath}`);
+    } else {
+      fs.writeFileSync(storedPath, bytes, { flag: "wx", mode: tail.mode });
+      fs.chmodSync(storedPath, tail.mode);
     }
-  }
-  return directories;
+    return { ...tail, storedAs };
+  });
 }
 
-function removeVerifiedLegacyRoot(root, files, emptyDirectories = []) {
+function removeVerifiedLegacyRoot(root, files, managedFiles = [], emptyDirectories = []) {
   if (!fs.existsSync(root)) return;
   for (const file of files) fs.rmSync(file.originalPath, { force: true });
+  for (const file of managedFiles) fs.rmSync(file, { force: true });
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (entry.isFile() && entry.name.endsWith(".json.tmp")) fs.rmSync(path.join(root, entry.name), { force: true });
   }
@@ -616,17 +753,33 @@ function applyLibrary(home, preimage, verificationPath) {
   }
   const receipt = verificationReceipt(home, preimage, verificationPath);
   if (receipt.issue) issues.push(receipt.issue);
+  const verifiedTails = receipt.receipt?.legacyTails ?? [];
+  const systemWorld = managedSystemWorldState(home, manifest, issues, receipt.receipt?.managedSystemWorld);
+  const tailSamples = new Map();
+  for (const sessionName of new Set(verifiedTails.map((tail) => tail.sessionName))) {
+    const sample = telemetryPair(home, preimage, manifest, sessionName, issues);
+    if (sample) tailSamples.set(sessionName, sample);
+  }
+  requireTailConvergence(verifiedTails, tailSamples, issues);
   const library = readLibraryConfig(home, issues);
-  const managedEmptyDirectories = validateManagedEmptyDirectories(home, manifest, issues);
   const legacyContextFiles = validateLegacySources(
     preimage,
     manifest,
     path.join(home, "context"),
     "context-source",
     issues,
-    managedEmptyDirectories,
+    systemWorld.directories,
+    verifiedTails,
   );
-  const legacyProviderFiles = validateLegacySources(preimage, manifest, path.join(home, "provider-usage"), "provider-source", issues);
+  const legacyProviderFiles = validateLegacySources(
+    preimage,
+    manifest,
+    path.join(home, "provider-usage"),
+    "provider-source",
+    issues,
+    [],
+    verifiedTails,
+  );
   if (library && fs.existsSync(library.sourceRoot) && !fs.statSync(library.sourceRoot).isDirectory()) {
     issues.push(issue("library_source_invalid", library.sourceRoot, "preserve the path and identify the real legacy context library"));
   }
@@ -662,9 +815,22 @@ function applyLibrary(home, preimage, verificationPath) {
     )] }, 1);
   }
 
+  let postApplyLegacyTails;
+  try {
+    postApplyLegacyTails = preserveVerifiedLegacyTails(preimage, verifiedTails);
+  } catch (error) {
+    emit({ schema: SCHEMA, phase: "apply-library", ok: false, applied: false, complete: false, issues: [issue(
+      "preimage_mismatch",
+      preimage,
+      "restore a writeable byte-matching preimage before migrating the library",
+      { diagnostic: error.message },
+    )] }, 1);
+  }
+
   const prepared = {
     ...manifest,
     status: "library-prepared",
+    postApplyLegacyTails,
     library: {
       sourceRoot: library.sourceRoot,
       targetRoot: library.targetRoot,
@@ -678,7 +844,12 @@ function applyLibrary(home, preimage, verificationPath) {
   atomicWrite(manifestPath, Buffer.from(`${JSON.stringify(prepared, null, 2)}\n`), 0o600);
 
   try {
-    removeVerifiedLegacyRoot(path.join(home, "context"), legacyContextFiles, managedEmptyDirectories);
+    removeVerifiedLegacyRoot(
+      path.join(home, "context"),
+      legacyContextFiles,
+      systemWorld.artifact ? [systemWorld.artifact.path] : [],
+      systemWorld.directories,
+    );
     removeVerifiedLegacyRoot(path.join(home, "provider-usage"), legacyProviderFiles);
     if (library.sourceRoot !== library.targetRoot) {
       if (fs.existsSync(library.targetRoot)) throw new Error(`library target still exists after telemetry removal: ${library.targetRoot}`);
@@ -745,6 +916,8 @@ function rollback(home, preimage) {
   const issues = [];
   const library = manifest.library;
   const libraryPhase = library && (manifest.status === "library-prepared" || manifest.status === "library-applied");
+  const postApplyLegacyTails = Array.isArray(manifest.postApplyLegacyTails) ? manifest.postApplyLegacyTails : [];
+  const tailByPath = new Map(postApplyLegacyTails.map((file) => [file.originalPath, file]));
   let libraryLocation = null;
   if (libraryPhase) {
     const sourceExists = fs.existsSync(library.sourceRoot);
@@ -796,8 +969,15 @@ function rollback(home, preimage) {
       }
     }
     for (const file of manifest.files.filter((entry) => entry.kind === "context-source" || entry.kind === "provider-source")) {
-      if (fs.existsSync(file.originalPath) && sha256(fs.readFileSync(file.originalPath)) !== file.sha256) {
+      const currentDigest = fs.existsSync(file.originalPath) ? sha256(fs.readFileSync(file.originalPath)) : null;
+      const acceptedDigests = new Set([file.sha256, tailByPath.get(file.originalPath)?.sha256].filter(Boolean));
+      if (currentDigest !== null && !acceptedDigests.has(currentDigest)) {
         issues.push(issue("destination_drift", file.originalPath, "preserve the changed legacy telemetry source and decide the merge manually before rollback"));
+      }
+    }
+    for (const tail of postApplyLegacyTails.filter((entry) => !manifest.files.some((file) => file.originalPath === entry.originalPath))) {
+      if (fs.existsSync(tail.originalPath) && sha256(fs.readFileSync(tail.originalPath)) !== tail.sha256) {
+        issues.push(issue("destination_drift", tail.originalPath, "preserve the changed post-apply legacy telemetry source and decide the merge manually before rollback"));
       }
     }
   }
@@ -846,9 +1026,12 @@ function rollback(home, preimage) {
       }
     }
     for (const file of manifest.files.filter((entry) => entry.kind === "context-source" || entry.kind === "provider-source")) {
-      if (!fs.existsSync(file.originalPath)) {
+      if (!fs.existsSync(file.originalPath) || sha256(fs.readFileSync(file.originalPath)) !== file.sha256) {
         atomicWrite(file.originalPath, fs.readFileSync(path.join(preimage, file.storedAs)), file.mode);
       }
+    }
+    for (const tail of postApplyLegacyTails.filter((entry) => !manifest.files.some((file) => file.originalPath === entry.originalPath))) {
+      if (fs.existsSync(tail.originalPath)) fs.rmSync(tail.originalPath);
     }
     for (const directory of manifest.managedEmptyDirectories ?? []) fs.mkdirSync(directory, { recursive: true });
   }
@@ -878,6 +1061,7 @@ function rollback(home, preimage) {
     restored: toRestore.map((file) => file.originalPath),
     alreadyOriginal,
     preserved: [path.join(home, "state", "context-usage"), path.join(home, "state", "provider-usage")],
+    preservedLegacyTails: postApplyLegacyTails.map((file) => path.join(preimage, file.storedAs)),
     issues: [],
     next: "the legacy collector projection is restored; migrated state copies remain preserved for inspection",
   });
