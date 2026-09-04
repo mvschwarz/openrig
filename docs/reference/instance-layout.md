@@ -88,6 +88,9 @@ telemetry sources, and collector settings. Verification binds accepted tail
 bytes, and library apply revalidates and preserves them before removal. The
 helper must stop rather than claim success if writer/reader convergence, resumed
 legacy writes, byte drift, or any migration-owned path cannot be proved.
+`--help` prints the phase grammar without inventorying; no phase flag is the
+intentional read-only plan, and unknown options fail nonzero before plan or
+mutation.
 
 ## Existing spec libraries
 

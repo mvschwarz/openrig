@@ -126,7 +126,13 @@ move reuses the old telemetry directory.
 With an exact protected preimage path, first inspect and then copy state plus
 rewrite known live Claude collector projections:
 
+`--help` prints the phase grammar without inventorying the instance. With no
+phase flag the helper intentionally runs the read-only plan; unknown options
+fail nonzero before plan or mutation.
+
 ```bash
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --help
+
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
   --home "$OPENRIG_HOME"
 

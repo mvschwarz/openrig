@@ -50,6 +50,7 @@ while the old collector is still writing.
 
 ```bash
 # SKILL_DIR is the installed openrig-upgrade skill directory.
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --help
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME"
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-state --preimage /safe/path/layout-0.5.9-before
 
@@ -60,6 +61,10 @@ node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOM
 # Restore helper-owned paths and collector projections if the observed upgrade must be reversed:
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --rollback /safe/path/layout-0.5.9-before
 ```
+
+`--help` prints the phase grammar without inventorying the instance. No phase
+flag intentionally runs the read-only plan; unknown options fail nonzero before
+plan or mutation.
 
 Every phase emits JSON. Stop on any issue or incomplete receipt and follow its
 `next` action; do not continue from copied legacy telemetry or retry a partial

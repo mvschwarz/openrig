@@ -186,6 +186,9 @@ describe("openrig-upgrade stays agent-driven", () => {
     for (const text of [readme, skill, reference]) {
       expect(text).toMatch(/paired new-root|newer paired|newer samples.*both new state roots/i);
       expect(text).toMatch(/tail bytes|exact tail bytes|accepted tail\s+bytes|accepted tails/i);
+      expect(text).toContain("--help");
+      expect(text).toMatch(/no\s+phase\s+flag[^.]*read-only plan/i);
+      expect(text).toMatch(/unknown options\s+fail nonzero/i);
     }
   });
 });
@@ -446,6 +449,72 @@ esac
 
 describe("0.5.9 telemetry-state migration helper", () => {
   const helper = "migrate-telemetry-state-0.5.9.mjs";
+
+  it("prints help without inventorying and refuses unknown options before planning", () => {
+    const root = temporaryRoot();
+    const home = path.join(root, "home");
+    const rigCalled = path.join(root, "rig-called");
+    const fakeRig = path.join(root, "rig");
+    fs.writeFileSync(fakeRig, `#!/bin/sh
+: > ${JSON.stringify(rigCalled)}
+exit 7
+`, { mode: 0o755 });
+    const scriptPath = path.join(skillRoot, "scripts", helper);
+    const env = { ...process.env, OPENRIG_HOME: "", OPENRIG_RIG_BIN: fakeRig };
+
+    const help = spawnSync(process.execPath, [scriptPath, "--help"], { encoding: "utf8", env });
+    expect(help.status, help.stderr).toBe(0);
+    expect(help.stderr).toBe("");
+    expect(help.stdout).toContain("Usage: migrate-telemetry-state-0.5.9.mjs");
+    expect(help.stdout).toContain("No phase flag runs the read-only plan");
+    expect(help.stdout).toContain("--apply-state");
+    expect(help.stdout).toContain("--verify");
+    expect(help.stdout).toContain("--apply-library");
+    expect(help.stdout).toContain("--rollback");
+    expect(fs.existsSync(rigCalled)).toBe(false);
+    expect(fs.existsSync(home)).toBe(false);
+
+    const unknown = spawnSync(process.execPath, [scriptPath, "--home", home, "--mystery"], {
+      encoding: "utf8",
+      env,
+    });
+    expect(unknown.status).toBe(1);
+    expect(unknown.stdout).toBe("");
+    expect(JSON.parse(unknown.stderr)).toMatchObject({
+      phase: "input",
+      ok: false,
+      issues: [{ code: "unknown_option", option: "--mystery" }],
+    });
+    expect(fs.existsSync(rigCalled)).toBe(false);
+    expect(fs.existsSync(home)).toBe(false);
+  });
+
+  it("routes the no-flag plan and every mutually exclusive phase distinctly", () => {
+    const root = temporaryRoot();
+    const home = path.join(root, "home");
+    const fakeRig = writeRigInventory(root, []);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+
+    expect(runJson(helper, ["--home", home], env).phase).toBe("plan");
+    for (const [args, phase] of [
+      [["--apply-state"], "apply-state"],
+      [["--verify"], "verify"],
+      [["--apply-library"], "apply-library"],
+      [["--rollback", path.join(root, "missing-preimage")], "rollback"],
+    ] as const) {
+      const result = runJsonResult(helper, ["--home", home, ...args], env);
+      expect(result.status, phase).toBe(1);
+      expect(result.body.phase).toBe(phase);
+    }
+
+    const conflict = runJsonResult(helper, ["--home", home, "--apply-state", "--verify"], env);
+    expect(conflict.status).toBe(1);
+    expect(conflict.body).toMatchObject({
+      phase: "input",
+      ok: false,
+      issues: [{ code: "phase_conflict" }],
+    });
+  });
 
   function prepareLibraryMigration(
     root: string,

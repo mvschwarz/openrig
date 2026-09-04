@@ -7,6 +7,20 @@ import { spawnSync } from "node:child_process";
 
 const SCHEMA = "openrig-telemetry-state-migration/v1";
 const rig = process.env.OPENRIG_RIG_BIN || "rig";
+const HELP = `Usage: migrate-telemetry-state-0.5.9.mjs [options]
+
+No phase flag runs the read-only plan.
+
+Options:
+  --home <path>               OpenRig home to inspect or migrate
+  --apply-state               Copy telemetry state and rewrite known collectors
+  --verify                    Verify paired new-root telemetry after apply-state
+  --apply-library             Move the context library after successful verification
+  --rollback <preimage>       Restore helper-owned layout and collector changes
+  --preimage <path>           Protected preimage created by apply-state
+  --verification <path>       Successful verification receipt for apply-library
+  -h, --help                  Show this help without inspecting the instance
+`;
 const DEFAULT_SYSTEM_WORLD = `schema: openrig.system-world/v0alpha1
 id: openrig-default
 version: "0.5.9"
@@ -19,9 +33,29 @@ context:
 skills: []
 `;
 
-function argument(name) {
-  const index = process.argv.indexOf(name);
-  return index === -1 ? undefined : process.argv[index + 1];
+function parseArguments(argv) {
+  const valueOptions = new Set(["--home", "--preimage", "--verification", "--rollback"]);
+  const phaseOptions = new Set(["--apply-state", "--verify", "--apply-library"]);
+  const values = new Map();
+  const phases = new Set();
+  for (let index = 0; index < argv.length; index += 1) {
+    const option = argv[index];
+    if (phaseOptions.has(option)) {
+      phases.add(option);
+      continue;
+    }
+    if (valueOptions.has(option)) {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("-")) {
+        return { issue: issue("value_required", null, `${option} requires a value`, { option }) };
+      }
+      values.set(option, value);
+      index += 1;
+      continue;
+    }
+    return { issue: issue("unknown_option", null, "run --help for supported options", { option }) };
+  }
+  return { values, phases };
 }
 
 function sha256(bytes) {
@@ -1357,21 +1391,30 @@ function rollback(home, preimage) {
   });
 }
 
-const homeArg = argument("--home") || process.env.OPENRIG_HOME;
+const argv = process.argv.slice(2);
+if (argv.includes("--help") || argv.includes("-h")) {
+  process.stdout.write(HELP);
+  process.exit(0);
+}
+const parsed = parseArguments(argv);
+if (parsed.issue) {
+  emit({ schema: SCHEMA, phase: "input", ok: false, issues: [parsed.issue] }, 1);
+}
+const homeArg = parsed.values.get("--home") || process.env.OPENRIG_HOME;
 if (!homeArg) {
   emit({ schema: SCHEMA, phase: "input", ok: false, issues: [issue("home_required", null, "pass --home or set OPENRIG_HOME")] }, 1);
 }
 const home = path.resolve(homeArg);
-const apply = process.argv.includes("--apply-state");
-const verifyFlag = process.argv.includes("--verify");
-const applyLibraryFlag = process.argv.includes("--apply-library");
-const rollbackArg = argument("--rollback");
+const apply = parsed.phases.has("--apply-state");
+const verifyFlag = parsed.phases.has("--verify");
+const applyLibraryFlag = parsed.phases.has("--apply-library");
+const rollbackArg = parsed.values.get("--rollback");
 if ([apply, verifyFlag, applyLibraryFlag, Boolean(rollbackArg)].filter(Boolean).length > 1) {
   emit({ schema: SCHEMA, phase: "input", ok: false, issues: [issue("phase_conflict", null, "choose exactly one of --apply-state, --verify, --apply-library, or --rollback")] }, 1);
 }
 
-if (apply) applyState(home, argument("--preimage"));
-if (verifyFlag) verify(home, argument("--preimage"));
-if (applyLibraryFlag) applyLibrary(home, argument("--preimage"), argument("--verification"));
+if (apply) applyState(home, parsed.values.get("--preimage"));
+if (verifyFlag) verify(home, parsed.values.get("--preimage"));
+if (applyLibraryFlag) applyLibrary(home, parsed.values.get("--preimage"), parsed.values.get("--verification"));
 if (rollbackArg) rollback(home, path.resolve(rollbackArg));
 emit(publicPlan(home, buildPlan(home)));
