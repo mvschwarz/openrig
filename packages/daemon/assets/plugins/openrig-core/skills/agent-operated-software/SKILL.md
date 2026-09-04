@@ -2,8 +2,8 @@
 name: agent-operated-software
 description: >-
   Use when designing, building, operating, or diagnosing an ongoing application whose live backend
-  or control loop includes OpenRig agents; when its behavior may come from a Markdown, YAML, or JSON
-  control plane; or when a thin application surface delegates work to specialist agent roles.
+  or control loop includes OpenRig agents, including applications with a Markdown, YAML, or JSON
+  agent control plane or a thin surface over specialist agent roles.
 metadata:
   openrig:
     stage: provisional

@@ -53,7 +53,7 @@
       "process/verification-before-completion/SKILL.md": "81df2cff3590b35aeac95757b0c21d5c47ed49f1f5e9aea1d23c00da61e8c7e8"
     },
     "plugin": {
-      "agent-operated-software/SKILL.md": "d636ef9166a5f84fcd7b78bc5ca2be318ddcf80b5a6c4e1ff1d5f9294420d2bb",
+      "agent-operated-software/SKILL.md": "14ac512225215af01e95b7f861b625387318011c597ade277cce4f6552f92368",
       "agent-operated-workflows/SKILL.md": "0d52c34f61446e96fb0ea372ee7a826c8e7fffc6124bc0f88fc42326170a93f0",
       "applying-a-permission-policy/SKILL.md": "7fde2a1220bae9cc5b912c297890a749b4e2ef2e5ace6ecfc3f71f87d141bc1a",
       "claude-compaction-restore/SKILL.md": "6f64609f32bcb4f115287eb13be00dfb787de0117cd597c75f29aa950e1773ed",

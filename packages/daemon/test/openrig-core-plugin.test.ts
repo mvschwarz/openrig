@@ -149,7 +149,7 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     );
     const description = (skill: string): string => {
       const frontmatter = skill.match(/^---\n([\s\S]*?)\n---/m)?.[1] ?? "";
-      const match = frontmatter.match(/^description:\s*(?:[>|]-?\s*)?\n?([\s\S]*?)(?=\n\w+:|$)/m);
+      const match = frontmatter.match(/(?:^|\n)description:\s*(?:[>|]-?\s*)?\n?([\s\S]*?)(?=\n\w+:|$)/);
       return (match?.[1] ?? "").replace(/\s+/g, " ").trim();
     };
 
@@ -174,6 +174,11 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
     expect(workflows).toContain("Slice 05");
     expect(workflows).toContain("agent-operated-software");
 
+    const softwareDescription = description(software);
+    expect(softwareDescription).toMatch(
+      /^Use when [^.]*ongoing application whose live backend or control loop includes OpenRig agents\b/i,
+    );
+    expect(softwareDescription).not.toMatch(/;\s*(?:when|or when)\b/i);
     expect(software).toMatch(/ongoing application/i);
     expect(software).toMatch(/bounded\s+workflow\s+does not[\s\S]{0,100}Agent-Operated Software/i);
     expect(software).toContain("agent-operated-workflows");
