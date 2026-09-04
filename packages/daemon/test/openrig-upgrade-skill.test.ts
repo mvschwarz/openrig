@@ -699,8 +699,10 @@ exit 7
     write(fixture.home, "context-packs/operator-pack/manifest.yaml", "name: operator-pack\nversion: \"1\"\ntaxonomy: world\nfiles: []\n");
     const libraryFile = path.join(fixture.home, "context-packs", "operator-pack", "manifest.yaml");
     const libraryFileDigest = sha256(fs.readFileSync(libraryFile));
+    const libraryDirectory = path.dirname(libraryFile);
+    const libraryDirectoryRow = `operator-pack\0directory\0${fs.statSync(libraryDirectory).mode & 0o777}`;
     const libraryFileRow = `operator-pack/manifest.yaml\0${fs.statSync(libraryFile).mode & 0o777}\0${libraryFileDigest}`;
-    const legacyRegularFileDigest = sha256(libraryFileRow);
+    const legacyLibraryDigest = sha256(`${libraryDirectoryRow}\n${libraryFileRow}`);
     write(fixture.home, "config.json", `${JSON.stringify({ keep: true, context: { packsRoot: path.join(fixture.home, "context-packs") } }, null, 2)}\n`);
     const originalConfig = fs.readFileSync(path.join(fixture.home, "config.json"));
     const fakeRig = writeRigInventory(root, [{
@@ -747,7 +749,7 @@ exit 7
     ], env);
     expect(migrated).toMatchObject({ phase: "apply-library", applied: true, complete: true, issues: [] });
     const completedManifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
-    expect(completedManifest.library.sourceTreeDigest).toBe(legacyRegularFileDigest);
+    expect(completedManifest.library.sourceTreeDigest).toBe(legacyLibraryDigest);
     expect(completedManifest.status).toBe("finalizer-applied");
     expect(completedManifest.library.targetTreeDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(completedManifest.library.sourceTreeInventory).toEqual(expect.arrayContaining([
@@ -776,6 +778,77 @@ exit 7
     expect(fs.existsSync(path.join(fixture.home, "state", "context-usage", `${fixture.sessionName}.json`))).toBe(true);
     expect(fs.existsSync(path.join(fixture.home, "context", "system"))).toBe(false);
     expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(fixture.originalSettings);
+  });
+
+  it("refuses a directory-only library change after inventory before copying it", () => {
+    const root = temporaryRoot();
+    const prepared = prepareLibraryMigration(root, (fixture) => {
+      write(fixture.home, "context-packs/operator-pack/a.txt", "alpha\n");
+    });
+    const lateDirectory = path.join(prepared.fixture.home, "context-packs", "operator-pack", "late-empty-directory");
+    const helperPath = path.join(skillRoot, "scripts", helper);
+    const interposedHelperPath = path.join(root, "migrate-directory-drift.mjs");
+    const seam = `  try {\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`;
+    const source = fs.readFileSync(helperPath, "utf8");
+    expect(source.split(seam)).toHaveLength(2);
+    fs.writeFileSync(interposedHelperPath, source.replace(seam, `  try {\n    fs.mkdirSync(${JSON.stringify(lateDirectory)});\n    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    fs.mkdirSync(library.targetRoot, { recursive: true });`));
+
+    const result = runJsonFileResult(interposedHelperPath, [
+      "--home", prepared.fixture.home,
+      "--apply-library",
+      "--preimage", prepared.preimage,
+      "--verification", prepared.verificationPath,
+    ], prepared.env);
+    expect(result.status).toBe(1);
+    expect(result.body).toMatchObject({ phase: "apply-library", applied: false, complete: false });
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "library_source_drift" }),
+    ]));
+    expect(fs.existsSync(lateDirectory)).toBe(true);
+    expect(fs.existsSync(path.join(prepared.fixture.home, "context", "operator-pack"))).toBe(false);
+  });
+
+  it("records an interrupted root copy so rollback preserves and names its partial residue", () => {
+    const root = temporaryRoot();
+    const prepared = prepareLibraryMigration(root, (fixture) => {
+      write(fixture.home, "context-packs/operator-pack/a.txt", "alpha\n");
+      write(fixture.home, "context-packs/operator-pack/b.txt", "beta\n");
+    });
+    const helperPath = path.join(skillRoot, "scripts", helper);
+    const interposedHelperPath = path.join(root, "migrate-interrupted-copy.mjs");
+    const seam = `function copyEntryOpaque(source, destination) {\n  const stat = fs.lstatSync(source);`;
+    const source = fs.readFileSync(helperPath, "utf8");
+    expect(source.split(seam)).toHaveLength(2);
+    fs.writeFileSync(interposedHelperPath, source.replace(seam, `function copyEntryOpaque(source, destination) {\n  if (source.endsWith(${JSON.stringify(`${path.sep}b.txt`)})) throw new Error("injected mid-root copy interruption");\n  const stat = fs.lstatSync(source);`));
+
+    const interrupted = runJsonFileResult(interposedHelperPath, [
+      "--home", prepared.fixture.home,
+      "--apply-library",
+      "--preimage", prepared.preimage,
+      "--verification", prepared.verificationPath,
+    ], prepared.env);
+    const partialRoot = path.join(prepared.fixture.home, "context", "operator-pack");
+    expect(interrupted.status).toBe(1);
+    expect(interrupted.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "library_apply_incomplete" }),
+    ]));
+    expect(fs.readdirSync(partialRoot)).toEqual(["a.txt"]);
+    const manifest = JSON.parse(fs.readFileSync(path.join(prepared.preimage, "manifest.json"), "utf8"));
+    expect(manifest.status).toBe("finalizer-copying");
+    expect(manifest.library.copiedRoots).toEqual([
+      expect.objectContaining({ name: "operator-pack" }),
+    ]);
+
+    const rolledBack = runJsonFileResult(helperPath, [
+      "--home", prepared.fixture.home,
+      "--rollback", prepared.preimage,
+    ], prepared.env);
+    expect(rolledBack.status).toBe(1);
+    expect(rolledBack.body).toMatchObject({ phase: "rollback", rolledBack: false, complete: false });
+    expect(rolledBack.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "destination_drift", path: partialRoot }),
+    ]));
+    expect(fs.readdirSync(partialRoot)).toEqual(["a.txt"]);
   });
 
   it("copies and rolls back an opaque project-context symlink without reading or claiming its target", () => {

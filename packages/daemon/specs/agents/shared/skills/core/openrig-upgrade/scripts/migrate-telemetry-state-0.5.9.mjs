@@ -126,6 +126,7 @@ function treeSnapshot(root, ignored = new Set()) {
         rows.push(`${relative}\0symlink\0${mode}\0${linkTargetBase64}`);
       } else if (current.isDirectory()) {
         entries.push({ path: relative, type: "directory", mode });
+        rows.push(`${relative}\0directory\0${mode}`);
         visit(absolute, relative);
       } else if (current.isFile()) {
         const digest = sha256(fs.readFileSync(absolute));
@@ -1198,9 +1199,15 @@ function applyLibrary(home, preimage, verificationPath) {
         const destination = path.join(library.targetRoot, name);
         assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);
         const sourceEntry = entrySnapshot(source);
+        copiedRoots.push({ name, snapshot: sourceEntry });
+        atomicWrite(manifestPath, Buffer.from(`${JSON.stringify({
+          ...prepared,
+          status: "finalizer-copying",
+          library: { ...prepared.library, copiedRoots },
+        }, null, 2)}\n`), 0o600);
         copyEntryOpaque(source, destination);
         const destinationEntry = assertEntrySnapshot(destination, sourceEntry, false);
-        copiedRoots.push({ name, snapshot: destinationEntry });
+        copiedRoots[copiedRoots.length - 1] = { name, snapshot: destinationEntry };
         atomicWrite(manifestPath, Buffer.from(`${JSON.stringify({
           ...prepared,
           status: "finalizer-copying",
