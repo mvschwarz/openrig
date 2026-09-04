@@ -75,14 +75,14 @@ function multiRigSnapshot(): FleetSnapshot {
     recentTransitionsScope: { kind: "instance" },
     recentTransitions: [
       { transitionId: 1, qitemId: "q-build", ts: "2026-09-03T23:01:00.000Z", actorSession: "dev-driver@build", change: "claimed", summary: "Build the instance mission-control hierarchy", rig: "build", targetKind: "slice", target: "OPR.0.5.9.12" },
-      { transitionId: 2, qitemId: "q-docs", ts: "2026-09-03T23:02:00.000Z", actorSession: "write-editor@docs", change: "completed", summary: "Document the operator journey", rig: "docs", targetKind: "qitem", target: "q-docs" },
+      { transitionId: 2, qitemId: "q-docs", ts: "2026-09-03T23:02:00.000Z", actorSession: "write-editor@docs", change: "completed", summary: null, rig: "docs", targetKind: "qitem", target: "q-docs" },
     ],
     attention: [{ qitemId: "q-build", state: "blocked", destinationSession: "dev-guard@build", blockedOn: "human@kernel", handedOffTo: null, tier: null, tags: ["slice:OPR.0.5.9.12"], summary: "needs founder", body: "", claimedAt: null, tsUpdated: "2026-09-03T23:00:00Z" }],
     blocked: [],
     inProgress: [],
     seatActivity: [],
     pending: [],
-    recentlyFinished: [{ qitemId: "q-docs", state: "done", destinationSession: "write-editor@docs", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: "docs complete", body: "", claimedAt: null, tsUpdated: "2026-09-03T23:02:00Z" }],
+    recentlyFinished: [{ qitemId: "q-docs", state: "done", destinationSession: "write-editor@docs", blockedOn: null, handedOffTo: null, tier: null, tags: null, summary: null, body: "Document the operator journey\nRetain the exact human-readable work text.", claimedAt: null, tsUpdated: "2026-09-03T23:02:00Z" }],
     hostsDown: [],
     stream: [],
     readErrors: [],
@@ -134,10 +134,12 @@ describe("S12 instance mission control", () => {
     const whole = renderScreen(view.get(), snap, { cols, rows: 120, nowMs: 0, colorMode: "none" }).lines.join("\n");
     expect(whole).toContain("mm2-openrig1");
     expect(whole).toMatch(/RIG\s+POD\s+SEAT/);
-    expect(whole).toContain("recoverable");
-    expect(whole).toContain("stopped");
-    expect(whole).toContain("── RIG build · running · 39 seats");
+    expect(whole).not.toMatch(/── RIG (?:build|docs|empty)/);
+    expect(whole).toMatch(/build\s+dev\s+/);
+    expect(whole).toMatch(/docs\s+write\s+/);
+    expect(whole).toMatch(/empty\s+—\s+\(no seats\).*stopped/);
     expect(whole).toMatch(/dev\s+[\s\S]*┈{8,}[\s\S]*qa\s+/);
+    expect((whole.match(/┈{8,}/g) ?? [])).toHaveLength(1);
     expect(whole).not.toMatch(/\+\d+|more hidden/i);
     expect(reached).toEqual(expectedAgents);
     expect(scrolledSeatRows).toBeGreaterThan(0);
@@ -152,6 +154,8 @@ describe("S12 instance mission control", () => {
     expect(table.indexOf("23:01")).toBeLessThan(table.indexOf("23:02"));
     expect((table.match(/23:01/g) ?? [])).toHaveLength(1);
     expect(table).toContain("Build the instance mission-control hierarchy");
+    expect(table).toContain("Document the operator journey");
+    expect(table).not.toContain("no summary served");
 
     view.dispatch(parseCommand("tab recent"));
     const recent = renderScreen(view.get(), snap, { cols: 160, rows: 90 }).lines.join("\n");
@@ -161,6 +165,7 @@ describe("S12 instance mission control", () => {
     expect(recent).toMatch(/build\s+dev-driver@build/);
     expect(recent).toMatch(/docs\s+write-editor@docs/);
     expect(recent).toContain("Document the operator journey");
+    expect(recent).not.toContain("no summary served");
   });
 
   it("uses the same actions for root, tabs, rig rows, seats, and transition targets", () => {
@@ -235,14 +240,14 @@ describe("S12 instance mission control", () => {
     );
   });
 
-  it("gives rig boundaries explicit semantic color without changing geometry", () => {
+  it("keeps continuous rig rows semantically colored without changing geometry", () => {
     const snap = multiRigSnapshot();
     const screen = renderScreen(openInstance(snap).get(), snap, { cols: 160, rows: 120, nowMs: 0, colorMode: "none" });
-    const header = screen.lines.findIndex((line) => line.includes("── RIG build · running · 3 seats"));
-    expect(header).toBeGreaterThan(0);
+    const docs = screen.lines.findIndex((line) => line.includes("docs") && line.includes("detached"));
+    expect(docs).toBeGreaterThan(0);
     const styled = stylizeLines(screen, createStyle("truecolor"));
-    expect(styled[header]).toContain("\x1b[");
-    expect(stripAnsi(styled[header]!)).toBe(screen.lines[header]);
+    expect(styled[docs]).toContain("\x1b[");
+    expect(stripAnsi(styled[docs]!)).toBe(screen.lines[docs]);
   });
 });
 

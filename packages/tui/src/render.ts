@@ -341,6 +341,12 @@ function queueRows(snap: FleetSnapshot): FleetSnapshot["attention"] {
   return [...snap.attention, ...snap.blocked, ...snap.inProgress, ...snap.pending, ...snap.recentlyFinished];
 }
 
+function recentWorkText(snap: FleetSnapshot, row: RecentTransitionSnap): string {
+  const qitem = queueRows(snap).find((candidate) => candidate.qitemId === row.qitemId);
+  const work = qitem?.summary?.trim() || qitem?.body.split("\n").find((line) => line.trim())?.trim();
+  return row.summary?.trim() || work || "no work served";
+}
+
 function agentDrillForSession(snap: FleetSnapshot, session: string): Action | undefined {
   const found = findAgentBySession(snap, session);
   return found
@@ -397,7 +403,7 @@ function recentLines(snap: FleetSnapshot, scope: RecentScope, width: number, exp
       });
       lines.push({ text: `      ${pad(row.actorSession, Math.max(8, width - 8))}`.slice(0, width), ...(action ? { action } : {}) });
       lines.push({ text: `      → ${row.target}`.slice(0, width), ...(action ? { action } : {}) });
-      lines.push(...wrapDetailValue("work", row.summary?.trim() || "no summary served", width)
+      lines.push(...wrapDetailValue("work", recentWorkText(snap, row), width)
         .map((line) => ({ ...line, ...(action ? { action } : {}) })));
     }
     return lines;
@@ -417,7 +423,7 @@ function recentLines(snap: FleetSnapshot, scope: RecentScope, width: number, exp
       [pad(row.target, targetW), targetW],
     ]).slice(0, width);
     lines.push({ text, ...(action ? { action } : {}) });
-    lines.push(...wrapDetailValue("work", row.summary?.trim() || "no summary served", width)
+    lines.push(...wrapDetailValue("work", recentWorkText(snap, row), width)
       .map((line) => ({ ...line, ...(action ? { action } : {}) })));
   }
   return lines;
@@ -589,13 +595,12 @@ function instanceContentLines(
     const agents = rig.pods.flatMap((pod) => pod.agents.map((agent) => ({ pod: pod.name, agent })))
       .filter(({ pod, agent }) => !state.filter || rig.name.includes(state.filter) || pod.includes(state.filter) || agent.name.includes(state.filter));
     if (state.filter && agents.length === 0 && !rig.name.includes(state.filter)) continue;
-    const rigHeading = sectionRule(`RIG ${rig.name} · ${rig.lifecycleState ?? "unknown"} · ${agents.length} seats`, columnsWidth(columns));
-    lines.push({ text: "" }, {
-      ...rigHeading,
-      action: { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } },
-    });
+    const rigAction: Action = { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } };
     if (agents.length === 0) {
-      lines.push({ text: "  (no seats served for this rig)" });
+      lines.push({
+        text: tableRow(columns, { rig: rig.name, pod: "—", seat: "(no seats)", status: rig.lifecycleState ?? "unknown" }),
+        action: rigAction,
+      });
       continue;
     }
     let previousPod: string | null = null;
@@ -622,6 +627,7 @@ function instanceContentLines(
           now: queue.now,
         }),
         action: { type: "drill", resource: "agent", name: agent.name, target: { host: host.name, rig: rig.name, pod } },
+        zones: [{ start: 0, end: columns[0]![2], action: rigAction }],
       });
     }
   }
