@@ -3,7 +3,11 @@ import { join } from "node:path";
 import os from "node:os";
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import type { ContextUsage, ContextUnknownReason } from "./types.js";
-import { contextUsageDirectory, telemetrySidecarPath } from "./telemetry-state-paths.js";
+import {
+  contextUsageDirectory,
+  legacyContextUsageDirectory,
+  telemetrySidecarPath,
+} from "./telemetry-state-paths.js";
 
 /** Freshness threshold: samples older than this are considered stale for compact displays. */
 export const FRESHNESS_THRESHOLD_MS = 600_000; // 10 minutes per PM spec
@@ -129,7 +133,14 @@ export class ContextUsageStore {
 
   /** Read and parse a sidecar JSON file. Returns discriminated result. */
   readSidecar(sessionName: string): { ok: true; data: SidecarRaw } | { ok: false; reason: "missing_sidecar" | "parse_error" } {
-    const filePath = this.getSidecarPath(sessionName);
+    const canonical = this.readSidecarAt(this.getSidecarPath(sessionName));
+    if (canonical.ok || canonical.reason !== "missing_sidecar") return canonical;
+    return this.readSidecarAt(
+      telemetrySidecarPath(legacyContextUsageDirectory(this.stateDir), sessionName),
+    );
+  }
+
+  private readSidecarAt(filePath: string): { ok: true; data: SidecarRaw } | { ok: false; reason: "missing_sidecar" | "parse_error" } {
     try {
       if (!existsSync(filePath)) return { ok: false, reason: "missing_sidecar" };
       const content = readFileSync(filePath, "utf-8");

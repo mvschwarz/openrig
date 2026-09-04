@@ -122,7 +122,7 @@ import { NodeCmuxService } from "./domain/node-cmux-service.js";
 import { createAppWithWebSocket, type AppDeps } from "./server.js";
 import { ProviderServiceImpl } from "./domain/provider/provider-service-impl.js";
 import { collectClaudeSignalsFromProviderUsageDirectory } from "./domain/provider/claude-usage-reader.js";
-import { providerUsageDirectory } from "./domain/telemetry-state-paths.js";
+import { legacyProviderUsageDirectory, providerUsageDirectory } from "./domain/telemetry-state-paths.js";
 import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -1020,6 +1020,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       listRigs: () => rigRepo.listRigs(),
       collectClaudeSignals: () => collectClaudeSignalsFromProviderUsageDirectory(
         providerUsageDirectory(OPENRIG_HOME),
+        undefined,
+        legacyProviderUsageDirectory(OPENRIG_HOME),
       ),
       agentActivityStore,
     }),
@@ -2188,7 +2190,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     codex: codexAdapter,
     pi: piAdapter,
   }, usageSamplesStore, () => providerWindowSamplesFromSignals(
-    collectClaudeSignalsFromProviderUsageDirectory(providerUsageDirectory(OPENRIG_HOME)),
+    collectClaudeSignalsFromProviderUsageDirectory(
+      providerUsageDirectory(OPENRIG_HOME),
+      undefined,
+      legacyProviderUsageDirectory(OPENRIG_HOME),
+    ),
   ));
   deps.contextMonitor = contextMonitor;
   // OPR.0.4.3.14 — expose the SAME enforcer instance to routes for the manual

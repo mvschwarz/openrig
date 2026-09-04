@@ -41,12 +41,14 @@ rig up product-team
 
 ## Upgrading an existing instance to 0.5.9
 
-0.5.9 makes `$OPENRIG_HOME/context` the addressable context library, moves
+0.5.9 makes `$OPENRIG_HOME/context` the addressable context library, writes
 Claude telemetry to `state/context-usage` (and provider telemetry to
 `state/provider-usage`), and installs the default System World at
-`context/system/system-world.yaml`. Existing instances must run the shipped
-`openrig-upgrade` skill's bounded helper; this is not a directory rename to do
-while the old collector is still writing.
+`context/system/system-world.yaml`. Existing instances cross this boundary by
+an **Agent-Operated Migration** from the shipped `openrig-upgrade` skill. The
+target runtime reads canonical-first with legacy-fallback while new writes use
+the canonical roots; a custom context-library root stays stable during
+activation. This is not a directory rename to do while an old collector writes.
 
 ```bash
 # SKILL_DIR is the installed openrig-upgrade skill directory.
@@ -54,11 +56,13 @@ node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --help
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME"
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-state --preimage /safe/path/layout-0.5.9-before
 
-# After the target daemon is running and every bounded legacy tail is followed by newer paired samples at both new state roots:
+# Activate the exact target runtime separately. After every bounded legacy tail is followed by newer paired samples at both new state roots:
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --verify --preimage /safe/path/layout-0.5.9-before > /safe/path/layout-0.5.9-verify.json
+
+# Run the separately invoked non-destructive finalizer only with that exact receipt:
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-library --preimage /safe/path/layout-0.5.9-before --verification /safe/path/layout-0.5.9-verify.json
 
-# Restore helper-owned paths and collector projections if the observed upgrade must be reversed:
+# Restore only helper-owned preparation/finalizer effects if the observed upgrade must be reversed:
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --rollback /safe/path/layout-0.5.9-before
 ```
 
@@ -68,11 +72,13 @@ plan or mutation.
 
 Every phase emits JSON. Stop on any issue or incomplete receipt and follow its
 `next` action; do not continue from copied legacy telemetry or retry a partial
-mutation blindly. Verification accepts a post-apply legacy tail only when that
-same seat has newer paired context and provider samples under `state/`; library
-apply revalidates and preserves the exact tail bytes before removing the legacy
-sources. The helper never performs daemon, database, seat, plugin, or
-release lifecycle actions—the agent-led upgrade workflow owns those separately.
+mutation blindly. Preparation leaves legacy state and collector settings in
+place. Verification accepts exact tail bytes only when that same seat has newer
+paired context and provider samples under `state/`; finalization revalidates the
+accepted tails, copies the library without overwrite, and switches config last.
+The helper never removes the legacy telemetry or library. Retirement follows
+separate stable runtime, writer, reader, and recovery proof. Daemon, database,
+seat, plugin, and release lifecycle actions remain agent-owned.
 
 ## What It Does
 
