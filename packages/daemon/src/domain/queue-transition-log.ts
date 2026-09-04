@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { ClosureReason } from "./hot-potato-enforcer.js";
+import { archiveWhereClause } from "./rig-repository.js";
 import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
 
 export const OWNER_NOTIFICATION_LEVELS = ["RECORD", "NOTICE", "ALERT"] as const;
@@ -207,9 +208,10 @@ export class QueueTransitionLog {
     const limit = Number.isFinite(requestedLimit)
       ? Math.min(20, Math.max(1, Math.floor(requestedLimit)))
       : 20;
+    const activeRigWhere = archiveWhereClause("archived_at");
     const rigNames = scope.kind === "rig"
       ? [scope.rig]
-      : (this.db.prepare("SELECT name FROM rigs ORDER BY name").all() as Array<{ name: string }>).map((row) => row.name);
+      : (this.db.prepare(`SELECT name FROM rigs${activeRigWhere ? ` WHERE ${activeRigWhere}` : ""} ORDER BY name`).all() as Array<{ name: string }>).map((row) => row.name);
     if (rigNames.length === 0) return [];
     const knownRigs = new Set(rigNames);
     const sessionPatterns = rigNames.map((rig) => `%@${rig.replace(/%/g, "\\%").replace(/_/g, "\\_")}`);

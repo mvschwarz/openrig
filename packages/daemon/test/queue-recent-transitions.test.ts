@@ -7,6 +7,7 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
+import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { queueRoutes } from "../src/routes/queue.js";
@@ -19,7 +20,7 @@ describe("RECENT queue transition projection", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema]);
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, rigArchiveSchema]);
     repo = new QueueRepository(db, new EventBus(db));
     app = new Hono();
     app.use("*", async (c, next) => {
@@ -155,9 +156,11 @@ describe("RECENT queue transition projection", () => {
     expect(await response.json()).toMatchObject({ error: "rig_required" });
   });
 
-  it("serves one bounded instance chronology across registered local rigs", async () => {
+  it("serves one bounded instance chronology across active local rigs", async () => {
     db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?), (?, ?)")
       .run("r-a", "rig-a", "r-b", "rig-b");
+    db.prepare("INSERT INTO rigs (id, name, archived_at) VALUES (?, ?, ?)")
+      .run("r-archived", "rig-archived", "2026-09-03T23:59:00.000Z");
     item("q-a", "rig-a", "in-progress", ["mission:m-a"]);
     transition("q-a", "pending", { actor: "sender@rig-a" });
     transition("q-a", "in-progress", { actor: "owner@rig-a" });
@@ -168,6 +171,9 @@ describe("RECENT queue transition projection", () => {
     item("q-foreign", "rig-c", "in-progress");
     transition("q-foreign", "pending", { actor: "sender@rig-c" });
     transition("q-foreign", "in-progress", { actor: "owner@rig-c" });
+    item("q-archived", "rig-archived", "in-progress");
+    transition("q-archived", "pending", { actor: "sender@rig-archived" });
+    transition("q-archived", "in-progress", { actor: "owner@rig-archived" });
 
     const response = await app.request("/api/queue/recent-transitions?scope=instance&limit=20");
     expect(response.status).toBe(200);
