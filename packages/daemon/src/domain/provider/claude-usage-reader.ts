@@ -127,8 +127,8 @@ export function collectClaudeSignalsFromProviderUsageDirectory(
   const readFrom = (candidateDirectory: string, seatSession: string): string | null => {
     try {
       return fs.readFileSync(nodePath.join(candidateDirectory, telemetrySidecarFilename(seatSession)), "utf-8");
-    } catch {
-      return null;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : "";
     }
   };
 

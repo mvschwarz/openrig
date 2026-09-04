@@ -112,6 +112,13 @@ describe("0.5.8 provider-usage compatibility bridge", () => {
     expect(malformedCanonical.find((signal) => signal.seatSession === "legacy@rig")?.usedPercent).toBeUndefined();
     expect(malformedCanonical.find((signal) => signal.seatSession === "legacy@rig")?.unknownReason)
       .toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
+
+    fs.rmSync(path.join(canonical, "legacy@rig.json"));
+    fs.mkdirSync(path.join(canonical, "legacy@rig.json"));
+    const wrongTypeCanonical = collectClaudeSignalsFromProviderUsageDirectory(canonical, () => ASOF, legacy);
+    expect(wrongTypeCanonical.find((signal) => signal.seatSession === "legacy@rig")?.usedPercent).toBeUndefined();
+    expect(wrongTypeCanonical.find((signal) => signal.seatSession === "legacy@rig")?.unknownReason)
+      .toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
     fs.rmSync(home, { recursive: true, force: true });
   });
 });

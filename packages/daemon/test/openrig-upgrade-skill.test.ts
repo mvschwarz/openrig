@@ -1222,6 +1222,33 @@ exit 7
     expect(fs.existsSync(path.join(fixture.home, "context-packs", "operator-pack", "manifest.yaml"))).toBe(true);
   });
 
+  it("refuses verification when a preimage-bound legacy source disappears", () => {
+    const root = temporaryRoot();
+    const fixture = seedLegacyTelemetry(root);
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before");
+
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    const manifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    const adoptedAt = new Date(Date.parse(manifest.appliedAt) + 1_000).toISOString();
+    const legacyContextPath = path.join(fixture.home, "context", `${fixture.sessionName}.json`);
+    fs.rmSync(legacyContextPath);
+    writeTelemetryPair(fixture, "state", adoptedAt, 30);
+
+    const result = runJsonResult(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    expect(result.status).toBe(1);
+    expect(result.body).toMatchObject({ phase: "verify", verified: false, complete: false });
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "legacy_source_drift", path: legacyContextPath }),
+    ]));
+  });
+
   it("refuses a legacy writer whose newest write follows its paired state samples", () => {
     const root = temporaryRoot();
     const fixture = seedLegacyTelemetry(root);

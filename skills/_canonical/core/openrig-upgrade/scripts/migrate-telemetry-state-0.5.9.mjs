@@ -732,6 +732,12 @@ function legacyTails(manifest, telemetry, appliedAt, issues) {
   const originalByPath = new Map(manifest.files
     .filter((file) => file.kind === "context-source" || file.kind === "provider-source")
     .map((file) => [file.originalPath, file]));
+  const currentPaths = new Set(telemetry.map((file) => file.source));
+  for (const original of originalByPath.values()) {
+    if (!currentPaths.has(original.originalPath)) {
+      issues.push(issue("legacy_source_drift", original.originalPath, "restore the preimage-bound legacy sidecar and rerun verification"));
+    }
+  }
   const tails = [];
   for (const file of telemetry) {
     const original = originalByPath.get(file.source);
