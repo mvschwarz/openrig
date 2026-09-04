@@ -51,7 +51,7 @@ function lstatOrNull(pathValue) {
   try {
     return fs.lstatSync(pathValue);
   } catch (error) {
-    if (error.code === "ENOENT") return null;
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
     throw error;
   }
 }
@@ -146,6 +146,43 @@ function assertTreeSnapshot(root, expected, ignored = new Set()) {
       || observed.identity.ino !== link.identity.ino) {
       throw librarySourceDrift(path.join(root, link.path), "symlink payload, type, mode, or inode no longer matches");
     }
+  }
+  return current;
+}
+
+function regularFileSnapshot(filePath) {
+  const before = lstatOrNull(filePath);
+  if (!before) throw new Error(`managed file is missing: ${filePath}`);
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new Error(`managed path is not a regular file: ${filePath}`);
+  }
+  const mode = before.mode & 0o777;
+  const digest = sha256(fs.readFileSync(filePath));
+  const after = fs.lstatSync(filePath);
+  if (!after.isFile()
+    || after.isSymbolicLink()
+    || after.dev !== before.dev
+    || after.ino !== before.ino
+    || (after.mode & 0o777) !== mode) {
+    throw new Error(`managed file changed while being inventoried: ${filePath}`);
+  }
+  return {
+    type: "file",
+    mode,
+    sha256: digest,
+    identity: { dev: String(before.dev), ino: String(before.ino) },
+  };
+}
+
+function assertRegularFileSnapshot(filePath, expected) {
+  if (!expected) throw new Error(`managed file has no recorded identity: ${filePath}`);
+  const current = regularFileSnapshot(filePath);
+  if (current.type !== expected.type
+    || current.mode !== expected.mode
+    || current.sha256 !== expected.sha256
+    || current.identity.dev !== expected.identity?.dev
+    || current.identity.ino !== expected.identity?.ino) {
+    throw new Error(`managed file identity no longer matches: ${filePath}`);
   }
   return current;
 }
@@ -1049,10 +1086,14 @@ function applyLibrary(home, preimage, verificationPath) {
       if (sourceTreeSnapshot.digest !== null) assertTreeSnapshot(library.targetRoot, sourceTreeSnapshot);
     }
     const systemWorldPath = path.join(library.targetRoot, "system", "system-world.yaml");
-    if (!fs.existsSync(systemWorldPath)) atomicWrite(systemWorldPath, Buffer.from(DEFAULT_SYSTEM_WORLD), 0o644);
+    const systemWorldAdded = !lstatOrNull(systemWorldPath);
+    if (systemWorldAdded) atomicWrite(systemWorldPath, Buffer.from(DEFAULT_SYSTEM_WORLD), 0o644);
+    const systemWorldIdentity = systemWorldAdded ? regularFileSnapshot(systemWorldPath) : null;
     if (library.configExists && sha256(library.originalConfig) !== sha256(library.nextConfig)) {
       atomicWrite(library.configPath, library.nextConfig, fs.statSync(library.configPath).mode & 0o777);
     }
+    const targetTreeDigest = treeDigest(library.targetRoot);
+    if (systemWorldAdded) assertRegularFileSnapshot(systemWorldPath, systemWorldIdentity);
     const appliedAt = new Date().toISOString();
     const completed = {
       ...prepared,
@@ -1060,8 +1101,9 @@ function applyLibrary(home, preimage, verificationPath) {
       library: {
         ...prepared.library,
         systemWorldPath,
-        systemWorldAdded: !systemWorldExisted,
-        targetTreeDigest: treeDigest(library.targetRoot),
+        systemWorldAdded,
+        systemWorldIdentity,
+        targetTreeDigest,
         appliedConfigSha256: library.configExists ? sha256(fs.readFileSync(library.configPath)) : null,
         appliedAt,
       },
@@ -1141,7 +1183,9 @@ function rollback(home, preimage) {
     }
     if (activeRoot) {
       try {
-        const ignored = !library.systemWorldExisted && fs.existsSync(path.join(activeRoot, "system", "system-world.yaml"))
+        const managedSystemWorldPath = path.join(activeRoot, "system", "system-world.yaml");
+        const managedSystemWorldStat = !library.systemWorldExisted ? lstatOrNull(managedSystemWorldPath) : null;
+        const ignored = managedSystemWorldStat
           ? new Set(["system/system-world.yaml"])
           : new Set();
         const currentTreeDigest = treeDigest(activeRoot, ignored);
@@ -1161,8 +1205,14 @@ function rollback(home, preimage) {
             }));
           }
         }
-        if (ignored.size > 0 && sha256(fs.readFileSync(path.join(activeRoot, "system", "system-world.yaml"))) !== sha256(DEFAULT_SYSTEM_WORLD)) {
-          issues.push(issue("destination_drift", path.join(activeRoot, "system", "system-world.yaml"), "preserve the changed System World and decide the merge manually before rollback"));
+        if (managedSystemWorldStat || library.systemWorldAdded === true) {
+          try {
+            assertRegularFileSnapshot(managedSystemWorldPath, library.systemWorldIdentity);
+          } catch (error) {
+            issues.push(issue("destination_drift", managedSystemWorldPath, "preserve the changed System World identity and decide the merge manually before rollback", {
+              diagnostic: error.message,
+            }));
+          }
         }
       } catch (error) {
         issues.push(issue("destination_drift", activeRoot, "preserve the changed context library and decide the merge manually before rollback", {
@@ -1211,7 +1261,17 @@ function rollback(home, preimage) {
   if (libraryPhase) {
     const activeRoot = libraryLocation === "target" ? library.targetRoot : libraryLocation === "source" ? library.sourceRoot : null;
     const managedSystemWorldPath = activeRoot ? path.join(activeRoot, "system", "system-world.yaml") : null;
-    if (!library.systemWorldExisted && managedSystemWorldPath && fs.existsSync(managedSystemWorldPath)) {
+    if (!library.systemWorldExisted && managedSystemWorldPath && lstatOrNull(managedSystemWorldPath)) {
+      try {
+        assertRegularFileSnapshot(managedSystemWorldPath, library.systemWorldIdentity);
+      } catch (error) {
+        emit({ schema: SCHEMA, phase: "rollback", rolledBack: false, complete: false, preimage, issues: [issue(
+          "destination_drift",
+          managedSystemWorldPath,
+          "the managed System World identity changed before rollback removal",
+          { diagnostic: error.message },
+        )] }, 1);
+      }
       fs.rmSync(managedSystemWorldPath);
       const systemDir = path.dirname(managedSystemWorldPath);
       if (fs.readdirSync(systemDir).length === 0) fs.rmdirSync(systemDir);

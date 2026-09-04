@@ -847,6 +847,51 @@ describe("0.5.9 telemetry-state migration helper", () => {
     },
   );
 
+  it.each([
+    { label: "matching-content", content: DEFAULT_SYSTEM_WORLD_MANIFEST },
+    { label: "different-content", content: "operator-owned: true\n" },
+  ])("refuses rollback when the managed System World path becomes a $label symlink", ({ content }) => {
+    const root = temporaryRoot();
+    const prepared = prepareLibraryMigration(root, (fixture) => {
+      write(fixture.home, "context-packs/operator-pack/manifest.yaml", "name: operator-pack\nversion: \"1\"\nfiles: []\n");
+    });
+    const migrated = runJson(helper, [
+      "--home", prepared.fixture.home,
+      "--apply-library",
+      "--preimage", prepared.preimage,
+      "--verification", prepared.verificationPath,
+    ], prepared.env);
+    expect(migrated).toMatchObject({ phase: "apply-library", applied: true, complete: true, issues: [] });
+    const manifest = JSON.parse(fs.readFileSync(path.join(prepared.preimage, "manifest.json"), "utf8"));
+    expect(manifest.library.systemWorldIdentity).toMatchObject({
+      type: "file",
+      mode: 0o644,
+      sha256: sha256(DEFAULT_SYSTEM_WORLD_MANIFEST),
+      identity: { dev: expect.any(String), ino: expect.any(String) },
+    });
+
+    const managedPath = path.join(prepared.fixture.home, "context", "system", "system-world.yaml");
+    const externalTarget = path.join(root, "external-system-world.yaml");
+    fs.rmSync(managedPath);
+    write(root, "external-system-world.yaml", content);
+    fs.symlinkSync(externalTarget, managedPath, "file");
+    const observed = fs.lstatSync(managedPath);
+    const settingsBefore = fs.readFileSync(prepared.fixture.settingsPath);
+
+    const result = runJsonResult(helper, ["--home", prepared.fixture.home, "--rollback", prepared.preimage], prepared.env);
+    expect(result.status).toBe(1);
+    expect(result.body).toMatchObject({ phase: "rollback", rolledBack: false, complete: false });
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "destination_drift", path: managedPath }),
+    ]));
+    expect(fs.lstatSync(managedPath).isSymbolicLink()).toBe(true);
+    expect(fs.lstatSync(managedPath).ino).toBe(observed.ino);
+    expect(fs.readlinkSync(managedPath)).toBe(externalTarget);
+    expect(fs.readFileSync(externalTarget, "utf8")).toBe(content);
+    expect(fs.existsSync(path.join(prepared.fixture.home, "context-packs"))).toBe(false);
+    expect(fs.readFileSync(prepared.fixture.settingsPath)).toEqual(settingsBefore);
+  });
+
   it("refuses a symlinked library root before changing live state", () => {
     const root = temporaryRoot();
     let externalLibrary = "";
