@@ -599,7 +599,6 @@ function instanceContentLines(
       continue;
     }
     let previousPod: string | null = null;
-    let firstInRig = true;
     for (const { pod, agent } of agents) {
       const firstInPod = pod !== previousPod;
       if (firstInPod && previousPod != null) lines.push({ text: "┈".repeat(columnsWidth(columns)) });
@@ -612,7 +611,7 @@ function instanceContentLines(
       openCount += queue.count;
       lines.push({
         text: tableRow(columns, {
-          rig: firstInRig ? rig.name : "",
+          rig: rig.name,
           pod: firstInPod ? pod : "",
           seat: `${stateCell.mark} ${seatName(pod, agent.name)}`,
           runtime: runtimeShort(agent.runtime),
@@ -624,7 +623,6 @@ function instanceContentLines(
         }),
         action: { type: "drill", resource: "agent", name: agent.name, target: { host: host.name, rig: rig.name, pod } },
       });
-      firstInRig = false;
     }
   }
   lines.push({ text: "" }, { text: `${host.rigs.length} rigs · ${seatCount} seats · ${workingCount} working · ${attentionCount} need attention · ${openCount} open rows` });

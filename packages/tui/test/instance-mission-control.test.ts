@@ -104,14 +104,30 @@ afterEach(() => {
 describe("S12 instance mission control", () => {
   it.each([[160, 42], [120, 34], [84, 28]])("renders every rig and seat with full scroll reach at %ix%i", (cols, rows) => {
     const snap = multiRigSnapshot();
+    const buildRig = snap.hosts[0]!.rigs[0]!;
+    buildRig.pods[0]!.agents.push(...Array.from({ length: 36 }, (_, index) =>
+      agent(`dev.extra-${index}`, `dev-extra-${index}@build`, "active", 20 + index),
+    ));
+    const expectedAgents = new Set(
+      snap.hosts[0]!.rigs.flatMap((rig) => rig.pods.flatMap((pod) => pod.agents.map((candidate) => candidate.name))),
+    );
     const view = openInstance(snap);
     let screen = renderScreen(view.get(), snap, { cols, rows, nowMs: 0, colorMode: "none" });
     view.dispatch({ type: "layout", contentMaxOffset: screen.contentMaxOffset, contentTargetCount: screen.contentTargets.length });
     const reached = new Set<string>();
+    let scrolledSeatRows = 0;
     for (let offset = 0; offset <= screen.contentMaxOffset; offset += 1) {
       screen = renderScreen(view.get(), snap, { cols, rows, nowMs: 0, colorMode: "none" });
       for (const target of screen.contentTargets) {
-        if (target.action.type === "drill" && target.action.resource === "agent") reached.add(target.action.name);
+        if (target.action.type !== "drill" || target.action.resource !== "agent") continue;
+        reached.add(target.action.name);
+        const rig = target.action.target?.rig;
+        const content = stripAnsi(screen.lines[target.y - 1] ?? "").slice(screen.explorerWidth + 2);
+        if (!rig || !/\b(working|needs you|idle|detached|failed|unknown|blocked)\b/.test(content)) continue;
+        const headingVisible = screen.lines.some((line) => stripAnsi(line).slice(screen.explorerWidth + 2).includes(`RIG ${rig} ·`));
+        if (headingVisible) continue;
+        scrolledSeatRows += 1;
+        expect(content.trimStart().startsWith(rig), `${cols}: scrolled seat row retains rig identity`).toBe(true);
       }
       view.dispatch({ type: "content-scroll", delta: 1 });
     }
@@ -120,10 +136,11 @@ describe("S12 instance mission control", () => {
     expect(whole).toMatch(/RIG\s+POD\s+SEAT/);
     expect(whole).toContain("recoverable");
     expect(whole).toContain("stopped");
-    expect(whole).toContain("── RIG build · running · 3 seats");
+    expect(whole).toContain("── RIG build · running · 39 seats");
     expect(whole).toMatch(/dev\s+[\s\S]*┈{8,}[\s\S]*qa\s+/);
     expect(whole).not.toMatch(/\+\d+|more hidden/i);
-    expect(reached).toEqual(new Set(["dev.driver", "dev.guard", "qa.checker", "write.editor"]));
+    expect(reached).toEqual(expectedAgents);
+    expect(scrolledSeatRows).toBeGreaterThan(0);
     screen.lines.forEach((line) => expect(stripAnsi(line).length).toBeLessThanOrEqual(cols));
   });
 
