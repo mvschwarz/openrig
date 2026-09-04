@@ -741,6 +741,7 @@ describe("managed catalog selection composition", () => {
         baseSpec: makeResolved(spec, root),
         member: makeMember({ cwd: project, runtime: "codex" }),
         skillsRoot: catalog,
+        systemSkills: ["system-skill"],
         homedir: join(root, "home"),
       }));
 

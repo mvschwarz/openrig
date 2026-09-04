@@ -101,8 +101,9 @@ describe("config routes (User Settings v0)", () => {
     //   stuck_sweep_unclaimed_age_minutes)
     // + 4 S01 (queue.wake_retry_interval_seconds / wake_retry_cap /
     //   wake_unconfirmed_window_minutes / wake_swap_grace_seconds)
-    // + 1 OPR.0.5.9.4 (skills.root) → 65 total.
-    expect(Object.keys(body.settings).length).toBe(65);
+    // + 1 OPR.0.5.9.4 (skills.root)
+    // + 1 OPR.0.5.9.5 (context.system_world) → 66 total.
+    expect(Object.keys(body.settings).length).toBe(66);
     expect(body.settings["daemon.port"]?.source).toBe("default");
     expect(body.settings["ui.preview.refresh_interval_seconds"]?.value).toBe(3);
     expect(body.settings["ui.preview.max_pins"]?.value).toBe(4);
@@ -115,6 +116,7 @@ describe("config routes (User Settings v0)", () => {
     expect(String(body.settings["workspace.projects_root"]?.value)).toMatch(/projects$/);
     expect(String(body.settings["workspace.catalog_path"]?.value)).toMatch(/workspace\.yaml$/);
     expect(String(body.settings["context.root"]?.value)).toMatch(/context$/);
+    expect(body.settings["context.system_world"]).toMatchObject({ value: "default", source: "default" });
     expect(body.settings["workspace.field_notes_root"]).toBeUndefined();
     expect(body.settings["workspace.dogfood_evidence_root"]).toBeUndefined();
   });

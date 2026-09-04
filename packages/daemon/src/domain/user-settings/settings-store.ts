@@ -103,6 +103,7 @@ export const SETTINGS_VALID_KEYS = [
   "topology.root",
   // OPR.0.5.9.5 Wave B — canonical context library; old key is refused.
   "context.root",
+  "context.system_world",
   "skills.root",
   "onboarding.default_pack.enabled",
   "files.allowlist",
@@ -228,6 +229,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "workspace.catalog_path": { primary: "OPENRIG_WORKSPACE_CATALOG_PATH" },
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
+  "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST" },
@@ -305,6 +307,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "workspace.catalog_path": ["workspace", "catalogPath"],
   "topology.root": ["topology", "root"],
   "context.root": ["context", "root"],
+  "context.system_world": ["context", "systemWorld"],
   "skills.root": ["skills", "root"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "files.allowlist": ["files", "allowlist"],
@@ -560,6 +563,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // OPR.0.5.3.6 D1 — derived under $OPENRIG_HOME, never a shared-docs literal.
     case "topology.root": return DEFAULT_TOPOLOGY_ROOT;
     case "context.root": return DEFAULT_CONTEXT_ROOT;
+    case "context.system_world": return "default";
     case "skills.root": return DEFAULT_SKILLS_ROOT;
     case "onboarding.default_pack.enabled": return true;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.
@@ -793,6 +797,7 @@ export interface ClaudeCompactionPolicy {
 export interface ResolvedConfig {
   skillsRoot: string;
   contextRoot: string;
+  systemWorld: string;
   topologyRoot: string;
   workspaceRoot: string;
   workspaceSlicesRoot: string;
@@ -881,6 +886,7 @@ export class SettingsStore {
     return {
       skillsRoot: this.resolveOne("skills.root", fc, wr).value as string,
       contextRoot: this.resolveOne("context.root", fc, wr).value as string,
+      systemWorld: this.resolveOne("context.system_world", fc, wr).value as string,
       topologyRoot: this.resolveOne("topology.root", fc, wr).value as string,
       workspaceRoot: wr,
       workspaceSlicesRoot: this.resolveOne("workspace.slices_root", fc, wr).value as string,

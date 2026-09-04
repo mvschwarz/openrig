@@ -50,6 +50,7 @@ export interface RiggedConfig {
   // installs here). The removed packsRoot shape is refused, never bridged.
   context: {
     root: string;
+    systemWorld: string;
   };
   skills: {
     root: string;
@@ -231,7 +232,7 @@ const DEFAULTS = {
   // OPR.0.5.3.6 D1 — derived under the OpenRig home, never a shared-docs literal.
   topology: { root: getDefaultOpenRigPath("topology") },
   // OPR.0.5.9.5 Wave B — canonical addressable context library.
-  context: { root: getDefaultOpenRigPath("context") },
+  context: { root: getDefaultOpenRigPath("context"), systemWorld: "default" },
   skills: { root: getDefaultOpenRigPath("skills") },
   onboarding: { defaultPack: { enabled: true } },
   files: { allowlist: "" },
@@ -363,6 +364,7 @@ export const VALID_KEYS = [
   "topology.root",
   // OPR.0.5.9.5 Wave B — canonical context library; old key is refused.
   "context.root",
+  "context.system_world",
   "skills.root",
   "onboarding.default_pack.enabled",
   "files.allowlist",
@@ -454,6 +456,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "workspace.catalog_path": { primary: "OPENRIG_WORKSPACE_CATALOG_PATH" },
   "topology.root": { primary: "OPENRIG_TOPOLOGY_ROOT" },
   "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
+  "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
@@ -533,6 +536,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "workspace.catalog_path": ["workspace", "catalogPath"],
   "topology.root": ["topology", "root"],
   "context.root": ["context", "root"],
+  "context.system_world": ["context", "systemWorld"],
   "skills.root": ["skills", "root"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "files.allowlist": ["files", "allowlist"],
@@ -947,6 +951,7 @@ export class ConfigStore {
       },
       context: {
         root: v("context.root") as string,
+        systemWorld: v("context.system_world") as string,
       },
       skills: {
         root: v("skills.root") as string,

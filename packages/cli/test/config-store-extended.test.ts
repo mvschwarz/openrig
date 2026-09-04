@@ -51,7 +51,7 @@ function clearEnv(): () => void {
     "OPENRIG_WORKSPACE_STEERING_PATH", "OPENRIG_WORKSPACE_FIELD_NOTES_ROOT",
     "OPENRIG_WORKSPACE_SPECS_ROOT", "OPENRIG_DOGFOOD_EVIDENCE_ROOT",
     "OPENRIG_WORKSPACE_PROJECTS_ROOT", "OPENRIG_WORKSPACE_CATALOG_PATH",
-    "OPENRIG_CONTEXT_ROOT", "OPENRIG_CONTEXT_PACKS_ROOT",
+    "OPENRIG_CONTEXT_ROOT", "OPENRIG_CONTEXT_SYSTEM_WORLD", "OPENRIG_CONTEXT_PACKS_ROOT",
     "OPENRIG_FILES_ALLOWLIST", "OPENRIG_PROGRESS_SCAN_ROOTS",
     "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS",
     "OPENRIG_UI_PREVIEW_MAX_PINS", "OPENRIG_UI_PREVIEW_DEFAULT_LINES",
@@ -123,6 +123,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       // OPR.0.5.3.6 D1 — the topology tree root (instance at its top).
       "topology.root",
       "context.root",
+      "context.system_world",
       "skills.root",
       "onboarding.default_pack.enabled",
       "files.allowlist", "progress.scan_roots",
@@ -190,6 +191,15 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
 
     process.env["OPENRIG_CONTEXT_ROOT"] = join(tmpDir, "context-library");
     expect(store.resolve().context.root).toBe(join(tmpDir, "context-library"));
+  });
+
+  it("resolves context.system_world with visible default, file, and env provenance", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("context.system_world")).toMatchObject({ value: "default", source: "default" });
+    store.set("context.system_world", "operator/system-world.yaml");
+    expect(store.resolveWithSource("context.system_world")).toMatchObject({ value: "operator/system-world.yaml", source: "file" });
+    process.env["OPENRIG_CONTEXT_SYSTEM_WORLD"] = "disabled";
+    expect(store.resolve().context.systemWorld).toBe("disabled");
   });
 
   it("refuses every removed context.packs_root input with context.root guidance", () => {

@@ -7,6 +7,17 @@ import { spawnSync } from "node:child_process";
 
 const SCHEMA = "openrig-telemetry-state-migration/v1";
 const rig = process.env.OPENRIG_RIG_BIN || "rig";
+const DEFAULT_SYSTEM_WORLD = `schema: openrig.system-world/v0alpha1
+id: openrig-default
+version: "0.5.9"
+context:
+  - ref: onboarding-width
+  - ref: world-public
+    profiles:
+      claude: guided
+      codex: codex-coverage
+skills: []
+`;
 
 function argument(name) {
   const index = process.argv.indexOf(name);
@@ -34,6 +45,70 @@ function readJson(filePath) {
   } catch {
     return null;
   }
+}
+
+function treeDigest(root, ignored = new Set()) {
+  if (!fs.existsSync(root)) return null;
+  const rows = [];
+  const visit = (directory, prefix = "") => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolute = path.join(directory, entry.name);
+      if (ignored.has(relative)) continue;
+      if (entry.isSymbolicLink()) throw new Error(`symlinked library entry is not supported: ${absolute}`);
+      if (entry.isDirectory()) visit(absolute, relative);
+      else if (entry.isFile()) rows.push(`${relative}\0${fs.statSync(absolute).mode & 0o777}\0${sha256(fs.readFileSync(absolute))}`);
+      else throw new Error(`unsupported library entry is not supported: ${absolute}`);
+    }
+  };
+  visit(root);
+  return sha256(rows.join("\n"));
+}
+
+function readLibraryConfig(home, issues) {
+  const configPath = path.join(home, "config.json");
+  const configExists = fs.existsSync(configPath);
+  const config = configExists ? readJson(configPath) : {};
+  if (!config) {
+    issues.push(issue("config_invalid", configPath, "repair config.json before migrating the context library"));
+    return null;
+  }
+  const context = config.context === undefined ? {} : config.context;
+  if (!context || typeof context !== "object" || Array.isArray(context)) {
+    issues.push(issue("config_invalid", configPath, "make config.context an object before migrating the context library"));
+    return null;
+  }
+  if (context.packsRoot !== undefined && (typeof context.packsRoot !== "string" || context.packsRoot.length === 0)) {
+    issues.push(issue("config_invalid", configPath, "make context.packsRoot a non-empty path or remove it before migration"));
+    return null;
+  }
+  if (context.root !== undefined && (typeof context.root !== "string" || context.root.length === 0)) {
+    issues.push(issue("config_invalid", configPath, "make context.root a non-empty path or remove it before migration"));
+    return null;
+  }
+  const defaultLegacyRoot = path.join(home, "context-packs");
+  const configuredLegacyRoot = context.packsRoot ? path.resolve(context.packsRoot) : defaultLegacyRoot;
+  const targetRoot = configuredLegacyRoot === defaultLegacyRoot ? path.join(home, "context") : configuredLegacyRoot;
+  if (context.root !== undefined && path.resolve(context.root) !== targetRoot) {
+    issues.push(issue("context_root_conflict", configPath, "reconcile context.root with the legacy context.packsRoot selection before migration", {
+      configuredRoot: path.resolve(context.root),
+      expectedRoot: targetRoot,
+    }));
+    return null;
+  }
+  const nextContext = { ...context };
+  delete nextContext.packsRoot;
+  if (context.packsRoot !== undefined) nextContext.root = targetRoot;
+  const nextConfig = { ...config, ...(Object.keys(nextContext).length > 0 ? { context: nextContext } : {}) };
+  if (Object.keys(nextContext).length === 0) delete nextConfig.context;
+  return {
+    configPath,
+    configExists,
+    originalConfig: configExists ? fs.readFileSync(configPath) : null,
+    nextConfig: Buffer.from(`${JSON.stringify(nextConfig, null, 2)}\n`),
+    sourceRoot: configuredLegacyRoot,
+    targetRoot,
+  };
 }
 
 function inventoryClaudeSeats(issues) {
@@ -189,7 +264,11 @@ function buildPlan(home) {
   ];
   const seats = inventoryClaudeSeats(issues);
   const collectors = collectorActions(home, seats, issues);
-  return { roots, telemetry, seats, collectors, issues };
+  const library = readLibraryConfig(home, issues);
+  if (library && fs.existsSync(library.sourceRoot) && !fs.statSync(library.sourceRoot).isDirectory()) {
+    issues.push(issue("library_source_invalid", library.sourceRoot, "preserve the path and identify the real legacy context library"));
+  }
+  return { roots, telemetry, seats, collectors, library, issues };
 }
 
 function publicPlan(home, plan) {
@@ -204,6 +283,12 @@ function publicPlan(home, plan) {
     actions: [
       ...plan.telemetry.map((item) => ({ decision: "copy", kind: item.kind, from: item.source, to: item.destination, sha256: sha256(item.bytes) })),
       ...plan.collectors.map((item) => ({ decision: "rewrite-collector", sessionName: item.sessionName, path: item.path })),
+      ...(plan.library ? [{
+        decision: plan.library.sourceRoot === plan.library.targetRoot ? "retarget-library" : "move-library",
+        from: plan.library.sourceRoot,
+        to: plan.library.targetRoot,
+        systemWorld: path.join(plan.library.targetRoot, "system", "system-world.yaml"),
+      }] : []),
     ],
     issues: plan.issues,
     next: plan.issues.length === 0
@@ -306,6 +391,11 @@ function applyState(home, preimage) {
       mode: item.originalMode,
       public: { kind: "settings", originalPath: item.path, appliedSha256: sha256(item.rewritten) },
     })),
+    ...(plan.library?.originalConfig ? [{
+      bytes: plan.library.originalConfig,
+      mode: fs.statSync(plan.library.configPath).mode & 0o777,
+      public: { kind: "config", originalPath: plan.library.configPath },
+    }] : []),
   ];
   const files = storePreimage(preimage, records);
   const manifestPath = path.join(preimage, "manifest.json");
@@ -427,11 +517,181 @@ function verify(home, preimage) {
     verified: issues.length === 0,
     complete: issues.length === 0,
     preimage,
+    preimageManifestSha256: sha256(fs.readFileSync(path.join(preimage, "manifest.json"))),
     freshSamples,
     issues,
     next: issues.length === 0 ? "telemetry state relocation is verified" : "resolve the named incomplete state and rerun verify",
   };
   emit(report, issues.length === 0 ? 0 : 1);
+}
+
+function verificationReceipt(home, preimage, verificationPath) {
+  if (!verificationPath) return { issue: issue("verification_receipt_required", null, "capture a successful --verify JSON receipt and pass it with --verification") };
+  const receipt = readJson(verificationPath);
+  const manifestPath = path.join(preimage, "manifest.json");
+  const valid = receipt?.schema === SCHEMA
+    && receipt.phase === "verify"
+    && receipt.verified === true
+    && receipt.complete === true
+    && typeof receipt.home === "string"
+    && typeof receipt.preimage === "string"
+    && path.resolve(receipt.home) === home
+    && path.resolve(receipt.preimage) === path.resolve(preimage)
+    && receipt.preimageManifestSha256 === sha256(fs.readFileSync(manifestPath));
+  return valid
+    ? { receipt }
+    : { issue: issue("verification_receipt_invalid", verificationPath, "rerun --verify against this exact home and preimage, capture its JSON, then retry") };
+}
+
+function validateLegacySources(preimage, manifest, root, kind, issues) {
+  const files = manifest.files.filter((file) => file.kind === kind && path.dirname(file.originalPath) === root);
+  const allowed = new Set(files.map((file) => path.basename(file.originalPath)));
+  if (!fs.existsSync(root)) return files;
+  if (!fs.statSync(root).isDirectory()) {
+    issues.push(issue("legacy_source_drift", root, "restore the verified legacy telemetry directory before migrating the library"));
+    return files;
+  }
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith(".json.tmp")) continue;
+    if (!entry.isFile() || !allowed.has(entry.name)) {
+      issues.push(issue("context_dir_not_empty_after_state_move", path.join(root, entry.name), "classify or archive the non-telemetry entry before applying the library move"));
+    }
+  }
+  for (const file of files) {
+    if (!fs.existsSync(file.originalPath) || sha256(fs.readFileSync(file.originalPath)) !== file.sha256) {
+      issues.push(issue("legacy_source_drift", file.originalPath, "rerun apply-state and verify; a legacy telemetry source changed after the receipt"));
+    }
+  }
+  return files;
+}
+
+function removeVerifiedLegacyRoot(root, files) {
+  if (!fs.existsSync(root)) return;
+  for (const file of files) fs.rmSync(file.originalPath, { force: true });
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.endsWith(".json.tmp")) fs.rmSync(path.join(root, entry.name), { force: true });
+  }
+  if (fs.readdirSync(root).length === 0) fs.rmdirSync(root);
+}
+
+function applyLibrary(home, preimage, verificationPath) {
+  if (!preimage) {
+    emit({ schema: SCHEMA, phase: "apply-library", ok: false, issues: [issue("preimage_required", null, "pass the apply-state --preimage path")] }, 1);
+  }
+  const manifest = loadManifest(preimage, home, "apply-library");
+  const issues = validatePreimage(preimage, manifest);
+  if (manifest.status !== "applied") {
+    issues.push(issue("preimage_manifest_mismatch", path.join(preimage, "manifest.json"), "apply-library requires one completed apply-state preimage"));
+  }
+  const receipt = verificationReceipt(home, preimage, verificationPath);
+  if (receipt.issue) issues.push(receipt.issue);
+  const library = readLibraryConfig(home, issues);
+  const legacyContextFiles = validateLegacySources(preimage, manifest, path.join(home, "context"), "context-source", issues);
+  const legacyProviderFiles = validateLegacySources(preimage, manifest, path.join(home, "provider-usage"), "provider-source", issues);
+  if (library && fs.existsSync(library.sourceRoot) && !fs.statSync(library.sourceRoot).isDirectory()) {
+    issues.push(issue("library_source_invalid", library.sourceRoot, "preserve the path and identify the real legacy context library"));
+  }
+  const configRecord = manifest.files.find((file) => file.kind === "config");
+  if (library?.configExists) {
+    const currentConfigSha = sha256(fs.readFileSync(library.configPath));
+    if (!configRecord || currentConfigSha !== configRecord.sha256) {
+      issues.push(issue("config_drift", library.configPath, "preserve the changed config and rerun the migration from a fresh preimage"));
+    }
+  }
+  if (issues.length > 0 || !library) {
+    emit({ schema: SCHEMA, phase: "apply-library", ok: false, applied: false, complete: false, issues }, 1);
+  }
+
+  let sourceTreeDigest;
+  try {
+    sourceTreeDigest = treeDigest(library.sourceRoot);
+  } catch (error) {
+    emit({ schema: SCHEMA, phase: "apply-library", ok: false, applied: false, complete: false, issues: [issue(
+      "library_source_invalid",
+      library.sourceRoot,
+      "remove unsupported entries from the legacy context library before migration",
+      { diagnostic: error.message },
+    )] }, 1);
+  }
+  const systemWorldPathBefore = path.join(library.sourceRoot, "system", "system-world.yaml");
+  const systemWorldExisted = fs.existsSync(systemWorldPathBefore);
+  if (systemWorldExisted && sha256(fs.readFileSync(systemWorldPathBefore)) !== sha256(DEFAULT_SYSTEM_WORLD)) {
+    emit({ schema: SCHEMA, phase: "apply-library", ok: false, applied: false, complete: false, issues: [issue(
+      "system_world_conflict",
+      systemWorldPathBefore,
+      "preserve the operator-owned manifest and explicitly select or reconcile it before retrying",
+    )] }, 1);
+  }
+
+  const prepared = {
+    ...manifest,
+    status: "library-prepared",
+    library: {
+      sourceRoot: library.sourceRoot,
+      targetRoot: library.targetRoot,
+      sourceTreeDigest,
+      systemWorldExisted,
+      configExisted: library.configExists,
+      nextConfigSha256: library.configExists ? sha256(library.nextConfig) : null,
+    },
+  };
+  const manifestPath = path.join(preimage, "manifest.json");
+  atomicWrite(manifestPath, Buffer.from(`${JSON.stringify(prepared, null, 2)}\n`), 0o600);
+
+  try {
+    removeVerifiedLegacyRoot(path.join(home, "context"), legacyContextFiles);
+    removeVerifiedLegacyRoot(path.join(home, "provider-usage"), legacyProviderFiles);
+    if (library.sourceRoot !== library.targetRoot) {
+      if (fs.existsSync(library.targetRoot)) throw new Error(`library target still exists after telemetry removal: ${library.targetRoot}`);
+      if (fs.existsSync(library.sourceRoot)) fs.renameSync(library.sourceRoot, library.targetRoot);
+      else fs.mkdirSync(library.targetRoot, { recursive: true });
+    } else {
+      fs.mkdirSync(library.targetRoot, { recursive: true });
+    }
+    const systemWorldPath = path.join(library.targetRoot, "system", "system-world.yaml");
+    if (!fs.existsSync(systemWorldPath)) atomicWrite(systemWorldPath, Buffer.from(DEFAULT_SYSTEM_WORLD), 0o644);
+    if (library.configExists && sha256(library.originalConfig) !== sha256(library.nextConfig)) {
+      atomicWrite(library.configPath, library.nextConfig, fs.statSync(library.configPath).mode & 0o777);
+    }
+    const appliedAt = new Date().toISOString();
+    const completed = {
+      ...prepared,
+      status: "library-applied",
+      library: {
+        ...prepared.library,
+        systemWorldPath,
+        systemWorldAdded: !systemWorldExisted,
+        targetTreeDigest: treeDigest(library.targetRoot),
+        appliedConfigSha256: library.configExists ? sha256(fs.readFileSync(library.configPath)) : null,
+        appliedAt,
+      },
+    };
+    atomicWrite(manifestPath, Buffer.from(`${JSON.stringify(completed, null, 2)}\n`), 0o600);
+    emit({
+      schema: SCHEMA,
+      generatedAt: appliedAt,
+      home,
+      phase: "apply-library",
+      applied: true,
+      complete: true,
+      preimage,
+      sourceRoot: library.sourceRoot,
+      contextRoot: library.targetRoot,
+      systemWorldPath,
+      issues: [],
+      next: "start the target daemon, inspect context.system_world provenance, and run the representative fresh-seat proof",
+    });
+  } catch (error) {
+    emit({
+      schema: SCHEMA,
+      phase: "apply-library",
+      ok: false,
+      applied: false,
+      complete: false,
+      preimage,
+      issues: [issue("library_apply_incomplete", null, "run --rollback with this preimage before retrying", { diagnostic: error.message })],
+    }, 1);
+  }
 }
 
 function rollback(home, preimage) {
@@ -444,6 +704,64 @@ function rollback(home, preimage) {
   const toRestore = [];
   const alreadyOriginal = [];
   const issues = [];
+  const library = manifest.library;
+  const libraryPhase = library && (manifest.status === "library-prepared" || manifest.status === "library-applied");
+  let libraryLocation = null;
+  if (libraryPhase) {
+    const sourceExists = fs.existsSync(library.sourceRoot);
+    const targetExists = fs.existsSync(library.targetRoot);
+    if (library.sourceRoot === library.targetRoot) {
+      libraryLocation = targetExists ? "target" : "missing";
+    } else if (sourceExists && targetExists) {
+      issues.push(issue("destination_drift", library.targetRoot, "preserve both context libraries and decide which tree is authoritative before rollback"));
+      libraryLocation = "ambiguous";
+    } else if (targetExists) {
+      libraryLocation = "target";
+    } else if (sourceExists) {
+      libraryLocation = "source";
+    } else {
+      libraryLocation = "missing";
+    }
+    const activeRoot = libraryLocation === "target" ? library.targetRoot : libraryLocation === "source" ? library.sourceRoot : null;
+    if (!activeRoot && library.sourceTreeDigest !== null) {
+      issues.push(issue("destination_drift", library.targetRoot, "restore the missing context library before rollback"));
+    }
+    if (activeRoot) {
+      try {
+        const ignored = !library.systemWorldExisted && fs.existsSync(path.join(activeRoot, "system", "system-world.yaml"))
+          ? new Set(["system/system-world.yaml"])
+          : new Set();
+        const currentTreeDigest = treeDigest(activeRoot, ignored);
+        if (currentTreeDigest !== (library.sourceTreeDigest ?? sha256(""))) {
+          issues.push(issue("destination_drift", activeRoot, "preserve the changed context library and decide the merge manually before rollback"));
+        }
+        if (ignored.size > 0 && sha256(fs.readFileSync(path.join(activeRoot, "system", "system-world.yaml"))) !== sha256(DEFAULT_SYSTEM_WORLD)) {
+          issues.push(issue("destination_drift", path.join(activeRoot, "system", "system-world.yaml"), "preserve the changed System World and decide the merge manually before rollback"));
+        }
+      } catch (error) {
+        issues.push(issue("destination_drift", activeRoot, "preserve the changed context library and decide the merge manually before rollback", {
+          diagnostic: error.message,
+        }));
+      }
+    }
+    if (library.configExisted) {
+      const configRecord = manifest.files.find((file) => file.kind === "config");
+      if (!configRecord || !fs.existsSync(configRecord.originalPath)) {
+        issues.push(issue("destination_drift", configRecord?.originalPath, "restore the migration-owned config path before rollback"));
+      } else {
+        const digest = sha256(fs.readFileSync(configRecord.originalPath));
+        const acceptedConfigDigests = new Set([configRecord.sha256, library.nextConfigSha256, library.appliedConfigSha256].filter(Boolean));
+        if (!acceptedConfigDigests.has(digest)) {
+          issues.push(issue("destination_drift", configRecord.originalPath, "preserve the changed config and decide the merge manually before rollback"));
+        }
+      }
+    }
+    for (const file of manifest.files.filter((entry) => entry.kind === "context-source" || entry.kind === "provider-source")) {
+      if (fs.existsSync(file.originalPath) && sha256(fs.readFileSync(file.originalPath)) !== file.sha256) {
+        issues.push(issue("destination_drift", file.originalPath, "preserve the changed legacy telemetry source and decide the merge manually before rollback"));
+      }
+    }
+  }
   for (const file of settings) {
     if (!fs.existsSync(file.originalPath)) {
       issues.push(issue("destination_drift", file.originalPath, "preserve the changed settings and decide the merge manually before rollback"));
@@ -453,6 +771,46 @@ function rollback(home, preimage) {
     if (digest === file.appliedSha256) toRestore.push(file);
     else if (digest === file.sha256) alreadyOriginal.push(file.originalPath);
     else issues.push(issue("destination_drift", file.originalPath, "preserve the changed settings and decide the merge manually before rollback"));
+  }
+  if (issues.length > 0) {
+    emit({ schema: SCHEMA, phase: "rollback", rolledBack: false, complete: false, preimage, restored: [], alreadyOriginal, issues }, 1);
+  }
+  if (libraryPhase) {
+    const activeRoot = libraryLocation === "target" ? library.targetRoot : libraryLocation === "source" ? library.sourceRoot : null;
+    const managedSystemWorldPath = activeRoot ? path.join(activeRoot, "system", "system-world.yaml") : null;
+    if (!library.systemWorldExisted && managedSystemWorldPath && fs.existsSync(managedSystemWorldPath)) {
+      fs.rmSync(managedSystemWorldPath);
+      const systemDir = path.dirname(managedSystemWorldPath);
+      if (fs.readdirSync(systemDir).length === 0) fs.rmdirSync(systemDir);
+    }
+    const restoredTreeDigest = activeRoot ? treeDigest(activeRoot) : null;
+    const expectedRestoredTreeDigest = library.sourceTreeDigest ?? sha256("");
+    if (activeRoot && restoredTreeDigest !== expectedRestoredTreeDigest) {
+      emit({ schema: SCHEMA, phase: "rollback", rolledBack: false, complete: false, preimage, issues: [issue(
+        "destination_drift",
+        activeRoot,
+        "the context library no longer matches its preserved pre-migration tree",
+      )] }, 1);
+    }
+    if (library.sourceRoot !== library.targetRoot && libraryLocation === "target") {
+      if (library.sourceTreeDigest === null) {
+        if (fs.readdirSync(library.targetRoot).length === 0) fs.rmdirSync(library.targetRoot);
+      } else {
+        fs.renameSync(library.targetRoot, library.sourceRoot);
+      }
+    }
+    const configRecord = manifest.files.find((file) => file.kind === "config");
+    if (configRecord) {
+      const currentDigest = sha256(fs.readFileSync(configRecord.originalPath));
+      if (currentDigest !== configRecord.sha256) {
+        atomicWrite(configRecord.originalPath, fs.readFileSync(path.join(preimage, configRecord.storedAs)), configRecord.mode);
+      }
+    }
+    for (const file of manifest.files.filter((entry) => entry.kind === "context-source" || entry.kind === "provider-source")) {
+      if (!fs.existsSync(file.originalPath)) {
+        atomicWrite(file.originalPath, fs.readFileSync(path.join(preimage, file.storedAs)), file.mode);
+      }
+    }
   }
   for (const file of toRestore) {
     atomicWrite(file.originalPath, fs.readFileSync(path.join(preimage, file.storedAs)), file.mode);
@@ -492,12 +850,14 @@ if (!homeArg) {
 const home = path.resolve(homeArg);
 const apply = process.argv.includes("--apply-state");
 const verifyFlag = process.argv.includes("--verify");
+const applyLibraryFlag = process.argv.includes("--apply-library");
 const rollbackArg = argument("--rollback");
-if ([apply, verifyFlag, Boolean(rollbackArg)].filter(Boolean).length > 1) {
-  emit({ schema: SCHEMA, phase: "input", ok: false, issues: [issue("phase_conflict", null, "choose exactly one of --apply-state, --verify, or --rollback")] }, 1);
+if ([apply, verifyFlag, applyLibraryFlag, Boolean(rollbackArg)].filter(Boolean).length > 1) {
+  emit({ schema: SCHEMA, phase: "input", ok: false, issues: [issue("phase_conflict", null, "choose exactly one of --apply-state, --verify, --apply-library, or --rollback")] }, 1);
 }
 
 if (apply) applyState(home, argument("--preimage"));
 if (verifyFlag) verify(home, argument("--preimage"));
+if (applyLibraryFlag) applyLibrary(home, argument("--preimage"), argument("--verification"));
 if (rollbackArg) rollback(home, path.resolve(rollbackArg));
 emit(publicPlan(home, buildPlan(home)));

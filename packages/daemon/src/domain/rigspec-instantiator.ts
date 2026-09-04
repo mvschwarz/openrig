@@ -313,6 +313,7 @@ import type {
   ContinuityPolicyMaterializer,
 } from "./continuity-policy-materializer.js";
 import type { ReconcileSkillLoadoutResult, SkillLoadout, SkillRuntime } from "./skill-catalog.js";
+import type { SystemWorldResolution } from "./system-world.js";
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
   const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
@@ -356,6 +357,9 @@ interface PodInstantiatorDeps {
   onboardingEnabledResolver?: () => boolean;
   /** S04 — live config resolver for the authoritative managed skill catalog. */
   skillsRootResolver?: () => string;
+  /** S05 — selected System World. Resolution failures refuse preflight/launch
+   *  rather than falling back to a different system selector. */
+  systemWorldResolver?: () => SystemWorldResolution;
   /** S04 — exact-byte catalog projection before a harness starts. Optional
    *  for old tests/embedders; production wires the shared reconciler. */
   skillReconciler?: (input: {
@@ -467,6 +471,13 @@ export class PodRigInstantiator {
     return this.deps.skillsRootResolver?.();
   }
 
+  private systemWorldResolutionContext(): { systemSkills?: string[]; systemWorldError?: string } {
+    const resolution = this.deps.systemWorldResolver?.();
+    if (!resolution) return {};
+    if (!resolution.ok) return { systemWorldError: resolution.error.message };
+    return { systemSkills: resolution.manifest?.skills ?? [] };
+  }
+
   private inheritedPermissionPolicy(targetRigId: string | undefined): PreflightSpecContext["inheritedPermissionPolicy"] {
     if (!targetRigId) return undefined;
     const provenance = this.deps.rigRepo.getRigPolicyProvenance(targetRigId);
@@ -511,6 +522,7 @@ export class PodRigInstantiator {
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
       skillsRoot: this.resolveSkillsRoot(),
+      ...this.systemWorldResolutionContext(),
       rigNameOverride: targetRig?.rig.name,
       externalQualifiedIds: targetRig?.nodes.map((node) => node.logicalId),
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
@@ -562,6 +574,7 @@ export class PodRigInstantiator {
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
       skillsRoot: this.resolveSkillsRoot(),
+      ...this.systemWorldResolutionContext(),
       rigNameOverride: targetRig?.rig.name,
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(opts?.targetRigId),
       exec: this.deps.exec,
@@ -992,6 +1005,7 @@ export class PodRigInstantiator {
       cwdOverride: opts?.cwdOverride,
       fsOps: this.deps.fsOps,
       skillsRoot: this.resolveSkillsRoot(),
+      ...this.systemWorldResolutionContext(),
       rigNameOverride: rig.rig.name,
       inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId),
       exec: this.deps.exec,
@@ -1120,7 +1134,7 @@ export class PodRigInstantiator {
     if (!nameGuard.ok) return nameGuard;
 
     // 2. Preflight
-    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
+    const preflight = await rigPreflight({ rigSpecYaml, rigRoot, cwdOverride: opts?.cwdOverride, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(), exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
     if (!preflight.ready) {
       return { ok: false, code: "preflight_failed", errors: preflight.errors, warnings: preflight.warnings };
     }
@@ -1273,6 +1287,7 @@ export class PodRigInstantiator {
           pod,
           rig: rigSpec,
           skillsRoot: this.resolveSkillsRoot(),
+          ...this.systemWorldResolutionContext(),
         });
         if (!configResult.ok) {
           nodeResults.push({ logicalId: qualifiedId, status: "failed", error: configResult.errors.join("; ") });
@@ -1733,6 +1748,7 @@ export class PodRigInstantiator {
       pod: input.pod,
       rig: input.rigSpec,
       skillsRoot: this.resolveSkillsRoot(),
+      ...this.systemWorldResolutionContext(),
     });
     if (!configResult.ok) {
       return { status: "failed", error: configResult.errors.join("; ") };

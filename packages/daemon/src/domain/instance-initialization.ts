@@ -5,6 +5,10 @@ import {
   type InitializationConflict,
   type InitializationFsOps,
 } from "./workspace/default-workspace-scaffold.js";
+import {
+  DEFAULT_SYSTEM_WORLD_MANIFEST,
+  DEFAULT_SYSTEM_WORLD_RELATIVE_PATH,
+} from "./system-world.js";
 
 export interface OpenRigInstanceInitializationOptions {
   home: string;
@@ -58,6 +62,7 @@ export function ensureOpenRigInstance(
     join(options.home, "secrets"),
   ])];
   const configPath = join(options.home, "config.json");
+  const systemWorldPath = join(contextRoot, DEFAULT_SYSTEM_WORLD_RELATIVE_PATH);
   const conflicts: InitializationConflict[] = [];
 
   for (const path of directories) {
@@ -70,6 +75,10 @@ export function ensureOpenRigInstance(
   if (configKind !== "missing" && configKind !== "file") {
     conflicts.push({ path: configPath, expected: "file", actual: configKind });
   }
+  const systemWorldKind = fs.pathKind(systemWorldPath);
+  if (systemWorldKind !== "missing" && systemWorldKind !== "file") {
+    conflicts.push({ path: systemWorldPath, expected: "file", actual: systemWorldKind });
+  }
 
   const workspacePlan = ensureDefaultWorkspace({ root: workspaceRoot, dryRun: true, fs });
   conflicts.push(...workspacePlan.conflicts);
@@ -81,6 +90,7 @@ export function ensureOpenRigInstance(
   const createdPaths = [
     ...missingDirectories,
     ...(configKind === "missing" ? [configPath] : []),
+    ...(systemWorldKind === "missing" ? [systemWorldPath] : []),
     ...(workspacePlan.rootCreated ? [workspaceRoot] : []),
     ...workspacePlan.subdirs.filter((entry) => entry.created).map((entry) => entry.path),
     ...workspacePlan.files.filter((entry) => entry.created).map((entry) => entry.absPath),
@@ -89,6 +99,7 @@ export function ensureOpenRigInstance(
   if (!dryRun) {
     for (const path of missingDirectories) fs.mkdirp(path);
     if (configKind === "missing") fs.writeFile(configPath, "{}\n");
+    if (systemWorldKind === "missing") fs.writeFile(systemWorldPath, DEFAULT_SYSTEM_WORLD_MANIFEST);
     ensureDefaultWorkspace({ root: workspaceRoot, fs });
   }
 

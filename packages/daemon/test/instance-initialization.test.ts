@@ -72,6 +72,7 @@ describe("canonical OpenRig instance initialization", () => {
       { path: "state", kind: "directory" },
       { path: "context", kind: "directory" },
       { path: "context/system", kind: "directory" },
+      { path: "context/system/system-world.yaml", kind: "file", content: expect.stringContaining("schema: openrig.system-world/v0alpha1") },
       { path: "skills", kind: "directory" },
       { path: "workspace", kind: "directory" },
       { path: "workspace/missions", kind: "directory" },

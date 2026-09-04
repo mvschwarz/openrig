@@ -113,6 +113,7 @@ import { PluginDiscoveryService } from "./domain/plugin-discovery-service.js";
 import { SkillLibraryDiscoveryService } from "./domain/skill-library-discovery.js";
 import { ContextPackLibraryService } from "./domain/context-packs/context-pack-library-service.js";
 import { openRigContextLibraryRoots } from "./domain/instance-initialization.js";
+import { resolveSystemWorld } from "./domain/system-world.js";
 import { AgentImageLibraryService } from "./domain/agent-images/agent-image-library-service.js";
 import { SnapshotCapturer } from "./domain/agent-images/snapshot-capturer.js";
 import { SettingsStore as ContextPackSettingsStore } from "./domain/user-settings/settings-store.js";
@@ -844,6 +845,16 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       new ContextPackSettingsStore().resolveOne("onboarding.default_pack.enabled").value === true,
     skillsRootResolver: () =>
       String(new ContextPackSettingsStore().resolveOne("skills.root").value),
+    systemWorldResolver: () => {
+      const settings = new ContextPackSettingsStore();
+      const cfg = settings.resolveConfig();
+      const selected = settings.resolveOne("context.system_world");
+      return resolveSystemWorld({
+        contextRoot: cfg.contextRoot,
+        selection: String(selected.value),
+        source: selected.source,
+      });
+    },
     skillReconciler: reconcileSkillLoadout,
   });
 

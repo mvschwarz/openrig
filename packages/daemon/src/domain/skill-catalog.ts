@@ -272,6 +272,7 @@ function scanCatalog(catalogRoot: string): {
 
 export function resolveSkillLoadout(input: {
   catalogRoot: string;
+  systemSkills?: string[];
   topologySkills?: string[];
   projectRoot?: string;
   projectSkills?: string[];
@@ -283,8 +284,9 @@ export function resolveSkillLoadout(input: {
   const projectSelectionDeclared = input.projectSkills !== undefined
     || (input.projectRoot !== undefined && existsSync(nodePath.join(input.projectRoot, "project.yaml")));
   try {
-    system = readSystemSkillSelection(input.catalogRoot);
+    system = input.systemSkills ?? readSystemSkillSelection(input.catalogRoot);
     project = input.projectSkills ?? (input.projectRoot ? readProjectSkillSelection(input.projectRoot) : []);
+    readStringList(system, "system skill selection");
     readStringList(input.topologySkills ?? [], "topology skill selection");
   } catch (err) {
     return { ok: false, errors: [{ code: "selector_invalid", message: (err as Error).message }] };

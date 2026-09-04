@@ -41,6 +41,10 @@
       "types": "./dist/instance-initialization-surface.d.ts",
       "import": "./dist/instance-initialization-surface.js"
     },
+    "./system-world": {
+      "types": "./dist/system-world-surface.d.ts",
+      "import": "./dist/system-world-surface.js"
+    },
     "./project-lifecycle": {
       "types": "./dist/project-lifecycle-surface.d.ts",
       "import": "./dist/project-lifecycle-surface.js"

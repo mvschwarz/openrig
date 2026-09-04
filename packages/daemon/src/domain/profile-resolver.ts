@@ -73,6 +73,12 @@ export interface ResolutionContext {
   homedir?: string;
   /** Config-resolved managed skill catalog root. */
   skillsRoot?: string;
+  /** System World-owned managed skill identities. When absent, the legacy
+   *  catalog.yaml selector remains the compatibility fallback. */
+  systemSkills?: string[];
+  /** A selected System World that could not be resolved. This is a launch
+   *  refusal, never a silent fallback to the legacy catalog selector. */
+  systemWorldError?: string;
 }
 
 export type ResolutionResult =
@@ -108,6 +114,7 @@ const RESTORE_POLICY_LEVEL: Record<string, number> = {
  */
 export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   const errors: string[] = [];
+  if (ctx.systemWorldError) return { ok: false, errors: [`system_world_invalid: ${ctx.systemWorldError}`] };
   const { baseSpec, importedSpecs, profileName, member, pod, rig } = ctx;
   const spec = baseSpec.spec;
 
@@ -201,6 +208,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   const catalogRoot = ctx.skillsRoot ?? nodePath.join(ctx.homedir ?? osHomedir(), ".openrig", "skills");
   const catalogResult = resolveSkillLoadout({
     catalogRoot,
+    ...(ctx.systemSkills !== undefined ? { systemSkills: ctx.systemSkills } : {}),
     topologySkills: profile.uses.skills,
     projectRoot: cwd,
     allowMissingTopology: true,

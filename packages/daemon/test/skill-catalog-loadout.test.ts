@@ -42,6 +42,24 @@ afterEach(() => {
 });
 
 describe("managed skill catalog and composable loadouts", () => {
+  it("uses an explicit System World selector instead of the legacy catalog selector", () => {
+    const f = fixture(["legacy-system"]);
+    for (const id of ["legacy-system", "world-system", "topology-skill"]) writeSkill(f.catalog, id);
+    commit(f.root);
+
+    const result = resolveSkillLoadout({
+      catalogRoot: f.catalog,
+      systemSkills: ["world-system"],
+      topologySkills: ["topology-skill"],
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.loadout.entries.map((entry) => [entry.id, entry.selectedBy])).toEqual([
+      ["topology-skill", ["topology"]],
+      ["world-system", ["system"]],
+    ]);
+  });
+
   it("composes system, topology, and project selectors deterministically with exact deduplication and provenance", () => {
     const f = fixture(["system-skill", "shared"]);
     writeSkill(f.catalog, "system-skill");

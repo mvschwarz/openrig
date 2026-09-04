@@ -4,6 +4,11 @@ import { parse as parseYaml } from "yaml";
 import { readFrontmatter, resolveNodeFile } from "./scope/scope-fs.js";
 import { readProjectSkillSelection } from "@openrig/daemon/skill-loadout";
 import {
+  resolveSystemWorld,
+  type SystemWorldContextSelection,
+  type SystemWorldSource,
+} from "@openrig/daemon/system-world";
+import {
   LifecycleManifestValidationError,
   validateMissionComposition,
 } from "@openrig/daemon/project-lifecycle";
@@ -33,6 +38,16 @@ export interface WorkInstallPlan {
     frontier: WorkInstallAltitude;
   };
   pieces: WorkInstallPiece[];
+  systemWorld: {
+    state: "default" | "replacement" | "disabled";
+    source: SystemWorldSource;
+    selection: string;
+    manifestPath: string | null;
+    id: string | null;
+    version: string | null;
+    context: SystemWorldContextSelection[];
+    skills: string[];
+  };
   /** Project-world skill identities from project.yaml install.skills. */
   skills: string[];
   derive: [];
@@ -167,6 +182,9 @@ function resolveExplicitSlice(
 export function resolveWorkPosition(opts: {
   workspaceRoot: string;
   catalogPath?: string;
+  contextRoot: string;
+  systemWorldSelection: string;
+  systemWorldSource: SystemWorldSource;
   project?: string;
   mission?: string;
   slice?: string;
@@ -190,6 +208,12 @@ export function resolveWorkPosition(opts: {
   }
 
   const warnings: string[] = [];
+  const systemWorld = resolveSystemWorld({
+    contextRoot: opts.contextRoot,
+    selection: opts.systemWorldSelection,
+    source: opts.systemWorldSource,
+  });
+  if (!systemWorld.ok) return failure(systemWorld.error.code, systemWorld.error.message);
   const catalogPath = resolve(opts.catalogPath ?? join(workspaceRoot, "workspace.yaml"));
   let projectId: string | null = null;
   let projectRoot = workspaceRoot;
@@ -398,6 +422,16 @@ export function resolveWorkPosition(opts: {
       frontier,
     },
     pieces,
+    systemWorld: {
+      state: systemWorld.state,
+      source: systemWorld.source,
+      selection: systemWorld.selection,
+      manifestPath: systemWorld.manifestPath,
+      id: systemWorld.manifest?.id ?? null,
+      version: systemWorld.manifest?.version ?? null,
+      context: systemWorld.manifest?.context ?? [],
+      skills: systemWorld.manifest?.skills ?? [],
+    },
     skills: projectSkills,
     derive: [],
     warnings,

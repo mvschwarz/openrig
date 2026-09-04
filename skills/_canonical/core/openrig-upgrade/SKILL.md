@@ -113,6 +113,67 @@ The helper never deletes a live file and never overwrites a local modification.
 Local deletions, live-only files, target removals, and ambiguous types are
 reported for the agent to resolve. Re-run the plan after any manual resolution.
 
+### Migrate a pre-0.5.9 instance layout
+
+Version 0.5.9 moves Claude context-usage telemetry from
+`$OPENRIG_HOME/context` to `$OPENRIG_HOME/state/context-usage`, moves provider
+telemetry to `state/provider-usage`, claims `context/` as the addressable
+library, and installs the default System World at
+`context/system/system-world.yaml`. The migration is deliberately split so a
+fresh telemetry sample proves writer/reader convergence before the library
+move reuses the old telemetry directory.
+
+With an exact protected preimage path, first inspect and then copy state plus
+rewrite known live Claude collector projections:
+
+```bash
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
+  --home "$OPENRIG_HOME"
+
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
+  --home "$OPENRIG_HOME" \
+  --apply-state \
+  --preimage "$OPENRIG_HOME/backups/layout-0.5.9-before"
+```
+
+After the target daemon is running, freshly launch one Claude seat so its
+process adopts the rewritten collector setting. Capture the verification JSON;
+do not infer success from a copied old sidecar:
+
+```bash
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
+  --home "$OPENRIG_HOME" \
+  --verify \
+  --preimage "$OPENRIG_HOME/backups/layout-0.5.9-before" \
+  > /safe/path/layout-0.5.9-verify.json
+```
+
+Only a successful receipt authorizes the context-library move:
+
+```bash
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
+  --home "$OPENRIG_HOME" \
+  --apply-library \
+  --preimage "$OPENRIG_HOME/backups/layout-0.5.9-before" \
+  --verification /safe/path/layout-0.5.9-verify.json
+```
+
+Stop on every reported issue: malformed or foreign legacy entries, an unknown
+live Claude cwd, a nonempty target, collector drift, config drift, or a missing
+fresh dual sample all require the named repair before continuing. The helper
+does not stop/start the daemon, launch a seat, touch the database, or decide
+whether the upgrade proceeds.
+
+To recover, restore the prior runtime as the agent-led workflow requires, then
+reverse only helper-owned layout/projection writes. The new state copies remain
+for inspection:
+
+```bash
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
+  --home "$OPENRIG_HOME" \
+  --rollback "$OPENRIG_HOME/backups/layout-0.5.9-before"
+```
+
 ## Agent-led continuity upgrade
 
 This is a decision guide, not a command recipe. Adapt paths and checks to the

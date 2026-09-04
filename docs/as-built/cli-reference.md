@@ -162,6 +162,11 @@ Supported keys:
   `OPENRIG_CONTEXT_ROOT`) — the single writable addressable context library.
   The removed `context.packs_root`, config field `context.packsRoot`, and env
   `OPENRIG_CONTEXT_PACKS_ROOT` are refused with replacement guidance.
+- `context.system_world` (default `default`; env
+  `OPENRIG_CONTEXT_SYSTEM_WORLD`) — selects
+  `$OPENRIG_HOME/context/system/system-world.yaml`, an explicit replacement
+  manifest path, or the explicit `disabled` state. `rig context work-install`
+  reports the resolved state and provenance.
 - `skills.root` (default `$OPENRIG_HOME/skills`; env `OPENRIG_SKILLS_ROOT`) — the
   one authoritative Git-versioned managed skill catalog. An override replaces
   the default; it does not add an overlay root.

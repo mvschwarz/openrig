@@ -38,10 +38,13 @@ describe("rig context work-install", () => {
   let alphaRoot: string;
   let betaRoot: string;
   let skillsRoot: string;
+  let contextRoot: string;
   let workingRoot: string;
   let savedWorkspaceRoot: string | undefined;
   let savedCatalogPath: string | undefined;
   let savedSkillsRoot: string | undefined;
+  let savedContextRoot: string | undefined;
+  let savedSystemWorld: string | undefined;
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "openrig-context-work-install-"));
@@ -49,9 +52,11 @@ describe("rig context work-install", () => {
     alphaRoot = join(root, "alpha-root");
     betaRoot = join(root, "unrelated-beta-tree");
     skillsRoot = join(root, "managed-skills");
+    contextRoot = join(root, "context");
     workingRoot = join(root, "agent-working-directory");
     mkdirSync(catalogRoot, { recursive: true });
     mkdirSync(skillsRoot, { recursive: true });
+    mkdirSync(join(contextRoot, "system"), { recursive: true });
     mkdirSync(workingRoot, { recursive: true });
     mkdirSync(join(alphaRoot, "missions", "alpha-active", "slices", "01-live-work"), { recursive: true });
     mkdirSync(join(betaRoot, "missions", "beta-scaffold"), { recursive: true });
@@ -102,6 +107,15 @@ composition:
     spec: SPEC.md
 `);
     writeFileSync(join(skillsRoot, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: [system-skill]\n");
+    writeFileSync(join(contextRoot, "system", "system-world.yaml"), `schema: openrig.system-world/v0alpha1
+id: test-default
+version: "0.5.9"
+context:
+  - ref: onboarding-width
+  - ref: world-public
+    profiles: { claude: guided, codex: codex-coverage }
+skills: [system-skill]
+`);
     for (const id of ["system-skill", "topology-skill", "project-skill"]) {
       mkdirSync(join(skillsRoot, id));
       writeFileSync(join(skillsRoot, id, "SKILL.md"), `---\nname: ${id}\ndescription: Use when testing ${id}.\n---\n\n# ${id}\n`);
@@ -126,9 +140,13 @@ composition:
     savedWorkspaceRoot = process.env["OPENRIG_WORKSPACE_ROOT"];
     savedCatalogPath = process.env["OPENRIG_WORKSPACE_CATALOG_PATH"];
     savedSkillsRoot = process.env["OPENRIG_SKILLS_ROOT"];
+    savedContextRoot = process.env["OPENRIG_CONTEXT_ROOT"];
+    savedSystemWorld = process.env["OPENRIG_CONTEXT_SYSTEM_WORLD"];
     process.env["OPENRIG_WORKSPACE_ROOT"] = catalogRoot;
     delete process.env["OPENRIG_WORKSPACE_CATALOG_PATH"];
     process.env["OPENRIG_SKILLS_ROOT"] = skillsRoot;
+    process.env["OPENRIG_CONTEXT_ROOT"] = contextRoot;
+    delete process.env["OPENRIG_CONTEXT_SYSTEM_WORLD"];
   });
 
   afterEach(() => {
@@ -138,6 +156,10 @@ composition:
     else process.env["OPENRIG_WORKSPACE_CATALOG_PATH"] = savedCatalogPath;
     if (savedSkillsRoot === undefined) delete process.env["OPENRIG_SKILLS_ROOT"];
     else process.env["OPENRIG_SKILLS_ROOT"] = savedSkillsRoot;
+    if (savedContextRoot === undefined) delete process.env["OPENRIG_CONTEXT_ROOT"];
+    else process.env["OPENRIG_CONTEXT_ROOT"] = savedContextRoot;
+    if (savedSystemWorld === undefined) delete process.env["OPENRIG_CONTEXT_SYSTEM_WORLD"];
+    else process.env["OPENRIG_CONTEXT_SYSTEM_WORLD"] = savedSystemWorld;
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -156,6 +178,42 @@ composition:
     expect(result.exitCode).toBeUndefined();
     const plan = JSON.parse(result.logs.join("")) as { position: { projectId: string; projectRoot: string } };
     expect(plan.position).toMatchObject({ projectId: "alpha", projectRoot: alphaRoot });
+  });
+
+  it("reports replacement and disabled System World states without missing-file inference", async () => {
+    writeFileSync(join(contextRoot, "replacement.yaml"), `schema: openrig.system-world/v0alpha1
+id: replacement
+version: "1"
+context: [{ ref: world-public, profiles: { codex: codex-coverage } }]
+skills: []
+`);
+    process.env["OPENRIG_CONTEXT_SYSTEM_WORLD"] = "replacement.yaml";
+    const replacement = await captureLogs(async () => {
+      await makeCommand().parseAsync(["node", "rig", "context", "work-install", "--project", "alpha", "--json"]);
+    });
+    expect(replacement.exitCode).toBeUndefined();
+    expect(JSON.parse(replacement.logs.join("")).systemWorld).toMatchObject({
+      state: "replacement",
+      source: "env",
+      selection: "replacement.yaml",
+      id: "replacement",
+    });
+
+    process.env["OPENRIG_CONTEXT_SYSTEM_WORLD"] = "disabled";
+    const disabled = await captureLogs(async () => {
+      await makeCommand().parseAsync(["node", "rig", "context", "work-install", "--project", "alpha", "--json"]);
+    });
+    expect(disabled.exitCode).toBeUndefined();
+    expect(JSON.parse(disabled.logs.join("")).systemWorld).toEqual({
+      state: "disabled",
+      source: "env",
+      selection: "disabled",
+      manifestPath: null,
+      id: null,
+      version: null,
+      context: [],
+      skills: [],
+    });
   });
 
   it("selects two declared roots and returns stable intent with current progress", async () => {
@@ -350,10 +408,15 @@ composition:
     });
     expect(planHuman.logs).toEqual([
       `project beta: ${betaRoot}`,
+      `system  default [default] test-default@0.5.9 ${join(contextRoot, "system", "system-world.yaml")}`,
+      "context system onboarding-width",
+      "context system world-public (claude=guided, codex=codex-coverage)",
+      "skills  system=system-skill",
+      "skills  topology=(none)",
+      "skills  project=(none)",
       `project project:SPEC.md [manifest] ${join(betaRoot, "SPEC.md")}`,
       `mission mission:SPEC.md [manifest] ${join(betaRoot, "missions", "beta-scaffold", "SPEC.md")}`,
       `mission mission:PROGRESS.md [default] (absent: ${join(betaRoot, "missions", "beta-scaffold", "PROGRESS.md")})`,
-      "skills  (none selected by project)",
     ]);
 
     const human = await captureLogs(async () => {

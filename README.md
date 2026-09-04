@@ -39,6 +39,33 @@ rig up product-team
 
 `rig ps` is a fleet glance. `rig down product-team` snapshots the team and stops it. `rig up product-team` brings it back by name from that snapshot.
 
+## Upgrading an existing instance to 0.5.9
+
+0.5.9 makes `$OPENRIG_HOME/context` the addressable context library, moves
+Claude telemetry to `state/context-usage` (and provider telemetry to
+`state/provider-usage`), and installs the default System World at
+`context/system/system-world.yaml`. Existing instances must run the shipped
+`openrig-upgrade` skill's bounded helper; this is not a directory rename to do
+while the old collector is still writing.
+
+```bash
+# SKILL_DIR is the installed openrig-upgrade skill directory.
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME"
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-state --preimage /safe/path/layout-0.5.9-before
+
+# After the target daemon is running and one freshly launched Claude seat has written a new sample:
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --verify --preimage /safe/path/layout-0.5.9-before > /safe/path/layout-0.5.9-verify.json
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-library --preimage /safe/path/layout-0.5.9-before --verification /safe/path/layout-0.5.9-verify.json
+
+# Restore helper-owned paths and collector projections if the observed upgrade must be reversed:
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --rollback /safe/path/layout-0.5.9-before
+```
+
+Every phase emits JSON. Stop on any issue or incomplete receipt and follow its
+`next` action; do not continue from copied legacy telemetry or retry a partial
+mutation blindly. The helper never performs daemon, database, seat, plugin, or
+release lifecycle actions—the agent-led upgrade workflow owns those separately.
+
 ## What It Does
 
 OpenRig is a multi-agent harness — it manages the system that coding agents form when you run them together. Not the agents themselves, but the team they create: which sessions are running, how they relate, how to recover after a reboot, and how to stop it from becoming terminal sprawl.

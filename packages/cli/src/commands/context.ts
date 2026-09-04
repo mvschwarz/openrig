@@ -30,7 +30,7 @@ import { ATOM_TAXONOMIES, TAXONOMY_TEACHING } from "@openrig/daemon/context-pack
 import { ConfigStore } from "../config-store.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
-import { resolveWorkPosition } from "../lib/work-install.js";
+import { resolveWorkPosition, type WorkInstallPlan } from "../lib/work-install.js";
 import {
   reconcileSkillLoadout,
   resolveSkillLoadout,
@@ -63,6 +63,26 @@ interface ContextPackEntryWire {
     bytes: number | null;
     estimatedTokens: number | null;
   }>;
+}
+
+function selectedIds(ids: string[], none: string): string {
+  return ids.length > 0 ? ids.join(", ") : none;
+}
+
+function printWorkInstallSelectors(result: WorkInstallPlan, topologySkills: string[]): void {
+  const world = result.systemWorld;
+  const identity = world.id ? ` ${world.id}@${world.version}` : "";
+  const path = world.manifestPath ? ` ${world.manifestPath}` : "";
+  console.log(`system  ${world.state} [${world.source}]${identity}${path}`);
+  for (const selection of world.context) {
+    const profiles = selection.profiles
+      ? ` (${Object.entries(selection.profiles).map(([runtime, profile]) => `${runtime}=${profile}`).join(", ")})`
+      : "";
+    console.log(`context system ${selection.ref}${profiles}`);
+  }
+  console.log(`skills  system=${selectedIds(world.skills, "(none)")}`);
+  console.log(`skills  topology=${selectedIds(topologySkills, "(none)")}`);
+  console.log(`skills  project=${selectedIds(result.skills, "(none)")}`);
 }
 
 interface PreviewWire {
@@ -347,7 +367,7 @@ Examples:
   };
 
   cmd.command("work-install")
-    .description("Resolve project/mission/slice context plus the managed project skill loadout")
+    .description("Resolve System World plus project work context and the managed skill loadout")
     .option("--project <id>", "Exact project id from workspace.yaml")
     .option("--mission <id>", "Exact mission id under the selected project")
     .option("--slice <id>", "Exact slice id under the selected mission")
@@ -361,9 +381,14 @@ Examples:
       const store = new ConfigStore();
       const workspaceRoot = String(store.resolveWithSource("workspace.root").value);
       const catalogPath = String(store.resolveWithSource("workspace.catalog_path").value);
+      const contextRoot = String(store.resolveWithSource("context.root").value);
+      const systemWorldSetting = store.resolveWithSource("context.system_world");
       const result = resolveWorkPosition({
         workspaceRoot,
         catalogPath,
+        contextRoot,
+        systemWorldSelection: String(systemWorldSetting.value),
+        systemWorldSource: systemWorldSetting.source,
         ...(opts.project !== undefined ? { project: opts.project } : {}),
         ...(opts.mission !== undefined ? { mission: opts.mission } : {}),
         ...(opts.slice !== undefined ? { slice: opts.slice } : {}),
@@ -390,6 +415,7 @@ Examples:
         const topologySkills = (opts.topology ?? "").split(",").map((id) => id.trim()).filter(Boolean);
         const resolvedSkills = resolveSkillLoadout({
           catalogRoot: String(store.resolveWithSource("skills.root").value),
+          systemSkills: result.systemWorld.skills,
           topologySkills,
           projectRoot: result.position.projectRoot,
           projectSkills: result.skills,
@@ -431,7 +457,7 @@ Examples:
           console.log(`=== ${planned.altitude} ${planned.address} ===`);
           console.log(readFileSync(planned.path, "utf8"));
         }
-        console.log(`skills  ${result.skills.length > 0 ? result.skills.join(", ") : "(none selected by project)"}`);
+        printWorkInstallSelectors(result, (opts.topology ?? "").split(",").map((id) => id.trim()).filter(Boolean));
         if (skillProjection) {
           for (const receipt of skillProjection.receipts) {
             console.log(`${receipt.status.padEnd(7)} ${receipt.id} [${receipt.selectedBy.join("+")}] ${receipt.target}`);
@@ -444,10 +470,10 @@ Examples:
         return;
       }
       console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}`);
+      printWorkInstallSelectors(result, (opts.topology ?? "").split(",").map((id) => id.trim()).filter(Boolean));
       for (const planned of result.pieces) {
         console.log(`${planned.altitude.padEnd(7)} ${planned.address} [${planned.source}] ${planned.exists ? planned.path : `(absent: ${planned.path})`}`);
       }
-      console.log(`skills  ${result.skills.length > 0 ? result.skills.join(", ") : "(none selected by project)"}`);
       if (skillProjection) {
         for (const receipt of skillProjection.receipts) {
           console.log(`${receipt.status.padEnd(7)} ${receipt.id} [${receipt.selectedBy.join("+")}] ${receipt.target}`);
