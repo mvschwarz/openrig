@@ -77,6 +77,15 @@ describe("control-socket adapter (spike-adopted; arch boundary constraint)", () 
     expect(JSON.parse(state!).state.viewTab).toBe("configuration");
   });
 
+  it("addresses the instance root and RECENT tab through the control socket", async () => {
+    const view = createViewState({ instanceId: "tui-sock", getSnapshot: () => snap });
+    open = await createControlSocket({ socketPath: shortSockPath(), view });
+    const [host, recent, state] = await ask(open.path, ["host vm-host", "tab recent", "state"]);
+    expect(JSON.parse(host!).drill).toEqual(["host:vm-host"]);
+    expect(JSON.parse(recent!).viewTab).toBe("recent");
+    expect(JSON.parse(state!).state).toMatchObject({ viewTab: "recent", drill: ["host:vm-host"] });
+  });
+
   it("refuses socket paths beyond the sun_path limit with a named error", async () => {
     const view = createViewState({ instanceId: "tui-sock", getSnapshot: () => snap });
     const tooLong = path.join(os.tmpdir(), "x".repeat(MAX_SOCKET_PATH_BYTES + 1) + ".sock");

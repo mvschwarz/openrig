@@ -28,7 +28,9 @@ const SPEC_4A_ROUTES = [
   "/api/views/execution",
   "/api/views/execution?mission=release-0.5.8",
   "/api/slices/11-production-tui-composed-system",
-  "/api/queue/recent-transitions?rig=openrig-build&limit=20",
+  "/healthz",
+  "/api/queue/recent-transitions?scope=rig&rig=openrig-build&limit=20",
+  "/api/queue/recent-transitions?scope=instance&limit=20",
 ];
 
 describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)", () => {
@@ -40,6 +42,7 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     }) as typeof fetch;
     const c = new DaemonClient({ baseUrl: "http://x", fetchImpl });
 
+    await c.health();
     await c.rigGraph("openrig-build");
     await c.ps();
     await c.rigsSummary();
@@ -59,7 +62,8 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     await c.execution();
     await c.execution("release-0.5.8");
     await c.sliceDetail("11-production-tui-composed-system");
-    await c.queueRecentTransitions("openrig-build");
+    await c.queueRecentTransitions({ kind: "rig", rig: "openrig-build" });
+    await c.queueRecentTransitions({ kind: "instance" });
 
     expect(seen.sort()).toEqual([...SPEC_4A_ROUTES].sort());
   });

@@ -127,6 +127,7 @@ describe("RECENT queue transition projection", () => {
       "escalation",
     ]);
     expect(rows.filter((row) => row.change.startsWith("handed off"))).toHaveLength(1);
+    expect(rows.every((row) => row.rig === "rig-a")).toBe(true);
     expect(rows.every((row) => row.actorSession !== "elsewhere@rig-b")).toBe(true);
     expect(rows[0]).toMatchObject({ qitemId: "q-claim", targetKind: "slice", target: "OPR.0.5.9.11" });
     expect(rows.map((row) => row.transitionId)).toEqual([...rows.map((row) => row.transitionId)].sort((a, b) => a - b));
@@ -152,5 +153,29 @@ describe("RECENT queue transition projection", () => {
     const response = await app.request("/api/queue/recent-transitions");
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: "rig_required" });
+  });
+
+  it("serves one bounded instance chronology across registered local rigs", async () => {
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?), (?, ?)")
+      .run("r-a", "rig-a", "r-b", "rig-b");
+    item("q-a", "rig-a", "in-progress", ["mission:m-a"]);
+    transition("q-a", "pending", { actor: "sender@rig-a" });
+    transition("q-a", "in-progress", { actor: "owner@rig-a" });
+    item("q-b", "rig-b", "done", ["slice:OPR.0.5.9.12"]);
+    transition("q-b", "pending", { actor: "sender@rig-b" });
+    transition("q-b", "in-progress", { actor: "owner@rig-b" });
+    transition("q-b", "done", { actor: "owner@rig-b", reason: "no-follow-on" });
+    item("q-foreign", "rig-c", "in-progress");
+    transition("q-foreign", "pending", { actor: "sender@rig-c" });
+    transition("q-foreign", "in-progress", { actor: "owner@rig-c" });
+
+    const response = await app.request("/api/queue/recent-transitions?scope=instance&limit=20");
+    expect(response.status).toBe(200);
+    const rows = await response.json() as Array<{ qitemId: string; rig: string; change: string }>;
+    expect(rows).toEqual([
+      expect.objectContaining({ qitemId: "q-a", rig: "rig-a", change: "claimed" }),
+      expect.objectContaining({ qitemId: "q-b", rig: "rig-b", change: "claimed" }),
+      expect.objectContaining({ qitemId: "q-b", rig: "rig-b", change: "completed" }),
+    ]);
   });
 });

@@ -149,7 +149,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       // reachable from ANY content context, unlike the section-scoped tabs.
       if (action.tab === "pulse") return resetContent({ ...next, viewTab: "pulse" });
       const rigSpec = state.section === "specs" && state.drill.at(-1)?.kind === "spec" && findSpec(snap, state.drill.at(-1)!.name)?.kind === "rig";
-      const allowed = rigSpec ? ["topology", "configuration", "yaml"] : state.section === "topology" ? ["table", "overview", "graph"] : [];
+      const allowed = rigSpec ? ["topology", "configuration", "yaml"] : state.section === "topology" ? ["table", "recent", "overview", "graph"] : [];
       if (!allowed.includes(action.tab)) return { ...next, lastError: `tab ${action.tab} is not available in this content context` };
       return resetContent({ ...next, viewTab: action.tab });
     }
@@ -306,7 +306,7 @@ export function findAgentBySession(snap: FleetSnapshot, session: string, hostId?
     for (const rig of host.rigs)
       for (const pod of rig.pods)
         for (const agent of pod.agents)
-          if (agent.session === session && (!hostId || host.name === hostId)) matches.push({ host, rig, pod, agent });
+          if (agent.session === session && (!hostId || (host.id ?? host.name) === hostId)) matches.push({ host, rig, pod, agent });
   return matches.length === 1 ? matches[0]! : null;
 }
 

@@ -31,7 +31,7 @@ export interface BuildCtx {
 }
 
 const RESOURCES: ResourceKind[] = ["host", "rig", "pod", "agent", "spec"];
-const TABS = ["table", "overview", "graph", "topology", "configuration", "yaml", "pulse"] as const;
+const TABS = ["table", "recent", "overview", "graph", "topology", "configuration", "yaml", "pulse"] as const;
 
 function drillEntry(resource: ResourceKind): CommandEntry {
   return {

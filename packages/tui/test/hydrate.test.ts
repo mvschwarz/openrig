@@ -9,6 +9,7 @@ import { createViewState } from "../src/state.js";
 // strings — fixture realism is the point (a text-only stub would false-green).
 
 const FIXTURES: Record<string, unknown> = {
+  "/healthz": { ok: true, selfHostId: "mm2-openrig1" },
   "/api/rigs/summary": [
     { id: "01JRIG", name: "myrig", nodeCount: 4, hasServices: false, latestSnapshotAt: null, latestSnapshotId: null, archivedAt: null, lifecycleState: "running" },
     { id: "01JDOWN", name: "downrig", nodeCount: 2, hasServices: false, latestSnapshotAt: null, latestSnapshotId: null, archivedAt: null, lifecycleState: "recoverable" },
@@ -129,7 +130,7 @@ const FIXTURES: Record<string, unknown> = {
   // PULSE ○ UP NEXT + ✓ JUST FINISHED lane sources (increment 3) — same /list route
   "/api/queue/list?state=pending&limit=50": [],
   "/api/queue/list?state=done,handed-off&limit=20": [],
-  "/api/queue/recent-transitions?rig=myrig&limit=20": [],
+  "/api/queue/recent-transitions?scope=rig&rig=myrig&limit=20": [],
 };
 
 function fixtureClient(overrides: Record<string, { status: number } | undefined> = {}, responses: Record<string, unknown> = {}): DaemonClient {
@@ -189,7 +190,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   });
   it("maps topology: pods grouped, agent rows VERBATIM from the maintained projection (PIN 2)", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
-    const local = snap.hosts.find((h) => h.name === "local");
+    const local = snap.hosts.find((h) => h.id === "local");
     expect(local?.rigs[0]?.name).toBe("myrig");
     const dev = local?.rigs[0]?.pods.find((p) => p.name === "dev");
     expect(dev?.agents.map((a) => a.name)).toEqual(["dev.impl", "dev.qa"]);
@@ -226,7 +227,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     // and the unreachable host appears in topology with honest reachability
     expect(snap.hosts.find((h) => h.name === "mm2-host")?.reachable).toBe(false);
     // the non-running rig carries its served lifecycleState verbatim (QA blocker 3)
-    expect(snap.hosts.find((h) => h.name === "local")?.rigs.find((r) => r.name === "downrig")?.lifecycleState).toBe("recoverable");
+    expect(snap.hosts.find((h) => h.id === "local")?.rigs.find((r) => r.name === "downrig")?.lifecycleState).toBe("recoverable");
   });
 
   it("hydrates agent-spec structured detail from the LIVE /:id/review route (QA blocker 2)", async () => {
@@ -456,7 +457,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(snap.humanQueueProbed).toBe(false);
     expect(snap.needs).toEqual([]);
     expect(snap.readErrors).toEqual([expect.stringMatching(/review-fleet: .*503/)]);
-    expect(snap.hosts.find((h) => h.name === "local")?.rigs[0]?.name).toBe("myrig");
+    expect(snap.hosts.find((h) => h.id === "local")?.rigs[0]?.name).toBe("myrig");
     expectIncompleteNeedsTruth(snap);
   });
 });

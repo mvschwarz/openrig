@@ -319,22 +319,18 @@ describe("founder live-QA correction — rig-wide RECENT rail", () => {
     return snap;
   }
 
-  it("renders a bounded chronological rail below the wide factory and omits it at medium/narrow widths", () => {
+  it("renders a bounded chronological rail below the factory at every supported width", () => {
     const snap = recentSnapshot();
     for (const cols of [160, 120, 84]) {
       const view = createViewState({ instanceId: "recent", getSnapshot: () => snap });
       const screen = renderScreen(view.get(), snap, { cols, rows: 80 });
       const body = screen.lines.join("\n");
-      if (cols === 160) {
-        expect(body).toContain("RECENT");
-        expect(body).toMatch(/TIME\s+ACTOR\s+CHANGE\s+TARGET/);
-        expect(body.indexOf("22:02")).toBeLessThan(body.indexOf("22:03"));
-        expect(body).toContain("OPR.0.5.9.11");
-        expect(body).not.toContain("next event");
-        expect(screen.contentTargets.some((item) => item.action.type === "scopes-open" && item.action.slice === "11-slice-11")).toBe(true);
-      } else {
-        expect(body).not.toContain("RECENT");
-      }
+      expect(body).toContain("RECENT");
+      if (cols === 160) expect(body).toMatch(/TIME\s+ACTOR\s+CHANGE\s+TARGET/);
+      expect(body.indexOf("22:02")).toBeLessThan(body.indexOf("22:03"));
+      expect(body).toContain("OPR.0.5.9.11");
+      expect(body).not.toContain("next event");
+      expect(screen.contentTargets.some((item) => item.action.type === "scopes-open" && item.action.slice === "11-slice-11")).toBe(true);
     }
   });
 

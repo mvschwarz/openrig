@@ -66,6 +66,8 @@ export interface RigNode {
 }
 
 export interface HostNode {
+  /** Stable transport key (`local` for this daemon); separate from display identity. */
+  id?: string;
   name: string;
   reachable: boolean;
   rigs: RigNode[];
@@ -245,6 +247,8 @@ export interface RecentTransitionSnap {
   ts: string;
   actorSession: string;
   change: string;
+  /** Owning local rig, explicit on instance-scoped reads. */
+  rig?: string | null;
   targetKind: "qitem" | "slice" | "mission";
   target: string;
 }
@@ -263,6 +267,8 @@ export interface FleetSnapshot {
   /** Bounded typed transition tail for one explicitly named rig. Undefined
    * means not loaded; [] means the served window is proven empty. */
   recentTransitions?: RecentTransitionSnap[];
+  recentTransitionsScope?: { kind: "instance" } | { kind: "rig"; rig: string };
+  /** Compatibility coordinate for S11 fixtures; new code prefers recentTransitionsScope. */
   recentTransitionsRig?: string | null;
   hosts: HostNode[];
   specs: SpecEntry[];
@@ -318,7 +324,7 @@ export interface DrillSegment {
   name: string;
 }
 
-export type ViewTab = "table" | "overview" | "graph" | "topology" | "configuration" | "yaml" | "pulse";
+export type ViewTab = "table" | "recent" | "overview" | "graph" | "topology" | "configuration" | "yaml" | "pulse";
 
 export type Action =
   | { type: "noop" }

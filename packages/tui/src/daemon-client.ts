@@ -90,6 +90,11 @@ export class DaemonClient {
     return parsed;
   }
 
+  /** Running daemon identity. `selfHostId` may be absent on an older daemon. */
+  health() {
+    return this.get("/healthz");
+  }
+
   // --- Crash-cart fleet restore (B1 conductor — the TUI OWNS the kick/poll/cancel
   //     lifecycle so it can retain the attempt id, render progress from the poll stream,
   //     and reach the cancel endpoint; it no longer delegates blind to a buffered child) ---
@@ -154,9 +159,12 @@ export class DaemonClient {
     return this.get(`/api/slices/${encodeURIComponent(directory)}`);
   }
 
-  /** Bounded typed queue chronology for the current rig. */
-  queueRecentTransitions(rig: string, limit = 20) {
-    return this.get(`/api/queue/recent-transitions?rig=${encodeURIComponent(rig)}&limit=${limit}`);
+  /** One bounded typed queue chronology for the current topology scope. */
+  queueRecentTransitions(scope: { kind: "instance" } | { kind: "rig"; rig: string }, limit = 20) {
+    const query = scope.kind === "instance"
+      ? "scope=instance"
+      : `scope=rig&rig=${encodeURIComponent(scope.rig)}`;
+    return this.get(`/api/queue/recent-transitions?${query}&limit=${limit}`);
   }
 
   queueAttention() {

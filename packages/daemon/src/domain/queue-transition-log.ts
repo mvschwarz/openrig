@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import type { ClosureReason } from "./hot-potato-enforcer.js";
+import { isHumanSeatSessionRef, parseSessionName } from "./session-name.js";
 
 export const OWNER_NOTIFICATION_LEVELS = ["RECORD", "NOTICE", "ALERT"] as const;
 export type OwnerNotificationLevel = (typeof OWNER_NOTIFICATION_LEVELS)[number];
@@ -42,6 +43,7 @@ export interface QueueTransitionInput {
 }
 
 export type RecentQueueTransitionTargetKind = "qitem" | "slice" | "mission";
+export type RecentQueueTransitionScope = { kind: "instance" } | { kind: "rig"; rig: string };
 
 /** A compact product event derived only from typed queue state and closure fields.
  * It deliberately carries neither transition_note nor body: prose cannot silently
@@ -52,6 +54,7 @@ export interface RecentQueueTransition {
   ts: string;
   actorSession: string;
   change: string;
+  rig: string;
   targetKind: RecentQueueTransitionTargetKind;
   target: string;
 }
@@ -80,6 +83,14 @@ interface RecentQueueTransitionRow {
   closure_target: string | null;
   tags: string | null;
   previous_state: string | null;
+  destination_session: string;
+  source_session: string;
+}
+
+function sessionRig(session: string, knownRigs: ReadonlySet<string>): string | null {
+  if (isHumanSeatSessionRef(session)) return null;
+  const parsed = parseSessionName(session);
+  return parsed.kind === "canonical" && knownRigs.has(parsed.rig) ? parsed.rig : null;
 }
 
 function recentTarget(row: RecentQueueTransitionRow): Pick<RecentQueueTransition, "targetKind" | "target"> {
@@ -188,16 +199,22 @@ export class QueueTransitionLog {
     return rows.map((r) => this.rowToTransition(r));
   }
 
-  /** Latest high-signal transitions for one rig, returned chronologically with
+  /** Latest high-signal transitions for one topology scope, returned chronologically with
    * newest last. The window function observes the complete per-qitem state
    * sequence before the allowlist is applied, so note-only same-state writes
    * cannot masquerade as claims, resumes, or blocks. */
-  listRecentForRig(rig: string, requestedLimit = 20): RecentQueueTransition[] {
+  listRecent(scope: RecentQueueTransitionScope, requestedLimit = 20): RecentQueueTransition[] {
     const limit = Number.isFinite(requestedLimit)
       ? Math.min(20, Math.max(1, Math.floor(requestedLimit)))
       : 20;
-    const escaped = rig.replace(/%/g, "\\%").replace(/_/g, "\\_");
-    const sessionPattern = `%@${escaped}`;
+    const rigNames = scope.kind === "rig"
+      ? [scope.rig]
+      : (this.db.prepare("SELECT name FROM rigs ORDER BY name").all() as Array<{ name: string }>).map((row) => row.name);
+    if (rigNames.length === 0) return [];
+    const knownRigs = new Set(rigNames);
+    const sessionPatterns = rigNames.map((rig) => `%@${rig.replace(/%/g, "\\%").replace(/_/g, "\\_")}`);
+    const scopeSql = sessionPatterns.map(() => "(q.destination_session LIKE ? ESCAPE '\\' OR q.source_session LIKE ? ESCAPE '\\')").join(" OR ");
+    const scopeParams = sessionPatterns.flatMap((pattern) => [pattern, pattern]);
     const rows = this.db.prepare(`
       WITH rig_history AS (
         SELECT
@@ -209,14 +226,15 @@ export class QueueTransitionLog {
           t.closure_reason,
           t.closure_target,
           q.tags,
+          q.destination_session,
+          q.source_session,
           LAG(t.state) OVER (
             PARTITION BY t.qitem_id
             ORDER BY t.transition_id
           ) AS previous_state
         FROM queue_transitions t
         JOIN queue_items q ON q.qitem_id = t.qitem_id
-        WHERE q.destination_session LIKE ? ESCAPE '\\'
-           OR q.source_session LIKE ? ESCAPE '\\'
+        WHERE ${scopeSql}
       ), qualifying AS (
         SELECT * FROM rig_history
         WHERE (state = 'in-progress' AND previous_state IN ('pending', 'blocked'))
@@ -227,24 +245,34 @@ export class QueueTransitionLog {
            OR closure_reason IN ('denied', 'canceled', 'escalation')
       )
       SELECT transition_id, qitem_id, ts, state, actor_session,
-             closure_reason, closure_target, tags, previous_state
+             closure_reason, closure_target, tags, previous_state,
+             destination_session, source_session
       FROM qualifying
       ORDER BY ts DESC, transition_id DESC
       LIMIT ?
-    `).all(sessionPattern, sessionPattern, limit) as RecentQueueTransitionRow[];
+    `).all(...scopeParams, limit) as RecentQueueTransitionRow[];
 
     return rows.reverse().flatMap((row) => {
       const change = recentChange(row);
       if (!change) return [];
+      const rig = sessionRig(row.destination_session, knownRigs)
+        ?? sessionRig(row.source_session, knownRigs)
+        ?? sessionRig(row.actor_session, knownRigs);
+      if (!rig) return [];
       return [{
         transitionId: row.transition_id,
         qitemId: row.qitem_id,
         ts: row.ts,
         actorSession: row.actor_session,
         change,
+        rig,
         ...recentTarget(row),
       }];
     });
+  }
+
+  listRecentForRig(rig: string, requestedLimit = 20): RecentQueueTransition[] {
+    return this.listRecent({ kind: "rig", rig }, requestedLimit);
   }
 
   latestOwnerNotificationForQitem(qitemId: string): QueueTransition | null {

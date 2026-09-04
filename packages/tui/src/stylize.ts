@@ -15,7 +15,7 @@ const STATUS_TOKENS: Array<[RegExp, "ok" | "warn" | "error" | "dim"]> = [
   [/\b(unknown|idle|stopped|pending)\b/g, "dim"],
 ];
 
-const LINK_RE = /(run ▸|term ▸|open ▸|\(open: [^)]+\)|\[ (?:TABLE|OVERVIEW|TOPOLOGY|CONFIGURATION|YAML) \])/g;
+const LINK_RE = /(run ▸|term ▸|open ▸|\(open: [^)]+\)|\[ (?:TABLE|RECENT|OVERVIEW|GRAPH|TOPOLOGY|CONFIGURATION|YAML) \])/g;
 
 function paintInline(text: string, s: Style): string {
   let out = text;

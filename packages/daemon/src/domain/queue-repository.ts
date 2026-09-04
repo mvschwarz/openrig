@@ -4,7 +4,7 @@ import type { EventBus } from "./event-bus.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult } from "./gateway/human-registry.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { PersistedEvent } from "./types.js";
-import { QueueTransitionLog, type OwnerNotificationLevel } from "./queue-transition-log.js";
+import { QueueTransitionLog, type OwnerNotificationLevel, type RecentQueueTransitionScope } from "./queue-transition-log.js";
 import { WAKE_INTENT_PREFIX, type OutboxHandler } from "./outbox-handler.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
@@ -2683,11 +2683,11 @@ export class QueueRepository {
     });
   }
 
-  /** Read-only current-rig RECENT projection. Normalization and its hard cap
+  /** Read-only scope-aware RECENT projection. Normalization and its hard cap
    * live with the append-only transition log; the repository owns the public
    * queue-domain door. */
-  listRecentTransitions(rig: string, limit = 20): ReturnType<QueueTransitionLog["listRecentForRig"]> {
-    return this.transitionLog.listRecentForRig(rig, limit);
+  listRecentTransitions(scope: RecentQueueTransitionScope | string, limit = 20): ReturnType<QueueTransitionLog["listRecent"]> {
+    return this.transitionLog.listRecent(typeof scope === "string" ? { kind: "rig", rig: scope } : scope, limit);
   }
 
   /** Called by the watchdog engine after the delivery attempt is durably

@@ -50,7 +50,7 @@ function padLeft(text: string | number | null | undefined, width: number): strin
 }
 
 type Align = "left" | "right";
-type AgentColumnKey = "pod" | "seat" | "runtime" | "model" | "context" | "status" | "queue" | "work" | "now" | "actions";
+type AgentColumnKey = "rig" | "pod" | "seat" | "runtime" | "model" | "context" | "status" | "queue" | "work" | "now" | "actions";
 type AgentColumn = [key: AgentColumnKey, name: string, width: number, align: Align];
 
 function columnsWidth(columns: AgentColumn[]): number {
@@ -80,7 +80,26 @@ function agentColumns(contentWidth: number): AgentColumn[] {
   ];
 }
 
-function tableRow(columns: AgentColumn[], cells: Record<AgentColumnKey, string | number | null>): string {
+function instanceAgentColumns(contentWidth: number): AgentColumn[] {
+  if (contentWidth >= 110) return [
+    ["rig", "RIG", 13, "left"], ["pod", "POD", 8, "left"], ["seat", "SEAT", 14, "left"],
+    ["runtime", "RT", 3, "left"], ["context", "CTX", 7, "right"], ["status", "STATE", 10, "left"],
+    ["queue", "Q", 2, "right"], ["work", "WORK", 12, "left"], ["now", "NOW", Math.max(18, contentWidth - 78), "left"],
+  ];
+  if (contentWidth >= 78) return [
+    ["rig", "RIG", 10, "left"], ["pod", "POD", 6, "left"], ["seat", "SEAT", 12, "left"],
+    ["runtime", "RT", 3, "left"], ["context", "CTX", 5, "right"], ["status", "STATE", 9, "left"],
+    ["queue", "Q", 2, "right"], ["work", "WORK", Math.max(8, contentWidth - 54), "left"],
+  ];
+  const fixed = 8 + 5 + 11 + 2 + 5 + 8 + 2 + 7;
+  return [
+    ["rig", "RIG", 8, "left"], ["pod", "POD", 5, "left"], ["seat", "SEAT", 11, "left"],
+    ["runtime", "RT", 2, "left"], ["context", "CTX", 5, "right"], ["status", "STATE", 8, "left"],
+    ["queue", "Q", 2, "right"], ["work", "WORK", Math.max(4, contentWidth - fixed), "left"],
+  ];
+}
+
+function tableRow(columns: AgentColumn[], cells: Partial<Record<AgentColumnKey, string | number | null>>): string {
   return columns.map(([key, , width, align]) => align === "right" ? padLeft(cells[key], width) : pad(cells[key], width)).join(" ");
 }
 
@@ -288,11 +307,12 @@ function agentDetailLines(
 }
 
 function tabsLine(state: ViewState, suffix: string): ContentLine[] {
-  // slice-17: three tabs, each its own click zone (the first zone starts at
+  // S12: four tabs, each its own click zone (the first zone starts at
   // content col 0, preserving the focus-marker floor); `tab graph` = the
   // topology graph view (frame-01 hatchet mainline)
-  const labels: Array<[Extract<ViewState["viewTab"], "table" | "overview" | "graph">, string]> = [
+  const labels: Array<[Extract<ViewState["viewTab"], "table" | "recent" | "overview" | "graph">, string]> = [
     ["table", state.viewTab === "table" ? "[ TABLE ]" : "  TABLE  "],
+    ["recent", state.viewTab === "recent" ? "[ RECENT ]" : "  RECENT  "],
     ["overview", state.viewTab === "overview" ? "[ OVERVIEW ]" : "  OVERVIEW  "],
     ["graph", state.viewTab === "graph" ? "[ GRAPH ]" : "  GRAPH  "],
   ];
@@ -312,37 +332,79 @@ function localClock(iso: string): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-function recentTargetAction(snap: FleetSnapshot, row: RecentTransitionSnap): Action | undefined {
-  if (row.targetKind === "mission") {
-    return snap.scopes?.some((mission) => mission.mission === row.target)
-      ? { type: "scopes-mission-open", mission: row.target }
-      : undefined;
-  }
-  if (row.targetKind !== "slice") return undefined;
-  for (const mission of snap.scopes ?? []) {
-    const slice = mission.slices.find((candidate) => candidate.id === row.target || candidate.dirName === row.target);
-    if (slice) return { type: "scopes-open", mission: mission.mission, slice: slice.dirName };
-  }
-  return undefined;
+function queueRows(snap: FleetSnapshot): FleetSnapshot["attention"] {
+  return [...snap.attention, ...snap.blocked, ...snap.inProgress, ...snap.pending, ...snap.recentlyFinished];
 }
 
-function recentRailLines(snap: FleetSnapshot, rigName: string, width: number): ContentLine[] {
-  if (width < 110 || snap.recentTransitionsRig !== rigName || snap.recentTransitions == null) return [];
+function agentDrillForSession(snap: FleetSnapshot, session: string): Action | undefined {
+  const found = findAgentBySession(snap, session);
+  return found
+    ? { type: "drill", resource: "agent", name: found.agent.name, target: { host: found.host.name, rig: found.rig.name, pod: found.pod.name } }
+    : undefined;
+}
+
+function recentTargetAction(snap: FleetSnapshot, row: RecentTransitionSnap): Action | undefined {
+  if (row.targetKind === "mission") {
+    if (snap.scopes?.some((mission) => mission.mission === row.target))
+      return { type: "scopes-mission-open", mission: row.target };
+  }
+  if (row.targetKind === "slice") {
+    for (const mission of snap.scopes ?? []) {
+      const slice = mission.slices.find((candidate) => candidate.id === row.target || candidate.dirName === row.target);
+      if (slice) return { type: "scopes-open", mission: mission.mission, slice: slice.dirName };
+    }
+  }
+  const qitem = queueRows(snap).find((candidate) => candidate.qitemId === row.qitemId || candidate.qitemId === row.target);
+  return (qitem ? agentDrillForSession(snap, qitem.destinationSession) : undefined)
+    ?? agentDrillForSession(snap, row.actorSession)
+    ?? (row.rig && snap.hosts.some((host) => host.rigs.some((rig) => rig.name === row.rig))
+      ? { type: "drill", resource: "rig", name: row.rig }
+      : undefined);
+}
+
+type RecentScope = { kind: "instance" } | { kind: "rig"; rig: string };
+
+function recentScopeMatches(snap: FleetSnapshot, scope: RecentScope): boolean {
+  const served = snap.recentTransitionsScope
+    ?? (snap.recentTransitionsRig ? { kind: "rig" as const, rig: snap.recentTransitionsRig } : null);
+  if (!served || served.kind !== scope.kind) return false;
+  return scope.kind === "instance" || (served.kind === "rig" && served.rig === scope.rig);
+}
+
+function recentLines(snap: FleetSnapshot, scope: RecentScope, width: number, expanded: boolean): ContentLine[] {
+  if (!recentScopeMatches(snap, scope) || snap.recentTransitions == null) return [];
   const timeW = 5;
-  const actorW = Math.min(28, Math.max(18, Math.floor(width * 0.23)));
-  const changeW = Math.min(42, Math.max(24, Math.floor(width * 0.32)));
-  const targetW = Math.max(12, width - timeW - actorW - changeW - 3);
-  const rows = snap.recentTransitions.slice(-5);
+  const rows = expanded ? snap.recentTransitions : snap.recentTransitions.slice(-5);
   const lines: ContentLine[] = [
-    { text: "" },
-    sectionRule("RECENT · material queue transitions · newest last", width),
+    ...(expanded ? [] : [{ text: "" }]),
+    sectionRule(`RECENT · ${scope.kind === "instance" ? "instance" : `rig ${scope.rig}`} · material queue transitions · newest last`, width),
   ];
   if (rows.length === 0) return [...lines, { text: "  No recorded transitions in the current window." }];
-  lines.push({ text: alignedRow([["TIME", timeW], ["ACTOR", actorW], ["CHANGE", changeW], ["TARGET", targetW]]) });
+  if (width < 78) {
+    const rigW = scope.kind === "instance" ? 9 : 0;
+    const changeW = Math.max(16, width - timeW - rigW - 2);
+    lines.push({ text: alignedRow([["TIME", timeW], ...(rigW ? [["RIG", rigW] as [string, number]] : []), ["CHANGE", changeW]]) });
+    for (const row of rows) {
+      const action = recentTargetAction(snap, row);
+      lines.push({
+        text: alignedRow([[localClock(row.ts), timeW], ...(rigW ? [[pad(row.rig ?? "?", rigW), rigW] as [string, number]] : []), [pad(row.change, changeW), changeW]]).slice(0, width),
+        ...(action ? { action } : {}),
+      });
+      lines.push({ text: `      ${pad(row.actorSession, Math.max(8, width - 8))}`.slice(0, width), ...(action ? { action } : {}) });
+      lines.push({ text: `      → ${row.target}`.slice(0, width), ...(action ? { action } : {}) });
+    }
+    return lines;
+  }
+  const rigW = scope.kind === "instance" ? Math.min(16, Math.max(9, Math.floor(width * 0.13))) : 0;
+  const actorW = Math.min(26, Math.max(16, Math.floor(width * 0.21)));
+  const changeW = Math.min(36, Math.max(20, Math.floor(width * 0.28)));
+  const targetW = Math.max(10, width - timeW - rigW - actorW - changeW - (scope.kind === "instance" ? 4 : 3));
+  lines.push({ text: alignedRow([["TIME", timeW], ...(scope.kind === "instance" ? [["RIG", rigW] as [string, number]] : []), ["ACTOR", actorW], ["CHANGE", changeW], ["TARGET", targetW]]) });
   for (const row of rows) {
     const action = recentTargetAction(snap, row);
     const text = alignedRow([
       [localClock(row.ts), timeW],
+      ...(scope.kind === "instance" ? [[pad(row.rig ?? "?", rigW), rigW] as [string, number]] : []),
       [pad(row.actorSession, actorW), actorW],
       [pad(row.change, changeW), changeW],
       [pad(row.target, targetW), targetW],
@@ -439,6 +501,121 @@ interface MotionCtx {
   loading: boolean;
 }
 
+function instanceContentLines(
+  state: ViewState,
+  snap: FleetSnapshot,
+  host: FleetSnapshot["hosts"][number],
+  contentWidth: number,
+  motion: MotionCtx,
+): ContentLine[] {
+  const lines = tabsLine(state, `instance ${host.name}`);
+  const scope = { kind: "instance" } as const;
+  if (state.viewTab === "recent") {
+    const recent = recentLines(snap, scope, contentWidth, true);
+    return recent.length > 0
+      ? [...lines, ...recent]
+      : [...lines, { text: "" }, { text: motion.loading ? `${motion.frame} instance RECENT read pending` : "(instance RECENT window not served)" }];
+  }
+  if (state.viewTab === "overview") {
+    return [
+      ...lines,
+      ...detailPage({ text: `instance ${host.name}` }, [
+        {
+          title: "instance",
+          fields: [
+            { label: "identity", value: host.name },
+            { label: "transport", value: host.id ?? "local" },
+            { label: "shape", value: `${host.rigs.length} rigs · ${host.rigs.reduce((n, rig) => n + rig.pods.reduce((m, pod) => m + pod.agents.length, 0), 0)} seats` },
+          ],
+        },
+        {
+          title: "rigs",
+          lines: host.rigs.length > 0
+            ? host.rigs.map((rig) => listItem(
+                alignedRow([[rig.name, 20], [rig.lifecycleState ?? "unknown", 20], [`${rig.pods.length} pods · ${rig.pods.reduce((n, pod) => n + pod.agents.length, 0)} seats`, 24]]),
+                { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } },
+              ))
+            : [{ text: "  (no local rigs served — proven empty)" }],
+        },
+      ]),
+    ];
+  }
+  if (state.viewTab === "graph") {
+    for (const rig of host.rigs) {
+      lines.push({ text: "" }, sectionRule(`rig ${rig.name} · ${rig.lifecycleState ?? "unknown"}`, contentWidth));
+      if (!rig.graph) {
+        if (motion.loading) {
+          if (!motion.reduced) motion.used = true;
+          lines.push({ text: `  ${motion.frame} topology graph read pending` });
+        } else if (snap.readErrors.some((error) => error.startsWith(`graph(${rig.name})`))) {
+          lines.push({ text: "  ✕ topology graph read failed — named in the status line" });
+        } else {
+          lines.push({ text: "  (no topology graph served)" });
+        }
+        continue;
+      }
+      const canvas = renderGraphStyle(state.graphStyle, rig.graph, { host: host.name, rig: rig.name, selected: null }, contentWidth);
+      const plain = canvas.plainLines();
+      const segs = canvas.segLines();
+      for (let row = 0; row < plain.length; row++) lines.push({
+        text: plain[row]!,
+        segs: segs[row]!,
+        zones: canvas.zones.filter((zone) => zone.y === row).map((zone) => ({ start: zone.start, end: zone.end, action: zone.action })),
+      });
+    }
+    if (host.rigs.length === 0) lines.push({ text: "" }, { text: "  (no local rigs served — proven empty)" });
+    lines.push({ text: "" }, { text: `  style: ${state.graphStyle} · style hatchet|braille|braille-fallback rides the command bar` });
+    return lines;
+  }
+
+  lines.push({ text: state.filter ? `/ filter instance rows: ${state.filter} · / replace · esc clear` : "/ filter instance rows…" });
+  const columns = instanceAgentColumns(contentWidth);
+  lines.push({ text: tableRow(columns, { rig: "RIG", pod: "POD", seat: "SEAT", runtime: "RT", context: "CTX", status: "STATE", queue: "Q", work: "WORK", now: "NOW" }) });
+  lines.push({ text: "━".repeat(columnsWidth(columns)) });
+  let seatCount = 0;
+  let workingCount = 0;
+  let attentionCount = 0;
+  let openCount = 0;
+  for (const rig of host.rigs) {
+    const agents = rig.pods.flatMap((pod) => pod.agents.map((agent) => ({ pod: pod.name, agent })))
+      .filter(({ pod, agent }) => !state.filter || rig.name.includes(state.filter) || pod.includes(state.filter) || agent.name.includes(state.filter));
+    if (state.filter && agents.length === 0 && !rig.name.includes(state.filter)) continue;
+    lines.push({
+      text: `─ rig ${rig.name} · ${rig.lifecycleState ?? "unknown"} · ${agents.length} seats`,
+      action: { type: "drill", resource: "rig", name: rig.name, target: { host: host.name } },
+    });
+    if (agents.length === 0) {
+      lines.push({ text: "  (no seats served for this rig)" });
+      continue;
+    }
+    for (const { pod, agent } of agents) {
+      const stateCell = operationalState(agent.status, motion);
+      const queue = queueFacts(snap, agent.session);
+      seatCount += 1;
+      if (["active", "working", "running"].includes(agent.status)) workingCount += 1;
+      if (/attention|needs|blocked|unknown|failed/.test(agent.status)) attentionCount += 1;
+      openCount += queue.count;
+      lines.push({
+        text: tableRow(columns, {
+          rig: rig.name,
+          pod,
+          seat: `${stateCell.mark} ${seatName(pod, agent.name)}`,
+          runtime: runtimeShort(agent.runtime),
+          context: contextCompact(agent.context, contentWidth < 110),
+          status: stateCell.word,
+          queue: queue.count || "·",
+          work: queue.work,
+          now: queue.now,
+        }),
+        action: { type: "drill", resource: "agent", name: agent.name, target: { host: host.name, rig: rig.name, pod } },
+      });
+    }
+  }
+  lines.push({ text: "" }, { text: `${host.rigs.length} rigs · ${seatCount} seats · ${workingCount} working · ${attentionCount} need attention · ${openCount} open rows` });
+  lines.push(...recentLines(snap, scope, contentWidth, false));
+  return lines;
+}
+
 function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: number, motion: MotionCtx): ContentLine[] {
   const contentWidthForGraph = contentWidth;
   void contentWidthForGraph;
@@ -473,9 +650,10 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       if (!found) return [{ text: `agent "${leaf.name}" not in the current snapshot` }];
       return agentDetailLines(snap, found, contentWidth);
     }
-    const rigName = state.drill.find((d) => d.kind === "rig")?.name ?? snap.hosts[0]?.rigs[0]?.name;
     const hostName = state.drill.find((d) => d.kind === "host")?.name;
     const host = (hostName ? snap.hosts.find((candidate) => candidate.name === hostName) : snap.hosts[0]);
+    if (leaf?.kind === "host" && host) return instanceContentLines(state, snap, host, contentWidth, motion);
+    const rigName = state.drill.find((d) => d.kind === "rig")?.name ?? snap.hosts[0]?.rigs[0]?.name;
     const rig = host?.rigs.find((candidate) => candidate.name === rigName);
     if (!rig || !host) {
       // round-6 (guard): the ROOT topology branch consumes the OWNER's load
@@ -498,6 +676,12 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       .filter((a) => !state.filter || a.name.includes(state.filter) || a.pod.includes(state.filter));
     const suffix = `rig ${rig.name}${podFilter ? ` · pod ${podFilter}` : ""}${state.filter ? ` · filter "${state.filter}"` : ""}`;
     lines.push(...tabsLine(state, suffix));
+    if (state.viewTab === "recent") {
+      const recent = recentLines(snap, { kind: "rig", rig: rig.name }, contentWidth, true);
+      return recent.length > 0
+        ? [...lines, ...recent]
+        : [...lines, { text: "" }, { text: motion.loading ? `${motion.frame} rig RECENT read pending` : "(rig RECENT window not served)" }];
+    }
     if (state.viewTab === "graph") {
       // slice-17 topology view (frame-01): the rig's SERVED /graph projection
       // rendered by the style registry; honest-empty until the read answers.
@@ -627,7 +811,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     const working = rows.filter((agent) => ["active", "working", "running"].includes(agent.status)).length;
     const attention = rows.filter((agent) => /attention|needs|blocked|unknown|failed/.test(agent.status)).length;
     lines.push({ text: `${rows.length} seats · ${working} working · ${attention} need attention · ${rows.reduce((n, agent) => n + queueFacts(snap, agent.session).count, 0)} open rows` });
-    if (!podFilter) lines.push(...recentRailLines(snap, rig.name, contentWidth));
+    if (!podFilter) lines.push(...recentLines(snap, { kind: "rig", rig: rig.name }, contentWidth, false));
     return lines;
   }
   if (state.section === "specs") {

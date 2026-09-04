@@ -83,11 +83,9 @@ async function run(): Promise<void> {
     return mission?.slices.find((slice) => slice.id === id || slice.dirName === id)?.dirName ?? null;
   };
   const selectedRigName = (): string | null =>
-    view.get().drill.find((part) => part.kind === "rig")?.name
-      ?? snapshot.hosts[0]?.rigs[0]?.name
-      ?? null;
+    view.get().drill.find((part) => part.kind === "rig")?.name ?? null;
   const live = client
-    ? createLiveRefresh({ hydrate: () => hydrateSnapshot(client, reviewCache, view.get().scopesMission, selectedSliceDirectory(), selectedRigName()), onFrame: () => draw(), now: () => Date.now() })
+    ? createLiveRefresh({ hydrate: () => hydrateSnapshot(client, reviewCache, view.get().scopesMission, selectedSliceDirectory(), selectedRigName(), view.get()), onFrame: () => draw(), now: () => Date.now() })
     : null;
   let motionTimer: NodeJS.Timeout | null = null;
   // S19 AM-R18 — the open view updates ITSELF: oracle pushes drive the refresh owner.

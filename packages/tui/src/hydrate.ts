@@ -13,7 +13,7 @@
 //   - A failed read leaves its portion honest-empty and records a NAMED error.
 import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
-import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SliceDetailSnap, SpecEntry } from "./types.js";
+import type { AgentRow, FleetSnapshot, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
 import { isHumanSeatSession } from "./pulse/pulse-model.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
@@ -27,6 +27,9 @@ interface RigStatusRead {
   status?: string;
   seatsTotal?: number;
   seatsRunning?: number;
+}
+interface HealthRead {
+  selfHostId?: string | null;
 }
 interface NodeInventoryRead {
   logicalId: string;
@@ -318,6 +321,7 @@ function agentSpecTruth(raw?: string): { runtime?: string; skills: string[] } {
  * avoids re-reading every spec every refresh; the key rolls when the library
  * entry's updatedAt changes. Owned by the caller (instance-scoped, no module state). */
 export type SpecReviewCache = Map<string, SpecLibraryReviewRead>;
+export type HydrateViewContext = Pick<ViewState, "section" | "viewTab" | "drill">;
 
 export async function hydrateSnapshot(
   client: DaemonClient,
@@ -325,6 +329,7 @@ export async function hydrateSnapshot(
   executionMission?: string | null,
   sliceDetailName?: string | null,
   currentRigName?: string | null,
+  viewContext?: HydrateViewContext,
 ): Promise<FleetSnapshot> {
   const readErrors: string[] = [];
   async function safe<T>(label: string, fn: () => Promise<unknown>): Promise<T | null> {
@@ -336,10 +341,17 @@ export async function hydrateSnapshot(
     }
   }
 
-  const [agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead] = await Promise.all([
+  const topologyLeaf = viewContext?.section === "topology" ? viewContext.drill.at(-1) : undefined;
+  const wantsSpecs = !viewContext || viewContext.section === "specs" || topologyLeaf?.kind === "agent";
+  const wantsTopologyScope = !viewContext || viewContext.section === "topology";
+  const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig");
+  const wantsGraph = wantsTopologyScope && (!viewContext || viewContext.viewTab === "graph");
+
+  const [health, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead] = await Promise.all([
+    safe<HealthRead>("health", () => client.health()),
     safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
     safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
-    safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()),
+    wantsSpecs ? safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()) : Promise.resolve(null),
     safe<ReviewFleetRead>("review-fleet", () => client.reviewFleet()),
     safe<StreamItemRead[]>("stream-tail", () => client.streamLatest()),
     // PULSE ▲ NEEDS YOU + ⧗ BLOCKED + ◌ PARKED — the shipped queue reads (increments 2/2b)
@@ -359,8 +371,14 @@ export async function hydrateSnapshot(
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
   if (review?.registryError) readErrors.push(`review-fleet registry: ${review.registryError}`);
   const recentTransitionsRig = currentRigName ?? summaries?.[0]?.name ?? null;
-  const recentTransitions = recentTransitionsRig
-    ? await safe<RecentTransitionSnap[]>(`queue-recent(${recentTransitionsRig})`, () => client.queueRecentTransitions(recentTransitionsRig))
+  const recentTransitionsScope = topologyLeaf?.kind === "host"
+    ? { kind: "instance" } as const
+    : recentTransitionsRig ? { kind: "rig", rig: recentTransitionsRig } as const : null;
+  const recentTransitions = wantsRecent && recentTransitionsScope
+    ? await safe<RecentTransitionSnap[]>(
+        `queue-recent(${recentTransitionsScope.kind === "instance" ? "instance" : recentTransitionsScope.rig})`,
+        () => client.queueRecentTransitions(recentTransitionsScope),
+      )
     : null;
 
   // BLOCKED ON AGENTS label==referent (r1 finding): blockedOn is a qitem POINTER
@@ -410,7 +428,9 @@ export async function hydrateSnapshot(
     // slice-17: the topology graph view consumes the DECLARED §4.A graph read
     // (nodes + edges + overlay in one fetch); a failed read leaves the view
     // honest-empty with a NAMED error, never fabricated boxes.
-    const graph = await safe<import("./topology/graph-types.js").RigGraph>(`graph(${rig.name})`, () => client.rigGraph(rig.id));
+    const graph = wantsGraph && (topologyLeaf?.kind === "host" || recentTransitionsRig === rig.name)
+      ? await safe<import("./topology/graph-types.js").RigGraph>(`graph(${rig.name})`, () => client.rigGraph(rig.id))
+      : null;
     rigs.push({
       id: rig.id,
       name: rig.name,
@@ -429,7 +449,9 @@ export async function hydrateSnapshot(
         ...(seatDetail ? { error: seatDetail } : {}),
       });
     }
-    const spec = await safe<RigSpecJsonRead>(`rig-spec(${rig.name})`, () => client.rigSpec(rig.id));
+    const spec = wantsSpecs
+      ? await safe<RigSpecJsonRead>(`rig-spec(${rig.name})`, () => client.rigSpec(rig.id))
+      : null;
     if (spec?.pods) {
       const refs = spec.pods.flatMap((p) =>
         (p.members ?? [])
@@ -442,13 +464,14 @@ export async function hydrateSnapshot(
   }
   const aggHosts = agg?.hosts ?? [];
   const localHost: HostNode = {
-    name: aggHosts.find((h) => h.hostId === "local")?.hostId ?? "local",
+    id: "local",
+    name: health?.selfHostId?.trim() || "local",
     reachable: true,
     rigs,
   };
   const remoteHosts: HostNode[] = aggHosts
     .filter((h) => h.hostId !== "local")
-    .map((h) => ({ name: h.hostId, reachable: h.status === "ok", rigs: [] }));
+    .map((h) => ({ id: h.hostId, name: h.hostId, reachable: h.status === "ok", rigs: [] }));
 
   // Specs: RIG + AGENT land well by consuming the existing structured review
   // for BOTH kinds. WORKFLOW remains basics. Reviews are memoized by updatedAt.
@@ -576,7 +599,13 @@ export async function hydrateSnapshot(
     executionMission: executionMission ?? execution?.mission ?? null,
     sliceDetail: sliceDetailRead,
     sliceDetailName: sliceDetailName ?? null,
-    ...(recentTransitions ? { recentTransitions, recentTransitionsRig } : {}),
+    ...(recentTransitions && recentTransitionsScope
+      ? {
+          recentTransitions,
+          recentTransitionsScope,
+          ...(recentTransitionsScope.kind === "rig" ? { recentTransitionsRig: recentTransitionsScope.rig } : {}),
+        }
+      : {}),
     attention: (attention ?? []).map(toQueueRead),
     blocked: blockedResolved,
     inProgress: (inProgress ?? []).map(toQueueRead),
