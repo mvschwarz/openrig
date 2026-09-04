@@ -8,6 +8,7 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { rigArchiveSchema } from "../src/db/migrations/042_rig_archive.js";
+import { queueItemSummarySchema } from "../src/db/migrations/044_queue_item_summary.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { queueRoutes } from "../src/routes/queue.js";
@@ -20,7 +21,7 @@ describe("RECENT queue transition projection", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, rigArchiveSchema]);
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, rigArchiveSchema, queueItemSummarySchema]);
     repo = new QueueRepository(db, new EventBus(db));
     app = new Hono();
     app.use("*", async (c, next) => {
@@ -33,11 +34,17 @@ describe("RECENT queue transition projection", () => {
 
   afterEach(() => db.close());
 
-  function item(id: string, rig: string, state: string, tags: string[] = [], extra: { handedOffFrom?: string } = {}): void {
+  function item(
+    id: string,
+    rig: string,
+    state: string,
+    tags: string[] = [],
+    extra: { handedOffFrom?: string; summary?: string } = {},
+  ): void {
     db.prepare(`INSERT INTO queue_items (
       qitem_id, ts_created, ts_updated, source_session, destination_session,
-      state, priority, tags, handed_off_from, body
-    ) VALUES (?, ?, ?, ?, ?, ?, 'routine', ?, ?, 'body text must never classify an event')`).run(
+      state, priority, tags, handed_off_from, summary, body
+    ) VALUES (?, ?, ?, ?, ?, ?, 'routine', ?, ?, ?, 'body text must never classify an event')`).run(
       id,
       "2026-09-03T20:00:00.000Z",
       "2026-09-03T20:00:00.000Z",
@@ -46,6 +53,7 @@ describe("RECENT queue transition projection", () => {
       state,
       JSON.stringify(tags),
       extra.handedOffFrom ?? null,
+      extra.summary ?? `Summary for ${id}`,
     );
   }
 
@@ -70,7 +78,9 @@ describe("RECENT queue transition projection", () => {
   }
 
   it("normalizes only the typed allowlist, stays current-rig scoped, de-duplicates handoff, and orders newest last", async () => {
-    item("q-claim", "rig-a", "in-progress", ["mission:release-0.5.9", "slice:OPR.0.5.9.11"]);
+    item("q-claim", "rig-a", "in-progress", ["mission:release-0.5.9", "slice:OPR.0.5.9.11"], {
+      summary: "Canceled wording is presentation context, not a typed outcome",
+    });
     transition("q-claim", "pending", { note: "created" });
     transition("q-claim", "in-progress", { note: "words are irrelevant" });
     transition("q-claim", "in-progress", { note: "claimed founder ruling CLEAR" });
@@ -130,7 +140,12 @@ describe("RECENT queue transition projection", () => {
     expect(rows.filter((row) => row.change.startsWith("handed off"))).toHaveLength(1);
     expect(rows.every((row) => row.rig === "rig-a")).toBe(true);
     expect(rows.every((row) => row.actorSession !== "elsewhere@rig-b")).toBe(true);
-    expect(rows[0]).toMatchObject({ qitemId: "q-claim", targetKind: "slice", target: "OPR.0.5.9.11" });
+    expect(rows[0]).toMatchObject({
+      qitemId: "q-claim",
+      summary: "Canceled wording is presentation context, not a typed outcome",
+      targetKind: "slice",
+      target: "OPR.0.5.9.11",
+    });
     expect(rows.map((row) => row.transitionId)).toEqual([...rows.map((row) => row.transitionId)].sort((a, b) => a - b));
 
     const response = await app.request("/api/queue/recent-transitions?rig=rig-a&limit=20");

@@ -47,14 +47,16 @@ export type RecentQueueTransitionTargetKind = "qitem" | "slice" | "mission";
 export type RecentQueueTransitionScope = { kind: "instance" } | { kind: "rig"; rig: string };
 
 /** A compact product event derived only from typed queue state and closure fields.
- * It deliberately carries neither transition_note nor body: prose cannot silently
- * become event semantics. */
+ * The authored queue summary is presentation only; it never participates in
+ * event normalization. transition_note and body remain excluded so prose cannot
+ * silently become event semantics. */
 export interface RecentQueueTransition {
   transitionId: number;
   qitemId: string;
   ts: string;
   actorSession: string;
   change: string;
+  summary: string | null;
   rig: string;
   targetKind: RecentQueueTransitionTargetKind;
   target: string;
@@ -83,6 +85,7 @@ interface RecentQueueTransitionRow {
   closure_reason: string | null;
   closure_target: string | null;
   tags: string | null;
+  summary: string | null;
   previous_state: string | null;
   destination_session: string;
   source_session: string;
@@ -228,6 +231,7 @@ export class QueueTransitionLog {
           t.closure_reason,
           t.closure_target,
           q.tags,
+          q.summary,
           q.destination_session,
           q.source_session,
           LAG(t.state) OVER (
@@ -247,7 +251,7 @@ export class QueueTransitionLog {
            OR closure_reason IN ('denied', 'canceled', 'escalation')
       )
       SELECT transition_id, qitem_id, ts, state, actor_session,
-             closure_reason, closure_target, tags, previous_state,
+             closure_reason, closure_target, tags, summary, previous_state,
              destination_session, source_session
       FROM qualifying
       ORDER BY ts DESC, transition_id DESC
@@ -267,6 +271,7 @@ export class QueueTransitionLog {
         ts: row.ts,
         actorSession: row.actor_session,
         change,
+        summary: row.summary?.trim() || null,
         rig,
         ...recentTarget(row),
       }];
