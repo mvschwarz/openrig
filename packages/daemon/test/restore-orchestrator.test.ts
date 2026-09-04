@@ -1456,6 +1456,71 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("pod-aware chooser attention preserves the attempted native token for no-input reconciliation", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-chooser", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-chooser" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "claude_id", "chooser-token-123");
+    db.prepare(
+      "INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)",
+    ).run(node.id, "[]", "[]", "[]", "claude-code");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const hasSession = vi.fn(async () => false);
+    const tmux = {
+      ...mockTmux(),
+      hasSession,
+      capturePaneContent: vi.fn(async () => [
+        "Claude Code v2.1.89",
+        "",
+        " ❯ accept edits on",
+        "",
+      ].join("\n")),
+    } as unknown as TmuxAdapter;
+    const adapter: RuntimeAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({
+        ok: false as const,
+        error: "Claude is at a resume-selection prompt",
+        recovery: "attention_required" as const,
+      })),
+    };
+    const orch = createOrchestrator({
+      tmux,
+      listProcesses: nativeLineage("claude-code", "chooser-token-123"),
+    });
+
+    const restored = await orch.restore(snap.id, { adapters: { "claude-code": adapter } });
+
+    expect(restored.ok).toBe(true);
+    if (!restored.ok) return;
+    expect(restored.result.nodes[0]?.status).toBe("attention_required");
+
+    const latest = db.prepare(
+      "SELECT startup_status, resume_type, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(node.id) as { startup_status: string; resume_type: string | null; resume_token: string | null };
+    expect(latest.startup_status).toBe("attention_required");
+    expect(latest.resume_type).toBe("claude_id");
+    expect(latest.resume_token).toBe("chooser-token-123");
+
+    hasSession.mockResolvedValue(true);
+    const reconciled = await orch.reconcileNodeRuntimeTruth(rig.id, node.id);
+    expect(reconciled.ok).toBe(true);
+    if (reconciled.ok) {
+      expect(reconciled.from).toBe("attention_required");
+      expect(reconciled.to).toBe("operator_recovered");
+      expect(reconciled.evidence.resumeTokenUsed).toBe(true);
+    }
+  });
+
   // Slice 51-01 stub-runtime — TEST-ONLY RED (undisputed mechanical FACT 4): pod-aware restore dispatches
   // resume to the REAL StubRuntimeAdapter keyed on runtime: stub, reaching "resumed" via the real
   // launchHarness (the shipped resume path, not old helpers, not a renamed mock). Dynamic import keeps

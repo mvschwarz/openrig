@@ -827,6 +827,7 @@ describe("StartupOrchestrator", () => {
       adapter,
       isRestore: true,
       resumeToken: "stale-token",
+      resumeType: "codex_id",
     }));
 
     expect(result).toEqual({
@@ -876,6 +877,7 @@ describe("StartupOrchestrator", () => {
       adapter,
       isRestore: true,
       resumeToken: "stale-token",
+      resumeType: "codex_id",
     }));
 
     expect(result.ok).toBe(false);
@@ -893,6 +895,8 @@ describe("StartupOrchestrator", () => {
     const sessions = sessionRegistry.getSessionsForRig(seed.rigId);
     const session = sessions.find((s) => s.id === seed.sessionId);
     expect(session!.startupStatus).toBe("attention_required");
+    expect(session!.resumeType).toBe("codex_id");
+    expect(session!.resumeToken).toBe("stale-token");
   });
 
   // NS-T05: readiness retry loop

@@ -29,6 +29,8 @@ export interface StartupInput {
   sessionName?: string;
   /** Resume token for restore path. Mutually exclusive with forkSource. */
   resumeToken?: string;
+  /** Runtime-native type for resumeToken (for example claude_id or codex_id). */
+  resumeType?: string;
   /**
    * Fork-source for new-seat-from-prior-conversation path. Mutually
    * exclusive with resumeToken. v1: kind="native_id" only. The captured
@@ -229,6 +231,21 @@ export class StartupOrchestrator {
           // status: "attention_required" + attentionEvidence (mirroring the
           // legacy mapping at :725-735).
           if (launchResult.recovery === "attention_required") {
+            // Attention proves this exact resume target reached a live prompt.
+            // Preserve it for later no-input reconciliation; retry_fresh has
+            // already cleared launchResumeToken and ordinary failures skip this.
+            const normalizedResumeToken = launchResumeToken?.trim();
+            const normalizedResumeType = input.resumeType?.trim();
+            if (normalizedResumeToken && normalizedResumeType) {
+              try {
+                this.sessionRegistry.updateResumeToken(
+                  input.sessionId,
+                  normalizedResumeType,
+                  normalizedResumeToken,
+                  "scrape",
+                );
+              } catch { /* best-effort */ }
+            }
             errors.push(`Harness launch requires attention: ${launchResult.error}`);
             return this.fail(input, "attention_required", errors, launchResult.evidence);
           }

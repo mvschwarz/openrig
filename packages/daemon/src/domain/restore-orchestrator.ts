@@ -1346,6 +1346,7 @@ export class RestoreOrchestrator {
               isRestore: replayAsRestore,
               skipHarnessLaunch: !shouldLaunchHarness,
               resumeToken: (isPodAware && resumeRequested) ? resumeToken ?? undefined : undefined,
+              resumeType: (isPodAware && resumeRequested) ? resumeType ?? undefined : undefined,
               sessionName: sessionName,
               allowFreshFallback: !(isPodAware && resumeRequested),
             });
