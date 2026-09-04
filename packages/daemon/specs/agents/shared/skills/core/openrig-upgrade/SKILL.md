@@ -115,18 +115,29 @@ reported for the agent to resolve. Re-run the plan after any manual resolution.
 
 ### Migrate a pre-0.5.9 instance layout
 
-Version 0.5.9 moves Claude context-usage telemetry from
-`$OPENRIG_HOME/context` to `$OPENRIG_HOME/state/context-usage`, moves provider
-telemetry to `state/provider-usage`, claims `context/` as the addressable
-library, and installs the default System World at
-`context/system/system-world.yaml`. The migration is deliberately split so a
-fresh telemetry sample proves writer/reader convergence before the library
-move reuses the old telemetry directory.
+Version 0.5.9 puts context-usage telemetry in
+`$OPENRIG_HOME/state/context-usage`, provider telemetry in
+`state/provider-usage`, the addressable library under `context/`, and the
+default System World at `context/system/system-world.yaml`. Existing 0.5.8
+homes cross that boundary through an **Agent-Operated Migration**: the target
+runtime reads canonical-first with legacy-fallback while all new writes use the
+canonical state roots. An explicitly configured custom context-library root
+stays stable throughout activation.
 
-With an exact protected preimage path, first inspect and then copy state plus
-rewrite known live Claude collector projections:
+The helper supplies bounded, inspectable operations. The agent owns their
+sequence and the target-runtime activation between them. With an exact
+protected preimage path, first inspect and then prepare canonical directories,
+the default System World, and a config pin to the existing library. Preparation
+does not copy telemetry, rewrite live collector settings, or run lifecycle
+actions:
+
+`--help` prints the phase grammar without inventorying the instance. With no
+phase flag the helper intentionally runs the read-only plan; unknown options
+fail nonzero before plan or mutation.
 
 ```bash
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --help
+
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
   --home "$OPENRIG_HOME"
 
@@ -136,9 +147,11 @@ node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
   --preimage "$OPENRIG_HOME/backups/layout-0.5.9-before"
 ```
 
-After the target daemon is running, freshly launch one Claude seat so its
-process adopts the rewritten collector setting. Capture the verification JSON;
-do not infer success from a copied old sidecar:
+Activate the exact target runtime using the ordinary upgrade workflow. Then
+wait until every bounded post-apply legacy tail is followed by newer paired
+new-root samples for that same seat. This proves temporal convergence
+without blanket process replacement; a later legacy write remains a hard stop.
+Capture the verification JSON; copied old sidecars are not evidence:
 
 ```bash
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
@@ -148,7 +161,9 @@ node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
   > /safe/path/layout-0.5.9-verify.json
 ```
 
-Only a successful receipt authorizes the context-library move:
+Only a successful receipt authorizes the separately invoked non-destructive
+finalizer. It copies an unconfigured legacy library into the canonical root
+without overwriting anything; a custom context-library root remains stable:
 
 ```bash
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
@@ -158,15 +173,20 @@ node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \
   --verification /safe/path/layout-0.5.9-verify.json
 ```
 
-Stop on every reported issue: malformed or foreign legacy entries, an unknown
-live Claude cwd, a nonempty target, collector drift, config drift, or a missing
-fresh dual sample all require the named repair before continuing. The helper
-does not stop/start the daemon, launch a seat, touch the database, or decide
+Stop on every reported issue: malformed or foreign telemetry, a reserved-path
+conflict, a library collision, config drift, resumed legacy writes, byte drift,
+or a missing fresh dual sample all require the named repair before continuing.
+Verification binds the exact accepted tail bytes to their paired-newer samples;
+the finalizer revalidates them immediately before switching config. The helper
+never removes the legacy telemetry or library. Their later retirement is a
+separate agent decision after stable runtime, writer, reader, and recovery proof.
+It does not stop/start the daemon, launch a seat, touch the database, or decide
 whether the upgrade proceeds.
 
 To recover, restore the prior runtime as the agent-led workflow requires, then
-reverse only helper-owned layout/projection writes. The new state copies remain
-for inspection:
+reverse only helper-owned config, System World, empty-directory, and copied
+library effects. Real state samples and both legacy recovery sources remain for
+inspection:
 
 ```bash
 node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" \

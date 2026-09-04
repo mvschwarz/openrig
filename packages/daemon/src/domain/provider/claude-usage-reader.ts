@@ -106,24 +106,38 @@ export function collectClaudeStatuslineSignals(deps: ClaudeUsageReaderDeps): Pro
 export function collectClaudeSignalsFromProviderUsageDirectory(
   directory: string,
   now: () => string = () => new Date().toISOString(),
+  legacyDirectory?: string,
 ): ProviderSignal[] {
   const seats = new Map<string, ClaudeSeatRef>();
-  try {
-    for (const file of fs.readdirSync(directory)) {
-      if (!file.endsWith(".json")) continue;
-      try {
-        const parsed = JSON.parse(fs.readFileSync(nodePath.join(directory, file), "utf-8")) as { seatSession?: unknown };
-        if (typeof parsed.seatSession === "string") {
-          seats.set(parsed.seatSession, { seatSession: parsed.seatSession });
-        }
-      } catch { /* malformed cache cannot create a usable cache signal */ }
+  for (const candidateDirectory of [directory, legacyDirectory]) {
+    if (!candidateDirectory) continue;
+    try {
+      for (const file of fs.readdirSync(candidateDirectory)) {
+        if (!file.endsWith(".json")) continue;
+        try {
+          const parsed = JSON.parse(fs.readFileSync(nodePath.join(candidateDirectory, file), "utf-8")) as { seatSession?: unknown };
+          if (typeof parsed.seatSession === "string") {
+            seats.set(parsed.seatSession, { seatSession: parsed.seatSession });
+          }
+        } catch { /* malformed cache cannot create a usable cache signal */ }
+      }
+    } catch { /* absent cache directory */ }
+  }
+
+  const readFrom = (candidateDirectory: string, seatSession: string): string | null => {
+    try {
+      return fs.readFileSync(nodePath.join(candidateDirectory, telemetrySidecarFilename(seatSession)), "utf-8");
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? null : "";
     }
-  } catch { /* absent cache directory */ }
+  };
 
   return collectClaudeStatuslineSignals({
     listClaudeSeats: () => [...seats.values()],
     readCacheRaw: (seatSession) => {
-      try { return fs.readFileSync(nodePath.join(directory, telemetrySidecarFilename(seatSession)), "utf-8"); } catch { return null; }
+      const canonical = readFrom(directory, seatSession);
+      if (canonical !== null) return canonical;
+      return legacyDirectory ? readFrom(legacyDirectory, seatSession) : null;
     },
     now,
   });

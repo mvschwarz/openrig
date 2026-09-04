@@ -271,6 +271,32 @@ describe("ContextUsageStore", () => {
     if (!result.ok) expect(result.reason).toBe("missing_sidecar");
   });
 
+  it("reads canonical context usage first and falls back to the legacy 0.5.8 sidecar only when canonical is absent", () => {
+    const home = join(tmpdir(), `context-bridge-${Date.now()}`);
+    const sessionName = "dev-impl@test-rig";
+    const canonical = join(home, "state", "context-usage", `${sessionName}.json`);
+    const legacy = join(home, "context", `${sessionName}.json`);
+    mkdirSync(join(home, "state", "context-usage"), { recursive: true });
+    mkdirSync(join(home, "context"), { recursive: true });
+    writeFileSync(legacy, JSON.stringify({
+      ...VALID_SIDECAR,
+      context_window: { ...VALID_SIDECAR.context_window, used_percentage: 41 },
+    }));
+
+    const bridge = new ContextUsageStore(db, { stateDir: home });
+    expect(bridge.readAndNormalize(sessionName).usedPercentage).toBe(41);
+
+    writeFileSync(canonical, JSON.stringify({
+      ...VALID_SIDECAR,
+      context_window: { ...VALID_SIDECAR.context_window, used_percentage: 73 },
+    }));
+    expect(bridge.readAndNormalize(sessionName).usedPercentage).toBe(73);
+
+    writeFileSync(canonical, "not json");
+    expect(bridge.readAndNormalize(sessionName).reason).toBe("parse_error");
+    rmSync(home, { recursive: true, force: true });
+  });
+
   // T15: readSidecar invalid JSON file -> { ok: false, reason: 'parse_error' }
   it("readSidecar returns parse_error for invalid JSON sidecar file", () => {
     const tmpDir = join(tmpdir(), `context-test-${Date.now()}`);

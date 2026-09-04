@@ -81,11 +81,20 @@ context selectors, and skills. With `--runtime`, its managed skill loadout then
 combines System World, topology, and Project World selectors with provenance.
 
 For a pre-0.5.9 home, use the `openrig-upgrade` skill's
-`migrate-telemetry-state-0.5.9.mjs` helper. Its order is plan → `--apply-state`
-→ fresh Claude sample → `--verify` → `--apply-library`; `--rollback` restores
-the preserved prior library, config, telemetry sources, and collector settings.
-The helper must stop rather than claim success if writer/reader convergence or
-any migration-owned path cannot be proved.
+`migrate-telemetry-state-0.5.9.mjs` helper as an Agent-Operated Migration. Its
+order is plan → `--apply-state` → separately activate the target runtime →
+paired new-root samples newer than any bounded legacy tail → `--verify` → the
+non-destructive finalizer `--apply-library`. During activation, runtime readers
+are canonical-first with legacy-fallback and a custom context-library root
+remains stable. Verification binds exact accepted tail bytes; finalization
+revalidates them, copies without overwrite, and switches config last. It never
+removes the legacy telemetry or library. `--rollback` reverses only helper-owned
+config, System World, empty-directory, and copied-library effects. The helper
+must stop rather than claim success if writer/reader convergence, resumed legacy
+writes, byte drift, collision, or any migration-owned path cannot be proved.
+`--help` prints the phase grammar without inventorying; no phase flag is the
+intentional read-only plan, and unknown options fail nonzero before plan or
+mutation.
 
 ## Existing spec libraries
 

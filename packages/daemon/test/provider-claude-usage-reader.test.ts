@@ -1,8 +1,12 @@
 // Slice-04 (OPR.0.5.0.4) C3 — Claude statusline provider_usage cache lane pins.
 import { describe, it, expect } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   writeProviderUsageCacheAtomic,
   collectClaudeStatuslineSignals,
+  collectClaudeSignalsFromProviderUsageDirectory,
   type ProviderUsageCacheFs,
   type ProviderUsageCache,
   type ClaudeUsageReaderDeps,
@@ -79,5 +83,42 @@ describe("collectClaudeStatuslineSignals — reader → provider_statusline / ex
     }));
     expect(sigs[0]!.sourceClass).toBe("unknown");
     expect(sigs[0]!.unknownReason).toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
+  });
+});
+
+describe("0.5.8 provider-usage compatibility bridge", () => {
+  it("prefers canonical caches and falls back per seat to the legacy root", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "provider-bridge-"));
+    const canonical = path.join(home, "state", "provider-usage");
+    const legacy = path.join(home, "provider-usage");
+    fs.mkdirSync(canonical, { recursive: true });
+    fs.mkdirSync(legacy, { recursive: true });
+    const cache = (seatSession: string, usedPercent: number) => JSON.stringify({
+      seatSession,
+      accountKind: "subscription",
+      asOf: CACHE_ASOF,
+      rateLimits: { five_hour: { usedPercent, resetsAt: "2026-08-03T17:00:00Z" } },
+    });
+    fs.writeFileSync(path.join(legacy, "legacy@rig.json"), cache("legacy@rig", 22));
+    fs.writeFileSync(path.join(legacy, "both@rig.json"), cache("both@rig", 33));
+    fs.writeFileSync(path.join(canonical, "both@rig.json"), cache("both@rig", 77));
+
+    const signals = collectClaudeSignalsFromProviderUsageDirectory(canonical, () => ASOF, legacy);
+    expect(signals.find((signal) => signal.seatSession === "legacy@rig")?.usedPercent).toBe(22);
+    expect(signals.find((signal) => signal.seatSession === "both@rig")?.usedPercent).toBe(77);
+
+    fs.writeFileSync(path.join(canonical, "legacy@rig.json"), "not json");
+    const malformedCanonical = collectClaudeSignalsFromProviderUsageDirectory(canonical, () => ASOF, legacy);
+    expect(malformedCanonical.find((signal) => signal.seatSession === "legacy@rig")?.usedPercent).toBeUndefined();
+    expect(malformedCanonical.find((signal) => signal.seatSession === "legacy@rig")?.unknownReason)
+      .toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
+
+    fs.rmSync(path.join(canonical, "legacy@rig.json"));
+    fs.mkdirSync(path.join(canonical, "legacy@rig.json"));
+    const wrongTypeCanonical = collectClaudeSignalsFromProviderUsageDirectory(canonical, () => ASOF, legacy);
+    expect(wrongTypeCanonical.find((signal) => signal.seatSession === "legacy@rig")?.usedPercent).toBeUndefined();
+    expect(wrongTypeCanonical.find((signal) => signal.seatSession === "legacy@rig")?.unknownReason)
+      .toBe(CLAUDE_UNKNOWN_REASON.empty_reading);
+    fs.rmSync(home, { recursive: true, force: true });
   });
 });
