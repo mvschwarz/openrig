@@ -753,6 +753,8 @@ describe("0.5.9 telemetry-state migration helper", () => {
     for (const [label, seam] of [
       ["before preservation", "    postApplyLegacyTails = preserveVerifiedLegacyTails(preimage, verifiedTails);"],
       ["before deletion", "    removeVerifiedLegacyRoot(\n      path.join(home, \"context\"),"],
+      ["at deletion boundary", "  for (const file of files) removeVerifiedLegacySource(file);"],
+      ["after quarantine capture", "      readVerifiedLegacySource(file, quarantinedPath);"],
     ]) {
       const root = temporaryRoot();
       const fixture = seedLegacyTelemetry(root);
@@ -786,9 +788,11 @@ describe("0.5.9 telemetry-state migration helper", () => {
       expect(source.split(seam), label).toHaveLength(2);
       fs.writeFileSync(interposedHelperPath, source.replace(seam, `    {
         const target = ${JSON.stringify(contextPath)};
-        const replacement = \`${contextPath}.interposed\`;
-        fs.writeFileSync(replacement, ${JSON.stringify(interposedBytes.toString("utf8"))}, { mode: 0o600 });
-        fs.renameSync(replacement, target);
+        if (typeof root === "undefined" || root === path.dirname(target)) {
+          const replacement = \`${contextPath}.interposed\`;
+          fs.writeFileSync(replacement, ${JSON.stringify(interposedBytes.toString("utf8"))}, { mode: 0o600 });
+          fs.renameSync(replacement, target);
+        }
       }
 ${seam}`));
 
@@ -807,7 +811,7 @@ ${seam}`));
       expect(fs.statSync(contextPath).mode & 0o777, label).toBe(0o600);
 
       const prepared = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
-      if (label === "before deletion") {
+      if (label !== "before preservation") {
         const tail = prepared.postApplyLegacyTails.find((entry: { originalPath: string }) => entry.originalPath === contextPath);
         expect(fs.readFileSync(path.join(preimage, tail.storedAs))).toEqual(verifiedBytes);
         expect(fs.statSync(path.join(preimage, tail.storedAs)).mode & 0o777).toBe(verifiedMode);

@@ -715,13 +715,20 @@ function validateLegacySources(preimage, manifest, root, kind, issues, allowedDi
   return [...expectedByPath.values()];
 }
 
-function readVerifiedLegacySource(file) {
+function legacySourceDrift(sourcePath, error) {
+  const drift = new Error(`legacy source changed after verification: ${sourcePath}: ${error.message}`);
+  drift.migrationIssueCode = "legacy_source_drift";
+  drift.migrationPath = sourcePath;
+  return drift;
+}
+
+function readVerifiedLegacySource(file, sourcePath = file.originalPath) {
   let descriptor;
   try {
-    descriptor = fs.openSync(file.originalPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    descriptor = fs.openSync(sourcePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const opened = fs.fstatSync(descriptor);
     const bytes = fs.readFileSync(descriptor);
-    const current = fs.lstatSync(file.originalPath);
+    const current = fs.lstatSync(sourcePath);
     if (!opened.isFile()
       || !current.isFile()
       || current.isSymbolicLink()
@@ -733,10 +740,7 @@ function readVerifiedLegacySource(file) {
     }
     return bytes;
   } catch (error) {
-    const drift = new Error(`legacy source changed after verification: ${file.originalPath}: ${error.message}`);
-    drift.migrationIssueCode = "legacy_source_drift";
-    drift.migrationPath = file.originalPath;
-    throw drift;
+    throw legacySourceDrift(file.originalPath, error);
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
   }
@@ -769,16 +773,57 @@ function preserveVerifiedLegacyTails(preimage, tails) {
   });
 }
 
+function removeVerifiedLegacySource(file) {
+  const quarantineRoot = fs.mkdtempSync(path.join(path.dirname(file.originalPath), ".openrig-legacy-remove-"));
+  const quarantinedPath = path.join(quarantineRoot, path.basename(file.originalPath));
+  let quarantined = false;
+  try {
+    try {
+      fs.renameSync(file.originalPath, quarantinedPath);
+      quarantined = true;
+    } catch (error) {
+      throw legacySourceDrift(file.originalPath, error);
+    }
+    try {
+      readVerifiedLegacySource(file, quarantinedPath);
+    } catch (error) {
+      try {
+        fs.linkSync(quarantinedPath, file.originalPath);
+        fs.rmSync(quarantinedPath);
+        quarantined = false;
+      } catch (restoreError) {
+        error.message = `${error.message}; changed entry remains recoverable at ${quarantinedPath}: ${restoreError.message}`;
+      }
+      throw error;
+    }
+    fs.rmSync(quarantinedPath);
+    quarantined = false;
+  } finally {
+    if (!quarantined && fs.existsSync(quarantineRoot) && fs.readdirSync(quarantineRoot).length === 0) {
+      fs.rmdirSync(quarantineRoot);
+    }
+  }
+}
+
 function removeVerifiedLegacyRoot(root, files, managedFiles = [], emptyDirectories = []) {
   if (!fs.existsSync(root)) return;
   for (const file of files) readVerifiedLegacySource(file);
-  for (const file of files) fs.rmSync(file.originalPath, { force: true });
+  for (const file of files) removeVerifiedLegacySource(file);
   for (const file of managedFiles) fs.rmSync(file, { force: true });
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (entry.isFile() && entry.name.endsWith(".json.tmp")) fs.rmSync(path.join(root, entry.name), { force: true });
   }
   for (const directory of emptyDirectories) fs.rmdirSync(directory);
-  if (fs.readdirSync(root).length === 0) fs.rmdirSync(root);
+  const remaining = fs.readdirSync(root);
+  if (remaining.length > 0) {
+    throw legacySourceDrift(path.join(root, remaining[0]), new Error(`unexpected entries remain: ${remaining.join(", ")}`));
+  }
+  try {
+    fs.rmdirSync(root);
+  } catch (error) {
+    if (error.code === "ENOTEMPTY") throw legacySourceDrift(root, error);
+    throw error;
+  }
 }
 
 function applyLibrary(home, preimage, verificationPath) {
