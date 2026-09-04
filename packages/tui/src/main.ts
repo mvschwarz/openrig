@@ -270,6 +270,7 @@ async function run(): Promise<void> {
   }
 
   async function shutdown(): Promise<void> {
+    process.stdout.off("resize", draw);
     if (motionTimer) clearTimeout(motionTimer);
     live?.close();
     unsubscribeCopyMode();
@@ -278,6 +279,7 @@ async function run(): Promise<void> {
     activityEvents?.close();
     process.exit(0);
   }
+  process.stdout.on("resize", draw);
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
 
