@@ -514,6 +514,21 @@ describe("native resume probe", () => {
       expect(result.status).not.toBe("attention_required");
     });
 
+    it("does not classify both current chooser labels in active-TUI prose", () => {
+      const result = assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand: "2.1.89",
+        paneContent: [
+          "Claude Code v2.1.89",
+          "❯ Compare Resume from summary with Resume full session as-is in the recovery notes.",
+          "────────────────────────────────────────────────────────────────────────────────",
+          "  ⏵⏵ accept edits on (shift+tab to cycle)                     ● high · /effort",
+        ].join("\n"),
+      });
+
+      expect(result).toMatchObject({ status: "resumed", code: "active_runtime" });
+    });
+
     it("does NOT classify Claude active TUI as resume-selection prompt (regression)", () => {
       const paneContent = [
         "Claude Code v2.1.89",
