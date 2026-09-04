@@ -162,6 +162,10 @@ describe("OPR.0.5.7.1 repair child — D1 four-way occupant truth + D6a uncondit
       resumeToken: r.token,
       restorePolicy: "resume_if_possible",
     }));
+    // This suite pins compatibility with the predecessor relation field. A
+    // freshly captured snapshot also carries the new tri-state relation, so
+    // remove it before expressing each legacy relation premise below.
+    delete data.activeOccupantsByNode;
     switch (relation.mode) {
       case "field-absent":
         delete data.activeSessionIdByNode;

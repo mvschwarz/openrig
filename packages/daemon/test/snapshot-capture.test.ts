@@ -86,6 +86,57 @@ describe("SnapshotCapture", () => {
     expect(snap.data.sessions[0]!.restorePolicy).toBe("resume_if_possible");
   });
 
+  it("persists a versioned intended roster and explicit three-state occupant truth", () => {
+    const { rig, n1, n2 } = seedRig();
+    const resolved = sessionRegistry.registerSession(n1.id, "r99-demo1-lead");
+    sessionRegistry.updateStatus(resolved.id, "running");
+    const ambiguousA = sessionRegistry.registerSession(n2.id, "r99-worker-a");
+    const ambiguousB = sessionRegistry.registerSession(n2.id, "r99-worker-b");
+    sessionRegistry.updateStatus(ambiguousA.id, "running");
+    sessionRegistry.updateStatus(ambiguousB.id, "running");
+
+    const snap = capture.captureSnapshot(rig.id, "manual", { intendedNodeIds: [n1.id, n2.id] });
+
+    expect(snap.data.topologyRoster).toEqual({
+      version: 1,
+      source: "operator_explicit",
+      intendedNodeIds: [n1.id, n2.id],
+    });
+    expect(snap.data.activeOccupantsByNode?.[n1.id]).toEqual({ kind: "resolved", sessionId: resolved.id });
+    expect(snap.data.activeOccupantsByNode?.[n2.id]).toEqual({
+      kind: "ambiguous",
+      candidateIds: [ambiguousA.id, ambiguousB.id],
+    });
+  });
+
+  it("uses the latest durable materialized topology roster instead of all historical nodes", () => {
+    const { rig, n1, n2 } = seedRig();
+    eventBus.emit({
+      type: "topology.roster_recorded",
+      rigId: rig.id,
+      intendedNodeIds: [n1.id],
+      source: "materialized_topology",
+    });
+
+    const snap = capture.captureSnapshot(rig.id, "manual");
+
+    expect(snap.data.nodes.map((node) => node.id)).toContain(n2.id);
+    expect(snap.data.topologyRoster).toEqual({
+      version: 1,
+      source: "materialized_topology",
+      intendedNodeIds: [n1.id],
+    });
+  });
+
+  it("refuses snapshot capture when the latest authoritative roster event is malformed", () => {
+    const { rig } = seedRig();
+    db.prepare("INSERT INTO events (rig_id, type, payload) VALUES (?, ?, ?)")
+      .run(rig.id, "topology.roster_recorded", JSON.stringify({ intendedNodeIds: "not-an-array" }));
+
+    expect(() => capture.captureSnapshot(rig.id, "manual")).toThrow(/malformed authoritative topology roster/);
+    expect(snapshotRepo.listSnapshots(rig.id)).toHaveLength(0);
+  });
+
   it("includes checkpoints as map (latest per node)", () => {
     const { rig, n1 } = seedRig();
     checkpointStore.createCheckpoint(n1.id, { summary: "old checkpoint", keyArtifacts: [] });

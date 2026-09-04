@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
-import type { SnapshotRepository } from "../domain/snapshot-repository.js";
+import { summarizeSnapshot, type SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { projectRigToGraph, type InventoryOverlay, type CurrentQitemSummary } from "../domain/graph-projection.js";
@@ -637,10 +637,13 @@ rigsRoutes.post("/:id/up", async (c) => {
 
   const snapshotRepo = c.get("snapshotRepo" as never) as SnapshotRepository;
   const snapshotCapture = c.get("snapshotCapture" as never) as SnapshotCapture;
-  let snapshot = snapshotRepo.findLatestRestoreUsable(rigId);
+  const automaticSelection = snapshotRepo.selectRestoreUsable(rigId);
+  let snapshot = automaticSelection.ok ? automaticSelection.snapshot : null;
+  let snapshotSelection = automaticSelection.ok ? automaticSelection.selection : undefined;
   let staleSnapshot = false;
   if (snapshot && !snapshotMatchesCurrentOccupants(repo.db, rig, snapshot)) {
     snapshot = null;
+    snapshotSelection = undefined;
     staleSnapshot = true;
   }
   let capturedCurrentState = false;
@@ -663,6 +666,12 @@ rigsRoutes.post("/:id/up", async (c) => {
 
   if (!snapshot) {
     snapshot = snapshotCapture.captureSnapshot(rigId, "auto-rehydrate");
+    snapshotSelection = {
+      ...summarizeSnapshot(snapshot),
+      mode: "automatic",
+      rationale: "automatic rehydrate captured current eligible state because no current-occupant snapshot was usable",
+      newerUsableAlternative: null,
+    };
     capturedCurrentState = true;
   }
 
@@ -677,6 +686,7 @@ rigsRoutes.post("/:id/up", async (c) => {
     adapters: adapters ?? {},
     fsOps: { exists: (p: string) => fs.existsSync(p) },
     freshLogicalIds,
+    snapshotSelection,
   });
   if (!result.ok) {
     if (result.code === "pre_restore_validation_failed") {

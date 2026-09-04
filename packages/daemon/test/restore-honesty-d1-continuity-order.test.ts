@@ -103,6 +103,7 @@ describe("OPR.0.5.7.1 — D1 ambiguity precedes the continuity_state=restoring s
       { ...template, id: ULID_OLD, status: "running", resumeToken: "tok-a" },
       { ...template, id: ULID_NEW, status: "running", resumeToken: "tok-b" },
     ];
+    delete data.activeOccupantsByNode;
     data.activeSessionIdByNode = { [node.id]: null };
     db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snap.id);
 

@@ -27,9 +27,11 @@ import type {
   Session,
   Checkpoint,
   RigServicesRecord,
+  RestoreSnapshotSelection,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
+import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 
 // L3: result shape for runtime-truth reconciliation. A reconciliation that
 // does NOT meet all four evidence preconditions is a no-op with a missing
@@ -50,6 +52,8 @@ export type ReconcileNodeResult =
         | "no_attempt"
         | "outcome_not_upgradable"
         | "tmux_session_missing"
+        | "binding_mismatch"
+        | "process_lineage_mismatch"
         | "fg_process_not_runtime"
         | "resume_token_not_used"
         | "pane_not_usable";
@@ -93,6 +97,27 @@ export const NON_RUNNING_LAUNCH_STATUSES: ReadonlySet<string> = new Set([
  *  successful launch): resumed / rebuilt / fresh / fresh-primed / operator_recovered. */
 export function launchStatusIsRunning(status: string): boolean {
   return !NON_RUNNING_LAUNCH_STATUSES.has(status);
+}
+
+export interface NarrowLaunchResult {
+  ok: boolean;
+  planOnly?: boolean;
+  code?: string;
+  message?: string;
+  launched?: RestoreNodeResult[];
+  held?: Array<{ nodeId: string; logicalId: string; reason: string }>;
+  alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
+  failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
+  targetNodes?: Array<{ nodeId: string; logicalId: string }>;
+  unmatchedIds?: string[];
+  warnings?: string[];
+  snapshotSelection?: RestoreSnapshotSelection;
+  nonTargetEffects?: {
+    mode: "unchanged" | "detach_and_hold";
+    reason: string | null;
+    affected: Array<{ nodeId: string; logicalId: string; reason: string }>;
+    condition?: string;
+  };
 }
 
 interface RestoreOrchestratorDeps {
@@ -184,6 +209,9 @@ export class RestoreOrchestrator {
      * resume-policy seats STOP as `awaiting-decision` instead.
      */
     freshLogicalIds?: string[];
+    /** Selection evidence from an automatic caller. Direct restore defaults
+     * to explicit because its public door names the snapshot id. */
+    snapshotSelection?: RestoreSnapshotSelection;
     /**
      * L3: fired with the persisted `restore.started` event seq as soon as the
      * orchestrator commits to running per-node restore. Routes use this to
@@ -203,6 +231,9 @@ export class RestoreOrchestrator {
     if (!rig) {
       return { ok: false, code: "rig_not_found", message: `Rig ${rigId} not found` };
     }
+    const selectionOutcome = opts?.snapshotSelection ? null : this.snapshotRepo.selectRestoreUsable(rigId, snapshotId);
+    if (selectionOutcome && !selectionOutcome.ok) return selectionOutcome;
+    const snapshotSelection = opts?.snapshotSelection ?? selectionOutcome?.selection;
 
     // Classify DB-running sessions against tmux reality WITHOUT mutating DB.
     // This determines whether the rig is safe to restore before any state
@@ -225,6 +256,7 @@ export class RestoreOrchestrator {
         servicesRecord: this.rigRepo.getServicesRecord(rigId),
         freshLogicalIds: opts?.freshLogicalIds,
       });
+      const topology = resolveSnapshotRestoreTopology(snapshot.data);
       if (validation.blockers.length > 0) {
         const result: RestoreResult = {
           snapshotId,
@@ -233,6 +265,9 @@ export class RestoreOrchestrator {
           nodes: [],
           warnings: validation.warnings,
           blockers: validation.blockers,
+          snapshotSelection,
+          intendedRoster: topology.intendedRoster,
+          excludedNodes: topology.excludedNodes,
         };
         return {
           ok: false,
@@ -254,7 +289,14 @@ export class RestoreOrchestrator {
 
       // 3. Emit restore.started — the persisted event seq IS the attempt id
       //    (Decision 1: no separate restore_attempts table).
-      const restoreStartedEvent = this.eventBus.emit({ type: "restore.started", rigId, snapshotId });
+      const restoreStartedEvent = this.eventBus.emit({
+        type: "restore.started",
+        rigId,
+        snapshotId,
+        snapshotSelection,
+        intendedRoster: topology.intendedRoster,
+        excludedNodes: topology.excludedNodes,
+      });
       const attemptId = restoreStartedEvent.seq;
       try {
         opts?.onAttemptStarted?.(attemptId);
@@ -269,7 +311,21 @@ export class RestoreOrchestrator {
         if (svcRecord) {
           const bootResult = await this.serviceOrchestrator.boot(rigId);
           if (!bootResult.ok) {
-            this.eventBus.emit({ type: "restore.completed", rigId, snapshotId, result: { snapshotId, preRestoreSnapshotId: preRestoreSnapshot.id, rigResult: "failed", nodes: [], warnings: [`Service boot failed: ${bootResult.error}`] } });
+            this.eventBus.emit({
+              type: "restore.completed",
+              rigId,
+              snapshotId,
+              result: {
+                snapshotId,
+                preRestoreSnapshotId: preRestoreSnapshot.id,
+                rigResult: "failed",
+                nodes: [],
+                warnings: [`Service boot failed: ${bootResult.error}`],
+                snapshotSelection,
+                intendedRoster: topology.intendedRoster,
+                excludedNodes: topology.excludedNodes,
+              },
+            });
             return { ok: false, code: "service_boot_failed", message: `Service boot failed before agent restore: ${bootResult.error}` };
           }
         }
@@ -292,6 +348,9 @@ export class RestoreOrchestrator {
         rigResult: rollupRestoreRigResult(nodeResults),
         nodes: nodeResults,
         warnings: restoreWarnings,
+        snapshotSelection,
+        intendedRoster: topology.intendedRoster,
+        excludedNodes: topology.excludedNodes,
       };
 
       // 7. Emit restore.completed
@@ -313,30 +372,76 @@ export class RestoreOrchestrator {
     adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
     fsOps?: { exists(path: string): boolean };
     holdReason?: string;
-  }): Promise<{
-    ok: boolean;
-    code?: string;
-    message?: string;
-    launched?: RestoreNodeResult[];
-    held?: Array<{ nodeId: string; logicalId: string; reason: string }>;
-    alreadyRunning?: Array<{ nodeId: string; logicalId: string }>;
-    failedTargets?: Array<{ nodeId: string; logicalId: string; reason: string }>;
-    unmatchedIds?: string[];
-    warnings?: string[];
-  }> {
+    snapshotId?: string;
+  }): Promise<NarrowLaunchResult> {
+    return this.launchNodeTargets(rigId, logicalIds, { ...opts, nonTargetMode: "detach_and_hold" });
+  }
+
+  planNodeSubset(rigId: string, logicalIds: string[], opts?: {
+    holdReason?: string;
+    snapshotId?: string;
+  }): NarrowLaunchResult {
+    const rig = this.rigRepo.getRig(rigId);
+    if (!rig) return { ok: false, code: "rig_not_found", message: `Rig ${rigId} not found` };
+    const selected = this.snapshotRepo.selectRestoreUsable(rigId, opts?.snapshotId);
+    if (!selected.ok) return selected;
+    const intendedNodes = resolveSnapshotRestoreTopology(selected.snapshot.data).intendedNodes;
+    const targetIds = new Set(intendedNodes.filter((node) => logicalIds.includes(node.logicalId)).map((node) => node.logicalId));
+    if (targetIds.size === 0) {
+      return { ok: false, code: "no_matching_nodes", message: `No nodes match logical ids: ${logicalIds.join(", ")}` };
+    }
+    const reason = opts?.holdReason ?? "excluded_from_subset";
+    return {
+      ok: true,
+      planOnly: true,
+      snapshotSelection: selected.selection,
+      targetNodes: intendedNodes
+        .filter((node) => targetIds.has(node.logicalId))
+        .map((node) => ({ nodeId: node.id, logicalId: node.logicalId })),
+      unmatchedIds: logicalIds.filter((logicalId) => !targetIds.has(logicalId)),
+      nonTargetEffects: {
+        mode: "detach_and_hold",
+        reason,
+        affected: rig.nodes
+          .filter((node) => !targetIds.has(node.logicalId))
+          .map((node) => ({ nodeId: node.id, logicalId: node.logicalId, reason })),
+        condition: "applies only to non-target seats proven not live at execution time",
+      },
+    };
+  }
+
+  async launchSingleNode(rigId: string, logicalId: string, opts?: {
+    adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
+    fsOps?: { exists(path: string): boolean };
+    snapshotId?: string;
+  }): Promise<NarrowLaunchResult> {
+    return this.launchNodeTargets(rigId, [logicalId], { ...opts, nonTargetMode: "unchanged" });
+  }
+
+  private async launchNodeTargets(rigId: string, logicalIds: string[], opts: {
+    adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>;
+    fsOps?: { exists(path: string): boolean };
+    holdReason?: string;
+    snapshotId?: string;
+    nonTargetMode: "unchanged" | "detach_and_hold";
+  }): Promise<NarrowLaunchResult> {
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) return { ok: false, code: "rig_not_found", message: `Rig ${rigId} not found` };
 
-    const snapshot = this.snapshotRepo.findLatestRestoreUsable(rigId);
-    if (!snapshot) return { ok: false, code: "no_usable_snapshot", message: `No usable snapshot for rig ${rigId}` };
+    const selected = this.snapshotRepo.selectRestoreUsable(rigId, opts.snapshotId);
+    if (!selected.ok) return selected;
+    const { snapshot, selection: snapshotSelection } = selected;
 
     const allNodes = rig.nodes;
-    const targetNodes = allNodes.filter((n) => logicalIds.includes(n.logicalId));
+    const targetNodes = resolveSnapshotRestoreTopology(snapshot.data).intendedNodes
+      .filter((node) => logicalIds.includes(node.logicalId));
     const matchedIds = new Set(targetNodes.map((n) => n.logicalId));
     const unmatchedIds = logicalIds.filter((id) => !matchedIds.has(id));
     if (targetNodes.length === 0) return { ok: false, code: "no_matching_nodes", message: `No nodes match logical ids: ${logicalIds.join(", ")}` };
 
-    const nonTargetNodes = allNodes.filter((n) => !logicalIds.includes(n.logicalId));
+    const nonTargetNodes = opts.nonTargetMode === "detach_and_hold"
+      ? allNodes.filter((node) => !targetNodes.some((target) => target.id === node.id))
+      : [];
 
     // Per-target tmux-liveness classification (runtime truth, fail-closed)
     const launched: RestoreNodeResult[] = [];
@@ -398,6 +503,7 @@ export class RestoreOrchestrator {
         rigResult: rollupRestoreRigResult(launched),
         nodes: launched,
         warnings: subsetWarnings,
+        snapshotSelection,
       };
       this.eventBus.emit({ type: "restore.subset_completed", rigId, snapshotId: snapshot.id, result: subsetResult });
     }
@@ -437,7 +543,21 @@ export class RestoreOrchestrator {
       held.push({ nodeId: node.id, logicalId: node.logicalId, reason: holdReasonText });
     }
 
-    return { ok: true, launched, held, alreadyRunning, failedTargets, unmatchedIds: unmatchedIds.length > 0 ? unmatchedIds : undefined, warnings: subsetWarnings.length > 0 ? subsetWarnings : undefined };
+    return {
+      ok: true,
+      launched,
+      held,
+      alreadyRunning,
+      failedTargets,
+      unmatchedIds: unmatchedIds.length > 0 ? unmatchedIds : undefined,
+      warnings: subsetWarnings.length > 0 ? subsetWarnings : undefined,
+      snapshotSelection,
+      nonTargetEffects: {
+        mode: opts.nonTargetMode,
+        reason: opts.nonTargetMode === "detach_and_hold" ? holdReasonText : null,
+        affected: held,
+      },
+    };
   }
 
   private validatePreRestore(
@@ -508,7 +628,19 @@ export class RestoreOrchestrator {
       return { blockers, warnings };
     }
 
-    for (const node of nodes) {
+    const topology = resolveSnapshotRestoreTopology(data);
+    for (const invalidNodeId of topology.invalidRosterIds) {
+      add({
+        code: "invalid_topology_roster",
+        severity: "critical",
+        nodeId: invalidNodeId,
+        target: "snapshot.topologyRoster",
+        message: `Intended topology roster names node ${invalidNodeId}, which is absent from snapshot.nodes.`,
+        remediation: "Capture a new snapshot from the authoritative materialized topology.",
+      });
+    }
+
+    for (const node of topology.intendedNodes) {
       const checkpoint = checkpoints[node.id] ?? null;
       if (checkpoint && !node.cwd) {
         add({
@@ -717,7 +849,7 @@ export class RestoreOrchestrator {
   }
 
   private computeRestorePlan(data: SnapshotData): PlanEntry[] {
-    const nodes = data.nodes;
+    const nodes = resolveSnapshotRestoreTopology(data).intendedNodes;
     const edges = data.edges;
 
     // Build adjacency for launch-dependency edges only
@@ -1327,6 +1459,7 @@ export class RestoreOrchestrator {
       sessionName,
       runtime: node.runtime ?? null,
       expectedResumeToken: resumeToken,
+      requireExactResumeLineage: true,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
     });
     if (!identity.ok) {
@@ -1552,6 +1685,20 @@ export class RestoreOrchestrator {
     }
     const fromStatus: "failed" | "attention_required" = nodeStatus;
 
+    const priorReconciliation = this.db.prepare(
+      "SELECT payload FROM events WHERE rig_id = ? AND node_id = ? AND type = 'restore.outcome_reconciled' AND json_extract(payload, '$.attemptId') = ? ORDER BY seq DESC LIMIT 1",
+    ).get(rigId, nodeId, attemptId) as { payload: string } | undefined;
+    if (priorReconciliation) {
+      try {
+        const prior = JSON.parse(priorReconciliation.payload) as Extract<import("./types.js").RigEvent, { type: "restore.outcome_reconciled" }>;
+        if ("tmux" in prior.evidence) {
+          return { ok: true, attemptId, from: prior.from, to: "operator_recovered", evidence: prior.evidence };
+        }
+      } catch {
+        // A malformed prior row is not positive evidence; continue to the live proof.
+      }
+    }
+
     // Resolve canonical session name for this node so we can probe tmux/pane.
     const bindingRow = this.db.prepare(
       "SELECT tmux_session FROM bindings WHERE node_id = ?"
@@ -1559,6 +1706,17 @@ export class RestoreOrchestrator {
     const sessionName = bindingRow?.tmux_session ?? null;
     if (!sessionName) {
       return { ok: false, code: "tmux_session_missing", detail: "No tmux session bound for this node." };
+    }
+
+    const sessRow = this.db.prepare(
+      "SELECT session_name, resume_token FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+    ).get(nodeId) as { session_name: string; resume_token: string | null } | undefined;
+    if (!sessRow || sessRow.session_name !== sessionName) {
+      return { ok: false, code: "binding_mismatch", detail: `Canonical binding ${sessionName} does not match the latest session row.` };
+    }
+    const expectedResumeToken = sessRow.resume_token;
+    if (!expectedResumeToken) {
+      return { ok: false, code: "resume_token_not_used", detail: "No resume token recorded on the latest session row." };
     }
 
     // Precondition #1: tmux session exists.
@@ -1574,32 +1732,32 @@ export class RestoreOrchestrator {
       return { ok: false, code: "tmux_session_missing", detail: `Tmux session ${sessionName} is not currently alive.` };
     }
 
-    // Resolve runtime + capture pane state for preconditions #2 and #4.
+    // Resolve runtime and prove exact native-token process lineage. Executable
+    // basename alone is never sufficient for no-input recovery.
     const nodeRow = this.db.prepare(
       "SELECT runtime FROM nodes WHERE id = ?"
     ).get(nodeId) as { runtime: string | null } | undefined;
     const runtime = nodeRow?.runtime ?? null;
-    const paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
-    const paneContent = (await this.tmuxAdapter.capturePaneContent(sessionName, 40)) ?? "";
-
-    // Precondition #2: foreground process is the runtime (claude or codex).
-    const probe = assessNativeResumeProbe({ runtime, paneCommand, paneContent });
-    const fgProcess = paneCommand && (paneCommand === "claude" || paneCommand.startsWith("codex"))
-      ? (paneCommand === "claude" ? "claude" : "codex") as "claude" | "codex"
-      : null;
-    if (!fgProcess) {
-      return { ok: false, code: "fg_process_not_runtime", detail: `Foreground process is "${paneCommand ?? "(unknown)"}", not claude/codex.` };
+    const identity = await rebindAndVerifyPaneIdentity({
+      db: this.db,
+      sessionRegistry: this.sessionRegistry,
+      tmux: this.tmuxAdapter,
+      nodeId,
+      sessionName,
+      runtime,
+      expectedResumeToken,
+      requireExactResumeLineage: true,
+      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
+    });
+    if (!identity.ok) {
+      return { ok: false, code: "process_lineage_mismatch", detail: identity.detail };
     }
-
-    // Precondition #3: the resume token was actually used at launch.
-    // Stored on the latest session row; null/empty means resume was not
-    // exercised so a "recovered" claim has no basis.
-    const sessRow = this.db.prepare(
-      "SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1"
-    ).get(nodeId) as { resume_token: string | null } | undefined;
-    const resumeTokenUsed = typeof sessRow?.resume_token === "string" && sessRow.resume_token.length > 0;
-    if (!resumeTokenUsed) {
-      return { ok: false, code: "resume_token_not_used", detail: "No resume token recorded on the latest session row." };
+    const paneCommand = await this.tmuxAdapter.getPaneCommand(identity.pane);
+    const paneContent = (await this.tmuxAdapter.capturePaneContent(identity.pane, 40)) ?? "";
+    const probe = assessNativeResumeProbe({ runtime, paneCommand, paneContent });
+    const fgProcess = runtime === "claude-code" ? "claude" as const : runtime === "codex" ? "codex" as const : null;
+    if (!fgProcess) {
+      return { ok: false, code: "fg_process_not_runtime", detail: `Node runtime is ${runtime ?? "unknown"}, not claude/codex.` };
     }
 
     // Precondition #4: pane is at a usable/idle state — explicitly NOT a

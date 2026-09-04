@@ -215,6 +215,76 @@ describe("SnapshotRepository", () => {
       expect(result!.kind).toBe("auto-pre-down");
     });
 
+    it("selects an exact usable snapshot and discloses a newer alternative", () => {
+      insertRaw("auto-old", "rig-1", "auto-pre-down", JSON.stringify(dataWithSession()), "2026-04-27 10:00:00");
+      insertRaw("manual-new", "rig-1", "manual", JSON.stringify(dataWithSession()), "2026-04-28 10:00:00");
+
+      const result = repo.selectRestoreUsable("rig-1", "manual-new", Date.parse("2026-04-29T10:00:00Z"));
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.snapshot.id).toBe("manual-new");
+      expect(result.selection).toMatchObject({
+        mode: "explicit",
+        snapshotId: "manual-new",
+        kind: "manual",
+        ageMs: 24 * 60 * 60 * 1000,
+        newerUsableAlternative: null,
+      });
+    });
+
+    it("keeps automatic crash-insurance ranking and reports the newer manual alternative", () => {
+      insertRaw("auto-old", "rig-1", "auto-pre-down", JSON.stringify(dataWithSession()), "2026-04-27 10:00:00");
+      insertRaw("manual-new", "rig-1", "manual", JSON.stringify(dataWithSession()), "2026-04-28 10:00:00");
+
+      const result = repo.selectRestoreUsable("rig-1", undefined, Date.parse("2026-04-29T10:00:00Z"));
+
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.snapshot.id).toBe("auto-old");
+      expect(result.selection.mode).toBe("automatic");
+      expect(result.selection.rationale).toMatch(/crash-insurance/i);
+      expect(result.selection.newerUsableAlternative).toMatchObject({ snapshotId: "manual-new", kind: "manual" });
+    });
+
+    it("refuses wrong-rig and unusable exact snapshots", () => {
+      insertRaw("other-rig", "rig-2", "manual", JSON.stringify(dataWithSession({ rigId: "rig-2" })), "2026-04-28 10:00:00");
+      insertRaw("broken", "rig-1", "manual", "{}", "2026-04-28 11:00:00");
+
+      expect(repo.selectRestoreUsable("rig-1", "other-rig")).toMatchObject({ ok: false, code: "snapshot_wrong_rig" });
+      expect(repo.selectRestoreUsable("rig-1", "broken")).toMatchObject({ ok: false, code: "snapshot_unusable" });
+    });
+
+    it("refuses malformed explicit roster and occupant metadata", () => {
+      insertRaw("bad-roster", "rig-1", "manual", JSON.stringify({
+        ...dataWithSession(),
+        topologyRoster: { version: 1, source: "operator_explicit", intendedNodeIds: ["missing-node"] },
+      }), "2026-04-28 10:00:00");
+      insertRaw("bad-occupant", "rig-1", "manual", JSON.stringify({
+        ...dataWithSession(),
+        activeOccupantsByNode: { "node-1": { kind: "resolved", sessionId: "" } },
+      }), "2026-04-28 11:00:00");
+
+      expect(repo.selectRestoreUsable("rig-1", "bad-roster")).toMatchObject({ ok: false, code: "snapshot_unusable" });
+      expect(repo.selectRestoreUsable("rig-1", "bad-occupant")).toMatchObject({ ok: false, code: "snapshot_unusable" });
+    });
+
+    it("refuses explicit occupant metadata with missing or cross-node session evidence", () => {
+      const data = dataWithSession();
+      data.nodes = [{ id: "node-a", logicalId: "dev.a" } as SnapshotData["nodes"][number]];
+      insertRaw("missing-occupant", "rig-1", "manual", JSON.stringify({
+        ...data,
+        activeOccupantsByNode: {},
+      }), "2026-04-28 10:00:00");
+      insertRaw("cross-node-occupant", "rig-1", "manual", JSON.stringify({
+        ...data,
+        activeOccupantsByNode: { "node-a": { kind: "resolved", sessionId: "missing-session" } },
+      }), "2026-04-28 11:00:00");
+
+      expect(repo.selectRestoreUsable("rig-1", "missing-occupant")).toMatchObject({ ok: false, code: "snapshot_unusable" });
+      expect(repo.selectRestoreUsable("rig-1", "cross-node-occupant")).toMatchObject({ ok: false, code: "snapshot_unusable" });
+    });
+
     it("returns null when no snapshot exists", () => {
       expect(repo.findLatestRestoreUsable("rig-1")).toBeNull();
     });

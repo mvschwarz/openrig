@@ -1,25 +1,9 @@
-// D-a (B8-family) — resolve the CURRENT OCCUPANT's provider record by RECORD-LIVENESS.
-//
-// Fourth cross-generation-keying lesson tonight, and this module's own first cut was specimen #4:
-// ~~"the pane's process tree is the only record that IS the occupant"~~ — WRONG, withdrawn by the
-// author before review. Measured on dev.planner: the pane process's --session-id ARGUMENT pointed
-// at a transcript dormant for a day (reading an old model), while the sidecar/registry id matched
-// the transcript being APPENDED that minute (reading the pinned model). Claude rolls session ids
-// internally — the launch argument records what was LAUNCHED; hooks report what RUNS (the slice-13
-// lesson, met again from the other side). On the B16 specimen the SIDECAR was the stale one. So no
-// single pointer — argument, sidecar, or registry row — is generation-true.
-//
-// What IS generation-true: the record being WRITTEN. LiveClaudeRecordSelector gathers every candidate
-// session id this seat is associated with (sidecar, newest registry hook row, pane argument),
-// resolves each to its transcript, and selects the freshest-mtime one. Codex differs: the
-// pid-to-logs join reads the live process's OWN log rows, so it needs no selection.
-//
-// Also measured: occupant_tenures.native_session_id_at_boot is NULL on every tenure on this box
-// (the ledger join the fix shape named is unpopulated — flagged upstream; when backfilled it joins
-// the candidate set, it does not replace liveness).
-//
-// All process reads are async (the F1/B12 discipline). Every no-answer is a NAMED reason, never a
-// silent fall-through — the ruled shape: honest INDETERMINATE over a masked stale read.
+// Resolve the CURRENT OCCUPANT's provider record through the registered pane and its verified
+// process identity. Transcript metadata is consulted only after that physical/occupant join holds.
+// A registry token is continuity metadata, not live identity, and transcript recency is never an
+// identity tie-breaker: a deliberately retained predecessor may keep writing forever.
+
+import { dirname, join } from "node:path";
 
 export interface ProcessRow {
   pid: number;
@@ -42,6 +26,30 @@ export interface CurrentGenerationDeps {
 
 export type CurrentRecordResolution =
   | { ok: true; id: string }
+  | { ok: false; reason: string };
+
+export interface ClaudeOccupantRecordInput {
+  sessionName: string;
+  generation: string | null;
+  occupantBootAt: string | null;
+  binding: { tmuxSession: string | null; tmuxPane: string | null } | null;
+  identity: {
+    verdict: string;
+    sessionName: string | null;
+    observedAt: string;
+    evidence: { registeredPane: string | null; observedPid: number | null };
+  } | null;
+  sidecar: {
+    session_id?: string;
+    session_name?: string;
+    transcript_path?: string;
+    sampled_at?: string;
+    occupant_generation?: string;
+  } | null;
+}
+
+export type ClaudeRecordSelection =
+  | { ok: true; id: string; path: string; source: "generation-sidecar" | "verified-pane-argument" }
   | { ok: false; reason: string };
 
 /** Descendants of `parentPid` whose command matches `matches`, breadth-first. (Deliberately local:
@@ -73,10 +81,9 @@ function commandBasenameIs(name: string): (command: string) => boolean {
   });
 }
 
-/** The pane process's claude session-id LAUNCH ARGUMENT — one CANDIDATE, never the answer alone:
- *  measured on the live specimen, claude rolls session ids internally (the slice-13 lesson — the
- *  argument records what was LAUNCHED; hooks report what RUNS), so the argument can be the stale
- *  pointer while the sidecar is current. Feed it into LiveClaudeRecordSelector with the others. */
+/** The pane process's Claude session-id LAUNCH ARGUMENT. It is authoritative only after the caller
+ *  verifies the canonical binding and current pane identity. A current-generation sidecar may
+ *  supersede it after a provider-internal session rollover. */
 export async function paneClaudeSessionIdArgument(
   sessionTarget: string,
   deps: Pick<CurrentGenerationDeps, "getPanePid" | "listProcesses">,
@@ -86,163 +93,121 @@ export async function paneClaudeSessionIdArgument(
   const processes = await deps.listProcesses();
   const claudePids = findDescendants(processes, panePid, commandBasenameIs("claude"));
   if (claudePids.length === 0) return { ok: false, reason: `no claude process under the live pane of ${sessionTarget}` };
+  const ids = new Set<string>();
   for (const pid of claudePids) {
     const command = processes.find((p) => p.pid === pid)?.command ?? "";
     const match = command.match(/--session-id[= ]([0-9a-f-]{36})/) ?? command.match(/--resume[= ]([0-9a-f-]{36})/);
-    if (match?.[1]) return { ok: true, id: match[1] };
+    if (match?.[1]) ids.add(match[1]);
   }
+  if (ids.size === 1) return { ok: true, id: [...ids][0]! };
+  if (ids.size > 1) return { ok: false, reason: `multiple claude session ids under the live pane of ${sessionTarget}: ${[...ids].join(", ")}` };
   return { ok: false, reason: `live claude process under ${sessionTarget} carries no --session-id/--resume argument` };
 }
 
-export interface ClaudeRecordCandidate {
-  /** Where this candidate id came from (sidecar / registry / pane-argument) — rides the verdict. */
-  source: string;
-  id: string;
-  /** Absolute transcript path for the id, when derivable. */
-  path: string | null;
-}
-
-export type ClaudeRecordSelection =
-  | { ok: true; id: string; path: string; source: string }
-  | { ok: false; reason: string };
-
-export interface RecordStat {
-  mtimeMs: number;
-  size: number;
-}
-
-/** The CURRENT claude record via CROSS-POLL OBSERVED ADVANCEMENT (r2 rounds 2-4 on this family):
- *  neither existence, nor recency, nor a 1.5s in-poll sample proves a record is being written —
- *  the in-poll window forgot everything between polls and oscillated truth/indeterminate with
- *  write timing (r2 round-4). This selector is STATEFUL per seat:
- *  - an id is readable if ANY of its candidate paths stats (all paths retained per id — r2's
- *    adjacent pin: a dead sidecar path must not mask a readable registry-derived one).
- *  - an UNREADABLE contender with a different id → ALWAYS a named INDETERMINATE.
- *  - exactly one readable id, no differing unreadable contender → that record (unanimity).
- *  - multiple readable ids → advancement is observed ACROSS POLLS: current stats vs the previous
- *    poll's cached stats (the full poll interval is the observation window, catching every
- *    intervening write). Exactly one record advanced → selected and RETAINED until the candidate
- *    id set changes; none/several advanced → named INDETERMINATE, re-observed next poll. The
- *    first observation of a disagreeing set is INDETERMINATE by construction (nothing to compare
- *    against yet — named as such). */
-export class LiveClaudeRecordSelector {
-  private readonly perSeat = new Map<string, {
-    idSetKey: string;
-    prevStats: Map<string, RecordStat>;
-    selected: { id: string; path: string; source: string } | null;
-  }>();
-
-  select(
-    seatKey: string,
-    candidates: ClaudeRecordCandidate[],
-    statRecord: (path: string) => RecordStat | null,
-  ): ClaudeRecordSelection {
-    // Dedupe by id, RETAINING every path offered for the id (first source labels it).
-    const byId = new Map<string, { source: string; paths: string[] }>();
-    for (const c of candidates) {
-      if (!c.id) continue;
-      const entry = byId.get(c.id) ?? { source: c.source, paths: [] };
-      if (c.path && !entry.paths.includes(c.path)) entry.paths.push(c.path);
-      byId.set(c.id, entry);
-    }
-    const readable: Array<{ id: string; path: string; source: string; stat: RecordStat }> = [];
-    const unreadable: string[] = [];
-    for (const [id, { source, paths }] of byId) {
-      let hit: { path: string; stat: RecordStat } | null = null;
-      for (const path of paths) {
-        const stat = statRecord(path);
-        if (stat) { hit = { path, stat }; break; }
-      }
-      if (hit) readable.push({ id, path: hit.path, source, stat: hit.stat });
-      else unreadable.push(`${source}:${id.slice(0, 8)}… (${paths.length ? "no file" : "no path"})`);
-    }
-    if (readable.length === 0) {
-      this.perSeat.delete(seatKey);
-      return { ok: false, reason: `no readable transcript for any candidate session (${unreadable.join(", ") || "no candidates"})` };
-    }
-    if (unreadable.length > 0) {
-      // ALWAYS indeterminate: the unreadable contender may be the current record before its first
-      // readable byte — confident stale truth here is the exact defect class.
-      this.rememberStats(seatKey, byIdKey(byId), readable);
-      return {
-        ok: false,
-        reason: `candidate sessions disagree and ${unreadable.length} contender(s) are unreadable (${unreadable.join(", ")}; readable: ${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}) — the unreadable one may be the record being written`,
-      };
-    }
-    if (readable.length === 1) {
-      const only = readable[0]!;
-      this.rememberSelection(seatKey, byIdKey(byId), readable, only);
-      return { ok: true, id: only.id, path: only.path, source: only.source };
-    }
-
-    const idSetKey = byIdKey(byId);
-    const state = this.perSeat.get(seatKey);
-    const retainedCurrent = state && state.idSetKey === idSetKey && state.selected
-      ? readable.find((r) => r.id === state.selected!.id)
-      : undefined;
-    if (retainedCurrent) {
-      // RETAIN the resolved ID until the candidate set changes (r2 round-4 remedy) — but rebind
-      // path/source to THIS poll's readable entry (r2 round-5): the cached path can die while a
-      // same-id fallback path stays readable, and returning the cached path verbatim is the
-      // temporal form of the dead-first-path-masks-readable-second defect.
-      const selected = { id: retainedCurrent.id, path: retainedCurrent.path, source: retainedCurrent.source };
-      this.rememberSelection(seatKey, idSetKey, readable, selected);
-      return { ok: true, ...selected };
-    }
-    const prev = state && state.idSetKey === idSetKey ? state.prevStats : null;
-    if (prev) {
-      const advanced = readable.filter((r) => {
-        const before = prev.get(r.id);
-        return before !== undefined && (before.size !== r.stat.size || before.mtimeMs !== r.stat.mtimeMs);
-      });
-      if (advanced.length === 1) {
-        const winner = advanced[0]!;
-        const selected = { id: winner.id, path: winner.path, source: winner.source };
-        this.rememberSelection(seatKey, idSetKey, readable, selected);
-        return { ok: true, ...selected };
-      }
-      this.rememberStats(seatKey, idSetKey, readable);
-      return {
-        ok: false,
-        reason:
-          `candidate sessions disagree (${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}) and ` +
-          (advanced.length === 0
-            ? "no record advanced since the previous poll — idle; re-observed next poll"
-            : `${advanced.length} records advanced since the previous poll — genuinely ambiguous`),
-      };
-    }
-    this.rememberStats(seatKey, idSetKey, readable);
+/**
+ * Resolve a Claude record only after the canonical seat's current occupant is joined to its
+ * registered pane and the pane's PID still matches the durable identity verdict. The pane's launch
+ * argument is the legacy identity anchor. A generation-stamped sidecar may supersede it after a
+ * provider-internal session rollover; an unstamped sidecar may locate files but cannot override it.
+ */
+export async function resolveIdentityVerifiedClaudeRecord(
+  input: ClaudeOccupantRecordInput,
+  deps: Pick<CurrentGenerationDeps, "getPanePid" | "listProcesses">,
+  isReadableRecord: (path: string) => boolean,
+): Promise<ClaudeRecordSelection> {
+  if (!input.generation) {
+    return { ok: false, reason: `current occupant generation is unknown for ${input.sessionName}` };
+  }
+  if (!input.occupantBootAt || !Number.isFinite(Date.parse(input.occupantBootAt))) {
+    return { ok: false, reason: `current occupant boot time is unknown for ${input.sessionName}` };
+  }
+  const binding = input.binding;
+  if (!binding?.tmuxPane || binding.tmuxSession !== input.sessionName) {
+    return { ok: false, reason: `no canonical tmux pane binding for ${input.sessionName}` };
+  }
+  const identity = input.identity;
+  if (!identity || identity.verdict !== "verified") {
+    return { ok: false, reason: `no verified pane identity for ${input.sessionName}${identity ? ` (verdict ${identity.verdict})` : ""}` };
+  }
+  if (identity.sessionName !== input.sessionName) {
+    return { ok: false, reason: `verified identity names ${identity.sessionName ?? "no session"}, not ${input.sessionName}` };
+  }
+  if (identity.evidence.registeredPane !== binding.tmuxPane) {
+    return { ok: false, reason: `verified identity's registered pane does not match binding ${binding.tmuxPane}` };
+  }
+  const observedAt = Date.parse(identity.observedAt);
+  if (!Number.isFinite(observedAt) || observedAt < Date.parse(input.occupantBootAt)) {
+    return { ok: false, reason: `verified pane identity predates occupant generation ${input.generation}` };
+  }
+  if (identity.evidence.observedPid === null) {
+    return { ok: false, reason: `verified pane identity carries no observed pid for ${input.sessionName}` };
+  }
+  const panePid = await deps.getPanePid(binding.tmuxPane);
+  if (!panePid) return { ok: false, reason: `registered pane ${binding.tmuxPane} has no live pid` };
+  if (panePid !== identity.evidence.observedPid) {
     return {
       ok: false,
-      reason: `candidate sessions disagree (${readable.map((r) => `${r.source}:${r.id.slice(0, 8)}…`).join(", ")}) — first observation of this candidate set; advancement compares from the next poll`,
+      reason: `registered pane pid changed since identity verification (${identity.evidence.observedPid} -> ${panePid})`,
     };
   }
 
-  private rememberStats(
-    seatKey: string,
-    idSetKey: string,
-    readable: Array<{ id: string; stat: RecordStat }>,
-    selected: { id: string; path: string; source: string } | null = null,
-  ): void {
-    this.perSeat.set(seatKey, {
-      idSetKey,
-      prevStats: new Map(readable.map((r) => [r.id, r.stat])),
-      selected,
-    });
+  const processes = await deps.listProcesses();
+  const claudePids = findDescendants(processes, panePid, commandBasenameIs("claude"));
+  if (claudePids.length === 0) {
+    return { ok: false, reason: `no claude process under verified pane ${binding.tmuxPane}` };
+  }
+  const paneIds = new Set<string>();
+  for (const pid of claudePids) {
+    const command = processes.find((process) => process.pid === pid)?.command ?? "";
+    const match = command.match(/--session-id[= ]([0-9a-f-]{36})/) ?? command.match(/--resume[= ]([0-9a-f-]{36})/);
+    if (match?.[1]) paneIds.add(match[1]);
+  }
+  if (paneIds.size === 0) {
+    return { ok: false, reason: `claude process under verified pane ${binding.tmuxPane} carries no session id` };
+  }
+  if (paneIds.size > 1) {
+    return { ok: false, reason: `multiple claude session ids under verified pane ${binding.tmuxPane}: ${[...paneIds].join(", ")}` };
+  }
+  const paneId = [...paneIds][0]!;
+  const sidecar = input.sidecar;
+  const sidecarPath = cleanString(sidecar?.transcript_path);
+  const sidecarId = cleanString(sidecar?.session_id);
+  const sidecarGeneration = cleanString(sidecar?.occupant_generation);
+
+  // A current-generation sidecar is the supported provider-rollover signal. Its generation stamp
+  // comes from the managed occupant's launch environment, so a retained predecessor carries its
+  // old generation even when its launch-time --name aliases the canonical seat.
+  if (sidecarGeneration === input.generation && sidecarId && sidecarPath) {
+    const sampledAt = Date.parse(cleanString(sidecar?.sampled_at) ?? "");
+    if (
+      sidecar?.session_name === input.sessionName
+      && Number.isFinite(sampledAt)
+      && sampledAt >= Date.parse(input.occupantBootAt)
+      && isReadableRecord(sidecarPath)
+    ) {
+      return { ok: true, id: sidecarId, path: sidecarPath, source: "generation-sidecar" };
+    }
   }
 
-  private rememberSelection(
-    seatKey: string,
-    idSetKey: string,
-    readable: Array<{ id: string; stat: RecordStat }>,
-    selected: { id: string; path: string; source: string },
-  ): void {
-    this.rememberStats(seatKey, idSetKey, readable, selected);
+  // Legacy sidecars have no occupant-generation stamp. They may locate the project transcript
+  // directory, but the verified pane's own launch id chooses the file. No registry token and no
+  // mtime participate in this decision.
+  if (sidecarPath) {
+    const panePath = sidecarId === paneId ? sidecarPath : join(dirname(sidecarPath), `${paneId}.jsonl`);
+    if (isReadableRecord(panePath)) {
+      return { ok: true, id: paneId, path: panePath, source: "verified-pane-argument" };
+    }
   }
+  return {
+    ok: false,
+    reason: `verified occupant ${input.generation} resolves native session ${paneId}, but its transcript is unreadable`,
+  };
 }
 
-function byIdKey(byId: Map<string, unknown>): string {
-  return [...byId.keys()].sort().join("|");
+function cleanString(value: string | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 /** The live codex occupant's thread id, via its own pid's log join — bypasses the stored resume

@@ -68,6 +68,13 @@ function mockCodexResume(result?: ResumeResult): CodexResumeAdapter {
   } as unknown as CodexResumeAdapter;
 }
 
+function nativeLineage(runtime: "claude-code" | "codex", token: string) {
+  return async () => [
+    { pid: 1234, ppid: 1, command: "zsh" },
+    { pid: 1235, ppid: 1234, command: runtime === "claude-code" ? `claude --resume ${token}` : `codex resume ${token}` },
+  ];
+}
+
 describe("RestoreOrchestrator", () => {
   let db: Database.Database;
   let rigRepo: RigRepository;
@@ -174,6 +181,83 @@ describe("RestoreOrchestrator", () => {
     if (!updated) throw new Error("expected updated snapshot");
     return updated;
   }
+
+  it("restores only the snapshot's intended roster and reports historical exclusions", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [
+        { logicalId: "lead", role: "lead", runtime: "claude-code" },
+        { logicalId: "worker", role: "worker", runtime: "codex" },
+        { logicalId: "historical", role: "worker", runtime: "claude-code" },
+      ],
+      edges: [],
+    });
+    const intendedIds = snap.data.nodes.filter((node) => node.logicalId !== "historical").map((node) => node.id);
+    const fixed = updateSnapshotData(snap, (data) => {
+      data.topologyRoster = { version: 1, source: "operator_explicit", intendedNodeIds: intendedIds };
+    });
+
+    const result = await createOrchestrator().restore(fixed.id, { freshLogicalIds: ["lead", "worker"] });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes.map((node) => node.logicalId).sort()).toEqual(["lead", "worker"]);
+    expect(result.result.intendedRoster?.map((node) => node.logicalId).sort()).toEqual(["lead", "worker"]);
+    expect(result.result.excludedNodes).toEqual([
+      expect.objectContaining({ logicalId: "historical", reason: "historical_not_in_intended_roster" }),
+    ]);
+  });
+
+  it("rejects an explicitly selected unusable snapshot before mutation", async () => {
+    const snap = seedRigAndSnapshot({ edges: [] });
+    const broken = updateSnapshotData(snap, (data) => {
+      delete data.edges;
+    });
+    const before = {
+      snapshotCount: snapshotRepo.listSnapshots(snap.rigId).length,
+      sessions: db.prepare("SELECT * FROM sessions ORDER BY id").all(),
+      events: db.prepare("SELECT * FROM events ORDER BY seq").all(),
+    };
+
+    const result = await createOrchestrator().restore(broken.id);
+
+    expect(result).toMatchObject({ ok: false, code: "snapshot_unusable" });
+    expect(snapshotRepo.listSnapshots(snap.rigId)).toHaveLength(before.snapshotCount);
+    expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(before.sessions);
+    expect(db.prepare("SELECT * FROM events ORDER BY seq").all()).toEqual(before.events);
+  });
+
+  it("fails a truly ambiguous intended occupant without launching or typing", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [],
+      resumeType: "claude_id",
+      resumeToken: "saved-thread",
+    });
+    const node = snap.data.nodes[0]!;
+    const firstSession = snap.data.sessions[0]!;
+    const ambiguous = updateSnapshotData(snap, (data) => {
+      data.sessions.push({
+        ...firstSession,
+        id: "second-live-session",
+        sessionName: "r99-worker-second",
+      });
+      data.activeOccupantsByNode = {
+        [node.id]: { kind: "ambiguous", candidateIds: [firstSession.id, "second-live-session"] },
+      };
+    });
+    const tmux = mockTmux();
+
+    const result = await createOrchestrator({ tmux }).restore(ambiguous.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes).toEqual([
+      expect.objectContaining({ logicalId: "worker", status: "failed", error: expect.stringContaining("Active-occupant ambiguity") }),
+    ]);
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
 
   it("constructor throws on mismatched db handles", () => {
     const otherDb = setupDb();
@@ -787,7 +871,7 @@ describe("RestoreOrchestrator", () => {
       resumeType: "claude_name",
       resumeToken: "tok",
     });
-    const orch = createOrchestrator({ claude: mockClaudeResume({ ok: true }) });
+    const orch = createOrchestrator({ claude: mockClaudeResume({ ok: true }), listProcesses: nativeLineage("claude-code", "tok") });
     const result = await orch.restore(snap.id);
 
     expect(result.ok).toBe(true);
@@ -1355,7 +1439,10 @@ describe("RestoreOrchestrator", () => {
     const claude = mockClaudeResume();
     (claude as any).resume = claudeResumeSpy;
 
-    const orch = createOrchestrator({ claude });
+    const orch = createOrchestrator({
+      claude,
+      listProcesses: nativeLineage("claude-code", "resume-token-123"),
+    });
     const result = await orch.restore(snap.id, { adapters: { "claude-code": mockAdapter } });
 
     expect(result.ok).toBe(true);
@@ -2103,7 +2190,9 @@ describe("RestoreOrchestrator", () => {
       restorePolicy: "resume_if_possible",
     });
 
-    const orchestrator = createOrchestrator();
+    const orchestrator = createOrchestrator({
+      listProcesses: nativeLineage("claude-code", "token-123"),
+    });
     const result = await orchestrator.restore(snapshot.id);
 
     expect(result.ok).toBe(true);
@@ -2299,7 +2388,10 @@ describe("RestoreOrchestrator", () => {
       };
     });
 
-    const orch = createOrchestrator({ claude: mockClaudeResume({ ok: true }) });
+    const orch = createOrchestrator({
+      claude: mockClaudeResume({ ok: true }),
+      listProcesses: nativeLineage("claude-code", "tok"),
+    });
     const result = await orch.restore(snapshot.id, {
       fsOps: { exists: (p) => p !== missingEntry && p !== "/tmp/openrig-stale-root" },
     });
@@ -2518,13 +2610,19 @@ describe("RestoreOrchestrator", () => {
         sendText: vi.fn(async () => ({ ok: true as const })),
         sendKeys: vi.fn(async () => ({ ok: true as const })),
         getPaneCommand: vi.fn(async () => "claude"),
+        getPanePid: vi.fn(async () => 1234),
         capturePaneContent: vi.fn(async () => ""),
         hasSession: vi.fn(async () => false),
         listSessions: async () => [],
         listWindows: async () => [],
-        listPanes: async () => [],
+        listPanes: async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }],
       } as unknown as TmuxAdapter;
     }
+
+    const exactClaudeLineage = (token = "tok-abc-123") => async () => [
+      { pid: 1234, ppid: 1, command: "zsh" },
+      { pid: 1235, ppid: 1234, command: `claude.exe --resume ${token}` },
+    ];
 
     let nextSeed = 90;
     function seedFailedAttempt(opts: {
@@ -2587,12 +2685,14 @@ describe("RestoreOrchestrator", () => {
         " ❯ accept edits on",
         "",
       ].join("\n"));
-      const orch = createOrchestrator({ tmux });
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
       const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
 
       const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
 
       expect(result.ok).toBe(true);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
       if (result.ok) {
         expect(result.from).toBe("failed");
         expect(result.to).toBe("operator_recovered");
@@ -2620,7 +2720,7 @@ describe("RestoreOrchestrator", () => {
         "",
         " ❯ accept edits on",
       ].join("\n"));
-      const orch = createOrchestrator({ tmux });
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
       const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
 
       const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
@@ -2637,7 +2737,7 @@ describe("RestoreOrchestrator", () => {
       (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
       (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
       (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Claude Code v2.1.89\n ❯ accept edits on");
-      const orch = createOrchestrator({ tmux });
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
       const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
 
       await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
@@ -2672,13 +2772,13 @@ describe("RestoreOrchestrator", () => {
       (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
       (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("zsh"); // shell, not claude/codex
       (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("$ ");
-      const orch = createOrchestrator({ tmux });
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
       const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
 
       const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
 
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.code).toBe("fg_process_not_runtime");
+      if (!result.ok) expect(result.code).toBe("process_lineage_mismatch");
     });
 
     it("no-op when resume token was not used (precondition #3 fails)", async () => {
@@ -2686,7 +2786,7 @@ describe("RestoreOrchestrator", () => {
       (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
       (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
       (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Claude Code v2.1.89\n ❯ accept edits on");
-      const orch = createOrchestrator({ tmux });
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
       const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: false });
 
       const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
@@ -2704,7 +2804,7 @@ describe("RestoreOrchestrator", () => {
         "  1. project-foo",
         "  2. project-bar",
       ].join("\n"));
-      const orch = createOrchestrator({ tmux });
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
       const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
 
       const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
@@ -2756,7 +2856,7 @@ describe("RestoreOrchestrator", () => {
       (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
       (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
       (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Claude Code v2.1.89\n ❯ accept edits on");
-      const orch = createOrchestrator({ tmux });
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
       const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
 
       const result = await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
@@ -2776,6 +2876,41 @@ describe("RestoreOrchestrator", () => {
         expect(parsed.to).toBe("operator_recovered");
         expect(parsed.to).not.toBe("ready");
       }
+    });
+
+    it("refuses executable-name-only and wrong-token process lineages", async () => {
+      const tmux = mockTmuxForReconciler();
+      (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude.exe");
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Claude Code v2.1.89\n ❯ accept edits on");
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+
+      const nameOnly = await createOrchestrator({
+        tmux,
+        listProcesses: async () => [{ pid: 1234, ppid: 1, command: "claude.exe" }],
+      }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      const wrongToken = await createOrchestrator({
+        tmux,
+        listProcesses: exactClaudeLineage("wrong-token"),
+      }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(nameOnly).toMatchObject({ ok: false, code: "process_lineage_mismatch" });
+      expect(wrongToken).toMatchObject({ ok: false, code: "process_lineage_mismatch" });
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(0);
+    });
+
+    it("is idempotent for the same restore attempt and node", async () => {
+      const tmux = mockTmuxForReconciler();
+      (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude.exe");
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Claude Code v2.1.89\n ❯ accept edits on");
+      const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+
+      expect((await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId)).ok).toBe(true);
+      expect((await orch.reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId)).ok).toBe(true);
+
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
     });
   });
 
@@ -2923,7 +3058,11 @@ describe("RestoreOrchestrator", () => {
         resumeToken: "tok",
       });
       const tmux = mockTmux();
-      const orch = createOrchestrator2(tmux, mockClaudeResume({ ok: true as const }));
+      const orch = createOrchestrator2(
+        tmux,
+        mockClaudeResume({ ok: true as const }),
+        nativeLineage("claude-code", "tok"),
+      );
 
       const result = await orch.restore(snap.id);
       expect(result.ok).toBe(true);
@@ -3109,7 +3248,10 @@ describe("RestoreOrchestrator", () => {
         launchHarness,
       };
       const tmux = mockTmux();
-      const orch = createOrchestrator({ tmux });
+      const orch = createOrchestrator({
+        tmux,
+        listProcesses: nativeLineage("claude-code", "resume-token-guard03"),
+      });
       const result = await orch.restore(snap.id, { adapters: { "claude-code": mockAdapter } });
 
       expect(result.ok).toBe(true);
@@ -3120,12 +3262,16 @@ describe("RestoreOrchestrator", () => {
     });
   });
 
-  function createOrchestrator2(tmux: TmuxAdapter, claude: ClaudeResumeAdapter) {
+  function createOrchestrator2(
+    tmux: TmuxAdapter,
+    claude: ClaudeResumeAdapter,
+    listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>,
+  ) {
     const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
     return new RestoreOrchestrator({
       db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
       checkpointStore, nodeLauncher, tmuxAdapter: tmux,
-      claudeResume: claude, codexResume: mockCodexResume(),
+      claudeResume: claude, codexResume: mockCodexResume(), listProcesses,
     });
   }
 

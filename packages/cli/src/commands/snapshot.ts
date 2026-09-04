@@ -17,12 +17,17 @@ export function snapshotCommand(depsOverride?: StatusDeps): Command {
   // rig snapshot <rigId> — default action creates a snapshot
   cmd
     .argument("<rigId>", "Rig ID to snapshot")
-    .action(async (rigId: string) => {
+    .option("--intended-seats <ids>", "Comma-separated intended topology roster stored with the snapshot")
+    .action(async (rigId: string, opts: { intendedSeats?: string }) => {
       const deps = getDeps();
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
 
-      const res = await client.post<{ id: string }>(`/api/rigs/${encodeURIComponent(rigId)}/snapshots`);
+      const intendedSeats = opts.intendedSeats?.split(",").map((seat) => seat.trim()).filter(Boolean);
+      const res = await client.post<{ id: string }>(
+        `/api/rigs/${encodeURIComponent(rigId)}/snapshots`,
+        intendedSeats ? { intendedSeats } : undefined,
+      );
       if (res.status === 404) {
         console.error(`Rig '${rigId}' not found`);
         process.exitCode = 1;

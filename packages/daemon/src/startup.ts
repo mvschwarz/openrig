@@ -59,7 +59,7 @@ import { SeatActivityService } from "./domain/seat-activity-service.js";
 import { readClaudeSelfReportEvidence } from "./adapters/claude-code-adapter.js";
 import { SeatStructuralActivityService } from "./domain/seat-structural-activity-service.js";
 import { deriveSelfHostIdSource, SeatIdentityReconciler, reconcileSelfHostIdentity } from "./domain/seat-identity-reconciler.js";
-import { SelfHostIdentityStore } from "./domain/seat-identity-store.js";
+import { SeatIdentityStore, SelfHostIdentityStore } from "./domain/seat-identity-store.js";
 import { DaemonLifecycleStore } from "./domain/daemon-lifecycle-store.js";
 import { randomUUID } from "node:crypto";
 import { setSelfHostId, setSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
@@ -985,6 +985,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { SeatAttentionReconciler } = await import("./domain/seat-attention-reconciler.js");
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry, eventBus, agentActivityStore, db, tmux: tmuxAdapter,
+    reconcileRestoreOutcome: (rigId, nodeId) => restoreOrchestrator.reconcileNodeRuntimeTruth(rigId, nodeId),
     sendVerify: async (session, text, opts) => {
       const transport = deps.sessionTransport;
       if (!transport) return { ok: false, outcome: "failed" };
@@ -1979,13 +1980,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     {
       const { ModelDivergenceMonitor } = await import("./domain/model-divergence/model-divergence-monitor.js");
       const { readClaudeEffectiveModel, readCodexEffectiveModel } = await import("./domain/model-divergence/effective-model-readers.js");
-      const { paneClaudeSessionIdArgument, LiveClaudeRecordSelector, resolveLiveCodexThreadId } = await import("./domain/model-divergence/current-generation-record.js");
-      const liveClaudeRecordSelector = new LiveClaudeRecordSelector();
+      const { resolveIdentityVerifiedClaudeRecord, resolveLiveCodexThreadId } = await import("./domain/model-divergence/current-generation-record.js");
       const { defaultListProcesses } = await import("./domain/resume-metadata-refresher.js");
       const { readCodexThreadIdFromCandidateHomes, defaultResolveHomeDirByPid } = await import("./domain/codex-thread-id.js");
       const nodeOs = await import("node:os");
-      const nodePathMod = await import("node:path");
       const nodeFs = await import("node:fs");
+      const seatIdentityStore = new SeatIdentityStore(db);
       // OPR.0.5.3.10 — ONE shared census + ONE PID-home resolver for the whole
       // divergence surface: no more `ps -Ao` per seat per poll, no more `ps eww`
       // per pid (default-home-first + bounded PID cache).
@@ -2017,11 +2017,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             .filter((row): row is typeof row & { sessionName: string } => row.sessionName !== null)
             .map((row) => ({ ...row, generation: sessionRegistry.currentOccupantGenerationForSession(row.sessionName) }));
         },
-        // D-a — the CURRENT GENERATION's record via the live pane process, never a name/token
-        // lookup alone: on the live specimen (dev.planner) the name-keyed sidecar AND the newest
-        // registry row were stale TOGETHER while the pane ran a different session — the old wiring
-        // read the old generation's transcript and MASKED a real divergence. The stored records are
-        // now only corroboration; the pane process is the join. Every no-answer is a named reason.
+        // D-a / OPR.0.5.9.13 — the CURRENT GENERATION's record through the canonical binding and
+        // verified pane identity, never a name, registry token, or transcript recency lookup. A
+        // retained predecessor may keep writing under the canonical launch-time name forever.
+        // Every missing or ambiguous identity join is an explicit no-answer.
         readEffectiveModel: async (seat, cycle) => {
           // OPR.0.5.3.10 mini-req 1 — the poll-scoped census (one ps per pass) when the
           // monitor threads it; the shared coalescing census otherwise.
@@ -2035,33 +2034,24 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             return model ? { ok: true as const, model } : { ok: false as const, reason: `no model signal in the bounded read of ${rollout}` };
           }
           if (seat.runtime === "claude-code") {
-            // D-a — RECORD-LIVENESS selection: no single pointer (sidecar, registry row, pane
-            // argument) is generation-true; the transcript being WRITTEN is. Gather all candidate
-            // ids, anchor paths beside the sidecar's project dir, pick the freshest-mtime record.
-            const usage = contextUsageStore.readAndNormalize(seat.sessionName);
-            const projectDir = usage.transcriptPath ? nodePathMod.dirname(usage.transcriptPath) : null;
-            const pathFor = (id: string | null | undefined): string | null =>
-              id && projectDir ? nodePathMod.join(projectDir, `${id}.jsonl`) : null;
-            const tokenRow = db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? AND session_name = ? ORDER BY id DESC LIMIT 1")
-              .get(seat.nodeId, seat.sessionName) as { resume_token: string | null } | undefined;
-            const paneArg = await paneClaudeSessionIdArgument(seat.sessionName, genDeps);
-            const selection = liveClaudeRecordSelector.select(
-              `${seat.nodeId}:${seat.generation ?? seat.sessionName}`,
-              [
-                // every path variant rides per id — a dead sidecar path must not mask a readable
-                // derived one (r2 round-4 adjacent pin)
-                { source: "sidecar", id: usage.sessionId ?? "", path: usage.transcriptPath ?? null },
-                { source: "sidecar", id: usage.sessionId ?? "", path: pathFor(usage.sessionId) },
-                { source: "registry", id: tokenRow?.resume_token ?? "", path: pathFor(tokenRow?.resume_token) },
-                { source: "pane-argument", id: paneArg.ok ? paneArg.id : "", path: pathFor(paneArg.ok ? paneArg.id : null) },
-              ],
-              (path) => { try { const st = nodeFs.statSync(path); return { mtimeMs: st.mtimeMs, size: st.size }; } catch { return null; } },
-            );
+            const tenure = sessionRegistry.currentOccupantTenure(seat.nodeId);
+            const sidecar = contextUsageStore.readSidecar(seat.sessionName);
+            const binding = sessionRegistry.getBindingForNode(seat.nodeId);
+            const selection = await resolveIdentityVerifiedClaudeRecord({
+              sessionName: seat.sessionName,
+              generation: seat.generation,
+              occupantBootAt: tenure?.bootAt ?? null,
+              binding: binding ? { tmuxSession: binding.tmuxSession, tmuxPane: binding.tmuxPane } : null,
+              identity: seatIdentityStore.getForNode(seat.nodeId),
+              sidecar: sidecar.ok ? sidecar.data : null,
+            }, genDeps, (path) => {
+              try { return nodeFs.statSync(path).isFile(); } catch { return false; }
+            });
             if (!selection.ok) return { ok: false as const, reason: selection.reason };
             const model = readClaudeEffectiveModel(selection.path);
             return model
               ? { ok: true as const, model }
-              : { ok: false as const, reason: `no assistant turn yet in the live record ${selection.path} (selected by liveness from ${selection.source})` };
+              : { ok: false as const, reason: `no assistant turn yet in the current occupant record ${selection.path} (selected from ${selection.source})` };
           }
           return { ok: false as const, reason: `runtime ${seat.runtime ?? "unknown"} has no effective-model reader yet` };
         },

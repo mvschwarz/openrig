@@ -48,6 +48,41 @@ describe("Snapshot routes", () => {
     expect(body.rigId).toBe(rig.id);
   });
 
+  it("POST snapshot resolves an explicit intended-seat roster into durable node ids", async () => {
+    const rig = rigRepo.createRig("r99");
+    const lead = rigRepo.addNode(rig.id, "dev.lead", { role: "lead" });
+    rigRepo.addNode(rig.id, "dev.historical", { role: "worker" });
+
+    const res = await app.request(`/api/rigs/${rig.id}/snapshots`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "manual", intendedSeats: ["dev.lead"] }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(201);
+    expect(body.data.topologyRoster).toEqual({
+      version: 1,
+      source: "operator_explicit",
+      intendedNodeIds: [lead.id],
+    });
+  });
+
+  it("POST snapshot rejects a malformed or empty explicit intended-seat roster", async () => {
+    const rig = rigRepo.createRig("r99");
+    rigRepo.addNode(rig.id, "dev.lead", { role: "lead" });
+
+    for (const intendedSeats of [[], ["dev.lead", 42], [" "], "dev.lead", ["dev.lead", "dev.lead"]]) {
+      const res = await app.request(`/api/rigs/${rig.id}/snapshots`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "manual", intendedSeats }),
+      });
+      expect(res.status).toBe(400);
+    }
+    expect(snapshotRepo.listSnapshots(rig.id)).toHaveLength(0);
+  });
+
   it("GET /api/rigs/:rigId/snapshots -> list of snapshots", async () => {
     const rig = rigRepo.createRig("r99");
     snapshotCapture.captureSnapshot(rig.id, "manual");
@@ -174,6 +209,31 @@ describe("Restore routes", () => {
     expect(startedEvent?.seq).toBe(body.attemptId);
   });
 
+  it("GET restore status derives the completed attempt receipt from append-only events", async () => {
+    const rig = rigRepo.createRig("r99");
+    rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    const started = await app.request(`/api/rigs/${rig.id}/restore/${snap.id}`, { method: "POST" });
+    const { attemptId } = await started.json() as { attemptId: number };
+
+    let status: Response | undefined;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      status = await app.request(`/api/rigs/${rig.id}/restore/status/${attemptId}`);
+      if (status.status === 200) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    expect(status?.status).toBe(200);
+    const body = await status!.json();
+    expect(body).toMatchObject({
+      ok: true,
+      attemptId,
+      snapshotSelection: { snapshotId: snap.id, mode: "explicit" },
+      originalResult: { snapshotId: snap.id },
+    });
+    expect(body.currentIntendedSetVerdict).toBeDefined();
+  });
+
   it("POST restore returns 409 not_attempted when pre-restore validation blocks", async () => {
     const rig = rigRepo.createRig("r99");
     const fixtureNode = rigRepo.addNode(rig.id, "worker", { role: "worker" });
@@ -215,6 +275,22 @@ describe("Restore routes", () => {
       path: missingPath,
     });
     expect(body.remediation[0]).toContain("Restore the missing startup file");
+  });
+
+  it("POST restore rejects an explicitly selected unusable snapshot before starting", async () => {
+    const rig = rigRepo.createRig("r99");
+    rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const snap = snapshotCapture.captureSnapshot(rig.id, "manual");
+    const data = JSON.parse(JSON.stringify(snap.data));
+    delete data.edges;
+    db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snap.id);
+    const beforeEvents = db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number };
+
+    const res = await app.request(`/api/rigs/${rig.id}/restore/${snap.id}`, { method: "POST" });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "snapshot_unusable" });
+    expect((db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n).toBe(beforeEvents.n);
   });
 
   it("POST nonexistent snapshot -> 404", async () => {

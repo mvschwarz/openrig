@@ -143,6 +143,15 @@ describe("Rig lifecycle routes", () => {
       },
     });
     expect(expanded.ok).toBe(true);
+    const materializedNode = setup.rigRepo.getRig(rig.id)?.nodes.find((candidate) => candidate.logicalId === "infra.server");
+    expect(materializedNode).toBeDefined();
+    const materializedRoster = db.prepare(
+      "SELECT payload FROM events WHERE rig_id = ? AND type = 'topology.roster_recorded' ORDER BY seq DESC LIMIT 1",
+    ).get(rig.id) as { payload: string };
+    expect(JSON.parse(materializedRoster.payload)).toMatchObject({
+      intendedNodeIds: [materializedNode!.id],
+      source: "materialized_topology",
+    });
 
     const res = await setup.app.request(`/api/rigs/${rig.id}/nodes/infra.server`, {
       method: "DELETE",
@@ -158,6 +167,13 @@ describe("Rig lifecycle routes", () => {
 
     const events = db.prepare("SELECT type FROM events WHERE type = 'node.removed'").all() as Array<{ type: string }>;
     expect(events).toHaveLength(1);
+    const roster = db.prepare(
+      "SELECT payload FROM events WHERE rig_id = ? AND type = 'topology.roster_recorded' ORDER BY seq DESC LIMIT 1",
+    ).get(rig.id) as { payload: string };
+    expect(JSON.parse(roster.payload)).toMatchObject({
+      intendedNodeIds: [],
+      source: "materialized_topology",
+    });
   });
 
   it("DELETE /api/rigs/:rigId/nodes/:nodeRef refuses removal while active qitems target the session", async () => {

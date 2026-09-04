@@ -4,7 +4,7 @@ import { CmuxAdapter } from "../src/adapters/cmux.js";
 import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
-import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp, mockTmuxAdapter } from "./helpers/test-app.js";
 
 function unavailableCmux() {
   const factory: CmuxTransportFactory = async () => {
@@ -102,6 +102,91 @@ describe("Session routes", () => {
     const body = await res.json();
     expect(body).toHaveLength(1);
     expect(body[0].sessionName).toBe("r01-dev1-impl");
+  });
+
+  it("POST clear-attention re-scopes a legacy attempt-zero reconciliation to the real restore attempt", async () => {
+    const tmux = {
+      ...mockTmuxAdapter(),
+      hasSession: vi.fn(async () => true),
+      listPanes: vi.fn(async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }]),
+      getPanePid: vi.fn(async () => 1234),
+      getPaneCommand: vi.fn(async () => "claude"),
+      capturePaneContent: vi.fn(async () => "Claude Code v2.1.89\n ❯ accept edits on"),
+    } as unknown as TmuxAdapter;
+    const { app, rigRepo, sessionRegistry, eventBus } = createTestApp(db, {
+      tmux,
+      listProcesses: async () => [
+        { pid: 1234, ppid: 1, command: "zsh" },
+        { pid: 1235, ppid: 1234, command: "claude.exe --resume tok-abc-123" },
+      ],
+    });
+    const rig = rigRepo.createRig("r90");
+    const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+    const sessionName = "r90-worker";
+    sessionRegistry.updateBinding(node.id, { tmuxSession: sessionName });
+    const session = sessionRegistry.registerSession(node.id, sessionName);
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    db.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = ? WHERE id = ?")
+      .run("tok-abc-123", session.id);
+    const started = eventBus.emit({
+      type: "restore.started",
+      rigId: rig.id,
+      snapshotId: "snap-1",
+      intendedRoster: [{ nodeId: node.id, logicalId: "worker" }],
+    });
+    eventBus.emit({
+      type: "restore.completed",
+      rigId: rig.id,
+      snapshotId: "snap-1",
+      result: {
+        snapshotId: "snap-1",
+        preRestoreSnapshotId: null,
+        rigResult: "partially_restored",
+        nodes: [{ nodeId: node.id, logicalId: "worker", status: "attention_required" }],
+        warnings: [],
+      },
+    });
+    eventBus.emit({
+      type: "restore.outcome_reconciled",
+      rigId: rig.id,
+      nodeId: node.id,
+      attemptId: 0,
+      from: "attention_required",
+      to: "operator_recovered",
+      evidence: { source: "clear_attention_evidence", kind: "fresh_activity", runtimeCwdVerified: false },
+    });
+
+    const cleared = await app.request(`/api/sessions/${encodeURIComponent(sessionName)}/clear-attention`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toMatchObject({
+      ok: true,
+      clearedBy: "evidence",
+      clearedClasses: ["restore_outcome"],
+      derivedEvidence: {
+        source: "restore_runtime_truth",
+        attemptId: started.seq,
+        resumeTokenUsed: true,
+      },
+    });
+
+    const status = await app.request(`/api/rigs/${rig.id}/restore/status/${started.seq}`);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({
+      ok: true,
+      attemptId: started.seq,
+      currentIntendedSetVerdict: "fully_restored",
+      reconciliations: [{ nodeId: node.id, to: "operator_recovered" }],
+    });
+    const reconciliations = db.prepare(
+      "SELECT json_extract(payload, '$.attemptId') AS attemptId FROM events WHERE type = 'restore.outcome_reconciled' ORDER BY seq",
+    ).all() as Array<{ attemptId: number }>;
+    expect(reconciliations.map((row) => row.attemptId)).toEqual([0, started.seq]);
   });
 
   it("POST .../launch -> 201 + sessionName + session + binding, binding.tmuxSession === sessionName", async () => {
@@ -298,6 +383,47 @@ describe("Session routes", () => {
     const payload = JSON.parse(events[0]!.payload);
     const eventIds = payload.result.nodes.map((n: { logicalId: string }) => n.logicalId).sort();
     expect(eventIds).toEqual(["dev.driver", "dev.guard"]);
+  });
+
+  it("POST .../nodes/launch-subset plan discloses non-target effects before mutation", async () => {
+    const { app, rigRepo } = createTestApp(db);
+    const podRepo = new PodRepository(db);
+    const rig = rigRepo.createRig("plan-rig");
+    const pod = podRepo.createPod(rig.id, "dev", "Development");
+    const driver = rigRepo.addNode(rig.id, "dev.driver", { runtime: "claude-code", podId: pod.id });
+    const guard = rigRepo.addNode(rig.id, "dev.guard", { runtime: "codex", podId: pod.id });
+    const { SnapshotRepository } = await import("../src/domain/snapshot-repository.js");
+    new SnapshotRepository(db).createSnapshot(rig.id, "manual", {
+      rig: { id: rig.id, name: "plan-rig" },
+      nodes: [driver, guard],
+      sessions: [],
+      edges: [],
+      checkpoints: {},
+    } as any);
+    const before = {
+      sessions: db.prepare("SELECT COUNT(*) AS n FROM sessions").get(),
+      events: db.prepare("SELECT COUNT(*) AS n FROM events").get(),
+    };
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/launch-subset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seats: ["dev.driver"], holdReason: "operator hold", plan: true }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      planOnly: true,
+      targetNodes: [{ logicalId: "dev.driver" }],
+      nonTargetEffects: {
+        mode: "detach_and_hold",
+        affected: [{ logicalId: "dev.guard", reason: "operator hold" }],
+      },
+    });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual(before.sessions);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(before.events);
   });
 
   it("POST .../nodes/launch-subset does NOT report an awaiting-decision restore as a successful launch (FR-7)", async () => {

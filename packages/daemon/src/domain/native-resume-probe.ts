@@ -249,6 +249,22 @@ function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
 // operator choose; later reconciliation upgrades to `operator_recovered` only
 // when the operator reaches a usable state.
 function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
+  // Current Claude chooser (observed 2026-09-04) asks which fidelity to
+  // resume with. Require the heading, both option rows, and a selection cursor;
+  // prose containing the labels is intentionally insufficient.
+  const recentLines = paneContent.split("\n").slice(-30);
+  const currentChooserHeading = recentLines.some((line) => line.trim() === "How would you like to resume?");
+  const currentChooserOptions = recentLines.filter((line) =>
+    /^\s*(?:[❯›]\s+)?(?:Resume from summary|Resume full session as-is)\s*$/.test(line)
+  );
+  const currentChooserSelection = currentChooserOptions.some((line) => /^\s*[❯›]\s+/.test(line));
+  if (
+    currentChooserHeading
+    && currentChooserSelection
+    && currentChooserOptions.some((line) => line.includes("Resume from summary"))
+    && currentChooserOptions.some((line) => line.includes("Resume full session as-is"))
+  ) return true;
+
   // Stable substring is the explicit "Choose ... conversation" verb plus the
   // numbered/arrow option marker that Claude prints. Both must be present so
   // we don't false-positive on similar TUI strings.
@@ -259,7 +275,6 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   if (!hasChooseVerb) return false;
 
   // Look for the numbered/arrow option marker in recent lines.
-  const recentLines = paneContent.split("\n").slice(-30);
   const numberedOption = recentLines.some((line) => /^\s*(?:›\s*)?\d+\.\s+\S/.test(line));
   return numberedOption;
 }

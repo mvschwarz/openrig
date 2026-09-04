@@ -53,6 +53,19 @@ describe("Claude Status Line Collector Script", () => {
     expect(content.sampled_at).toBeTruthy();
   });
 
+  it("stamps the managed occupant generation inherited by the collector process", () => {
+    const outputPath = join(tmpDir, "context", "generation.json");
+    const result = spawnSync("node", [collectorPath, outputPath], {
+      encoding: "utf-8",
+      input: VALID_STATUS_LINE,
+      env: { ...process.env, OPENRIG_OCCUPANT_GENERATION: "generation-current" },
+    });
+
+    expect(result.status).toBe(0);
+    const content = JSON.parse(readFileSync(outputPath, "utf-8"));
+    expect(content.occupant_generation).toBe("generation-current");
+  });
+
   // T2: Atomic write (no .tmp left behind on success)
   it("writes atomically — no .tmp file left behind", () => {
     const outputPath = join(tmpDir, "context", "atomic.json");

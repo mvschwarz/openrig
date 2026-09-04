@@ -421,6 +421,7 @@ export class RigLifecycleService {
     }
 
     const persisted: Array<{ type: "session.detached" | "node.removed"; seq: number; createdAt: string }> = [];
+    let rosterEvent: ReturnType<EventBus["persistWithinTransaction"]> | null = null;
     const tx = this.db.transaction(() => {
       if (node.latest_session_name && !preserveDetachedClaimedSession) {
         const detached = this.eventBus.persistWithinTransaction({
@@ -438,6 +439,12 @@ export class RigLifecycleService {
       });
       persisted.push({ type: "node.removed", seq: removed.seq, createdAt: removed.createdAt });
       this.rigRepo.deleteNode(node.node_id);
+      rosterEvent = this.eventBus.persistWithinTransaction({
+        type: "topology.roster_recorded",
+        rigId,
+        intendedNodeIds: this.rigRepo.getRig(rigId)?.nodes.map((candidate) => candidate.id) ?? [],
+        source: "materialized_topology",
+      });
     });
     tx();
 
@@ -462,6 +469,7 @@ export class RigLifecycleService {
         });
       }
     }
+    if (rosterEvent) this.eventBus.notifySubscribers(rosterEvent);
 
     return {
       ok: true,

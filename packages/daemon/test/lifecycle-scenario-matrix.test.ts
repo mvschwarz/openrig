@@ -329,6 +329,7 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
         restorePolicy: "resume_if_possible",
       }];
       data.activeSessionIdByNode = { [node.id]: "sess-1" };
+      data.activeOccupantsByNode = { [node.id]: { kind: "resolved", sessionId: "sess-1" } };
       db.prepare("UPDATE snapshots SET data = ? WHERE id = ?")
         .run(JSON.stringify(data), snap.id);
 
@@ -471,6 +472,7 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
           restorePolicy: "resume_if_possible",
         }];
         data.activeSessionIdByNode = { [node.id]: "sess-codex-1" };
+        data.activeOccupantsByNode = { [node.id]: { kind: "resolved", sessionId: "sess-codex-1" } };
         db.prepare("UPDATE snapshots SET data = ? WHERE id = ?")
           .run(JSON.stringify(data), snap.id);
 
@@ -641,6 +643,10 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
         db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
         checkpointStore, nodeLauncher, tmuxAdapter: tmux,
         claudeResume: claudeStub, codexResume: codexStub,
+        listProcesses: async () => [
+          { pid: 1234, ppid: 1, command: "zsh" },
+          { pid: 5678, ppid: 1234, command: "claude --resume t1" },
+        ],
       });
 
       const rig = rigRepo.createRig("r77");
@@ -665,6 +671,11 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
         [claudeOk.id]: "s-ok",
         [claudeAtt.id]: "s-att",
         [codexFail.id]: "s-fail",
+      };
+      data.activeOccupantsByNode = {
+        [claudeOk.id]: { kind: "resolved", sessionId: "s-ok" },
+        [claudeAtt.id]: { kind: "resolved", sessionId: "s-att" },
+        [codexFail.id]: { kind: "resolved", sessionId: "s-fail" },
       };
       db.prepare("UPDATE snapshots SET data = ? WHERE id = ?")
         .run(JSON.stringify(data), snap.id);
@@ -732,6 +743,10 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
           resumeType: "claude_name", resumeToken: "tb", restorePolicy: "resume_if_possible" },
       ];
       data.activeSessionIdByNode = { [a.id]: "s-a", [b.id]: "s-b" };
+      data.activeOccupantsByNode = {
+        [a.id]: { kind: "resolved", sessionId: "s-a" },
+        [b.id]: { kind: "resolved", sessionId: "s-b" },
+      };
       db.prepare("UPDATE snapshots SET data = ? WHERE id = ?")
         .run(JSON.stringify(data), snap.id);
 
@@ -771,12 +786,22 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
         paneCommand: opts.paneCommand ?? (opts.runtime === "codex" ? "codex" : "claude"),
         paneContent: opts.paneContent ?? "",
       });
+      tmux.listPanes = vi.fn(async () => [{ id: "%1", index: 0, cwd: "/", width: 80, height: 24, active: true }]);
+      tmux.getPanePid = vi.fn(async () => 1234);
       const nodeLauncher = new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux });
       const orchestrator = new RestoreOrchestrator({
         db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
         checkpointStore, nodeLauncher, tmuxAdapter: tmux,
         claudeResume: mockClaudeResumeReturning({ ok: true }),
         codexResume: mockCodexResumeReturning({ ok: true }),
+        listProcesses: async () => [
+          { pid: 1234, ppid: 1, command: "zsh" },
+          {
+            pid: 5678,
+            ppid: 1234,
+            command: opts.runtime === "codex" ? "codex resume tok-abc" : "claude --resume tok-abc",
+          },
+        ],
       });
 
       const rig = rigRepo.createRig(`r${Math.floor(Math.random() * 90) + 10}`);
@@ -889,14 +914,14 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
       ctx.db.close();
     });
 
-    it("refuses upgrade with code=fg_process_not_runtime when pane is in shell", async () => {
+    it("refuses upgrade with code=process_lineage_mismatch when pane is in shell", async () => {
       const ctx = setupForReconcile({
         runtime: "claude-code", restoreOutcome: "failed",
         paneCommand: "zsh", paneContent: "$ ",
       });
       const result = await ctx.orchestrator.reconcileNodeRuntimeTruth(ctx.rig.id, ctx.nodeId);
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.code).toBe("fg_process_not_runtime");
+      if (!result.ok) expect(result.code).toBe("process_lineage_mismatch");
       ctx.db.close();
     });
 

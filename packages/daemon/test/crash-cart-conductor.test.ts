@@ -133,6 +133,31 @@ describe("createDefaultRestoreRig — composes findLatestRestoreUsable + restore
     expect(r.receiptRef).toBe(99);
   });
 
+  it("threads automatic snapshot-selection evidence into the restore attempt", async () => {
+    const selection = {
+      snapshotId: "snap-ranked",
+      kind: "auto-periodic",
+      createdAt: "2026-09-04 18:00:00",
+      ageMs: 60_000,
+      mode: "automatic" as const,
+      rationale: "automatic crash-insurance ranking prefers auto-pre-down/auto-periodic, then newest usable",
+      newerUsableAlternative: null,
+    };
+    let observed: typeof selection | undefined;
+    const restoreRig = createDefaultRestoreRig({
+      findLatestRestoreUsable: () => ({ id: "fallback" }),
+      selectRestoreUsable: () => ({ ok: true, snapshot: { id: "snap-ranked" }, selection }),
+      restore: async (_snapshotId, opts) => {
+        observed = opts?.snapshotSelection;
+        return { ok: true, result: { rigResult: "fully_restored" } };
+      },
+    });
+
+    await restoreRig("alpha");
+
+    expect(observed).toEqual(selection);
+  });
+
   it("R3: no usable snapshot → not_attempted CARRIES a reason + remediation (no blank gap)", async () => {
     const restoreRig = createDefaultRestoreRig({
       findLatestRestoreUsable: () => null,

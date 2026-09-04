@@ -77,6 +77,35 @@ describe("rig launch --seats", () => {
     expect(logs.some((l) => l.includes("dev.guard"))).toBe(true);
   });
 
+  it("passes --plan through and renders non-target effects without claiming launch", async () => {
+    const deps = makeDeps({
+      "launch-subset": {
+        status: 200,
+        data: {
+          ok: true,
+          planOnly: true,
+          snapshotSelection: { snapshotId: "snap-1", mode: "automatic" },
+          nonTargetEffects: {
+            mode: "detach_and_hold",
+            reason: "operator hold",
+            affected: [{ logicalId: "dev.guard", reason: "operator hold" }],
+          },
+        },
+      },
+    });
+
+    await launchCommand(deps).parseAsync([
+      "node", "rig", "rig-1", "--seats", "dev.driver", "--hold-reason", "operator hold", "--plan",
+    ]);
+
+    expect(deps._client.post).toHaveBeenCalledWith(
+      "/api/rigs/rig-1/nodes/launch-subset",
+      { seats: ["dev.driver"], holdReason: "operator hold", plan: true },
+    );
+    expect(logs.join("\n")).toContain("Plan only; no changes made.");
+    expect(logs.join("\n")).toContain("dev.guard: operator hold");
+  });
+
   it("reports held and failedTargets honestly in human output", async () => {
     const deps = makeDeps({
       "launch-subset": {
@@ -173,6 +202,18 @@ describe("rig launch --seats", () => {
     expect(logs.some((l) => l.includes("Launched"))).toBe(false);
   });
 
+  it("refuses a single-target hold reason because single launch leaves non-targets unchanged", async () => {
+    const deps = makeDeps({});
+
+    await launchCommand(deps).parseAsync([
+      "node", "rig", "rig-1", "dev.driver", "--hold-reason", "hold everyone else",
+    ]);
+
+    expect(deps._client.post).not.toHaveBeenCalled();
+    expect(errors.join("\n")).toContain("single-seat launch never changes non-targets");
+    expect(process.exitCode).toBe(1);
+  });
+
   // OPR.0.4.3.28 correction — the liveness_probe_unknown warning is a non-blocking
   // proceed-with-warning: it prints on human output and does NOT set a non-zero exit.
   it("prints liveness warnings in --seats human output with exit 0 (proceed-with-warning)", async () => {
@@ -207,6 +248,15 @@ describe("rig launch --seats", () => {
           launched: [{ nodeId: "n1", logicalId: "dev.driver", status: "fresh" }],
           held: [],
           alreadyRunning: [],
+          snapshotSelection: {
+            snapshotId: "snap-manual",
+            kind: "manual",
+            createdAt: "2026-09-04 00:00:00",
+            ageMs: 5000,
+            mode: "explicit",
+            rationale: "operator selected this exact restore-usable snapshot",
+            newerUsableAlternative: null,
+          },
           warnings: ["liveness_probe_unknown: launched 'dev.driver' despite a failed tmux liveness probe — verify no live seat was squatted"],
         },
       },
@@ -214,6 +264,8 @@ describe("rig launch --seats", () => {
     const cmd = launchCommand(deps);
     await cmd.parseAsync(["node", "rig", "rig-1", "dev.driver"]);
     expect(logs.some((l) => l.includes("Launched node") && l.includes("dev.driver"))).toBe(true);
+    expect(logs.some((l) => l.includes("snap-manual") && l.includes("manual") && l.includes("explicit"))).toBe(true);
+    expect(logs.some((l) => l.includes("operator selected this exact restore-usable snapshot"))).toBe(true);
     expect(errors.some((l) => l.includes("Warning") && l.includes("liveness_probe_unknown"))).toBe(true);
     expect(process.exitCode).toBeUndefined();
   });

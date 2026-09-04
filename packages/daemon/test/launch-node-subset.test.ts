@@ -16,7 +16,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 
 function makeTmux(overrides?: Partial<Record<string, (...args: unknown[]) => unknown>>) {
   return {
-    createSession: vi.fn(async () => true),
+    createSession: vi.fn(async () => ({ ok: true as const })),
     hasSession: vi.fn(async () => false),
     sendKeys: vi.fn(async () => {}),
     capturePaneContent: vi.fn(async () => ""),
@@ -73,8 +73,9 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       id: `sess-${i}`,
       sessionName: `seat-${i}@test-rig`,
       status: "running",
-      resumeType: "claude-native",
-      resumeToken: `token-${i}`,
+      resumeType: "none",
+      resumeToken: null,
+      restorePolicy: "relaunch_fresh",
     }));
     const data = {
       rig: { id: rigId, name: "test-rig" },
@@ -127,6 +128,135 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     expect(result.held).toHaveLength(1);
     expect(result.held![0].logicalId).toBe("dev.guard");
     expect(result.held![0].reason).toBe("excluded_from_subset");
+    expect(result.nonTargetEffects).toMatchObject({ mode: "detach_and_hold", reason: "excluded_from_subset" });
+  });
+
+  it("single-node launch leaves non-target rows, bindings, startup state, and events unchanged", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    seedSnapshot(rigId, nodeIds);
+    const nonTarget = sessionRegistry.registerSession(nodeIds[1]!, "dev-guard@test-rig");
+    sessionRegistry.updateStatus(nonTarget.id, "running");
+    sessionRegistry.updateBinding(nodeIds[1]!, { tmuxSession: "dev-guard@test-rig", tmuxPane: "%9" });
+    db.prepare("UPDATE sessions SET startup_status = ? WHERE id = ?").run("attention_required", nonTarget.id);
+    const before = {
+      session: db.prepare("SELECT * FROM sessions WHERE id = ?").get(nonTarget.id),
+      binding: db.prepare("SELECT * FROM bindings WHERE node_id = ?").get(nodeIds[1]),
+      events: db.prepare("SELECT COUNT(*) AS n FROM events WHERE node_id = ?").get(nodeIds[1]) as { n: number },
+    };
+
+    const result = await orchestrator.launchSingleNode(rigId, "dev.driver");
+
+    expect(result.ok).toBe(true);
+    expect(result.launched).toEqual([
+      expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" }),
+    ]);
+    expect(result.nonTargetEffects).toEqual({ mode: "unchanged", reason: null, affected: [] });
+    expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(nonTarget.id)).toEqual(before.session);
+    expect(db.prepare("SELECT * FROM bindings WHERE node_id = ?").get(nodeIds[1])).toEqual(before.binding);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM events WHERE node_id = ?").get(nodeIds[1]) as { n: number }).n).toBe(before.events.n);
+  });
+
+  it("failed single-node launch also leaves non-target state unchanged", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    seedSnapshot(rigId, nodeIds);
+    const nonTarget = sessionRegistry.registerSession(nodeIds[1]!, "dev-guard@test-rig");
+    sessionRegistry.updateStatus(nonTarget.id, "running");
+    sessionRegistry.updateBinding(nodeIds[1]!, { tmuxSession: "dev-guard@test-rig", tmuxPane: "%9" });
+    db.prepare("UPDATE sessions SET startup_status = ? WHERE id = ?").run("attention_required", nonTarget.id);
+    const before = {
+      session: db.prepare("SELECT * FROM sessions WHERE id = ?").get(nonTarget.id),
+      binding: db.prepare("SELECT * FROM bindings WHERE node_id = ?").get(nodeIds[1]),
+      events: db.prepare("SELECT COUNT(*) AS n FROM events WHERE node_id = ?").get(nodeIds[1]) as { n: number },
+    };
+    tmux.createSession.mockResolvedValue({ ok: false, code: "tmux_error", message: "launch failed" } as never);
+
+    const result = await orchestrator.launchSingleNode(rigId, "dev.driver");
+
+    expect(result.ok).toBe(true);
+    expect(result.launched).toEqual([
+      expect.objectContaining({ logicalId: "dev.driver", status: "failed", error: "launch failed" }),
+    ]);
+    expect(result.nonTargetEffects).toEqual({ mode: "unchanged", reason: null, affected: [] });
+    expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(nonTarget.id)).toEqual(before.session);
+    expect(db.prepare("SELECT * FROM bindings WHERE node_id = ?").get(nodeIds[1])).toEqual(before.binding);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM events WHERE node_id = ?").get(nodeIds[1]) as { n: number }).n).toBe(before.events.n);
+  });
+
+  it("exact snapshot selection overrides automatic ranking before a narrow launch", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    const manualId = seedSnapshot(rigId, nodeIds);
+    db.prepare("UPDATE snapshots SET created_at = ? WHERE id = ?").run("2026-04-28 10:00:00", manualId);
+    const autoId = seedSnapshot(rigId, nodeIds);
+    db.prepare("UPDATE snapshots SET kind = ?, created_at = ? WHERE id = ?").run("auto-pre-down", "2026-04-27 10:00:00", autoId);
+
+    const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { snapshotId: manualId });
+
+    expect(result.ok).toBe(true);
+    expect(result.snapshotSelection).toMatchObject({ snapshotId: manualId, mode: "explicit", kind: "manual" });
+  });
+
+  it("rejects an exact snapshot from another rig before any launch mutation", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    seedSnapshot(rigId, nodeIds);
+    const otherRig = rigRepo.createRig("other-rig");
+    const otherNode = rigRepo.addNode(otherRig.id, "other.worker", { runtime: "codex" });
+    const otherSnapshot = snapshotRepo.createSnapshot(otherRig.id, "manual", {
+      rig: otherRig.rig,
+      nodes: [otherNode],
+      sessions: [],
+      edges: [],
+      checkpoints: {},
+    } as any);
+    const before = {
+      sessions: db.prepare("SELECT COUNT(*) AS n FROM sessions").get(),
+      events: db.prepare("SELECT COUNT(*) AS n FROM events").get(),
+    };
+
+    const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { snapshotId: otherSnapshot.id });
+
+    expect(result).toMatchObject({ ok: false, code: "snapshot_wrong_rig" });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual(before.sessions);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(before.events);
+  });
+
+  it("does not launch a current node excluded from the selected snapshot's intended roster", async () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    const snapshotId = seedSnapshot(rigId, nodeIds);
+    const snapshot = snapshotRepo.getSnapshot(snapshotId)!;
+    const data = JSON.parse(JSON.stringify(snapshot.data));
+    data.topologyRoster = { version: 1, source: "operator_explicit", intendedNodeIds: [nodeIds[0]] };
+    db.prepare("UPDATE snapshots SET data = ? WHERE id = ?").run(JSON.stringify(data), snapshotId);
+    const beforeEvents = db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number };
+
+    const result = await orchestrator.launchSingleNode(rigId, "dev.guard", { snapshotId });
+
+    expect(result).toMatchObject({ ok: false, code: "no_matching_nodes" });
+    expect(tmux.createSession).not.toHaveBeenCalled();
+    expect((db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n).toBe(beforeEvents.n);
+  });
+
+  it("plans multi-seat non-target effects without mutating sessions or events", () => {
+    const { rigId, nodeIds } = seedPodAwareRig();
+    seedSnapshot(rigId, nodeIds);
+    const before = {
+      sessions: db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number },
+      events: db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number },
+    };
+
+    const result = orchestrator.planNodeSubset(rigId, ["dev.driver"], { holdReason: "operator hold" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      planOnly: true,
+      snapshotSelection: { mode: "automatic" },
+      nonTargetEffects: {
+        mode: "detach_and_hold",
+        reason: "operator hold",
+        affected: [{ logicalId: "dev.guard", reason: "operator hold" }],
+      },
+    });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual(before.sessions);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(before.events);
   });
 
   it("emits restore.subset_completed for launched targets only", async () => {

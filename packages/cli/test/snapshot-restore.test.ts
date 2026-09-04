@@ -134,6 +134,11 @@ function createMockDaemon() {
         res.end(JSON.stringify({ error: "Rig rig-1 must be stopped before restore" }));
         return;
       }
+      if (snapshotId === "unusable") {
+        res.writeHead(409, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Snapshot unusable is not structurally restore-usable", code: "snapshot_unusable" }));
+        return;
+      }
       if (snapshotId === "blocked") {
         res.writeHead(409, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -258,6 +263,25 @@ describe("rig snapshot + restore", () => {
     // NS-T14: handoff includes restore instruction
     expect(output).toContain("To restore:");
     expect(output).toContain("rig restore snap-new-123 --rig rig-1");
+  });
+
+  it("snapshot create: sends an explicit intended-seat roster", async () => {
+    const post = vi.fn(async () => ({ status: 201, data: { id: "snap-explicit" } }));
+    const deps: StatusDeps = {
+      ...runningDeps(port),
+      clientFactory: () => ({ post } as unknown as DaemonClient),
+    };
+    const program = new Command();
+    program.addCommand(snapshotCommand(deps));
+
+    await captureLogs(() => program.parseAsync([
+      "node", "rig", "snapshot", "rig-1", "--intended-seats", "dev.lead,dev.qa",
+    ]));
+
+    expect(post).toHaveBeenCalledWith(
+      "/api/rigs/rig-1/snapshots",
+      { intendedSeats: ["dev.lead", "dev.qa"] },
+    );
   });
 
   // Test 2: snapshot create 404
@@ -395,6 +419,16 @@ describe("rig snapshot + restore", () => {
     program.addCommand(restoreCommand(runningDeps(port)));
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "running", "--rig", "rig-1"]));
     expect(logs.join("\n")).toMatch(/stopped before restore/i);
+  });
+
+  it("restore: unusable snapshot conflict does not prescribe stopping the rig", async () => {
+    const program = new Command();
+    program.addCommand(restoreCommand(runningDeps(port)));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "restore", "unusable", "--rig", "rig-1"]));
+    const output = logs.join("\n");
+    expect(output).toMatch(/not structurally restore-usable/i);
+    expect(output).toMatch(/choose a different snapshot/i);
+    expect(output).not.toMatch(/stop the rig/i);
   });
 
   // Test 8: snapshot with daemon stopped -> no HTTP
