@@ -104,7 +104,7 @@ describe("Session routes", () => {
     expect(body[0].sessionName).toBe("r01-dev1-impl");
   });
 
-  it("POST clear-attention reconciles the real restore attempt through strict native lineage", async () => {
+  it("POST clear-attention re-scopes a legacy attempt-zero reconciliation to the real restore attempt", async () => {
     const tmux = {
       ...mockTmuxAdapter(),
       hasSession: vi.fn(async () => true),
@@ -147,6 +147,15 @@ describe("Session routes", () => {
         warnings: [],
       },
     });
+    eventBus.emit({
+      type: "restore.outcome_reconciled",
+      rigId: rig.id,
+      nodeId: node.id,
+      attemptId: 0,
+      from: "attention_required",
+      to: "operator_recovered",
+      evidence: { source: "clear_attention_evidence", kind: "fresh_activity", runtimeCwdVerified: false },
+    });
 
     const cleared = await app.request(`/api/sessions/${encodeURIComponent(sessionName)}/clear-attention`, {
       method: "POST",
@@ -174,6 +183,10 @@ describe("Session routes", () => {
       currentIntendedSetVerdict: "fully_restored",
       reconciliations: [{ nodeId: node.id, to: "operator_recovered" }],
     });
+    const reconciliations = db.prepare(
+      "SELECT json_extract(payload, '$.attemptId') AS attemptId FROM events WHERE type = 'restore.outcome_reconciled' ORDER BY seq",
+    ).all() as Array<{ attemptId: number }>;
+    expect(reconciliations.map((row) => row.attemptId)).toEqual([0, started.seq]);
   });
 
   it("POST .../launch -> 201 + sessionName + session + binding, binding.tmuxSession === sessionName", async () => {

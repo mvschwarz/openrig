@@ -517,6 +517,10 @@ describe("SeatAttentionReconciler", () => {
     const events = db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all() as { payload: string }[];
     expect(events).toHaveLength(1);
     expect(JSON.parse(events[0]!.payload)).toMatchObject({ attemptId: 0, from: "attention_required" });
+
+    const repeated = await subsetReconciler.clearAttention("worker@r-subset-derived");
+    expect(repeated).toMatchObject({ ok: false, code: "not_in_attention" });
+    expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
   });
 
   it("OPR.0.4.0.16: clears derived-only class (startupStatus=ready + restoreOutcome=failed+running)", async () => {

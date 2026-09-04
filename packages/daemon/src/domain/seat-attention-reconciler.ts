@@ -566,16 +566,25 @@ export class SeatAttentionReconciler {
       "SELECT type, payload FROM events WHERE rig_id = ? AND type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled') ORDER BY seq DESC"
     ).all(session.rigId) as { type: string; payload: string }[];
 
+    let sawLegacyReconciliation = false;
     for (const row of rows) {
       try {
         if (row.type === "restore.outcome_reconciled") {
-          const ev = JSON.parse(row.payload) as { nodeId: string; to: "operator_recovered" };
+          const ev = JSON.parse(row.payload) as { nodeId: string; attemptId?: number; to: "operator_recovered" };
           if (ev.nodeId !== session.nodeId) continue;
+          // Before restore receipts, both whole and subset clears used the
+          // unscoped attemptId 0. It remains terminal for a subset, but cannot
+          // settle a whole restore whose exact attempt still needs proof.
+          if (ev.attemptId === 0) {
+            sawLegacyReconciliation = true;
+            continue;
+          }
           return null;
         }
         const ev = JSON.parse(row.payload) as { result: { nodes: Array<{ nodeId: string; status: string }> } };
         const n = ev.result.nodes.find((nd) => nd.nodeId === session.nodeId);
         if (!n) continue;
+        if (sawLegacyReconciliation && row.type === "restore.subset_completed") return null;
         // Mirror deriveNodeLifecycleState: attention_required regardless of
         // sessionStatus; failed only when sessionStatus=running.
         const source = row.type as DerivedAttentionOutcome["source"];
