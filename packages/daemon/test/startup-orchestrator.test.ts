@@ -897,6 +897,40 @@ describe("StartupOrchestrator", () => {
     expect(session!.startupStatus).toBe("attention_required");
     expect(session!.resumeType).toBe("codex_id");
     expect(session!.resumeToken).toBe("stale-token");
+    expect(session!.resumeProvenance).toBeNull();
+    expect(session!.resumeLastVerified).toBeNull();
+    expect(session!.resumeLastProbeStatus).toBeNull();
+  });
+
+  it.each([
+    "runner exited (code 1)",
+    "readiness timed out before the runtime became interactive",
+  ])("preserves attempted lineage without certifying attention outcome: %s", async (error) => {
+    const seed = seedSession();
+    const adapter = mockAdapter({
+      runtime: "pi",
+      launchHarness: vi.fn(async () => ({
+        ok: false as const,
+        error,
+        recovery: "attention_required" as const,
+      })),
+    });
+
+    const result = await createOrchestrator().startNode(makeInput(seed, {
+      adapter,
+      isRestore: true,
+      resumeToken: "attempted-pi-token",
+      resumeType: "pi_session_file",
+    }));
+
+    expect(result.ok).toBe(false);
+    expect(result.startupStatus).toBe("attention_required");
+    const session = sessionRegistry.getSessionsForRig(seed.rigId).find((s) => s.id === seed.sessionId)!;
+    expect(session.resumeType).toBe("pi_session_file");
+    expect(session.resumeToken).toBe("attempted-pi-token");
+    expect(session.resumeProvenance).toBeNull();
+    expect(session.resumeLastVerified).toBeNull();
+    expect(session.resumeLastProbeStatus).toBeNull();
   });
 
   // NS-T05: readiness retry loop

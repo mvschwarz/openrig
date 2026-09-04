@@ -94,6 +94,32 @@ describe("SessionRegistry", () => {
     expect(updated!.resumeToken).toBe("abc-123-def");
   });
 
+  it("recordResumeAttempt preserves unverified lineage without certifying it", () => {
+    const session = registry.registerSession("node-1", "r01-dev1-impl");
+
+    expect(registry.recordResumeAttempt(session.id, " claude_id ", " attempted-token ")).toBe(true);
+
+    const updated = registry.getSessionsForRig("rig-1").find((s) => s.id === session.id)!;
+    expect(updated.resumeType).toBe("claude_id");
+    expect(updated.resumeToken).toBe("attempted-token");
+    expect(updated.resumeProvenance).toBeNull();
+    expect(updated.resumeLastVerified).toBeNull();
+    expect(updated.resumeLastProbeStatus).toBeNull();
+  });
+
+  it("recordResumeAttempt does not overwrite stronger live evidence", () => {
+    const session = registry.registerSession("node-1", "r01-dev1-impl");
+    registry.updateResumeToken(session.id, "codex_id", "hook-token", "hook");
+
+    expect(registry.recordResumeAttempt(session.id, "codex_id", "attempted-token")).toBe(false);
+
+    const updated = registry.getSessionsForRig("rig-1").find((s) => s.id === session.id)!;
+    expect(updated.resumeToken).toBe("hook-token");
+    expect(updated.resumeProvenance).toBe("hook");
+    expect(updated.resumeLastVerified).not.toBeNull();
+    expect(updated.resumeLastProbeStatus).toBe("resumable");
+  });
+
   // OPR.0.4.0.22 — operator/attested provenance OUTRANKS hook + scrape.
   function provenanceOf(sessionId: string): string | null {
     const row = db.prepare("SELECT resume_provenance FROM sessions WHERE id = ?").get(sessionId) as { resume_provenance: string | null } | undefined;

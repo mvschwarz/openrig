@@ -351,6 +351,27 @@ export class SessionRegistry {
     return true;
   }
 
+  /** Preserve a resume target that was attempted but not verified.
+   *
+   * Attention outcomes include live chooser prompts, runner exits, and
+   * readiness timeouts, so reaching one cannot certify the token as resumable.
+   * Only fill an empty session row: a concurrent hook/operator write is
+   * stronger evidence and must win. */
+  recordResumeAttempt(sessionId: string, type: string, token: string): boolean {
+    const normalizedType = type.trim();
+    const normalizedToken = token.trim();
+    if (!normalizedType || !normalizedToken) return false;
+    const result = this.db
+      .prepare(
+        "UPDATE sessions SET resume_type = ?, resume_token = ?, resume_provenance = NULL, " +
+          "resume_last_verified = NULL, resume_last_probe_status = NULL " +
+          "WHERE id = ? AND (resume_token IS NULL OR trim(resume_token) = '') " +
+          "AND resume_provenance IS NULL AND resume_last_verified IS NULL AND resume_last_probe_status IS NULL",
+      )
+      .run(normalizedType, normalizedToken, sessionId);
+    return result.changes > 0;
+  }
+
   /** OPR.0.4.3.20 FR-6 — record a live resume-probe outcome WITHOUT clearing the
    *  token. On `resumable` it stamps the freshness marker (equal-value-refresh);
    *  on `not_resumable` / `inconclusive` it marks the PRESENT token stale so the

@@ -231,18 +231,18 @@ export class StartupOrchestrator {
           // status: "attention_required" + attentionEvidence (mirroring the
           // legacy mapping at :725-735).
           if (launchResult.recovery === "attention_required") {
-            // Attention proves this exact resume target reached a live prompt.
-            // Preserve it for later no-input reconciliation; retry_fresh has
-            // already cleared launchResumeToken and ordinary failures skip this.
+            // Preserve the attempted lineage for later no-input reconciliation,
+            // but do not certify it: attention also covers runner exits/timeouts.
+            // retry_fresh already cleared launchResumeToken; ordinary failures
+            // skip this branch.
             const normalizedResumeToken = launchResumeToken?.trim();
             const normalizedResumeType = input.resumeType?.trim();
             if (normalizedResumeToken && normalizedResumeType) {
               try {
-                this.sessionRegistry.updateResumeToken(
+                this.sessionRegistry.recordResumeAttempt(
                   input.sessionId,
                   normalizedResumeType,
                   normalizedResumeToken,
-                  "scrape",
                 );
               } catch { /* best-effort */ }
             }
