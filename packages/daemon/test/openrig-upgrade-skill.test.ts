@@ -36,7 +36,11 @@ function runJson(script: string, args: string[], env?: NodeJS.ProcessEnv): any {
 }
 
 function runJsonResult(script: string, args: string[], env?: NodeJS.ProcessEnv): { status: number | null; body: any } {
-  const result = spawnSync(process.execPath, [path.join(skillRoot, "scripts", script), ...args], {
+  return runJsonFileResult(path.join(skillRoot, "scripts", script), args, env);
+}
+
+function runJsonFileResult(scriptPath: string, args: string[], env?: NodeJS.ProcessEnv): { status: number | null; body: any } {
+  const result = spawnSync(process.execPath, [scriptPath, ...args], {
     encoding: "utf8",
     env: { ...process.env, ...env },
   });
@@ -743,6 +747,80 @@ describe("0.5.9 telemetry-state migration helper", () => {
     ]));
     expect(fs.existsSync(path.join(fixture.home, "context-packs", "operator-pack", "manifest.yaml"))).toBe(true);
     expect(fs.existsSync(path.join(fixture.home, "context", `${fixture.sessionName}.json`))).toBe(true);
+  });
+
+  it("refuses legacy-byte drift after apply-library's initial source validation", () => {
+    for (const [label, seam] of [
+      ["before preservation", "    postApplyLegacyTails = preserveVerifiedLegacyTails(preimage, verifiedTails);"],
+      ["before deletion", "    removeVerifiedLegacyRoot(\n      path.join(home, \"context\"),"],
+    ]) {
+      const root = temporaryRoot();
+      const fixture = seedLegacyTelemetry(root);
+      write(fixture.home, "context-packs/operator-pack/manifest.yaml", "name: operator-pack\nversion: \"1\"\ntaxonomy: world\nfiles: []\n");
+      const fakeRig = writeRigInventory(root, [{
+        runtime: "claude-code",
+        sessionStatus: "running",
+        canonicalSessionName: fixture.sessionName,
+        cwd: fixture.cwd,
+      }]);
+      const env = { OPENRIG_RIG_BIN: fakeRig };
+      const preimage = path.join(fixture.home, "backups", "before");
+
+      runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+      const manifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+      const tailAt = new Date(Date.parse(manifest.appliedAt) + 1_000).toISOString();
+      const adoptedAt = new Date(Date.parse(manifest.appliedAt) + 2_000).toISOString();
+      writeTelemetryPair(fixture, "legacy", tailAt, 30);
+      writeTelemetryPair(fixture, "state", adoptedAt, 31);
+      const contextPath = path.join(fixture.home, "context", `${fixture.sessionName}.json`);
+      const verifiedBytes = fs.readFileSync(contextPath);
+      const verifiedMode = fs.statSync(contextPath).mode & 0o777;
+      const verification = runJson(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+      const verificationPath = path.join(root, "verification.json");
+      fs.writeFileSync(verificationPath, JSON.stringify(verification));
+
+      const interposedBytes = Buffer.from(`changed ${label}`);
+      const helperPath = path.join(skillRoot, "scripts", helper);
+      const interposedHelperPath = path.join(root, helper);
+      const source = fs.readFileSync(helperPath, "utf8");
+      expect(source.split(seam), label).toHaveLength(2);
+      fs.writeFileSync(interposedHelperPath, source.replace(seam, `    {
+        const target = ${JSON.stringify(contextPath)};
+        const replacement = \`${contextPath}.interposed\`;
+        fs.writeFileSync(replacement, ${JSON.stringify(interposedBytes.toString("utf8"))}, { mode: 0o600 });
+        fs.renameSync(replacement, target);
+      }
+${seam}`));
+
+      const result = runJsonFileResult(interposedHelperPath, [
+        "--home", fixture.home,
+        "--apply-library",
+        "--preimage", preimage,
+        "--verification", verificationPath,
+      ], env);
+      expect(result.status, label).toBe(1);
+      expect(result.body, label).toMatchObject({ phase: "apply-library", applied: false, complete: false });
+      expect(result.body.issues, label).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "legacy_source_drift", path: contextPath }),
+      ]));
+      expect(fs.readFileSync(contextPath), label).toEqual(interposedBytes);
+      expect(fs.statSync(contextPath).mode & 0o777, label).toBe(0o600);
+
+      const prepared = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+      if (label === "before deletion") {
+        const tail = prepared.postApplyLegacyTails.find((entry: { originalPath: string }) => entry.originalPath === contextPath);
+        expect(fs.readFileSync(path.join(preimage, tail.storedAs))).toEqual(verifiedBytes);
+        expect(fs.statSync(path.join(preimage, tail.storedAs)).mode & 0o777).toBe(verifiedMode);
+        const rollback = runJsonResult(helper, ["--home", fixture.home, "--rollback", preimage], env);
+        expect(rollback.status).toBe(1);
+        expect(rollback.body.issues).not.toEqual(expect.arrayContaining([
+          expect.objectContaining({ code: "preimage_mismatch" }),
+        ]));
+      } else {
+        const rolledBack = runJson(helper, ["--home", fixture.home, "--rollback", preimage], env);
+        expect(rolledBack, label).toMatchObject({ phase: "rollback", complete: true, rolledBack: true, issues: [] });
+      }
+    }
   });
 
   it("refuses library mutation without the exact successful verification receipt", () => {

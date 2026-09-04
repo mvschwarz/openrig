@@ -715,17 +715,55 @@ function validateLegacySources(preimage, manifest, root, kind, issues, allowedDi
   return [...expectedByPath.values()];
 }
 
+function readVerifiedLegacySource(file) {
+  let descriptor;
+  try {
+    descriptor = fs.openSync(file.originalPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const opened = fs.fstatSync(descriptor);
+    const bytes = fs.readFileSync(descriptor);
+    const current = fs.lstatSync(file.originalPath);
+    if (!opened.isFile()
+      || !current.isFile()
+      || current.isSymbolicLink()
+      || opened.dev !== current.dev
+      || opened.ino !== current.ino
+      || sha256(bytes) !== file.sha256
+      || (current.mode & 0o777) !== file.mode) {
+      throw new Error("path, bytes, or mode no longer match the verification receipt");
+    }
+    return bytes;
+  } catch (error) {
+    const drift = new Error(`legacy source changed after verification: ${file.originalPath}: ${error.message}`);
+    drift.migrationIssueCode = "legacy_source_drift";
+    drift.migrationPath = file.originalPath;
+    throw drift;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
 function preserveVerifiedLegacyTails(preimage, tails) {
   return tails.map((tail, index) => {
-    const bytes = fs.readFileSync(tail.originalPath);
+    const bytes = readVerifiedLegacySource(tail);
     const storedAs = path.join("post-apply-legacy-tails", `${String(index).padStart(4, "0")}-${tail.sha256}`);
     const storedPath = path.join(preimage, storedAs);
     fs.mkdirSync(path.dirname(storedPath), { recursive: true });
     if (fs.existsSync(storedPath)) {
-      if (sha256(fs.readFileSync(storedPath)) !== tail.sha256) throw new Error(`preserved legacy tail changed: ${storedPath}`);
+      const stored = fs.lstatSync(storedPath);
+      if (!stored.isFile() || stored.isSymbolicLink()
+        || sha256(fs.readFileSync(storedPath)) !== tail.sha256
+        || (stored.mode & 0o777) !== tail.mode) {
+        throw new Error(`preserved legacy tail changed: ${storedPath}`);
+      }
     } else {
       fs.writeFileSync(storedPath, bytes, { flag: "wx", mode: tail.mode });
       fs.chmodSync(storedPath, tail.mode);
+    }
+    const stored = fs.lstatSync(storedPath);
+    if (!stored.isFile() || stored.isSymbolicLink()
+      || sha256(fs.readFileSync(storedPath)) !== tail.sha256
+      || (stored.mode & 0o777) !== tail.mode) {
+      throw new Error(`preserved legacy tail does not match its receipt: ${storedPath}`);
     }
     return { ...tail, storedAs };
   });
@@ -733,6 +771,7 @@ function preserveVerifiedLegacyTails(preimage, tails) {
 
 function removeVerifiedLegacyRoot(root, files, managedFiles = [], emptyDirectories = []) {
   if (!fs.existsSync(root)) return;
+  for (const file of files) readVerifiedLegacySource(file);
   for (const file of files) fs.rmSync(file.originalPath, { force: true });
   for (const file of managedFiles) fs.rmSync(file, { force: true });
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
@@ -819,10 +858,13 @@ function applyLibrary(home, preimage, verificationPath) {
   try {
     postApplyLegacyTails = preserveVerifiedLegacyTails(preimage, verifiedTails);
   } catch (error) {
+    const sourceDrift = error.migrationIssueCode === "legacy_source_drift";
     emit({ schema: SCHEMA, phase: "apply-library", ok: false, applied: false, complete: false, issues: [issue(
-      "preimage_mismatch",
-      preimage,
-      "restore a writeable byte-matching preimage before migrating the library",
+      sourceDrift ? "legacy_source_drift" : "preimage_mismatch",
+      sourceDrift ? error.migrationPath : preimage,
+      sourceDrift
+        ? "preserve the changed legacy telemetry source and rerun verification before migrating the library"
+        : "restore a writeable byte-matching preimage before migrating the library",
       { diagnostic: error.message },
     )] }, 1);
   }
@@ -892,6 +934,7 @@ function applyLibrary(home, preimage, verificationPath) {
       next: "start the target daemon, inspect context.system_world provenance, and run the representative fresh-seat proof",
     });
   } catch (error) {
+    const sourceDrift = error.migrationIssueCode === "legacy_source_drift";
     emit({
       schema: SCHEMA,
       phase: "apply-library",
@@ -899,7 +942,14 @@ function applyLibrary(home, preimage, verificationPath) {
       applied: false,
       complete: false,
       preimage,
-      issues: [issue("library_apply_incomplete", null, "run --rollback with this preimage before retrying", { diagnostic: error.message })],
+      issues: [issue(
+        sourceDrift ? "legacy_source_drift" : "library_apply_incomplete",
+        sourceDrift ? error.migrationPath : null,
+        sourceDrift
+          ? "preserve the changed legacy telemetry source and reconcile it with the receipt before rollback or retry"
+          : "run --rollback with this preimage before retrying",
+        { diagnostic: error.message },
+      )],
     }, 1);
   }
 }
