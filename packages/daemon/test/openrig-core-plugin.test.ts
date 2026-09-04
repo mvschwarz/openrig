@@ -32,6 +32,8 @@ const EXPECTED_SKILLS = [
   // canon-drift regeneration (commit 4281729e3); every seat may be inherited or retired.
   // — so by the spine-only design's own rule they belong in the plugin. Kept in lockstep with the
   // shipped skills dir + the openrig-skills index + the README count.
+  "agent-operated-software",
+  "agent-operated-workflows",
   "applying-a-permission-policy",
   "claude-compaction-restore",
   "delegating-work",
@@ -48,6 +50,8 @@ const EXPECTED_SKILLS = [
   "retiring-and-inheriting-a-seat",
   "seat-continuity-and-handover",
   "session-compaction-and-restore",
+  // One-release compatibility redirect. The editable doctrine lives only in
+  // agent-operated-software.
   "software-for-agents",
 ];
 
@@ -136,6 +140,57 @@ describe("openrig-core plugin — skills (HG-2.1 skill content per agentskills.i
       && fs.existsSync(nodePath.join(skillsDir, f, "SKILL.md")),
     );
     expect(actual.sort()).toEqual([...EXPECTED_SKILLS].sort());
+  });
+
+  it("ships the agent-operated taxonomy as two canonical skills plus one bounded compatibility redirect", () => {
+    const readSkill = (id: string): string => fs.readFileSync(
+      nodePath.join(PLUGIN_ROOT, "skills", id, "SKILL.md"),
+      "utf-8",
+    );
+    const description = (skill: string): string => {
+      const frontmatter = skill.match(/^---\n([\s\S]*?)\n---/m)?.[1] ?? "";
+      const match = frontmatter.match(/(?:^|\n)description:\s*(?:[>|]-?\s*)?\n?([\s\S]*?)(?=\n\w+:|$)/);
+      return (match?.[1] ?? "").replace(/\s+/g, " ").trim();
+    };
+
+    const workflows = readSkill("agent-operated-workflows");
+    const software = readSkill("agent-operated-software");
+    const legacy = readSkill("software-for-agents");
+
+    for (const canonical of [workflows, software]) {
+      expect(description(canonical)).toMatch(/^Use when\b/);
+      expect(description(canonical)).not.toMatch(/runbook owns|tools own|agent owns|human owns/i);
+      expect(canonical).toContain("AI-enabled software");
+      expect(canonical).toContain("Agent-Operated Workflow");
+      expect(canonical).toContain("Agent-Operated Software");
+    }
+
+    expect(workflows).toMatch(/runbook[^\n]*owns policy/i);
+    expect(workflows).toMatch(/deterministic tools[^\n]*context gathering[^\n]*bounded exact actions/i);
+    expect(workflows).toMatch(/agent[^\n]*interpretation[^\n]*sequencing[^\n]*effect verification/i);
+    expect(workflows).toMatch(/human[^\n]*destructive ambiguity[^\n]*product policy/i);
+    expect(workflows).toMatch(/(?:closed[^\n]*state space|state space[^\n]*closed)/i);
+    expect(workflows).toContain("Agent-Operated Migration");
+    expect(workflows).toContain("Slice 05");
+    expect(workflows).toContain("agent-operated-software");
+
+    const softwareDescription = description(software);
+    expect(softwareDescription).toMatch(
+      /^Use when [^.]*ongoing application whose live backend or control loop includes OpenRig agents\b/i,
+    );
+    expect(softwareDescription).not.toMatch(/;\s*(?:when|or when)\b/i);
+    expect(software).toMatch(/ongoing application/i);
+    expect(software).toMatch(/bounded\s+workflow\s+does not[\s\S]{0,100}Agent-Operated Software/i);
+    expect(software).toContain("agent-operated-workflows");
+    for (const retained of ["Markdown", "progressive disclosure", "studio", "artifact", "SDLC"]) {
+      expect(software).toContain(retained);
+    }
+
+    expect(legacy).toContain("agent-operated-software");
+    expect(legacy).toMatch(/retire|remove/i);
+    expect(legacy).toContain("0.6.0");
+    expect(Buffer.byteLength(legacy, "utf8")).toBeLessThan(1_200);
+    expect(legacy).not.toContain("# Software for agents — the markdown control plane");
   });
 
   it("ships the addressable-Markdown resolver with its skill", () => {

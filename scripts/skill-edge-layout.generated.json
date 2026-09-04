@@ -16,6 +16,18 @@
     }
   },
   "skills": {
+    "agent-operated-software": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
+    "agent-operated-workflows": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
     "agent-browser": {
       "edges": [
         "canonical",
