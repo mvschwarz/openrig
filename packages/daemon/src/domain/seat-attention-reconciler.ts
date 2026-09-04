@@ -10,37 +10,10 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { defaultListProcesses } from "./resume-metadata-refresher.js";
+import { findExactNativeResumeProcess } from "./native-process-lineage.js";
 
 type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
 type ProcessRow = { pid: number; ppid: number; command: string };
-
-function codexResumeInPaneLineage(
-  processes: ProcessRow[],
-  panePid: number,
-  resumeToken: string,
-): ProcessRow | null {
-  const childrenByParent = new Map<number, ProcessRow[]>();
-  for (const process of processes) {
-    const children = childrenByParent.get(process.ppid) ?? [];
-    children.push(process);
-    childrenByParent.set(process.ppid, children);
-  }
-
-  const queue = [panePid];
-  while (queue.length > 0) {
-    const parentPid = queue.shift()!;
-    for (const child of childrenByParent.get(parentPid) ?? []) {
-      queue.push(child.pid);
-      const tokens = child.command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^['"]|['"]$/g, "")) ?? [];
-      const codexIndex = tokens.findIndex((token) => token.split("/").pop() === "codex");
-      let resumeIndex = codexIndex + 1;
-      while (["-p", "--profile", "-s", "--sandbox", "-m", "--model"].includes(tokens[resumeIndex] ?? "")) resumeIndex += 2;
-      const sessionIndex = tokens[resumeIndex + 1] === "--add-dir" ? resumeIndex + 3 : resumeIndex + 1;
-      if (codexIndex >= 0 && tokens[resumeIndex] === "resume" && tokens[sessionIndex] === resumeToken) return child;
-    }
-  }
-  return null;
-}
 
 export type PaneIdentityReconcileResult =
   | { ok: true; pane: string; pid: number; command: string | null }
@@ -56,6 +29,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
   sessionName: string;
   runtime: string | null;
   expectedResumeToken?: string | null;
+  requireExactResumeLineage?: boolean;
   listProcesses?: () => Promise<ProcessRow[]>;
   now?: () => Date;
 }): Promise<PaneIdentityReconcileResult> {
@@ -98,27 +72,26 @@ export async function rebindAndVerifyPaneIdentity(input: {
   const runtimeMatch = classifyPaneRuntimeMatch(command, input.runtime);
   const normalizedCommand = command?.trim().toLowerCase() ?? "";
   let lineageMatch: ProcessRow | null = null;
-  if (
-    pid !== null
-    && runtimeMatch === "match"
-    && input.runtime === "codex"
-    && !normalizedCommand.includes("codex")
-    && input.expectedResumeToken
-  ) {
+  const expectedResumeToken = input.expectedResumeToken ?? null;
+  const strictNativeLineage = input.requireExactResumeLineage === true
+    && expectedResumeToken !== null
+    && (input.runtime === "claude-code" || input.runtime === "codex");
+  if (pid !== null && runtimeMatch === "match" && strictNativeLineage) {
     try {
-      lineageMatch = codexResumeInPaneLineage(
+      lineageMatch = findExactNativeResumeProcess(
         await (input.listProcesses ?? defaultListProcesses)(),
         pid,
-        input.expectedResumeToken,
+        input.runtime,
+        expectedResumeToken!,
       );
     } catch {
       // Missing process evidence is ambiguity, never positive identity.
     }
   }
-  const runtimeAmbiguous = runtimeMatch === "match" && (
-    (input.runtime === "claude-code" && !normalizedCommand.includes("claude"))
-    || (input.runtime === "codex" && !normalizedCommand.includes("codex") && lineageMatch === null)
-  );
+  const runtimeAmbiguous = runtimeMatch === "match" && (strictNativeLineage
+    ? lineageMatch === null
+    : (input.runtime === "claude-code" && !normalizedCommand.includes("claude"))
+      || (input.runtime === "codex" && !normalizedCommand.includes("codex")));
   const verdict: SeatIdentityVerdict = {
     nodeId: input.nodeId,
     verdict: pid === null

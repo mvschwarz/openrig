@@ -249,6 +249,14 @@ function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
 // operator choose; later reconciliation upgrades to `operator_recovered` only
 // when the operator reaches a usable state.
 function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
+  // Current Claude chooser (observed 2026-09-04) asks which fidelity to
+  // resume with. Both exact option labels are required; one phrase in prose
+  // is intentionally insufficient.
+  if (
+    paneContent.includes("Resume from summary")
+    && paneContent.includes("Resume full session as-is")
+  ) return true;
+
   // Stable substring is the explicit "Choose ... conversation" verb plus the
   // numbered/arrow option marker that Claude prints. Both must be present so
   // we don't false-positive on similar TUI strings.

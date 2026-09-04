@@ -130,10 +130,11 @@ export type RigEvent =
   | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null }
   | { type: "session.cleaned"; rigId: string; nodeId: string; sessionName: string | null; reason: string; operator: string | null; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | { type: "node.launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
+  | { type: "topology.roster_recorded"; rigId: string; intendedNodeIds: string[]; source: "materialized_topology" }
   | { type: "seat.fresh_launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string; nativeSessionId: string | null; nativeSessionIdReason?: string; model: string | null; startupPolicyHash: string; reason: string; operator: string | null; status: "ready" | "attention_required" }
   | { type: "seat.fresh_launch_failed"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string | null; model: string | null; startupPolicyHash: string; reason: string; operator: string | null; errors: string[] }
   | { type: "snapshot.created"; rigId: string; snapshotId: string; kind: string }
-  | { type: "restore.started"; rigId: string; snapshotId: string }
+  | { type: "restore.started"; rigId: string; snapshotId: string; snapshotSelection?: RestoreSnapshotSelection; intendedRoster?: Array<{ nodeId: string; logicalId: string }>; excludedNodes?: RestoreExcludedNode[] }
   | { type: "restore.completed"; rigId: string; snapshotId: string; result: RestoreResult }
   | { type: "restore.subset_completed"; rigId: string; snapshotId: string; result: RestoreResult }
   | { type: "node.held"; rigId: string; nodeId: string; logicalId: string; reason: string }
@@ -356,11 +357,48 @@ export interface SnapshotData {
    *  then falls back to the uniquely-running invariant, and ambiguity makes
    *  the seat unrecoverable-until-resolved, never newest-row-wins. */
   activeSessionIdByNode?: Record<string, string | null>;
+  /** OPR.0.5.9.14 — explicit occupant truth. Unlike the legacy relation map,
+   *  this never overloads null: zero candidates is absent, one live candidate
+   *  is resolved, and multiple candidates retain their exact ids. */
+  activeOccupantsByNode?: Record<string, SnapshotOccupantState>;
+  /** The immutable intended membership for this snapshot's restore attempt.
+   *  Historical node records remain in `nodes` but are not in this roster. */
+  topologyRoster?: SnapshotTopologyRoster;
   checkpoints: Record<string, Checkpoint | null>;
   pods?: Pod[];
   continuityStates?: ContinuityState[];
   nodeStartupContext?: Record<string, NodeStartupSnapshot | null>;
   envReceipt?: EnvReceipt | null;
+}
+
+export type SnapshotOccupantState =
+  | { kind: "resolved"; sessionId: string }
+  | { kind: "absent" }
+  | { kind: "ambiguous"; candidateIds: string[] };
+
+export interface SnapshotTopologyRoster {
+  version: 1;
+  source: "materialized_topology" | "operator_explicit" | "legacy_current_nodes";
+  intendedNodeIds: string[];
+}
+
+export interface RestoreSnapshotSummary {
+  snapshotId: string;
+  kind: string;
+  createdAt: string;
+  ageMs: number;
+}
+
+export interface RestoreSnapshotSelection extends RestoreSnapshotSummary {
+  mode: "explicit" | "automatic";
+  rationale: string;
+  newerUsableAlternative: RestoreSnapshotSummary | null;
+}
+
+export interface RestoreExcludedNode {
+  nodeId: string;
+  logicalId: string;
+  reason: "historical_not_in_intended_roster";
 }
 
 export interface Snapshot {
@@ -394,6 +432,9 @@ export interface RestoreResult {
   nodes: RestoreNodeResult[];
   warnings: string[];
   blockers?: RestoreValidationBlocker[];
+  snapshotSelection?: RestoreSnapshotSelection;
+  intendedRoster?: Array<{ nodeId: string; logicalId: string }>;
+  excludedNodes?: RestoreExcludedNode[];
 }
 
 export type RestoreRigResult = "fully_restored" | "partially_restored" | "failed" | "not_attempted";
@@ -436,6 +477,9 @@ export interface RestoreNodeResult {
 export type RestoreOutcome =
   | { ok: true; result: RestoreResult }
   | { ok: false; code: "snapshot_not_found"; message: string }
+  | { ok: false; code: "snapshot_wrong_rig"; message: string }
+  | { ok: false; code: "snapshot_unusable"; message: string }
+  | { ok: false; code: "no_usable_snapshot"; message: string }
   | { ok: false; code: "rig_not_found"; message: string }
   | { ok: false; code: "rig_not_stopped"; message: string }
   | { ok: false; code: "restore_error"; message: string }

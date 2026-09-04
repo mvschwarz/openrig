@@ -5,7 +5,7 @@ import type { BootstrapRepository } from "../domain/bootstrap-repository.js";
 import type { EventBus } from "../domain/event-bus.js";
 import type { UpCommandRouter } from "../domain/up-command-router.js";
 import type { RigRepository } from "../domain/rig-repository.js";
-import type { SnapshotRepository } from "../domain/snapshot-repository.js";
+import { summarizeSnapshot, type SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { SnapshotCapture } from "../domain/snapshot-capture.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import { assessCurrentStateRehydrateEligibility, snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
@@ -101,10 +101,13 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
     return c.json({ error: `Rig ${rigId} not found`, code: "rig_not_found" }, 404);
   }
 
-  let snapshot = snapshotRepo.findLatestRestoreUsable(rigId);
+  const automaticSelection = snapshotRepo.selectRestoreUsable(rigId);
+  let snapshot = automaticSelection.ok ? automaticSelection.snapshot : null;
+  let snapshotSelection = automaticSelection.ok ? automaticSelection.selection : undefined;
   let staleSnapshot = false;
   if (snapshot && !snapshotMatchesCurrentOccupants(snapshotRepo.db, rig, snapshot)) {
     snapshot = null;
+    snapshotSelection = undefined;
     staleSnapshot = true;
   }
   let capturedCurrentState = false;
@@ -131,6 +134,12 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
 
   if (!snapshot) {
     snapshot = deps.snapshotCapture.captureSnapshot(rigId, "auto-rehydrate");
+    snapshotSelection = {
+      ...summarizeSnapshot(snapshot),
+      mode: "automatic",
+      rationale: "automatic rehydrate captured current eligible state because no current-occupant snapshot was usable",
+      newerUsableAlternative: null,
+    };
     capturedCurrentState = true;
   }
 
@@ -144,6 +153,7 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
     fsOps: { exists: (p: string) => fs.existsSync(p) },
     // OPR.0.3.4.2 — operation B opt-in seats from `rig up --existing --fresh`.
     freshLogicalIds,
+    snapshotSelection,
   });
   if (!result.ok) {
     if (result.code === "pre_restore_validation_failed") {

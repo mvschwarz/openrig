@@ -96,10 +96,19 @@ export class RestoreConductor {
 export interface RestoreRigDeps {
   /** Newest restore-usable snapshot for the rig, or null (→ `not_attempted`; never a silent substitute). */
   findLatestRestoreUsable: (rigId: string) => { id: string } | null;
+  /** Optional richer selector. Production supplies it so the restore attempt
+   * records why crash-cart chose this source; legacy test/integration callers
+   * may keep the historical finder-only shape. */
+  selectRestoreUsable?: (rigId: string) =>
+    | { ok: true; snapshot: { id: string }; selection: import("./types.js").RestoreSnapshotSelection }
+    | { ok: false };
   /** The shipped per-rig restore. `onAttemptStarted` yields the restore-started event seq = the receipt ref. */
   restore: (
     snapshotId: string,
-    opts?: { onAttemptStarted?: (attemptId: number) => void },
+    opts?: {
+      onAttemptStarted?: (attemptId: number) => void;
+      snapshotSelection?: import("./types.js").RestoreSnapshotSelection;
+    },
   ) => Promise<{ ok: boolean; result?: { rigResult: PerRigOutcome; nodes?: RestoreNodeLite[] } }>;
 }
 
@@ -229,7 +238,8 @@ export function createDefaultRestoreRig(
       // node.reconciled events the shipped adopt emits per seat.
       if (live.length > 0) return adoptLivePanesRig(rigId, live, adoptDeps);
     }
-    const snapshot = _deps.findLatestRestoreUsable(rigId);
+    const selected = _deps.selectRestoreUsable?.(rigId);
+    const snapshot = selected?.ok ? selected.snapshot : _deps.findLatestRestoreUsable(rigId);
     if (!snapshot)
       // no usable snapshot — never a silent substitute; R3: carry WHY + the fix.
       return {
@@ -239,6 +249,7 @@ export function createDefaultRestoreRig(
       };
     let receiptRef: number | undefined;
     const outcome = await _deps.restore(snapshot.id, {
+      ...(selected?.ok ? { snapshotSelection: selected.selection } : {}),
       onAttemptStarted: (attemptId) => {
         receiptRef = attemptId;
       },

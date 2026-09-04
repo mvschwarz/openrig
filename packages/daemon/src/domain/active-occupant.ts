@@ -13,7 +13,7 @@
 // a null value, a missing node key, or a dangling id each fails LOUDLY; the
 // map is never collapsed by truthiness into the legacy ladder.
 
-import type { SnapshotData, Session } from "./types.js";
+import type { SnapshotData, Session, SnapshotOccupantState } from "./types.js";
 
 /** The minimal row shape the ladder needs — satisfied by Session and by the
  *  preview's narrower session rows alike, so ONE ladder serves every consumer
@@ -72,6 +72,23 @@ export function resolveActiveOccupantRow<T extends OccupantCandidateRow>(
 /** The snapshot-shaped entry point (the original public signature; a thin
  *  wrapper so execution call sites are unchanged). */
 export function resolveActiveSnapshotSession(data: SnapshotData, nodeId: string): ActiveSnapshotSessionResolution {
+  const explicit = data.activeOccupantsByNode;
+  if (explicit !== undefined) {
+    const state = explicit[nodeId];
+    const rows = data.sessions.filter((session) => session.nodeId === nodeId);
+    if (!state) {
+      return { kind: "ambiguous", candidateIds: rows.map((row) => row.id), detail: "the snapshot's activeOccupantsByNode map carries no entry for this node" };
+    }
+    if (state.kind === "absent") return { kind: "none" };
+    if (state.kind === "ambiguous") {
+      return { kind: "ambiguous", candidateIds: [...state.candidateIds], detail: "the snapshot recorded multiple live occupant candidates at capture" };
+    }
+    const session = rows.find((row) => row.id === state.sessionId);
+    if (!session) {
+      return { kind: "ambiguous", candidateIds: rows.map((row) => row.id), detail: `the recorded active occupant ${state.sessionId} names no session row in this snapshot (dangling)` };
+    }
+    return { kind: "resolved", session };
+  }
   return resolveActiveOccupantRow(data.sessions, data.activeSessionIdByNode, nodeId);
 }
 
@@ -95,6 +112,43 @@ export function deriveActiveSessionIdByNode(
   for (const nodeId of nodeIds) {
     const running = sessions.filter((s) => s.nodeId === nodeId && s.status === "running");
     relation[nodeId] = running.length === 1 ? running[0]!.id : null;
+  }
+  return relation;
+}
+
+/** Capture the same live relation without collapsing absent and ambiguous. */
+export function deriveActiveOccupantsByNode(
+  sessions: OccupantCandidateRow[],
+  nodeIds: string[],
+): Record<string, SnapshotOccupantState> {
+  const relation: Record<string, SnapshotOccupantState> = {};
+  for (const nodeId of nodeIds) {
+    const running = sessions.filter((session) => session.nodeId === nodeId && session.status === "running");
+    relation[nodeId] = running.length === 0
+      ? { kind: "absent" }
+      : running.length === 1
+        ? { kind: "resolved", sessionId: running[0]!.id }
+        : { kind: "ambiguous", candidateIds: running.map((session) => session.id) };
+  }
+  return relation;
+}
+
+/** Reboot capture equivalent: resolve one durable non-terminal occupant when
+ * possible, otherwise preserve the exact absent/ambiguous candidate set. */
+export function deriveRehydrateOccupantsByNode(
+  sessions: OccupantCandidateRow[],
+  nodeIds: string[],
+): Record<string, SnapshotOccupantState> {
+  const candidates = sessions.filter((session) => session.status !== "superseded" && session.status !== "exited");
+  const relation: Record<string, SnapshotOccupantState> = {};
+  for (const nodeId of nodeIds) {
+    const rows = candidates.filter((session) => session.nodeId === nodeId);
+    const resolved = resolveActiveOccupantRow(candidates, undefined, nodeId);
+    relation[nodeId] = resolved.kind === "resolved"
+      ? { kind: "resolved", sessionId: resolved.session.id }
+      : rows.length === 0
+        ? { kind: "absent" }
+        : { kind: "ambiguous", candidateIds: rows.map((row) => row.id) };
   }
   return relation;
 }

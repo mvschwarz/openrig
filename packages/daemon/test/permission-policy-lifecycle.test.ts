@@ -118,7 +118,8 @@ describe("F1 — rig-level custom provenance is RESTART-COMPLETE", () => {
     const session = setup1.sessionRegistry.registerSession(organic.id, "dev-organic@lifecycle-rig");
     setup1.sessionRegistry.updateStatus(session.id, "running");
     db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-123' WHERE id = ?").run(session.id);
-    const snap = setup1.snapshotCapture.captureSnapshot(rigId, "manual");
+    const intendedNodeIds = setup1.rigRepo.getRig(rigId)!.nodes.map((node) => node.id);
+    const snap = setup1.snapshotCapture.captureSnapshot(rigId, "manual", { intendedNodeIds });
     db1.close(); // ── restart boundary ──
 
     const db2 = createDb(dbFile);

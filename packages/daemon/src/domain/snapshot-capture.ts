@@ -1,5 +1,10 @@
 import type Database from "better-sqlite3";
-import { deriveActiveSessionIdByNode, deriveRehydrateSessionIdByNode } from "./active-occupant.js";
+import {
+  deriveActiveOccupantsByNode,
+  deriveActiveSessionIdByNode,
+  deriveRehydrateOccupantsByNode,
+  deriveRehydrateSessionIdByNode,
+} from "./active-occupant.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
@@ -51,7 +56,7 @@ export class SnapshotCapture {
     this.checkpointStore = deps.checkpointStore;
   }
 
-  captureSnapshot(rigId: string, kind: string): Snapshot {
+  captureSnapshot(rigId: string, kind: string, opts?: { intendedNodeIds?: string[] }): Snapshot {
     // 1. Get rig with nodes, edges, bindings
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) {
@@ -67,6 +72,20 @@ export class SnapshotCapture {
     const activeSessionIdByNode = kind === "auto-rehydrate"
       ? deriveRehydrateSessionIdByNode(sessions, rig.nodes.map((n) => n.id))
       : deriveActiveSessionIdByNode(sessions, rig.nodes.map((n) => n.id));
+    const activeOccupantsByNode = kind === "auto-rehydrate"
+      ? deriveRehydrateOccupantsByNode(sessions, rig.nodes.map((n) => n.id))
+      : deriveActiveOccupantsByNode(sessions, rig.nodes.map((n) => n.id));
+
+    const requestedRoster = opts?.intendedNodeIds;
+    const materializedRoster = requestedRoster ? null : this.materializedRoster(rigId);
+    const intendedNodeIds = requestedRoster ?? materializedRoster ?? rig.nodes.map((node) => node.id);
+    const allNodeIds = new Set(rig.nodes.map((node) => node.id));
+    if (
+      new Set(intendedNodeIds).size !== intendedNodeIds.length
+      || intendedNodeIds.some((nodeId) => !allNodeIds.has(nodeId))
+    ) {
+      throw new Error("Snapshot intended roster must contain unique node ids belonging to the target rig");
+    }
 
     // 3. Get checkpoints as map (latest per node)
     const checkpoints = this.checkpointStore.getCheckpointsForRig(rigId);
@@ -108,6 +127,16 @@ export class SnapshotCapture {
       edges: rig.edges,
       sessions,
       activeSessionIdByNode,
+      activeOccupantsByNode,
+      topologyRoster: {
+        version: 1,
+        source: requestedRoster
+          ? "operator_explicit"
+          : materializedRoster
+            ? "materialized_topology"
+            : "legacy_current_nodes",
+        intendedNodeIds,
+      },
       checkpoints,
       pods: podRows.map((p) => ({ id: p.id, rigId: p.rig_id, namespace: p.namespace, label: p.label, summary: p.summary, continuityPolicyJson: p.continuity_policy_json, createdAt: p.created_at })),
       continuityStates: continuityRows.map((r) => ({ podId: r.pod_id, nodeId: r.node_id, status: r.status as "healthy" | "degraded" | "restoring", artifactsJson: r.artifacts_json, lastSyncAt: r.last_sync_at, updatedAt: r.updated_at })),
@@ -133,5 +162,21 @@ export class SnapshotCapture {
     this.eventBus.notifySubscribers(persistedEvent);
 
     return snapshot;
+  }
+
+  private materializedRoster(rigId: string): string[] | null {
+    const row = this.db.prepare(
+      "SELECT payload FROM events WHERE rig_id = ? AND type = 'topology.roster_recorded' ORDER BY seq DESC LIMIT 1",
+    ).get(rigId) as { payload: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.payload) as { intendedNodeIds?: unknown };
+      if (!Array.isArray(parsed.intendedNodeIds) || !parsed.intendedNodeIds.every((id) => typeof id === "string")) {
+        throw new Error("latest topology roster event has no string intendedNodeIds array");
+      }
+      return parsed.intendedNodeIds;
+    } catch (error) {
+      throw new Error(`Cannot capture snapshot from malformed authoritative topology roster: ${(error as Error).message}`);
+    }
   }
 }

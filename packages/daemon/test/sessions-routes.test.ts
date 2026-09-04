@@ -300,6 +300,47 @@ describe("Session routes", () => {
     expect(eventIds).toEqual(["dev.driver", "dev.guard"]);
   });
 
+  it("POST .../nodes/launch-subset plan discloses non-target effects before mutation", async () => {
+    const { app, rigRepo } = createTestApp(db);
+    const podRepo = new PodRepository(db);
+    const rig = rigRepo.createRig("plan-rig");
+    const pod = podRepo.createPod(rig.id, "dev", "Development");
+    const driver = rigRepo.addNode(rig.id, "dev.driver", { runtime: "claude-code", podId: pod.id });
+    const guard = rigRepo.addNode(rig.id, "dev.guard", { runtime: "codex", podId: pod.id });
+    const { SnapshotRepository } = await import("../src/domain/snapshot-repository.js");
+    new SnapshotRepository(db).createSnapshot(rig.id, "manual", {
+      rig: { id: rig.id, name: "plan-rig" },
+      nodes: [driver, guard],
+      sessions: [],
+      edges: [],
+      checkpoints: {},
+    } as any);
+    const before = {
+      sessions: db.prepare("SELECT COUNT(*) AS n FROM sessions").get(),
+      events: db.prepare("SELECT COUNT(*) AS n FROM events").get(),
+    };
+
+    const res = await app.request(`/api/rigs/${rig.id}/nodes/launch-subset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seats: ["dev.driver"], holdReason: "operator hold", plan: true }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      planOnly: true,
+      targetNodes: [{ logicalId: "dev.driver" }],
+      nonTargetEffects: {
+        mode: "detach_and_hold",
+        affected: [{ logicalId: "dev.guard", reason: "operator hold" }],
+      },
+    });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sessions").get()).toEqual(before.sessions);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()).toEqual(before.events);
+  });
+
   it("POST .../nodes/launch-subset does NOT report an awaiting-decision restore as a successful launch (FR-7)", async () => {
     const { app, rigRepo } = createTestApp(db);
     const podRepo = new PodRepository(db);

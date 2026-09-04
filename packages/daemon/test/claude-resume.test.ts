@@ -262,6 +262,33 @@ describe("ClaudeResumeAdapter", () => {
       expect(sendKeys.mock.calls[0]![1]).toEqual(["Enter"]);
     });
 
+    it("current resume-mode chooser returns attention immediately with no selection input", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const sendKeys = vi.fn(async () => ({ ok: true as const }));
+      const sleep = vi.fn(async () => {});
+      const adapter = new ClaudeResumeAdapter(
+        mockTmux({
+          sendText,
+          sendKeys,
+          getPaneCommand: vi.fn(async () => "claude"),
+          capturePaneContent: vi.fn(async () => [
+            "How would you like to resume?",
+            "❯ Resume from summary",
+            "  Resume full session as-is",
+          ].join("\n")),
+        }),
+        { pollMs: 200, maxWaitMs: 5_000, sleep },
+      );
+
+      const result = await adapter.resume("r99-worker", "claude_name", "my-session", "/repo");
+
+      expect(result).toMatchObject({ ok: false, code: "attention_required" });
+      expect(sleep).not.toHaveBeenCalled();
+      expect(sendText).toHaveBeenCalledTimes(1);
+      expect(sendKeys).toHaveBeenCalledTimes(1);
+      expect(sendKeys).toHaveBeenCalledWith("r99-worker", ["Enter"]);
+    });
+
     it("treats the edit-approval footer as a live Claude TUI during resume verification", async () => {
       const getPaneCommand = vi
         .fn<(_: string) => Promise<string | null>>()

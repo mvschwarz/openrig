@@ -5,6 +5,8 @@ import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 import type { RestoreOrchestrator } from "../domain/restore-orchestrator.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { ResumeMetadataRefresher } from "../domain/resume-metadata-refresher.js";
+import type { RigRepository } from "../domain/rig-repository.js";
+import { deriveRestoreAttemptReceipt } from "../domain/restore-attempt-receipt.js";
 
 export const snapshotsRoutes = new Hono();
 export const restoreRoutes = new Hono();
@@ -17,6 +19,7 @@ function getDeps(c: { get: (key: string) => unknown }) {
     // OPR.0.4.3.20 FR-4 — for refresh-before-serialize on manual snapshots.
     resumeMetadataRefresher: c.get("resumeMetadataRefresher" as never) as ResumeMetadataRefresher | undefined,
     sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry | undefined,
+    rigRepo: c.get("rigRepo" as never) as RigRepository,
   };
 }
 
@@ -25,7 +28,7 @@ snapshotsRoutes.post("/", async (c) => {
   const rigId = c.req.param("rigId")!;
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const kind = typeof body["kind"] === "string" ? body["kind"] : "manual";
-  const { snapshotCapture, resumeMetadataRefresher, sessionRegistry } = getDeps(c);
+  const { snapshotCapture, resumeMetadataRefresher, sessionRegistry, rigRepo } = getDeps(c);
 
   try {
     // OPR.0.4.3.20 FR-4 — refresh live tokens before serialize, in its OWN
@@ -42,7 +45,25 @@ snapshotsRoutes.post("/", async (c) => {
         );
       } catch { /* best-effort — the snapshot still writes below */ }
     }
-    const snapshot = snapshotCapture.captureSnapshot(rigId, kind);
+    let intendedNodeIds: string[] | undefined;
+    if (body["intendedSeats"] !== undefined) {
+      if (!Array.isArray(body["intendedSeats"])) {
+        return c.json({ error: "intendedSeats must be a non-empty array of node references" }, 400);
+      }
+      const rawRequested = body["intendedSeats"] as unknown[];
+      if (rawRequested.length === 0 || !rawRequested.every((value) => typeof value === "string" && value.trim().length > 0)) {
+        return c.json({ error: "intendedSeats must be a non-empty array of node references" }, 400);
+      }
+      const requested = rawRequested.map((value) => (value as string).trim());
+      const rig = rigRepo.getRig(rigId);
+      if (!rig) throw new RigNotFoundError(rigId);
+      const byRef = new Map(rig.nodes.flatMap((node) => [[node.id, node.id], [node.logicalId, node.id]]));
+      intendedNodeIds = requested.map((ref) => byRef.get(ref)).filter((id): id is string => !!id);
+      if (intendedNodeIds.length !== requested.length || new Set(intendedNodeIds).size !== intendedNodeIds.length) {
+        return c.json({ error: "Every intendedSeats entry must name a unique node in the target rig" }, 400);
+      }
+    }
+    const snapshot = snapshotCapture.captureSnapshot(rigId, kind, { intendedNodeIds });
     return c.json(snapshot, 201);
   } catch (err) {
     if (err instanceof RigNotFoundError) {
@@ -50,6 +71,24 @@ snapshotsRoutes.post("/", async (c) => {
     }
     return c.json({ error: "Failed to capture snapshot" }, 500);
   }
+});
+
+// GET /api/rigs/:rigId/restore/status/:attemptId — derived, read-only receipt.
+restoreRoutes.get("/status/:attemptId", (c) => {
+  const rigId = c.req.param("rigId")!;
+  const attemptId = Number(c.req.param("attemptId"));
+  if (!Number.isSafeInteger(attemptId) || attemptId < 1) {
+    return c.json({ error: "attemptId must be a positive integer", code: "invalid_attempt_id" }, 400);
+  }
+  const { snapshotRepo } = getDeps(c);
+  const receipt = deriveRestoreAttemptReceipt(snapshotRepo.db, rigId, attemptId);
+  if (!receipt.ok) {
+    const status = receipt.code === "attempt_not_found" || receipt.code === "attempt_wrong_rig" ? 404
+      : receipt.code === "attempt_incomplete" ? 409
+      : 500;
+    return c.json({ error: receipt.message, code: receipt.code }, status);
+  }
+  return c.json(receipt);
 });
 
 // GET /api/rigs/:rigId/snapshots
@@ -135,7 +174,7 @@ restoreRoutes.post("/:snapshotId", async (c) => {
           }
           const status = outcome.code === "snapshot_not_found" || outcome.code === "rig_not_found"
             ? 404
-            : outcome.code === "restore_in_progress" || outcome.code === "rig_not_stopped"
+            : outcome.code === "snapshot_unusable" || outcome.code === "restore_in_progress" || outcome.code === "rig_not_stopped"
             ? 409
             : 500;
           resolve(c.json({ error: outcome.message, code: outcome.code }, status));

@@ -199,6 +199,12 @@ export class RigInstantiator {
     // 6. Emit rig.imported (best-effort)
     try {
       this.eventBus.emit({
+        type: "topology.roster_recorded",
+        rigId: rigId!,
+        intendedNodeIds: Object.values(nodeIdMap),
+        source: "materialized_topology",
+      });
+      this.eventBus.emit({
         type: "rig.imported",
         rigId: rigId!,
         specName: spec.name,
@@ -758,6 +764,13 @@ export class PodRigInstantiator {
           }
           this.deps.rigRepo.addEdge(materializedRigId, fromId, toId, edge.kind);
         }
+
+        persistedEvents.push(this.deps.eventBus.persistWithinTransaction({
+          type: "topology.roster_recorded",
+          rigId: materializedRigId,
+          intendedNodeIds: [...logicalIdToNodeId.values()],
+          source: "materialized_topology",
+        }));
 
         if (!opts?.suppressSummaryEvent) {
           persistedEvents.push(this.deps.eventBus.persistWithinTransaction({
@@ -1445,6 +1458,12 @@ export class PodRigInstantiator {
       // attention_required, not "launched", so `rig ps` shows the
       // correct lifecycle state.
       try {
+        this.deps.eventBus.emit({
+          type: "topology.roster_recorded",
+          rigId,
+          intendedNodeIds: Object.values(nodeIdMap),
+          source: "materialized_topology",
+        });
         this.deps.eventBus.emit({ type: "rig.imported", rigId, specName: rigSpec.name, specVersion: rigSpec.version });
       } catch { /* best-effort */ }
       return {
@@ -1458,6 +1477,12 @@ export class PodRigInstantiator {
 
     // Emit rig.imported
     try {
+      this.deps.eventBus.emit({
+        type: "topology.roster_recorded",
+        rigId,
+        intendedNodeIds: Object.values(nodeIdMap),
+        source: "materialized_topology",
+      });
       this.deps.eventBus.emit({ type: "rig.imported", rigId, specName: rigSpec.name, specVersion: rigSpec.version });
     } catch { /* best-effort */ }
 

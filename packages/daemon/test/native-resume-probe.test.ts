@@ -491,6 +491,29 @@ describe("native resume probe", () => {
       expect(result.status).toBe("attention_required");
     });
 
+    it("classifies the current two-choice resume-mode prompt as attention_required", () => {
+      const paneContent = [
+        "How would you like to resume?",
+        "",
+        "❯ Resume from summary",
+        "  Resume full session as-is",
+      ].join("\n");
+
+      const result = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent });
+
+      expect(result).toMatchObject({ status: "attention_required", code: "claude_resume_selection_prompt" });
+    });
+
+    it("does not classify a prose mention of only one current chooser option", () => {
+      const result = assessNativeResumeProbe({
+        runtime: "claude-code",
+        paneCommand: "claude",
+        paneContent: "The recovery notes recommend Resume from summary when context is stale.",
+      });
+
+      expect(result.status).not.toBe("attention_required");
+    });
+
     it("does NOT classify Claude active TUI as resume-selection prompt (regression)", () => {
       const paneContent = [
         "Claude Code v2.1.89",

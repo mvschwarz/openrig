@@ -62,7 +62,7 @@ describe("Restore CLI (L3)", () => {
   beforeAll(async () => {
     server = http.createServer(async (req, res) => {
       lastRoutePath = req.url ?? null;
-      if (req.url?.startsWith("/api/rigs/") && req.url?.includes("/restore/") && req.method === "POST") {
+      if (req.url?.startsWith("/api/rigs/") && req.url?.includes("/restore/") && (req.method === "POST" || req.method === "GET")) {
         res.writeHead(routeResponse.status, { "Content-Type": "application/json" });
         res.end(JSON.stringify(routeResponse.body));
         return;
@@ -127,6 +127,31 @@ describe("Restore CLI (L3)", () => {
 
     expect(errLogs.join("\n")).toMatch(/not found/i);
     expect(exitCode).toBe(1);
+  });
+
+  it("restore status renders the original and current intended-set verdicts", async () => {
+    routeResponse = {
+      status: 200,
+      body: {
+        ok: true,
+        attemptId: 42,
+        snapshotSelection: { snapshotId: "manual-1", kind: "manual", mode: "explicit", ageMs: 1, rationale: "operator selected exact snapshot" },
+        originalResult: { rigResult: "partially_restored" },
+        currentIntendedSetVerdict: "fully_restored",
+        intendedRoster: [{ nodeId: "n1", logicalId: "lead" }],
+        excludedNodes: [{ nodeId: "old", logicalId: "historical" }],
+        unresolvedIntendedSeats: [],
+      },
+    };
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "restore", "status", "42", "--rig", "rig-1"]);
+    });
+
+    expect(lastRoutePath).toBe("/api/rigs/rig-1/restore/status/42");
+    expect(logs.join("\n")).toContain("Original verdict: partially_restored");
+    expect(logs.join("\n")).toContain("Current intended-set verdict: fully_restored");
+    expect(exitCode).toBeUndefined();
   });
 
   it("409 pre_restore_validation_failed prints blockers and exits 1", async () => {

@@ -7,11 +7,14 @@ import type { StatusDeps } from "./status.js";
 const LONG_RUNNING_TIMEOUT_MS = 45_000;
 
 export function restoreCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("restore").description("Restore a rig from a snapshot");
+  const cmd = new Command("restore")
+    .description("Restore a rig from a snapshot")
+    .addHelpText("after", "\nDirect restore: rig restore <snapshotId> --rig <rigId>");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
-    .argument("<snapshotId>", "Snapshot ID to restore")
+    .command("apply <snapshotId>", { isDefault: true, hidden: true })
+    .description("Restore a rig from a snapshot")
     .requiredOption("--rig <rigId>", "Rig ID to restore into")
     .action(async (snapshotId: string, opts: { rig: string }) => {
       const deps = getDeps();
@@ -72,7 +75,11 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
           process.exitCode = 1;
           return;
         }
-        console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "rig may still be running"}. Stop the rig first with: rig down ${rigId}`);
+        if ((res.data as { code?: string }).code === "snapshot_unusable") {
+          console.error(`Restore refused: ${(res.data as { error?: string }).error ?? "the selected snapshot is not restore-usable"}. Choose a different snapshot.`);
+        } else {
+          console.error(`Restore conflict: ${(res.data as { error?: string }).error ?? "rig may still be running"}. Stop the rig first with: rig down ${rigId}`);
+        }
         process.exitCode = 1;
       } else if (res.status >= 400) {
         console.error(`Restore failed: ${(res.data as { error?: string }).error ?? "unknown error"} (HTTP ${res.status}). Check daemon logs or try a different snapshot.`);
@@ -104,6 +111,47 @@ export function restoreCommand(depsOverride?: StatusDeps): Command {
           process.exitCode = 1;
         }
       }
+    });
+
+  cmd
+    .command("status <attemptId>")
+    .description("Show the derived current receipt for one restore attempt")
+    .requiredOption("--rig <rigId>", "Rig ID containing the restore attempt")
+    .option("--json", "JSON output")
+    .action(async (attemptId: string, opts: { rig: string; json?: boolean }) => {
+      const deps = getDeps();
+      const status = await getDaemonStatus(deps.lifecycleDeps);
+      if (!daemonStatusGuard(status)) return;
+      const client = deps.clientFactory(getDaemonUrl(status));
+      const res = await client.get<{
+        ok?: boolean;
+        error?: string;
+        attemptId?: number;
+        snapshotSelection?: { snapshotId: string; mode: string; kind: string; ageMs: number; rationale: string } | null;
+        originalResult?: { rigResult: string };
+        currentIntendedSetVerdict?: string;
+        intendedRoster?: unknown[];
+        excludedNodes?: unknown[];
+        unresolvedIntendedSeats?: Array<{ logicalId: string; status: string }>;
+      }>(`/api/rigs/${encodeURIComponent(opts.rig)}/restore/status/${encodeURIComponent(attemptId)}`);
+      if (res.status >= 400 || !res.data.ok) {
+        console.error(res.data.error ?? `Restore attempt status failed (HTTP ${res.status})`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(res.data, null, 2));
+        return;
+      }
+      console.log(`Restore attempt ${res.data.attemptId ?? attemptId}`);
+      if (res.data.snapshotSelection) {
+        console.log(`Snapshot: ${res.data.snapshotSelection.snapshotId} (${res.data.snapshotSelection.kind}, ${res.data.snapshotSelection.mode})`);
+        console.log(`Selection: ${res.data.snapshotSelection.rationale}`);
+      }
+      console.log(`Original verdict: ${res.data.originalResult?.rigResult ?? "unknown"}`);
+      console.log(`Current intended-set verdict: ${res.data.currentIntendedSetVerdict ?? "unknown"}`);
+      console.log(`Intended: ${res.data.intendedRoster?.length ?? 0}; excluded historical: ${res.data.excludedNodes?.length ?? 0}; unresolved: ${res.data.unresolvedIntendedSeats?.length ?? 0}`);
+      for (const node of res.data.unresolvedIntendedSeats ?? []) console.log(`  ${node.logicalId}: ${node.status}`);
     });
 
   return cmd;

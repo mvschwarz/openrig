@@ -119,6 +119,9 @@ crashCartRoutes.post("/restore-fleet", (c) => {
     restoreRig: createDefaultRestoreRig(
       {
         findLatestRestoreUsable: (rigId) => snapshotRepo.findLatestRestoreUsable(rigId),
+        ...(typeof snapshotRepo.selectRestoreUsable === "function"
+          ? { selectRestoreUsable: (rigId: string) => snapshotRepo.selectRestoreUsable(rigId) }
+          : {}),
         // H1 — thread the app's adapters + fsOps into the shipped restore.
         restore: (snapshotId, opts) =>
           restoreOrchestrator.restore(snapshotId, {

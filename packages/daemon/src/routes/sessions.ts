@@ -60,6 +60,12 @@ function getDeps(c: { get: (key: string) => unknown }) {
   };
 }
 
+function narrowLaunchErrorStatus(code: string | undefined): 404 | 409 | 500 {
+  if (code === "rig_not_found" || code === "no_matching_nodes" || code === "snapshot_not_found" || code === "snapshot_wrong_rig" || code === "no_usable_snapshot") return 404;
+  if (code === "snapshot_unusable") return 409;
+  return 500;
+}
+
 // OPR.0.4.3.20 FR-7 (Gap 2a) — build the runtime adapters + fsOps a node-subset
 // launch needs so its pod-aware seats run the SAME resume/continuity verification
 // as a full restore (mirrors routes/snapshots.ts). Without these, launchNodeSubset
@@ -247,10 +253,10 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     if (!restoreOrchestrator) {
       return c.json({ ok: false, code: "internal_error", error: "Restore orchestrator not available" }, 500);
     }
-    const body = await c.req.json().catch(() => ({})) as { holdReason?: string };
-    const result = await restoreOrchestrator.launchNodeSubset(rigId, [node.logicalId], { holdReason: body.holdReason, ...(await resumeLaunchOpts(c)) });
+    const body = await c.req.json().catch(() => ({})) as { snapshotId?: string };
+    const result = await restoreOrchestrator.launchSingleNode(rigId, node.logicalId, { snapshotId: body.snapshotId, ...(await resumeLaunchOpts(c)) });
     if (!result.ok) {
-      return c.json(result, result.code === "rig_not_found" ? 404 : result.code === "no_matching_nodes" ? 404 : 500);
+      return c.json(result, narrowLaunchErrorStatus(result.code));
     }
     const failedTarget = result.failedTargets?.find((n) => n.logicalId === node.logicalId);
     if (failedTarget) {
@@ -266,13 +272,14 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
           ok: false, rigId, nodeId: launchedNode.nodeId, logicalId: launchedNode.logicalId,
           code: launchedNode.status, status: launchedNode.status, error: launchedNode.error,
           launched: result.launched, held: result.held, warnings: result.warnings,
+          snapshotSelection: result.snapshotSelection, nonTargetEffects: result.nonTargetEffects,
         }, launchedNode.status === "failed" ? 500 : 409);
       }
-      return c.json({ ok: true, rigId, nodeId: launchedNode.nodeId, logicalId: launchedNode.logicalId, launched: result.launched, held: result.held, alreadyRunning: result.alreadyRunning, warnings: result.warnings }, 201);
+      return c.json({ ok: true, rigId, nodeId: launchedNode.nodeId, logicalId: launchedNode.logicalId, launched: result.launched, held: result.held, alreadyRunning: result.alreadyRunning, warnings: result.warnings, snapshotSelection: result.snapshotSelection, nonTargetEffects: result.nonTargetEffects }, 201);
     }
     const alreadyRunningNode = result.alreadyRunning?.find((n) => n.logicalId === node.logicalId);
     if (alreadyRunningNode) {
-      return c.json({ ok: true, rigId, nodeId: alreadyRunningNode.nodeId, logicalId: alreadyRunningNode.logicalId, code: "already_running", launched: result.launched, held: result.held, alreadyRunning: result.alreadyRunning });
+      return c.json({ ok: true, rigId, nodeId: alreadyRunningNode.nodeId, logicalId: alreadyRunningNode.logicalId, code: "already_running", launched: result.launched, held: result.held, alreadyRunning: result.alreadyRunning, snapshotSelection: result.snapshotSelection, nonTargetEffects: result.nonTargetEffects });
     }
     return c.json(result);
   }
@@ -297,13 +304,15 @@ nodesRoutes.post("/launch-subset", async (c) => {
   if (!restoreOrchestrator) {
     return c.json({ ok: false, code: "internal_error", error: "Restore orchestrator not available" }, 500);
   }
-  const body = await c.req.json().catch(() => ({})) as { seats?: string[]; holdReason?: string };
+  const body = await c.req.json().catch(() => ({})) as { seats?: string[]; holdReason?: string; snapshotId?: string; plan?: boolean };
   if (!Array.isArray(body.seats) || body.seats.length === 0) {
     return c.json({ ok: false, code: "invalid_request", error: "Request body must include a non-empty 'seats' array of logical IDs" }, 400);
   }
-  const result = await restoreOrchestrator.launchNodeSubset(rigId, body.seats, { holdReason: body.holdReason, ...(await resumeLaunchOpts(c)) });
+  const result = body.plan === true
+    ? restoreOrchestrator.planNodeSubset(rigId, body.seats, { holdReason: body.holdReason, snapshotId: body.snapshotId })
+    : await restoreOrchestrator.launchNodeSubset(rigId, body.seats, { holdReason: body.holdReason, snapshotId: body.snapshotId, ...(await resumeLaunchOpts(c)) });
   if (!result.ok) {
-    return c.json(result, result.code === "rig_not_found" ? 404 : result.code === "no_matching_nodes" ? 404 : 500);
+    return c.json(result, narrowLaunchErrorStatus(result.code));
   }
   // OPR.0.4.3.20 FR-7 — a target that landed awaiting-decision / attention_required /
   // failed is NOT launched (no running session). Success requires at least one running
