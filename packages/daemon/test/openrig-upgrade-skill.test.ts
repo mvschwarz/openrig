@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +15,10 @@ const skillRoot = path.join(
 );
 const skillPath = path.join(skillRoot, "SKILL.md");
 const temporaryRoots: string[] = [];
+
+function sha256(bytes: string | Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
 
 function temporaryRoot(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-upgrade-skill-"));
@@ -442,6 +447,44 @@ esac
 describe("0.5.9 telemetry-state migration helper", () => {
   const helper = "migrate-telemetry-state-0.5.9.mjs";
 
+  function prepareLibraryMigration(
+    root: string,
+    seedLibrary: (fixture: ReturnType<typeof seedLegacyTelemetry>) => void,
+  ) {
+    const fixture = seedLegacyTelemetry(root);
+    fs.mkdirSync(path.join(fixture.home, "context", "system"));
+    seedLibrary(fixture);
+    const fakeRig = writeRigInventory(root, [{
+      runtime: "claude-code",
+      sessionStatus: "running",
+      canonicalSessionName: fixture.sessionName,
+      cwd: fixture.cwd,
+    }]);
+    const env = { OPENRIG_RIG_BIN: fakeRig };
+    const preimage = path.join(fixture.home, "backups", "before-layout");
+    runJson(helper, ["--home", fixture.home, "--apply-state", "--preimage", preimage], env);
+    write(fixture.home, "context/system/system-world.yaml", DEFAULT_SYSTEM_WORLD_MANIFEST);
+    const collector = path.join(repoRoot, "packages", "daemon", "assets", "claude-statusline-context.cjs");
+    const collected = spawnSync(process.execPath, [
+      collector,
+      path.join(fixture.home, "state", "context-usage"),
+      path.join(fixture.home, "state", "provider-usage"),
+    ], {
+      encoding: "utf8",
+      input: JSON.stringify({
+        session_id: "session-1",
+        session_name: fixture.sessionName,
+        context_window: { context_window_size: 200_000, used_percentage: 26 },
+      }),
+    });
+    expect(collected.status, collected.stderr).toBe(0);
+    const verification = runJson(helper, ["--home", fixture.home, "--verify", "--preimage", preimage], env);
+    expect(verification).toMatchObject({ phase: "verify", verified: true, complete: true, issues: [] });
+    const verificationPath = path.join(root, "verification.json");
+    fs.writeFileSync(verificationPath, JSON.stringify(verification));
+    return { fixture, env, preimage, verificationPath };
+  }
+
   it("plans read-only, copies state with byte-addressed preimages, verifies fresh dual telemetry, and rolls settings back", () => {
     const root = temporaryRoot();
     const fixture = seedLegacyTelemetry(root);
@@ -526,6 +569,11 @@ describe("0.5.9 telemetry-state migration helper", () => {
     const fixture = seedLegacyTelemetry(root);
     fs.mkdirSync(path.join(fixture.home, "context", "system"));
     write(fixture.home, "context-packs/operator-pack/manifest.yaml", "name: operator-pack\nversion: \"1\"\ntaxonomy: world\nfiles: []\n");
+    const libraryFile = path.join(fixture.home, "context-packs", "operator-pack", "manifest.yaml");
+    const libraryFileDigest = sha256(fs.readFileSync(libraryFile));
+    const libraryFileRow = `operator-pack/manifest.yaml\0${fs.statSync(libraryFile).mode & 0o777}\0${libraryFileDigest}`;
+    const legacyRegularFileDigest = sha256(libraryFileRow);
+    const expectedTargetDigest = sha256(`${libraryFileRow}\nsystem/system-world.yaml\0${0o644}\0${sha256(DEFAULT_SYSTEM_WORLD_MANIFEST)}`);
     write(fixture.home, "config.json", `${JSON.stringify({ keep: true, context: { packsRoot: path.join(fixture.home, "context-packs") } }, null, 2)}\n`);
     const originalConfig = fs.readFileSync(path.join(fixture.home, "config.json"));
     const fakeRig = writeRigInventory(root, [{
@@ -571,6 +619,12 @@ describe("0.5.9 telemetry-state migration helper", () => {
       "--verification", verificationPath,
     ], env);
     expect(migrated).toMatchObject({ phase: "apply-library", applied: true, complete: true, issues: [] });
+    const completedManifest = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    expect(completedManifest.library.sourceTreeDigest).toBe(legacyRegularFileDigest);
+    expect(completedManifest.library.targetTreeDigest).toBe(expectedTargetDigest);
+    expect(completedManifest.library.sourceTreeInventory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "operator-pack/manifest.yaml", type: "file", sha256: libraryFileDigest }),
+    ]));
     expect(fs.existsSync(path.join(fixture.home, "context-packs"))).toBe(false);
     expect(fs.readFileSync(path.join(fixture.home, "context", "operator-pack", "manifest.yaml"), "utf8")).toContain("operator-pack");
     expect(fs.readFileSync(path.join(fixture.home, "context", "system", "system-world.yaml"), "utf8")).toBe(DEFAULT_SYSTEM_WORLD_MANIFEST);
@@ -590,6 +644,241 @@ describe("0.5.9 telemetry-state migration helper", () => {
     expect(fs.existsSync(path.join(fixture.home, "state", "context-usage", `${fixture.sessionName}.json`))).toBe(true);
     expect(fs.readdirSync(path.join(fixture.home, "context", "system"))).toEqual([]);
     expect(fs.readFileSync(fixture.settingsPath, "utf8")).toBe(fixture.originalSettings);
+  });
+
+  it("moves and rolls back an opaque project-context symlink without reading or claiming its target", () => {
+    const root = temporaryRoot();
+    let projectPack = "";
+    let legacyLink = "";
+    const prepared = prepareLibraryMigration(root, (fixture) => {
+      projectPack = path.join(fixture.home, "workspace", ".openrig", "context-packs", "context-engineering");
+      write(projectPack, "manifest.yaml", "name: context-engineering\nversion: \"1\"\ntaxonomy: world\nfiles: []\n");
+      legacyLink = path.join(fixture.home, "context-packs", "context-engineering");
+      fs.mkdirSync(path.dirname(legacyLink), { recursive: true });
+      fs.symlinkSync(projectPack, legacyLink, "dir");
+    });
+    const { fixture, env, preimage, verificationPath } = prepared;
+    const originalLink = fs.lstatSync(legacyLink);
+    const originalTargetBytes = fs.readFileSync(path.join(projectPack, "manifest.yaml"));
+
+    const migrated = runJson(helper, [
+      "--home", fixture.home,
+      "--apply-library",
+      "--preimage", preimage,
+      "--verification", verificationPath,
+    ], env);
+    expect(migrated).toMatchObject({ phase: "apply-library", applied: true, complete: true, issues: [] });
+    const migratedLink = path.join(fixture.home, "context", "context-engineering");
+    expect(fs.lstatSync(migratedLink).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(migratedLink)).toBe(projectPack);
+    expect(fs.lstatSync(migratedLink).ino).toBe(originalLink.ino);
+    const completed = JSON.parse(fs.readFileSync(path.join(preimage, "manifest.json"), "utf8"));
+    expect(completed.library).toEqual(expect.objectContaining({
+      sourceTreeDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      targetTreeDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      sourceTreeInventory: expect.arrayContaining([
+        expect.objectContaining({
+          path: "context-engineering",
+          type: "symlink",
+          mode: originalLink.mode & 0o777,
+          linkTargetBase64: Buffer.from(projectPack).toString("base64"),
+          identity: { dev: String(originalLink.dev), ino: String(originalLink.ino) },
+        }),
+      ]),
+    }));
+
+    write(projectPack, "manifest.yaml", "project target changed after migration\n");
+    const rolledBack = runJson(helper, ["--home", fixture.home, "--rollback", preimage], env);
+    expect(rolledBack).toMatchObject({ phase: "rollback", complete: true, rolledBack: true, issues: [] });
+    expect(fs.lstatSync(legacyLink).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(legacyLink)).toBe(projectPack);
+    expect(fs.lstatSync(legacyLink).ino).toBe(originalLink.ino);
+    expect(originalTargetBytes).not.toEqual(fs.readFileSync(path.join(projectPack, "manifest.yaml")));
+  });
+
+  it.each(["relative", "broken-relative", "absolute-outside"])(
+    "preserves a %s child symlink as opaque library identity",
+    (shape) => {
+      const root = temporaryRoot();
+      let linkPath = "";
+      let linkTarget = "";
+      const prepared = prepareLibraryMigration(root, (fixture) => {
+        linkPath = path.join(fixture.home, "context-packs", "linked-pack");
+        fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+        if (shape === "relative") {
+          const target = path.join(fixture.home, "workspace", ".openrig", "context-packs", "linked-pack");
+          write(target, "manifest.yaml", "name: linked-pack\nversion: \"1\"\nfiles: []\n");
+          linkTarget = "../workspace/.openrig/context-packs/linked-pack";
+        } else if (shape === "broken-relative") {
+          linkTarget = "../workspace/.openrig/context-packs/missing-pack";
+        } else {
+          const target = path.join(root, "outside-library", "linked-pack");
+          write(target, "manifest.yaml", "outside target stays outside\n");
+          linkTarget = target;
+        }
+        fs.symlinkSync(linkTarget, linkPath, "dir");
+      });
+      const original = fs.lstatSync(linkPath);
+
+      const migrated = runJson(helper, [
+        "--home", prepared.fixture.home,
+        "--apply-library",
+        "--preimage", prepared.preimage,
+        "--verification", prepared.verificationPath,
+      ], prepared.env);
+      expect(migrated, shape).toMatchObject({ phase: "apply-library", applied: true, complete: true, issues: [] });
+      const movedLink = path.join(prepared.fixture.home, "context", "linked-pack");
+      expect(fs.lstatSync(movedLink).isSymbolicLink(), shape).toBe(true);
+      expect(fs.readlinkSync(movedLink), shape).toBe(linkTarget);
+      expect(fs.lstatSync(movedLink).ino, shape).toBe(original.ino);
+
+      const rolledBack = runJson(helper, ["--home", prepared.fixture.home, "--rollback", prepared.preimage], prepared.env);
+      expect(rolledBack, shape).toMatchObject({ phase: "rollback", complete: true, rolledBack: true, issues: [] });
+      expect(fs.lstatSync(linkPath).isSymbolicLink(), shape).toBe(true);
+      expect(fs.readlinkSync(linkPath), shape).toBe(linkTarget);
+      expect(fs.lstatSync(linkPath).ino, shape).toBe(original.ino);
+    },
+  );
+
+  it.each(["payload", "type", "inode"])(
+    "refuses pre-mutation library symlink %s drift and preserves the observed entry",
+    (change) => {
+      const root = temporaryRoot();
+      let linkPath = "";
+      const linkTarget = "../workspace/.openrig/context-packs/linked-pack";
+      const prepared = prepareLibraryMigration(root, (fixture) => {
+        const target = path.join(fixture.home, "workspace", ".openrig", "context-packs", "linked-pack");
+        write(target, "manifest.yaml", "name: linked-pack\nversion: \"1\"\nfiles: []\n");
+        linkPath = path.join(fixture.home, "context-packs", "linked-pack");
+        fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+        fs.symlinkSync(linkTarget, linkPath, "dir");
+      });
+      const original = fs.lstatSync(linkPath);
+      const legacyContextPath = path.join(prepared.fixture.home, "context", `${prepared.fixture.sessionName}.json`);
+      const legacyProviderPath = path.join(prepared.fixture.home, "provider-usage", `${prepared.fixture.sessionName}.json`);
+      const contextBefore = fs.readFileSync(legacyContextPath);
+      const providerBefore = fs.readFileSync(legacyProviderPath);
+      const helperPath = path.join(skillRoot, "scripts", helper);
+      const interposedHelperPath = path.join(root, `migrate-${change}.mjs`);
+      const seam = `    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);\n    removeVerifiedLegacyRoot(`;
+      const source = fs.readFileSync(helperPath, "utf8");
+      expect(source.split(seam), change).toHaveLength(2);
+      const replacement = change === "type"
+        ? `fs.rmSync(${JSON.stringify(linkPath)}); fs.writeFileSync(${JSON.stringify(linkPath)}, "changed type");`
+        : `fs.rmSync(${JSON.stringify(linkPath)}); fs.symlinkSync(${JSON.stringify(change === "payload" ? "changed-target" : linkTarget)}, ${JSON.stringify(linkPath)}, "dir");`;
+      fs.writeFileSync(interposedHelperPath, source.replace(seam, `    ${replacement}\n${seam}`));
+
+      const result = runJsonFileResult(interposedHelperPath, [
+        "--home", prepared.fixture.home,
+        "--apply-library",
+        "--preimage", prepared.preimage,
+        "--verification", prepared.verificationPath,
+      ], prepared.env);
+      expect(result.status, change).toBe(1);
+      expect(result.body, change).toMatchObject({ phase: "apply-library", applied: false, complete: false });
+      expect(result.body.issues, change).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "library_source_drift" }),
+      ]));
+      expect(fs.readFileSync(legacyContextPath), change).toEqual(contextBefore);
+      expect(fs.readFileSync(legacyProviderPath), change).toEqual(providerBefore);
+      expect(fs.existsSync(path.join(prepared.fixture.home, "context", "linked-pack")), change).toBe(false);
+      const manifest = JSON.parse(fs.readFileSync(path.join(prepared.preimage, "manifest.json"), "utf8"));
+      expect(manifest.status, change).toBe("library-prepared");
+      expect(manifest.library.appliedAt, change).toBeUndefined();
+      if (change === "type") {
+        expect(fs.lstatSync(linkPath).isFile()).toBe(true);
+        expect(fs.readFileSync(linkPath, "utf8")).toBe("changed type");
+      } else {
+        expect(fs.lstatSync(linkPath).isSymbolicLink()).toBe(true);
+        expect(fs.readlinkSync(linkPath)).toBe(change === "payload" ? "changed-target" : linkTarget);
+        if (change === "inode") expect(fs.lstatSync(linkPath).ino).not.toBe(original.ino);
+      }
+    },
+  );
+
+  it.each(["payload", "type", "inode"])(
+    "refuses rollback when the migrated library symlink %s drifts",
+    (change) => {
+      const root = temporaryRoot();
+      const linkTarget = "../workspace/.openrig/context-packs/linked-pack";
+      const prepared = prepareLibraryMigration(root, (fixture) => {
+        const target = path.join(fixture.home, "workspace", ".openrig", "context-packs", "linked-pack");
+        write(target, "manifest.yaml", "name: linked-pack\nversion: \"1\"\nfiles: []\n");
+        const linkPath = path.join(fixture.home, "context-packs", "linked-pack");
+        fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+        fs.symlinkSync(linkTarget, linkPath, "dir");
+      });
+      const migrated = runJson(helper, [
+        "--home", prepared.fixture.home,
+        "--apply-library",
+        "--preimage", prepared.preimage,
+        "--verification", prepared.verificationPath,
+      ], prepared.env);
+      expect(migrated).toMatchObject({ phase: "apply-library", applied: true, complete: true, issues: [] });
+
+      const movedLink = path.join(prepared.fixture.home, "context", "linked-pack");
+      const original = fs.lstatSync(movedLink);
+      fs.rmSync(movedLink);
+      if (change === "type") fs.writeFileSync(movedLink, "changed type");
+      else fs.symlinkSync(change === "payload" ? "changed-target" : linkTarget, movedLink, "dir");
+      const settingsBefore = fs.readFileSync(prepared.fixture.settingsPath);
+
+      const result = runJsonFileResult(path.join(skillRoot, "scripts", helper), [
+        "--home", prepared.fixture.home,
+        "--rollback", prepared.preimage,
+      ], prepared.env);
+      expect(result.status, change).toBe(1);
+      expect(result.body, change).toMatchObject({ phase: "rollback", rolledBack: false, complete: false });
+      expect(result.body.issues, change).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "destination_drift" }),
+      ]));
+      expect(fs.existsSync(path.join(prepared.fixture.home, "context-packs")), change).toBe(false);
+      expect(fs.readFileSync(prepared.fixture.settingsPath), change).toEqual(settingsBefore);
+      expect(JSON.parse(fs.readFileSync(path.join(prepared.preimage, "manifest.json"), "utf8")).status, change)
+        .toBe("library-applied");
+      if (change === "type") {
+        expect(fs.lstatSync(movedLink).isFile()).toBe(true);
+        expect(fs.readFileSync(movedLink, "utf8")).toBe("changed type");
+      } else {
+        expect(fs.lstatSync(movedLink).isSymbolicLink()).toBe(true);
+        expect(fs.readlinkSync(movedLink)).toBe(change === "payload" ? "changed-target" : linkTarget);
+        if (change === "inode") expect(fs.lstatSync(movedLink).ino).not.toBe(original.ino);
+      }
+    },
+  );
+
+  it("refuses a symlinked library root before changing live state", () => {
+    const root = temporaryRoot();
+    let externalLibrary = "";
+    let sourceRoot = "";
+    const prepared = prepareLibraryMigration(root, (fixture) => {
+      externalLibrary = path.join(root, "external-library");
+      write(externalLibrary, "pack/manifest.yaml", "name: pack\nversion: \"1\"\nfiles: []\n");
+      sourceRoot = path.join(fixture.home, "context-packs");
+      fs.symlinkSync(externalLibrary, sourceRoot, "dir");
+    });
+    const legacyContextPath = path.join(prepared.fixture.home, "context", `${prepared.fixture.sessionName}.json`);
+    const legacyProviderPath = path.join(prepared.fixture.home, "provider-usage", `${prepared.fixture.sessionName}.json`);
+    const contextBefore = fs.readFileSync(legacyContextPath);
+    const providerBefore = fs.readFileSync(legacyProviderPath);
+
+    const result = runJsonResult(helper, [
+      "--home", prepared.fixture.home,
+      "--apply-library",
+      "--preimage", prepared.preimage,
+      "--verification", prepared.verificationPath,
+    ], prepared.env);
+    expect(result.status).toBe(1);
+    expect(result.body).toMatchObject({ phase: "apply-library", applied: false, complete: false });
+    expect(result.body.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "library_source_invalid", path: sourceRoot }),
+    ]));
+    expect(fs.lstatSync(sourceRoot).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(path.join(externalLibrary, "pack", "manifest.yaml"), "utf8")).toContain("name: pack");
+    expect(fs.readFileSync(legacyContextPath)).toEqual(contextBefore);
+    expect(fs.readFileSync(legacyProviderPath)).toEqual(providerBefore);
+    const manifest = JSON.parse(fs.readFileSync(path.join(prepared.preimage, "manifest.json"), "utf8"));
+    expect(manifest.status).toBe("applied");
   });
 
   it.each([

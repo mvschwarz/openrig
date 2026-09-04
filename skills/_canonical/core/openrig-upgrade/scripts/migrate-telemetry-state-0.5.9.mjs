@@ -47,22 +47,107 @@ function readJson(filePath) {
   }
 }
 
-function treeDigest(root, ignored = new Set()) {
-  if (!fs.existsSync(root)) return null;
+function lstatOrNull(pathValue) {
+  try {
+    return fs.lstatSync(pathValue);
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function treeSnapshot(root, ignored = new Set()) {
+  const rootStat = lstatOrNull(root);
+  if (!rootStat) return { digest: null, rootIdentity: null, entries: [] };
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+    throw new Error(`library root is not a real directory: ${root}`);
+  }
   const rows = [];
+  const entries = [];
   const visit = (directory, prefix = "") => {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
       const absolute = path.join(directory, entry.name);
       if (ignored.has(relative)) continue;
-      if (entry.isSymbolicLink()) throw new Error(`symlinked library entry is not supported: ${absolute}`);
-      if (entry.isDirectory()) visit(absolute, relative);
-      else if (entry.isFile()) rows.push(`${relative}\0${fs.statSync(absolute).mode & 0o777}\0${sha256(fs.readFileSync(absolute))}`);
-      else throw new Error(`unsupported library entry is not supported: ${absolute}`);
+      const current = fs.lstatSync(absolute);
+      const mode = current.mode & 0o777;
+      if (current.isSymbolicLink()) {
+        const linkTargetBase64 = fs.readlinkSync(absolute, { encoding: "buffer" }).toString("base64");
+        const afterRead = fs.lstatSync(absolute);
+        if (!afterRead.isSymbolicLink()
+          || afterRead.dev !== current.dev
+          || afterRead.ino !== current.ino
+          || (afterRead.mode & 0o777) !== mode) {
+          throw new Error(`symlink changed while being inventoried: ${absolute}`);
+        }
+        entries.push({
+          path: relative,
+          type: "symlink",
+          mode,
+          linkTargetBase64,
+          identity: { dev: String(current.dev), ino: String(current.ino) },
+        });
+        rows.push(`${relative}\0symlink\0${mode}\0${linkTargetBase64}`);
+      } else if (current.isDirectory()) {
+        entries.push({ path: relative, type: "directory", mode });
+        visit(absolute, relative);
+      } else if (current.isFile()) {
+        const digest = sha256(fs.readFileSync(absolute));
+        entries.push({ path: relative, type: "file", mode, sha256: digest });
+        // Preserve the pre-symlink regular-file serialization byte-for-byte.
+        rows.push(`${relative}\0${mode}\0${digest}`);
+      } else {
+        throw new Error(`unsupported library entry is not supported: ${absolute}`);
+      }
     }
   };
   visit(root);
-  return sha256(rows.join("\n"));
+  return {
+    digest: sha256(rows.join("\n")),
+    rootIdentity: { dev: String(rootStat.dev), ino: String(rootStat.ino) },
+    entries,
+  };
+}
+
+function treeDigest(root, ignored = new Set()) {
+  return treeSnapshot(root, ignored).digest;
+}
+
+function librarySourceDrift(sourcePath, message) {
+  const drift = new Error(`context library changed after inventory: ${sourcePath}: ${message}`);
+  drift.migrationIssueCode = "library_source_drift";
+  drift.migrationPath = sourcePath;
+  return drift;
+}
+
+function assertTreeSnapshot(root, expected, ignored = new Set()) {
+  let current;
+  try {
+    current = treeSnapshot(root, ignored);
+  } catch (error) {
+    throw librarySourceDrift(root, error.message);
+  }
+  const rootIdentityChanged = expected.rootIdentity !== null && (
+    current.rootIdentity?.dev !== expected.rootIdentity.dev
+    || current.rootIdentity?.ino !== expected.rootIdentity.ino
+  );
+  if (current.digest !== expected.digest || rootIdentityChanged) {
+    throw librarySourceDrift(root, "tree digest or root identity no longer matches");
+  }
+  const currentLinks = new Map(current.entries
+    .filter((entry) => entry.type === "symlink")
+    .map((entry) => [entry.path, entry]));
+  for (const link of expected.entries.filter((entry) => entry.type === "symlink")) {
+    const observed = currentLinks.get(link.path);
+    if (!observed
+      || observed.mode !== link.mode
+      || observed.linkTargetBase64 !== link.linkTargetBase64
+      || observed.identity.dev !== link.identity.dev
+      || observed.identity.ino !== link.identity.ino) {
+      throw librarySourceDrift(path.join(root, link.path), "symlink payload, type, mode, or inode no longer matches");
+    }
+  }
+  return current;
 }
 
 function readLibraryConfig(home, issues) {
@@ -864,9 +949,6 @@ function applyLibrary(home, preimage, verificationPath) {
     [],
     verifiedTails,
   );
-  if (library && fs.existsSync(library.sourceRoot) && !fs.statSync(library.sourceRoot).isDirectory()) {
-    issues.push(issue("library_source_invalid", library.sourceRoot, "preserve the path and identify the real legacy context library"));
-  }
   const configRecord = manifest.files.find((file) => file.kind === "config");
   if (library?.configExists) {
     const currentConfigSha = sha256(fs.readFileSync(library.configPath));
@@ -878,19 +960,28 @@ function applyLibrary(home, preimage, verificationPath) {
     emit({ schema: SCHEMA, phase: "apply-library", ok: false, applied: false, complete: false, issues }, 1);
   }
 
-  let sourceTreeDigest;
+  let sourceTreeSnapshot;
   try {
-    sourceTreeDigest = treeDigest(library.sourceRoot);
+    sourceTreeSnapshot = treeSnapshot(library.sourceRoot);
   } catch (error) {
     emit({ schema: SCHEMA, phase: "apply-library", ok: false, applied: false, complete: false, issues: [issue(
       "library_source_invalid",
       library.sourceRoot,
-      "remove unsupported entries from the legacy context library before migration",
+      "preserve the unsupported entry and extend the bounded migration before retrying",
       { diagnostic: error.message },
     )] }, 1);
   }
+  const systemEntry = sourceTreeSnapshot.entries.find((entry) => entry.path === "system");
+  const systemWorldEntry = sourceTreeSnapshot.entries.find((entry) => entry.path === "system/system-world.yaml");
+  if (systemEntry?.type === "symlink" || systemWorldEntry?.type === "symlink") {
+    emit({ schema: SCHEMA, phase: "apply-library", ok: false, applied: false, complete: false, issues: [issue(
+      "system_world_conflict",
+      path.join(library.sourceRoot, "system"),
+      "preserve the opaque entry at the reserved System World path and reconcile it before migration",
+    )] }, 1);
+  }
   const systemWorldPathBefore = path.join(library.sourceRoot, "system", "system-world.yaml");
-  const systemWorldExisted = fs.existsSync(systemWorldPathBefore);
+  const systemWorldExisted = systemWorldEntry?.type === "file";
   if (systemWorldExisted && sha256(fs.readFileSync(systemWorldPathBefore)) !== sha256(DEFAULT_SYSTEM_WORLD)) {
     emit({ schema: SCHEMA, phase: "apply-library", ok: false, applied: false, complete: false, issues: [issue(
       "system_world_conflict",
@@ -901,13 +992,17 @@ function applyLibrary(home, preimage, verificationPath) {
 
   let postApplyLegacyTails;
   try {
+    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);
     postApplyLegacyTails = preserveVerifiedLegacyTails(preimage, verifiedTails);
   } catch (error) {
     const sourceDrift = error.migrationIssueCode === "legacy_source_drift";
+    const libraryDrift = error.migrationIssueCode === "library_source_drift";
     emit({ schema: SCHEMA, phase: "apply-library", ok: false, applied: false, complete: false, issues: [issue(
-      sourceDrift ? "legacy_source_drift" : "preimage_mismatch",
-      sourceDrift ? error.migrationPath : preimage,
-      sourceDrift
+      sourceDrift ? "legacy_source_drift" : libraryDrift ? "library_source_drift" : "preimage_mismatch",
+      sourceDrift || libraryDrift ? error.migrationPath : preimage,
+      libraryDrift
+        ? "preserve the changed context library and rerun from a fresh inventory"
+        : sourceDrift
         ? "preserve the changed legacy telemetry source and rerun verification before migrating the library"
         : "restore a writeable byte-matching preimage before migrating the library",
       { diagnostic: error.message },
@@ -921,7 +1016,9 @@ function applyLibrary(home, preimage, verificationPath) {
     library: {
       sourceRoot: library.sourceRoot,
       targetRoot: library.targetRoot,
-      sourceTreeDigest,
+      sourceTreeDigest: sourceTreeSnapshot.digest,
+      sourceTreeRootIdentity: sourceTreeSnapshot.rootIdentity,
+      sourceTreeInventory: sourceTreeSnapshot.entries,
       systemWorldExisted,
       configExisted: library.configExists,
       nextConfigSha256: library.configExists ? sha256(library.nextConfig) : null,
@@ -931,6 +1028,7 @@ function applyLibrary(home, preimage, verificationPath) {
   atomicWrite(manifestPath, Buffer.from(`${JSON.stringify(prepared, null, 2)}\n`), 0o600);
 
   try {
+    assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);
     removeVerifiedLegacyRoot(
       path.join(home, "context"),
       legacyContextFiles,
@@ -940,10 +1038,15 @@ function applyLibrary(home, preimage, verificationPath) {
     removeVerifiedLegacyRoot(path.join(home, "provider-usage"), legacyProviderFiles);
     if (library.sourceRoot !== library.targetRoot) {
       if (fs.existsSync(library.targetRoot)) throw new Error(`library target still exists after telemetry removal: ${library.targetRoot}`);
-      if (fs.existsSync(library.sourceRoot)) fs.renameSync(library.sourceRoot, library.targetRoot);
+      if (sourceTreeSnapshot.digest !== null) {
+        assertTreeSnapshot(library.sourceRoot, sourceTreeSnapshot);
+        fs.renameSync(library.sourceRoot, library.targetRoot);
+        assertTreeSnapshot(library.targetRoot, sourceTreeSnapshot);
+      }
       else fs.mkdirSync(library.targetRoot, { recursive: true });
     } else {
       fs.mkdirSync(library.targetRoot, { recursive: true });
+      if (sourceTreeSnapshot.digest !== null) assertTreeSnapshot(library.targetRoot, sourceTreeSnapshot);
     }
     const systemWorldPath = path.join(library.targetRoot, "system", "system-world.yaml");
     if (!fs.existsSync(systemWorldPath)) atomicWrite(systemWorldPath, Buffer.from(DEFAULT_SYSTEM_WORLD), 0o644);
@@ -980,6 +1083,7 @@ function applyLibrary(home, preimage, verificationPath) {
     });
   } catch (error) {
     const sourceDrift = error.migrationIssueCode === "legacy_source_drift";
+    const libraryDrift = error.migrationIssueCode === "library_source_drift";
     emit({
       schema: SCHEMA,
       phase: "apply-library",
@@ -988,9 +1092,11 @@ function applyLibrary(home, preimage, verificationPath) {
       complete: false,
       preimage,
       issues: [issue(
-        sourceDrift ? "legacy_source_drift" : "library_apply_incomplete",
-        sourceDrift ? error.migrationPath : null,
-        sourceDrift
+        sourceDrift ? "legacy_source_drift" : libraryDrift ? "library_source_drift" : "library_apply_incomplete",
+        sourceDrift || libraryDrift ? error.migrationPath : null,
+        libraryDrift
+          ? "preserve the changed context library and run --rollback with this preimage before retrying"
+          : sourceDrift
           ? "preserve the changed legacy telemetry source and reconcile it with the receipt before rollback or retry"
           : "run --rollback with this preimage before retrying",
         { diagnostic: error.message },
@@ -1041,6 +1147,19 @@ function rollback(home, preimage) {
         const currentTreeDigest = treeDigest(activeRoot, ignored);
         if (currentTreeDigest !== (library.sourceTreeDigest ?? sha256(""))) {
           issues.push(issue("destination_drift", activeRoot, "preserve the changed context library and decide the merge manually before rollback"));
+        }
+        if (Array.isArray(library.sourceTreeInventory)) {
+          try {
+            assertTreeSnapshot(activeRoot, {
+              digest: library.sourceTreeDigest,
+              rootIdentity: library.sourceTreeRootIdentity,
+              entries: library.sourceTreeInventory,
+            }, ignored);
+          } catch (error) {
+            issues.push(issue("destination_drift", error.migrationPath ?? activeRoot, "preserve the changed context library identity and decide the merge manually before rollback", {
+              diagnostic: error.message,
+            }));
+          }
         }
         if (ignored.size > 0 && sha256(fs.readFileSync(path.join(activeRoot, "system", "system-world.yaml"))) !== sha256(DEFAULT_SYSTEM_WORLD)) {
           issues.push(issue("destination_drift", path.join(activeRoot, "system", "system-world.yaml"), "preserve the changed System World and decide the merge manually before rollback"));
@@ -1105,6 +1224,22 @@ function rollback(home, preimage) {
         activeRoot,
         "the context library no longer matches its preserved pre-migration tree",
       )] }, 1);
+    }
+    if (activeRoot && Array.isArray(library.sourceTreeInventory)) {
+      try {
+        assertTreeSnapshot(activeRoot, {
+          digest: library.sourceTreeDigest,
+          rootIdentity: library.sourceTreeRootIdentity,
+          entries: library.sourceTreeInventory,
+        });
+      } catch (error) {
+        emit({ schema: SCHEMA, phase: "rollback", rolledBack: false, complete: false, preimage, issues: [issue(
+          "destination_drift",
+          error.migrationPath ?? activeRoot,
+          "the context library identity no longer matches its preserved pre-migration tree",
+          { diagnostic: error.message },
+        )] }, 1);
+      }
     }
     if (library.sourceRoot !== library.targetRoot && libraryLocation === "target") {
       if (library.sourceTreeDigest === null) {
