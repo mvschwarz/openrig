@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Eighty-one-plus top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.5.8`). Read this once for shape, and let it make you suspicious that a thing
+`capability-delta-v0.5.9`). Read this once for shape, and let it make you suspicious that a thing
 already exists. Model-divergence proclamations are live product (trust them; pins use canonical
 model IDs).
 
@@ -132,7 +132,9 @@ you that is still running.
 
 - **`rig watchdog register`** — arm a wake for a condition that will become true after you are
   asleep, compacted or finished. For a context wall, use the exact
-  `--policy context-usage-threshold` rather than a hand-rolled transcript timer.
+  `--policy context-usage-threshold` rather than a hand-rolled transcript timer. A scheduled
+  reminder arrives as the authored message under an explicit scheduler identity, not as YAML
+  syntax or anonymous agent input.
 - **`rig watchdog list` / `show` / `status` / `stop`** — did it fire, is it still live, did someone
   stop it. `list` defaults to active, compact, and 100; `--all --full` is the complete history.
   **Quiet skips are not recorded**, so a healthy idle job and a job that never ran look identical
@@ -151,6 +153,10 @@ cheaper than being it.
 - **`rig workflow specs`** — what can be started here, and which are shipped versus authored by
   this rig.
 - **`rig workflow validate`** — will this spec instantiate at all, before a run finds out for you.
+- **`rig workflow compile <mission>`** / **`instantiate-lifecycle`** — derive one executable graph
+  from `project.yaml` → `mission.yaml` → `slice.yaml`, inspect it without writing, then start an
+  eligible graph with an opaque replay key. Typed acceptance candidate, verdict, and evidence
+  travel through `workflow project`; workflow completion alone is never release acceptance.
 - **`rig workflow instantiate`** — start a multi-step, multi-seat run as one governed instance with
   an entry packet that lands on a real owner.
 - **`rig workflow status`** — **which instances need *you*, right now**, with the reason and next
@@ -177,6 +183,9 @@ not have to tear one down to change it, and you rarely have to start from nothin
 - **`rig down`** — stop a rig's seats and take it out of the running set.
 - **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
   rest.
+- **`rig seat launch <seat> --fresh --reason <why>`** — deliberately create a blank occupant for
+  exactly one existing seat. It uses no resume, fork, rebuild, snapshot, or restore packet;
+  siblings and durable work stay put, and unmanaged ambiguity refuses.
 - **`rig add`** / **`rig expand`** — graft one more member, or a whole new pod, onto a rig that is
   already running. `rig grow --new-pod` and `rig expand` are one ingress; choose by input shape.
 - **`rig remove`** / **`rig shrink`** — take a seat, or an entire pod, out of a running topology.
@@ -220,14 +229,19 @@ because someone lost work once.
   list with their exact remediation, mid-run cancel with `c`. It only offers RESTORE on POSITIVE
   down-evidence (confirmed-down vs cannot-verify are distinct screens).
 - **`rig snapshot`** — take a restore point **before** the risky thing. `snapshot list` shows what
-  you actually have and how old the newest is.
+  you actually have and how old the newest is; `--intended-seats` records the topology roster the
+  later restore must judge rather than treating every historical node as current.
 - **`rig restore`** — put a rig back to a snapshot. **`rig restore-check` first**: what would
   actually come back, and for everything that would not, which check fails and what the fix is.
+  Use `rig launch ... --snapshot-id <id>` when selection must be exact, and `rig restore status
+  <attempt> --rig <rig>` for the derived intended-set receipt after an asynchronous restore.
 - **`rig restore-packet write` / `read` / `validate`** — a seat is about to die or must move
   runtimes; capture what it knows into a portable artifact instead of losing it with the process.
 - **Upgrading is agent-led** — load the shipped `openrig-upgrade` skill for the bounded inspect,
-  backup, and plugin-refresh helpers. There is no `rig upgrade` verb, and `rig down` is not part of
-  a continuity-preserving upgrade.
+  backup, plugin-refresh, and 0.5.9 instance-migration helpers. The migration is an
+  Agent-Operated Workflow: inspect, take one bounded reversible action, verify its effect, and
+  continue from the receipt. There is no `rig upgrade` verb, and `rig down` is not part of a
+  continuity-preserving upgrade.
 - **A seat's `compaction_strategy` is declared, not improvised at the wall.** Pair a threshold-
   managed seat with the `context-usage-threshold` watchdog above so continuity is arranged while
   the seat can still act.
@@ -240,7 +254,9 @@ because someone lost work once.
 - **`rig seat set-model` / `stop` / `clean`** — persist the model for later managed resumes, stop
   exactly one live seat, or clear a dead seat's stale binding. When the topology is right and only
   the occupant is wrong, use these seat lifecycle verbs or `rig handover`, not a rig down/up cycle.
-  A `<synthetic>` transcript record is skipped, so a PENDING model check is not a divergence.
+  Effective-model detection follows the identity-verified current occupant, not a retained
+  predecessor; a `<synthetic>` transcript record is skipped, so a PENDING model check is not a
+  divergence.
 - **`rig compact-plan`** → **`rig compact`** — who is near the context wall, then act on it.
   **Ordering matters: running `compact` without the plan is guessing which seat needed it.**
 - **Know what compaction costs before you reach for it.** On some runtimes what comes back has
@@ -292,8 +308,10 @@ scheme, and nothing downstream can see it.
 - **`rig workspace doctor` / `validate`** — does the daemon agree with you about where the work
   tree is, and which files are missing the frontmatter their kind requires.
 - **`rig context work-install --project … --mission … --slice … [--deliver]`** — resolves the ordered
-  context plan; add `--deliver` to emit the exact extant files in that same order while marking
-  absent pieces visibly. Without the flag it remains plan-only.
+  System World, topology, and Project World plan. Add `--runtime` to see the composed managed skill
+  loadout, `--apply-skills` to reconcile its owned harness projection, or `--deliver` to emit the
+  exact extant files in order while marking absent pieces visibly. Without the flags it remains
+  plan-only.
 - **`rig context show` / `sync` / `rm`** — what is inside a context pack before you prime a seat
   with it, and how to make the library catch up when you edit one.
 - **`rig context get <name-or-ref>`** — pull exact context by address instead of reading files:
@@ -374,7 +392,9 @@ reaching them is ordinary work rather than an escalation.
 your circumstances is configuration, and the ones that are not, another agent can change for you.
 
 - **`rig config get` / `reset` / `init-workspace`** — read one value, change a system-wide setting
-  and put it back exactly as it was, or lay down the workspace tree on a box that has none.
+  and put it back exactly as it was, or additively lay down the canonical project scaffold on a
+  box that has none. Instance startup uses the same additive initializer for the surrounding
+  `state`, `context`, `skills`, `topology`, and operational roots.
 - **`rig policy list` / `show` / `current`** *(v0.5.2)* — what permission policy is actually in
   effect: discovers custom policy specs, validates refs (malformed can never read as valid OR
   absent), shows what would apply.
@@ -400,14 +420,18 @@ your circumstances is configuration, and the ones that are not, another agent ca
 - **`rig usage series`** — what a seat's token curve has looked like over time: climbing steadily,
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
 - **`rig tui`** — the interactive view over rigs, pods, seats and specs. **`rig tui commands`**
-  lists everything it can do without launching it. **`rig ui open`** is unmaintained, best-effort,
-  and replaced by the TUI, so never diagnose product behaviour from the web UI. The TUI plus Slack
-  are the human surface; the CLI plus terminal are the agent surface.
+  lists everything it can do without launching it. Open the instance row for one continuous
+  cross-rig agent table with pod separators and material `RECENT` transitions; drill into a rig,
+  mission, slice, or agent without losing the owning identity. **`rig ui open`** is unmaintained,
+  best-effort, and replaced by the TUI, so never diagnose product behaviour from the web UI. The
+  TUI plus Slack are the human surface; the CLI plus terminal are the agent surface.
 - **`rig mcp serve`** — how an agent that speaks MCP rather than shell drives OpenRig, and which
   operations are exposed that way. Relevant the moment a tool you are integrating cannot run a
   shell command.
-- **`rig skill`** — how packaged capability gets routed and projected to seats. Worth knowing the
-  layer exists; it is mid-repair right now, so treat what is currently installed as in flux.
+- **`rig skill loadout --runtime <claude-code|codex>`** — inspect the exact catalog revision,
+  selectors, target, and current/missing/shadowed/conflicting state for one working directory.
+  `--apply` writes only the managed ownership set, is idempotent, and refuses local edits or
+  unowned collisions.
 - **`rig startup-proof submit`** — prove you actually oriented at boot, rather than claiming you
   read the prompt.
 

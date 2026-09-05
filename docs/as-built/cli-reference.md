@@ -445,7 +445,7 @@ Notes:
 ### `rig snapshot`
 
 Usage:
-- `rig snapshot <rigId>`
+- `rig snapshot <rigId> [--intended-seats <ids>]`
 - `rig snapshot list <rigId>`
 
 Subcommands:
@@ -453,7 +453,9 @@ Subcommands:
 
 ### `rig restore`
 
-Usage: `rig restore <snapshotId> --rig <rigId>`
+Usage:
+- `rig restore <snapshotId> --rig <rigId>`
+- `rig restore status <attemptId> --rig <rigId> [--json]`
 
 Important:
 - `--rig <rigId>` is required by the source code, even though the help text does not visually mark it as required.
@@ -461,6 +463,9 @@ Important:
 Notes:
 - Human output prints each restored node and any failed node error.
 - Non-zero exit if any restored node fails.
+- A started asynchronous restore prints its attempt id. `status` derives the
+  original and current intended-set verdict, snapshot selection, historical
+  exclusions, and unresolved intended seats from that durable attempt.
 
 ### `rig restore-check`
 
@@ -723,13 +728,16 @@ Notes:
 
 ### `rig launch`
 
-Usage: `rig launch <rigId> [nodeRef] [--seats <ids>] [--hold-reason <reason>] [--json]`
+Usage: `rig launch <rigId> [nodeRef] [--seats <ids>] [--hold-reason <reason>] [--snapshot-id <id>] [--plan] [--json]`
 
 Notes:
 - Launches or relaunches a node in a running rig.
 - `nodeRef` (optional) can be a logical ID or node ID for the single-target form.
 - `--seats <ids>` (v0.3.4, slice 11) takes a comma-separated list of logical IDs for node-granular managed partial restore — launch a named subset of seats while holding the rest. Retires the prior `pod_aware_launch_unsupported` dead-end.
 - `--hold-reason <reason>` records the reason non-target seats are being held; surfaced via observability so the held state is auditable.
+- `--snapshot-id <id>` selects one exact restore-usable snapshot instead of
+  applying the automatic choice. `--plan` previews a multi-seat subset and its
+  non-target effects without mutation.
 
 ### `rig remove`
 
@@ -1209,6 +1217,13 @@ Phase D extends the policy enum with `workflow-keepalive` (the policy deferred f
 ### `rig workflow`
 
 - `validate <specPath>` — validate a workflow spec file; returns structured ok/error report (role resolution, step uniqueness, allowed-exits consistency, optional seat liveness). Spec-only: it takes no rig context (OPR.0.4.6.FAC1 arch ruling — rig-coverage checks happen at instantiate).
+- `compile <missionPath> [--operation-key <key>]` — read `project.yaml` →
+  `mission.yaml` → `slice.yaml` into an inspectable lifecycle graph without
+  creating a cached spec, workflow instance, or qitem.
+- `instantiate-lifecycle <missionPath> --operation-key <key> --root-objective
+  <text> --created-by <session>` — compile and start an eligible lifecycle;
+  `--entry-owner` and `--rig` retain their normal workflow meanings. The opaque
+  operation key makes exact replay idempotent and conflicting reuse refuses.
 - `instantiate <specPath> --root-objective <text> --created-by <session>` — create a new instance + entry-step qitem in the same daemon transaction; `--entry-owner <session>` overrides the default entry owner. **OPR.0.4.6.FAC1**: `--rig <name>` binds the instance to a rig (overrides the spec's `target.rig` DEFAULT; persists as `boundRig` on the instance, rendered by `show`/`trace` and carried in `--json`). On a bound instance, a role with **no `preferred_targets`** resolves to a live capable SEAT on that rig by the pure capability policy (running agents declaring the role, managed seats only, required runtime, least pending backlog, deterministic coordinate tiebreak). Unknown rig = structured `bound_rig_unknown`; a bound-rig role no seat structurally declares = `bound_rig_role_uncovered` (existence at any lifecycle state satisfies it — liveness is checked when the step projects). No `--rig` and no spec default = unbound, byte-identical pre-FAC-1 behavior.
 - `run <specPath> …` — accepts the same `--rig <name>` binding (run instantiates too).
 - `project --instance <id> --current-packet <qitem-id> --exit <handoff|waiting|done|failed> --actor-session <session>` — close the current packet AND project the next-step packet IN THE SAME daemon transaction (transactional-scribe; lost handoffs impossible by design). `--result-note <text>`, `--blocked-on <ref>`, `--next-owner <session>` modify behavior.
@@ -1248,6 +1263,10 @@ Usage: `rig seat <subcommand>`
 Subcommands:
 - `status <seat> [options]` — show read-only seat handover observability status.
 - `handover <seat> [options]` — plan a safe two-phase seat handover.
+- `launch <seat> --fresh --reason <text> [--stop] [--operator <address>] [--json]`
+  — create a deliberate blank occupant for exactly one existing seat. No
+  continuity source is used; a live managed occupant requires `--stop`, while
+  adopted or unmanaged ambiguity refuses.
 - `clear-attention <session> [--reason <text>] [--json]` — evidence-gated, operator-attested, audited reconcile of a stuck `attention_required` seat.
 
 Notes:
