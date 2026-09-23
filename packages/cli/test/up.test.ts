@@ -216,6 +216,45 @@ describe("Up CLI", () => {
     failServer.close();
   });
 
+  it("renders structured daemon errors and attention node attach hints", async () => {
+    const failServer = http.createServer((_, res) => {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        status: "failed",
+        error: {
+          fact: "All seats need interactive trust approval.",
+          consequence: "The rig is created and parked in attention_required.",
+          action: "Attach to each pane and approve the prompt.",
+        },
+        attentionNodes: [
+          { logicalId: "dev.owner", sessionName: "openrig-dev-owner", reason: "trust prompt" },
+        ],
+        stages: [{ stage: "import_rig", status: "blocked" }],
+        errors: [],
+      }));
+    });
+    await new Promise<void>((resolve) => { failServer.listen(0, resolve); });
+    const failPort = (failServer.address() as { port: number }).port;
+
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(upCommand(runningDeps(failPort)));
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "up", "/tmp/rig.yaml"]);
+    });
+
+    const output = logs.join("\n");
+    expect(output).toContain("All seats need interactive trust approval.");
+    expect(output).toContain("The rig is created and parked in attention_required.");
+    expect(output).toContain("Attach to each pane and approve the prompt.");
+    expect(output).toContain("dev.owner: tmux attach -t openrig-dev-owner");
+    expect(output).not.toContain("[object Object]");
+    expect(output).not.toContain("validate your spec");
+    expect(exitCode).toBe(1);
+    failServer.close();
+  });
+
   // T13: Relative path resolved to absolute before sending
   it("resolves relative path to absolute in POST body", async () => {
     let lastBody: Record<string, unknown> = {};

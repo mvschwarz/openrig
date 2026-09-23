@@ -11,6 +11,45 @@ import type { StatusDeps } from "./status.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
 
+type StructuredUpError = {
+  fact?: unknown;
+  consequence?: unknown;
+  action?: unknown;
+  message?: unknown;
+};
+
+type UpAttentionNode = {
+  logicalId?: unknown;
+  sessionName?: unknown;
+  reason?: unknown;
+  evidence?: unknown;
+};
+
+function formatUpError(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const structured = error as StructuredUpError;
+    const parts = [structured.fact, structured.consequence, structured.action, structured.message]
+      .filter((part): part is string => typeof part === "string" && part.trim().length > 0);
+    if (parts.length > 0) return parts.join("\n");
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return "unknown error";
+    }
+  }
+  return error === undefined || error === null ? "unknown error" : String(error);
+}
+
+function formatAttentionNode(node: UpAttentionNode): string {
+  const logicalId = typeof node.logicalId === "string" && node.logicalId.length > 0 ? node.logicalId : "attention node";
+  const fields: string[] = [];
+  if (typeof node.sessionName === "string" && node.sessionName.length > 0) fields.push(`tmux attach -t ${node.sessionName}`);
+  if (typeof node.reason === "string" && node.reason.length > 0) fields.push(node.reason);
+  if (typeof node.evidence === "string" && node.evidence.length > 0) fields.push(node.evidence);
+  return `  ${logicalId}: ${fields.join(" — ") || "attention required"}`;
+}
+
 /** OPR.0.3.4.2 — default interactive [y/N] prompt for the awaiting-decision
  *  ASK (TTY only; tests inject promptYesNo instead). Default answer: No. */
 async function defaultPromptYesNo(question: string): Promise<boolean> {
@@ -463,8 +502,17 @@ Examples:
           const teaching = String(res.data["error"] ?? ((res.data["errors"] as string[]) ?? [])[0] ?? "A rig with this name is already running.");
           console.error(teaching);
         } else {
-          const errorText = String(res.data["error"] ?? "unknown error");
-          console.error(`Up failed: ${errorText} (HTTP ${res.status}). Check daemon logs or validate your spec with: rig spec validate <path>`);
+          const errorText = formatUpError(res.data["error"]);
+          const attentionNodes = Array.isArray(res.data["attentionNodes"])
+            ? (res.data["attentionNodes"] as UpAttentionNode[])
+            : [];
+          const genericHint = attentionNodes.length > 0
+            ? ""
+            : " Check daemon logs or validate your spec with: rig spec validate <path>";
+          console.error(`Up failed: ${errorText} (HTTP ${res.status}).${genericHint}`);
+          for (const node of attentionNodes) {
+            console.error(formatAttentionNode(node));
+          }
           if (/agent_ref resolution failed|No agent\.yaml found/i.test(errorText)) {
             console.error("Hint: local: agent_ref paths resolve relative to the rig spec directory, not your shell cwd.");
             console.error("      Keep the agents/ tree beside the rig YAML, or switch those refs to path:/absolute/path.");
