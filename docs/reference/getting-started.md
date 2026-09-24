@@ -160,6 +160,14 @@ being built. When repeated coordination warrants a workflow, discover with
 selected name with `rig workflow instantiate --help`. A workflow is not needed
 merely to make the first local change.
 
+For a continuing team, [OpenRig Software Factory](../../packages/daemon/specs/agents/shared/skills/core/openrig-software-factory/SKILL.md)
+connects repository intent, a small team, context and reviewed work through real
+waits and later tasks. Give its short request to your existing agent. After
+installation, discover the compatible bundled recipe with `rig context show
+skills/core/openrig-software-factory --json`; retain a missing/version-mismatch
+result rather than silently using newer instructions. The recipe has one worked
+example; this guide remains the short first-use path.
+
 ## Incomplete setup and restart
 
 | Observation | Next action |
@@ -210,13 +218,13 @@ Two related primitives, often confused by new operators:
   an **entry qitem** that routes the first step to an owner. This is the live
   coordination of *who does the next step*.
 
-How they relate: a scope slice is the durable description of a unit of work; a
-workflow instance + its qitems are the live machinery that moves that work
-through owners (hot-potato handoffs). They are not auto-bridged - there is no
-auto-instantiate-from-scope - you instantiate a workflow by name when you want to
-run one, and you reference your scope artifacts as the work it coordinates. A
-typical loop: author/track the unit in `rig scope`, then
-`rig workflow instantiate <name>` to start the runtime that drives it.
+Scope files retain what the work is; workflow instances and their queue packets
+retain who acts next. Creating or editing a mission does not start work. You can
+instantiate a named workflow with `rig workflow instantiate <name>`, or explicitly
+inspect an authored lifecycle with `rig workflow compile` and create its runtime
+with `rig workflow instantiate-lifecycle`. Compilation alone does not start work.
+[OpenRig Software Factory](../../packages/daemon/specs/agents/shared/skills/core/openrig-software-factory/SKILL.md)
+shows a small reviewed example and how to retain custody through a genuine wait.
 
 ## Opt-in permissive operation
 

@@ -16,6 +16,13 @@
     }
   },
   "skills": {
+    "agent-browser": {
+      "edges": [
+        "canonical",
+        "spec"
+      ],
+      "category": "process"
+    },
     "agent-operated-software": {
       "edges": [
         "plugin"
@@ -27,13 +34,6 @@
         "plugin"
       ],
       "category": null
-    },
-    "agent-browser": {
-      "edges": [
-        "canonical",
-        "spec"
-      ],
-      "category": "process"
     },
     "agent-starters": {
       "edges": [
@@ -194,6 +194,13 @@
       "edges": [
         "canonical",
         "plugin",
+        "spec"
+      ],
+      "category": "core"
+    },
+    "openrig-software-factory": {
+      "edges": [
+        "canonical",
         "spec"
       ],
       "category": "core"
