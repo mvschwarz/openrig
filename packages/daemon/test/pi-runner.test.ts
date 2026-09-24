@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import {
-  PasteAggregator, RunnerCore, mapPiEvent, extractMessageText, parseRunnerArgs,
+  PasteAggregator, RunnerCore, mapPiEvent, parseRunnerArgs,
   prepareRunnerSidecar,
   type RunnerIo,
 } from "../src/adapters/pi-runner.js";
@@ -171,6 +171,37 @@ describe("RunnerCore identity + sidecar", () => {
 
 // ── event → mirror / activity mapping ────────────────────────────────────────
 
+// Shapes from a real `pi --mode rpc` 0.87.1 run (OpenRig's child argv) that
+// streamed a reply from a local OpenAI-compatible mock. Since Pi 0.84.0,
+// message_update carries only `usage` and the `assistantMessageEvent` delta.
+const PI_USAGE = {
+  input: 12, output: 5, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 17,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+const PI_REPLY = {
+  role: "assistant",
+  content: [
+    { type: "thinking", thinking: "User wants a greeting.", thinkingSignature: "reasoning_content" },
+    { type: "text", text: "Hello from the mock server." },
+  ],
+  api: "openai-completions", provider: "mock", model: "mock-model", usage: PI_USAGE,
+  stopReason: "stop", timestamp: 1790281248272, responseId: "chatcmpl-mock",
+};
+const piUpdate = (assistantMessageEvent: Record<string, unknown>) =>
+  ({ type: "message_update", usage: PI_USAGE, assistantMessageEvent });
+const PI_REPLY_EVENTS = [
+  { type: "message_start", message: { ...PI_REPLY, content: [], stopReason: "pending" } },
+  piUpdate({ type: "thinking_start", contentIndex: 0 }),
+  piUpdate({ type: "thinking_delta", contentIndex: 0, delta: "User wants a greeting." }),
+  piUpdate({ type: "text_start", contentIndex: 1 }),
+  piUpdate({ type: "text_delta", contentIndex: 1, delta: "Hello" }),
+  piUpdate({ type: "text_delta", contentIndex: 1, delta: " from the" }),
+  piUpdate({ type: "text_delta", contentIndex: 1, delta: " mock server." }),
+  piUpdate({ type: "thinking_end", contentIndex: 0, content: "User wants a greeting." }),
+  piUpdate({ type: "text_end", contentIndex: 1, content: "Hello from the mock server." }),
+  { type: "message_end", message: PI_REPLY },
+];
+
 describe("mapPiEvent", () => {
   it("agent_start/agent_end drive streaming + running/idle activity", () => {
     expect(mapPiEvent({ type: "agent_start" })).toMatchObject({
@@ -181,10 +212,14 @@ describe("mapPiEvent", () => {
     });
   });
 
-  it("message_update deltas append to the mirror; message_end terminates the line", () => {
-    const update = mapPiEvent({ type: "message_update", message: { content: [{ type: "text", text: "hel" }] } });
-    expect(update.mirrorAppend).toBe("hel");
-    expect(mapPiEvent({ type: "message_end" }).mirrorLines).toEqual([""]);
+  it("pre-0.84 message_update appends only the delta, never the cumulative message", () => {
+    const partial = { ...PI_REPLY, content: [{ type: "text", text: "Hello from the" }], stopReason: "pending" };
+    const legacy = mapPiEvent({
+      type: "message_update",
+      message: partial,
+      assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: " from the", partial },
+    });
+    expect(legacy.mirrorAppend).toBe(" from the");
   });
 
   it("tool executions render compact one-line summaries + PreToolUse activity", () => {
@@ -199,14 +234,17 @@ describe("mapPiEvent", () => {
     expect(mapPiEvent({ type: "compaction_start" }).activity).toEqual({ hookEvent: "active", subtype: "compaction" });
     expect(mapPiEvent({ type: "auto_retry_start" }).activity).toEqual({ hookEvent: "active", subtype: "auto_retry" });
   });
+});
 
-  it("extractMessageText tolerates string / {text} / content-block shapes", () => {
-    expect(extractMessageText("plain")).toBe("plain");
-    expect(extractMessageText({ text: "t" })).toBe("t");
-    expect(extractMessageText({ content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] })).toBe("ab");
-    expect(extractMessageText({ content: "inline" })).toBe("inline");
-    expect(extractMessageText(null)).toBe("");
-    expect(extractMessageText({ weird: true })).toBe("");
+describe("RunnerCore assistant reply mirror", () => {
+  it("streams a Pi 0.84+ reply from text deltas and ends the line on message_end", () => {
+    const f = fakeIo();
+    const { core } = readyCore(f);
+    let pane = "";
+    f.io.mirrorLine = (line) => { pane += `${line}\n`; };
+    f.io.mirrorAppend = (text) => { pane += text; };
+    for (const event of PI_REPLY_EVENTS) core.handlePiLine(JSON.stringify(event));
+    expect(pane).toBe("Hello from the mock server.\n");
   });
 });
 
