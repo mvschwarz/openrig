@@ -1,10 +1,109 @@
 # Worked example: reviewed CSV validation
 
-Read this when adapting the recipe to a repository with CSV handling. The complete files below passed the 0.5.14 source catalog, Markdown reader and lifecycle compiler checks. The full native-agent journey and runtime commands remain untested. Use compatible installed command help and preserve first failures.
+Read this when adapting the recipe to a repository with CSV handling. The complete files below passed the 0.5.14 source catalog, Markdown reader and lifecycle compiler checks. The prior bounded native trial completed reviewed work and next-task pickup with setup assistance and 48 one-time approvals; it did not demonstrate a genuine product-decision wait/answer or automatic refocus. The revised guidance below has source checks only. Use compatible installed command help and preserve first failures.
 
 This is a concrete CSV-validation example for adaptation, not a requirement that an arbitrary repository become a CSV project or every outcome be split into two slices. This example uses two genuinely dependent slices. Select a real, authorized repository and record its starting commit and existing CSV behavior. If it has no relevant CSV code, choose two dependent changes appropriate to that repository and rewrite the example objectives before execution; ordinary user tasks retain their appropriate size.
 
 For the example only, repository root and work root are the same absolute directory, called `PROJECT_ROOT`. The selected project ID is `csv-tool`, mission is `csv-validation`, and rig is the shipped `first-project`. These are authored example identities, not live discoveries. Resolve existing catalog/config/intent first. Never overwrite a real `project.yaml`, `workspace.yaml`, `SPEC.md`, `AGENTS.md`, or existing mission to install a template. Merge compatible fields deliberately or choose an unused work directory and preserve the existing catalog entries. If using a separate work root, launch seats in the code repository and record both roots in intent/context. Keep `project.yaml` two directories above the mission directory for this compiler path; arbitrary custom mission-root layouts are not established here.
+
+## Manual work and the queue loop
+
+For one small change, start with repository instructions, an observable result,
+a named owner and the chosen checker. Let the owner carry the result through
+implementation and independent judgment. You do not need the manifests below
+or a Workflow instance to begin. Retain useful acceptance, decisions and evidence
+in the project's existing files.
+
+When work should outlive a turn, the actual owner verifies its identity and uses
+the queue. In this example, owner/checker addresses are synthetic until verified
+against the real `first-project` team. The task file contains the real outcome,
+boundary, acceptance and evidence pointers; create it before sending:
+
+```sh
+rig whoami --json
+rig queue create --destination dev-owner@first-project \
+  --body-file ./TASK.md --summary 'Implement the agreed CSV inspection' --json
+rig queue claim <returned-qitem-id> --json
+```
+
+After implementing and checking the cumulative candidate, the current owner uses:
+
+```sh
+rig queue handoff <owned-qitem-id> --to dev-check@first-project \
+  --body-file ./REVIEW-REQUEST.md --json
+```
+
+The request binds exact candidate, acceptance, commands and evidence. Read the
+successor back with `rig queue show <id> --full --json`; the checker claims it,
+judges it independently, then hands that lineage back to the owner. Keep repairs
+with this outcome and checker. The owner reports the checked result and explicitly
+hands off remaining work or closes with the truthful outcome using installed
+`rig queue update --help`. A terminal queue state alone is not acceptance.
+A message can clarify scope; `rig send` alone does not transfer queue ownership.
+
+For a genuine local dependency, retain the owned row with a continuation:
+
+```sh
+rig queue block <owned-qitem-id> --on <live-blocker-qitem-id> \
+  --continuation 'Read the result, then resume the agreed CLI change' --json
+```
+
+For a real external wait, name its actual blocker. If a reminder is useful within
+the agreed time/spend budget, add `--wake-after 2h` to that blocking command; the
+example duration is a choice, not a required cadence. A reminder requests a fresh
+look, never supplies the answer. Read back state, owner, blocker and wake. On a
+real answer, preserve it and resume the same obligation through the supported
+claim/update path; do not create a duplicate task. If no question is unresolved,
+do not manufacture one to demonstrate waiting.
+
+After completion the same owner can pick up the next authorized outcome. Keep
+useful project context and progress current. Neither a long roadmap nor an empty
+queue authorizes the agent to invent work.
+
+## What wakes work, and what it costs
+
+The following behavior is source-checked for this 0.5.14 candidate. Inspect the
+installed configuration and `rig watchdog list` for actual jobs; old jobs in an
+upgraded installation are not proof of fresh-install defaults.
+
+| Mechanism | Trigger and boundary |
+| --- | --- |
+| Queue create/handoff | Normally nudges the destination after persistence; `--no-nudge` opts out. Read delivery/pickup receipts; an accepted write is not completed work. |
+| Local dependency resolution | A row blocked on a live local qitem can return to pending and wake its owner when the blocker resolves. If work is handed onward to another owner, the blocker can follow that successor instead of falsely announcing completion. External prose blockers do not self-resolve. |
+| Explicit blocked `--wake-after` | Arms a reminder with the park, timed from registration. No timer is implied by merely writing a deadline in prose. Repeated reminders can wake a model while a real blocker remains. |
+| Parked-owner anti-park check | A daemon-registered per-rig supervisor checks for an eligible idle owner holding open work; it reserves one wake per park episode. It is not an idle-work generator. |
+| Stuck sweep / wake-or-escalate | Standing daemon checks surface stuck obligations and route recovery; failed handoff wakes get bounded retries/escalation. Unconfirmed delivery follows its confirmation path rather than blind resending. They do not override interactive prompts or provider limits. |
+| Idle-gate | Opt-in: `policies.idle_gate_qitem.auto_register` defaults to `off`, and `policies.idle_gate_qitem.opt_in_sessions` defaults to an empty list. Existing jobs may persist. Do not assume every fresh seat has this periodic nudge. |
+| Workflow keepalive | Explicit runtime instantiation arms keepalive for its entry packet; authoring YAML or compiling alone does not. Automatic keepalive is deadline-gated, not a promise that every check causes a model turn. |
+
+Wake scheduling, refocus and health have different jobs: wakes seek renewed
+attention, refocus supplies pointers/context, and health reports observations.
+None proves that useful work happened or that newly authored context was read.
+Background checks are ordinary daemon computation, not themselves model turns.
+**Delivered wakes and resumed work can consume tokens.** Agree work/time/spend
+limits before choosing reminders or more automation; prefer dependency events
+and a useful stop condition over short repeated empty prompts. No wake changes
+permissions, supplies a missing product decision or authorizes more work.
+
+## Permissions at the point of work
+
+Before launching or giving the owner the first task, choose the ordinary prompted
+route or a deliberate permissive setup using the installed getting-started guide's
+“Opt-in permissive operation” and “Custom settings and precedence” sections.
+The public source entry links those same sections. Keep the user's defaults unless
+they choose otherwise. Codex sandbox and approval policy are distinct controls;
+actual native/provider behavior and managed restrictions determine what prompts.
+More permissive operation exposes files/network with fewer confirmations and
+still grants no extra product scope. Do not silently enable YOLO, global trust or
+network access. The prior bounded trial needed 48 one-time approvals (34 owner,
+14 checker), so do not sell this path as unattended or free of permission friction.
+
+## Advanced: an explicit Workflow contract
+
+Use the following complete example when explicit runtime prerequisites/exits are
+useful. Manual and queue-only work above do not require this graph. Keep the same
+repository purpose, owner/checker and evidence habits when moving between modes;
+do not run a queue-only task and a second Workflow task for the same implementation.
 
 Authored layout (the user's code and tests remain in their existing locations):
 
@@ -232,7 +331,7 @@ The CLI implementation interface and check commands are repository-derived facts
 
 ## Deliberate runtime creation and truthful continuation
 
-The **actual owner seat** runs the following commands after context and address checks. The example addresses below are used only after its own `rig whoami --json` confirms `dev-owner@first-project`; an unbound bootstrap shell must not pretend to be that seat. `PROJECT_ROOT` is an ordinary task variable holding the selected absolute work root. Pick and record a unique operation key once, then reuse it after a timeout. Example commands are UNEXECUTED:
+The **actual owner seat**, after choosing the Workflow path, runs the following commands after context and address checks. The example addresses below are used only after its own `rig whoami --json` confirms `dev-owner@first-project`; an unbound bootstrap shell must not pretend to be that seat. `PROJECT_ROOT` is an ordinary task variable holding the selected absolute work root. Pick and record a unique operation key once, then reuse it after a timeout. These are adaptable examples; the prior trial executed its own bound instance. The genuine product-decision wait below remains unproven:
 
 ```sh
 rig workflow compile "$PROJECT_ROOT/missions/csv-validation/mission.yaml" \
@@ -272,7 +371,7 @@ rig workflow project --instance <instance-id> --current-packet <cli-packet> \
 
 Read back waiting state, blocker, owner and retained frontier packet. A timer or reminder is not a user answer. Once the actual decision arrives, retain it in NOTES, read the same frontier, finish that same step and use its permitted `handoff` exit; do not instantiate again or claim that `workflow resume` is the wait verb. That command is for failed-instance recovery. If the real repository already settles this choice, do not fabricate uncertainty: select another genuine external input for the bounded trial, or report wait coverage absent.
 
-The checker receives the cumulative candidate, both proof files, exact accepted decision and reproducible checks. Its truthful `handoff` advances to `finish`; the owner reports the exact checked cut and how the user can exercise it. A failed check is recorded honestly, routed to the owner through the selected exception path and resolved using the existing failure/repair continuation. Keep the same checker and outcome through bounded repairs; there is no routine root relay or new review lane. A workflow terminal state alone is not evidence that the user outcome passed.
+The checker receives the cumulative candidate, both proof files, exact accepted decision and reproducible checks. Its truthful `handoff` advances to `finish`; the owner reports the exact checked cut and how the user can exercise it. A failed check is recorded honestly, routed to the owner through the selected exception path and resolved using the existing failure/repair continuation. Keep the same checker and outcome through bounded repairs; keep the implementation/check exchange with that owner and checker. A workflow terminal state alone is not evidence that the user outcome passed.
 
 On `finish`, the owner records completion and uses `done`. The human can then send the next bounded outcome to the same address, referencing the prior result. The owner creates/claims its durable task and acknowledges the actual boundary; it need not create another mission or full workflow for every small change. If nothing else is authorized, explicitly record no next work. For a bounded demonstration, observe next-task pickup separately from its implementation.
 
@@ -288,8 +387,7 @@ When the user has authorized stopping this team, use `rig down <verified-rig>`
 for that exact rig, then read back the reported state. Preserve the repository,
 context and evidence; stopping is not deletion. A later `rig up <verified-rig>`
 requires actual native readiness checks before work resumes. Record a failed
-resume as failed; do not silently replace the original sessions. No stop or
-restore success is claimed by this source-only example.
+resume as failed; do not silently replace the original sessions. The prior bounded trial observed a supported stop; restore remains untested.
 
 ## Optional growth, with the same two seats
 

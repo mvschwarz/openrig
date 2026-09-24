@@ -8,6 +8,8 @@ metadata:
     - context get
     - context list
     - context show
+    - queue create
+    - queue handoff
     - workflow compile
     - workflow instantiate-lifecycle
   openrig:
@@ -17,18 +19,55 @@ metadata:
 
 # OpenRig Software Factory
 
-Turn a repository and an outcome into useful reviewed work, visible ownership,
-and a way through genuine waits. Compose the existing team, context and workflow
-primitives. A single local edit need not become a factory or a new workflow.
+Start with a useful repository outcome and add coordination when it earns its
+cost. A beginner can complete reviewed work without Workflow. These are choices
+using existing capabilities, not stages everyone must graduate through.
 
-## Start with compatible guidance
+## Choose how the team works
 
-Before installation, read this file and its companion at the same published tag
-or commit as the chosen package. Use the public getting-started guide for setup,
-native login and the user's permission choice. An existing agent can bootstrap;
-a ready kernel operator can help, but is neither required nor the project owner.
+| Need | Start here | Add more when… |
+| --- | --- | --- |
+| One change, close human guidance | Manual/team work: give an owner the outcome, use repository instructions, implement and obtain the chosen independent check. | Work must survive turns or move between seats. |
+| Continuing work with visible ownership | Queue-supported orchestration: use `rig queue create`, claim work, then `rig queue handoff` with the candidate/evidence to the next owner. Record real blockers and the continuation. No Workflow instance is needed. | Repeated steps need an explicit dependency graph and permitted exits. |
+| An explicit execution contract | Workflow: inspect `rig workflow compile`, then deliberately use `rig workflow instantiate-lifecycle`. Advance its packets through the workflow projection mechanism. | The actual project needs reusable profiles, additional roles or gates. |
 
-After installation, discover the bundled copy:
+For the concrete queue loop, wake behavior and optional two-slice Workflow,
+read [references/worked-example.md](references/worked-example.md). Installed copy:
+`rig context get skills/core/openrig-software-factory/references/worked-example.md`.
+A roadmap, YAML file or wake does not execute work or authorize a new outcome.
+
+## Establish the working agreement
+
+Read the repository instructions, current work and desired user-visible result.
+Verify the intended instance, code/work roots, real seat addresses and native
+readiness. Reuse a suitable small team; an existing agent can bootstrap it.
+A kernel operator is optional and is not automatically the project owner.
+
+Agree the work boundary, time/spend limit, who answers unresolved choices, and
+when to stop: checked result, no authorized next work, exhausted budget, or a real
+user/permission/provider blocker. Background daemon checks are not themselves
+model turns, but delivered wakes and resumed work **can spend tokens**. Prefer
+an event-driven wait to frequent empty reminders. Wakes cannot answer a user
+question, clear a permission prompt or guarantee progress.
+
+**Choose permissions before launching or assigning work.** Keep ordinary native
+prompts, or deliberately select the user's permissive policy after explaining
+its filesystem/network risks. Read the [permission guidance](../../../../../../../../docs/reference/getting-started.md#opt-in-permissive-operation)
+(the installed `getting-started.md` has the same section). Check the effective
+native mode: an OpenRig resource profile is not a permission profile, and a
+Codex YOLO sandbox setting alone does not select its approval policy. Preserve
+user defaults; never silently add global trust, network grants or bypass flags.
+
+Keep purpose, acceptance, decisions and evidence in existing project files.
+Deliver selected context and obtain each seat's scope reaction; retrieval alone
+is not peer delivery. The owner carries the candidate through the chosen check
+and bounded repairs, reports how to try it, and retains the next authorized task
+or explicitly reports none. Preserve work and custody before a supported stop.
+
+## Read compatible guidance
+
+Before installation, use this file and companion at the same published tag or
+commit as the selected package. After installation:
 
 ```sh
 rig --version
@@ -37,67 +76,27 @@ rig context show skills/core/openrig-software-factory --json
 rig context get skills/core/openrig-software-factory/SKILL.md
 ```
 
-Check the selected instance, package/build identity and served recipe version.
-Equal version numbers alone do not prove equal builds. If the ref is missing,
-unreadable or incompatible, retain that result and resolve the package/guidance
-choice. Do not silently substitute current GitHub main for an older installation.
-Do not proceed with an incomplete companion.
+Compare build identity as well as version. Preserve missing, unreadable or older
+recipe results; do not silently substitute newer main or skip a missing companion.
 
-## Set up only what serves this outcome
-
-1. Read the repository's instructions, existing work and the user's desired
-   result. Establish the intended instance, code/work roots, available runtimes,
-   permissions and spend boundary. Preserve existing files and unrelated edits.
-   Ask only for decisions that remain unresolved; ordinary work already within
-   the agreed scope needs no repeated approval.
-2. Reuse a suitable team or preview a small one using the getting-started guide.
-   The `first-project` owner/checker pair is one example. Verify actual native
-   readiness and addresses before assigning work. Daemon health is insufficient;
-   do not create duplicate seats to escape prompts. The project owner coordinates
-   implementation and the independent check after bootstrap.
-3. Read [references/worked-example.md](references/worked-example.md) when connecting
-   project/mission/slice files, context and workflow. Installed retrieval:
-   `rig context get skills/core/openrig-software-factory/references/worked-example.md`.
-   Adapt its two dependent CSV changes to the real outcome; they are not a required
-   decomposition. Keep readable intent and useful agreements in user-owned files.
-   Bind actual workspace/topology roots, deliver the selected context, and verify
-   each seat's role/scope reaction. A context retrieval is not a delivery receipt.
-4. Distinguish authoring from execution. `rig workflow compile` inspects the
-   selected lifecycle graph. Only a deliberate `rig workflow instantiate-lifecycle`
-   creates the runtime and entry obligation. Inspect routes, prerequisites and
-   advisories first; retain one operation key and reconcile a timeout before
-   retrying. Running inputs do not silently adopt later YAML edits.
-5. Let the current packet owner carry the exact candidate and evidence through
-   implementation, the selected independent check and bounded repairs. Use the
-   workflow projection mechanism for its packets. Preserve a real missing user
-   decision as a wait on that same frontier; a timer is not an answer. Resume the
-   retained step when the decision arrives, without creating another instance.
-6. Report the checked result and how to try it. Retain the next authorized task
-   with the same owner or explicitly record that none exists. Show why work is
-   waiting, who acts next and what remains unverified. Use the existing lifecycle
-   guide to stop only the intended team safely while preserving work and custody.
-   A stop alone does not prove restore; one next-task pickup does not prove weeks
-   of unattended operation.
-
-## User request
+## Request to give your agent
 
 > Help me achieve [observable change] in this repository. Read the compatible
-> OpenRig Software Factory recipe. Use a small suitable team with an owner and
-> independent checker, preserve existing instructions and files, and show who owns
-> the next step. Perform the agreed local implementation and checks. Ask about
-> unresolved product decisions or effects outside that scope. Keep publication
-> and destructive changes out of this task.
+> Software Factory recipe, choose the lightest useful team/queue/Workflow path,
+> and keep the next owner visible. Preserve existing files and permissions.
+> Agree time/spend limits, perform the authorized work and chosen independent
+> check, and ask only about unresolved decisions or effects outside that scope.
+> Keep publication and destructive changes out of this task.
 
-## Verification and maintenance
+## What has been observed
 
-This recipe is being prepared with OpenRig 0.5.14 source on macOS arm64. The
-independent public-only native-agent journey is **not yet tested**; no platform,
-provider, fresh-account or sustained-autonomy success is implied. Bind exact
-source/build/archive and recipe bytes in the delivery receipt. Record actual
-prerequisites, assistance, failures, reviewed work, wait/continuation, next pickup
-and stop before replacing this limit with measured coverage.
+A bounded macOS/Codex trial on 0.5.14 completed independently reviewed two-slice
+work, next-task pickup and a supported stop with setup assistance. It required
+**48 one-time approvals (34 owner, 14 checker)**. This is not an unattended or
+low-friction result. A genuine product-decision wait/answer and automatic refocus
+were not demonstrated; these revised instructions have not had a new native trial.
+No fresh-account, other-platform/provider, restore or weeks-long autonomy claim.
 
-When referenced commands, manifests, bootstrap or permission semantics change,
-check the recipe and companion in that same change. Keep its index, public entry
-and packaged copies aligned. Website presentation should link to or import the
-same versioned source, with no separate maintained procedure.
+When commands, defaults or permission semantics change, check this source and
+companion together and regenerate their existing projections. Website guidance
+should link to the same versioned recipe, not maintain another procedure.

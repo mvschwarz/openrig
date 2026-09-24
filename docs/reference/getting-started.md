@@ -114,10 +114,16 @@ independent check. You should not have to relay the review between terminals.
 `rig send` is the initial conversation; the queue and repository artifacts
 retain the work. An unbound shell does not need to impersonate a queue owner.
 
-Follow the work with `rig queue list --rig first-project --limit 1000`, then
-`rig queue show <id> --full` and `rig queue transitions <id>`. A delivered
-message is not a reviewed result. Read the final artifact, exercise the stated
-behavior, and check the candidate the review actually covered.
+From an actual `first-project` seat, follow the work with
+`rig queue list --limit 1000`: its default scope is the caller's current rig.
+`queue list` has no `--rig` option. From an observer shell or another rig, use
+`rig queue list --destination dev-owner@first-project --limit 1000` and the same
+command for `dev-check@first-project`, after verifying those live addresses.
+These show each destination's obligations, not a whole-rig view. An unbound shell
+must not pretend to be a seat to change scope; use `--all-rigs` only when that
+broader view is intended. Then read `rig queue show <id> --full` and
+`rig queue transitions <id>`. A delivered message is not a reviewed result.
+Read the artifact, exercise its behavior, and check the candidate reviewed.
 
 ## Share the dashboard and return to it
 
@@ -161,8 +167,9 @@ selected name with `rig workflow instantiate --help`. A workflow is not needed
 merely to make the first local change.
 
 For a continuing team, [OpenRig Software Factory](../../packages/daemon/specs/agents/shared/skills/core/openrig-software-factory/SKILL.md)
-connects repository intent, a small team, context and reviewed work through real
-waits and later tasks. Give its short request to your existing agent. After
+offers manual/team work, queue-supported orchestration without Workflow, and an
+optional explicit Workflow path, with wake defaults, token costs and permission
+choices visible. Give its short request to your existing agent. After
 installation, discover the compatible bundled recipe with `rig context show
 skills/core/openrig-software-factory --json`; retain a missing/version-mismatch
 result rather than silently using newer instructions. The recipe has one worked

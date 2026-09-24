@@ -426,7 +426,7 @@ scheme, and nothing downstream can see it.
   policy acceptance, higher outcome judgment and publication remain separate decisions.
 - **`rig workspace doctor` / `validate`** — does the daemon agree with you about where the work
   tree is, and which files are missing the frontmatter their kind requires.
-- **OpenRig Software Factory** — when a first team needs a repeatable path from repository intent to reviewed work, a real wait and later tasks. Discover the bundled recipe with `rig context show skills/core/openrig-software-factory --json`, then load `rig context get skills/core/openrig-software-factory/SKILL.md`; use guidance compatible with the installed build.
+- **OpenRig Software Factory** — when a first team needs manual or queue-only reviewed work, or chooses an explicit Workflow; explains wake defaults, token costs and permission choices. Discover the bundled recipe with `rig context show skills/core/openrig-software-factory --json`, then load `rig context get skills/core/openrig-software-factory/SKILL.md`; use guidance compatible with the installed build.
 - **`rig context work-install --project … --mission … --slice … [--deliver]`** — resolves the ordered
   System World, topology, and Project World plan. Add `--runtime` to see the composed managed skill
   loadout, `--apply-skills` to reconcile its owned harness projection, or `--deliver` to emit the
