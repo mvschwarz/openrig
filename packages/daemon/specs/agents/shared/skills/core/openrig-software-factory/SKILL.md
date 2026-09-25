@@ -53,8 +53,8 @@ question, clear a permission prompt or guarantee progress.
 
 **Choose permissions before launching or assigning work.** Keep ordinary native
 prompts, or deliberately select the user's permissive policy after explaining
-its filesystem/network risks. Read the [permission guidance](../../../../../../../../docs/reference/getting-started.md#opt-in-permissive-operation)
-(the installed `getting-started.md` has the same section). Check the effective
+its filesystem/network risks. [Find the compatible permission guide](#find-the-compatible-permission-guide)
+and read its **Opt-in permissive operation** section. Check the effective
 native mode: an OpenRig resource profile is not a permission profile, and a
 Codex YOLO sandbox setting alone does not select its approval policy. Preserve
 user defaults; never silently add global trust, network grants or bypass flags.
@@ -105,6 +105,23 @@ rig context get skills/core/openrig-software-factory/SKILL.md
 
 Compare build identity as well as version. Preserve missing, unreadable or older
 recipe results; do not silently substitute newer main or skip a missing companion.
+
+### Find the compatible permission guide
+
+Read **Opt-in permissive operation** (`#opt-in-permissive-operation`), including
+its Codex, Claude Code and already-running guidance, in the matching guide below.
+These paths are relative to the named root, not to this skill's directory:
+
+| Reading from | Guide location |
+| --- | --- |
+| Source checkout, including `skills/_canonical` | `docs/reference/getting-started.md` below that repository's root, at the same tag or commit as this recipe. |
+| npm installation | `@openrig/cli/daemon/docs/reference/getting-started.md` below the directory printed by `npm root -g` for a global installation, or `npm root` run from the project with the local installation. |
+| Unpacked npm archive | `package/daemon/docs/reference/getting-started.md` below the archive's extraction directory. |
+
+For installed guidance, use the npm installation that supplies the selected
+`rig` executable; another prefix or local project can contain a different version.
+If the matching guide or section is missing, report the gap before proceeding;
+do not substitute current main or guidance from another installation.
 
 ## Request to give your agent
 
