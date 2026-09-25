@@ -2,6 +2,9 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { launchCommand } from "../src/commands/launch.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function mockClient(responses: Record<string, { status: number; data: unknown }>) {
   return {
@@ -75,6 +78,37 @@ describe("rig launch --seats", () => {
     );
     expect(logs.some((l) => l.includes("dev.driver"))).toBe(true);
     expect(logs.some((l) => l.includes("dev.guard"))).toBe(true);
+  });
+
+  it("posts an explicit original member retry to the existing single-node route", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "first-start-cli-"));
+    const fragment = join(directory, "member.yaml");
+    writeFileSync(fragment, "member:\n  id: pi\n  runtime: pi\n  agent_ref: local:agent\n  profile: default\n  cwd: /project\n");
+    const deps = makeDeps({ "dev.pi/launch": { status: 201, data: { ok: true, nodeId: "same-node", logicalId: "dev.pi", status: "launched" } } });
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "dev.pi", "--retry-startup-from", fragment, "--rig-root", directory]);
+    expect(deps._client.post).toHaveBeenCalledWith("/api/rigs/rig-1/nodes/dev.pi/launch", {
+      retryStartupFrom: { member: { id: "pi", runtime: "pi", agent_ref: "local:agent", profile: "default", cwd: "/project" }, rigRoot: directory },
+    });
+    expect(logs.join("\n")).toContain("Launched node dev.pi");
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it.each([["--snapshot-id", "s"], ["--seats", "dev.pi"], ["--plan"], ["--hold-reason", "reason"]])("refuses ambiguous retry options %j before a request", async (...extra) => {
+    const deps = makeDeps({});
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "dev.pi", "--retry-startup-from", "/absent", "--rig-root", "/project", ...extra]);
+    expect(deps._client.post).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("keeps retry refusal nonzero and does not claim launch", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "first-start-cli-"));
+    const fragment = join(directory, "member.json");
+    writeFileSync(fragment, JSON.stringify({ id: "pi" }));
+    const deps = makeDeps({ "dev.pi/launch": { status: 409, data: { ok: false, code: "first_start_retry_refused", message: "Seat is still bound" } } });
+    await launchCommand(deps).parseAsync(["node", "rig", "rig-1", "dev.pi", "--retry-startup-from", fragment, "--rig-root", directory]);
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toContain("Seat is still bound");
+    expect(logs.join("\n")).not.toContain("Launched");
   });
 
   it("passes --plan through and renders non-target effects without claiming launch", async () => {

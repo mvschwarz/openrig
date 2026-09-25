@@ -761,7 +761,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
       const paneContent = await this.captureProbeScreen(tmuxSession);
       lastPaneContent = paneContent;
-      const probe = assessNativeResumeProbe({
+      let probe = assessNativeResumeProbe({
         runtime: "codex",
         paneCommand,
         paneContent,
@@ -776,10 +776,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
 
       if (probe.code === "returned_to_shell") {
-        return {
-          ok: false,
-          error: "Codex resume failed: pane returned to shell instead of entering Codex",
-          recovery: "retry_fresh",
+        // sendShellCommand starts asynchronously, and a shell can remain the
+        // pane's wrapper while Codex loads. Use the existing bounded boot wait;
+        // this label proves neither launch failure nor readiness. A usable
+        // screen is still required here, followed by joined native identity
+        // proof in restore before the seat is reported resumed.
+        probe = {
+          status: "inconclusive", code: "awaiting_runtime",
+          detail: "Codex resume has not yet reached an interactive conversation in the launch pane.",
         };
       }
 

@@ -1122,6 +1122,94 @@ export class PodRigInstantiator {
     };
   }
 
+  /** Recover the legacy gap where projection failed before startup context was
+   * persisted. This is an explicit first-start retry, never a resume/fresh fallback.
+   * The operator supplies the original member source after exiting and cleaning
+   * the failed shell. Existing validation, projection and startup delivery own all
+   * effects; no node, history, token or startup-context row is fabricated here. */
+  async retryFirstStart(rigId: string, nodeId: string, memberFragment: Record<string, unknown>, rigRoot: string): Promise<
+    { ok: false; code: string; message: string } |
+    { ok: true; rigId: string; nodeId: string; logicalId: string; status: "launched"; sessionName?: string; warnings?: string[] }
+  > {
+    const refuse = (message: string) => ({ ok: false as const, code: "first_start_retry_refused", message });
+    const rig = this.deps.rigRepo.getRig(rigId);
+    const node = rig?.nodes.find(n => n.id === nodeId);
+    const podRow = node && this.deps.podRepo.getPodsForRig(rigId).find(p => p.id === node.podId);
+    if (!rig || !node || !podRow || node.runtime === "terminal") return refuse("Retry requires an existing agent member in a pod.");
+    if (!nodePath.isAbsolute(rigRoot)) return refuse("Supply the original absolute --rig-root for agent resolution.");
+
+    const eligible = (): string | undefined => {
+      const current = this.deps.rigRepo.getRig(rigId)?.nodes.find(n => n.id === nodeId);
+      if (!current || JSON.stringify(current) !== JSON.stringify(node)) return "Seat changed during recovery checks; inspect it before retrying.";
+      if (this.deps.sessionRegistry.getBindingForNode(nodeId)) return "Seat is still bound. Exit the failed shell, then use rig seat clean; retry never stops a process.";
+      if (this.db.prepare("SELECT 1 FROM node_startup_context WHERE node_id = ?").get(nodeId)) return "Startup context already exists; use the ordinary seat lifecycle commands.";
+      const sessions = this.deps.sessionRegistry.getSessionsForRig(rigId).filter(s => s.nodeId === nodeId);
+      if (sessions.length === 0 || sessions.some(s => s.status !== "exited" || s.startupStatus !== "failed" || s.origin !== "launched" || s.resumeToken)) {
+        return "Every prior session must be an exited, failed first start with no native resume token.";
+      }
+      if (this.db.prepare("SELECT 1 FROM occupant_tenures WHERE node_id = ? AND native_session_id_at_boot IS NOT NULL").get(nodeId)
+        || this.db.prepare("SELECT 1 FROM applied_launch_observations a JOIN occupant_tenures t USING (generation_uuid) WHERE t.node_id = ?").get(nodeId)) {
+        return "A native identity or applied launch was recorded; first-start retry cannot replace it.";
+      }
+      const events = this.db.prepare("SELECT type, payload FROM events WHERE node_id = ? AND type IN ('node.startup_ready', 'node.startup_failed') ORDER BY seq").all(nodeId) as Array<{ type: string; payload: string }>;
+      if (events.some(e => e.type === "node.startup_ready")) return "This seat previously reached startup readiness.";
+      // Old producers have no structured phase field. Admit only their exact
+      // projection-failure prefixes, which precede launchHarness in startNode.
+      try {
+        const failures = events.map(e => JSON.parse(e.payload) as { sessionId?: string; error?: string });
+        if (sessions.some(s => {
+          const last = failures.filter(f => f.sessionId === s.id).at(-1);
+          return !last || typeof last.error !== "string" || !/^Projection (failed for |error: )/.test(last.error);
+        })) return "Retained events do not prove projection failed before native launch for every session.";
+      } catch { return "Retained startup failure evidence is unreadable."; }
+    };
+    const initialRefusal = eligible();
+    if (initialRefusal) return refuse(initialRefusal);
+
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "cwd", "role", "codex_config_profile", "permission_policy", "restore_policy"]);
+    if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
+    const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
+    const validation = PodRigSpecSchema.validate(rawSpec);
+    if (!validation.valid) return refuse(validation.errors.join("; "));
+    const rigSpec = PodRigSpecSchema.normalize(rawSpec);
+    const pod = rigSpec.pods[0]!;
+    const member = pod.members[0]!;
+    // These overrides were not retained on the old node. Refuse to guess them or
+    // introduce new startup/session-source behavior in a recovery request.
+    if (member.startup || member.starterRef || member.sessionSource || member.compactionStrategy || member.mechanic || node.sessionSource) {
+      return refuse("First-start retry does not accept unretained member startup, continuity or session-source overrides.");
+    }
+    const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
+    if (`${pod.id}.${member.id}` !== node.logicalId || !same(member.agentRef, node.agentRef) || !same(member.profile, node.profile)
+      || !same(member.runtime, node.runtime) || !same(member.role, node.role) || !same(member.label, node.label) || !same(member.codexConfigProfile, node.codexConfigProfile)
+      || !same(member.permissionPolicy, node.permissionPolicy)) return refuse("Member source disagrees with the retained seat identity or policy.");
+    const resolved = resolveAgentRef(member.agentRef, rigRoot, this.deps.fsOps);
+    if (!resolved.ok) return refuse(resolved.code === "validation_failed" ? resolved.errors.join("; ") : resolved.error);
+    if (!node.resolvedSpecHash || resolved.resolved.hash !== node.resolvedSpecHash) return refuse("Agent source hash differs from the failed first start.");
+    const config = resolveNodeConfig({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+      profileName: member.profile, specRoot: rigRoot, member, pod, rig: rigSpec, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() });
+    if (!config.ok) return refuse(config.errors.join("; "));
+    if (!same(config.config.model, node.model) || !same(config.config.cwd, node.cwd) || !same(config.config.restorePolicy, node.restorePolicy)) {
+      return refuse("Resolved model, cwd or restore policy differs from the failed first start.");
+    }
+    const preflight = await preflightValidatedSpec(rigSpec, { rigRoot, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(),
+      ...this.systemWorldResolutionContext(), rigNameOverride: rig.rig.name, inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId), exec: this.deps.exec });
+    if (!preflight.ready) return refuse(preflight.errors.join("; "));
+    const names = new Set([deriveCanonicalSessionName(pod.id, member.id, rig.rig.name),
+      ...this.deps.sessionRegistry.getSessionsForRig(rigId).filter(s => s.nodeId === nodeId).map(s => s.sessionName)]);
+    try {
+      for (const name of names) {
+        if ((await this.deps.tmuxAdapter?.probeSession(name))?.state !== "absent") return refuse(`Session "${name}" is live or its liveness is unknown; no retry was attempted.`);
+      }
+    } catch { return refuse("Session liveness could not be determined; no retry was attempted."); }
+    const finalRefusal = eligible();
+    if (finalRefusal) return refuse(finalRefusal);
+    const result = await this.launchExistingAgentMember({ rigId, nodeId, qualifiedId: node.logicalId, rigSpec, rigRoot, pod, member,
+      resolveResult: resolved, configResult: config });
+    if (result.status !== "launched") return { ok: false, code: result.status, message: result.error ?? "First-start retry did not reach readiness." };
+    return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
+  }
+
   async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;

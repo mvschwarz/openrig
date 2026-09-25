@@ -102,24 +102,30 @@ export function parsePiRunnerState(raw: string): PiRunnerState | null {
 }
 
 // ── Provider env passthrough (BR-3 / FR-7) ──────────────────────────────────
-// Deny-by-default: the runner passes the pi child ONLY the baseline vars plus
-// the DECLARED provider's key var. Extending this map is a reviewed change,
+// Deny-by-default: only baseline vars, managed identity/instance locators and
+// the DECLARED provider's key cross into Pi. Extending this map is a reviewed change,
 // never a convenience edit. Custom/local providers configure keys via the
 // seat's managed models.json instead (their vars are not ambient-forwarded).
 
 export const PI_PROVIDER_ENV_VARS: Record<string, string> = {
-  // Founder ruling 2026-07-06 (supersedes the PRD FR-7 zai/kimi-first framing):
-  // OpenRouter is the PREFERRED provider path — one key covers the GLM and
-  // Kimi model families and is the cheaper/easier route users actually take.
-  // The native providers stay supported as secondary paths.
+  // Forward only the API key for the model's declared provider.
   "openrouter": "OPENROUTER_API_KEY",
   "zai": "ZAI_API_KEY",
   "kimi-coding": "KIMI_API_KEY",
 };
 
-// Baseline process needs for a spawned pi child. No OPENRIG_*, no host
-// credential families, no shell customization vars.
+// Baseline process needs. No host credential families or shell customization.
 export const PI_ENV_BASELINE_VARS = ["PATH", "HOME", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"] as const;
+
+// NodeLauncher supplies identity and instance routing on both fresh and resumed
+// seats. Pi's shell tools inherit this child env: dropping these values makes
+// ordinary whoami/send/queue resolve as an unmanaged caller or another instance.
+// Preserve supplied runtime/generation and legacy context-root provenance too;
+// never synthesize identity or forward arbitrary OPENRIG_* settings/tokens.
+const PI_ENV_OPENRIG_VARS = [
+  "OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME", "OPENRIG_OCCUPANT_GENERATION",
+  "OPENRIG_HOME", "OPENRIG_URL", "OPENRIG_HOST", "OPENRIG_PORT", "OPENRIG_SHARED_DOCS_ROOT",
+] as const;
 
 /** Model declaration: Pi accepts `--model provider/id`. The provider segment
  *  (before the first "/") selects the env passthrough var, if any. */
@@ -137,7 +143,7 @@ export function buildPiChildEnv(
   opts: { agentDir: string; sessionsDir: string; model?: string },
 ): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const name of PI_ENV_BASELINE_VARS) {
+  for (const name of [...PI_ENV_BASELINE_VARS, ...PI_ENV_OPENRIG_VARS]) {
     const value = source[name];
     if (value !== undefined) env[name] = value;
   }

@@ -1,7 +1,6 @@
 {
   "version": 0,
   "provisional": true,
-  "owner": "pm-lead@openrig-pm",
   "product_public": {
     "clean": [
       "agent-operated-software",

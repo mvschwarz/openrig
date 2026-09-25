@@ -348,7 +348,7 @@ export function deriveSelfHostIdSource(
 
   // Seeded from the operator's name and still agreeing with it.
   if (admissibleSeed !== null && admissibleSeed === hostId) return "named";
-  // Nobody usably named this machine and the id carries the generated shape: the founder-kept fallback.
+  // Nobody usably named this machine and the id carries the generated shape: the retained generated-id fallback.
   if (admissibleSeed === null && GENERATED_SELF_HOST_ID.test(hostId)) return "generated";
   // An admissible name that DISAGREES (the conflict the reconciler keeps and warns about), or an id
   // whose shape fits neither story. Unprovable, and said so.

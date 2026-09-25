@@ -162,7 +162,7 @@ describe("Codex runtime adapter", () => {
       fs.writeFileSync(nodePath.join(stale, "codex"), "#!/bin/sh\nprintf stale", { mode: 0o755 });
       const tmux = mockTmux();
       const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs(), launchPath: selected + ":/usr/bin:/bin", sleep: async () => {} });
-      await adapter.launchHarness(makeBinding(), { name: "operator-agent@kernel" });
+      await adapter.launchHarness(makeBinding(), { name: "operator@example-rig" });
       const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
       const output = execFileSync("/bin/sh", ["-c", command], { env: { ...process.env, PATH: stale + ":/usr/bin:/bin" }, encoding: "utf8" });
       expect(output).toBe("selected");

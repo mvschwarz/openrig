@@ -1441,6 +1441,98 @@ describe("RestoreOrchestrator", () => {
     if (!r2.ok) expect(r2.code).not.toBe("restore_in_progress");
   });
 
+  it.each([
+    "delayed screen", "immediate screen", "no usable screen", "shell only", "trust gate",
+    "wrong token", "wrong runtime", "wrong executable", "background native", "missing ancestry",
+    "missing start time", "multiple natives", "duplicate PID", "native PID reused", "pane PID reused",
+  ])("real pod-aware Codex resume preserves readiness and identity: %s", async (mode) => {
+    const { CodexRuntimeAdapter } = await import("../src/adapters/codex-runtime-adapter.js");
+    const token = "00000000-0000-7000-8000-000000000001";
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-resume", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.owner", { runtime: "codex", podId: "pod-resume" });
+    const session = sessionRegistry.registerSession(node.id, "dev-owner@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateResumeToken(session.id, "codex_id", token);
+    db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+      .run(node.id, "[]", "[]", "[]", "codex");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    // Modeled startup timing, not a reconstruction of an unrecorded historical
+    // sample. All IDs, paths, process groups and start times are synthetic.
+    let ticks = 0;
+    const screen = () => {
+      if (mode === "trust gate") return "Do you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, exit";
+      if (mode === "shell only") return "$ ";
+      if (mode === "no usable screen" || (mode !== "immediate screen" && ticks < 8)) return "Starting Codex...";
+      return "OpenAI Codex (v0.155.1)\n› Ask Codex to do anything";
+    };
+    let launched = false;
+    const tmux = {
+      ...mockTmux(),
+      createSession: vi.fn(async () => { launched = true; return { ok: true as const }; }),
+      hasSession: vi.fn(async () => launched),
+      sendShellCommand: vi.fn(async () => ({ ok: true as const })),
+      getPanePid: vi.fn(async () => 3001),
+      getPaneCommand: vi.fn(async () => "bash"),
+      capturePaneScreen: vi.fn(async () => screen()),
+      capturePaneContent: vi.fn(async () => screen()),
+    } as unknown as TmuxAdapter;
+    const startedAt = "Sat Jan  1 12:00:00 2000";
+    const rows = [
+      { pid: 3001, ppid: 1, pgid: 3001, tpgid: 3002, executableName: "zsh", command: "-zsh", startedAt },
+      { pid: 3002, ppid: 3001, pgid: 3002, tpgid: 3002, executableName: "bash", command: "/bin/sh /tmp/openrig-tmux-send.txt", startedAt },
+      { pid: 3003, ppid: 3002, pgid: 3002, tpgid: 3002, executableName: "node", command: `node /opt/bin/codex resume ${token}`, startedAt },
+      { pid: 3004, ppid: 3003, pgid: 3002, tpgid: 3002, executableName: "codex", command: `/opt/native/codex -s workspace-write -m fixture-model resume --add-dir /tmp/state ${token}`, startedAt },
+    ];
+    if (mode === "wrong token") rows[3]!.command = "/opt/native/codex resume other";
+    if (mode === "wrong runtime") rows[3]!.command = "/opt/native/claude --resume " + token;
+    if (mode === "wrong executable") rows[3]!.executableName = "printf";
+    if (mode === "background native") rows[3]!.pgid = 999;
+    if (mode === "missing ancestry") rows[3]!.ppid = 999;
+    if (mode === "missing start time") rows[3]!.startedAt = "";
+    if (mode === "multiple natives") rows.push({ ...rows[3]!, pid: 3005 });
+    if (mode === "duplicate PID") rows.push({ ...rows[3]! });
+    let samples = 0;
+    const listProcesses = async () => {
+      samples++;
+      if (mode === "shell only") return rows.slice(0, 1);
+      return rows.map(row => ({ ...row, startedAt:
+        ((mode === "native PID reused" && row.pid === 3004) || (mode === "pane PID reused" && row.pid === 3001)) && samples % 2 === 0
+          ? "Sat Jan  1 12:00:01 2000" : row.startedAt }));
+    };
+    const adapter = new CodexRuntimeAdapter({ tmux, listProcesses, sleep: async () => { ticks++; },
+      fsOps: { exists: () => false, readFile: () => { throw new Error("absent"); }, writeFile: () => {}, mkdirp: () => {}, homedir: "/fixture/home" },
+    });
+    const result = await createOrchestrator({ tmux, listProcesses }).restore(snap.id, { adapters: { codex: adapter } });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    tmux.listSessions = async () => [{ name: "dev-owner@test-rig" }] as never;
+    await new SeatIdentityReconciler({ db, tmux, listProcesses }).reconcileAll();
+    const latest = db.prepare("SELECT resume_token FROM sessions WHERE node_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1").get(node.id) as { resume_token: string | null };
+    const verdict = db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(node.id) as { verdict: string };
+    const observed = { status: result.result.nodes[0]?.status, token: latest.resume_token, identity: verdict.verdict };
+    if (mode === "delayed screen" || mode === "immediate screen") {
+      expect(observed).toEqual({ status: "resumed", token, identity: "verified" });
+    } else {
+      expect(result.result.nodes[0]?.status).toBe("attention_required");
+      const identityOnly = mode === "no usable screen" || mode === "trust gate";
+      expect(verdict.verdict).toBe(identityOnly ? "verified" : "mismatch");
+      if (identityOnly || mode === "shell only") {
+        // An attempted UUID may be retained without certifying conversation
+        // readiness. Periodic identity must not clear this startup failure.
+        expect(db.prepare("SELECT startup_status, resume_provenance, resume_last_verified FROM sessions WHERE node_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1").get(node.id))
+          .toEqual({ startup_status: "attention_required", resume_provenance: null, resume_last_verified: null });
+      }
+    }
+    expect(tmux.sendShellCommand).toHaveBeenCalledTimes(1);
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+  });
+
   // NS-T05: R1 — pod-aware restore uses launchHarness (not old helpers)
   it("pod-aware restore uses launchHarness for resume, not old helpers", async () => {
     // Create a pod-aware rig

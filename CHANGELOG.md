@@ -8,6 +8,44 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.5.15]
+
+- Recognize Codex through shell and Node launchers during startup and recovery,
+  while keeping uncertain process identity visible.
+- Skip recognized Codex update notices without installing provider updates, and
+  give clearer startup recovery guidance, including `rig up <name> --existing`.
+- Add the OpenRig Software Factory recipe and worked example for continuing
+  reviewed work, with incremental team growth using `rig grow`.
+- Guide agents through user-chosen command permissions, preserving existing rules
+  and explaining project versus user scope. Permission defaults are unchanged.
+- Explain provider hooks, workspace trust and other machine changes before the
+  first launch.
+- Show Pi replies and tool progress, retain managed OpenRig context in shell
+  tools, and report bounded provider errors without exhausted-retry duplicates.
+- Submit pasted Pi messages explicitly and handle input beyond the terminal's
+  canonical buffer limit, including cancellation and oversized-input recovery.
+- Add a guarded retry for an added seat whose first startup failed during resource
+  projection; retain its complete original configuration for recovery.
+
+Pi support remains qualified and supervised: controlled coding and continuity
+were verified, but ordinary useful-task completion and unattended teamwork remain
+unverified. Shipped permission defaults, the Node support range and SQLite version
+are unchanged; project work-policy features are outside this release.
+
+Includes [#37](https://github.com/mvschwarz/openrig/pull/37) by
+[@danielkuykendall23-boop](https://github.com/danielkuykendall23-boop), and
+[#38](https://github.com/mvschwarz/openrig/pull/38),
+[#39](https://github.com/mvschwarz/openrig/pull/39),
+[#45](https://github.com/mvschwarz/openrig/pull/45) and
+[#46](https://github.com/mvschwarz/openrig/pull/46) by
+[@mvschwarz](https://github.com/mvschwarz).
+
+**Known compatibility limitation:** on macOS arm64 with Node 24, SQLite dependency
+installation can fail when a suitable prebuilt binary is unavailable, and
+compiler-built SQLite has also shown runtime cleanup failures. Use Node 22 on
+that platform for now; the declared Node support range is unchanged.
+See [the release notes](docs/releases/v0.5.15.md) for starting commands and guidance.
+
 ## [0.5.14] - 2026-09-14
 
 VM inspection was accepted: generally zero-to-two-second loading with
@@ -277,9 +315,9 @@ Overdue + undelivered become routed findings with derived evidence inline. **Rea
 
 `rig seat handover --source fork:` (carries live context) or `rebuild` (primes from the durable chain and names its priming artifacts). Mid-swap failures record honestly. **Reach for it when:** replacing an occupant — no more dry-run-only planning surface.
 
-#### Reach humans (and the founder) directly through Slack
+#### Reach human decision owners directly through Slack
 
-Gateway running, thread-per-seat, exactly-once inbound reconciliation, escalation loudness (mention) distinct from routine. Humans are addressable members; `rig gateway human` has full fragment-lifecycle verbs. **Reach for it when:** anything must reach the founder — an escalation-class send arrives loud on their phone.
+Gateway running, thread-per-seat, exactly-once inbound reconciliation, escalation loudness (mention) distinct from routine. Humans are addressable members; `rig gateway human` has full fragment-lifecycle verbs. **Reach for it when:** anything must reach a human decision owner — an escalation-class send arrives loud on their phone.
 
 #### Onboard fresh installs without hand-walking
 
@@ -420,7 +458,7 @@ The refocus hook resolves library refs automatically (ref beats file), fails lou
 
 `rig context get` serves expertise packs by path-like ref, e.g. `skills/process/context-engineering`. The old `context-pack:` colon form was removed and the CLI says so.
 
-**Caveat that pack:** it is titled "Traditional Context Engineering — 2024-2025 Snapshot" for a reason — provisional, historical, non-normative by founder ruling. Current OpenRig skills, explicit user rulings, and measured practice outrank it on any conflict.
+**Caveat that pack:** it is titled "Traditional Context Engineering — 2024-2025 Snapshot" for a reason — provisional, historical, non-normative by the project owner's ruling. Current OpenRig skills, explicit user rulings, and measured practice outrank it on any conflict.
 
 ### What to STOP doing (each was correct under 0.5.2 and is wrong now)
 
@@ -841,7 +879,7 @@ Building on the v0.4.8 permission-policy foundation, v0.5.0 ships the built-in p
 - **New shipped starter: `rig up factory-rsi`** — the single-rig recursive-self-improvement factory MVP. One rig, seven seats (`plan-planner`, `build-implementer`, `check-qa`, `review-reviewer`, `dogfood-tester`, `release-manager`, `orch-lead`), running the new `factory-rsi` workflow. A launch-tier product starter (a `product-team` sibling), workspace-agnostic — point `--cwd <repo>` at whatever the loop should improve.
 - **New builtin workflow: `factory-rsi`** — the inner loop `plan → implement → qa_check → review → release`, with `qa_check`/`review` `failed` → `implement` (bounded remediation), engine-routed — never an orchestrator relay. Dogfood is **decoupled** from this gated loop: the dogfood seat runs out-of-band against the **shipped** product and feeds its findings into the next plan (the RSI edge, ungated — no loop-stop in the MVP; the continuous out-of-band runtime mechanism is refined in a later release). The remediation loops are sanctioned only by the enforceable `loop_guards.max_hops`; a trip is an exception routed orchestrator-first (`exception_routing`), and `rig workflow resume` grants one more bounded window.
 - **Recorded-state cycles**: the next plan's input is the *recorded* dogfood findings (`evidence_ref` / the packet trail), never a seat's chat memory — the RSI feedback is durable recorded state.
-- **Publish stays a human act**: the release leg is two steps — `release_prep` (the release-manager PREPARES notes/docs/PR and records the evidence; un-gated, runs first) hands off to `release_signoff`, which holds the ship decision at a human gate (`gate.target: human@kernel`). Prepared artifacts exist before sign-off; no seat pushes, tags, publishes, or upgrades a host.
+- **Publish stays a human act**: the release leg is two steps — `release_prep` (the release-manager PREPARES notes/docs/PR and records the evidence; un-gated, runs first) hands off to `release_signoff`, which holds the ship decision at the configured human gate target. Prepared artifacts exist before sign-off; no seat pushes, tags, publishes, or upgrades a host.
 - **Rides the merged engine, no new machinery**: runs on the workflow engine + spec language + exception model as shipped, with the v0 hardcode seam (`target.rig: factory-rsi` + `preferred_targets` pin each role 1:1 to a seat) — no binding-layer dependency, no engine change. Runtime config: seats inherit their runtime's default model (no per-seat pin); plan/build/release/orch run on claude-code, and qa/review/dogfood run on codex for cross-runtime diversity against the builder.
 - **No migrations. No breaking changes.**
 
@@ -1125,7 +1163,7 @@ The v0.4.0 cascade-metadata hygiene findings (`missing_provenance` + `missing_ve
 
 ## [0.4.0] - 2026-06-20
 
-**Status**: wrap-gate CLEAR; lifecycle push / npm publish / tag held for founder-auth.
+**Status**: wrap-gate CLEAR; lifecycle push / npm publish / tag held for authorization from the project owner.
 
 ### Summary For Installing Agents
 
@@ -1172,7 +1210,7 @@ Five read-commands flip from firehose-by-default to compact-by-default — close
 ### Known Limitations / Carry-Forward
 
 - **Plugin-lineage drift in `openrig-core`** — the openrig-core plugin skill lineage is divergent/stale; full re-sync is OPR.0.4.1.4 (rides 0.4.1). Boot-path layers (canonical + hub cwd) verified current in wrap-gate AC-3 sweep. `rig skill audit` (slice 10) is the runtime mechanism for future drift detection.
-- All earlier "PUSHED to 0.4.1" carry-forwards from the original wrap-gate were RESTORED to 0.4.0 during the wrap: slice 34 (`rig ps` current-rig default + `-A`/`--all-rigs` + `resumeTokenPresent`) landed — see Token-Efficient Defaults; slice 35 (`rig scope` stage/verified/reconcile) landed — see New Top-Level CLI Verbs. Real-terminal-related slices 38 + 39 also shipped via founder live-dogfood forward-fix authorization 2026-06-21. Nothing of substance carries forward to 0.4.1 from the original wrap-gate set.
+- All earlier "PUSHED to 0.4.1" carry-forwards from the original wrap-gate were RESTORED to 0.4.0 during the wrap: slice 34 (`rig ps` current-rig default + `-A`/`--all-rigs` + `resumeTokenPresent`) landed — see Token-Efficient Defaults; slice 35 (`rig scope` stage/verified/reconcile) landed — see New Top-Level CLI Verbs. Real-terminal-related slices 38 + 39 also shipped via the project owner's live-dogfood forward-fix authorization on 2026-06-21. Nothing of substance carries forward to 0.4.1 from the original wrap-gate set.
 
 ### What To STOP Using
 

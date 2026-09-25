@@ -21,52 +21,125 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import readline from "node:readline";
+import { PassThrough } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER,
   type PiRunnerState,
 } from "./pi-runner-protocol.js";
 
-// ── Paste aggregation (arch n1) ──────────────────────────────────────────────
-// `rig send` delivers a multi-line body via send-keys -l and THEN a separate
-// Enter, so a multi-line paste arrives as several stdin lines in quick
-// succession. The aggregator treats the whole quiet-window batch as ONE
-// prompt — never N prompts.
+// ── Submitted input boundaries ─────────────────────────────────────────────
+// Canonical TTY buffers can overflow before Node sees even the paste terminator.
+// Use Node's line editor in raw mode, with only paste framing handled here.
+export const MAX_PI_INPUT_BYTES = 1024 * 1024;
 
-export class PasteAggregator {
-  private buffer: string[] = [];
-  private timer: ReturnType<typeof setTimeout> | null = null;
-
-  constructor(
-    private onFlush: (block: string) => void,
-    // 600ms: the daemon transport's two-step send pastes the body, waits
-    // 200ms, THEN submits Enter — so the final line's newline arrives ~200ms
-    // after the paste. A 200ms quiet window raced that gap and split one
-    // rig-send envelope into two prompts (VM leg-4 finding); 3x the transport
-    // gap absorbs it while staying far below human message cadence.
-    private quietMs = 600,
-    private schedule: (fn: () => void, ms: number) => ReturnType<typeof setTimeout> = setTimeout,
-    private cancel: (t: ReturnType<typeof setTimeout>) => void = clearTimeout,
-  ) {}
-
-  addLine(line: string): void {
-    this.buffer.push(line);
-    if (this.timer !== null) this.cancel(this.timer);
-    this.timer = this.schedule(() => this.flush(), this.quietMs);
+export function createRunnerInput(
+  input: NodeJS.ReadStream,
+  output: NodeJS.WriteStream,
+  onSubmit: (block: string) => void,
+): readline.Interface {
+  const reject = () => output.write(
+    "[pi-runner] input rejected: maximum 1048576 UTF-8 bytes; send a smaller message. Ctrl-C clears unfinished input.\n",
+  );
+  const submit = (block: string) => {
+    if (Buffer.byteLength(block) > MAX_PI_INPUT_BYTES) reject();
+    else if (block.trim()) onSubmit(block);
+  };
+  // A pipe has no kernel line limit or terminal editing; each line is a message.
+  if (!input.isTTY || !output.isTTY) {
+    return readline.createInterface({ input, crlfDelay: Infinity }).on("line", submit);
   }
 
-  flush(): void {
-    if (this.timer !== null) {
-      this.cancel(this.timer);
-      this.timer = null;
+  const keys = new PassThrough();
+  const editor = readline.createInterface({
+    input: keys, output, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
+  });
+  const decoder = new StringDecoder("utf8");
+  let pending = "";
+  let paste: string | null = null;
+  let pasteBytes = 0;
+  let discarded = false;
+  const setLine = (line: string, cursor: number) => {
+    // Node documents changing rl.line together with rl.cursor. The installed
+    // typings mark them readonly, so assign this pair through one explicit seam.
+    Object.assign(editor, { line, cursor });
+    editor.prompt(true);
+  };
+  const clear = () => setLine("", 0);
+  const consume = (text: string) => {
+    if (paste === null) {
+      keys.write(text);
+    } else if (!discarded) {
+      pasteBytes += Buffer.byteLength(text);
+      if (pasteBytes > MAX_PI_INPUT_BYTES) {
+        paste = "";
+        discarded = true;
+        clear();
+        reject();
+      } else paste += text;
     }
-    if (this.buffer.length === 0) return;
-    const block = this.buffer.join("\n").trim();
-    this.buffer = [];
-    if (block.length > 0) this.onFlush(block);
-  }
+  };
+  const receive = (chunk: Buffer) => {
+    pending += decoder.write(chunk);
+    while (pending) {
+      const marker = paste === null ? "\u001b[200~" : "\u001b[201~";
+      const boundary = pending.indexOf(marker);
+      const interrupt = pending.indexOf("\u0003");
+      const at = boundary < 0 ? interrupt : interrupt < 0 ? boundary : Math.min(boundary, interrupt);
+      if (at < 0) {
+        // Retain only a possible split marker; normal editing keys go to Node.
+        let tail = Math.min(marker.length - 1, pending.length);
+        while (tail && !marker.startsWith(pending.slice(-tail))) tail--;
+        consume(pending.slice(0, pending.length - tail));
+        pending = pending.slice(pending.length - tail);
+        break;
+      }
+      consume(pending.slice(0, at));
+      pending = pending.slice(at + (at === interrupt ? 1 : marker.length));
+      if (at === interrupt) {
+        paste = null;
+        discarded = false;
+        clear();
+        output.write("\n[pi-runner] input cleared\n");
+        onSubmit("/abort");
+      } else if (paste === null) {
+        paste = "";
+        pasteBytes = 0;
+        discarded = false;
+      } else {
+        if (!discarded) {
+          const line = editor.line.slice(0, editor.cursor) + paste + editor.line.slice(editor.cursor);
+          if (Buffer.byteLength(line) > MAX_PI_INPUT_BYTES) { clear(); reject(); }
+          else {
+            // rl.write(text) treats pasted newlines as submits. These public
+            // editing fields insert the whole literal paste without submitting.
+            setLine(line, editor.cursor + paste.length);
+          }
+        }
+        paste = null;
+      }
+    }
+  };
+  const wasRaw = input.isRaw;
+  const end = () => editor.close();
+  input.setRawMode(true);
+  output.write("\u001b[?2004h");
+  input.on("data", receive);
+  input.once("end", end);
+  editor.on("line", submit);
+  editor.once("close", () => {
+    input.removeListener("data", receive);
+    input.removeListener("end", end);
+    input.setRawMode(wasRaw);
+    input.pause();
+    keys.destroy();
+    output.write("\u001b[?2004l");
+  });
+  return editor;
 }
 
 // ── Pi event → mirror + activity mapping (pure, hermetically testable) ──────
@@ -80,6 +153,15 @@ export interface MirrorAndActivity {
   activity?: { hookEvent: string; subtype: string | null };
   /** Streaming-state transition, when the event carries one. */
   streaming?: boolean;
+  /** A typed terminal failure; the core coalesces its exhausted-retry notice. */
+  errorNotice?: string;
+}
+
+function errorNotice(detail: unknown): string {
+  const text = typeof detail === "string"
+    ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
+    : "";
+  return `${PI_RUNNER_ERROR_MARKER} ${text.slice(0, 400) || "request failed"}`;
 }
 
 export function mapPiEvent(event: Record<string, unknown>): MirrorAndActivity {
@@ -109,7 +191,12 @@ export function mapPiEvent(event: Record<string, unknown>): MirrorAndActivity {
       // terminates the line. (mapPiEvent is stateless, so a hypothetical
       // updates-carried-nothing case is a VM-calibration follow-up, not
       // silently guessed here.)
-      return { mirrorLines: [""] };
+      const message = event.message as Record<string, unknown> | undefined;
+      return {
+        mirrorLines: [""],
+        ...(message?.role === "assistant" && message.stopReason === "error"
+          ? { errorNotice: errorNotice(message.errorMessage) } : {}),
+      };
     }
     case "tool_execution_start": {
       const tool = typeof event.toolName === "string" ? event.toolName : (typeof event.name === "string" ? event.name : "tool");
@@ -129,7 +216,9 @@ export function mapPiEvent(event: Record<string, unknown>): MirrorAndActivity {
     case "auto_retry_start":
       return { mirrorLines: ["[pi] transient error — retrying"], activity: { hookEvent: "active", subtype: "auto_retry" } };
     case "auto_retry_end":
-      return { mirrorLines: [] };
+      return event.success === false
+        ? { mirrorLines: [""], errorNotice: errorNotice(event.finalError) }
+        : { mirrorLines: [] };
     case "extension_error": {
       const message = typeof event.message === "string" ? event.message : "extension error";
       return { mirrorLines: [`${PI_RUNNER_ERROR_MARKER} extension: ${message}`] };
@@ -165,6 +254,7 @@ export class RunnerCore {
   private sessionId: string | undefined;
   private lastEntryId: string | undefined;
   private ready = false;
+  private assistantErrorShown = false;
 
   constructor(
     private io: RunnerIo,
@@ -285,6 +375,10 @@ export class RunnerCore {
   }
 
   private handleEvent(event: Record<string, unknown>): void {
+    const message = event.message as Record<string, unknown> | undefined;
+    if (event.type === "agent_start" || (event.type === "message_start" && message?.role === "assistant")) {
+      this.assistantErrorShown = false;
+    }
     // Durable cursor: any event carrying a session-entry id advances it.
     const entryId = typeof event.entryId === "string" ? event.entryId : (typeof event.id === "string" ? event.id : undefined);
     if (entryId) {
@@ -304,6 +398,15 @@ export class RunnerCore {
     }
     if (mapped.mirrorAppend) this.io.mirrorAppend(mapped.mirrorAppend);
     for (const line of mapped.mirrorLines) this.io.mirrorLine(line);
+    if (mapped.errorNotice) {
+      // Pi can announce the same failed message again when retries exhaust.
+      // Keep the first useful detail even if finalError is absent, then reset
+      // at the next assistant message/agent turn, not at agent_end.
+      if (event.type !== "auto_retry_end" || !this.assistantErrorShown) {
+        this.io.mirrorLine(mapped.errorNotice);
+      }
+      this.assistantErrorShown = true;
+    }
     if (mapped.activity) {
       this.io.postActivity(this.activityPayload(mapped.activity.hookEvent, mapped.activity.subtype));
     }
@@ -497,21 +600,22 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   };
 
   const core = new RunnerCore(io, { sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId }, { catchUpSince });
-  const aggregator = new PasteAggregator((block) => core.handleUserBlock(block));
 
   readline.createInterface({ input: child.stdout }).on("line", (line) => core.handlePiLine(line));
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
     if (line.trim()) process.stdout.write(`[pi:err] ${line}\n`);
   });
-  readline.createInterface({ input: process.stdin }).on("line", (line) => aggregator.addLine(line));
+  const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block));
 
   child.on("error", (err) => {
     console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);
     core.handlePiExit(null);
+    input.close();
     process.exitCode = 1;
   });
   child.on("exit", (code) => {
     core.handlePiExit(code);
+    input.close();
     process.exitCode = code ?? 1;
   });
 

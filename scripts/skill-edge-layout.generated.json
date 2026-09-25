@@ -1,6 +1,5 @@
 {
   "version": 0,
-  "owner": "skills-architect@skill-library",
   "edges": {
     "canonical": {
       "path": "skills/_canonical",

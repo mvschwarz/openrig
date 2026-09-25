@@ -52,10 +52,15 @@ export async function generateControlPlaneJson({
   const digests = buildEdgeDigests({ repoRoot, layout });
 
   mkdirSync(outputDir, { recursive: true });
-  writeJson(join(outputDir, "product-public-skills.generated.json"), membership);
+  writeJson(join(outputDir, "product-public-skills.generated.json"), publicProjection(membership));
   writeJson(join(outputDir, "internal-tokens.generated.json"), denylist);
-  writeJson(join(outputDir, "skill-edge-layout.generated.json"), layout);
+  writeJson(join(outputDir, "skill-edge-layout.generated.json"), publicProjection(layout));
   writeJson(join(outputDir, "skill-edge-digests.generated.json"), digests);
+}
+
+// Ownership belongs to the private authoring source, not its public projection.
+export function publicProjection({ owner, ...value }) {
+  return value;
 }
 
 export async function extractSkillEdgeLayout({
