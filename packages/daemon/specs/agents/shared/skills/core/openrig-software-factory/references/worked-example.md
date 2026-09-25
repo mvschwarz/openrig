@@ -1,6 +1,6 @@
 # Worked example: reviewed CSV validation
 
-Read this when adapting the recipe to a repository with CSV handling. The complete files below passed source catalog, Markdown reader and lifecycle compiler checks on a private 0.5.14-based candidate. The prior bounded native trial also used a private 0.5.14-based candidate and completed reviewed work and next-task pickup with setup assistance and 48 one-time approvals; it did not demonstrate a genuine product-decision wait/answer or automatic refocus. The revised guidance below has source checks only. Use compatible installed command help and preserve first failures.
+Use this example to adapt reviewed work to a repository with CSV handling. Choose the simple team or queue loop first; the full Workflow files are optional. Check the selected installation’s command help before applying examples.
 
 This is a concrete CSV-validation example for adaptation, not a requirement that an arbitrary repository become a CSV project or every outcome be split into two slices. This example uses two genuinely dependent slices. Select a real, authorized repository and record its starting commit and existing CSV behavior. If it has no relevant CSV code, choose two dependent changes appropriate to that repository and rewrite the example objectives before execution; ordinary user tasks retain their appropriate size.
 
@@ -62,8 +62,7 @@ queue authorizes the agent to invent work.
 
 ## What wakes work, and what it costs
 
-The following behavior is source-checked for this private 0.5.14-based candidate. Inspect the
-installed configuration and `rig watchdog list` for actual jobs; old jobs in an
+Inspect the installed configuration and `rig watchdog list` for actual jobs; old jobs in an
 upgraded installation are not proof of fresh-install defaults.
 
 | Mechanism | Trigger and boundary |
@@ -95,8 +94,8 @@ they choose otherwise. Codex sandbox and approval policy are distinct controls;
 actual native/provider behavior and managed restrictions determine what prompts.
 More permissive operation exposes files/network with fewer confirmations and
 still grants no extra product scope. Do not silently enable YOLO, global trust or
-network access. The prior bounded trial needed 48 one-time approvals (34 owner,
-14 checker), so do not sell this path as unattended or free of permission friction.
+network access. A running team can still need user decisions or native permission
+input; choose how those will be handled before leaving work unattended.
 
 ## Grow the running team
 
@@ -105,95 +104,56 @@ independent work, add one or two seats to that running rig. The example below ad
 two builders; it does not require a larger starter, new Workflow or replacement
 sessions. Use the actual rig name if yours differs.
 
-### Prepare one small pod fragment
+### Add one or two seats without YAML
 
-From the operator or coordinating seat, inspect the existing team and the installed
-implementation agent:
+From the coordinating seat, inspect the existing rig, its work and the shipped
+general-purpose agent:
 
 ```sh
 rig ps --json
 rig ps --nodes --rig first-project --json
 rig queue list --destination dev-owner@first-project --json
-rig specs show implementer --kind agent --json
-rig expand --help
+rig specs show orchestrator --kind agent --json
+rig grow --help
 ```
 
-Set `RIG_ID` to the `rigId` value for the running `first-project` in the first result;
-the expansion/export commands below take that ID, not the starter spec name.
-Verify the existing `dev.owner` and `dev.check` identities and their current work;
-choose another pod ID if `build` is already present. The spec result's `sourcePath`
-names an `agent.yaml`: use its containing directory for the `path:` reference
-below. Preserve the installed agent's imports/resources; do not copy only that
-one YAML file. If the library result is missing or ambiguous, resolve it through
-`rig specs ls` and the returned exact ID before proceeding.
-
-Set `PROJECT_ROOT` to the actual absolute code repository. Put the following
-complete pod fragment in the new user-owned file
-`$PROJECT_ROOT/.openrig/factory/add-builders.yaml`, creating the parent directory
-if needed. Replace both `/absolute/path/to/implementer` values with the discovered
-agent directory and both `/absolute/path/to/project` values with the repository.
-YAML does not expand shell variables. Use a model supported by the selected
-runtime/account; this example matches the Codex starter. Keep the existing
-permission choice and check the new seats' effective native permissions.
-
-```yaml
-pod:
-  id: build
-  label: Builders
-  members:
-    - id: a
-      label: Builder A
-      agent_ref: "path:/absolute/path/to/implementer"
-      profile: default
-      runtime: codex
-      model: gpt-6-astra
-      cwd: "/absolute/path/to/project"
-    - id: b
-      label: Builder B
-      agent_ref: "path:/absolute/path/to/implementer"
-      profile: default
-      runtime: codex
-      model: gpt-6-astra
-      cwd: "/absolute/path/to/project"
-  edges: []
-crossPodEdges:
-  - kind: delegates_to
-    from: dev.owner
-    to: build.a
-  - kind: delegates_to
-    from: dev.owner
-    to: build.b
-```
-
-For just one new seat, omit member `b` and its `crossPodEdges` entry **before** the
-first expansion. This is an expansion fragment (`pod` plus `crossPodEdges`), not a
-complete RigSpec with `version`, `name` and `pods`. Do not pass it to `rig up` or
-claim a full-spec validator tested it. The expansion service validates/preflights
-the new pod against the existing rig before adding it. There is no expansion
-`--dry-run` option in this command surface.
-
-### Add, inspect, then assign
-
-The next command creates topology and starts only the new pod's members. Run it
-once when the user has authorized this growth and its cost:
+Set `RIG_ID` to the `rigId` for the running `first-project`, and `PROJECT_ROOT`
+to the absolute code repository. Verify its existing `dev` pod and choose unused
+member names. When the user has authorized the added capacity and cost, run:
 
 ```sh
-rig expand "$RIG_ID" "$PROJECT_ROOT/.openrig/factory/add-builders.yaml" \
-  --rig-root "$PROJECT_ROOT" --json
+rig grow "$RIG_ID" a b --pod dev --runtime codex --cwd "$PROJECT_ROOT" --json
 rig ps --nodes --rig first-project --json
 ```
 
-`--rig-root` supplies the resolution root; the fragment's explicit `cwd` supplies
-the working directory. Expected logical IDs are `build.a` and `build.b`, with
-addresses `build-a@first-project` and `build-b@first-project`. Derive the actual
-addresses from the result. Confirm the original seats and their work remain
-present. Inspect every node's status/error and the native pane, even if the
-overall result says `ok`; a created node or tmux session is not proof of readiness.
-A partial result can leave new nodes persisted. After a timeout, read topology
-before any retry. Do not repeat expansion against a pod that was already added.
-If a newly created seat failed to start, resolve its reported cause; the supported
-single-seat retry is `rig launch "$RIG_ID" build.a` for that existing node.
-`rig launch` does not create a missing seat. Preserve other sessions and work.
+For one builder, omit `b`. The expected new logical IDs are `dev.a` and `dev.b`,
+with addresses `dev-a@first-project` and `dev-b@first-project`; use the actual
+returned identities. The command adds and launches the named seats.
+
+To put those seats in a **new** pod instead, choose this alternative once, with an
+unused pod ID; do not run both examples for the same desired capacity:
+
+```sh
+rig grow "$RIG_ID" a b --new-pod build --runtime codex --cwd "$PROJECT_ROOT" --json
+```
+
+That alternative produces `build.a`/`build.b` and corresponding `build-...`
+addresses. `--pod` and `--new-pod` are mutually exclusive. With one existing pod,
+`--pod` can be inferred; select it explicitly when the intended target matters.
+The runtime defaults to `claude-code` and cwd defaults to the caller's current
+directory, so these examples select Codex and the repository deliberately.
+
+`grow` resolves the shipped builtin `orchestrator` agent and its `default`
+profile. It does not copy the owner's custom agent, model, context, native
+permission profile or conversation. Check the returned `source` and native
+configuration; assign builder duties explicitly. For custom member fields or
+agent specs, use the optional Architect path below and `rig expand --help`.
+
+Inspect each node's status/error and native pane. Confirm existing seats and work
+remain present; a created node is not readiness. Partial results can leave nodes
+persisted. After a timeout, reconcile topology before retrying. Fix the reported
+cause, then use `rig launch "$RIG_ID" dev.a` only for an already-created seat that
+failed to start. That command does not create a missing seat.
 
 New seats do not inherit the owner's conversation or task. Record the agreed
 division in the project's existing working agreement and prepare each task file
@@ -202,8 +162,8 @@ checks, next owner and stopping condition. Then deliver the context instruction,
 for example for the first builder:
 
 ```sh
-rig send build-a@first-project "Read $PROJECT_ROOT/SPEC.md and the addressed sources in $PROJECT_ROOT/.openrig/factory/TASK-A.md. Run rig whoami --json and rig queue list --owned --json in your own seat; report your identity, scope and any native readiness/permission blocker. Await the bounded queue assignment."
-rig capture build-a@first-project
+rig send dev-a@first-project "Read $PROJECT_ROOT/SPEC.md and the addressed sources in $PROJECT_ROOT/.openrig/factory/TASK-A.md. Run rig whoami --json and rig queue list --owned --json in your own seat; report your identity, scope and any native readiness/permission blocker. Await the bounded queue assignment."
+rig capture dev-a@first-project
 ```
 
 Read the actual reply and pane; resolve startup/login/permission prompts under the
@@ -213,7 +173,7 @@ the coordinator creates the distinct agreed task (or hands off an existing owned
 task instead of duplicating it):
 
 ```sh
-rig queue create --destination build-a@first-project \
+rig queue create --destination dev-a@first-project \
   --body-file "$PROJECT_ROOT/.openrig/factory/TASK-A.md" \
   --summary 'Implement the agreed independent change A' --json
 ```
@@ -222,15 +182,15 @@ Use actual project/mission/slice tags where applicable. Read back the returned I
 with `rig queue show <id> --full --json`; A claims it as itself. Use the earlier
 queue loop for results, review and blockers. Existing Workflow-bound work keeps
 its packet/projection contract: adding a seat does not revise a running graph or
-automatically bind its roles. The fragment's labels/edges describe relationships;
-responsibilities and ownership come from the working agreement and assigned work.
+automatically bind its roles. Responsibilities and ownership come from the
+working agreement and assigned work, not the seat's name or default agent label.
 
 ### Specialize only when the work warrants it
 
 | Seat in this example | Deliberately agreed responsibility |
 | --- | --- |
 | `dev-owner@first-project` | Initially implements and coordinates; can become the dedicated orchestrator, selecting outcomes, separating tasks, owning integration and retaining next-work custody. |
-| `build-a@first-project`, `build-b@first-project` | Implement distinct authorized tasks and return exact candidates/evidence. Neither silently edits the other's files or folds both candidates without integration ownership. |
+| `dev-a@first-project`, `dev-b@first-project` | Implement distinct authorized tasks and return exact candidates/evidence. Neither silently edits the other's files or folds both candidates without integration ownership. |
 | `dev-check@first-project` | Retains independent judgment under the project's review policy. The implementer does not count its own check as independent review. |
 
 This is one progression, not a required four-seat layout. One extra builder may
@@ -248,7 +208,7 @@ still apply to idle seats, so an idle label is not a zero-token guarantee.
 ### Save the expanded shape without replacing the live rig
 
 Expansion persists new topology in the running instance's database. It does not
-rewrite the starter, the fragment or your original authored `rig.yaml`. Save a
+rewrite the starter or your original authored `rig.yaml`. Save a
 separate live export to an unused user-owned path:
 
 ```sh
@@ -265,16 +225,25 @@ reconciled full RigSpec with `rig spec validate <path> --json`, then compare its
 seat membership with the live rig using `rig doctor --spec <path>`. That comparison
 does not prove all startup/context fields or native recovery.
 
-Keep the fragment, reconciled spec and existing continuity evidence. A bundle made
+Keep the reconciled spec and existing continuity evidence. A bundle made
 from an old authored spec can omit the added seats. A snapshot taken before growth
 cannot establish recovery of the new seats; use the compatible lifecycle guide for
 any later authorized snapshot/restore. Do not stop, rebuild or replace the running
-rig merely to save its definition. The fragment/parser checks for this recipe are
-offline evidence; no new native live-growth or restore trial is claimed.
+rig merely to save its definition.
 
 For a different team structure, use the optional
 [OpenRig Architect](../../openrig-architect/SKILL.md) path from the main recipe.
-Custom-rig authoring is not a prerequisite for adding this pod.
+Use it when you need custom agent specs, model/profile fields or authored edges.
+YAML authoring is optional; ordinary growth uses the commands above.
+
+### Remove capacity deliberately
+
+When a seat is no longer needed, preserve its work and next owner first.
+`rig remove "$RIG_ID" dev.a` removes that seat; `rig shrink "$RIG_ID" build`
+removes the whole optional build pod. These end the affected sessions. Removal
+refuses active work unless you explicitly select a live `--fallback <live-seat>`
+to receive it. Check the exact targets, handoff and returned outcomes; do not use
+fallback to discard an obligation or remove seats merely because they look idle.
 
 ## Advanced: an explicit Workflow contract
 
@@ -429,7 +398,7 @@ composition:
 
 These are two slice artifacts and four coordination steps, not four product slices. Order in `composition.slices` describes membership; `steps[].depends_on` supplies the runtime prerequisite. The mission graph is selected explicitly. The compiler calls this supported path `legacy-mission` and emits an advisory because there is no project-owned reusable graph yet; retain that result rather than disguising it. Do not add simultaneous slice `execution` contracts: an authored mission graph takes precedence over them. Explicit preferred targets avoid assuming the starter's display labels are declared topology roles. The two addresses must be verified against the launched seats before use.
 
-Each of the four `SPEC.md` files must start with its complete frontmatter block below, immediately followed by its body from the table. The opening `---` is the first line, before any heading. All four blocks passed the source reader checks. The refocus reader needs a leading literal `intent:` field; an `## Intent` heading alone does not supply it. A missing field must remain visible in the trace.
+Each of the four `SPEC.md` files must start with its complete frontmatter block below, immediately followed by its body from the table. The opening `---` is the first line, before any heading. The refocus reader needs a leading literal `intent:` field; an `## Intent` heading alone does not supply it. A missing field must remain visible in the trace.
 
 `SPEC.md` — complete example frontmatter:
 
@@ -505,11 +474,11 @@ The CLI implementation interface and check commands are repository-derived facts
 3. **Owner and checker:** read the repository instructions and relevant intent; derive their own identity and queue. For example, the owner can run `rig context work-install --project csv-tool --mission csv-validation --slice 01-inspect --deliver --runtime codex --cwd <actual-code-root> --json`; use `02-cli` for the dependent work and give the checker both exact slice addresses. `--deliver` returns composed bytes to its caller: it is not a transport acknowledgment. Do not use `--apply-skills` merely to make this example work. `install.skills: []` adds no private or invented skill requirement; discover applicable public skills normally.
 4. **Bootstrap context delivery:** send the two seats a short instruction naming the exact work root and addressed files to retrieve; obtain their scope/role reaction before assigning implementation. A registered context pack can be sent with `rig send --context <discovered-ref>`; an arbitrary filesystem address is not automatically a context-pack ref. Deliver the actual composed bytes when a receiver cannot retrieve them. Keep instruction delivery separate from queue ownership.
 5. **Minimal durable topology context:** derive `topology.root`, then preserve existing chain files. In a new dedicated example instance, put purpose/root pointers in `LEARNED.md`, the two-seat relationship in `rigs/first-project/LEARNED.md`, and short duties in `rigs/first-project/seats/dev-owner/LEARNED.md` and `.../dev-check/LEARNED.md`. Owner text: “Own the user's bounded outcome, implementation, exact check handoff, result and next-work custody; derive the current packet.” Checker text: “Independently judge the supplied candidate against project/mission/slice acceptance, record evidence and limits, and return judgment without self-assigning broader work.” Rig text points to the user's `SPEC.md#working-agreement` and active mission; instance text points to the configured work root. Do not copy a status roster into these files. Optional pod files and eight-region trees are unnecessary.
-6. **Refocus delivery:** use the public `refocus-channel.md` and `chain-file-convention.md`, discovered under the selected instance reference directory. The ordinary hook derives roots and emits pointers at its supported prompt/compaction boundaries; it does not mean an edited file has been read. Ask each seat to run the discovered public refocusing procedure and read the relevant named sources once as part of bootstrap, recording any trace gap. Automatic delivery is confirmed only when delivery at a supported boundary is actually observed; until then report it as unverified. Do not force compaction/restart to obtain that observation; a manual message is not proof of the automatic hook. Existing running seats do not inherit shell environment edits. Any explicit `OPENRIG_REFOCUS_WORK_NODE` or content override belongs in an intentionally configured launch context, not a claim that setting it in the sender changed another seat.
+6. **Refocus delivery:** use the public `refocus-channel.md` and `chain-file-convention.md`, discovered under the selected instance reference directory. The ordinary hook derives roots and emits pointers at its supported prompt/compaction boundaries; it does not mean an edited file has been read. Ask each seat to run the discovered public refocusing procedure and read the relevant named sources once as part of bootstrap, recording any trace gap. Existing running seats do not inherit shell environment edits. Any explicit `OPENRIG_REFOCUS_WORK_NODE` or content override belongs in an intentionally configured launch context, not a claim that setting it in the sender changed another seat.
 
 ## Deliberate runtime creation and truthful continuation
 
-The **actual owner seat**, after choosing the Workflow path, runs the following commands after context and address checks. The example addresses below are used only after its own `rig whoami --json` confirms `dev-owner@first-project`; an unbound bootstrap shell must not pretend to be that seat. `PROJECT_ROOT` is an ordinary task variable holding the selected absolute work root. Pick and record a unique operation key once, then reuse it after a timeout. These are adaptable examples; the prior trial executed its own bound instance. The genuine product-decision wait below remains unproven:
+The **actual owner seat**, after choosing the Workflow path, runs the following commands after context and address checks. The example addresses below are used only after its own `rig whoami --json` confirms `dev-owner@first-project`; an unbound bootstrap shell must not pretend to be that seat. `PROJECT_ROOT` is an ordinary task variable holding the selected absolute work root. Pick and record a unique operation key once, then reuse it after a timeout. Use the following commands for the selected graph:
 
 ```sh
 rig workflow compile "$PROJECT_ROOT/missions/csv-validation/mission.yaml" \
@@ -547,13 +516,12 @@ rig workflow project --instance <instance-id> --current-packet <cli-packet> \
   --evidence-ref <absolute-mission-notes-path> --json
 ```
 
-Read back waiting state, blocker, owner and retained frontier packet. A timer or reminder is not a user answer. Once the actual decision arrives, retain it in NOTES, read the same frontier, finish that same step and use its permitted `handoff` exit; do not instantiate again or claim that `workflow resume` is the wait verb. That command is for failed-instance recovery. If the real repository already settles this choice, do not fabricate uncertainty: select another genuine external input for the bounded trial, or report wait coverage absent.
+Read back waiting state, blocker, owner and retained frontier packet. A timer or reminder is not a user answer. Once the actual decision arrives, retain it in NOTES, read the same frontier, finish that same step and use its permitted `handoff` exit; do not instantiate again or claim that `workflow resume` is the wait verb. That command is for failed-instance recovery. If the repository already settles the choice, use that decision and continue; do not manufacture a wait.
 
 The checker receives the cumulative candidate, both proof files, exact accepted decision and reproducible checks. Its truthful `handoff` advances to `finish`; the owner reports the exact checked cut and how the user can exercise it. A failed check is recorded honestly, routed to the owner through the selected exception path and resolved using the existing failure/repair continuation. Keep the same checker and outcome through bounded repairs; keep the implementation/check exchange with that owner and checker. A workflow terminal state alone is not evidence that the user outcome passed.
 
-On `finish`, the owner records completion and uses `done`. The human can then send the next bounded outcome to the same address, referencing the prior result. The owner creates/claims its durable task and acknowledges the actual boundary; it need not create another mission or full workflow for every small change. If nothing else is authorized, explicitly record no next work. For a bounded demonstration, observe next-task pickup separately from its implementation.
+On `finish`, the owner records completion and uses `done`. The human can then send the next bounded outcome to the same address, referencing the prior result. The owner creates/claims its durable task and acknowledges the actual boundary; it need not create another mission or full workflow for every small change. If nothing else is authorized, explicitly record no next work.
 
-That pickup establishes only bounded continuation from the first result. Repeated operation across multiple missions remains a future observed claim; neither this example nor a successfully picked-up next task proves it.
 
 ## Stop safely
 
@@ -565,7 +533,7 @@ When the user has authorized stopping this team, use `rig down <verified-rig>`
 for that exact rig, then read back the reported state. Preserve the repository,
 context and evidence; stopping is not deletion. A later `rig up <verified-rig>`
 requires actual native readiness checks before work resumes. Record a failed
-resume as failed; do not silently replace the original sessions. The prior bounded trial observed a supported stop; restore remains untested.
+resume as failed; do not silently replace the original sessions.
 
 ## Optional growth, with the same two seats
 

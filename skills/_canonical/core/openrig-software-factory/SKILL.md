@@ -8,7 +8,7 @@ metadata:
     - context get
     - context list
     - context show
-    - expand
+    - grow
     - queue create
     - queue handoff
     - workflow compile
@@ -73,7 +73,7 @@ Choose the team size separately from the coordination method above:
    while that pair meets the workload. The owner can implement and coordinate.
 2. **Add one or two seats to the running rig.** This is the usual next step.
    Follow [Grow the running team](references/worked-example.md#grow-the-running-team)
-   for a complete pod fragment, `rig expand` commands, readiness/context/work
+   for `rig grow` commands, readiness/context/work
    assignment, and saving the expanded topology. Existing sessions need no
    rebuild or down/up cycle solely to add capacity.
 3. **Author a custom rig when you want a different structure.** Read
@@ -131,16 +131,6 @@ do not substitute current main or guidance from another installation.
 > Agree time/spend limits, perform the authorized work and chosen independent
 > check, and ask only about unresolved decisions or effects outside that scope.
 > Keep publication and destructive changes out of this task.
-
-## What has been observed
-
-A bounded macOS/Codex trial on a private 0.5.14-based candidate completed
-independently reviewed two-slice work, next-task pickup and a supported stop
-with setup assistance. It required
-**48 one-time approvals (34 owner, 14 checker)**. This is not an unattended or
-low-friction result. A genuine product-decision wait/answer and automatic refocus
-were not demonstrated; these revised instructions have not had a new native trial.
-No fresh-account, other-platform/provider, restore or weeks-long autonomy claim.
 
 When commands, defaults or permission semantics change, check this source and
 companion together and regenerate their existing projections. Website guidance

@@ -97,7 +97,7 @@ OpenRig is a multi-agent harness — it manages the system that coding agents fo
 - **Discover** existing Claude Code and Codex sessions in tmux and adopt them into a managed rig
 - **Snapshot** the topology with `rig down --snapshot`, restore by name with `rig up <name>`
 - **Communicate** across agents with `rig send`, `rig broadcast`, and `rig chatroom`
-- **Evolve** running topologies with `rig expand`, `rig shrink`, `rig launch`, `rig remove`
+- **Evolve** running topologies with `rig grow`, `rig shrink`, `rig launch`, `rig remove`
 
 Every agent runs in a tmux session you can attach to, inspect, and work with directly.
 
