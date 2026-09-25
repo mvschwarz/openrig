@@ -531,7 +531,7 @@ profiles:
     expect(content).toContain("transcript capture is unreliable");
     expect(content).toContain("mean the session was quiet");
     expect(content).toContain("say so rather than inferring");
-    // The founder-ruled walk-back, pinned as absences: no operating-model SDLC and
+    // The product decision to keep the boot overlay thin, pinned as absences: no operating-model SDLC and
     // no skill-library routing may ride the default boot overlay (they are opt-in
     // layers, delivered by profile/startup config, never hardcoded here).
     expect(content).not.toContain("mission-slice-sop");

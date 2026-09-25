@@ -85,6 +85,8 @@ describe("control-plane JSON generator", () => {
     );
     write(layoutPath, layoutYaml());
     seedEdges(root);
+    const sourcePaths = [membershipPath, denylistPath, layoutPath];
+    const sourceBytes = sourcePaths.map((path) => readFileSync(path));
 
     await generator.generateControlPlaneJson({
       repoRoot: root,
@@ -104,6 +106,9 @@ describe("control-plane JSON generator", () => {
     const second = readGenerated(output);
 
     expect(second).toEqual(first);
+    expect(first.membership).not.toHaveProperty("owner");
+    expect(first.layout).not.toHaveProperty("owner");
+    expect(sourcePaths.map((path) => readFileSync(path))).toEqual(sourceBytes);
     expect(first.membership.product_public.clean).toEqual(["alpha"]);
     expect(first.membership.not_public.reclass_host_only).toEqual(["private"]);
     expect(first.denylist.section_fence.begin).toBe("<!-- internal:begin -->");

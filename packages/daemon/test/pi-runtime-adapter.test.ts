@@ -166,6 +166,36 @@ describe("buildPiChildEnv — deny-by-default allowlist (BR-3)", () => {
     OPENROUTER_API_KEY: "or-key",
   };
 
+  it("preserves managed identity and instance/context provenance, not ambient OpenRig settings", () => {
+    const managed = {
+      OPENRIG_NODE_ID: "node-17", OPENRIG_SESSION_NAME: SESSION,
+      OPENRIG_HOME: "/private/instance", OPENRIG_URL: "http://127.0.0.1:17433",
+      OPENRIG_HOST: "127.0.0.1", OPENRIG_PORT: "17433",
+      OPENRIG_RUNTIME: "pi", OPENRIG_OCCUPANT_GENERATION: "generation-current",
+      OPENRIG_SHARED_DOCS_ROOT: "/private/context",
+    };
+    const env = buildPiChildEnv({
+      ...source, ...managed, OPENRIG_UNREVIEWED_SETTING: "exclude",
+      OPENRIG_TERMINAL_BEARER_TOKEN: "exclude", OPENAI_API_KEY: "exclude",
+      BASH_ENV: "/untrusted/startup", ENV: "/untrusted/startup", NODE_OPTIONS: "--inspect",
+      TMUX: "/some/socket", TMUX_PANE: "%7", RIGGED_SESSION_NAME: "stale@other",
+    }, { agentDir: "/seat/agent", sessionsDir: "/seat/sessions", model: "openrouter/example" });
+    expect(env).toMatchObject(managed);
+    expect(env.OPENROUTER_API_KEY).toBe("or-key");
+    for (const name of ["OPENRIG_UNREVIEWED_SETTING", "OPENRIG_TERMINAL_BEARER_TOKEN",
+      "OPENRIG_ACTIVITY_HOOK_TOKEN", "OPENAI_API_KEY", "ZAI_API_KEY", "KIMI_API_KEY",
+      "BASH_ENV", "ENV", "NODE_OPTIONS", "TMUX", "TMUX_PANE", "RIGGED_SESSION_NAME"]) {
+      expect(env).not.toHaveProperty(name);
+    }
+  });
+
+  it("does not invent missing or empty managed identity", () => {
+    const opts = { agentDir: "/seat/agent", sessionsDir: "/seat/sessions" };
+    expect(buildPiChildEnv({}, opts)).not.toHaveProperty("OPENRIG_SESSION_NAME");
+    expect(buildPiChildEnv({}, opts)).not.toHaveProperty("OPENRIG_NODE_ID");
+    expect(buildPiChildEnv({ OPENRIG_SESSION_NAME: "" }, opts).OPENRIG_SESSION_NAME).toBe("");
+  });
+
   it("passes baseline vars + seat isolation roots, and NOTHING else", () => {
     const env = buildPiChildEnv(source, { agentDir: "/seat/agent", sessionsDir: "/seat/sessions" });
     expect(env.PATH).toBe("/usr/bin");
@@ -190,7 +220,7 @@ describe("buildPiChildEnv — deny-by-default allowlist (BR-3)", () => {
     expect(kimi).not.toHaveProperty("ZAI_API_KEY");
   });
 
-  it("openrouter (the preferred one-key path, founder ruling 2026-07-06) passes only OPENROUTER_API_KEY", () => {
+  it("openrouter passes only OPENROUTER_API_KEY", () => {
     const env = buildPiChildEnv(source, { agentDir: "/a", sessionsDir: "/s", model: "openrouter/z-ai/glm-4.6" });
     expect(env.OPENROUTER_API_KEY).toBe("or-key");
     expect(env).not.toHaveProperty("ZAI_API_KEY");

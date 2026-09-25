@@ -23,6 +23,7 @@ import nodePath from "node:path";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER,
@@ -80,6 +81,15 @@ export interface MirrorAndActivity {
   activity?: { hookEvent: string; subtype: string | null };
   /** Streaming-state transition, when the event carries one. */
   streaming?: boolean;
+  /** A typed terminal failure; the core coalesces its exhausted-retry notice. */
+  errorNotice?: string;
+}
+
+function errorNotice(detail: unknown): string {
+  const text = typeof detail === "string"
+    ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
+    : "";
+  return `${PI_RUNNER_ERROR_MARKER} ${text.slice(0, 400) || "request failed"}`;
 }
 
 export function mapPiEvent(event: Record<string, unknown>): MirrorAndActivity {
@@ -109,7 +119,12 @@ export function mapPiEvent(event: Record<string, unknown>): MirrorAndActivity {
       // terminates the line. (mapPiEvent is stateless, so a hypothetical
       // updates-carried-nothing case is a VM-calibration follow-up, not
       // silently guessed here.)
-      return { mirrorLines: [""] };
+      const message = event.message as Record<string, unknown> | undefined;
+      return {
+        mirrorLines: [""],
+        ...(message?.role === "assistant" && message.stopReason === "error"
+          ? { errorNotice: errorNotice(message.errorMessage) } : {}),
+      };
     }
     case "tool_execution_start": {
       const tool = typeof event.toolName === "string" ? event.toolName : (typeof event.name === "string" ? event.name : "tool");
@@ -129,7 +144,9 @@ export function mapPiEvent(event: Record<string, unknown>): MirrorAndActivity {
     case "auto_retry_start":
       return { mirrorLines: ["[pi] transient error — retrying"], activity: { hookEvent: "active", subtype: "auto_retry" } };
     case "auto_retry_end":
-      return { mirrorLines: [] };
+      return event.success === false
+        ? { mirrorLines: [""], errorNotice: errorNotice(event.finalError) }
+        : { mirrorLines: [] };
     case "extension_error": {
       const message = typeof event.message === "string" ? event.message : "extension error";
       return { mirrorLines: [`${PI_RUNNER_ERROR_MARKER} extension: ${message}`] };
@@ -165,6 +182,7 @@ export class RunnerCore {
   private sessionId: string | undefined;
   private lastEntryId: string | undefined;
   private ready = false;
+  private assistantErrorShown = false;
 
   constructor(
     private io: RunnerIo,
@@ -285,6 +303,10 @@ export class RunnerCore {
   }
 
   private handleEvent(event: Record<string, unknown>): void {
+    const message = event.message as Record<string, unknown> | undefined;
+    if (event.type === "agent_start" || (event.type === "message_start" && message?.role === "assistant")) {
+      this.assistantErrorShown = false;
+    }
     // Durable cursor: any event carrying a session-entry id advances it.
     const entryId = typeof event.entryId === "string" ? event.entryId : (typeof event.id === "string" ? event.id : undefined);
     if (entryId) {
@@ -304,6 +326,15 @@ export class RunnerCore {
     }
     if (mapped.mirrorAppend) this.io.mirrorAppend(mapped.mirrorAppend);
     for (const line of mapped.mirrorLines) this.io.mirrorLine(line);
+    if (mapped.errorNotice) {
+      // Pi can announce the same failed message again when retries exhaust.
+      // Keep the first useful detail even if finalError is absent, then reset
+      // at the next assistant message/agent turn, not at agent_end.
+      if (event.type !== "auto_retry_end" || !this.assistantErrorShown) {
+        this.io.mirrorLine(mapped.errorNotice);
+      }
+      this.assistantErrorShown = true;
+    }
     if (mapped.activity) {
       this.io.postActivity(this.activityPayload(mapped.activity.hookEvent, mapped.activity.subtype));
     }

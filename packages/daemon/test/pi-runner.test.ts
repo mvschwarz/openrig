@@ -248,6 +248,85 @@ describe("RunnerCore assistant reply mirror", () => {
   });
 });
 
+describe("RunnerCore terminal assistant failures", () => {
+  const failure = (errorMessage?: unknown, content: unknown[] = []) => ({
+    type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage, content },
+  });
+  const errors = (lines: string[]) => lines.filter(line => line.startsWith("[pi-runner] ERROR"));
+
+  it("shows an empty native error and ends partial text without replaying its content", () => {
+    const { core, lines, appends } = readyCore();
+    core.handlePiLine(JSON.stringify(failure('400 "field_not_allowed"')));
+    expect(errors(lines)).toEqual(['[pi-runner] ERROR 400 "field_not_allowed"']);
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify(piUpdate({ type: "text_delta", delta: "Partial answer" })));
+    core.handlePiLine(JSON.stringify(failure("connection ended", [{ type: "text", text: "Partial answer" }])));
+    expect(appends).toEqual(["Partial answer"]);
+    expect(lines.slice(-2)).toEqual(["", "[pi-runner] ERROR connection ended"]);
+  });
+
+  it.each([undefined, null, {}, 7, "", " \n\t "])("uses a useful fallback for invalid error detail %j", (detail) => {
+    const { core, lines } = readyCore();
+    core.handlePiLine(JSON.stringify(failure(detail)));
+    expect(errors(lines)).toEqual(["[pi-runner] ERROR request failed"]);
+  });
+
+  it("ignores malformed message envelopes and does not dump thinking or tool arguments", () => {
+    const { core, lines, appends } = readyCore();
+    for (const message of [undefined, null, 7, [], { role: "user", stopReason: "error" }]) {
+      core.handlePiLine(JSON.stringify({ type: "message_end", message }));
+    }
+    core.handlePiLine(JSON.stringify(piUpdate({ type: "thinking_delta", delta: "private-thought" })));
+    core.handlePiLine(JSON.stringify(piUpdate({ type: "toolcall_delta", delta: "private-arguments" })));
+    core.handlePiLine(JSON.stringify(failure(undefined, [
+      { type: "thinking", thinking: "private-thought" }, { type: "toolCall", arguments: "private-arguments" },
+    ])));
+    expect(errors(lines)).toEqual(["[pi-runner] ERROR request failed"]);
+    expect(appends).toEqual([]);
+    expect(lines.join("\n")).not.toMatch(/private-thought|private-arguments/);
+  });
+
+  it("strips terminal controls, flattens newlines and bounds error notices", () => {
+    const { core, lines } = readyCore();
+    core.handlePiLine(JSON.stringify(failure("\u001b[2J\u001b]0;title\u0007bad\r\nrequest\u0000\u202e" + "x".repeat(1000))));
+    const notice = errors(lines)[0]!;
+    expect(notice).toContain("bad request");
+    expect(notice).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+    expect(notice).not.toContain("title");
+    expect(notice.length).toBeLessThanOrEqual(420);
+  });
+
+  it("shows standalone exhausted retry once and suppresses its duplicate terminal notice", () => {
+    const { core, lines } = readyCore();
+    const retryEnd = { type: "auto_retry_end", success: false, finalError: "busy" };
+    core.handlePiLine(JSON.stringify(retryEnd));
+    core.handlePiLine(JSON.stringify(retryEnd));
+    expect(errors(lines)).toEqual(["[pi-runner] ERROR busy"]);
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify(failure("busy")));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_end", success: false }));
+    expect(errors(lines)).toEqual(["[pi-runner] ERROR busy", "[pi-runner] ERROR busy"]);
+  });
+
+  it("resets for a subsequent successful turn and a later independent failure", () => {
+    const { core, lines, appends, activity, sidecars } = readyCore();
+    core.handlePiLine(JSON.stringify(failure("first failure")));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    for (const event of PI_REPLY_EVENTS) core.handlePiLine(JSON.stringify(event));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_end", success: true }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    expect(appends.join("")).toBe("Hello from the mock server.");
+    expect(errors(lines)).toEqual(["[pi-runner] ERROR first failure"]);
+    expect(activity.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "agent_end" });
+    expect(sidecars.at(-1)).toMatchObject({ ready: true, sessionFile: SESSION_FILE, launchId: "launch-77" });
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "auto_retry_end", success: false, finalError: "first failure" }));
+    expect(errors(lines)).toHaveLength(2);
+  });
+});
+
 // ── argv contract ────────────────────────────────────────────────────────────
 
 describe("parseRunnerArgs", () => {
