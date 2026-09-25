@@ -1,4 +1,6 @@
 import { Command } from "commander";
+import { readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
@@ -59,15 +61,36 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
     .option("--seats <ids>", "Comma-separated logical IDs for subset launch")
     .option("--hold-reason <reason>", "Reason for holding non-target seats")
     .option("--snapshot-id <id>", "Use this exact restore-usable snapshot")
+    .option("--retry-startup-from <member-file>", "Retry a stopped first start that failed during projection, using its original member fragment")
+    .option("--rig-root <path>", "Original absolute source root for --retry-startup-from")
     .option("--plan", "Show subset selection and non-target effects without mutation")
     .option("--json", "JSON output")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
-    .action(async (rigId: string, nodeRef: string | undefined, opts: { json?: boolean; holdReason?: string; seats?: string; host?: string; snapshotId?: string; plan?: boolean }) => {
+    .action(async (rigId: string, nodeRef: string | undefined, opts: { json?: boolean; holdReason?: string; seats?: string; host?: string; snapshotId?: string; plan?: boolean; retryStartupFrom?: string; rigRoot?: string }) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly.
       opts.host = resolveEffectiveHost(opts.host);
       const deps = getDeps();
+      let retryBody: { retryStartupFrom: { member: Record<string, unknown>; rigRoot: string } } | undefined;
+      if (opts.retryStartupFrom || opts.rigRoot) {
+        if (!nodeRef || !opts.retryStartupFrom || !opts.rigRoot || !isAbsolute(opts.rigRoot) || opts.seats || opts.snapshotId || opts.plan || opts.holdReason) {
+          console.error("First-start retry requires one node, --retry-startup-from and an absolute --rig-root; it cannot combine with snapshot/subset/plan options.");
+          process.exitCode = 1;
+          return;
+        }
+        try {
+          const { parse } = await import("yaml");
+          const parsed = parse(readFileSync(opts.retryStartupFrom, "utf8"));
+          const member = parsed?.member ?? parsed;
+          if (!member || typeof member !== "object" || Array.isArray(member) || parsed.edges || member.edges) throw new Error("Supply a single member fragment without edges; retry preserves existing topology.");
+          retryBody = { retryStartupFrom: { member, rigRoot: opts.rigRoot } };
+        } catch (error) {
+          console.error(`Cannot read retry member: ${(error as Error).message}`);
+          process.exitCode = 1;
+          return;
+        }
+      }
 
       if (opts.host) {
         const { runRemoteHttpOp } = await import("../remote-host-ops.js");
@@ -89,7 +112,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
             return;
           }
           apiPath = `/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}/launch`;
-          body = opts.snapshotId ? { snapshotId: opts.snapshotId } : {};
+          body = retryBody ?? (opts.snapshotId ? { snapshotId: opts.snapshotId } : {});
         } else {
           console.error("Either a node reference or --seats is required for launch --host");
           process.exitCode = 1;
@@ -188,7 +211,7 @@ export function launchCommand(depsOverride?: StatusDeps): Command {
         return;
       }
 
-      const body: Record<string, string> = {};
+      const body: Record<string, unknown> = retryBody ?? {};
       if (opts.snapshotId) body.snapshotId = opts.snapshotId;
 
       const res = await client.post<LaunchResponse>(`/api/rigs/${encodeURIComponent(rigId)}/nodes/${encodeURIComponent(nodeRef)}/launch`, body);

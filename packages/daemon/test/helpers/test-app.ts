@@ -317,6 +317,7 @@ export function createTestApp(
   };
   const podInstantiator = new PodRigInstantiator({
     db, rigRepo, podRepo, sessionRegistry, eventBus, nodeLauncher,
+    tmuxAdapter: tmux,
     startupOrchestrator,
     fsOps: opts?.podInstantiatorFsOps ?? { readFile: () => "", exists: () => false },
     claudeActivityAssets: opts?.claudeActivityAssets,

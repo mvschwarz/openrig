@@ -895,6 +895,21 @@ Notes:
 - `--snapshot-id <id>` selects one exact restore-usable snapshot instead of
   applying the automatic choice. `--plan` previews a multi-seat subset and its
   non-target effects without mutation.
+- `rig launch <rigId> <nodeRef> --retry-startup-from <member-file> --rig-root <absolute-source-root>`
+  explicitly retries an added agent whose first start failed during resource
+  projection, before a native conversation began and before startup context was
+  saved. First correct the projection failure, exit the failed shell normally,
+  and use `rig seat clean <seat> --reason <reason>` after it is stopped. Supply
+  the original bare or `{member: ...}` YAML/JSON fragment, without edges or
+  member startup/continuity overrides. The agent source hash and retained
+  identity, model, cwd and policy must agree. The retry uses normal validation,
+  projection and required startup delivery on the same node; it preserves other
+  seats and prior failures. It refuses bound, live, indeterminate or previously
+  native sessions. This is not snapshot restore or a substitute for deliberate
+  fresh launch, and cannot combine with snapshot, subset or plan options.
+  The operator is responsible for supplying the complete original fragment:
+  retained state cannot reconstruct missing member, pod or rig instructions.
+  Never strip unsupported overrides to make a retry pass.
 
 ### `rig remove`
 

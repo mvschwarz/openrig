@@ -255,12 +255,23 @@ nodesRoutes.post("/:logicalId/launch", async (c) => {
     return c.json({ ok: false, code: "node_not_found", error: `Node "${logicalId}" not found in rig "${rigId}"` }, 404);
   }
 
+  const body = await c.req.json().catch(() => ({})) as { snapshotId?: string; retryStartupFrom?: { member?: Record<string, unknown>; rigRoot?: string } };
+  if (body.retryStartupFrom !== undefined) {
+    const retry = body.retryStartupFrom;
+    if (body.snapshotId || !retry || !retry.member || typeof retry.member !== "object" || Array.isArray(retry.member) || typeof retry.rigRoot !== "string") {
+      return c.json({ ok: false, code: "invalid_retry", message: "Supply retryStartupFrom.member and an absolute rigRoot, without snapshotId." }, 400);
+    }
+    const instantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
+    if (!instantiator) return c.json({ ok: false, code: "internal_error", message: "Pod instantiator unavailable" }, 500);
+    const result = await instantiator.retryFirstStart(rigId, node.id, retry.member, retry.rigRoot);
+    return c.json(result, result.ok ? 201 : result.code === "failed" ? 500 : 409);
+  }
+
   if (node.podId) {
     const { restoreOrchestrator } = getDeps(c);
     if (!restoreOrchestrator) {
       return c.json({ ok: false, code: "internal_error", error: "Restore orchestrator not available" }, 500);
     }
-    const body = await c.req.json().catch(() => ({})) as { snapshotId?: string };
     const result = await restoreOrchestrator.launchSingleNode(rigId, node.logicalId, { snapshotId: body.snapshotId, ...(await resumeLaunchOpts(c)) });
     if (!result.ok) {
       return c.json(result, narrowLaunchErrorStatus(result.code));
