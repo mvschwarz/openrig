@@ -82,29 +82,6 @@ export interface MirrorAndActivity {
   streaming?: boolean;
 }
 
-/** Tolerant text extraction from a Pi message shape (string, {text}, or
- *  content-block arrays). Exact field calibration is a VM-proof concern; this
- *  covers the documented shapes without throwing on unknowns. */
-export function extractMessageText(message: unknown): string {
-  if (typeof message === "string") return message;
-  if (message === null || typeof message !== "object") return "";
-  const m = message as Record<string, unknown>;
-  if (typeof m.text === "string") return m.text;
-  if (Array.isArray(m.content)) {
-    return m.content
-      .map((block) => {
-        if (typeof block === "string") return block;
-        if (block !== null && typeof block === "object" && typeof (block as Record<string, unknown>).text === "string") {
-          return (block as Record<string, unknown>).text as string;
-        }
-        return "";
-      })
-      .join("");
-  }
-  if (typeof m.content === "string") return m.content;
-  return "";
-}
-
 export function mapPiEvent(event: Record<string, unknown>): MirrorAndActivity {
   const type = typeof event.type === "string" ? event.type : "";
   switch (type) {
@@ -117,7 +94,14 @@ export function mapPiEvent(event: Record<string, unknown>): MirrorAndActivity {
     case "message_start":
       return { mirrorLines: [] };
     case "message_update": {
-      const delta = extractMessageText(event.message ?? event.delta);
+      // Pi streams assistant text as `assistantMessageEvent` text_delta
+      // records. Only the delta is mirrored: Pi 0.84.0 dropped the cumulative
+      // `message` from RPC message_update, and older Pi sent it alongside the
+      // same deltas, so appending it repeated the growing text. Thinking and
+      // tool-call argument deltas stay out of the pane; tool calls get their
+      // own one-line summaries from tool_execution_*.
+      const update = event.assistantMessageEvent as Record<string, unknown> | undefined;
+      const delta = update?.type === "text_delta" && typeof update.delta === "string" ? update.delta : "";
       return delta ? { mirrorLines: [], mirrorAppend: delta } : { mirrorLines: [] };
     }
     case "message_end": {
