@@ -51,7 +51,7 @@
     "@openrig/daemon": "*",
     "ajv": "^8.18.0",
     "ajv-formats": "^3.0.1",
-    "better-sqlite3": "^11.8.0",
+    "better-sqlite3": "^13.0.3",
     "commander": "^13.0.0",
     "hono": "^4.7.0",
     "jsonc-parser": "^3.3.1",
