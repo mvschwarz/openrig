@@ -27,11 +27,12 @@ import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../src/adapters/pi-resume.js";
+import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
-import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
+import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
 import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 
@@ -104,6 +105,7 @@ describe("RestoreOrchestrator", () => {
     claude?: ClaudeResumeAdapter;
     codex?: CodexResumeAdapter;
     pi?: PiResumeAdapter;
+    omp?: OmpResumeAdapter;
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
   }) {
     const tmux = opts?.tmux ?? mockTmux();
@@ -114,6 +116,7 @@ describe("RestoreOrchestrator", () => {
       claudeResume: opts?.claude ?? mockClaudeResume(),
       codexResume: opts?.codex ?? mockCodexResume(),
       piResume: opts?.pi,
+      ompResume: opts?.omp,
       listProcesses: opts?.listProcesses,
     });
   }
@@ -330,15 +333,16 @@ describe("RestoreOrchestrator", () => {
     otherDb.close();
   });
 
-  it("never resurrects an invalidated generation from delayed legacy Claude, Codex, or Pi resume", async () => {
+  it("never resurrects an invalidated generation from delayed legacy Claude, Codex, Pi, or OMP resume", async () => {
     const cases: Array<{
-      runtime: "claude-code" | "codex" | "pi";
-      resumeType: "claude_id" | "codex_id" | "pi_session_file";
+      runtime: "claude-code" | "codex" | "pi" | "omp";
+      resumeType: "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file";
       appliedLaunch: AppliedLaunchObservation;
     }> = [
       { runtime: "claude-code", resumeType: "claude_id", appliedLaunch: observeClaudePermission("--permission-mode acceptEdits") },
       { runtime: "codex", resumeType: "codex_id", appliedLaunch: observeCodexSandbox("-s workspace-write") },
       { runtime: "pi", resumeType: "pi_session_file", appliedLaunch: observePiResourceTrust("no-approve") },
+      { runtime: "omp", resumeType: "omp_session_file", appliedLaunch: observeOmpApprovalMode("--approval-mode always-ask") },
     ];
 
     for (const [index, testCase] of cases.entries()) {
@@ -362,6 +366,9 @@ describe("RestoreOrchestrator", () => {
           : {}),
         ...(testCase.runtime === "pi"
           ? { pi: { canResume: vi.fn(() => true), resume } as unknown as PiResumeAdapter }
+          : {}),
+        ...(testCase.runtime === "omp"
+          ? { omp: { canResume: vi.fn(() => true), resume } as unknown as OmpResumeAdapter }
           : {}),
       });
 

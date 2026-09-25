@@ -12,11 +12,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
 import type { ResumeResult } from "./claude-resume.js";
-import { piTrust } from "./yolo-mode.js";
+import { piTrust, yoloEnabled } from "./yolo-mode.js";
 import {
-  piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
+  piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
-import { observePiResourceTrust } from "../domain/permission-drift.js";
+import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permission-drift.js";
 
 export { type ResumeResult };
 
@@ -37,6 +37,7 @@ interface PiResumeOptions {
 }
 
 export class PiResumeAdapter {
+  protected readonly runtime: RunnerRuntime = "pi";
   constructor(
     private tmux: TmuxAdapter,
     private fs: PiResumeFsOps,
@@ -45,7 +46,7 @@ export class PiResumeAdapter {
   ) {}
 
   canResume(resumeType: string | null, resumeToken: string | null): boolean {
-    return resumeType === "pi_session_file" && !!resumeToken;
+    return resumeType === `${this.runtime}_session_file` && !!resumeToken;
   }
 
   async resume(
@@ -58,14 +59,14 @@ export class PiResumeAdapter {
     resolvedPosture?: "floor" | "full_bypass",
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
-      return { ok: false, code: "no_resume", message: "Pi resume not available" };
+      return { ok: false, code: "no_resume", message: `${this.runtime} resume not available` };
     }
     const sessionFile = resumeToken!;
 
     if (!this.fs.exists(sessionFile)) {
       // The honest zero-session outcome: the caller's retry_fresh mapping
       // realizes the awaiting-decision stop-and-ask (BR-6).
-      return { ok: false, code: "retry_fresh", message: "Pi resume failed: the persisted session file no longer exists" };
+      return { ok: false, code: "retry_fresh", message: `${this.runtime} resume failed: the persisted session file no longer exists` };
     }
 
     const seat = piSeatPaths(this.paths.stateRoot, tmuxSessionName);
@@ -83,9 +84,14 @@ export class PiResumeAdapter {
       JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
     );
 
-    const trust = piTrust(this.options.trustPosture, process.env, resolvedPosture);
-    const appliedLaunch = observePiResourceTrust(trust);
+    const trust = this.runtime === "omp"
+      ? (yoloEnabled(process.env, resolvedPosture) ? "approve" : "no-approve")
+      : piTrust(this.options.trustPosture, process.env, resolvedPosture);
+    const appliedLaunch = this.runtime === "omp"
+      ? observeOmpApprovalMode(`--approval-mode ${trust === "approve" ? "yolo" : "always-ask"}`)
+      : observePiResourceTrust(trust);
     const cmd = buildPiRunnerCommand({
+      runtime: this.runtime,
       runnerEntryPath: this.paths.runnerEntryPath,
       sessionName: tmuxSessionName,
       stateRoot: this.paths.stateRoot,
@@ -137,7 +143,7 @@ export class PiResumeAdapter {
           return {
             ok: false,
             code: "resume_failed",
-            message: `Pi resume failed: the runner exited (code ${state.exited.code ?? "unknown"})`,
+            message: `${this.runtime} resume failed: the runner exited (code ${state.exited.code ?? "unknown"})`,
             evidence: paneContent.split("\n").slice(-12).join("\n"),
           } as ResumeResult;
         }
@@ -146,7 +152,7 @@ export class PiResumeAdapter {
             return {
               ok: false,
               code: "resume_failed",
-              message: "Pi resume failed: the runner is ready but does not report the requested session file",
+              message: `${this.runtime} resume failed: the runner is ready but does not report the requested session file`,
             };
           }
           return { ok: true };
@@ -161,7 +167,7 @@ export class PiResumeAdapter {
     return {
       ok: false,
       code: "resume_failed",
-      message: "Pi resume failed: timed out waiting for the runner to prove the requested session",
+      message: `${this.runtime} resume failed: timed out waiting for the runner to prove the requested session`,
     };
   }
 

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
@@ -104,37 +105,47 @@ activityRoutes.post("/hooks", async (c) => {
     if (!resolved) {
       return c.json({ ok: false, code: "session_not_found", error: `No session found for ${sessionName}` }, 404);
     }
-
-    // OPR.0.4.6.PI1 FR-5 — Pi session identity arrives from the pi-runner's
-    // RPC get_state (provenance "rpc" on the bus, never scrape). The resume
-    // TOKEN for Pi is the session FILE (body.sessionFile), not the session id;
-    // it is format-validated before the persist and never echoed on failure.
-    if (runtime === "pi") {
+    if (sessionName !== resolved.sessionName) {
+      return c.json({ ok: false, code: "session_not_found", error: "Session identity does not match the managed seat." }, 404);
+    }
+    if (runtime !== resolved.runtime) {
+      return c.json({ ok: false, code: "runtime_mismatch", error: "Session identity runtime does not match the managed seat." }, 409);
+    }
+    // RPC identity for Pi and OMP carries the exact .jsonl session file,
+    // not the ephemeral session id. The persisted seat runtime is authoritative:
+    // never allow a hook payload to cross-type another seat's resume token.
+    if (resolved.runtime === "pi" || resolved.runtime === "omp") {
       const { validateResumeToken } = await import("../domain/resume-token-validation.js");
       const sessionFile = stringOrNull(body.sessionFile);
-      const validation = validateResumeToken("pi", sessionFile);
-      if (validation.ok) {
-        sessionRegistry.updateResumeToken(resolved.sessionId, "pi_session_file", validation.token, "hook");
-      }
+      const validation = validateResumeToken(resolved.runtime, sessionFile);
+      // OMP reports a path before its first turn is written. Persist only
+      // materialized history; the runner can re-announce identity later.
+      const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
+      const omp = adapters?.["omp"] as { readSessionFile?: (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } } | undefined;
+      const ownFile = resolved.runtime === "omp" && typeof omp?.readSessionFile === "function"
+        ? omp.readSessionFile(resolved.sessionName)
+        : null;
+      const tokenEligible = validation.ok && (resolved.runtime !== "omp" || (ownFile?.ok === true && ownFile.sessionFile === validation.token && existsSync(validation.token)));
+      const tokenPersisted = tokenEligible && validation.ok
+        ? sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
+          || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token)
+        : false;
       eventBus.emit({
         type: "agent.session_identity",
         rigId: resolved.rigId,
         nodeId: resolved.nodeId,
         sessionName: resolved.sessionName,
-        runtime: "pi",
+        runtime: resolved.runtime,
         sessionId,
         provenance: "rpc",
       });
-      return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted: validation.ok });
+      return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
     }
 
-    // The resume-type label derives from the RUNTIME, never a fixed default: this line used to stamp
-    // "codex_id" for every non-pi runtime, so claude-code seats carried a codex-typed label over a
-    // correct token value — and a restore path selecting its resume MECHANISM by label would pick the
-    // wrong one while looking healthy. The relay only posts session_identity with a runtime present;
-    // an unmapped runtime skips the persist (tokenPersisted: false) rather than guessing a label.
+    // Id-shaped tokens also derive their type from persisted runtime metadata.
+    // Unmapped runtimes skip persistence rather than guessing a type.
     const { validateResumeToken } = await import("../domain/resume-token-validation.js");
-    const validation = validateResumeToken(runtime, sessionId);
+    const validation = validateResumeToken(resolved.runtime, sessionId);
     if (validation.ok) {
       sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook");
     }
@@ -143,7 +154,7 @@ activityRoutes.post("/hooks", async (c) => {
       rigId: resolved.rigId,
       nodeId: resolved.nodeId,
       sessionName: resolved.sessionName,
-      runtime: runtime ?? "codex",
+      runtime: resolved.runtime ?? "codex",
       sessionId,
       provenance: "hook",
     });

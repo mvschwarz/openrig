@@ -97,7 +97,10 @@ export class AgentActivityStore {
     // resolver call — the live-gen resolver is used only at READ, for the comparison.
     const generation = input.generation ?? null;
     const activity = normalizeHookActivity({
+      // Stamp the emitter's claimed runtime (consumers such as the provider
+      // tap filter on it); semantics that depend on the runtime use the seat's.
       runtime: input.runtime ?? session.runtime,
+      seatRuntime: session.runtime,
       hookEvent: input.hookEvent,
       subtype: input.subtype ?? null,
       sampledAt,
@@ -277,14 +280,14 @@ export class AgentActivityStore {
     };
   }
 
-  resolveSession(input: { sessionName?: string | null; nodeId?: string | null; runtime?: string | null }): { sessionId: string; rigId: string; nodeId: string; sessionName: string } | null {
+  resolveSession(input: { sessionName?: string | null; nodeId?: string | null; runtime?: string | null }): { sessionId: string; rigId: string; nodeId: string; sessionName: string; runtime: string | null } | null {
     const row = this._resolveSession(input);
     if (!row) return null;
     const sessionRow = this.db.prepare(
-      "SELECT id FROM sessions WHERE session_name = ? ORDER BY id DESC LIMIT 1"
-    ).get(row.session_name) as { id: string } | undefined;
+      "SELECT id FROM sessions WHERE session_name = ? AND node_id = ? ORDER BY id DESC LIMIT 1"
+    ).get(row.session_name, row.node_id) as { id: string } | undefined;
     if (!sessionRow) return null;
-    return { sessionId: sessionRow.id, rigId: row.rig_id, nodeId: row.node_id, sessionName: row.session_name };
+    return { sessionId: sessionRow.id, rigId: row.rig_id, nodeId: row.node_id, sessionName: row.session_name, runtime: row.runtime };
   }
 
   private _resolveSession(input: { sessionName?: string | null; nodeId?: string | null }): SessionLookupRow | null {
@@ -315,6 +318,8 @@ export class AgentActivityStore {
 
 function normalizeHookActivity(input: {
   runtime: string | null;
+  /** The managed seat's runtime, never a hook's claim. */
+  seatRuntime: string | null;
   hookEvent: string;
   subtype: string | null;
   sampledAt: string;
@@ -341,7 +346,9 @@ function normalizeHookActivity(input: {
     state = "needs_input";
     normalizedReason = "permission_request";
   } else if (rawEvent === "Notification") {
-    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog") {
+    // runtime_error is an OMP runner signal; a hook claiming OMP on another
+    // runtime's seat must not escalate it.
+    if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (input.seatRuntime === "omp" && rawSubtype === "runtime_error")) {
       state = "needs_input";
     } else if (rawSubtype === "idle_prompt") {
       state = "idle";

@@ -406,6 +406,9 @@ export function createTestApp(
     healthProjection,
     whoamiService,
     nodeCmuxService,
+    // Only caller-supplied adapters reach route handlers: the always-ready
+    // instantiator stubs above would make restore routes report resumes.
+    ...(opts?.adapters ? { runtimeAdapters: opts.adapters as Record<string, RuntimeAdapter> } : {}),
     agentActivityStore,
     seatAttentionReconciler,
     seatStructuralActivityService: opts?.seatStructuralActivityService,

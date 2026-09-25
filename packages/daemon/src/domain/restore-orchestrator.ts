@@ -13,6 +13,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
+import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import type {
@@ -136,6 +137,7 @@ interface RestoreOrchestratorDeps {
   /** OPR.0.4.6.PI1 FR-6 — optional so older wiring/tests keep working; a Pi
    *  resume without the adapter falls through to the honest no-adapter error. */
   piResume?: PiResumeAdapter;
+  ompResume?: OmpResumeAdapter;
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
@@ -154,6 +156,7 @@ export class RestoreOrchestrator {
   private claudeResume: ClaudeResumeAdapter;
   private codexResume: CodexResumeAdapter;
   private piResume: PiResumeAdapter | null;
+  private ompResume: OmpResumeAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
@@ -193,6 +196,7 @@ export class RestoreOrchestrator {
     this.claudeResume = deps.claudeResume;
     this.codexResume = deps.codexResume;
     this.piResume = deps.piResume ?? null;
+    this.ompResume = deps.ompResume ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
     this.listProcesses = deps.listProcesses;
@@ -1647,6 +1651,19 @@ export class RestoreOrchestrator {
       }
       return { kind: "failed", message: result.message };
     }
+    if (this.ompResume?.canResume(resumeType, resumeToken)) {
+      const result = await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
+      if (result.ok) {
+        if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
+        return { kind: "resumed" };
+      }
+      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
+      if (result.code === "attention_required") {
+        return { kind: "attention_required", message: result.message, evidence: (result as { evidence?: string }).evidence };
+      }
+      return { kind: "failed", message: result.message };
+    }
+
 
     return { kind: "failed", message: "No resume adapter available for this runtime/token combination." };
   }

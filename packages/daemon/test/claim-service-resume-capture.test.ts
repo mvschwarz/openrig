@@ -124,6 +124,28 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     expect(captureCodexThreadId).toHaveBeenCalledWith("dev-qa@test-rig");
   });
 
+  it("bind captures only an OMP seat's own runner session file", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.omp", { runtime: "omp", cwd: "/projects/app" });
+    const discovered = seedDiscovery({ runtimeHint: "omp", tmuxSession: "dev-omp@test-rig" });
+    const sessionFile = "/openrig/state/omp/dev-omp@test-rig/sessions/live.jsonl";
+    const ompRead = vi.fn((name: string) => {
+      expect(name).toBe("dev-omp@test-rig");
+      return { ok: true as const, sessionFile };
+    });
+    const piRead = vi.fn(() => { throw new Error("Pi state must not be read for OMP"); });
+    const service = new ClaimService({
+      db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: mockTmux,
+      ompRunnerStateStore: { readSessionFile: ompRead },
+      piRunnerStateStore: { readSessionFile: piRead },
+    });
+
+    expect((await service.bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "dev.omp" })).ok).toBe(true);
+    expect(tokenRow(node.id)).toMatchObject({ resume_type: "omp_session_file", resume_token: sessionFile, resume_provenance: "adoption" });
+    expect(ompRead).toHaveBeenCalledOnce();
+    expect(piRead).not.toHaveBeenCalled();
+  });
+
   it("bind honest-skips when the Claude sidecar is missing (no token persisted, skip event with reason)", async () => {
     readSidecar.mockReturnValue({ ok: false, reason: "missing_sidecar" });
     const rig = rigRepo.createRig("test-rig");

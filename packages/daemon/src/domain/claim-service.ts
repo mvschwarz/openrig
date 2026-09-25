@@ -6,7 +6,7 @@ import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { startTmuxTranscriptCapture } from "./transcript-capture.js";
-import { deriveResumeToken } from "./resume-token-capture.js";
+import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import {
   observeSolePane,
   paneObservationVerdict,
@@ -80,6 +80,7 @@ interface ClaimServiceDeps {
   piRunnerStateStore?: {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   };
+  ompRunnerStateStore?: ResumeTokenCaptureDeps["ompRunnerStateStore"];
 }
 
 interface BindOptions {
@@ -113,6 +114,7 @@ export class ClaimService {
   private contextUsageStore: ClaimServiceDeps["contextUsageStore"] | null;
   private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
   private piRunnerStateStore: ClaimServiceDeps["piRunnerStateStore"] | null;
+  private ompRunnerStateStore: ClaimServiceDeps["ompRunnerStateStore"] | null;
 
   constructor(deps: ClaimServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("ClaimService: rigRepo must share the same db handle");
@@ -130,6 +132,7 @@ export class ClaimService {
     this.contextUsageStore = deps.contextUsageStore ?? null;
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
     this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
+    this.ompRunnerStateStore = deps.ompRunnerStateStore ?? null;
   }
 
   private async observeBindingPane(
@@ -227,7 +230,7 @@ export class ClaimService {
       // FR-3's adoption provenance/audit semantics are unchanged.
       const derived = await deriveResumeToken(
         { runtime: input.runtime, sessionName: input.sessionName },
-        { contextUsageStore: this.contextUsageStore, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore },
+        { contextUsageStore: this.contextUsageStore, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore },
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return;
       const runtime = input.runtime as string; // non-null past exempt

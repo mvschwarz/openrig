@@ -23,6 +23,10 @@ const SHELL_NAMES = new Set(["bash", "zsh", "fish", "sh", "dash", "tcsh", "csh"]
 
 const CLAUDE_PROCESS_PATTERNS = ["claude", "claude-code"];
 const CODEX_PROCESS_PATTERNS = ["codex"];
+// Only the OpenRig-managed runner's READY marker is evidence of resumable OMP
+// state; a bare `omp` executable could use the default, unisolated user home.
+// No Layer-1 OMP signal: tmux reports the runner as `node`, never its argv.
+const OMP_READY_PATTERN = /^\s*\[omp-runner\] READY(?:\s|$)/;
 
 const CLAUDE_PANE_PATTERNS = [
   { label: "Claude Code", test: (line: string) => /^\s*Claude Code\b/i.test(line) },
@@ -77,6 +81,7 @@ export class SessionFingerprinter {
         evidence.cmuxSignal = cmuxMatch;
         const hint = cmuxMatch.runtime.includes("claude") ? "claude-code" as RuntimeHint
           : cmuxMatch.runtime.includes("codex") ? "codex" as RuntimeHint
+          : cmuxMatch.runtime.toLowerCase() === "omp" || cmuxMatch.runtime.toLowerCase() === "oh-my-pi" ? "omp" as RuntimeHint
           : "unknown" as RuntimeHint;
         return { runtimeHint: hint, confidence: "highest", evidence };
       }
@@ -113,6 +118,14 @@ export class SessionFingerprinter {
     const content = await this.tmux.capturePaneContent(pane.tmuxPane);
     if (content) {
       const lines = content.split("\n");
+      for (const line of lines) {
+        if (OMP_READY_PATTERN.test(line)) {
+          evidence.layerUsed = 2;
+          evidence.paneContentSignal = { pattern: "[omp-runner] READY", matchedLine: line.trim() };
+          return { runtimeHint: "omp", confidence: "medium", evidence };
+        }
+      }
+
 
       for (const line of lines) {
         for (const pattern of CLAUDE_PANE_PATTERNS) {

@@ -94,6 +94,19 @@ describe("SessionFingerprinter", () => {
     expect(result.confidence).toBe("high");
   });
 
+  it("recognizes only an explicit managed OMP runner, not a bare node pane", async () => {
+    const fp = new SessionFingerprinter({
+      cmuxAdapter: mockCmux(),
+      tmuxAdapter: mockTmux("[omp-runner] READY session=/isolated/sessions/current.jsonl"),
+      fsExists: () => false,
+    });
+    const managed = await fp.fingerprint(makePane({ activeCommand: "node" }));
+    expect(managed).toMatchObject({ runtimeHint: "omp", confidence: "medium" });
+
+    const bare = new SessionFingerprinter({ cmuxAdapter: mockCmux(), tmuxAdapter: mockTmux("unrelated output"), fsExists: () => false });
+    expect((await bare.fingerprint(makePane({ activeCommand: "node" }))).runtimeHint).toBe("unknown");
+  });
+
   // T5: shell only (bash) -> terminal, high
   it("shell process (bash) -> terminal, high", async () => {
     const fp = new SessionFingerprinter({

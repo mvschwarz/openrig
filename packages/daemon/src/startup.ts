@@ -32,6 +32,8 @@ import { RestoreOrchestrator } from "./domain/restore-orchestrator.js";
 import { ClaudeResumeAdapter } from "./adapters/claude-resume.js";
 import { CodexResumeAdapter } from "./adapters/codex-resume.js";
 import { PiResumeAdapter } from "./adapters/pi-resume.js";
+import { OmpResumeAdapter } from "./adapters/omp-resume.js";
+import { SEAT_PROVIDER_AUTH_ENV_VARS } from "./adapters/pi-runner-protocol.js";
 import { RigSpecExporter } from "./domain/rigspec-exporter.js";
 import { PodRepository } from "./domain/pod-repository.js";
 import { RigSpecPreflight } from "./domain/rigspec-preflight.js";
@@ -200,7 +202,7 @@ interface DaemonResult {
   injectWebSocket: (server: any) => void;
 }
 
-const KNOWN_PROVIDER_AUTH_ENV = new Set([
+const KNOWN_PROVIDER_AUTH_ENV: Record<string, true> = Object.fromEntries([
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
   "CLAUDE_CODE_OAUTH_TOKEN",
@@ -208,16 +210,13 @@ const KNOWN_PROVIDER_AUTH_ENV = new Set([
   "OPENAI_BASE_URL",
   "OPENAI_ORG_ID",
   "OPENAI_PROJECT_ID",
-  // OPR.0.4.6.PI1 FR-7 — Pi seat providers. Without these in the KNOWN set,
-  // a daemon-launched Pi seat can never receive its provider key (the
-  // pi-runner's own deny-by-default allowlist then has nothing to pass
-  // through). Double opt-in preserved: the operator must still name each var
-  // in recovery.provider_auth_env_allowlist. OpenRouter is the founder-ruled
-  // preferred path (2026-07-06); zai/kimi-coding are the secondary natives.
-  "OPENROUTER_API_KEY",
-  "ZAI_API_KEY",
-  "KIMI_API_KEY",
-]);
+  // OPR.0.4.6.PI1 FR-7 — Pi and OMP seat providers, derived from the runner's
+  // own provider maps so a key the runner can pass is always admissible here.
+  // Double opt-in preserved: the operator must still name each var in
+  // recovery.provider_auth_env_allowlist, and the runner forwards only the
+  // var of the provider its seat declares.
+  ...SEAT_PROVIDER_AUTH_ENV_VARS,
+].map((name) => [name, true as const]));
 
 export function collectAllowlistedProviderAuthEnv(
   raw: string | null | undefined,
@@ -228,7 +227,7 @@ export function collectAllowlistedProviderAuthEnv(
     const name = item.trim();
     if (!name) continue;
     if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) continue;
-    if (!KNOWN_PROVIDER_AUTH_ENV.has(name)) continue;
+    if (!Object.hasOwn(KNOWN_PROVIDER_AUTH_ENV, name)) continue;
     const value = env[name];
     if (typeof value === "string" && value.length > 0) {
       out[name] = value;
@@ -510,11 +509,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // dist). Shared by the Pi runtime adapter, the resume adapter, and the
   // resume-token capture sidecar reader.
   const piStateRoot = nodePath.join(OPENRIG_HOME, "state", "pi");
+  const ompStateRoot = nodePath.join(OPENRIG_HOME, "state", "omp");
   const piRunnerEntryPath = nodePath.resolve(import.meta.dirname, "./adapters/pi-runner.js");
   const piResume = new PiResumeAdapter(
     tmuxAdapter,
     { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }) },
     { stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath },
+  );
+  const ompResume = new OmpResumeAdapter(
+    tmuxAdapter,
+    { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }) },
+    { stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath },
   );
   // Services infrastructure (RigEnv) — created early so restore/bootstrap can use it
   const { ComposeServicesAdapter } = await import("./adapters/compose-services-adapter.js");
@@ -524,7 +529,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const restoreOrchestrator = new RestoreOrchestrator({
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
-    checkpointStore, nodeLauncher, tmuxAdapter, claudeResume, codexResume, piResume,
+    checkpointStore, nodeLauncher, tmuxAdapter, claudeResume, codexResume, piResume, ompResume,
     transcriptStore, serviceOrchestrator,
   });
 
@@ -649,6 +654,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   }
   const { CodexRuntimeAdapter } = await import("./adapters/codex-runtime-adapter.js");
   const { PiRuntimeAdapter } = await import("./adapters/pi-runtime-adapter.js");
+  const { OmpRuntimeAdapter } = await import("./adapters/omp-runtime-adapter.js");
 
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
@@ -657,6 +663,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
   const piAdapter = new PiRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: piStateRoot, runnerEntryPath: piRunnerEntryPath });
+  const ompAdapter = new OmpRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; } }, stateRoot: ompStateRoot, runnerEntryPath: piRunnerEntryPath });
   // OPR.0.5.1.1 — the stub runtime adapter (Pi-shaped node-script runner in a pane).
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.
   const { StubRuntimeAdapter } = await import("./adapters/stub-runtime-adapter.js");
@@ -841,7 +848,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     db, rigRepo, podRepo,
     sessionRegistry, eventBus, nodeLauncher, startupOrchestrator,
     fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) },
-    adapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
+    adapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
     tmuxAdapter,
     agentImageLibrary,
     continuityPolicyMaterializer,
@@ -980,6 +987,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     resumeTokenCapturer: resumeMetadataRefresher,
     // OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader (the adapter exposes it).
     piRunnerStateStore: piAdapter,
+    ompRunnerStateStore: ompAdapter,
   });
   const selfAttachService = new SelfAttachService({
     db, rigRepo, podRepo, sessionRegistry, eventBus, tmuxAdapter, transcriptStore,
@@ -1093,7 +1101,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     }),
     podInstantiator,
     podBundleSourceResolver,
-    runtimeAdapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
+    runtimeAdapters: { "claude-code": claudeAdapter, "codex": codexAdapter, "pi": piAdapter, "omp": ompAdapter, "stub": stubAdapter, "terminal": new (await import("./adapters/terminal-adapter.js")).TerminalAdapter() },
     transcriptStore,
     sessionTransport: (() => {
       const t = new SessionTransport({
@@ -2237,6 +2245,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     "claude-code": claudeAdapter,
     codex: codexAdapter,
     pi: piAdapter,
+    omp: ompAdapter,
   }, usageSamplesStore, () => providerWindowSamplesFromSignals(
     collectClaudeSignalsFromProviderUsageDirectory(
       providerUsageDirectory(OPENRIG_HOME),
