@@ -27,6 +27,70 @@ Ask your agent to [configure your chosen permissions](docs/reference/getting-sta
 keep prompts, remember selected commands, or deliberately choose broader access.
 The agent handles the setup and verification; OpenRig's shipped defaults stay unchanged.
 
+## What OpenRig changes on your machine
+
+OpenRig writes instance state, provider integration and workspace files as part
+of setup and operation. These include **trust settings and executable hooks**.
+The summary below follows this source revision; check `rig --version` when
+using a published package, since repository guidance can be ahead of npm.
+
+| When | What changes and why |
+| --- | --- |
+| **npm installation** | Installs the CLI, bundled components and dependencies under your npm prefix. OpenRig's postinstall checks Node/SQLite compatibility; it does not run daemon or provider setup. |
+| **`rig setup`** | Attempts missing tools and writes an OpenRig block in `~/.tmux.conf` for mouse support and scrollback. On macOS it can install cmux and enable its automation socket control in `~/.config/cmux/settings.json`. `--full` adds workstation tools. `--dry-run` shows setup's plan without applying it. |
+| **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. With `runtime.codex.hooks_enabled` enabled (the default), writes Codex hook configuration and trust records as described below—even before a rig launches. |
+| **Rig/seat launch and attachment** | Creates tmux sessions, supplies seat identity and daemon connection environment, and projects selected guidance, skills, plugins and runtime resources into the workspace. Managed startup pre-trusts the workspace. Claude context collection can also be provisioned for attached sessions and refreshed during monitoring. |
+| **Explicit permission configuration** | The built-in bootstrap does **not** add `rig` command allow rules. Ask your agent to [apply your chosen project or user scope](docs/reference/getting-started.md#have-your-agent-configure-permissions); existing rules remain relevant. Broader access is a separate choice. |
+
+The provider files are separate from instance state. Here `~` means the daemon
+user's home; changing `OPENRIG_HOME` alone does not isolate provider configuration.
+
+- **Claude Code:** managed startup writes workspace trust and onboarding completion
+  to `~/.claude.json`. In the workspace, `.claude/settings.local.json` receives
+  the context collector's `statusLine` command and selected activity hooks;
+  helper scripts live under `.openrig/`. Selected settings/MCP resources can also
+  change that settings file and `.mcp.json`. The shared settings resource sets
+  `permissions.defaultMode` to `acceptEdits` and enables Exa/Context7 MCP entries;
+  selected MCP resources configure those external services. Built-in bootstrap
+  no longer writes a command allowlist to `~/.claude/settings.json` or removes
+  older allowances. The trust writer uses the daemon home, so a custom
+  `CLAUDE_CONFIG_DIR` is not a general relocation of these writes.
+- **Codex:** writes the daemon's `CODEX_HOME/config.toml` (normally
+  `~/.codex/config.toml`). Startup enables hooks, adds the OpenRig activity relay
+  commands and pre-writes trust hashes for those commands. Seat startup adds
+  `trust_level = "trusted"` for the workspace; selected config resources can
+  add MCP settings. Recognized update notices can be skipped during launch,
+  recording the skipped version in Codex's cache; this is not an update install.
+
+Activity relays send event type/subtype, seat/runtime identity, timestamps and
+native session identity to the configured OpenRig daemon's `/api/activity/hooks`
+endpoint, using its activity token. That payload excludes prompt text and tool
+arguments. Claude's collector writes context/token usage, session/transcript-path
+metadata and available rate-limit data to the instance's `state/context-usage`
+and `state/provider-usage`. Provider and selected MCP connections have their own
+data flows. Daemon plugin initialization also checks the OpenRig plugin release
+endpoint on GitHub.
+
+Managed launches supply `HOME`, `CODEX_HOME` and `OPENRIG_*` identity/connection
+variables. Claude uses `--permission-mode acceptEdits` and defaults to the classic
+renderer for terminal scrollback. Codex uses `-s workspace-write` unless a named
+profile governs its sandbox; OpenRig does not force an approval-policy flag.
+Fresh Codex launches also add writable access to the workspace's `.git` and the
+pod's shared queue-state directory with `--add-dir`; the shared root comes from
+`OPENRIG_SHARED_DOCS_ROOT` or `~/.openrig/shared-docs`.
+YOLO is **off by default**. Explicit `OPENRIG_YOLO=1` or a full-bypass seat policy
+selects Claude's `--dangerously-skip-permissions` or Codex's
+`-s danger-full-access`; a resolved seat policy takes precedence over the
+environment setting.
+
+Managed hook blocks target OpenRig's entries and retain unrelated hooks, but
+trust entries, selected resource keys and Claude's existing status-line command
+can be replaced. Some writers recover unreadable settings as empty objects;
+this is not a complete preservation or rollback guarantee. Back up relevant
+files before first use. Daemon/bootstrap writes are automatic and do not each
+have an interactive preview; `rig setup --dry-run` does not preview every later
+startup effect.
+
 ## First Run
 
 Check readiness, then give the owner a bounded outcome from your repository:
@@ -209,12 +273,7 @@ Optional:
 
 Both commands support `--json` for agent-driven workflows.
 
-Managed runtime boot (during `rig up`) may modify runtime config for core bootstrap and spec-selected runtime resources. `rig setup` discloses these paths so agents know what may be changed:
-- global Claude: `~/.claude/settings.json` for minimal OpenRig command allowlisting
-- global Claude state: `~/.claude.json` for managed workspace trust and onboarding completion
-- project Claude: `.claude/settings.local.json` for context collector/activity hooks and selected `claude_settings_fragment` resources
-- project Claude MCP: `.mcp.json` for selected `claude_mcp_fragment` resources
-- global Codex: `~/.codex/config.toml` for workspace trust and selected `codex_config_fragment` resources
+Before setup or managed launch, review [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine), including provider trust, hooks and selected runtime resources.
 
 Already-running adopted sessions may need restart before they pick up newly written runtime config.
 
