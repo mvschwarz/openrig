@@ -4,32 +4,56 @@ A harness wraps a model. A rig wraps your harnesses. Define your agent team in Y
 
 OpenRig turns AI coding agents from a pile of terminal sessions into a persistent, organized team. Talk to a lead agent about the outcome you want; it can coordinate specialists across teams and bring you results and decisions that need your attention. Start with a repository and one useful change, then keep the team's work and context at the same addresses.
 
-The terminal UI is the shared dashboard; the CLI drives work and coordination. The older web UI is in maintenance mode with best-effort support.
+## Install and first run
 
-Launching a rig writes provider hooks and workspace trust settings. Before
-running the commands below, review [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine)
-and back up the relevant files.
+Requires Node.js 20, 22 or 24 and tmux. Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
 
 ```bash
 npm install -g @openrig/cli
 rig setup --dry-run
+```
+
+Review setup's plan before applying `rig setup`: it checks both native harnesses and cmux. This starter requires tmux and authenticated Codex; the other harness and terminal provider are optional for its repository task.
+
+Before launching, ask your agent to [configure your chosen permissions](docs/reference/getting-started.md#have-your-agent-configure-permissions): keep prompts, remember selected commands, or deliberately choose broader access. The agent handles setup and verification; OpenRig's shipped defaults stay unchanged.
+
+Check prerequisites in your launch shell:
+
+```bash
+tmux -V
+codex --version
+codex login status
+```
+
+Resolve missing tools or login before continuing. From your repository, inspect the plan before launching the two Codex seats, an owner and a checker:
+
+```bash
 cd /path/to/your/repository
+rig up first-project --cwd . --plan
 rig up first-project --cwd .
 rig tui --shared
 ```
 
-`first-project` has two native Codex seats: an owner and a checker. The kernel
-provides separate operational support and a shared TUI terminal. Check
-`codex login status` and inspect `rig up first-project --cwd . --plan` before
-launching. [The guided first-use path](docs/reference/getting-started.md) covers
-readiness, a useful task, a reviewed result, Herdr/cmux terminals and recovery.
-Review setup's plan before applying `rig setup`: it checks both native
-harnesses and cmux. This starter requires tmux and authenticated Codex; the
-other harness and terminal provider are optional for its repository task.
+The kernel provides separate operational support and the shared dashboard. To detach without stopping the dashboard, press Ctrl-b then d; `rig tui --shared` returns to that view. Plain `rig tui` opens an independent view. Closing a viewing terminal does not mean you should relaunch the team.
 
-Ask your agent to [configure your chosen permissions](docs/reference/getting-started.md#have-your-agent-configure-permissions):
-keep prompts, remember selected commands, or deliberately choose broader access.
-The agent handles the setup and verification; OpenRig's shipped defaults stay unchanged.
+Check project-seat readiness with `rig ps --nodes --rig first-project` and resolve any authentication, trust or permission prompt before assigning work. Then give the owner one bounded outcome from your repository:
+
+```bash
+rig send dev-owner@first-project 'Implement <one useful change>. Track the task in the queue and return its ID. Keep it local, verify the behavior, ask dev-check@first-project to check the exact candidate, and record the result and how I can try it.'
+rig queue list --destination dev-owner@first-project --limit 1000
+```
+
+Sending a message does not itself create a queue item; the owner records the task. Read the final artifact and the review of its exact candidate, then return to the same owner for the next change. [The guided first-use path](docs/reference/getting-started.md) covers readiness, a useful task, a reviewed result, Herdr/cmux terminals and recovery.
+
+## Community
+
+- **Questions:** [Discussions › Q&A](https://github.com/mvschwarz/openrig/discussions/categories/q-a)
+- **Bugs and feature requests:** [open an issue](https://github.com/mvschwarz/openrig/issues/new/choose)
+- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Security policy](SECURITY.md) · [Getting help](.github/SUPPORT.md)
+- **Videos:** [youtube.com/@openrig](https://www.youtube.com/@openrig)
+- **Releases:** [GitHub Releases](https://github.com/mvschwarz/openrig/releases) and npm `@openrig/cli`
+
+We aim to acknowledge issues and pull requests within one day; see [CONTRIBUTING.md](CONTRIBUTING.md#what-to-expect-from-us) for review targets.
 
 ## What OpenRig changes on your machine
 
@@ -95,70 +119,6 @@ files before first use. Daemon/bootstrap writes are automatic and do not each
 have an interactive preview; `rig setup --dry-run` does not preview every later
 startup effect.
 
-## First Run
-
-Check readiness, then give the owner a bounded outcome from your repository:
-
-```bash
-rig ps --nodes --rig first-project
-rig send dev-owner@first-project 'Implement <one useful change>. Track the task in the queue and return its ID. Keep it local, verify the behavior, ask dev-check@first-project to check the exact candidate, and record the result and how I can try it.'
-rig queue list --destination dev-owner@first-project --limit 1000
-```
-
-Sending a message does not itself create a queue item; the owner records the task.
-Read the final artifact and the review of its exact candidate. Return to the
-same owner for the next change. To leave the shared dashboard without stopping
-it, press Ctrl-b then d; `rig tui --shared` returns to that view. Plain `rig tui`
-opens an independent view. Closing a viewing terminal does not mean you should
-relaunch the team.
-
-## Upgrading an existing instance
-
-For an existing installation, follow the [upgrade procedure](skills/_canonical/core/openrig-upgrade/SKILL.md) and the [0.5.14 release notes](docs/releases/v0.5.14.md). Preserve live seats during the upgrade; `rig down` is not an upgrade step.
-
-### Crossing the 0.5.9 layout boundary
-
-The migration below still applies when upgrading from a pre-0.5.9 instance.
-
-0.5.9 makes `$OPENRIG_HOME/context` the addressable context library, writes
-Claude telemetry to `state/context-usage` (and provider telemetry to
-`state/provider-usage`), and installs the default System World at
-`context/system/system-world.yaml`. Existing instances cross this boundary by
-an **Agent-Operated Migration** from the shipped `openrig-upgrade` skill. The
-target runtime reads canonical-first with legacy-fallback while new writes use
-the canonical roots; a custom context-library root stays stable during
-activation. This is not a directory rename to do while an old collector writes.
-
-```bash
-# SKILL_DIR is the installed openrig-upgrade skill directory.
-node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --help
-node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME"
-node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-state --preimage /safe/path/layout-0.5.9-before
-
-# Activate the exact target runtime separately. After every bounded legacy tail is followed by newer paired samples at both new state roots:
-node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --verify --preimage /safe/path/layout-0.5.9-before > /safe/path/layout-0.5.9-verify.json
-
-# Run the separately invoked non-destructive finalizer only with that exact receipt:
-node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-library --preimage /safe/path/layout-0.5.9-before --verification /safe/path/layout-0.5.9-verify.json
-
-# Restore only helper-owned preparation/finalizer effects if the observed upgrade must be reversed:
-node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --rollback /safe/path/layout-0.5.9-before
-```
-
-`--help` prints the phase grammar without inventorying the instance. No phase
-flag intentionally runs the read-only plan; unknown options fail nonzero before
-plan or mutation.
-
-Every phase emits JSON. Stop on any issue or incomplete receipt and follow its
-`next` action; do not continue from copied legacy telemetry or retry a partial
-mutation blindly. Preparation leaves legacy state and collector settings in
-place. Verification accepts exact tail bytes only when that same seat has newer
-paired context and provider samples under `state/`; finalization revalidates the
-accepted tails, copies the library without overwrite, and switches config last.
-The helper never removes the legacy telemetry or library. Retirement follows
-separate stable runtime, writer, reader, and recovery proof. Daemon, database,
-seat, plugin, and release lifecycle actions remain agent-owned.
-
 ## What It Does
 
 OpenRig is a multi-agent harness — it manages the system that coding agents form when you run them together. Not the agents themselves, but the team they create: which sessions are running, how they relate, how to recover after a reboot, and how to stop it from becoming terminal sprawl.
@@ -204,7 +164,7 @@ rig specs ls
 
 ## How It Works
 
-OpenRig is a local daemon + CLI + terminal UI + MCP server, built on tmux. The older React web UI remains in maintenance mode.
+OpenRig is a local daemon + CLI + terminal UI + MCP server, built on tmux. The older React web UI remains in maintenance mode with best-effort support.
 
 ```
 CLI / TUI / MCP
@@ -260,6 +220,53 @@ rig send vault-specialist@secrets-manager "Check Vault health and report status.
 
 Requires Docker for service-backed rigs.
 
+## Upgrading an existing instance
+
+For an existing installation, follow the [upgrade procedure](skills/_canonical/core/openrig-upgrade/SKILL.md) and the [0.5.14 release notes](docs/releases/v0.5.14.md). Preserve live seats during the upgrade; `rig down` is not an upgrade step.
+
+### Crossing the 0.5.9 layout boundary
+
+The migration below still applies when upgrading from a pre-0.5.9 instance.
+
+0.5.9 makes `$OPENRIG_HOME/context` the addressable context library, writes
+Claude telemetry to `state/context-usage` (and provider telemetry to
+`state/provider-usage`), and installs the default System World at
+`context/system/system-world.yaml`. Existing instances cross this boundary by
+an **Agent-Operated Migration** from the shipped `openrig-upgrade` skill. The
+target runtime reads canonical-first with legacy-fallback while new writes use
+the canonical roots; a custom context-library root stays stable during
+activation. This is not a directory rename to do while an old collector writes.
+
+```bash
+# SKILL_DIR is the installed openrig-upgrade skill directory.
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --help
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME"
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-state --preimage /safe/path/layout-0.5.9-before
+
+# Activate the exact target runtime separately. After every bounded legacy tail is followed by newer paired samples at both new state roots:
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --verify --preimage /safe/path/layout-0.5.9-before > /safe/path/layout-0.5.9-verify.json
+
+# Run the separately invoked non-destructive finalizer only with that exact receipt:
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --apply-library --preimage /safe/path/layout-0.5.9-before --verification /safe/path/layout-0.5.9-verify.json
+
+# Restore only helper-owned preparation/finalizer effects if the observed upgrade must be reversed:
+node "$SKILL_DIR/scripts/migrate-telemetry-state-0.5.9.mjs" --home "$OPENRIG_HOME" --rollback /safe/path/layout-0.5.9-before
+```
+
+`--help` prints the phase grammar without inventorying the instance. No phase
+flag intentionally runs the read-only plan; unknown options fail nonzero before
+plan or mutation.
+
+Every phase emits JSON. Stop on any issue or incomplete receipt and follow its
+`next` action; do not continue from copied legacy telemetry or retry a partial
+mutation blindly. Preparation leaves legacy state and collector settings in
+place. Verification accepts exact tail bytes only when that same seat has newer
+paired context and provider samples under `state/`; finalization revalidates the
+accepted tails, copies the library without overwrite, and switches config last.
+The helper never removes the legacy telemetry or library. Retirement follows
+separate stable runtime, writer, reader, and recovery proof. Daemon, database,
+seat, plugin, and release lifecycle actions remain agent-owned.
+
 ## Requirements
 
 - Node.js 20, 22, or 24 (the supported versions in this release)
@@ -292,10 +299,12 @@ OpenRig is open source and self-hosted, with Claude Code and Codex in the same t
 ## Links
 
 - **Website**: [openrig.dev](https://openrig.dev)
-- **Blog**: [Why I Built OpenRig](https://esoteric.run/blog/why-i-built-openrig)
-- **Docs**: [openrig.dev/docs](https://openrig.dev/docs)
+- **Docs**: [openrig.dev/docs](https://openrig.dev/docs) ([documentation index for agents](https://openrig.dev/llms.txt))
+- **Blog**: [openrig.dev/blog](https://openrig.dev/blog) · [Why I Built OpenRig](https://esoteric.run/blog/why-i-built-openrig)
 - **Open Specification**: [openrig.dev/specs](https://openrig.dev/specs)
-- **Twitter**: [@_feralmachine](https://twitter.com/_feralmachine)
+- **Videos**: [youtube.com/@openrig](https://www.youtube.com/@openrig)
+- **X**: [@_feralmachine](https://twitter.com/_feralmachine)
+- **Follow the project**: [openrig.dev/follow](https://openrig.dev/follow)
 
 ## License
 
