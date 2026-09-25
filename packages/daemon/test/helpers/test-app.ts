@@ -430,7 +430,10 @@ export function createTestApp(
     // across the suite). Tests for the observer itself construct it directly
     // and pass it here explicitly.
     permissionDriftObserver: opts?.permissionDriftObserver ?? { diagnose: () => null },
-    runtimeAdapters: opts?.wireRuntimeAdapters ? adapters : undefined,
+    // Caller-supplied adapters always reach route handlers; the always-ready
+    // instantiator stubs only when explicitly wired, since they would make
+    // restore routes report resumes.
+    runtimeAdapters: opts?.wireRuntimeAdapters ? adapters : opts?.adapters as Record<string, RuntimeAdapter> | undefined,
   });
   return {
     app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,

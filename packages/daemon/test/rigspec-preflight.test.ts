@@ -140,6 +140,15 @@ describe("RigSpecPreflight", () => {
     expect(codexCall![0]).toBe("codex --version");
   });
 
+  it("probes OMP independently of Pi for an OMP-only legacy rig", async () => {
+    const exec = vi.fn<ExecFn>().mockResolvedValue("");
+    const pf = createPreflight({ exec });
+    const result = await pf.check(validSpec({ nodes: [{ id: "worker", runtime: "omp", cwd: "/" }] }));
+    expect(result.ready).toBe(true);
+    expect(exec).toHaveBeenCalledWith("omp --version");
+    expect(exec).not.toHaveBeenCalledWith("pi --version");
+  });
+
   it("runtime not available -> error", async () => {
     const exec = vi.fn<ExecFn>().mockRejectedValue(new Error("not found"));
     const pf = createPreflight({ exec });

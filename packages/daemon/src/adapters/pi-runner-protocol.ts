@@ -18,6 +18,7 @@
 
 import nodePath from "node:path";
 import { shellQuote } from "./shell-quote.js";
+export type RunnerRuntime = "pi" | "omp";
 
 // ── Seat state layout ────────────────────────────────────────────────────────
 // <stateRoot>/<sessionName>/agent     → PI_CODING_AGENT_DIR (auth.json, models.json, skills, …)
@@ -114,6 +115,43 @@ export const PI_PROVIDER_ENV_VARS: Record<string, string> = {
   "kimi-coding": "KIMI_API_KEY",
 };
 
+/** Explicit OMP chat-provider credential names. Only the declared provider's
+ *  key can cross into the child; arbitrary *_KEY variables are never forwarded. */
+export const OMP_PROVIDER_ENV_VARS: Record<string, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  "openai-codex": "OPENAI_CODEX_OAUTH_TOKEN",
+  google: "GEMINI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  zai: "ZAI_API_KEY",
+  "zhipu-coding-plan": "ZHIPU_API_KEY",
+  "kimi-coding": "KIMI_API_KEY",
+  moonshot: "MOONSHOT_API_KEY",
+  xai: "XAI_API_KEY",
+  mistral: "MISTRAL_API_KEY",
+  deepseek: "DEEPSEEK_API_KEY",
+  groq: "GROQ_API_KEY",
+  cerebras: "CEREBRAS_API_KEY",
+  fireworks: "FIREWORKS_API_KEY",
+  together: "TOGETHER_API_KEY",
+  minimax: "MINIMAX_API_KEY",
+  "minimax-code": "MINIMAX_CODE_API_KEY",
+  "minimax-code-cn": "MINIMAX_CODE_CN_API_KEY",
+  qianfan: "QIANFAN_API_KEY",
+  "qwen-portal": "QWEN_PORTAL_API_KEY",
+  "opencode-go": "OPENCODE_API_KEY",
+  "opencode-zen": "OPENCODE_API_KEY",
+  huggingface: "HUGGINGFACE_HUB_TOKEN",
+  "github-copilot": "COPILOT_GITHUB_TOKEN",
+  "vercel-ai-gateway": "AI_GATEWAY_API_KEY",
+  "ollama-cloud": "OLLAMA_CLOUD_API_KEY",
+  baseten: "BASETEN_API_KEY",
+  deepinfra: "DEEPINFRA_API_KEY",
+  siliconflow: "SILICONFLOW_API_KEY",
+  "siliconflow-cn": "SILICONFLOW_CN_API_KEY",
+  litellm: "LITELLM_API_KEY",
+};
+
 // Baseline process needs. No host credential families or shell customization.
 export const PI_ENV_BASELINE_VARS = ["PATH", "HOME", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"] as const;
 
@@ -140,7 +178,7 @@ export function providerFromModel(model: string | undefined): string | null {
  *  the runner's own env; only allowlisted names cross the boundary. */
 export function buildPiChildEnv(
   source: Record<string, string | undefined>,
-  opts: { agentDir: string; sessionsDir: string; model?: string },
+  opts: { agentDir: string; sessionsDir: string; model?: string; runtime?: RunnerRuntime; sessionName?: string; nodeId?: string; openrigHome?: string; openrigUrl?: string },
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of [...PI_ENV_BASELINE_VARS, ...PI_ENV_OPENRIG_VARS]) {
@@ -150,9 +188,23 @@ export function buildPiChildEnv(
   env.PI_CODING_AGENT_DIR = opts.agentDir;
   env.PI_CODING_AGENT_SESSION_DIR = opts.sessionsDir;
   const provider = providerFromModel(opts.model);
-  const providerVar = provider ? PI_PROVIDER_ENV_VARS[provider] : undefined;
+  const providerVar = provider ? (opts.runtime === "omp" ? OMP_PROVIDER_ENV_VARS : PI_PROVIDER_ENV_VARS)[provider] : undefined;
   if (providerVar && source[providerVar] !== undefined) {
     env[providerVar] = source[providerVar]!;
+  }
+  if (opts.runtime === "omp") {
+    // The per-seat HOME prevents OMP from consulting the operator's ~/.omp
+    // and ~/.env. Project cwd/.env remains an OMP discovery surface. The
+    // runner resolves the OMP binary before this HOME applies.
+    env.HOME = nodePath.dirname(opts.agentDir);
+    // OMP seats also pin their managed identity and daemon locator from the
+    // runner's own arguments (never the hook token, which belongs to the
+    // runner's POST client).
+    if (opts.sessionName) env.OPENRIG_SESSION_NAME = opts.sessionName;
+    env.OPENRIG_RUNTIME = "omp";
+    if (opts.nodeId) env.OPENRIG_NODE_ID = opts.nodeId;
+    if (opts.openrigHome) env.OPENRIG_HOME = opts.openrigHome;
+    if (opts.openrigUrl) env.OPENRIG_URL = opts.openrigUrl;
   }
   return env;
 }
@@ -160,6 +212,8 @@ export function buildPiChildEnv(
 // ── Command construction ─────────────────────────────────────────────────────
 
 export interface PiRunnerLaunchOpts {
+  /** Explicit runtime; omitted keeps the original Pi command byte-for-byte. */
+  runtime?: RunnerRuntime;
   /** Absolute path to the compiled runner entry (daemon dist). */
   runnerEntryPath: string;
   /** The seat's canonical session name (identity + sidecar key). */
@@ -170,7 +224,7 @@ export interface PiRunnerLaunchOpts {
   cwd: string;
   /** Optional `provider/id` model declaration (FR-7). */
   model?: string;
-  /** Explicit trust posture — REQUIRED, never ambient (BR-5). */
+  /** Explicit posture; OMP maps it to --approval-mode, Pi to resource trust. */
   trust: "approve" | "no-approve";
   /** Exact session file to resume (FR-6). Mutually exclusive with forkRef. */
   sessionFile?: string;
@@ -190,7 +244,9 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
     "--state-root", shellQuote(opts.stateRoot),
     "--cwd", shellQuote(opts.cwd),
     "--launch-id", shellQuote(opts.launchId),
-    `--${opts.trust}`,
+    ...(opts.runtime === "omp"
+      ? ["--runtime", "omp", "--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
+      : [`--${opts.trust}`]),
   ];
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
@@ -214,12 +270,14 @@ export function buildPiChildArgs(opts: {
   trust: "approve" | "no-approve";
   sessionFile?: string;
   forkRef?: string;
+  runtime?: RunnerRuntime;
 }): string[] {
   const args = [
     "--mode", "rpc",
     "--session-dir", opts.sessionsDir,
-    "--name", opts.sessionName,
-    `--${opts.trust}`,
+    ...(opts.runtime === "omp"
+      ? ["--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
+      : ["--name", opts.sessionName, `--${opts.trust}`]),
   ];
   if (opts.model?.trim()) {
     args.push("--model", opts.model.trim());

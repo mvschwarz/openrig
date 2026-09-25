@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
@@ -105,6 +106,60 @@ activityRoutes.post("/hooks", async (c) => {
     const resolved = store.resolveSession({ sessionName, nodeId, runtime });
     if (!resolved) {
       return c.json({ ok: false, code: "session_not_found", error: `No session found for ${sessionName}` }, 404);
+    }
+    // OMP session identity (hook or seat) is strict: the exact seat name, the
+    // seat's own runtime, the current occupant generation, and a materialized
+    // session file that matches the seat's runner sidecar. Every refusal
+    // reports tokenPersisted: false so the OMP runner keeps re-announcing.
+    // Pi, Claude, Codex and terminal seats keep the paths below unchanged.
+    if (runtime === "omp" || resolved.runtime === "omp") {
+      if (sessionName !== resolved.sessionName) {
+        return c.json({ ok: false, code: "session_not_found", tokenPersisted: false, error: "Session identity does not match the managed seat." }, 404);
+      }
+      if (runtime !== resolved.runtime) {
+        return c.json({ ok: false, code: "runtime_mismatch", tokenPersisted: false, error: "Session identity runtime does not match the managed seat." }, 409);
+      }
+      // Same occupant-generation gate as Pi below, before any file eligibility.
+      const generation = stringOrNull(body.generation);
+      let reason: string | null = null;
+      try {
+        const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
+        if (!generation) reason = "generation_unverifiable";
+        else if (!current || !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)) {
+          reason = "generation_unresolvable";
+        } else if (current.generationUuid !== generation) reason = "generation_mismatch";
+      } catch {
+        return c.json({
+          ok: false, code: "generation_resolver_error", tokenPersisted: false,
+          error: "OMP session identity ignored: occupant generation is unavailable.",
+        }, 503);
+      }
+      if (reason) {
+        return c.json({
+          ok: false, code: reason, tokenPersisted: false,
+          error: "OMP session identity ignored: emitter is not the registered current occupant.",
+        }, 409);
+      }
+      const validation = validateResumeToken("omp", stringOrNull(body.sessionFile));
+      // OMP reports a path before its first turn is written. Persist only
+      // materialized history; the runner can re-announce identity later.
+      const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
+      const omp = adapters?.["omp"] as { readSessionFile?: (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } } | undefined;
+      const ownFile = typeof omp?.readSessionFile === "function" ? omp.readSessionFile(resolved.sessionName) : null;
+      const tokenPersisted = validation.ok && ownFile?.ok === true && ownFile.sessionFile === validation.token && existsSync(validation.token)
+        ? sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
+          || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token)
+        : false;
+      eventBus.emit({
+        type: "agent.session_identity",
+        rigId: resolved.rigId,
+        nodeId: resolved.nodeId,
+        sessionName: resolved.sessionName,
+        runtime: "omp",
+        sessionId,
+        provenance: "rpc",
+      });
+      return c.json({ ok: true, sessionId, provenance: "rpc", tokenPersisted });
     }
 
     // OPR.0.4.6.PI1 FR-5 — Pi session identity arrives from the pi-runner's

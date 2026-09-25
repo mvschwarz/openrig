@@ -62,6 +62,27 @@ describe("AgentActivityStore", () => {
     });
   });
 
+  it("does not let a hook claiming OMP escalate runtime_error on another runtime's seat", () => {
+    const { node, sessionName } = seedSession("codex");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    const result = store.recordHookEvent({ runtime: "omp", sessionName, hookEvent: "Notification", subtype: "runtime_error" });
+    expect(result.ok).toBe(true);
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW })).toMatchObject({ state: "unknown", runtime: "omp" });
+  });
+
+  it("projects an OMP model/auth error as needs_input until a later turn succeeds", () => {
+    const rig = rigRepo.createRig("omp-rig");
+    const node = rigRepo.addNode(rig.id, "qa.worker", { runtime: "omp" });
+    const sessionName = "qa-worker@omp-rig";
+    const session = sessionRegistry.registerSession(node.id, sessionName);
+    sessionRegistry.updateStatus(session.id, "running");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ sessionName, runtime: "omp", hookEvent: "Notification", subtype: "runtime_error" });
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW })).toMatchObject({ state: "needs_input", reason: "runtime_error" });
+    store.recordHookEvent({ sessionName, runtime: "omp", hookEvent: "Stop" });
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW })).toMatchObject({ state: "idle" });
+  });
+
   it("normalizes Claude permission notifications to needs_input and idle_prompt to idle", () => {
     const { node, sessionName } = seedSession("claude-code");
     const store = new AgentActivityStore({ db, eventBus, now: () => NOW });

@@ -86,6 +86,7 @@ export class SuccessorSessionLauncher {
   private tmuxAdapter: TmuxAdapter;
   private discoveryRepo: DiscoveryRepository;
   private sessionEnv: Record<string, string | undefined>;
+  private runtimeSessionEnv: Record<string, Record<string, string | undefined>>;
   private newId: () => string;
   private runtimeAdapters: Record<string, RuntimeAdapter>;
   private readinessTimeoutMs: number;
@@ -99,6 +100,8 @@ export class SuccessorSessionLauncher {
     discoveryRepo: DiscoveryRepository,
     opts: {
       sessionEnv?: Record<string, string | undefined>;
+      /** Extra env for one runtime only, merged over sessionEnv (see NodeLauncher). */
+      runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
       newId?: () => string;
       /** Runtime adapters keyed by runtime, used to launch + ready-probe the
        *  successor agent. Absent → a fresh successor cannot be launched. */
@@ -122,6 +125,7 @@ export class SuccessorSessionLauncher {
     this.tmuxAdapter = tmuxAdapter;
     this.discoveryRepo = discoveryRepo;
     this.sessionEnv = opts.sessionEnv ?? {};
+    this.runtimeSessionEnv = opts.runtimeSessionEnv ?? {};
     this.newId = opts.newId ?? ulid;
     this.runtimeAdapters = opts.runtimeAdapters ?? {};
     this.readinessTimeoutMs = opts.readinessTimeoutMs ?? 30_000;
@@ -165,6 +169,7 @@ export class SuccessorSessionLauncher {
       OPENRIG_SESSION_NAME: departingSession,
       OPENRIG_RUNTIME: input.node.runtime ?? undefined,
       ...this.sessionEnv,
+      ...(input.node.runtime ? this.runtimeSessionEnv[input.node.runtime] : undefined),
       OPENRIG_OCCUPANT_GENERATION: input.occupantGeneration ?? undefined,
     });
     const cwd = input.node.cwd ?? undefined;
