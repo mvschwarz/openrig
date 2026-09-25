@@ -8,7 +8,7 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
-## [0.5.15] - Unreleased
+## [0.5.15]
 
 - Recognize Codex through shell and Node launchers during startup and recovery,
   while keeping uncertain process identity visible.
