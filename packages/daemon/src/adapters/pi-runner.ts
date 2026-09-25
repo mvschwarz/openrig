@@ -30,43 +30,38 @@ import {
   type PiRunnerState,
 } from "./pi-runner-protocol.js";
 
-// ── Paste aggregation (arch n1) ──────────────────────────────────────────────
-// `rig send` delivers a multi-line body via send-keys -l and THEN a separate
-// Enter, so a multi-line paste arrives as several stdin lines in quick
-// succession. The aggregator treats the whole quiet-window batch as ONE
-// prompt — never N prompts.
+// ── Submitted input boundaries ─────────────────────────────────────────────
+// TmuxAdapter.sendText uses bracketed paste; sendKeys supplies Enter separately.
+// Embedded paste newlines reach canonical stdin before that Enter. Keep them
+// inside the explicit paste frame, however long delivery takes. Unframed human
+// lines submit immediately; a quiet timer cannot distinguish either boundary.
 
 export class PasteAggregator {
-  private buffer: string[] = [];
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private buffer = "";
+  private pasting = false;
 
-  constructor(
-    private onFlush: (block: string) => void,
-    // 600ms: the daemon transport's two-step send pastes the body, waits
-    // 200ms, THEN submits Enter — so the final line's newline arrives ~200ms
-    // after the paste. A 200ms quiet window raced that gap and split one
-    // rig-send envelope into two prompts (VM leg-4 finding); 3x the transport
-    // gap absorbs it while staying far below human message cadence.
-    private quietMs = 600,
-    private schedule: (fn: () => void, ms: number) => ReturnType<typeof setTimeout> = setTimeout,
-    private cancel: (t: ReturnType<typeof setTimeout>) => void = clearTimeout,
-  ) {}
+  constructor(private onFlush: (block: string) => void) {}
 
   addLine(line: string): void {
-    this.buffer.push(line);
-    if (this.timer !== null) this.cancel(this.timer);
-    this.timer = this.schedule(() => this.flush(), this.quietMs);
-  }
-
-  flush(): void {
-    if (this.timer !== null) {
-      this.cancel(this.timer);
-      this.timer = null;
+    let offset = 0;
+    while (offset < line.length) {
+      const marker = this.pasting ? "\u001b[201~" : "\u001b[200~";
+      const at = line.indexOf(marker, offset);
+      if (at < 0) {
+        this.buffer += line.slice(offset);
+        break;
+      }
+      this.buffer += line.slice(offset, at);
+      this.pasting = !this.pasting;
+      offset = at + marker.length;
     }
-    if (this.buffer.length === 0) return;
-    const block = this.buffer.join("\n").trim();
-    this.buffer = [];
-    if (block.length > 0) this.onFlush(block);
+    if (this.pasting) {
+      this.buffer += "\n";
+    } else {
+      const block = this.buffer;
+      this.buffer = "";
+      if (block.trim().length > 0) this.onFlush(block);
+    }
   }
 }
 
@@ -534,7 +529,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
     if (line.trim()) process.stdout.write(`[pi:err] ${line}\n`);
   });
-  readline.createInterface({ input: process.stdin }).on("line", (line) => aggregator.addLine(line));
+  // Ask tmux (and human terminals) to preserve paste boundaries. Keep canonical
+  // input so ordinary line editing remains available; readline reassembles UTF-8
+  // and marker bytes before passing complete lines to the aggregator.
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    process.stdout.write("\u001b[?2004h");
+    process.once("exit", () => process.stdout.write("\u001b[?2004l"));
+  }
+  readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on("line", (line) => aggregator.addLine(line));
 
   child.on("error", (err) => {
     console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);

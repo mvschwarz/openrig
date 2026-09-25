@@ -1,10 +1,12 @@
-// OPR.0.4.6.PI1 — hermetic unit tests for the pi-runner core: paste-block
-// aggregation (the arch n1 multi-line-send case), stdin→RPC routing
+// OPR.0.4.6.PI1 — hermetic unit tests for the pi-runner core: submitted paste
+// boundaries (including delayed multi-line sends), stdin→RPC routing
 // (idle→prompt / streaming→steer / prefix conventions), the event→mirror and
 // event→activity mapping, the get_state identity capture + sidecar, the
 // durable catch-up cursor, and honest pi-exit reporting. No live pi.
 
 import { describe, it, expect, vi } from "vitest";
+import readline from "node:readline";
+import { PassThrough } from "node:stream";
 import {
   PasteAggregator, RunnerCore, mapPiEvent, parseRunnerArgs,
   prepareRunnerSidecar,
@@ -42,55 +44,96 @@ function readyCore(f = fakeIo()) {
   return { core, ...f };
 }
 
-// ── PasteAggregator — the arch n1 case ───────────────────────────────────────
+// ── Submitted input boundaries ─────────────────────────────────────────────
 
 describe("PasteAggregator", () => {
-  it("treats a rapid multi-line paste block as ONE prompt, never N prompts", () => {
-    const flushed: string[] = [];
-    // Manual scheduler: capture the pending flush; "time passes" = run it.
-    let pending: (() => void) | null = null;
-    const agg = new PasteAggregator(
-      (block) => flushed.push(block),
-      200,
-      (fn) => { pending = fn; return 0 as unknown as ReturnType<typeof setTimeout>; },
-      () => { pending = null; },
-    );
+  const start = "\u001b[200~";
+  const end = "\u001b[201~";
 
-    agg.addLine("line one");
-    agg.addLine("line two");
-    agg.addLine("line three");
-    expect(flushed).toEqual([]); // nothing until the quiet window elapses
-    pending!();
-    expect(flushed).toEqual(["line one\nline two\nline three"]);
+  it("holds a bracketed multiline paste across arbitrary quiet gaps until submission", () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[] = [];
+      const input = new PasteAggregator(block => flushed.push(block));
+      input.addLine(start + "From: sender@fixture");
+      input.addLine("body");
+      input.addLine("");
+      vi.advanceTimersByTime(60_000);
+      expect(flushed).toEqual([]);
+      input.addLine('↩ Reply: rig send sender@fixture "..."' + end);
+      expect(flushed).toEqual(['From: sender@fixture\nbody\n\n↩ Reply: rig send sender@fixture "..."']);
+    } finally { vi.useRealTimers(); }
   });
 
-  it("separate quiet-window batches are separate prompts", () => {
+  it("preserves blank lines, Unicode and surrounding whitespace within the paste", () => {
     const flushed: string[] = [];
-    let pending: (() => void) | null = null;
-    const agg = new PasteAggregator(
-      (block) => flushed.push(block), 200,
-      (fn) => { pending = fn; return 0 as unknown as ReturnType<typeof setTimeout>; },
-      () => { pending = null; },
-    );
-    agg.addLine("first");
-    pending!();
-    agg.addLine("second");
-    pending!();
-    expect(flushed).toEqual(["first", "second"]);
+    const input = new PasteAggregator(block => flushed.push(block));
+    input.addLine(start);
+    input.addLine("  café 日本語  ");
+    input.addLine("");
+    input.addLine(end);
+    expect(flushed).toEqual(["\n  café 日本語  \n\n"]);
   });
 
-  it("drops empty blocks (a bare Enter is not a prompt)", () => {
+  it("keeps separately submitted inputs separate even without a quiet gap", () => {
     const flushed: string[] = [];
-    let pending: (() => void) | null = null;
-    const agg = new PasteAggregator(
-      (block) => flushed.push(block), 200,
-      (fn) => { pending = fn; return 0 as unknown as ReturnType<typeof setTimeout>; },
-      () => { pending = null; },
-    );
-    agg.addLine("");
-    agg.addLine("   ");
-    pending!();
+    const input = new PasteAggregator(block => flushed.push(block));
+    input.addLine(start + "first" + end);
+    input.addLine(start + "second" + end);
+    input.addLine("  human input  ");
+    expect(flushed).toEqual(["first", "second", "  human input  "]);
+  });
+
+  it("combines multiple pastes on one edited line without inventing submission", () => {
+    const flushed: string[] = [];
+    const input = new PasteAggregator(block => flushed.push(block));
+    input.addLine("prefix " + start + "one" + end + " " + start + "two");
+    input.addLine("last" + end + " suffix");
+    expect(flushed).toEqual(["prefix one two\nlast suffix"]);
+  });
+
+  it("ignores blank submitted input, and does not flush an unfinished paste", () => {
+    const flushed: string[] = [];
+    const input = new PasteAggregator(block => flushed.push(block));
+    input.addLine("");
+    input.addLine("   ");
+    input.addLine(start + end);
+    input.addLine(start + "unfinished");
     expect(flushed).toEqual([]);
+  });
+
+  it("reassembles UTF-8 and paste markers split across stdin chunks", () => {
+    const stream = new PassThrough();
+    const flushed: string[] = [];
+    const input = new PasteAggregator(block => flushed.push(block));
+    const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    lines.on("line", line => input.addLine(line));
+    for (const byte of Buffer.from(start + "café\n\n日本語" + end)) {
+      stream.write(Buffer.from([byte]));
+    }
+    expect(flushed).toEqual([]);
+    stream.write("\n");
+    expect(flushed).toEqual(["café\n\n日本語"]);
+    stream.end();
+    lines.close();
+  });
+
+  it("routes each submission with current streaming state and aborts immediately", () => {
+    const { core, rpc } = readyCore();
+    const input = new PasteAggregator(block => core.handleUserBlock(block));
+    input.addLine(start + "instruction");
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    input.addLine("footer" + end);
+    input.addLine("/followup next turn");
+    input.addLine("/abort");
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    input.addLine("next prompt");
+    expect(rpc.filter(command => ["prompt", "steer", "follow_up", "abort"].includes(String(command.type)))).toEqual([
+      { type: "steer", message: "instruction\nfooter" },
+      { type: "follow_up", message: "next turn" },
+      { type: "abort" },
+      { type: "prompt", message: "next prompt" },
+    ]);
   });
 });
 
