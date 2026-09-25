@@ -71,6 +71,7 @@ These are auto-delivered to every rig; their name+description are already in you
 ### Load when your role or task calls for it (repo-shipped, profile-selected)
 These ship in the OpenRig repo and reach a seat when its profile selects them. To use one, select it in your profile's `uses.skills`, or open it directly at `packages/daemon/specs/agents/shared/skills/core/<skill>/SKILL.md`.
 
+- **openrig-software-factory** — a user wants continuing reviewed work: manual/team, queue-only orchestration or an explicit Workflow; add one or two seats to the running starter when useful, with context, ownership, concurrency, spend and permission limits. Load `rig context get skills/core/openrig-software-factory/SKILL.md`.
 - **openrig-architect** — authoring a rig or topology (NOT for changing OpenRig itself — that's `openrig-builder`).
 - **openrig-cmux** — driving the `cmux` terminal provider.
 - **openrig-herdr** — opening/managing seat terminals via the default proof-gated provider.

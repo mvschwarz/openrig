@@ -16,7 +16,8 @@
       "openrig-operating-model",
       "refocusing",
       "delegating-work",
-      "context-engineering"
+      "context-engineering",
+      "openrig-software-factory"
     ],
     "ship_after_fix": [
       "openrig-user",

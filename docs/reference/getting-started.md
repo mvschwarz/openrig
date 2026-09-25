@@ -10,9 +10,9 @@ Codex with `-s workspace-write`; it leaves approval policy to your native Codex
 configuration. Network access is normally off in that sandbox, including access
 to the local OpenRig daemon. Its `profile: default` selects OpenRig resources,
 not a Codex permission profile. Ordinary permission prompts are therefore expected.
-You can keep those prompts, [choose an explicit permissive setup](#opt-in-permissive-operation),
-or [configure a custom policy](#custom-settings-and-precedence). OpenRig does not
-choose permissive operation for everyone.
+You can keep those prompts, remember selected commands, or choose broader access.
+[Ask your agent to configure that choice](#have-your-agent-configure-permissions);
+OpenRig does not choose permissive operation for everyone.
 
 > Everything below reports **what is currently true**, never a guarantee that
 > downstream work will succeed. "Daemon up" does not mean every agent is healthy;
@@ -114,10 +114,16 @@ independent check. You should not have to relay the review between terminals.
 `rig send` is the initial conversation; the queue and repository artifacts
 retain the work. An unbound shell does not need to impersonate a queue owner.
 
-Follow the work with `rig queue list --rig first-project --limit 1000`, then
-`rig queue show <id> --full` and `rig queue transitions <id>`. A delivered
-message is not a reviewed result. Read the final artifact, exercise the stated
-behavior, and check the candidate the review actually covered.
+From an actual `first-project` seat, follow the work with
+`rig queue list --limit 1000`: its default scope is the caller's current rig.
+`queue list` has no `--rig` option. From an observer shell or another rig, use
+`rig queue list --destination dev-owner@first-project --limit 1000` and the same
+command for `dev-check@first-project`, after verifying those live addresses.
+These show each destination's obligations, not a whole-rig view. An unbound shell
+must not pretend to be a seat to change scope; use `--all-rigs` only when that
+broader view is intended. Then read `rig queue show <id> --full` and
+`rig queue transitions <id>`. A delivered message is not a reviewed result.
+Read the artifact, exercise its behavior, and check the candidate reviewed.
 
 ## Share the dashboard and return to it
 
@@ -159,6 +165,18 @@ being built. When repeated coordination warrants a workflow, discover with
 `rig workflow specs`, inspect its owners and inputs, and instantiate the
 selected name with `rig workflow instantiate --help`. A workflow is not needed
 merely to make the first local change.
+
+For a continuing team, [OpenRig Software Factory](../../packages/daemon/specs/agents/shared/skills/core/openrig-software-factory/SKILL.md)
+offers manual/team work, queue-supported orchestration without Workflow, and an
+optional explicit Workflow path, with wake defaults, token costs and permission
+choices visible. Give its short request to your existing agent. After
+installation, discover the compatible bundled recipe with `rig context show
+skills/core/openrig-software-factory --json`; retain a missing/version-mismatch
+result rather than silently using newer instructions. Its growth section keeps
+three choices clear: stay with the pair, add one or two seats to the running rig
+with `rig grow` and no YAML, or optionally author a custom rig. It covers
+new-seat context/work ownership, concurrency costs and saving the expanded spec.
+This guide remains the short first-use path.
 
 ## Incomplete setup and restart
 
@@ -210,13 +228,45 @@ Two related primitives, often confused by new operators:
   an **entry qitem** that routes the first step to an owner. This is the live
   coordination of *who does the next step*.
 
-How they relate: a scope slice is the durable description of a unit of work; a
-workflow instance + its qitems are the live machinery that moves that work
-through owners (hot-potato handoffs). They are not auto-bridged - there is no
-auto-instantiate-from-scope - you instantiate a workflow by name when you want to
-run one, and you reference your scope artifacts as the work it coordinates. A
-typical loop: author/track the unit in `rig scope`, then
-`rig workflow instantiate <name>` to start the runtime that drives it.
+Scope files retain what the work is; workflow instances and their queue packets
+retain who acts next. Creating or editing a mission does not start work. You can
+instantiate a named workflow with `rig workflow instantiate <name>`, or explicitly
+inspect an authored lifecycle with `rig workflow compile` and create its runtime
+with `rig workflow instantiate-lifecycle`. Compilation alone does not start work.
+[OpenRig Software Factory](../../packages/daemon/specs/agents/shared/skills/core/openrig-software-factory/SKILL.md)
+shows a small reviewed example and how to retain custody through a genuine wait.
+
+## Have your agent configure permissions
+
+You choose the scope; the agent inspects the target harness and applies it.
+For example:
+
+> Configure persistent permission for OpenRig commands in this project. Explain
+> what the whole `rig` family allows and offer narrower verbs if appropriate.
+> Preserve existing deny/ask rules and unrelated settings, back up touched files,
+> apply my choice, then verify repeated ordinary reads without extra approvals.
+
+Allowing all `rig` commands includes lifecycle, topology and configuration
+operations, not only reads. Keeping prompts or selecting broader permissive
+operation are also valid choices. An existing explicit choice authorizes the
+routine setup; the agent need not ask you to approve each file edit again.
+
+Use the maintained **Applying a permission policy** procedure:
+
+```sh
+rig context get skills/applying-a-permission-policy/SKILL.md
+```
+
+In a source checkout, read [its source](../../packages/daemon/assets/plugins/openrig-core/skills/applying-a-permission-policy/SKILL.md).
+In an npm installation, the same file is under
+`@openrig/cli/daemon/assets/plugins/openrig-core/skills/applying-a-permission-policy/SKILL.md`
+below the matching `npm root -g` or local `npm root`. Use the version supplying
+your `rig` executable. It covers Codex/Claude command rules, actual config roots,
+preserving restrictions and verifying the target conversation. A missing guide or
+unsupported native version is a reported gap, not permission to silently bypass.
+
+The broader launch-mode recipes below are optional. Command-family rules do not
+require changing the starter's sandbox or everyone else's defaults.
 
 ## Opt-in permissive operation
 
@@ -340,10 +390,7 @@ launch mode, so verify the native mode again before continuing work.
   project-local settings. See [Claude settings and precedence](https://code.claude.com/docs/en/settings)
   and [OpenRig's runtime config disclosure](agent-startup-guide.md#runtime-config-disclosure).
 
-These are source-checked recipes for this OpenRig release, not a native test of
-every provider/version/config combination. Codex 0.155.1 was observed requesting
-approval for local `rig` calls under workspace-write with network disabled;
-that does not establish every timeout's cause. Provider docs evolve: check your
-installed version and effective settings. Newer permission-profile or automatic
-review features are provider choices, not implicit OpenRig capabilities. Private
-startup fixes do not change the released permission defaults described here.
+These recipes do not establish every provider/version/config combination.
+Check the installed version and effective settings. Newer permission-profile or
+automatic review features are provider choices, not implicit OpenRig capabilities.
+Selecting rules or a broader mode does not change the shipped defaults.
