@@ -24,8 +24,8 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
   tools, and report bounded provider errors without exhausted-retry duplicates.
 - Submit pasted Pi messages explicitly and handle input beyond the terminal's
   canonical buffer limit, including cancellation and oversized-input recovery.
-- Add a guarded retry for an added seat whose first startup failed before saving
-  startup context; retain its complete original configuration for recovery.
+- Add a guarded retry for an added seat whose first startup failed during resource
+  projection; retain its complete original configuration for recovery.
 
 Pi support remains qualified and supervised: controlled coding and continuity
 were verified, but ordinary useful-task completion and unattended teamwork remain
