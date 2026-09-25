@@ -70,8 +70,23 @@ another prompt. They leave other sandbox/network settings unchanged.
 Check `codex --version` and `codex execpolicy check --help`.
 See the [official rules reference](https://learn.chatgpt.com/docs/agent-configuration/rules).
 
-Merge the chosen rule into a `.rules` file under the target's
-`CODEX_HOME/rules` (normally `~/.codex/rules`):
+Choose the destination **before writing**, according to the user's scope:
+
+- **This project only:** verify the installed version supports project rules and
+  derive this session's actual project/worktree config root and trust state.
+  Current docs describe `<repo>/.codex/rules/` in a trusted project config layer.
+  Use that layer only after confirming it is supported, active and trusted for
+  the intended project. If any of those facts is unsupported or unverified,
+  report the limitation and leave user-layer rules unchanged; do not silently
+  mark a project trusted or substitute a user-wide allowance.
+- **Explicitly user-wide:** use `rules/` under the target user's actual
+  `CODEX_HOME` (normally `~/.codex/rules`). This can affect other projects using
+  that home. The TUI's remember-allow action also writes a user-layer rule;
+  do not use it to implement a project-only request.
+
+Merge the chosen rule into a `.rules` file in the selected layer. The prefix
+itself has no project restriction; even a project-layer rule does not constrain
+which targets an allowed `rig` command can affect:
 
 ```python
 prefix_rule(pattern = ["rig"], decision = "allow")
@@ -89,7 +104,12 @@ codex execpolicy check --pretty --rules /absolute/path/to/openrig.rules -- print
 
 Inspect matches, not only exit status; repeat `--rules` for other effective
 files. A matching `prompt` or `forbidden` overrides allow. Verify rule loading
-in the target conversation.
+in the target conversation after the required reload. For project-only scope,
+confirm the layer is active there and absent from an unrelated project's active
+layers. An evaluator given an explicit `--rules` file proves matching, not that
+scope or automatic loading. Existing user-wide rules may already permit the
+same command: preserve and disclose them, attribute matches, and do not claim
+project isolation or remove those rules without a separate authorized choice.
 
 The standalone evaluator checks supplied argv; native shell parsing can split
 ordinary commands/chains first. A raw `zsh -lc` non-match does not prove that
