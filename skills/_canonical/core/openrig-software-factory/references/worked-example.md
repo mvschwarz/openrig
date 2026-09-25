@@ -98,6 +98,184 @@ still grants no extra product scope. Do not silently enable YOLO, global trust o
 network access. The prior bounded trial needed 48 one-time approvals (34 owner,
 14 checker), so do not sell this path as unattended or free of permission friction.
 
+## Grow the running team
+
+Keep `first-project`'s owner and checker when they are enough. When there is useful
+independent work, add one or two seats to that running rig. The example below adds
+two builders; it does not require a larger starter, new Workflow or replacement
+sessions. Use the actual rig name if yours differs.
+
+### Prepare one small pod fragment
+
+From the operator or coordinating seat, inspect the existing team and the installed
+implementation agent:
+
+```sh
+rig ps --json
+rig ps --nodes --rig first-project --json
+rig queue list --destination dev-owner@first-project --json
+rig specs show implementer --kind agent --json
+rig expand --help
+```
+
+Set `RIG_ID` to the `rigId` value for the running `first-project` in the first result;
+the expansion/export commands below take that ID, not the starter spec name.
+Verify the existing `dev.owner` and `dev.check` identities and their current work;
+choose another pod ID if `build` is already present. The spec result's `sourcePath`
+names an `agent.yaml`: use its containing directory for the `path:` reference
+below. Preserve the installed agent's imports/resources; do not copy only that
+one YAML file. If the library result is missing or ambiguous, resolve it through
+`rig specs ls` and the returned exact ID before proceeding.
+
+Set `PROJECT_ROOT` to the actual absolute code repository. Put the following
+complete pod fragment in the new user-owned file
+`$PROJECT_ROOT/.openrig/factory/add-builders.yaml`, creating the parent directory
+if needed. Replace both `/absolute/path/to/implementer` values with the discovered
+agent directory and both `/absolute/path/to/project` values with the repository.
+YAML does not expand shell variables. Use a model supported by the selected
+runtime/account; this example matches the Codex starter. Keep the existing
+permission choice and check the new seats' effective native permissions.
+
+```yaml
+pod:
+  id: build
+  label: Builders
+  members:
+    - id: a
+      label: Builder A
+      agent_ref: "path:/absolute/path/to/implementer"
+      profile: default
+      runtime: codex
+      model: gpt-6-astra
+      cwd: "/absolute/path/to/project"
+    - id: b
+      label: Builder B
+      agent_ref: "path:/absolute/path/to/implementer"
+      profile: default
+      runtime: codex
+      model: gpt-6-astra
+      cwd: "/absolute/path/to/project"
+  edges: []
+crossPodEdges:
+  - kind: delegates_to
+    from: dev.owner
+    to: build.a
+  - kind: delegates_to
+    from: dev.owner
+    to: build.b
+```
+
+For just one new seat, omit member `b` and its `crossPodEdges` entry **before** the
+first expansion. This is an expansion fragment (`pod` plus `crossPodEdges`), not a
+complete RigSpec with `version`, `name` and `pods`. Do not pass it to `rig up` or
+claim a full-spec validator tested it. The expansion service validates/preflights
+the new pod against the existing rig before adding it. There is no expansion
+`--dry-run` option in this command surface.
+
+### Add, inspect, then assign
+
+The next command creates topology and starts only the new pod's members. Run it
+once when the user has authorized this growth and its cost:
+
+```sh
+rig expand "$RIG_ID" "$PROJECT_ROOT/.openrig/factory/add-builders.yaml" \
+  --rig-root "$PROJECT_ROOT" --json
+rig ps --nodes --rig first-project --json
+```
+
+`--rig-root` supplies the resolution root; the fragment's explicit `cwd` supplies
+the working directory. Expected logical IDs are `build.a` and `build.b`, with
+addresses `build-a@first-project` and `build-b@first-project`. Derive the actual
+addresses from the result. Confirm the original seats and their work remain
+present. Inspect every node's status/error and the native pane, even if the
+overall result says `ok`; a created node or tmux session is not proof of readiness.
+A partial result can leave new nodes persisted. After a timeout, read topology
+before any retry. Do not repeat expansion against a pod that was already added.
+If a newly created seat failed to start, resolve its reported cause; the supported
+single-seat retry is `rig launch "$RIG_ID" build.a` for that existing node.
+`rig launch` does not create a missing seat. Preserve other sessions and work.
+
+New seats do not inherit the owner's conversation or task. Record the agreed
+division in the project's existing working agreement and prepare each task file
+with exact project/mission/slice source addresses, outcome, file/worktree boundary,
+checks, next owner and stopping condition. Then deliver the context instruction,
+for example for the first builder:
+
+```sh
+rig send build-a@first-project "Read $PROJECT_ROOT/SPEC.md and the addressed sources in $PROJECT_ROOT/.openrig/factory/TASK-A.md. Run rig whoami --json and rig queue list --owned --json in your own seat; report your identity, scope and any native readiness/permission blocker. Await the bounded queue assignment."
+rig capture build-a@first-project
+```
+
+Read the actual reply and pane; resolve startup/login/permission prompts under the
+chosen policy before dispatch. Repeat for B only if B was added. The operator must
+not impersonate either seat. Context delivery does not claim the work. Once ready,
+the coordinator creates the distinct agreed task (or hands off an existing owned
+task instead of duplicating it):
+
+```sh
+rig queue create --destination build-a@first-project \
+  --body-file "$PROJECT_ROOT/.openrig/factory/TASK-A.md" \
+  --summary 'Implement the agreed independent change A' --json
+```
+
+Use actual project/mission/slice tags where applicable. Read back the returned ID
+with `rig queue show <id> --full --json`; A claims it as itself. Use the earlier
+queue loop for results, review and blockers. Existing Workflow-bound work keeps
+its packet/projection contract: adding a seat does not revise a running graph or
+automatically bind its roles. The fragment's labels/edges describe relationships;
+responsibilities and ownership come from the working agreement and assigned work.
+
+### Specialize only when the work warrants it
+
+| Seat in this example | Deliberately agreed responsibility |
+| --- | --- |
+| `dev-owner@first-project` | Initially implements and coordinates; can become the dedicated orchestrator, selecting outcomes, separating tasks, owning integration and retaining next-work custody. |
+| `build-a@first-project`, `build-b@first-project` | Implement distinct authorized tasks and return exact candidates/evidence. Neither silently edits the other's files or folds both candidates without integration ownership. |
+| `dev-check@first-project` | Retains independent judgment under the project's review policy. The implementer does not count its own check as independent review. |
+
+This is one progression, not a required four-seat layout. One extra builder may
+be enough; a different workload may justify a specialist or additional independent
+review capacity instead. Use suitable discovered agent specs for those duties.
+Follow the user's review policy rather than adding a reviewer to every trivial edit.
+Start concurrent tasks only when their inputs and edits can proceed independently;
+use explicit disjoint files or separate worktrees and one integration owner. Shared
+files, serial dependencies and a review bottleneck can erase any speed gain.
+More active seats and delivered wakes can spend more tokens. Agree model choices,
+active concurrency, time/spend limits and a stop condition; adding a seat changes
+neither permission authority nor the authorized outcome. Existing wake policies
+still apply to idle seats, so an idle label is not a zero-token guarantee.
+
+### Save the expanded shape without replacing the live rig
+
+Expansion persists new topology in the running instance's database. It does not
+rewrite the starter, the fragment or your original authored `rig.yaml`. Save a
+separate live export to an unused user-owned path:
+
+```sh
+rig export "$RIG_ID" -o "$PROJECT_ROOT/.openrig/factory/first-project-expanded.yaml"
+```
+
+Inspect the export and reconcile it with your user-owned authored RigSpec, retaining
+original culture/startup/context files, agent imports, permissions and other settings.
+The export reconstructs stored topology; it is not a lossless copy of every original
+authoring field or a backup of native conversations. If exported agent references
+are relative, resolve them from their original root and correct them for the new
+file location; a changed file location does not move those resources. Validate the
+reconciled full RigSpec with `rig spec validate <path> --json`, then compare its
+seat membership with the live rig using `rig doctor --spec <path>`. That comparison
+does not prove all startup/context fields or native recovery.
+
+Keep the fragment, reconciled spec and existing continuity evidence. A bundle made
+from an old authored spec can omit the added seats. A snapshot taken before growth
+cannot establish recovery of the new seats; use the compatible lifecycle guide for
+any later authorized snapshot/restore. Do not stop, rebuild or replace the running
+rig merely to save its definition. The fragment/parser checks for this recipe are
+offline evidence; no new native live-growth or restore trial is claimed.
+
+For a different team structure, use the optional
+[OpenRig Architect](../../openrig-architect/SKILL.md) path from the main recipe.
+Custom-rig authoring is not a prerequisite for adding this pod.
+
 ## Advanced: an explicit Workflow contract
 
 Use the following complete example when explicit runtime prerequisites/exits are

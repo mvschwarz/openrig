@@ -172,8 +172,11 @@ optional explicit Workflow path, with wake defaults, token costs and permission
 choices visible. Give its short request to your existing agent. After
 installation, discover the compatible bundled recipe with `rig context show
 skills/core/openrig-software-factory --json`; retain a missing/version-mismatch
-result rather than silently using newer instructions. The recipe has one worked
-example; this guide remains the short first-use path.
+result rather than silently using newer instructions. Its growth section keeps
+three choices clear: stay with the pair, add one or two seats to the running rig
+with a complete `rig expand` fragment, or optionally author a custom rig. It covers
+new-seat context/work ownership, concurrency costs and saving the expanded spec.
+This guide remains the short first-use path.
 
 ## Incomplete setup and restart
 

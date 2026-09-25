@@ -8,6 +8,7 @@ metadata:
     - context get
     - context list
     - context show
+    - expand
     - queue create
     - queue handoff
     - workflow compile
@@ -63,6 +64,32 @@ Deliver selected context and obtain each seat's scope reaction; retrieval alone
 is not peer delivery. The owner carries the candidate through the chosen check
 and bounded repairs, reports how to try it, and retains the next authorized task
 or explicitly reports none. Preserve work and custody before a supported stop.
+
+## Grow your factory
+
+Choose the team size separately from the coordination method above:
+
+1. **Use the two-agent starter.** Keep the existing owner and independent checker
+   while that pair meets the workload. The owner can implement and coordinate.
+2. **Add one or two seats to the running rig.** This is the usual next step.
+   Follow [Grow the running team](references/worked-example.md#grow-the-running-team)
+   for a complete pod fragment, `rig expand` commands, readiness/context/work
+   assignment, and saving the expanded topology. Existing sessions need no
+   rebuild or down/up cycle solely to add capacity.
+3. **Author a custom rig when you want a different structure.** Read
+   [OpenRig Architect](../openrig-architect/SKILL.md), available through
+   `rig context get skills/core/openrig-architect/SKILL.md`. Request:
+   “Design a user-owned rig for [outcome] using the compatible RigSpec/AgentSpec
+   guidance. Reuse suitable agents, define responsibilities and context, and
+   validate the files. Preserve the existing rig and agree any new launch.”
+
+As independent work grows, the original owner can concentrate on orchestration,
+multiple builders can implement separate outcomes, and the checker can retain
+independent review capacity. Record that division explicitly; adding seats does
+not assign work, change permissions or create parallelism. Agree file/worktree
+boundaries and integration ownership, follow the project's existing review policy,
+and keep active concurrency within the user's time/spend budget. Two seats are
+an entry point, not a finished factory or a maximum.
 
 ## Read compatible guidance
 
