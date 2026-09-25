@@ -10,9 +10,9 @@ Codex with `-s workspace-write`; it leaves approval policy to your native Codex
 configuration. Network access is normally off in that sandbox, including access
 to the local OpenRig daemon. Its `profile: default` selects OpenRig resources,
 not a Codex permission profile. Ordinary permission prompts are therefore expected.
-You can keep those prompts, [choose an explicit permissive setup](#opt-in-permissive-operation),
-or [configure a custom policy](#custom-settings-and-precedence). OpenRig does not
-choose permissive operation for everyone.
+You can keep those prompts, remember selected commands, or choose broader access.
+[Ask your agent to configure that choice](#have-your-agent-configure-permissions);
+OpenRig does not choose permissive operation for everyone.
 
 > Everything below reports **what is currently true**, never a guarantee that
 > downstream work will succeed. "Daemon up" does not mean every agent is healthy;
@@ -236,6 +236,38 @@ with `rig workflow instantiate-lifecycle`. Compilation alone does not start work
 [OpenRig Software Factory](../../packages/daemon/specs/agents/shared/skills/core/openrig-software-factory/SKILL.md)
 shows a small reviewed example and how to retain custody through a genuine wait.
 
+## Have your agent configure permissions
+
+You choose the scope; the agent inspects the target harness and applies it.
+For example:
+
+> Configure persistent permission for OpenRig commands in this project. Explain
+> what the whole `rig` family allows and offer narrower verbs if appropriate.
+> Preserve existing deny/ask rules and unrelated settings, back up touched files,
+> apply my choice, then verify repeated ordinary reads without extra approvals.
+
+Allowing all `rig` commands includes lifecycle, topology and configuration
+operations, not only reads. Keeping prompts or selecting broader permissive
+operation are also valid choices. An existing explicit choice authorizes the
+routine setup; the agent need not ask you to approve each file edit again.
+
+Use the maintained **Applying a permission policy** procedure:
+
+```sh
+rig context get skills/applying-a-permission-policy/SKILL.md
+```
+
+In a source checkout, read [its source](../../packages/daemon/assets/plugins/openrig-core/skills/applying-a-permission-policy/SKILL.md).
+In an npm installation, the same file is under
+`@openrig/cli/daemon/assets/plugins/openrig-core/skills/applying-a-permission-policy/SKILL.md`
+below the matching `npm root -g` or local `npm root`. Use the version supplying
+your `rig` executable. It covers Codex/Claude command rules, actual config roots,
+preserving restrictions and verifying the target conversation. A missing guide or
+unsupported native version is a reported gap, not permission to silently bypass.
+
+The broader launch-mode recipes below are optional. Command-family rules do not
+require changing the starter's sandbox or everyone else's defaults.
+
 ## Opt-in permissive operation
 
 Permissive operation lets agents act with your account's filesystem and network
@@ -358,10 +390,7 @@ launch mode, so verify the native mode again before continuing work.
   project-local settings. See [Claude settings and precedence](https://code.claude.com/docs/en/settings)
   and [OpenRig's runtime config disclosure](agent-startup-guide.md#runtime-config-disclosure).
 
-These are source-checked recipes for this OpenRig release, not a native test of
-every provider/version/config combination. Codex 0.155.1 was observed requesting
-approval for local `rig` calls under workspace-write with network disabled;
-that does not establish every timeout's cause. Provider docs evolve: check your
-installed version and effective settings. Newer permission-profile or automatic
-review features are provider choices, not implicit OpenRig capabilities. Private
-startup fixes do not change the released permission defaults described here.
+These recipes do not establish every provider/version/config combination.
+Check the installed version and effective settings. Newer permission-profile or
+automatic review features are provider choices, not implicit OpenRig capabilities.
+Selecting rules or a broader mode does not change the shipped defaults.

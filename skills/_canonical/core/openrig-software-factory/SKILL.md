@@ -51,13 +51,12 @@ model turns, but delivered wakes and resumed work **can spend tokens**. Prefer
 an event-driven wait to frequent empty reminders. Wakes cannot answer a user
 question, clear a permission prompt or guarantee progress.
 
-**Choose permissions before launching or assigning work.** Keep ordinary native
-prompts, or deliberately select the user's permissive policy after explaining
-its filesystem/network risks. [Find the compatible permission guide](#find-the-compatible-permission-guide)
-and read its **Opt-in permissive operation** section. Check the effective
-native mode: an OpenRig resource profile is not a permission profile, and a
-Codex YOLO sandbox setting alone does not select its approval policy. Preserve
-user defaults; never silently add global trust, network grants or bypass flags.
+**Choose permissions before launching or assigning work.** Offer ordinary prompts,
+persistent rules for selected commands, or deliberately broader access. Follow
+[Applying a permission policy](#find-the-compatible-permission-guide) to perform
+the user's choice and verify it in the target conversation. Preserve restrictions
+and unrelated settings. A whole `rig` allowance covers every verb, not just reads;
+it does not grant new product authority or change everyone else's defaults.
 
 Keep purpose, acceptance, decisions and evidence in existing project files.
 Deliver selected context and obtain each seat's scope reaction; retrieval alone
@@ -108,15 +107,17 @@ recipe results; do not silently substitute newer main or skip a missing companio
 
 ### Find the compatible permission guide
 
-Read **Opt-in permissive operation** (`#opt-in-permissive-operation`), including
-its Codex, Claude Code and already-running guidance, in the matching guide below.
-These paths are relative to the named root, not to this skill's directory:
+Retrieve the maintained procedure with
+`rig context get skills/applying-a-permission-policy/SKILL.md`.
+For source or archive readers, locate it below; the companion getting-started
+guide contains optional broader launch-mode recipes under **Opt-in permissive
+operation**. These paths are relative to the named root, not this skill:
 
-| Reading from | Guide location |
+| Reading from | Procedure and guide, at the same version as this recipe |
 | --- | --- |
-| Source checkout, including `skills/_canonical` | `docs/reference/getting-started.md` below that repository's root, at the same tag or commit as this recipe. |
-| npm installation | `@openrig/cli/daemon/docs/reference/getting-started.md` below the directory printed by `npm root -g` for a global installation, or `npm root` run from the project with the local installation. |
-| Unpacked npm archive | `package/daemon/docs/reference/getting-started.md` below the archive's extraction directory. |
+| Source checkout, including `skills/_canonical` | Below the repository root: `packages/daemon/assets/plugins/openrig-core/skills/applying-a-permission-policy/SKILL.md` and `docs/reference/getting-started.md`. |
+| npm installation | Below the matching `npm root -g` or local `npm root`: `@openrig/cli/daemon/assets/plugins/openrig-core/skills/applying-a-permission-policy/SKILL.md` and `@openrig/cli/daemon/docs/reference/getting-started.md`. |
+| Unpacked npm archive | Below the extraction directory: `package/daemon/assets/plugins/openrig-core/skills/applying-a-permission-policy/SKILL.md` and `package/daemon/docs/reference/getting-started.md`. |
 
 For installed guidance, use the npm installation that supplies the selected
 `rig` executable; another prefix or local project can contain a different version.

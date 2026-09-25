@@ -86,16 +86,17 @@ permissions, supplies a missing product decision or authorizes more work.
 
 ## Permissions at the point of work
 
-Before launching or giving the owner the first task, choose the ordinary prompted
-route or a deliberate permissive setup using the installed getting-started guide's
-“Opt-in permissive operation” and “Custom settings and precedence” sections.
-The public source entry links those same sections. Keep the user's defaults unless
-they choose otherwise. Codex sandbox and approval policy are distinct controls;
-actual native/provider behavior and managed restrictions determine what prompts.
-More permissive operation exposes files/network with fewer confirmations and
-still grants no extra product scope. Do not silently enable YOLO, global trust or
-network access. A running team can still need user decisions or native permission
-input; choose how those will be handled before leaving work unattended.
+Before the first task, ask the agent to configure your choice: keep prompts,
+remember selected commands, or deliberately select broader access. Use
+`rig context get skills/applying-a-permission-policy/SKILL.md`, or the
+[compatible source/package paths](../SKILL.md#find-the-compatible-permission-guide).
+The agent handles setup and verifies the actual conversation; the user need not
+hand-edit configuration or repeat an already authorized choice for every step.
+A whole `rig` rule covers all its verbs, including lifecycle and configuration;
+narrower rules are available. Preserve deny/ask rules and unrelated settings.
+Native/provider restrictions still apply, and permissions do not grant extra
+product scope. Agree how real user decisions will be answered before leaving
+work unattended.
 
 ## Grow the running team
 

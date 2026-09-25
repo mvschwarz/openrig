@@ -23,6 +23,10 @@ Review setup's plan before applying `rig setup`: it checks both native
 harnesses and cmux. This starter requires tmux and authenticated Codex; the
 other harness and terminal provider are optional for its repository task.
 
+Ask your agent to [configure your chosen permissions](docs/reference/getting-started.md#have-your-agent-configure-permissions):
+keep prompts, remember selected commands, or deliberately choose broader access.
+The agent handles the setup and verification; OpenRig's shipped defaults stay unchanged.
+
 ## First Run
 
 Check readiness, then give the owner a bounded outcome from your repository:
