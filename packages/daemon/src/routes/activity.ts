@@ -157,10 +157,12 @@ activityRoutes.post("/hooks", async (c) => {
     // correct token value — and a restore path selecting its resume MECHANISM by label would pick the
     // wrong one while looking healthy. The relay only posts session_identity with a runtime present;
     // an unmapped runtime skips the persist (tokenPersisted: false) rather than guessing a label.
+    // tokenPersisted reports the stored state, not format validity: a higher-provenance token
+    // (operator) refuses the hook write, which only counts as persisted when it already matches.
     const validation = validateResumeToken(runtime, sessionId);
-    if (validation.ok) {
-      sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook");
-    }
+    const tokenPersisted = validation.ok
+      && (sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook")
+        || sessionRegistry.resumeTokenMatches(resolved.sessionId, validation.resumeType, validation.token));
     eventBus.emit({
       type: "agent.session_identity",
       rigId: resolved.rigId,
@@ -171,7 +173,7 @@ activityRoutes.post("/hooks", async (c) => {
       provenance: "hook",
     });
 
-    return c.json({ ok: true, sessionId, provenance: "hook", tokenPersisted: validation.ok });
+    return c.json({ ok: true, sessionId, provenance: "hook", tokenPersisted });
   }
 
   // OPR.0.4.3.06 — startup proof ingestion. Mirrors session_identity: reuses
