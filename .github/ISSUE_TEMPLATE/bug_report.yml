@@ -1,0 +1,60 @@
+name: Bug report
+description: Something OpenRig does is wrong, or a command fails
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks. Include a small reproduction and the relevant versions.
+        This report will be public. Remove API keys, tokens, private prompts, personal details and private paths from commands, logs and configuration.
+        For a suspected vulnerability, follow our [security policy](https://github.com/mvschwarz/openrig/security/policy) instead of posting details here.
+  - type: input
+    id: version
+    attributes:
+      label: OpenRig version
+      description: Output of `rig --version`
+      placeholder: 0.5.14 (2edc1b7a)
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS, Node and tmux versions
+      placeholder: macOS 15.6, Node 22.22.1, tmux 3.5a
+    validations:
+      required: true
+  - type: dropdown
+    id: harness
+    attributes:
+      label: Harnesses involved
+      multiple: true
+      options:
+        - None / not sure
+        - Claude Code
+        - Codex
+        - Pi / Oh My Pi
+        - Other (say which below)
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: What you ran and what happened
+      description: The command(s), relevant redacted output, and what you expected instead. Paste text where you can; screenshots are useful for visual issues.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: state
+    attributes:
+      label: Instance state that might matter
+      description: Fresh install or upgrade? Include only relevant redacted lines from status output or your rig spec; do not upload full transcripts, credentials or your instance directory.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and Discussions for this.
+          required: true
+        - label: I am on the latest published version, or I said which version above.
+          required: true

@@ -1,0 +1,32 @@
+name: Feature request
+description: Something you want OpenRig to do that it does not
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For open-ended ideas or "how should this work" questions, [Discussions › Ideas](https://github.com/mvschwarz/openrig/discussions/categories/ideas) is the better place. Use this form when you can name the outcome you want.
+        This request will be public; use examples without credentials, private prompts or personal details.
+  - type: textarea
+    id: outcome
+    attributes:
+      label: What are you trying to do, and what stops you today?
+      description: Describe the situation, not the solution. One real example beats a general case.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like OpenRig to do?
+      description: A command, a setting, a behaviour. Rough is fine.
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How do you handle it now?
+  - type: input
+    id: version
+    attributes:
+      label: OpenRig version
+      placeholder: 0.5.14

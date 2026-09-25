@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Ask a question
+    url: https://github.com/mvschwarz/openrig/discussions/categories/q-a
+    about: Setup, usage and "is this expected" questions go to Discussions Q&A.
+  - name: Share an idea or a setup
+    url: https://github.com/mvschwarz/openrig/discussions
+    about: Ideas and Show and tell live in Discussions.
+  - name: Documentation
+    url: https://openrig.dev/docs
+    about: Getting started, CLI reference, configuration and troubleshooting.
+  - name: Security report
+    url: https://github.com/mvschwarz/openrig/security/policy
+    about: Read how to arrange a private report. Do not include vulnerability details in public issues.
