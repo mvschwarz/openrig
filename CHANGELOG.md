@@ -20,6 +20,25 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
   and explaining project versus user scope. Permission defaults are unchanged.
 - Explain provider hooks, workspace trust and other machine changes before the
   first launch.
+- Show Pi replies and tool progress, retain managed OpenRig context in shell
+  tools, and report bounded provider errors without exhausted-retry duplicates.
+- Submit pasted Pi messages explicitly and handle input beyond the terminal's
+  canonical buffer limit, including cancellation and oversized-input recovery.
+- Add a guarded retry for an added seat whose first startup failed before saving
+  startup context; retain its complete original configuration for recovery.
+
+Pi support remains qualified and supervised: controlled coding and continuity
+were verified, but ordinary useful-task completion and unattended teamwork remain
+unverified. Shipped permission defaults, the Node support range and SQLite version
+are unchanged; project work-policy features are outside this release.
+
+Includes [#37](https://github.com/mvschwarz/openrig/pull/37) by
+[@danielkuykendall23-boop](https://github.com/danielkuykendall23-boop), and
+[#38](https://github.com/mvschwarz/openrig/pull/38),
+[#39](https://github.com/mvschwarz/openrig/pull/39),
+[#45](https://github.com/mvschwarz/openrig/pull/45) and
+[#46](https://github.com/mvschwarz/openrig/pull/46) by
+[@mvschwarz](https://github.com/mvschwarz).
 
 **Known compatibility limitation:** on macOS arm64 with Node 24, SQLite dependency
 installation can fail when a suitable prebuilt binary is unavailable, and
