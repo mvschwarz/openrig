@@ -21,6 +21,8 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import readline from "node:readline";
+import { PassThrough } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -31,38 +33,113 @@ import {
 } from "./pi-runner-protocol.js";
 
 // ── Submitted input boundaries ─────────────────────────────────────────────
-// TmuxAdapter.sendText uses bracketed paste; sendKeys supplies Enter separately.
-// Embedded paste newlines reach canonical stdin before that Enter. Keep them
-// inside the explicit paste frame, however long delivery takes. Unframed human
-// lines submit immediately; a quiet timer cannot distinguish either boundary.
+// Canonical TTY buffers can overflow before Node sees even the paste terminator.
+// Use Node's line editor in raw mode, with only paste framing handled here.
+export const MAX_PI_INPUT_BYTES = 1024 * 1024;
 
-export class PasteAggregator {
-  private buffer = "";
-  private pasting = false;
+export function createRunnerInput(
+  input: NodeJS.ReadStream,
+  output: NodeJS.WriteStream,
+  onSubmit: (block: string) => void,
+): readline.Interface {
+  const reject = () => output.write(
+    "[pi-runner] input rejected: maximum 1048576 UTF-8 bytes; send a smaller message. Ctrl-C clears unfinished input.\n",
+  );
+  const submit = (block: string) => {
+    if (Buffer.byteLength(block) > MAX_PI_INPUT_BYTES) reject();
+    else if (block.trim()) onSubmit(block);
+  };
+  // A pipe has no kernel line limit or terminal editing; each line is a message.
+  if (!input.isTTY || !output.isTTY) {
+    return readline.createInterface({ input, crlfDelay: Infinity }).on("line", submit);
+  }
 
-  constructor(private onFlush: (block: string) => void) {}
-
-  addLine(line: string): void {
-    let offset = 0;
-    while (offset < line.length) {
-      const marker = this.pasting ? "\u001b[201~" : "\u001b[200~";
-      const at = line.indexOf(marker, offset);
+  const keys = new PassThrough();
+  const editor = readline.createInterface({
+    input: keys, output, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
+  });
+  const decoder = new StringDecoder("utf8");
+  let pending = "";
+  let paste: string | null = null;
+  let pasteBytes = 0;
+  let discarded = false;
+  const setLine = (line: string, cursor: number) => {
+    // Node documents changing rl.line together with rl.cursor. The installed
+    // typings mark them readonly, so assign this pair through one explicit seam.
+    Object.assign(editor, { line, cursor });
+    editor.prompt(true);
+  };
+  const clear = () => setLine("", 0);
+  const consume = (text: string) => {
+    if (paste === null) {
+      keys.write(text);
+    } else if (!discarded) {
+      pasteBytes += Buffer.byteLength(text);
+      if (pasteBytes > MAX_PI_INPUT_BYTES) {
+        paste = "";
+        discarded = true;
+        clear();
+        reject();
+      } else paste += text;
+    }
+  };
+  const receive = (chunk: Buffer) => {
+    pending += decoder.write(chunk);
+    while (pending) {
+      const marker = paste === null ? "\u001b[200~" : "\u001b[201~";
+      const boundary = pending.indexOf(marker);
+      const interrupt = pending.indexOf("\u0003");
+      const at = boundary < 0 ? interrupt : interrupt < 0 ? boundary : Math.min(boundary, interrupt);
       if (at < 0) {
-        this.buffer += line.slice(offset);
+        // Retain only a possible split marker; normal editing keys go to Node.
+        let tail = Math.min(marker.length - 1, pending.length);
+        while (tail && !marker.startsWith(pending.slice(-tail))) tail--;
+        consume(pending.slice(0, pending.length - tail));
+        pending = pending.slice(pending.length - tail);
         break;
       }
-      this.buffer += line.slice(offset, at);
-      this.pasting = !this.pasting;
-      offset = at + marker.length;
+      consume(pending.slice(0, at));
+      pending = pending.slice(at + (at === interrupt ? 1 : marker.length));
+      if (at === interrupt) {
+        paste = null;
+        discarded = false;
+        clear();
+        output.write("\n[pi-runner] input cleared\n");
+        onSubmit("/abort");
+      } else if (paste === null) {
+        paste = "";
+        pasteBytes = 0;
+        discarded = false;
+      } else {
+        if (!discarded) {
+          const line = editor.line.slice(0, editor.cursor) + paste + editor.line.slice(editor.cursor);
+          if (Buffer.byteLength(line) > MAX_PI_INPUT_BYTES) { clear(); reject(); }
+          else {
+            // rl.write(text) treats pasted newlines as submits. These public
+            // editing fields insert the whole literal paste without submitting.
+            setLine(line, editor.cursor + paste.length);
+          }
+        }
+        paste = null;
+      }
     }
-    if (this.pasting) {
-      this.buffer += "\n";
-    } else {
-      const block = this.buffer;
-      this.buffer = "";
-      if (block.trim().length > 0) this.onFlush(block);
-    }
-  }
+  };
+  const wasRaw = input.isRaw;
+  const end = () => editor.close();
+  input.setRawMode(true);
+  output.write("\u001b[?2004h");
+  input.on("data", receive);
+  input.once("end", end);
+  editor.on("line", submit);
+  editor.once("close", () => {
+    input.removeListener("data", receive);
+    input.removeListener("end", end);
+    input.setRawMode(wasRaw);
+    input.pause();
+    keys.destroy();
+    output.write("\u001b[?2004l");
+  });
+  return editor;
 }
 
 // ── Pi event → mirror + activity mapping (pure, hermetically testable) ──────
@@ -523,28 +600,22 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   };
 
   const core = new RunnerCore(io, { sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId }, { catchUpSince });
-  const aggregator = new PasteAggregator((block) => core.handleUserBlock(block));
 
   readline.createInterface({ input: child.stdout }).on("line", (line) => core.handlePiLine(line));
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
     if (line.trim()) process.stdout.write(`[pi:err] ${line}\n`);
   });
-  // Ask tmux (and human terminals) to preserve paste boundaries. Keep canonical
-  // input so ordinary line editing remains available; readline reassembles UTF-8
-  // and marker bytes before passing complete lines to the aggregator.
-  if (process.stdin.isTTY && process.stdout.isTTY) {
-    process.stdout.write("\u001b[?2004h");
-    process.once("exit", () => process.stdout.write("\u001b[?2004l"));
-  }
-  readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on("line", (line) => aggregator.addLine(line));
+  const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block));
 
   child.on("error", (err) => {
     console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);
     core.handlePiExit(null);
+    input.close();
     process.exitCode = 1;
   });
   child.on("exit", (code) => {
     core.handlePiExit(code);
+    input.close();
     process.exitCode = code ?? 1;
   });
 
