@@ -6,6 +6,10 @@ OpenRig turns AI coding agents from a pile of terminal sessions into a persisten
 
 The terminal UI is the shared dashboard; the CLI drives work and coordination. The older web UI is in maintenance mode with best-effort support.
 
+Launching a rig writes provider hooks and workspace trust settings. Before
+running the commands below, review [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine)
+and back up the relevant files.
+
 ```bash
 npm install -g @openrig/cli
 rig setup --dry-run
