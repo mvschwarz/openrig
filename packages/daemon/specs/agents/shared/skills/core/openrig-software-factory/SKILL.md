@@ -90,8 +90,9 @@ recipe results; do not silently substitute newer main or skip a missing companio
 
 ## What has been observed
 
-A bounded macOS/Codex trial on 0.5.14 completed independently reviewed two-slice
-work, next-task pickup and a supported stop with setup assistance. It required
+A bounded macOS/Codex trial on a private 0.5.14-based candidate completed
+independently reviewed two-slice work, next-task pickup and a supported stop
+with setup assistance. It required
 **48 one-time approvals (34 owner, 14 checker)**. This is not an unattended or
 low-friction result. A genuine product-decision wait/answer and automatic refocus
 were not demonstrated; these revised instructions have not had a new native trial.
