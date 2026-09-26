@@ -39,6 +39,8 @@ const toneClass: Record<RuntimeBrandId, string> = {
   "claude-code": "border-[#9f5f4e]/40 bg-[#b06a57]/[0.12] text-[#62392f]",
   codex: "border-outline/50 bg-surface-lowest/75 text-on-surface",
   pi: "border-[#4c5b9e]/45 bg-[#5b6bb5]/[0.10] text-[#33406e]",
+  muse: "border-outline/50 bg-surface-lowest/75 text-on-surface",
+  opencode: "border-outline/50 bg-surface-lowest/75 text-on-surface",
   terminal: "border-outline/45 bg-inverse-surface/[0.08] text-on-surface",
   unknown: "border-outline-variant bg-surface-lowest/55 text-on-surface-variant",
 };
@@ -47,6 +49,8 @@ const inlineToneClass: Record<RuntimeBrandId, string> = {
   "claude-code": "text-[#62392f]",
   codex: "text-on-surface",
   pi: "text-[#33406e]",
+  muse: "text-on-surface",
+  opencode: "text-on-surface",
   terminal: "text-on-surface",
   unknown: "text-on-surface-variant",
 };
@@ -110,6 +114,24 @@ function PiGlyph({ className, title, decorative }: { className?: string; title: 
     <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
       <rect x="2" y="2" width="12" height="12" rx="2.4" fill="#5b6bb5" />
       <path d="M4.4 5.6h7.2M6.2 5.6v5M9.8 5.6v4.2c0 .5.3.8.8.8h.8" fill="none" stroke="#fafaf9" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function MuseGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <rect x="2" y="2" width="12" height="12" rx="6" fill="#0f766e" />
+      <path d="M5 11V5.8L8 9l3-3.2V11" fill="none" stroke="#fafaf9" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function OpencodeGlyph({ className, title, decorative }: { className?: string; title: string; decorative?: boolean }) {
+  return (
+    <svg viewBox="0 0 16 16" {...glyphA11y(title, decorative)} className={className}>
+      <rect x="2" y="2" width="12" height="12" rx="2.4" fill="#4d7c0f" />
+      <path d="M5 5.5 8 8l-3 2.5M8.5 5.5 11.5 8l-3 2.5" fill="none" stroke="#fafaf9" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -351,6 +373,8 @@ export function RuntimeMark({ runtime, size = "sm", className, title, decorative
   if (id === "claude-code") return <ClaudeGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "codex") return <CodexGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "pi") return <PiGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "muse") return <MuseGlyph className={cls} title={label} decorative={decorative} />;
+  if (id === "opencode") return <OpencodeGlyph className={cls} title={label} decorative={decorative} />;
   if (id === "terminal") return <TerminalGlyph className={cls} title={label} decorative={decorative} />;
   return <UnknownGlyph className={cls} title={label} decorative={decorative} />;
 }
