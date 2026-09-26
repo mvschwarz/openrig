@@ -112,3 +112,72 @@ test("a second run is a no-op", () => {
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test("leaves import-shaped text in comments, strings and templates unchanged", () => {
+  const text = [
+    '// import x from "@openrig/daemon/attention";',
+    "const example = 'import x from \"@openrig/daemon/attention\"';",
+    'const other = `import x from "@openrig/daemon/attention"`;',
+    "export {};",
+    "",
+  ].join("\n");
+  const f = fixture({ "dist/prose-imports.js": text });
+  try {
+    assert.deepEqual(rewriteDaemonImports({ cliDir: f.cliDir, daemonPackageJsonPath: f.daemonPackageJsonPath }), { rewritten: 0, files: 0 });
+    assert.equal(f.read("dist/prose-imports.js"), text);
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("rewrites real imports that carry comments or use a template literal", () => {
+  const f = fixture({
+    "dist/x.js": [
+      'const a = import /* kept */ ("@openrig/daemon/attention");',
+      'import b from /* kept */ "@openrig/daemon/attention";',
+      "const c = import(`@openrig/daemon/crash-cart`);",
+      "",
+    ].join("\n"),
+  });
+  try {
+    assert.deepEqual(rewriteDaemonImports({ cliDir: f.cliDir, daemonPackageJsonPath: f.daemonPackageJsonPath }), { rewritten: 3, files: 1 });
+    assert.equal(f.read("dist/x.js"), [
+      'const a = import /* kept */ ("../daemon/dist/attention-surface.js");',
+      'import b from /* kept */ "../daemon/dist/attention-surface.js";',
+      "const c = import(`../daemon/dist/crash-cart-surface.js`);",
+      "",
+    ].join("\n"));
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("fails on an unmapped subpath hidden behind a comment", () => {
+  const f = fixture({ "dist/x.js": 'const x = import /* kept */ ("@openrig/daemon/unknown");\n' });
+  try {
+    assert.throws(
+      () => rewriteDaemonImports({ cliDir: f.cliDir, daemonPackageJsonPath: f.daemonPackageJsonPath }),
+      /has no entry in the daemon exports map/,
+    );
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("fails on a non-literal module argument naming the package, and on unparseable files", () => {
+  const cases = [
+    ['const x = import("@openrig/daemon/" + name);\n', /non-literal module argument/],
+    ["const x = import(`@openrig/daemon/${name}`);\n", /non-literal module argument/],
+    ['const x = require("@openrig/daemon/" + name);\n', /non-literal module argument/],
+    ['import { from "@openrig/daemon/attention";\n', /cannot parse/],
+  ];
+  for (const [text, expected] of cases) {
+    const f = fixture({ "dist/x.js": text });
+    try {
+      assert.throws(() => rewriteDaemonImports({ cliDir: f.cliDir, daemonPackageJsonPath: f.daemonPackageJsonPath }), expected);
+      assert.equal(f.read("dist/x.js"), text);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }
+});
