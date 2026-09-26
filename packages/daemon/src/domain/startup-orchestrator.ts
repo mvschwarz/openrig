@@ -125,8 +125,10 @@ export class StartupOrchestrator {
   private readFile: (path: string) => string;
 
   async startNode(input: StartupInput): Promise<StartupResult> {
-    // #25: every launch, restore, relaunch, handover and expand passes through
-    // here, so the rig's managed-block destination is bound once for the adapter.
+    // #25: launch, restore replay, relaunch, continue and added members deliver
+    // guidance through here, so the rig's managed-block destination is bound once
+    // for the adapter. Handover does not come here: the successor launches directly
+    // and reads the file already written in its cwd.
     const claudeManagedBlockFile = new RigRepository(this.db).getRigClaudeManagedBlockFile(input.rigId);
     if (claudeManagedBlockFile) input = { ...input, binding: { ...input.binding, claudeManagedBlockFile } };
     const errors: string[] = [];
