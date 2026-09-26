@@ -8,13 +8,23 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
-## [Unreleased]
+## [0.5.16]
 
 - Let a rig write Claude Code's managed instruction blocks to `CLAUDE.local.md`
   instead of a tracked `CLAUDE.md`, with `managed_blocks: { claude-code: CLAUDE.local.md }`.
   The default stays `CLAUDE.md`, and Codex stays on `AGENTS.md`. Blocks already
   written to `CLAUDE.md` are not moved; remove them by hand after switching.
-  Thanks to @hvpaiva for reporting and proposing this (#25).
+  Thanks to [@hvpaiva](https://github.com/hvpaiva) for reporting and proposing
+  this ([#25](https://github.com/mvschwarz/openrig/issues/25)).
+- Add an advisory portability report for pull requests. It lists added lines
+  that contain machine-, network- or account-specific values and never fails
+  the check.
+- Show badges and a short demo of agents working in the README.
+
+Includes [#54](https://github.com/mvschwarz/openrig/pull/54) and
+[#56](https://github.com/mvschwarz/openrig/pull/56) by
+[@mvschwarz](https://github.com/mvschwarz). The Node support range and SQLite
+version are unchanged.
 
 ## [0.5.15]
 
