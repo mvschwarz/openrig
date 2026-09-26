@@ -7,7 +7,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import {
-  createRunnerInput, MAX_PI_INPUT_BYTES, RunnerCore, mapPiEvent, parseRunnerArgs,
+  createRunnerInput, MAX_PI_INPUT_BYTES, occupantGeneration, RunnerCore, mapPiEvent, parseRunnerArgs,
   prepareRunnerSidecar,
   type RunnerIo,
 } from "../src/adapters/pi-runner.js";
@@ -232,6 +232,31 @@ describe("RunnerCore identity + sidecar", () => {
     expect(lines.some((l) => l.startsWith(PI_RUNNER_EXIT_MARKER))).toBe(true);
     expect(sidecars.at(-1)!.exited).toEqual({ code: 1, at: "2026-07-06T10:00:00Z" });
     expect(activity.at(-1)).toMatchObject({ hookEvent: "Stop", subtype: "pi_exited" });
+  });
+
+  // W2a-1: without a carried generation the daemon cannot verify the claim
+  // (`generation_unverifiable`) and every pi seat stays `unknown` forever.
+  it("stamps the seat's occupant generation on the identity post and every activity POST", () => {
+    const f = fakeIo();
+    const core = new RunnerCore(f.io, { sessionName: SESSION, nodeId: "node-1", launchId: "launch-77", generation: "66df8fc8-aaaa" });
+    core.start();
+    core.handlePiLine(JSON.stringify({
+      type: "response", id: "pi-runner-get-state",
+      data: { sessionFile: SESSION_FILE, sessionId: "0197a2f0" },
+    }));
+    expect(f.activity.find((a) => a.eventFamily === "session_identity")).toMatchObject({ generation: "66df8fc8-aaaa" });
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    core.handlePiLine(JSON.stringify({ type: "agent_end" }));
+    core.handlePiExit(0);
+    expect(f.activity.length).toBeGreaterThan(1);
+    for (const post of f.activity) expect(post.generation).toBe("66df8fc8-aaaa");
+  });
+
+  it("no generation in the seat env → explicit null, never a forged claim", () => {
+    const { core, activity } = readyCore();
+    core.handlePiLine(JSON.stringify({ type: "agent_start" }));
+    expect(activity.find((a) => a.eventFamily === "session_identity")).toMatchObject({ generation: null });
+    expect(activity.at(-1)).toMatchObject({ hookEvent: "active", generation: null });
   });
 
   it("non-JSON pi stdout noise is mirrored verbatim, never swallowed", () => {
@@ -521,5 +546,27 @@ describe("cursor refresh via get_entries (QA RED, qitem-20260707020922)", () => 
       data: { sessionFile: SESSION_FILE, sessionId: "x" },
     }));
     expect(f.sidecars.at(-1)!.lastEntryId).toBe("e5");
+  });
+});
+
+// ── W2a-1: the seat's occupant generation reaches the activity payloads ───────
+
+describe("occupantGeneration (W2a-1)", () => {
+  it("reads the launch env the NodeLauncher mints for the seat", () => {
+    expect(occupantGeneration({ OPENRIG_OCCUPANT_GENERATION: "66df8fc8-1234" })).toBe("66df8fc8-1234");
+  });
+
+  it("trims, and treats a blank value as no claim (null, never an empty stamp)", () => {
+    expect(occupantGeneration({ OPENRIG_OCCUPANT_GENERATION: "  66df8fc8-1234\n" })).toBe("66df8fc8-1234");
+    expect(occupantGeneration({ OPENRIG_OCCUPANT_GENERATION: "   " })).toBeUndefined();
+  });
+
+  it("falls back to the legacy RIGGED_ alias, preferring the current name", () => {
+    expect(occupantGeneration({ RIGGED_OCCUPANT_GENERATION: "old-1" })).toBe("old-1");
+    expect(occupantGeneration({ OPENRIG_OCCUPANT_GENERATION: "new-1", RIGGED_OCCUPANT_GENERATION: "old-1" })).toBe("new-1");
+  });
+
+  it("an unmanaged seat with no generation env yields no claim", () => {
+    expect(occupantGeneration({})).toBeUndefined();
   });
 });
