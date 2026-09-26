@@ -49,7 +49,7 @@ Sending a message does not itself create a queue item; the owner records the tas
 
 ## See it running
 
-![Six OpenRig agents, Claude Code and Codex, working in their own terminals in Herdr (real footage, 9 seconds)](assets/readme/openrig-agents-working.gif)
+![The OpenRig TUI: the build rig as a graph, then as a table of seats with runtime, model, context and state, then one seat in detail (real recording, 10 seconds)](assets/readme/openrig-agents-working.gif)
 
 ## Community
 
