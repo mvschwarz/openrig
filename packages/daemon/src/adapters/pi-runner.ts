@@ -248,6 +248,21 @@ const GET_STATE_ID = "pi-runner-get-state";
 const CATCH_UP_ID = "pi-runner-catch-up";
 const CURSOR_REFRESH_ID = "pi-runner-cursor-refresh";
 
+/** W2a-1 — the SEAT's emitting occupant generation, read from the launch env the
+ *  same way the Claude/Codex relay reads it (activity-relay.cjs). NodeLauncher
+ *  mints it per occupancy into the seat's tmux environment, so the runner stamps
+ *  it source-bound on every activity POST. Without it the daemon's freshness gate
+ *  cannot verify the claim (`generation_unverifiable`) and every pi seat reads
+ *  `unknown` forever. Legacy RIGGED_ alias honored; a blank value carries no
+ *  claim and stays null — absence is recorded as its own state, never faked. */
+export function occupantGeneration(env: NodeJS.ProcessEnv): string | undefined {
+  for (const value of [env.OPENRIG_OCCUPANT_GENERATION, env.RIGGED_OCCUPANT_GENERATION]) {
+    const trimmed = value?.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
 export class RunnerCore {
   private streaming = false;
   private sessionFile: string | undefined;
@@ -258,7 +273,7 @@ export class RunnerCore {
 
   constructor(
     private io: RunnerIo,
-    private identity: { sessionName: string; nodeId?: string; launchId?: string },
+    private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
     private opts: { catchUpSince?: string } = {},
   ) {
     // The durable cursor seeds from the carried-over value (FR-5) so this
@@ -347,6 +362,7 @@ export class RunnerCore {
         sessionName: this.identity.sessionName,
         nodeId: this.identity.nodeId ?? null,
         runtime: "pi",
+        generation: this.identity.generation ?? null,
         hookEvent: "SessionStart",
         sessionId: this.sessionId ?? "unknown",
         sessionFile: this.sessionFile ?? null,
@@ -417,6 +433,9 @@ export class RunnerCore {
       sessionName: this.identity.sessionName,
       nodeId: this.identity.nodeId ?? null,
       runtime: "pi",
+      // W2a-1 — source-bound, so a hook from a replaced occupant reads as
+      // `generation_mismatch` at the daemon instead of crediting the live one.
+      generation: this.identity.generation ?? null,
       hookEvent,
       subtype,
       occurredAt: this.io.now(),
@@ -599,7 +618,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     now: () => new Date().toISOString(),
   };
 
-  const core = new RunnerCore(io, { sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId }, { catchUpSince });
+  const core = new RunnerCore(io, {
+    sessionName: args.sessionName,
+    nodeId: process.env.OPENRIG_NODE_ID,
+    launchId: args.launchId,
+    generation: occupantGeneration(process.env),
+  }, { catchUpSince });
 
   readline.createInterface({ input: child.stdout }).on("line", (line) => core.handlePiLine(line));
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
