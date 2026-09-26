@@ -1,0 +1,30 @@
+name: Portability report
+
+# Lists lines a pull request adds that contain values tied to one machine, network or account
+# (credentials, home paths, temporary paths, network addresses, email addresses). Findings never
+# fail the job; the author reads the report and decides what to change. An operational error (for
+# example a git failure) does fail it. See scripts/portability-report.mjs.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  portability-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Report added lines with machine-specific values
+        run: >
+          node scripts/portability-report.mjs
+          --from ${{ github.event.pull_request.base.sha }}
+          --to ${{ github.event.pull_request.head.sha }}
+          --out "$GITHUB_STEP_SUMMARY"
