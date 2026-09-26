@@ -14,6 +14,8 @@ export interface NodeBinding extends Binding {
    * restore). Absent = no policy attached → the env-driven floor/YOLO decision stands.
    * Present = authoritative for this seat (overrides the env read in BOTH directions). */
   launchPosture?: "floor" | "full_bypass";
+  /** #25: the rig's `managed_blocks.claude-code` file. Absent = CLAUDE.md. Only the Claude adapter reads it. */
+  claudeManagedBlockFile?: import("./managed-blocks.js").ClaudeManagedBlockFile;
 }
 
 // -- Resolved startup file with source-root provenance --

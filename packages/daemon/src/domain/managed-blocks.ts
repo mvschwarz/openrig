@@ -7,6 +7,13 @@ import nodePath from "node:path";
 export const MANAGED_BLOCK_START = (id: string) => `<!-- BEGIN OpenRig MANAGED BLOCK: ${id} -->`;
 export const MANAGED_BLOCK_END = (id: string) => `<!-- END OpenRig MANAGED BLOCK: ${id} -->`;
 const LEGACY_BLOCK_START = (id: string) => `<!-- BEGIN RIGGED MANAGED BLOCK: ${id} -->`;
+
+// #25 — the file a rig's Claude Code seats receive managed blocks in
+// (`managed_blocks: { claude-code: <file> }`). This is the set supported in
+// this release, not every file Claude Code can load.
+export const CLAUDE_MANAGED_BLOCK_FILES = ["CLAUDE.md", "CLAUDE.local.md"] as const;
+export type ClaudeManagedBlockFile = (typeof CLAUDE_MANAGED_BLOCK_FILES)[number];
+export const DEFAULT_CLAUDE_MANAGED_BLOCK_FILE: ClaudeManagedBlockFile = "CLAUDE.md";
 const LEGACY_BLOCK_END = (id: string) => `<!-- END RIGGED MANAGED BLOCK: ${id} -->`;
 
 export interface ManagedBlockMergeFsOps {

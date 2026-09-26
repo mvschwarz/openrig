@@ -8,7 +8,7 @@ import { RigNotFoundError } from "./errors.js";
 import type { ResumeMetadataRefresher } from "./resume-metadata-refresher.js";
 import fs from "node:fs";
 import nodePath from "node:path";
-import { removeManagedBlocksFromFile } from "./managed-blocks.js";
+import { removeManagedBlocksFromFile, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE } from "./managed-blocks.js";
 import { stopTranscriptRotation } from "./transcript-rotation.js";
 
 export interface TeardownResult {
@@ -124,7 +124,7 @@ export class RigTeardownOrchestrator {
       if (killResult.ok || (killResult as { code?: string }).code === "session_not_found") {
         // Success or already gone — update DB atomically
         this.atomicNodeCleanup(session);
-        this.cleanupManagedGuidanceFileForNode(session.runtime, session.cwd);
+        this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd);
         result.sessionsKilled++;
       } else {
         // Real kill failure — don't update this node
@@ -206,16 +206,17 @@ export class RigTeardownOrchestrator {
       WHERE rig_id = ?
     `).all(rigId) as Array<{ runtime: string | null; cwd: string | null }>;
     for (const row of rows) {
-      this.cleanupManagedGuidanceFileForNode(row.runtime, row.cwd);
+      this.cleanupManagedGuidanceFileForNode(rigId, row.runtime, row.cwd);
     }
   }
 
-  private cleanupManagedGuidanceFileForNode(runtime: string | null, cwd: string | null): void {
+  private cleanupManagedGuidanceFileForNode(rigId: string, runtime: string | null, cwd: string | null): void {
     if (!runtime || !cwd) {
       return;
     }
+    // #25: clean only the rig's selected Claude file; the other file is never touched.
     const targetPath = runtime === "claude-code"
-      ? nodePath.join(cwd, "CLAUDE.md")
+      ? nodePath.join(cwd, this.deps.rigRepo.getRigClaudeManagedBlockFile(rigId) ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE)
       : runtime === "codex"
         ? nodePath.join(cwd, "AGENTS.md")
         : null;

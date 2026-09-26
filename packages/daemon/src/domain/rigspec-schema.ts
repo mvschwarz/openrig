@@ -14,6 +14,7 @@ import type {
 } from "./types.js";
 import { WORKSPACE_KINDS } from "./types.js";
 import { validateSafePath } from "./path-safety.js";
+import { CLAUDE_MANAGED_BLOCK_FILES } from "./managed-blocks.js";
 import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agent-manifest.js";
 import { aliasModelPinAdvisory } from "./spec-validation-advisory.js";
 import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
@@ -44,7 +45,7 @@ const VALID_WAIT_TARGET_CONDITIONS = new Set(["healthy"]);
 const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string[]);
 
 const RIG_KEYS = new Set([
-  "version", "name", "summary", "culture_file", "permission_policy", "docs",
+  "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
   "startup", "services", "workspace", "pods", "edges",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
@@ -59,6 +60,21 @@ const EDGE_KEYS = new Set(["kind", "from", "to"]);
  * unknown structural key before that literal can make accepted input vanish.
  * This stays deliberately small: one check over the four topology object
  * levels, not a second schema framework. */
+function validateManagedBlocks(raw: unknown): string[] {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return ['managed_blocks: must be a mapping such as { claude-code: CLAUDE.local.md }'];
+  }
+  const errors: string[] = [];
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (key !== "claude-code") {
+      errors.push(`managed_blocks.${key}: unsupported runtime "${key}"; only "claude-code" is configurable`);
+    } else if (!(CLAUDE_MANAGED_BLOCK_FILES as readonly unknown[]).includes(value)) {
+      errors.push(`managed_blocks.claude-code: must be one of ${CLAUDE_MANAGED_BLOCK_FILES.join(", ")} (got ${JSON.stringify(value)})`);
+    }
+  }
+  return errors;
+}
+
 function rejectUnknownTopologyKeys(
   raw: unknown,
   allowed: ReadonlySet<string>,
@@ -156,6 +172,12 @@ export class RigSpecSchema {
       if (refErr) errors.push(refErr);
     }
 
+    // #25: optional per-runtime managed-block destination. Only claude-code is
+    // configurable in this release; Codex stays on AGENTS.md.
+    if (obj["managed_blocks"] !== undefined) {
+      errors.push(...validateManagedBlocks(obj["managed_blocks"]));
+    }
+
     // pods: required array
     if (!obj["pods"] || !Array.isArray(obj["pods"])) {
       errors.push("pods: required non-empty array");
@@ -223,6 +245,7 @@ export class RigSpecSchema {
       summary: raw["summary"] as string | undefined,
       cultureFile: raw["culture_file"] as string | undefined,
       permissionPolicy: raw["permission_policy"] as string | undefined,
+      managedBlocks: raw["managed_blocks"] as RigSpec["managedBlocks"],
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
       services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,

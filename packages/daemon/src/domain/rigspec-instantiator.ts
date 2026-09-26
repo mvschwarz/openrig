@@ -642,6 +642,10 @@ export class PodRigInstantiator {
         if (rigSpec.workspace) {
           this.deps.rigRepo.setRigWorkspace(materializedRigId, rigSpec.workspace);
         }
+        // #25: the Claude managed-block destination is rig-row state (both persist sites).
+        if (rigSpec.managedBlocks?.["claude-code"]) {
+          this.deps.rigRepo.setRigClaudeManagedBlockFile(materializedRigId, rigSpec.managedBlocks["claude-code"]);
+        }
 
         // OPR.0.4.8.3 Seam B: persist the rig-level permission_policy REF (raw, like role) —
         // this is ONE of TWO rig-persist sites (materializeValidatedSpec + instantiate); missing
@@ -1263,6 +1267,10 @@ export class PodRigInstantiator {
       // record. Whoami / node-inventory read it via getRigWorkspace().
       if (rigSpec.workspace) {
         this.deps.rigRepo.setRigWorkspace(rigId, rigSpec.workspace);
+      }
+      // #25: the second rig-persist site (see materializeValidatedSpec).
+      if (rigSpec.managedBlocks?.["claude-code"]) {
+        this.deps.rigRepo.setRigClaudeManagedBlockFile(rigId, rigSpec.managedBlocks["claude-code"]);
       }
       // OPR.0.4.8.3 Seam B: the SECOND rig-persist site (bootstrap instantiate path) —
       // both sites must write or the rig ref silently drops on one instantiate path.
@@ -1943,7 +1951,12 @@ export class PodRigInstantiator {
       // P17 (finding A2): the conflict detector's resolver, UNINJECTED since the
       // 4.8 restack dropped the warnings-site threading — without it every entry
       // classified safe_projection and divergent targets overwrote silently.
-      resolveTargetPath: claudeConflictTargetPath,
+      // #25: a Claude seat's guidance conflict target is the rig's selected file (rig row,
+      // the same source startNode binds for the write).
+      resolveTargetPath: (category, effectiveId, cwd, sourcePath) => claudeConflictTargetPath(
+        category, effectiveId, cwd, sourcePath,
+        input.member.runtime === "claude-code" ? this.deps.rigRepo.getRigClaudeManagedBlockFile(input.rigId) ?? undefined : undefined,
+      ),
       lastHashLookup: (targetPath) => projectionManifest.lastHash(targetPath),
     });
     if (!planResult.ok) {

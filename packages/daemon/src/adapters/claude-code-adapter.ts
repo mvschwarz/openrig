@@ -11,7 +11,7 @@ import type {
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
-import { mergeManagedBlock } from "../domain/managed-blocks.js";
+import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
@@ -114,7 +114,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       }
 
       try {
-        const didProject = this.projectEntry(entry, binding.cwd);
+        const didProject = this.projectEntry(entry, binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE);
         if (didProject) {
           projected.push(entry.effectiveId);
         } else {
@@ -174,7 +174,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
         switch (hint) {
           case "guidance_merge": {
-            const targetPath = nodePath.join(binding.cwd, "CLAUDE.md");
+            const targetPath = nodePath.join(binding.cwd, binding.claudeManagedBlockFile ?? DEFAULT_CLAUDE_MANAGED_BLOCK_FILE);
             const merged = this.mergeGuidance(targetPath, file.path, content);
             if (!merged) continue; // rig-role skip: do not count as delivered
             break;
@@ -421,13 +421,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return { ok: false, error: "Claude resume failed: timed out waiting for Claude to become active" };
   }
 
-  private projectEntry(entry: ProjectionEntry, cwd: string): boolean {
+  private projectEntry(entry: ProjectionEntry, cwd: string, managedBlockFile: ClaudeManagedBlockFile): boolean {
     if (entry.category === "runtime_resource" && this.applyRuntimeResource(entry, cwd)) {
       return true;
     }
 
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
-      const targetPath = nodePath.join(cwd, "CLAUDE.md");
+      const targetPath = nodePath.join(cwd, managedBlockFile);
       const content = this.fs.readFile(entry.absolutePath);
       return this.mergeGuidance(targetPath, entry.effectiveId, content);
     }
