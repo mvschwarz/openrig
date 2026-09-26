@@ -1167,6 +1167,8 @@ export interface RigSpec {
   /** OPR.0.4.8.3 Seam B: optional rig-level permission_policy REF (builtin:<name> or a
    *  spec-relative custom path). Absent = the floor. A per-member ref overrides this. */
   permissionPolicy?: string;
+  /** #25: per-runtime managed-block destination. Absent = CLAUDE.md. */
+  managedBlocks?: { "claude-code"?: import("./managed-blocks.js").ClaudeManagedBlockFile };
   docs?: RigSpecDoc[];
   startup?: StartupBlock;
   services?: RigServicesSpec;

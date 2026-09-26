@@ -5,6 +5,7 @@ import { classifyResourceProjection } from "./conflict-detector.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "./profile-resolver.js";
 import type { ResourceCollision } from "./agent-resolver.js";
 import type { ResolvedStartupFile } from "./runtime-adapter.js";
+import { DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "./managed-blocks.js";
 
 // -- Types --
 
@@ -292,6 +293,7 @@ export function claudeConflictTargetPath(
   effectiveId: string,
   cwd: string,
   sourcePath?: string,
+  managedBlockFile: ClaudeManagedBlockFile = DEFAULT_CLAUDE_MANAGED_BLOCK_FILE,
 ): string | null {
   switch (category) {
     case "skill":
@@ -299,7 +301,7 @@ export function claudeConflictTargetPath(
     case "subagent":
       return sourcePath ? nodePath.join(cwd, ".claude", "agents", nodePath.basename(sourcePath)) : null;
     case "guidance":
-      return nodePath.join(cwd, "CLAUDE.md");
+      return nodePath.join(cwd, managedBlockFile);
     default:
       return null; // plugin / runtime_resource: merged or dir-shaped — deferred
   }

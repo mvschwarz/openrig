@@ -12,6 +12,7 @@ import type { ProjectionPlan } from "./projection-planner.js";
 import { issueStartupChallenge } from "./startup-proof.js";
 import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
+import { RigRepository } from "./rig-repository.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 
 // -- Types --
@@ -124,6 +125,10 @@ export class StartupOrchestrator {
   private readFile: (path: string) => string;
 
   async startNode(input: StartupInput): Promise<StartupResult> {
+    // #25: every launch, restore, relaunch, handover and expand passes through
+    // here, so the rig's managed-block destination is bound once for the adapter.
+    const claudeManagedBlockFile = new RigRepository(this.db).getRigClaudeManagedBlockFile(input.rigId);
+    if (claudeManagedBlockFile) input = { ...input, binding: { ...input.binding, claudeManagedBlockFile } };
     const errors: string[] = [];
     let continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" = input.resumeToken
       ? "resumed"

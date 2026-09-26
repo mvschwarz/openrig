@@ -102,6 +102,7 @@ export class RigSpecCodec {
     if (spec.cultureFile) doc["culture_file"] = spec.cultureFile;
     // OPR.0.4.8.3 Seam B: rig-level permission_policy ref round-trips through serialization.
     if (spec.permissionPolicy) doc["permission_policy"] = spec.permissionPolicy;
+    if (spec.managedBlocks) doc["managed_blocks"] = { ...spec.managedBlocks };
     if (spec.docs && spec.docs.length > 0) doc["docs"] = spec.docs.map((d) => ({ path: d.path }));
     if (spec.startup) doc["startup"] = serializeStartupBlock(spec.startup);
     if (spec.services) doc["services"] = serializeServices(spec.services);

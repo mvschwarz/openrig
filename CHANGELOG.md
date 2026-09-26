@@ -8,6 +8,14 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [Unreleased]
+
+- Let a rig write Claude Code's managed instruction blocks to `CLAUDE.local.md`
+  instead of a tracked `CLAUDE.md`, with `managed_blocks: { claude-code: CLAUDE.local.md }`.
+  The default stays `CLAUDE.md`, and Codex stays on `AGENTS.md`. Blocks already
+  written to `CLAUDE.md` are not moved; remove them by hand after switching.
+  Thanks to @hvpaiva for reporting and proposing this (#25).
+
 ## [0.5.15]
 
 - Recognize Codex through shell and Node launchers during startup and recovery,

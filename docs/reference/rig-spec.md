@@ -175,6 +175,7 @@ edges:
 | `summary` | string | no | — | Human-readable description. Shown in spec library, review surfaces, and `rig specs show`. |
 | `culture_file` | string | no | — | Relative path to a rig-wide culture/constitution file. Must be a safe relative path (no `..`, no absolute). |
 | `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute). Absent leaves the default floor. A member may set its own `permission_policy`, which takes precedence over the rig-level one. See "Attaching a permission policy" below. |
+| `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex members always use `AGENTS.md`. See "Choosing the Claude instruction file" below. |
 | `docs` | Doc[] | no | — | Documentation files that should travel with the rig. Included in rig bundles. Each entry has a `path` field (safe relative path). The engine does not consume these — they are for humans and agents setting up the environment before launch. |
 | `startup` | StartupBlock | no | — | Rig-level startup files and actions. Applied to all members via the startup layering model. |
 | `services` | ServicesBlock | no | — | Optional managed services (Docker Compose). When present, services boot before any agent launches. |
@@ -204,6 +205,34 @@ select launch flags; config-surface policies still need native configuration
 application and inspection. In particular, `builtin:yolo` selects Codex's
 `danger-full-access` sandbox without forcing its approval policy, and replaces
 any `codex_config_profile` argument. See [practical permission choices](getting-started.md#opt-in-permissive-operation).
+
+### Choosing the Claude instruction file
+
+OpenRig writes its instructions for Claude Code members into managed blocks in
+the member's working directory. By default the file is `CLAUDE.md`. If your
+repository tracks `CLAUDE.md`, write the blocks to `CLAUDE.local.md` instead:
+
+```yaml
+managed_blocks:
+  claude-code: CLAUDE.local.md
+```
+
+Claude Code loads `CLAUDE.local.md` from the working directory as well. By
+convention the file is kept out of git, for example with a `.gitignore` entry.
+
+- Accepted values are `CLAUDE.md` and `CLAUDE.local.md`. Any other value or
+  runtime key is rejected before a member launches.
+- The setting applies to launch, restore, relaunch, handover, adding members,
+  and export. `rig down` removes OpenRig's blocks from the selected file only.
+- OpenRig never edits, moves or deletes blocks in the other file.
+
+A rig that already wrote blocks into `CLAUDE.md` keeps them there after you
+switch. Until you remove them, `CLAUDE.md` stays modified and Claude Code loads
+both copies. Delete each `<!-- BEGIN OpenRig MANAGED BLOCK: … -->` …
+`<!-- END OpenRig MANAGED BLOCK: … -->` section by hand, or restore the tracked
+file with `git restore CLAUDE.md`. Running `rig down` on a rig that still uses
+the default is not a substitute: it strips every OpenRig block from that
+directory's `CLAUDE.md`, including blocks written by other rigs.
 
 ---
 

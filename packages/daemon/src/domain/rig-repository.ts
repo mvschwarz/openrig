@@ -3,6 +3,7 @@ import { resolveActiveOccupantRow } from "./active-occupant.js";
 import { resolve } from "node:path";
 import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
+import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
 import type {
   Rig,
   Node,
@@ -203,6 +204,22 @@ export class RigRepository {
     const row = this.db.prepare("SELECT permission_policy FROM rigs WHERE id = ?")
       .get(rigId) as { permission_policy: string | null } | undefined;
     return row?.permission_policy ?? null;
+  }
+
+  /** #25 — persist the rig's selected Claude managed-block file (migration 085), or null for
+   *  the CLAUDE.md default. Mirrors setRigPermissionPolicy. */
+  setRigClaudeManagedBlockFile(rigId: string, file: ClaudeManagedBlockFile | null): void {
+    if (!this.hasRigColumn("claude_managed_block_file")) return;
+    this.db.prepare("UPDATE rigs SET claude_managed_block_file = ?, updated_at = ? WHERE id = ?")
+      .run(file ?? null, new Date().toISOString(), rigId);
+  }
+
+  /** #25 — the rig's selected Claude managed-block file, or null when it uses the default. */
+  getRigClaudeManagedBlockFile(rigId: string): ClaudeManagedBlockFile | null {
+    if (!this.hasRigColumn("claude_managed_block_file")) return null;
+    const row = this.db.prepare("SELECT claude_managed_block_file FROM rigs WHERE id = ?")
+      .get(rigId) as { claude_managed_block_file: ClaudeManagedBlockFile | null } | undefined;
+    return row?.claude_managed_block_file ?? null;
   }
 
   /** Seam B Guard-F1 — persist the RIG-level resolved attachment provenance (migration 058).
