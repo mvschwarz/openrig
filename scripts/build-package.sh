@@ -136,35 +136,10 @@ if [ -d "$REPO_ROOT/docs/reference" ]; then
   cp -r "$REPO_ROOT/docs/reference/"* "$CLI_DIR/daemon/docs/reference/"
 fi
 
-# RESOLVER-VISIBLE daemon (Q2 packaging fix). The cli's RUNTIME bare-specifier value-imports —
-# await import("@openrig/daemon/{crash-cart,gateway-protocol,gateway-human-registry}") — resolve via
-# @openrig/daemon's EXPORTS MAP, so the daemon must live where node's resolver looks:
-# <cli>/node_modules/@openrig/daemon. (The <cli>/daemon dir above is resolver-INVISIBLE — it is the
-# path the cli SPAWNS the daemon PROCESS from, not an import target.) @openrig/daemon is UNPUBLISHED,
-# so packages/cli lists it in "bundledDependencies": npm pack ships THIS copy in the tarball and npm
-# install uses it, never the 404 registry. We assemble a CLEAN copy (package.json + dist only) that
-# REPLACES the dev workspace symlink. The daemon's own runtime deps (hono/tar/ulid/yaml/@hono/*) and
-# better-sqlite3 (NATIVE — builds fresh on target, never prebuilt) are NOT nested here: the daemon dep
-# set is a SUBSET of the cli's, so they stay HOISTED as the cli's own deps and resolve by node walking
-# up to <cli>/node_modules.
-DAEMON_NM="$CLI_DIR/node_modules/@openrig/daemon"
-rm -rf "$DAEMON_NM"
-mkdir -p "$DAEMON_NM/dist"
-# Q2 break #5 fix: STRIP the bundled daemon's dependency fields. The daemon's runtime deps
-# (better-sqlite3 + @hono/node-server,@hono/node-ws,hono,tar,ulid,yaml) are a strict SUBSET of the
-# cli's own deps, so on target they must be fetched ONCE at the cli level from the registry (COMPLETE,
-# with better-sqlite3's binding.gyp) and resolved by node walking UP to <cli>/node_modules. If the
-# BUNDLED daemon package.json still DECLARES them, `npm install -g` treats them as bundle-provided
-# UNDER @openrig/daemon and leaves an EMPTY <cli>/node_modules/better-sqlite3 (no binding.gyp →
-# 'prebuild-install: not found' + 'binding.gyp not found' = break #5). Runtime is unaffected: node
-# resolves by hoisting; a package.json `dependencies` field is only consulted by npm at INSTALL time.
-node -e '
-  const fs = require("fs");
-  const p = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  delete p.dependencies; delete p.devDependencies; delete p.optionalDependencies; delete p.peerDependencies;
-  fs.writeFileSync(process.argv[2], JSON.stringify(p, null, 2) + "\n");
-' "$DAEMON_DIR/package.json" "$DAEMON_NM/package.json"
-cp -r "$DAEMON_DIR/dist/"* "$DAEMON_NM/dist/"
+# Earlier builds assembled a bundled copy of the unpublished @openrig/daemon here. The package now
+# imports the shipped daemon/dist directly (rewrite step below), so remove any stale copy: it would
+# otherwise shadow the development workspace link for code under packages/cli.
+rm -rf "$CLI_DIR/node_modules/@openrig/daemon"
 
 # UI: dist
 mkdir -p "$CLI_DIR/ui/dist"
@@ -173,6 +148,11 @@ cp -r "$UI_DIR/dist/"* "$CLI_DIR/ui/dist/"
 # TUI: dist (public openrig-tui bin declared by the CLI package)
 mkdir -p "$CLI_DIR/tui/dist"
 cp -r "$TUI_DIR/dist/"* "$CLI_DIR/tui/dist/"
+
+# The CLI and TUI import daemon code as @openrig/daemon/<subpath>. That package is not published, so
+# rewrite those specifiers in the staged JS to the daemon/dist copy shipped above (#66). Fails the
+# build on an unmapped or unstaged subpath and on any daemon import left afterwards.
+node "$REPO_ROOT/scripts/rewrite-daemon-imports.mjs"
 
 # Report
 echo ""

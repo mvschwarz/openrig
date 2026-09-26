@@ -1,19 +1,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { remainingDaemonImports } from "./rewrite-daemon-imports.mjs";
 
 // 51-04 Q2 — the pack-step proof. The old guard only string-matched `npm pack`, so it stayed GREEN
 // over THREE stacked breaks (root package / no bin / non-standalone-installable). Tiers:
-//   1. fast OFFLINE pre-check — the tarball is @openrig/cli, ships the `rig` bin, and BUNDLES the
-//      (unpublished) @openrig/daemon;
-//   2. BUNDLE PROOF (host-runnable) — assemble via build-package.sh + pack, and prove the tarball
-//      ships <cli>/node_modules/@openrig/daemon with the EXACT exports-map surfaces the cli's four
-//      bare-specifier value-imports resolve to. This is what makes the standalone install stop 404ing
-//      on @openrig/daemon (verified: the install now progresses past it to the native build);
+//   1. fast OFFLINE pre-check — the tarball is @openrig/cli, ships the `rig` bin, and does NOT depend
+//      on the unpublished @openrig/daemon (#66: package managers that ignore bundling tried the
+//      registry and got a 404);
+//   2. PACKAGE PROOF (host-runnable) — assemble via build-package.sh + pack, and prove the tarball
+//      ships the daemon exports-map surfaces under daemon/dist and that no packaged JS still imports
+//      @openrig/daemon;
 //   3. FULL install+LOAD GATE (opt-in RUN_TESTBED_PACK_GATE=1) — the desk-ruled effect proof on a
 //      CLEAN target: install + run a command that LOADS the daemon. It requires TARGET build tools
 //      because better-sqlite3 is NEVER prebuilt and builds fresh on target (desk caveat 1); on a host
@@ -22,47 +23,67 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
 const CLI_DIR = join(REPO_ROOT, "packages", "cli");
-// The 3 daemon exports-map subpaths the cli's runtime value-imports resolve through.
+// Daemon exports-map surfaces the cli's runtime value-imports resolve to after packaging.
 const DAEMON_SURFACES = [
-  "node_modules/@openrig/daemon/dist/gateway-protocol-surface.js",
-  "node_modules/@openrig/daemon/dist/gateway-human-registry-surface.js",
-  "node_modules/@openrig/daemon/dist/crash-cart-surface.js",
+  "daemon/dist/gateway-human-registry-surface.js",
+  "daemon/dist/crash-cart-surface.js",
+  "daemon/dist/gateway-slack-surface.js",
 ];
 
-test("pre-check: @openrig/cli, ships the `rig` bin, and BUNDLES the unpublished @openrig/daemon", () => {
+test("pre-check: @openrig/cli, ships the `rig` bin, and does not depend on the unpublished @openrig/daemon", () => {
   const pkg = JSON.parse(readFileSync(join(CLI_DIR, "package.json"), "utf8"));
   assert.equal(pkg.name, "@openrig/cli", "must pack @openrig/cli, not the root openrig");
   assert.equal(pkg.bin?.rig, "dist/bin-wrapper.js", "@openrig/cli must declare the `rig` bin");
-  assert.ok(Array.isArray(pkg.bundledDependencies) && pkg.bundledDependencies.includes("@openrig/daemon"),
-    "@openrig/daemon (unpublished) must be in bundledDependencies so npm install uses the bundle, never the 404 registry");
+  for (const field of ["dependencies", "optionalDependencies", "peerDependencies"]) {
+    assert.equal(pkg[field]?.["@openrig/daemon"], undefined, `@openrig/daemon must not be in ${field} (it is unpublished)`);
+  }
+  for (const field of ["bundledDependencies", "bundleDependencies"]) {
+    assert.ok(!(pkg[field] ?? []).includes("@openrig/daemon"), `@openrig/daemon must not be in ${field}`);
+  }
 });
 
-test("bundle proof: the assembled tarball ships @openrig/daemon's exports-map surfaces (standalone resolution)", () => {
-  // assemble (bundles daemon into <cli>/node_modules/@openrig/daemon) — heavy but no install/native build
+test("package proof: the tarball ships the daemon surfaces and no packaged JS imports @openrig/daemon", () => {
+  // assemble (stages daemon/, rewrites daemon imports) — heavy but no install/native build
   execFileSync("bash", [join(REPO_ROOT, "scripts", "build-package.sh")], { cwd: REPO_ROOT, stdio: "inherit" });
-  assert.ok(existsSync(join(CLI_DIR, "node_modules", "@openrig", "daemon", "package.json")),
-    "build-package.sh must assemble a resolver-visible <cli>/node_modules/@openrig/daemon");
+  assert.ok(!existsSync(join(CLI_DIR, "node_modules", "@openrig", "daemon")),
+    "build-package.sh must not leave a bundled <cli>/node_modules/@openrig/daemon copy");
 
   const tgz = execFileSync("npm", ["pack", "--silent"], { cwd: CLI_DIR, encoding: "utf8" }).trim().split("\n").filter(Boolean).pop();
   const tgzPath = join(CLI_DIR, tgz);
+  const extract = mkdtempSync(join(tmpdir(), "q2-pack-content-"));
   try {
     const listing = execFileSync("tar", ["-tzf", tgzPath], { encoding: "utf8" });
     assert.match(listing, /^package\/dist\/bin-wrapper\.js$/m, "the tarball must ship the `rig` bin");
-    assert.match(listing, /^package\/node_modules\/@openrig\/daemon\/package\.json$/m, "must BUNDLE @openrig/daemon (its package.json + exports map)");
+    assert.match(listing, /^package\/tui\/dist\/main\.js$/m, "the tarball must ship the `openrig-tui` bin");
+    assert.doesNotMatch(listing, /^package\/node_modules\//m, "the tarball must not bundle node_modules");
     for (const surface of DAEMON_SURFACES) {
       assert.match(listing, new RegExp(`^package/${surface.replace(/[.]/g, "\\.")}$`, "m"),
-        `the bundled daemon must ship ${surface} (a value-import resolution target)`);
+        `the shipped daemon must include ${surface} (a value-import resolution target)`);
     }
-    // better-sqlite3 (native) must NOT be nested under the bundled daemon — it stays hoisted (caveat 1)
-    assert.doesNotMatch(listing, /node_modules\/@openrig\/daemon\/node_modules\/better-sqlite3/,
-      "better-sqlite3 must NOT be nested under the bundled daemon (it stays a hoisted cli dep, builds fresh on target)");
+    const packed = JSON.parse(execFileSync("tar", ["-xzOf", tgzPath, "package/package.json"], { encoding: "utf8" }));
+    assert.equal(packed.dependencies?.["@openrig/daemon"], undefined, "the packed manifest must not depend on @openrig/daemon");
+    assert.equal(packed.bundledDependencies, undefined, "the packed manifest must not bundle dependencies");
+
+    execFileSync("tar", ["-xzf", tgzPath, "-C", extract]);
+    const left = [];
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir)) {
+        const path = join(dir, entry);
+        if (statSync(path).isDirectory()) walk(path);
+        else if (path.endsWith(".js")) left.push(...remainingDaemonImports(readFileSync(path, "utf8")).map((m) => `${path}: ${m}`));
+      }
+    };
+    walk(join(extract, "package", "dist"));
+    walk(join(extract, "package", "tui", "dist"));
+    assert.deepEqual(left, [], "no packaged cli/tui JS may import @openrig/daemon");
   } finally {
     rmSync(tgzPath, { force: true });
+    rmSync(extract, { recursive: true, force: true });
   }
 });
 
 test("install RED (resident, docker-free): a clean install materializes a COMPLETE better-sqlite3 (binding.gyp present)", () => {
-  // Q2 break #5: the BUNDLED @openrig/daemon package.json declared its cli-SUBSET deps
+  // Q2 break #5 (historical: the daemon is no longer bundled): the BUNDLED @openrig/daemon package.json declared its cli-SUBSET deps
   // (better-sqlite3 + hono/tar/ulid/yaml/@hono/*), so `npm install -g` treated them as bundle-provided
   // UNDER @openrig/daemon and left an EMPTY <cli>/node_modules/better-sqlite3 (no binding.gyp →
   // 'prebuild-install: not found' + 'binding.gyp not found'). The pack-CONTENT assertion above
