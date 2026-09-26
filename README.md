@@ -1,5 +1,10 @@
 # OpenRig
 
+[![npm version](https://img.shields.io/npm/v/@openrig/cli)](https://www.npmjs.com/package/@openrig/cli)
+[![npm downloads](https://img.shields.io/npm/dw/@openrig/cli)](https://www.npmjs.com/package/@openrig/cli)
+[![License: Apache 2.0](https://img.shields.io/github/license/mvschwarz/openrig)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/mvschwarz/openrig?style=social)](https://github.com/mvschwarz/openrig/stargazers)
+
 A harness wraps a model. A rig wraps your harnesses. Define your agent team in YAML, boot it with one command. Claude Code and Codex in the same rig, managed as one system.
 
 OpenRig turns AI coding agents from a pile of terminal sessions into a persistent, organized team. Talk to a lead agent about the outcome you want; it can coordinate specialists across teams and bring you results and decisions that need your attention. Start with a repository and one useful change, then keep the team's work and context at the same addresses.
@@ -305,6 +310,10 @@ OpenRig is open source and self-hosted, with Claude Code and Codex in the same t
 - **Videos**: [youtube.com/@openrig](https://www.youtube.com/@openrig)
 - **X**: [@_feralmachine](https://twitter.com/_feralmachine)
 - **Follow the project**: [openrig.dev/follow](https://openrig.dev/follow)
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=mvschwarz/openrig&type=Date)](https://star-history.com/#mvschwarz/openrig&Date)
 
 ## License
 
