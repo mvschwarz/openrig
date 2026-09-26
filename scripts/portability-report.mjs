@@ -82,7 +82,7 @@ export function findPortabilityIssues(lines, checks = CHECKS) {
 export function renderReport(findings, label) {
   const out = [`# Portability report: ${label}`, ""];
   if (findings.length === 0) {
-    out.push("No added line contains a machine-specific value.");
+    out.push("No matching machine-specific values detected.");
     return `${out.join("\n")}\n`;
   }
   out.push(
