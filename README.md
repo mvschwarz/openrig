@@ -15,6 +15,8 @@ npm install -g @openrig/cli
 rig setup --dry-run
 ```
 
+To install with Bun instead, run `bun add -g @openrig/cli`. OpenRig still runs on Node.js, so install Node.js 22 as well. Bun may block this package's postinstall script, in which case the Node.js and SQLite check described under [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) does not run at install time.
+
 Review setup's plan before applying `rig setup`: it checks both native harnesses and cmux. This starter requires tmux and authenticated Codex; the other harness and terminal provider are optional for its repository task.
 
 Before launching, ask your agent to [configure your chosen permissions](docs/reference/getting-started.md#have-your-agent-configure-permissions): keep prompts, remember selected commands, or deliberately choose broader access. The agent handles setup and verification; OpenRig's shipped defaults stay unchanged.
@@ -70,7 +72,7 @@ using a published package, since repository guidance can be ahead of npm.
 
 | When | What changes and why |
 | --- | --- |
-| **npm installation** | Installs the CLI, bundled components and dependencies under your npm prefix. OpenRig's postinstall checks Node/SQLite compatibility; it does not run daemon or provider setup. |
+| **npm installation** | Installs the CLI, bundled components and dependencies under your npm prefix (with Bun, under Bun's global directory). OpenRig's postinstall checks the Node.js version and that the SQLite module loads; Bun may block this script. It does not run daemon or provider setup. |
 | **`rig setup`** | Attempts missing tools and writes an OpenRig block in `~/.tmux.conf` for mouse support and scrollback. On macOS it can install cmux and enable its automation socket control in `~/.config/cmux/settings.json`. `--full` adds workstation tools. `--dry-run` shows setup's plan without applying it. |
 | **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. With `runtime.codex.hooks_enabled` enabled (the default), writes Codex hook configuration and trust records as described below—even before a rig launches. |
 | **Rig/seat launch and attachment** | Creates tmux sessions, supplies seat identity and daemon connection environment, and projects selected guidance, skills, plugins and runtime resources into the workspace. Managed startup pre-trusts the workspace. Claude context collection can also be provisioned for attached sessions and refreshed during monitoring. |
