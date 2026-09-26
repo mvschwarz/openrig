@@ -1,31 +1,4 @@
 {
   "url": "https://context7.com/mvschwarz/openrig",
-  "public_key": "pk_HcRwWEoFBsmU1mo5VIvWw",
-  "projectTitle": "OpenRig",
-  "description": "OpenRig is an open-source multi-agent harness: define a team of Claude Code and Codex agents in YAML, boot it with the rig CLI, and coordinate the agents through tmux sessions, a durable queue and a local daemon.",
-  "folders": [],
-  "excludeFolders": [
-    "docs/releases",
-    "packages/daemon/specs",
-    "packages/daemon/test",
-    "packages/test-system",
-    "skills/_canonical/process",
-    "skills/_canonical/pm",
-    ".evidence",
-    "spike",
-    "docker",
-    "**/node_modules",
-    "**/fixtures"
-  ],
-  "excludeFiles": [],
-  "rules": [
-    "Install with npm install -g @openrig/cli. OpenRig requires Node.js 20, 22 or 24 and tmux; the first-project starter also requires an authenticated Codex CLI.",
-    "Preview before launching: rig specs preview <spec>, then rig up <spec> --cwd . --plan, then rig up <spec> --cwd .",
-    "Check seat readiness with rig ps --nodes --rig <rig>, not only daemon health from rig status.",
-    "Inside a rig, an agent runs rig whoami --json first and treats its output as its identity.",
-    "rig send <session> \"message\" types into a peer's terminal and presses Enter; rig capture <session> reads that peer's screen.",
-    "Work another agent must act on goes in the queue (rig queue create or rig queue handoff); a message informs but does not assign work.",
-    "Use rig start to bring rigs back after a reboot or daemon restart.",
-    "Run rig --help for the current command surface; the CLI is authoritative over older examples."
-  ]
+  "public_key": "pk_HcRwWEoFBsmU1mo5VIvWw"
 }
