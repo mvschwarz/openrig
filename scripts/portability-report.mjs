@@ -16,6 +16,7 @@
 //   node scripts/portability-report.mjs --from A --to B      # a commit range
 //   node scripts/portability-report.mjs --staged             # what is staged for the next commit
 //   add --out report.md to also write the report to a file
+//   add --locations-only to list file and line without quoting the matched text (for public CI output)
 
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
@@ -79,7 +80,7 @@ export function findPortabilityIssues(lines, checks = CHECKS) {
   return findings;
 }
 
-export function renderReport(findings, label) {
+export function renderReport(findings, label, { locationsOnly = false } = {}) {
   const out = [`# Portability report: ${label}`, ""];
   if (findings.length === 0) {
     out.push("No matching machine-specific values detected.");
@@ -105,6 +106,10 @@ export function renderReport(findings, label) {
     if (group.length === 0) continue;
     out.push(`## ${check.category} (${group.length})`, "", `_${check.why}_`, "");
     for (const { file, line, match, text } of group) {
+      if (locationsOnly) {
+        out.push(`- \`${file}:${line}\``);
+        continue;
+      }
       if (check.category === "Credential") {
         out.push(`- \`${file}:${line}\` matched \`${match.slice(0, 6)}…\` (value withheld)`);
         continue;
@@ -120,10 +125,11 @@ export function renderReport(findings, label) {
 }
 
 function parseArguments(argv) {
-  const options = { staged: false };
+  const options = { staged: false, locationsOnly: false };
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index];
     if (key === "--staged") options.staged = true;
+    else if (key === "--locations-only") options.locationsOnly = true;
     else if (["--from", "--to", "--out", "--repo"].includes(key)) options[key.slice(2)] = argv[++index];
     else throw new Error(`Unknown argument: ${key}`);
   }
@@ -149,7 +155,9 @@ export function main(argv = process.argv.slice(2)) {
     label = `${from.slice(0, 8)}..${to.length > 12 ? to.slice(0, 8) : to}`;
   }
   const diff = git(repo, ["diff", "-U0", "--no-color", "--diff-filter=ACMR", ...range]);
-  const report = renderReport(findPortabilityIssues(addedLines(diff)), label);
+  const report = renderReport(findPortabilityIssues(addedLines(diff)), label, {
+    locationsOnly: options.locationsOnly,
+  });
   process.stdout.write(report);
   if (options.out) writeFileSync(options.out, report);
   return 0;
