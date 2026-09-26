@@ -229,8 +229,10 @@ convention the file is kept out of git, for example with a `.gitignore` entry.
 A rig that already wrote blocks into `CLAUDE.md` keeps them there after you
 switch. Until you remove them, `CLAUDE.md` stays modified and Claude Code loads
 both copies. Delete each `<!-- BEGIN OpenRig MANAGED BLOCK: … -->` …
-`<!-- END OpenRig MANAGED BLOCK: … -->` section by hand, or restore the tracked
-file with `git restore CLAUDE.md`. Running `rig down` on a rig that still uses
+`<!-- END OpenRig MANAGED BLOCK: … -->` section by hand and keep the rest of the
+file. If `CLAUDE.md` has no other uncommitted edits you need to keep, you can
+instead run `git restore CLAUDE.md`; that command discards every unstaged change
+to the file, not only OpenRig's blocks. Running `rig down` on a rig that still uses
 the default is not a substitute: it strips every OpenRig block from that
 directory's `CLAUDE.md`, including blocks written by other rigs.
 

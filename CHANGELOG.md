@@ -17,8 +17,8 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
   Thanks to [@hvpaiva](https://github.com/hvpaiva) for reporting and proposing
   this ([#25](https://github.com/mvschwarz/openrig/issues/25)).
 - Add an advisory portability report for pull requests. It lists added lines
-  that contain machine-, network- or account-specific values and never fails
-  the check.
+  that contain machine-, network- or account-specific values. Findings never
+  fail the check; operational errors, such as a git failure, still do.
 - Show badges and a short demo of agents working in the README.
 
 Includes [#54](https://github.com/mvschwarz/openrig/pull/54) and
