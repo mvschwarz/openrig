@@ -43,6 +43,11 @@ export function realDeps(): LifecycleDeps {
       }
     },
     readProcessState: (pid) => {
+      // Windows: no ps(1) and no zombie states — the signal check above is
+      // already authoritative liveness. Returning null here would make
+      // createIsProcessAlive report every live process as dead, which killed
+      // the daemon at state publication on `rig daemon start` (issue #1).
+      if (process.platform === "win32") return "S";
       try {
         return execFileSync("ps", ["-o", "state=", "-p", String(pid)], { encoding: "utf-8" });
       } catch {

@@ -80,6 +80,16 @@ interface ClaimServiceDeps {
   piRunnerStateStore?: {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   };
+  /** Muse session-id reader (global-newest approximation) for Muse
+   *  resume-token capture on the adoption boundary. */
+  museSessionStore?: {
+    readSessionId(sessionName: string): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+  };
+  /** OpenCode session-id reader (global-newest approximation) for OpenCode
+   *  resume-token capture on the adoption boundary. */
+  opencodeSessionStore?: {
+    readSessionId(sessionName: string): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+  };
 }
 
 interface BindOptions {
@@ -113,6 +123,8 @@ export class ClaimService {
   private contextUsageStore: ClaimServiceDeps["contextUsageStore"] | null;
   private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
   private piRunnerStateStore: ClaimServiceDeps["piRunnerStateStore"] | null;
+  private museSessionStore: ClaimServiceDeps["museSessionStore"] | null;
+  private opencodeSessionStore: ClaimServiceDeps["opencodeSessionStore"] | null;
 
   constructor(deps: ClaimServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("ClaimService: rigRepo must share the same db handle");
@@ -130,6 +142,8 @@ export class ClaimService {
     this.contextUsageStore = deps.contextUsageStore ?? null;
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
     this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
+    this.museSessionStore = deps.museSessionStore ?? null;
+    this.opencodeSessionStore = deps.opencodeSessionStore ?? null;
   }
 
   private async observeBindingPane(
@@ -218,16 +232,37 @@ export class ClaimService {
    * failure). ANY throw is swallowed — capture NEVER fails or blocks the
    * adoption (PRD Rule 7).
    */
+  /** Best-effort node-scoped token presence for the Muse fill-null guard. */
+  private museNodeTokenPresent(nodeId: string): boolean {
+    try {
+      const row = this.db.prepare(
+        "SELECT resume_token FROM sessions WHERE node_id = ? AND trim(coalesce(resume_token, '')) <> '' LIMIT 1",
+      ).get(nodeId) as { resume_token: string | null } | undefined;
+      return !!row?.resume_token?.trim();
+    } catch {
+      return false; // unreadable → proceed with capture (never block adoption)
+    }
+  }
+
   private async captureResumeTokenOnAdoption(input: {
-    rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null;
+    rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null; cwd?: string | null;
   }): Promise<void> {
     try {
+      // Muse adoption is fill-null-only at node scope: the store read is
+      // global-newest (no seat key), so persisting it over a previously
+      // recorded token could bind a pod-mate's conversation at adoption
+      // rank and block correction. A present node token (even stale — FR-6
+      // surfaces that honestly) always beats an approximate fresh read.
+      if (input.runtime === "muse" && this.museNodeTokenPresent(input.nodeId)) {
+        this.emitCaptureSkip(input, "muse", "token_present");
+        return;
+      }
       // Derivation is the shared PURE helper (OPR.0.4.3.04 B2 — reused by the
       // seat-handover discovered-mode capture); persistence + events stay here so
       // FR-3's adoption provenance/audit semantics are unchanged.
       const derived = await deriveResumeToken(
-        { runtime: input.runtime, sessionName: input.sessionName },
-        { contextUsageStore: this.contextUsageStore, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore },
+        { runtime: input.runtime, sessionName: input.sessionName, cwd: input.cwd ?? null },
+        { contextUsageStore: this.contextUsageStore, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, museSessionStore: this.museSessionStore, opencodeSessionStore: this.opencodeSessionStore },
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return;
       const runtime = input.runtime as string; // non-null past exempt
@@ -264,7 +299,7 @@ export class ClaimService {
   private emitCaptureSkip(
     input: { rigId: string; nodeId: string; sessionId: string; sessionName: string },
     runtime: string,
-    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token",
+    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token" | "token_present",
   ): void {
     try {
       this.eventBus.emit({
@@ -369,6 +404,7 @@ export class ClaimService {
       await this.captureResumeTokenOnAdoption({
         rigId: opts.rigId, nodeId, sessionId, sessionName: discovered.tmuxSession,
         runtime: node.runtime ?? discoveredRuntime ?? null,
+        cwd: node.cwd ?? discovered.cwd ?? null,
       });
 
       return { ok: true, nodeId, sessionId };
@@ -554,7 +590,7 @@ export class ClaimService {
       // (FR-3 captures a token, it does not assert conversation continuity).
       await this.captureResumeTokenOnAdoption({
         rigId: nodeRow.rig_id, nodeId: nodeRow.id, sessionId, sessionName,
-        runtime: nodeRow.runtime,
+        runtime: nodeRow.runtime, cwd: nodeRow.cwd ?? null,
       });
 
       return {
@@ -709,7 +745,7 @@ export class ClaimService {
       // OPR.0.4.3.20 FR-3 — capture the resume token at the adoption boundary.
       await this.captureResumeTokenOnAdoption({
         rigId: opts.rigId, nodeId, sessionId, sessionName: discovered.tmuxSession,
-        runtime: discoveredRuntime ?? null,
+        runtime: discoveredRuntime ?? null, cwd: discovered.cwd ?? null,
       });
 
       return { ok: true, nodeId, sessionId };

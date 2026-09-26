@@ -59,6 +59,29 @@ export function codexPostureArg(
   return profileArg ? profileArg : " -s workspace-write";
 }
 
+/** Muse launch posture segment (leading space included), applied on EVERY
+ *  managed Muse path (fresh / resume / fork). YOLO (or a per-seat resolved
+ *  full_bypass policy) selects ` --yolo` (maximally-permissive launch flag);
+ *  otherwise the harness default floor applies (no flag — Muse's own
+ *  default approval behavior, never a bypass we invent). */
+export function musePostureFlag(
+  env: NodeJS.ProcessEnv = process.env,
+  resolvedPosture?: ResolvedLaunchPosture,
+): string {
+  return yoloEnabled(env, resolvedPosture) ? " --yolo" : "";
+}
+
+/** OpenCode approval posture: YOLO / a per-seat resolved full_bypass selects
+ *  ` --auto` (auto-approve permissions that are not explicitly denied —
+ *  opencode marks it dangerous); otherwise the harness-default floor applies
+ *  (no flag, interactive approvals). Same decision on fresh / resume / fork. */
+export function opencodePostureFlag(
+  env: NodeJS.ProcessEnv = process.env,
+  resolvedPosture?: ResolvedLaunchPosture,
+): string {
+  return yoloEnabled(env, resolvedPosture) ? " --auto" : "";
+}
+
 /** Pi RESOURCE TRUST (Pi's --approve/--no-approve govern resource trust, NOT a permission policy):
  *  YOLO forces `approve`; otherwise the configured posture (default `no-approve`). */
 export function piTrust(

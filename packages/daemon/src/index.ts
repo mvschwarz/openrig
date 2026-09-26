@@ -1,5 +1,6 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
@@ -408,9 +409,12 @@ export async function startServer(port?: number) {
 }
 
 // Only start the server when this file is executed directly (not imported).
+// pathToFileURL normalizes argv[1] (backslash paths on Windows) into the same
+// shape as import.meta.url — a plain `file://${argv[1]}` never matches on win32,
+// which made the daemon exit silently with code 0.
 const isDirectRun =
   process.argv[1] &&
-  import.meta.url === `file://${process.argv[1]}`;
+  import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isDirectRun) {
   startServer();

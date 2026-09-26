@@ -29,5 +29,9 @@
   },
   "engines": {
     "node": "^20 || ^22 || ^24"
+  },
+  "allowScripts": {
+    "esbuild@0.27.4": true,
+    "esbuild@0.25.12": true
   }
 }

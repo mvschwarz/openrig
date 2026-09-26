@@ -97,7 +97,7 @@ export interface ValidationResult {
 
 // --- Constants ---
 
-const KNOWN_RUNTIMES = new Set(["claude-code", "codex"]);
+const KNOWN_RUNTIMES = new Set(["claude-code", "codex", "muse", "opencode"]);
 const KNOWN_SCOPES = new Set(["project_shared", "project_local", "user_global", "system_managed", "session_ephemeral"]);
 const KNOWN_GUIDANCE_KINDS = new Set(["agents_md", "claude_md", "generic_rules_overlay"]);
 const KNOWN_MERGE_STRATEGIES = new Set(["managed_block", "append", "prepend", "replace", "manual"]);

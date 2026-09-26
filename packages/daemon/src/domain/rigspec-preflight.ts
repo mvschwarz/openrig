@@ -10,6 +10,8 @@ const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
   "codex": "codex --version",
   "pi": "pi --version",
+  "muse": "muse --version",
+  "opencode": "opencode --version",
 };
 
 interface RigSpecPreflightDeps {
@@ -141,7 +143,7 @@ import {
 
 // Slice 51-01 (OPR.0.5.1.1): `stub` is a first-class runtime (the deterministic node-script fake harness
 // through the real orchestrator) — admitted at the modern-pod preflight gate alongside the real runtimes.
-const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "terminal", "stub"]);
+const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "muse", "opencode", "terminal", "stub"]);
 
 // Default daemon-shipped asset paths for the managed Claude activity hooks — the SAME files the
 // ClaudeCodeAdapter is wired with in startup.ts (validation is the shared module either way).
@@ -402,6 +404,11 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
     // launch-time surprise.
     const piErrors = await verifyPiRuntimeAvailable(rigSpec, preflightCtx.exec);
     errors.push(...piErrors);
+    // Muse/OpenCode binary probes (same never-a-launch-time-surprise rule).
+    const museErrors = await verifyMuseRuntimeAvailable(rigSpec, preflightCtx.exec);
+    errors.push(...museErrors);
+    const opencodeErrors = await verifyOpencodeRuntimeAvailable(rigSpec, preflightCtx.exec);
+    errors.push(...opencodeErrors);
   }
 
   // §6 RECONCILIATION — WARNING EMISSION ORDER (PM ruling 2026-08-05): ACTIVITY-HOOK-FIRST,
@@ -438,6 +445,53 @@ export async function verifyPiRuntimeAvailable(
   } catch {
     return [
       `Runtime "pi" not available ('pi --version' failed). The spec declares a pi member, so the launch would fail. Fix: install the Pi coding agent (npm install -g @earendil-works/pi-coding-agent, or the pi.dev install script) and ensure 'pi' is on PATH.`,
+    ];
+  }
+}
+
+/**
+ * Muse post-preflight probe (mirrors verifyPiRuntimeAvailable): when the spec
+ * declares any `runtime: "muse"` member, verify the `muse` binary answers
+ * `muse --version`. Returns a single what/why/fix error on failure.
+ */
+export async function verifyMuseRuntimeAvailable(
+  rigSpec: PodRigSpec,
+  exec: ExecFn,
+): Promise<string[]> {
+  const hasMuseMember = (rigSpec.pods ?? []).some((pod: RigSpecPod) =>
+    (pod.members ?? []).some((member: RigSpecPodMember) => member.runtime === "muse"),
+  );
+  if (!hasMuseMember) return [];
+  try {
+    await exec(RUNTIME_COMMANDS["muse"]!);
+    return [];
+  } catch {
+    return [
+      `Runtime "muse" not available ('muse --version' failed). The spec declares a muse member, so the launch would fail. Fix: install the Muse CLI and ensure 'muse' is on PATH.`,
+    ];
+  }
+}
+
+/**
+ * OpenCode post-preflight probe (mirrors verifyMuseRuntimeAvailable): when the
+ * spec declares any `runtime: "opencode"` member, verify the `opencode`
+ * binary answers `opencode --version`. Returns a single what/why/fix error
+ * on failure.
+ */
+export async function verifyOpencodeRuntimeAvailable(
+  rigSpec: PodRigSpec,
+  exec: ExecFn,
+): Promise<string[]> {
+  const hasOpencodeMember = (rigSpec.pods ?? []).some((pod: RigSpecPod) =>
+    (pod.members ?? []).some((member: RigSpecPodMember) => member.runtime === "opencode"),
+  );
+  if (!hasOpencodeMember) return [];
+  try {
+    await exec(RUNTIME_COMMANDS["opencode"]!);
+    return [];
+  } catch {
+    return [
+      `Runtime "opencode" not available ('opencode --version' failed). The spec declares an opencode member, so the launch would fail. Fix: install the OpenCode CLI and ensure 'opencode' is on PATH.`,
     ];
   }
 }

@@ -136,6 +136,12 @@ interface RestoreOrchestratorDeps {
   /** OPR.0.4.6.PI1 FR-6 — optional so older wiring/tests keep working; a Pi
    *  resume without the adapter falls through to the honest no-adapter error. */
   piResume?: PiResumeAdapter;
+  /** Muse resume — same optional posture as piResume; absent falls through
+   *  to the honest no-adapter error. */
+  museResume?: import("../adapters/muse-resume.js").MuseResumeAdapter;
+  /** OpenCode resume — same optional posture as museResume; absent falls
+   *  through to the honest no-adapter error. */
+  opencodeResume?: import("../adapters/opencode-resume.js").OpencodeResumeAdapter;
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
@@ -154,6 +160,8 @@ export class RestoreOrchestrator {
   private claudeResume: ClaudeResumeAdapter;
   private codexResume: CodexResumeAdapter;
   private piResume: PiResumeAdapter | null;
+  private museResume: import("../adapters/muse-resume.js").MuseResumeAdapter | null;
+  private opencodeResume: import("../adapters/opencode-resume.js").OpencodeResumeAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
@@ -193,6 +201,8 @@ export class RestoreOrchestrator {
     this.claudeResume = deps.claudeResume;
     this.codexResume = deps.codexResume;
     this.piResume = deps.piResume ?? null;
+    this.opencodeResume = deps.opencodeResume ?? null;
+    this.museResume = deps.museResume ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
     this.listProcesses = deps.listProcesses;
@@ -1633,6 +1643,46 @@ export class RestoreOrchestrator {
     // awaiting-decision stop-and-ask — never a silent fresh start (BR-6).
     if (this.piResume?.canResume(resumeType, resumeToken)) {
       const result = await this.piResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
+      if (result.ok) {
+        if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
+        return { kind: "resumed" };
+      }
+      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
+      if (result.code === "attention_required") {
+        return {
+          kind: "attention_required",
+          message: result.message,
+          evidence: (result as { evidence?: string }).evidence,
+        };
+      }
+      return { kind: "failed", message: result.message };
+    }
+
+    // Muse — honest exact-id continuation (`muse resume <id>`). A dead id
+    // returns retry_fresh (the awaiting-decision stop-and-ask), never a
+    // silent fresh start.
+    if (this.museResume?.canResume(resumeType, resumeToken)) {
+      const result = await this.museResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
+      if (result.ok) {
+        if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
+        return { kind: "resumed" };
+      }
+      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
+      if (result.code === "attention_required") {
+        return {
+          kind: "attention_required",
+          message: result.message,
+          evidence: (result as { evidence?: string }).evidence,
+        };
+      }
+      return { kind: "failed", message: result.message };
+    }
+
+    // OpenCode — honest exact-id continuation (`opencode <cwd> --session
+    // <id>`). A dead id returns retry_fresh (the awaiting-decision
+    // stop-and-ask), never a silent fresh start.
+    if (this.opencodeResume?.canResume(resumeType, resumeToken)) {
+      const result = await this.opencodeResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };

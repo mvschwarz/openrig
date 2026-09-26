@@ -1,5 +1,5 @@
 import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync, readFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, relative, isAbsolute, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { getLastCaptureAt } from "./transcript-rotation.js";
@@ -195,8 +195,12 @@ export class TranscriptStore {
 
   getTranscriptPath(rigName: string, sessionName: string): string {
     const resolved = join(this.root, rigName, `${sessionName}.log`);
-    // Guard against path traversal from rig/session names containing ".."
-    if (!resolved.startsWith(this.root + "/") && resolved !== this.root) {
+    // Guard against path traversal from rig/session names containing "..".
+    // Separator-agnostic: `join()` yields backslashes on Windows, so a
+    // `startsWith(root + "/")` check rejected every valid path there and
+    // routed all transcripts to the _unsafe fallback (issue #1).
+    const rel = relative(this.root, resolved);
+    if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
       return join(this.root, "_unsafe", `${sessionName}.log`);
     }
     return resolved;
@@ -235,8 +239,11 @@ export class TranscriptStore {
     if (!this._enabled) return false;
     try {
       const dir = join(this.root, rigName);
-      // Guard against path traversal
-      if (!dir.startsWith(this.root + "/") && dir !== this.root) {
+      // Guard against path traversal. Separator-agnostic: `join()` yields
+      // backslashes on Windows, so a `startsWith(root + "/")` check can never
+      // pass there (it rejected every rig dir and transcripts never started).
+      const rel = relative(this.root, dir);
+      if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
         return false;
       }
       mkdirSync(dir, { recursive: true });
