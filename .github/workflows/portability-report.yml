@@ -3,7 +3,9 @@ name: Portability report
 # Lists lines a pull request adds that contain values tied to one machine, network or account
 # (credentials, home paths, temporary paths, network addresses, email addresses). Findings never
 # fail the job; the author reads the report and decides what to change. An operational error (for
-# example a git failure) does fail it. See scripts/portability-report.mjs.
+# example a git failure) does fail it. The repository is public, so this summary lists file and
+# line only; authors see the matched text when they run the report locally or on push.
+# See scripts/portability-report.mjs.
 
 on:
   pull_request:
@@ -27,4 +29,5 @@ jobs:
           node scripts/portability-report.mjs
           --from ${{ github.event.pull_request.base.sha }}
           --to ${{ github.event.pull_request.head.sha }}
+          --locations-only
           --out "$GITHUB_STEP_SUMMARY"

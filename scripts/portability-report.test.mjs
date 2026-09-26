@@ -82,6 +82,14 @@ test("a credential on the same line as another finding is withheld from every ca
   assert.match(report, /100\.95\.1\.2/);
 });
 
+test("locations-only output names file and line without quoting the matched text", () => {
+  const findings = findPortabilityIssues(addedLines(diff));
+  const report = renderReport(findings, "x..y", { locationsOnly: true });
+  assert.match(report, /## Home path \(1\)/);
+  assert.match(report, /- `docs\/a\.md:10`/);
+  assert.ok(!report.includes("/Users/alice/"), report);
+});
+
 test("the report says so when nothing is found and groups findings when something is", () => {
   assert.match(renderReport([], "x..y"), /No matching machine-specific values detected/);
   const report = renderReport(findPortabilityIssues(addedLines(diff)), "x..y");
