@@ -57,6 +57,8 @@ export function buildCodexResumeCore(
   model?: string | null,
   /** Launch callers may pass the exact already-resolved segment they insert, avoiding a second policy decision. */
   precomputedPostureArg?: string,
+  /** #69: launch callers pass true when the installed Codex supports `--no-daemon`. Absent → byte-identical. */
+  daemonOptOut?: boolean,
 ): string {
   // OPR.0.4.8.2: the RESUME path uses the SAME posture decision (codexPostureArg) as fresh/fork.
   // YOLO forces -s danger-full-access (overriding even a named profile); otherwise a named profile
@@ -68,7 +70,8 @@ export function buildCodexResumeCore(
   const modelArg = model ? ` -m ${shellQuote(model)}` : "";
   const middle = extraArgs ? `${extraArgs} ` : "";
   const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
-  return `codex${profileOrPosture}${modelArg} resume ${middle}${tokenArg}`;
+  const daemonArg = daemonOptOut ? " --no-daemon" : "";
+  return `codex${daemonArg}${profileOrPosture}${modelArg} resume ${middle}${tokenArg}`;
 }
 
 export function assessNativeResumeProbe(

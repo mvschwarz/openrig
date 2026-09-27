@@ -6,6 +6,7 @@ import { runSyncSite } from "../domain/sync-site-wrap.js";
 import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
+import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 
 const CODEX_TYPES = new Set(["codex_id", "codex_last"]);
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -18,6 +19,8 @@ interface CodexResumeOptions {
   maxWaitMs?: number;
   sleep?: (ms: number) => Promise<void>;
   exec?: (cmd: string) => Promise<string>;
+  /** #69: whether the installed Codex supports --no-daemon; absent keeps the existing invocation. */
+  detectDaemonSupport?: CodexDaemonSupportDetector;
 }
 
 export class CodexResumeAdapter {
@@ -39,7 +42,7 @@ export class CodexResumeAdapter {
     tmuxSessionName: string,
     resumeType: string | null,
     resumeToken: string | null,
-    _cwd: string,
+    cwd: string,
     codexConfigProfile?: string | null,
     // OPR.0.4.8.3 Seam B: persisted resolved posture threaded from restore.
     resolvedPosture?: "floor" | "full_bypass",
@@ -70,6 +73,12 @@ export class CodexResumeAdapter {
       }
     }
 
+    // #69: detect for the Codex the restored pane runs (its cwd, the launch PATH).
+    const daemonSupport = this.options.detectDaemonSupport ? await this.options.detectDaemonSupport(cwd) : undefined;
+    if (daemonSupport?.kind === "unknown") {
+      return { ok: false, code: "resume_failed", message: unknownDaemonSupportMessage(daemonSupport.detail) };
+    }
+
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
     const postureArg = codexPostureArg(profileArg, process.env, resolvedPosture);
     const appliedLaunch = observeCodexSandbox(postureArg);
@@ -81,6 +90,7 @@ export class CodexResumeAdapter {
       resolvedPosture,
       model,
       postureArg,
+      daemonSupport?.kind === "supported",
     );
 
     const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.launchPath

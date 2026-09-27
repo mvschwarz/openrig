@@ -23,6 +23,7 @@ import {
   type ResolveHomeDirByPid,
 } from "../domain/codex-thread-id.js";
 import { assessNativeResumeProbe, buildCodexResumeCore, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
+import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { parseSessionName } from "../domain/session-name.js";
 import { shellQuote } from "./shell-quote.js";
@@ -73,6 +74,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // so no real codex subprocess runs. Contract not weakened — production uses
   // the real probe by default.
   private verifyProfilePreflight: (profile: string) => Promise<CodexProfileProbeResult>;
+  // #69: whether the installed Codex supports --no-daemon. Startup wires the real probe;
+  // absent (unit tests, other embedders) keeps the existing invocation unchanged.
+  private detectDaemonSupport?: CodexDaemonSupportDetector;
   // OPR.0.4.1.10 FR-B — absolute path to the daemon's own shipped activity-relay.cjs,
   // resolved by startup from import.meta.dirname. Used by ensureCodexActivityHooks
   // (FR-A) to write config-layer [hooks] command entries that are cwd-independent and
@@ -91,11 +95,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     /** Match the daemon's prerequisite probe even if the pane's login shell rewrites PATH. */
     launchPath?: string;
     verifyProfilePreflight?: (profile: string) => Promise<CodexProfileProbeResult>;
+    detectDaemonSupport?: CodexDaemonSupportDetector;
   }) {
     this.tmux = deps.tmux;
     this.fs = deps.fsOps;
     this.codexHome = deps.codexHome;
     this.launchPath = deps.launchPath;
+    this.detectDaemonSupport = deps.detectDaemonSupport;
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
@@ -343,6 +349,14 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const gitDirArg = ` --add-dir ${shellQuote(nodePath.join(binding.cwd, ".git"))}`;
     const queueStateDirArg = this.buildQueueStateAddDirArg(opts.name);
+    // #69: one daemon-support decision for this launch, for the Codex the seat pane runs
+    // (its cwd, the launch PATH), applied to fresh, fork and resume.
+    const daemonSupport = this.detectDaemonSupport ? await this.detectDaemonSupport(binding.cwd) : undefined;
+    if (daemonSupport?.kind === "unknown") {
+      return { ok: false, error: unknownDaemonSupportMessage(daemonSupport.detail) };
+    }
+    const daemonOptOut = daemonSupport?.kind === "supported";
+    const daemonArg = daemonOptOut ? " --no-daemon" : "";
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record
@@ -362,7 +376,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
-      const cmd = `codex${postureArg}${modelArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      const cmd = `codex${daemonArg}${postureArg}${modelArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${cmd}` : cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -386,8 +400,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const cmd = opts.resumeToken
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
-      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, postureArg)
-      : `codex${postureArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
+      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, postureArg, daemonOptOut)
+      : `codex${daemonArg}${postureArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}`;
 
     const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${cmd}` : cmd);
     if (!textResult.ok) {
