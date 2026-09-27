@@ -13,7 +13,7 @@
 // import left afterwards. Running it twice is a no-op. Source imports and development
 // resolution are unchanged.
 
-import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync, statSync, existsSync, realpathSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -122,7 +122,17 @@ export function rewriteDaemonImports({ cliDir, daemonPackageJsonPath }) {
   return { rewritten, files };
 }
 
-if (import.meta.url === `file://${resolve(process.argv[1] ?? "")}`) {
+// Run only when executed directly. Compare real file paths, not a hand-built URL:
+// import.meta.url is percent-encoded (spaces, "#") and names the symlink-resolved file.
+function invokedDirectly() {
+  try {
+    return Boolean(process.argv[1]) && fileURLToPath(import.meta.url) === realpathSync(process.argv[1]);
+  } catch {
+    return false; // argv[1] is not an existing file, so this module was imported, not run
+  }
+}
+
+if (invokedDirectly()) {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   try {
     const { rewritten, files } = rewriteDaemonImports({
