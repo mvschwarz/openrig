@@ -8,6 +8,18 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.5.17]
+
+- Install the CLI with Bun as well as npm: `bun add -g @openrig/cli`. The package
+  no longer depends on the unpublished `@openrig/daemon`; it imports the daemon
+  copy it already ships, which also makes the package smaller. OpenRig still runs
+  on Node.js, and Bun may block the package's postinstall check. Thanks to
+  [@drewpayment](https://github.com/drewpayment) for reporting this
+  ([#66](https://github.com/mvschwarz/openrig/issues/66)).
+
+Includes [#68](https://github.com/mvschwarz/openrig/pull/68). The Node support
+range and SQLite version are unchanged.
+
 ## [0.5.16]
 
 - Let a rig write Claude Code's managed instruction blocks to `CLAUDE.local.md`
