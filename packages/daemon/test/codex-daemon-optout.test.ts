@@ -278,6 +278,41 @@ describe("#69 production detector with a fake executor", () => {
     expect(processMocks.execSync).not.toHaveBeenCalled();
   });
 
+  it("refuses at the deadline without waiting for the callback or accepting late help", async () => {
+    vi.useFakeTimers();
+    try {
+      let complete: HelpCallback | undefined;
+      processMocks.execFile.mockImplementation((_file, _args, _options, callback: HelpCallback) => { complete = callback; });
+      let observed: CodexDaemonSupport | undefined;
+      const pending = codexDaemonSupportProbe(launchPath, 200)(cwd).then((value) => { observed = value; return value; });
+      await vi.advanceTimersByTimeAsync(199);
+      expect(complete).toBeTypeOf("function");
+      expect(observed).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(observed).toEqual({ kind: "unknown", detail: "codex --help failed: timed out after 200 ms" });
+      complete!(null, SUPPORTED_HELP);
+      expect(await pending).toEqual(observed);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["success", "error", "throw"])("clears its deadline after early %s", async (outcome) => {
+    vi.useFakeTimers();
+    try {
+      processMocks.execFile.mockImplementation((_file, _args, _options, callback: HelpCallback) => {
+        if (outcome === "throw") throw new Error("invalid spawn");
+        callback(outcome === "error" ? new Error("not available") : null, SUPPORTED_HELP);
+      });
+      const result = await codexDaemonSupportProbe(launchPath, 200)(cwd);
+      expect(result.kind).toBe(outcome === "success" ? "supported" : "unknown");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports missing executable errors as unknown", async () => {
     processMocks.execFile.mockImplementation((_file, _args, _options, callback: HelpCallback) => {
       callback(new Error("spawn codex ENOENT"), "");

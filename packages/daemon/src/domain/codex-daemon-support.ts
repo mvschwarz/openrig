@@ -37,12 +37,17 @@ export function codexDaemonSupportProbe(launchPath?: string, timeoutMs = 10_000)
   return (cwd) => probeCodexDaemonSupport(async () => {
     const { execFile } = await import("node:child_process");
     const env = launchPath ? { ...process.env, PATH: launchPath } : process.env;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     return new Promise<string>((resolve, reject) => {
+      // execFile closes its pipes on timeout, but can report success if a wrapper
+      // already exited zero while a descendant kept them open. Bound the decision
+      // separately; execFile still owns pipe/direct-child cleanup, not the whole tree.
+      deadline = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs);
       execFile("codex", ["--help"], { cwd, env, timeout: timeoutMs, killSignal: "SIGKILL", encoding: "utf-8" }, (error, stdout) => {
         if (error) reject(error.killed ? new Error(`timed out after ${timeoutMs} ms`) : error);
         else resolve(stdout);
       });
-    });
+    }).finally(() => clearTimeout(deadline));
   });
 }
 
