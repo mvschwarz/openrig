@@ -8,7 +8,7 @@ OpenRig turns AI coding agents from a pile of terminal sessions into a persisten
 
 ## Install and first run
 
-Requires Node.js 20, 22 or 24 and tmux. Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
+Requires Node.js 20, 22 or 24 and tmux, on macOS or Linux. On a Mac with Apple silicon, use Node.js 22 ([why](docs/releases/v0.5.15.md#known-compatibility-limitation)). Native Windows is not supported yet, and WSL2 has not been tested. Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
 
 ```bash
 npm install -g @openrig/cli
@@ -277,8 +277,9 @@ seat, plugin, and release lifecycle actions remain agent-owned.
 
 ## Requirements
 
-- Node.js 20, 22, or 24 (the supported versions in this release)
+- Node.js 20, 22, or 24 (the supported versions in this release). On a Mac with Apple silicon, use Node.js 22: see the [known compatibility limitation](docs/releases/v0.5.15.md#known-compatibility-limitation)
 - tmux
+- macOS or Linux. Native Windows is not supported yet, and WSL2 has not been tested
 
 Optional:
 - herdr or cmux for terminal workspaces showing the agents together

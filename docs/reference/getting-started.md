@@ -5,6 +5,11 @@ Start with a repository and one bounded change you can exercise. The shipped
 an independent checker. It uses your installed Codex executable and login;
 terminal-provider support does not change the harness or account being used.
 
+You need Node.js 20, 22 or 24 and tmux, on macOS or Linux. On a Mac with Apple
+silicon, use Node.js 22 (see the [known compatibility
+limitation](../releases/v0.5.15.md#known-compatibility-limitation)). Native
+Windows is not supported yet, and WSL2 has not been tested.
+
 **Choose permissions before starting the team.** The unchanged starter launches
 Codex with `-s workspace-write`; it leaves approval policy to your native Codex
 configuration. Network access is normally off in that sandbox, including access
