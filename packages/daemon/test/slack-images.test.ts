@@ -3,7 +3,7 @@
 // thread_ts) are captured at the fetch boundary. The live phone render is the named external
 // door; these receipts prove the mechanical path.
 import { describe, it, expect } from "vitest";
-import { subsystemSlackDeliver } from "../src/domain/gateway/slack/slack-delivery.js";
+import { subsystemSlackDeliver, isHttpsImageRef, evidenceAttachment } from "../src/domain/gateway/slack/slack-delivery.js";
 import { SeenStore, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 import type { OutboundDecision } from "../src/domain/gateway/protocol.js";
 import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
@@ -108,5 +108,54 @@ describe("S10 outbound images — external-upload flow (founder screenshot class
       expect(out.ok).toBe(true); // the text delivered; failing the decision would repost it
       expect(logs.join("\n")).toMatch(/ATTACHMENT .* FAILED .*text delivered; attachment missing/);
     }
+  });
+});
+
+describe("#47 — a non-image https evidenceRef never becomes a Block Kit image block", () => {
+  it("isHttpsImageRef: image extension (query/fragment stripped) → image; anything else → not", () => {
+    expect(isHttpsImageRef("https://example.invalid/shot.png")).toBe(true);
+    expect(isHttpsImageRef("https://example.invalid/shot.PNG?width=800#frag")).toBe(true);
+    expect(isHttpsImageRef("https://gitlab.com/acme/team/-/work_items/10")).toBe(false);
+    expect(isHttpsImageRef("https://example.invalid/PROOF.md")).toBe(false);
+    expect(isHttpsImageRef("http://example.invalid/shot.png")).toBe(false);
+    expect(isHttpsImageRef("/tmp/local-shot.png")).toBe(false);
+    expect(isHttpsImageRef(null)).toBe(false);
+    expect(isHttpsImageRef(42)).toBe(false);
+  });
+
+  it("evidenceAttachment: image https ref → media ref; non-image https ref → plain link; explicit media wins", () => {
+    const img = evidenceAttachment(undefined, "https://example.invalid/a.jpg", "s");
+    expect(img.mediaRefs).toEqual([{ imageUrl: "https://example.invalid/a.jpg", altText: "s" }]);
+    expect(img.evidenceLink).toBeUndefined();
+    const link = evidenceAttachment(undefined, "https://gitlab.com/acme/team/-/work_items/10", "s");
+    expect(link.mediaRefs).toBeUndefined();
+    expect(link.evidenceLink).toBe("https://gitlab.com/acme/team/-/work_items/10");
+    const explicit = evidenceAttachment([{ imageUrl: "https://example.invalid/x.png", altText: "a" }], "https://gitlab.com/y", "s");
+    expect(explicit.mediaRefs).toHaveLength(1); // explicit media stays caller-controlled
+    expect(explicit.evidenceLink).toBeUndefined();
+    const local = evidenceAttachment(undefined, "/tmp/shot.png", "s");
+    expect(local.mediaRefs).toBeUndefined();
+    expect(local.evidenceLink).toBeUndefined(); // local refs keep the upload-flow handling
+  });
+
+  it("a GitLab issue-link evidenceRef posts with NO image block and a plain evidence link", async () => {
+    const { fetchImpl, calls } = slackFetch();
+    const out = await makeDeliver(fetchImpl)(decision("https://gitlab.com/acme/team/-/work_items/10"));
+    expect(out.ok).toBe(true);
+    const body = calls[0]!.body as { blocks: { type: string; image_url?: string }[]; text: string };
+    expect(body.blocks.filter((b) => b.type === "image")).toHaveLength(0);
+    const contexts = body.blocks.filter((b) => b.type === "context");
+    expect(JSON.stringify(contexts)).toContain("https://gitlab.com/acme/team/-/work_items/10");
+    expect(body.text).toContain("Evidence: https://gitlab.com/acme/team/-/work_items/10");
+  });
+
+  it("an https image URL with a query string still rides as a Block Kit image (no behavior change)", async () => {
+    const { fetchImpl, calls } = slackFetch();
+    await makeDeliver(fetchImpl)(decision("https://example.invalid/board.png?width=800"));
+    const blocks = (calls[0]!.body as { blocks: { type: string; image_url?: string }[] }).blocks;
+    const images = blocks.filter((b) => b.type === "image");
+    expect(images).toHaveLength(1);
+    expect(images[0]!.image_url).toBe("https://example.invalid/board.png?width=800");
+    expect((calls[0]!.body as { text: string }).text).not.toContain("Evidence:");
   });
 });

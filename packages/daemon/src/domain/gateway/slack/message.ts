@@ -32,6 +32,11 @@ export interface OutboundMessageOpts {
   extraBlocks?: unknown[];
   /** M1 A5b: outbound image attachments, rendered as Block Kit `image` blocks (the wired seam). */
   mediaRefs?: SlackMediaRef[];
+  /** #47 — an https evidenceRef that is NOT an image (GitLab issue link, PROOF.md URL, …),
+   *  rendered as a plain link in the message text + a context block. NEVER a Block Kit
+   *  `image` block: Slack rejects the ENTIRE message with `invalid_blocks` when an image
+   *  block's URL is not a real image, silently and permanently breaking delivery. */
+  evidenceLink?: string | null;
   /** S10 / A1.2 — the structured seat-attribution header (rig/host/seat/session), rendered as
    *  one sender context line in ONE honest bot identity. Authorship lives in OUR record;
    *  Slack's transport actor stays the app. NEVER a per-message username/icon override. */
@@ -128,6 +133,21 @@ function inert(text: string): string {
   return escapeSlackText(redactSecrets(text));
 }
 
+/** #47 — render a non-image https evidenceRef as a plain link instead of a Block Kit
+ *  `image` block. The URL arrives pre-validated as `^https://\S+$` from the delivery
+ *  layer; item-7 hygiene still applies (a secret-bearing URL is refused, never
+ *  forwarded), and a URL carrying mrkdwn-breaking `<`, `>`, `|` degrades to escaped
+ *  plain text rather than a link. Returns null when there is nothing safe to render. */
+function buildEvidenceLink(url: string | null | undefined): { text: string; block: unknown } | null {
+  const ref = typeof url === "string" ? url.trim() : "";
+  if (!ref || !/^https:\/\/\S+$/.test(ref) || containsSecret(ref)) return null;
+  const text = `Evidence: ${inert(ref)}`;
+  const block = /[<>|]/.test(ref)
+    ? { type: "context", elements: [{ type: "mrkdwn", text }] }
+    : { type: "context", elements: [{ type: "mrkdwn", text: `Evidence: <${ref}|evidence>` }] };
+  return { text, block };
+}
+
 /** S10 fix-r3 (R2 exactly-once) — the STRUCTURAL reconciliation identity: a bounded,
  *  decision-scoped token. decisionId is daemon-minted per decision (never settable through
  *  queue rows) and stable across retries of the same decision, so ONLY the target posted
@@ -168,13 +188,16 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   const attr = bounded(`from ${inert(opts.attribution?.session || opts.sourceLabel)}`, 2000, "sender");
   const imageBlocks = buildImageBlocks(opts.mediaRefs);
   const attachmentText = imageBlocks.map((b) => `Image: ${(b as { alt_text: string }).alt_text}`).join("\n");
+  const evidence = buildEvidenceLink(opts.evidenceLink);
   if (opts.extraBlocks?.length) {
     throw new HumanMessageShapeError("Extra blocks have no complete accessible fallback. Use mediaRefs for images or author supplemental human detail.");
   }
-  const text = bounded([headline, body, attr, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n"), SLACK_TEXT_CAP, "complete fallback");
+  const text = bounded([headline, body, attr, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n"), SLACK_TEXT_CAP, "complete fallback");
   const blocks: unknown[] = [{ type: "section", text: { type: "mrkdwn", text: headline } }];
   if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: body } });
-  blocks.push(...imageBlocks, { type: "context", elements: [{ type: "mrkdwn", text: attr }] });
+  blocks.push(...imageBlocks);
+  if (evidence) blocks.push(evidence.block);
+  blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: attr }] });
   if (blocks.length > 50) throw new HumanMessageShapeError("Message exceeds 50 Slack blocks. Reduce attachments before sending.");
   return { text, blocks };
 }

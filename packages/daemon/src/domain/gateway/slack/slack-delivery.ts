@@ -103,6 +103,40 @@ export function defaultReadLocalImage(refPath: string): { bytes: Uint8Array; fil
   }
 }
 
+/** #47 — only an https evidenceRef with an image-like extension may ride as a Block Kit
+ *  `image` block (extension set mirrors LOCAL_IMAGE_EXT). Slack rejects the ENTIRE
+ *  message with `invalid_blocks` when an image block's URL is not a real image (e.g. a
+ *  GitLab issue link or a PROOF.md URL — both explicitly documented evidenceRef uses),
+ *  so a non-image https ref must never become an image block. Query strings and
+ *  fragments are stripped before the extension check. */
+export function isHttpsImageRef(ref: unknown): boolean {
+  if (typeof ref !== "string") return false;
+  const url = ref.trim();
+  if (!/^https:\/\/\S+$/.test(url)) return false;
+  const bare = url.split(/[?#]/, 1)[0] ?? "";
+  return LOCAL_IMAGE_EXT.has(path.extname(bare).toLowerCase());
+}
+
+/** #47 — split an evidenceRef into an image attachment vs. a plain link. An explicit
+ *  `media` array stays fully caller-controlled; otherwise an image-looking https
+ *  evidenceRef becomes a Block Kit image and a non-image https evidenceRef becomes a
+ *  plain link (rendered by buildEvidenceLink, never an image block). Local refs keep
+ *  their existing handling (image upload flow / clean skip). */
+export function evidenceAttachment(
+  media: unknown,
+  evidenceRef: unknown,
+  summary: string | null | undefined,
+): { mediaRefs: SlackMediaRef[] | undefined; evidenceLink: string | undefined } {
+  if (Array.isArray(media)) return { mediaRefs: media as SlackMediaRef[], evidenceLink: undefined };
+  if (typeof evidenceRef !== "string") return { mediaRefs: undefined, evidenceLink: undefined };
+  const ref = evidenceRef.trim();
+  if (isHttpsImageRef(ref)) {
+    return { mediaRefs: [{ imageUrl: ref, altText: summary ?? "attachment" }], evidenceLink: undefined };
+  }
+  if (/^https:\/\/\S+$/.test(ref)) return { mediaRefs: undefined, evidenceLink: ref };
+  return { mediaRefs: undefined, evidenceLink: undefined };
+}
+
 /** Build the subsystem DeliverFn. Contract mirrors the retired connector handleDecision. */
 function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true): SubsystemDeliverFn {
   const log = opts.log ?? (() => {});
@@ -114,13 +148,10 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     }
     const q = (decision.payload ?? {}) as OutboundPostPayload & { media?: SlackMediaRef[] };
     // M1 A5b (carried over from the retired sweep): an alert's evidenceRef IS the artifact the
-    // human judges — an https image URL rides as a Block Kit image. buildImageBlocks stays the
-    // single hygiene gate (drops non-https / secret-bearing), so the predicate lives in ONE place.
-    const mediaRefs: SlackMediaRef[] | undefined = Array.isArray(q.media)
-      ? q.media
-      : q.evidenceRef
-        ? [{ imageUrl: String(q.evidenceRef), altText: q.summary ?? "attachment" }]
-        : undefined;
+    // human judges. #47 — it rides as a Block Kit image ONLY when it looks like an image;
+    // a non-image https ref rides as a plain link instead (Slack's invalid_blocks rejects
+    // the whole message when an image block's URL is not a real image).
+    const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef, q.summary);
     const payload = buildOutboundMessage(
       {
         qitemId: q.qitemId ?? decision.decisionId,
@@ -132,6 +163,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
         sourceLabel: opts.sourceLabel,
         bodyExcerpt: opts.bodyExcerpt,
         mediaRefs,
+        evidenceLink,
         // A1.2 — attribution rides every post; identity stays the app's own (postChatMessage
         // structurally cannot carry username/icon overrides — the customize-absence rail).
         attribution: attributionFromSession(q.sourceSession),
@@ -338,12 +370,16 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const partId = (index: number) => parts.length === 1 ? decision.decisionId : `${decision.decisionId}:part:${index + 1}`;
     try {
       for (const [index, part] of parts.entries()) {
+        // #47 — preflight must mirror deliverSinglePart exactly: the same evidenceRef
+        // split (image attachment vs. plain link) so the shape check sees the true payload.
+        const partEvidence = evidenceAttachment(part.media, part.evidenceRef, part.summary);
         buildOutboundMessage(part, {
           sourceLabel: opts.sourceLabel,
           attribution: attributionFromSession(part.sourceSession),
           mentionUserId: index === 0 ? opts.resolveMentionUserId?.(q) : undefined,
           reconcileMarker: reconcileToken(partId(index)),
-          mediaRefs: Array.isArray(part.media) ? part.media : part.evidenceRef ? [{ imageUrl: part.evidenceRef, altText: part.summary ?? "attachment" }] : undefined,
+          mediaRefs: partEvidence.mediaRefs,
+          evidenceLink: partEvidence.evidenceLink,
         });
       }
     } catch (error) {
