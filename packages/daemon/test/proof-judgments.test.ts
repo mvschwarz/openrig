@@ -205,6 +205,22 @@ describe("retained authority negative controls", () => {
     f.write(join(f.beta, "proof/judgments/00000001.md"), fs.readFileSync(join(f.alpha, "proof/judgments/00000001.md"), "utf8"));
     expect(readSliceReadiness(f.beta).items[0]!.state).toBe("unknown");
   });
+  /**
+   * Verifies that mission readiness resolves composition slices when metadata is omitted (#72),
+   * while rejecting malformed metadata values.
+   */
+  it("tolerates mission without metadata and resolves composition slices (#72)", () => {
+    const f = fixture();
+    const members = ["01-alpha", "02-beta"].map((s, i) => ({ ref: `slices/${s}/slice.yaml`, order: i + 1, active: true }));
+    f.write(join(f.mission, "mission.yaml"), { kind: "mission", composition: { slices: members } });
+    const readiness = readMissionReadiness(f.mission);
+    expect(readiness.issues).toEqual([]);
+    expect(readiness.slices.map(s => s.id)).toEqual(["01-alpha", "02-beta"]);
+    expect(readiness.historicalStatus).toBeNull();
+    f.write(join(f.mission, "mission.yaml"), { kind: "mission", metadata: "not-a-mapping", composition: { slices: members } });
+    const invalid = readMissionReadiness(f.mission);
+    expect(invalid.issues).toContain("mission metadata: expected a mapping");
+  });
   it("pushes changed source truth, keeps sibling basis, and ignores unchanged source bytes", async () => {
     const f = fixture(); f.judge(); const sibling = readSliceReadiness(f.beta).revision;
     const events: Array<{ type: string; revision: string }> = []; let invalidated = 0;

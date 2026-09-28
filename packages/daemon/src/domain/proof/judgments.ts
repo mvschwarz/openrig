@@ -211,6 +211,15 @@ export interface JudgeInput {
   subject?: Judgment["subject"]; expectedEvidence?: Evidence[]; reason: string; expectedRevision: string;
   expectedPrevious: string | null; operationId?: string; replace?: boolean;
 }
+/**
+ * Records a verifiable proof judgment for a slice item into the judgments ledger.
+ *
+ * @param missionsRoot - Workspace root path for resolving scopes.
+ * @param input - Judgment details including scope, item, verdict, and evidence.
+ * @param actor - Identifier of the judging actor authorized under the proof policy.
+ * @param provenance - Attestation provenance string recorded in the ledger.
+ * @returns Recorded judgment receipt, current slice readiness, and replay status.
+ */
 export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: string, provenance: string): { judgment: Judgment; readiness: ScopeReadiness; replayed: boolean } {
   const dir = resolveProofScope(missionsRoot, input.scope), root = workspaceOf(dir, proofFs);
   if (path.basename(path.dirname(dir)) !== "slices") throw new JudgmentError("slice_required", "Item judgments belong to a slice; higher outcome judgments remain workflow decisions");
@@ -264,13 +273,20 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   return { judgment, readiness: readSliceReadiness(dir), replayed: false };
 }
 
+/**
+ * Evaluates readiness for a mission by reading its composition and resolving member slices.
+ *
+ * @param missionDir - Path to the mission directory containing mission.yaml.
+ * @param readPolicy - Reader function for determining applicable proof policy.
+ * @returns Evaluated mission readiness, including revision, state, slices, and any issues.
+ */
 export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicyRead = policyOf): MissionReadiness {
   const issues: string[] = [], slices: MissionReadiness["slices"] = [];
   let historicalStatus: string | null = null;
   try {
     const doc = manifest(proofFs, path.join(missionDir, "mission.yaml"));
     if (!doc) return { revision: hash("legacy"), state: "legacy", slices, issues, historicalStatus };
-    const metadata = mapping(doc.metadata, "mission metadata");
+    const metadata = doc.metadata != null ? mapping(doc.metadata, "mission metadata") : {};
     historicalStatus = typeof metadata.status === "string" ? metadata.status : null;
     const members = validateMissionComposition(doc, path.join(missionDir, "mission.yaml")).filter(m => m.active);
     for (const member of members) {
