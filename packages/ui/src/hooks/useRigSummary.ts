@@ -5,6 +5,8 @@ import { useSelectedHostId } from "./useHosts.js";
 export interface RigSummary {
   id: string;
   name: string;
+  /** Built-in kernel spec file selected during auto-boot, when recorded. */
+  kernelVariant?: "rig.yaml" | "rig-claude-only.yaml" | "rig-codex-only.yaml" | null;
   nodeCount: number;
   hasServices?: boolean;
   latestSnapshotAt: string | null;

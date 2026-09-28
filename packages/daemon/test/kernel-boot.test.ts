@@ -23,10 +23,14 @@ import type { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator
 import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { EventBus } from "../src/domain/event-bus.js";
 
-function makeRigRepo(existingRigs: Array<{ id?: string; name: string }>): RigRepository {
+function makeRigRepo(
+  existingRigs: Array<{ id?: string; name: string }>,
+  setRigKernelVariant = vi.fn(),
+): RigRepository {
   return {
     listRigs: () => existingRigs,
     findRigsByName: (name: string) => existingRigs.filter((r) => r.name === name),
+    setRigKernelVariant,
   } as unknown as RigRepository;
 }
 
@@ -241,6 +245,31 @@ describe("bootKernelIfNeeded — fire-and-forget bootstrap", () => {
       probeRuntimes: async () => ({ claudeCode: "unavailable", codex: "ok" }),
     }, tmpSpecsDir));
     expect(tracker.getStatus().variant).toBe("rig-codex-only.yaml");
+    tracker.stop();
+  });
+
+  it("persists the selected variant on the created kernel rig", async () => {
+    const setRigKernelVariant = vi.fn();
+    const bootstrap = {
+      bootstrap: vi.fn(async () => ({
+        runId: "t",
+        status: "ok",
+        stages: [],
+        rigId: "kernel-id",
+        errors: [],
+        warnings: [],
+      })),
+    } as unknown as BootstrapOrchestrator;
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({
+      rigRepo: makeRigRepo([], setRigKernelVariant),
+      bootstrapOrchestrator: bootstrap,
+      probeRuntimes: async () => ({ claudeCode: "ok", codex: "unavailable" }),
+    }, tmpSpecsDir));
+
+    await flushPromises();
+
+    expect(setRigKernelVariant).toHaveBeenCalledOnce();
+    expect(setRigKernelVariant).toHaveBeenCalledWith("kernel-id", "rig-claude-only.yaml");
     tracker.stop();
   });
 });

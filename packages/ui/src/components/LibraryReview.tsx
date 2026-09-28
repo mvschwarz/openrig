@@ -36,7 +36,7 @@ import {
   type AgentImageEntry,
   type AgentImagePreview,
 } from "../hooks/useAgentImageLibrary.js";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   WorkflowHeader,
   WorkflowSummaryCard,
@@ -47,6 +47,9 @@ import { AgentSpecDisplay } from "./AgentSpecDisplay.js";
 import { RigSpecDisplay } from "./RigSpecDisplay.js";
 import { buildSetupPrompt } from "../lib/build-setup-prompt.js";
 import { copyText } from "../lib/copy-text.js";
+import { withHostParam } from "../lib/host-param.js";
+import { useSelectedHostId } from "../hooks/useHosts.js";
+import { useRigSummary } from "../hooks/useRigSummary.js";
 
 interface LibraryReviewProps {
   entryId: string;
@@ -102,6 +105,9 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
   const reviewPods = review.pods ?? [];
   const reviewNodes = review.nodes ?? [];
   const reviewEdges = review.edges ?? [];
+  const normalizedSourcePath = review.sourcePath.replace(/\\/g, "/");
+  const isKernelLibraryTemplate = review.name === "kernel"
+    && normalizedSourcePath.endsWith("/rigs/launch/kernel/rig.yaml");
 
   const resolveMemberAgent = (agentRef: string) => {
     if (!agentRef.startsWith("local:")) return null;
@@ -127,7 +133,9 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
         <WorkflowHeader
           eyebrow={review.services ? "Library — Managed App" : "Library — Rig Spec"}
           title={review.name}
-          description={review.summary ?? "Rig spec from library."}
+          description={isKernelLibraryTemplate
+            ? `Library template: ${review.summary ?? "Kernel rig spec from library."} The selected kernel rig configuration is shown below when available.`
+            : review.summary ?? "Rig spec from library."}
           actions={
             <div className="flex gap-2">
               {review.services && (
@@ -154,6 +162,7 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
           }
         />
         <ProvenanceBadge sourcePath={review.sourcePath} sourceState={review.sourceState} />
+        {isKernelLibraryTemplate && <KernelLiveSpecPanel />}
 
         <WorkflowSummaryGrid>
           <WorkflowSummaryCard label="Format" value={review.format === "pod_aware" ? "Pod-Aware" : "Legacy"} testId="lib-rig-format" />
@@ -192,6 +201,11 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
           />
         </WorkflowSummaryGrid>
 
+        {isKernelLibraryTemplate && (
+          <div className="border border-outline-variant/40 bg-surface-lowest/[0.08] px-3 py-2 font-mono text-[9px] text-on-surface-variant" data-testid="kernel-library-template-note">
+            The current managed kernel spec is shown above when available; this entry is the built-in default template.
+          </div>
+        )}
         <RigSpecDisplay
           review={review}
           yaml={review.raw}
@@ -207,6 +221,72 @@ function LibraryRigReviewContent({ review }: { review: LibraryRigReview }) {
         />
       </div>
     </WorkspacePage>
+  );
+}
+
+function KernelLiveSpecPanel() {
+  const hostId = useSelectedHostId();
+  const {
+    data: rigs = [],
+    isLoading: rigsLoading,
+    isPlaceholderData,
+    error: rigsError,
+  } = useRigSummary();
+  const kernelRigs = isPlaceholderData ? [] : rigs.filter((rig) => rig.name === "kernel");
+  const kernelRig = kernelRigs.length === 1 ? kernelRigs[0]! : null;
+  const rigId = kernelRig?.id ?? null;
+  const {
+    data: liveYaml,
+    isLoading: specLoading,
+    error: specError,
+  } = useQuery({
+    queryKey: ["kernel-live-spec", rigId, hostId],
+    enabled: rigId !== null,
+    queryFn: async ({ signal }) => {
+      if (!rigId) throw new Error("A unique kernel rig is required.");
+      const response = await fetch(withHostParam(`/api/rigs/${encodeURIComponent(rigId)}/spec`, hostId), { signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    },
+  });
+
+  return (
+    <section className="border border-outline-variant/50 bg-surface-lowest/[0.08]" data-testid="kernel-live-spec">
+      <header className="border-b border-outline-variant bg-background px-3 py-2 font-mono text-[10px] uppercase tracking-[0.10em] text-on-surface-variant">
+        Current kernel rig configuration
+      </header>
+      <div className="space-y-2 px-3 py-3">
+        {rigsLoading || isPlaceholderData ? (
+          <div className="font-mono text-[9px] text-on-surface-variant">Loading the selected host’s kernel rig…</div>
+        ) : rigsError ? (
+          <div className="font-mono text-[9px] text-red-700">Could not load kernel rigs: {(rigsError as Error).message}</div>
+        ) : kernelRigs.length === 0 ? (
+          <div className="font-mono text-[9px] text-on-surface-variant">No managed kernel rig was found on the selected host.</div>
+        ) : kernelRigs.length > 1 ? (
+          <div className="font-mono text-[9px] text-on-surface-variant">
+            Found {kernelRigs.length} managed rigs named kernel; the current configuration is ambiguous.
+          </div>
+        ) : (
+          <>
+            <div className="font-mono text-[9px] text-on-surface-variant" data-testid="kernel-live-spec-variant">
+              Selected variant: {kernelRig?.kernelVariant ?? "not recorded"} · rig {rigId}
+            </div>
+            {specLoading ? (
+              <div className="font-mono text-[9px] text-on-surface-variant">Loading exported rig spec…</div>
+            ) : specError ? (
+              <div className="font-mono text-[9px] text-red-700">Could not load the kernel rig spec: {(specError as Error).message}</div>
+            ) : liveYaml ? (
+              <pre className="max-h-96 overflow-y-auto whitespace-pre-wrap bg-background px-3 py-2 font-mono text-[9px] text-on-surface" data-testid="kernel-live-spec-yaml">
+                {liveYaml}
+              </pre>
+            ) : null}
+            <div className="font-mono text-[9px] text-on-surface-variant">
+              This spec is exported from the selected host’s persisted kernel rig. The library template is shown below for comparison.
+            </div>
+          </>
+        )}
+      </div>
+    </section>
   );
 }
 

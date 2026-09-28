@@ -23,6 +23,7 @@ import type { BootstrapOrchestrator } from "./bootstrap-orchestrator.js";
 import type { EventBus } from "./event-bus.js";
 import type { SessionRegistry } from "./session-registry.js";
 import { KernelBootTracker } from "./kernel-boot-tracker.js";
+import type { KernelVariant } from "./types.js";
 
 export type RuntimeAuthStatus = "ok" | "unavailable";
 
@@ -125,6 +126,15 @@ export async function bootKernelIfNeeded(deps: KernelBootDeps): Promise<KernelBo
     sourceKind: "rig_spec",
     autoApprove: true,
     cwdOverride: deps.cwdOverride,
+  }).then((result) => {
+    if (result.rigId) {
+      try {
+        deps.rigRepo.setRigKernelVariant(result.rigId, variant);
+      } catch (err) {
+        log("warn", `kernel-boot: could not persist selected variant for rig ${result.rigId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return result;
   });
   tracker.startBooting(variant, bootstrapPromise);
   return tracker;
@@ -137,7 +147,7 @@ export function kernelAlreadyManaged(rigRepo: RigRepository): boolean {
 }
 
 /** Choose a rig variant from the auth probe. */
-export function selectVariant(probe: RuntimeProbeResult): string {
+export function selectVariant(probe: RuntimeProbeResult): KernelVariant {
   if (probe.claudeCode === "ok" && probe.codex === "ok") return "rig.yaml";
   if (probe.claudeCode === "ok") return "rig-claude-only.yaml";
   if (probe.codex === "ok") return "rig-codex-only.yaml";

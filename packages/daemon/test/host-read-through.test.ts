@@ -91,6 +91,7 @@ describe("READ_THROUGH_ALLOWLIST matcher (arch P1 — the named closed set)", ()
       "/api/rigs/summary",
       "/api/rigs/factory-fleet/graph",
       "/api/rigs/factory-fleet/nodes",
+      "/api/rigs/factory-fleet/spec",
       "/api/rigs/factory-fleet/nodes/orch-lead", // rev1-r2 B2 + arch Option A: the seat-detail leaf
       "/api/ps",
       "/api/slices",
@@ -115,6 +116,7 @@ describe("READ_THROUGH_ALLOWLIST matcher (arch P1 — the named closed set)", ()
       "/api/mission-control/action",
       "/api/rigs", // bare collection is not a screen read today
       "/api/rigs/x/graph/extra",
+      "/api/rigs/x/spec/extra",
       // THE ARCH TOOTH on the first parameterized seat-detail entry: strict
       // segment-shape only — the deeper ACTION routes under the same prefix
       // stay refused (these are exactly rev1-r2 B1's local action endpoints).
@@ -140,6 +142,7 @@ describe("READ_THROUGH_ALLOWLIST matcher (arch P1 — the named closed set)", ()
       "/api/rigs/summary",
       "/api/rigs/:rigId/graph",
       "/api/rigs/:rigId/nodes",
+      "/api/rigs/:rigId/spec",
       "/api/rigs/:rigId/nodes/:logicalId", // rev1-r2 B2, arch-ruled Option A
       "/api/ps",
       "/api/slices",

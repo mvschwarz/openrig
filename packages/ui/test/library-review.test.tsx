@@ -9,6 +9,90 @@ describe("LibraryReview", () => {
     cleanup();
   });
 
+  it("shows the selected kernel variant and exported rig spec beside the library template", async () => {
+    const liveSpec = [
+      "name: kernel",
+      "pods:",
+      "  - id: platform",
+      "    members:",
+      "      - id: advisor-lead",
+      "        runtime: claude-code",
+      "      - id: operator-agent",
+      "        runtime: claude-code",
+      "      - id: operator-human",
+      "        runtime: terminal",
+      "      - id: queue-worker",
+      "        runtime: claude-code",
+    ].join("\n");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+
+      if (url === "/api/specs/library?kind=agent") {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      if (url === "/api/rigs/summary") {
+        return new Response(JSON.stringify([{
+          id: "kernel-rig-1",
+          name: "kernel",
+          kernelVariant: "rig-claude-only.yaml",
+          nodeCount: 4,
+          latestSnapshotAt: null,
+          latestSnapshotId: null,
+          hasServices: false,
+          archivedAt: null,
+        }]), { status: 200 });
+      }
+      if (url === "/api/rigs/kernel-rig-1/spec") {
+        return new Response(liveSpec, { status: 200, headers: { "Content-Type": "text/yaml" } });
+      }
+      if (url === "/api/specs/library/kernel-entry/review") {
+        return new Response(JSON.stringify({
+          sourceState: "library_item",
+          kind: "rig",
+          name: "kernel",
+          version: "0.5.0",
+          summary: "Default dual-runtime kernel template.",
+          format: "pod_aware",
+          pods: [{ id: "platform", label: "Platform", members: [
+            { id: "advisor-lead", agentRef: "local:agents/advisor-lead", runtime: "claude-code" },
+            { id: "operator-agent", agentRef: "local:agents/operator-agent", runtime: "codex" },
+            { id: "operator-human", agentRef: "local:agents/operator-human", runtime: "terminal" },
+            { id: "queue-worker", agentRef: "local:agents/queue-worker", runtime: "codex" },
+          ], edges: [] }],
+          nodes: [],
+          edges: [],
+          graph: { nodes: [], edges: [] },
+          raw: "name: kernel\npods:\n  # default template uses codex seats\n",
+          libraryEntryId: "kernel-entry",
+          sourcePath: "/specs/rigs/launch/kernel/rig.yaml",
+        }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(createAppTestRouter({
+      initialPath: "/specs/library/kernel-entry",
+      routes: [
+        { path: "/specs/library/kernel-entry", component: () => <LibraryReview entryId="kernel-entry" /> },
+      ],
+    }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("kernel-live-spec-yaml")).toBeDefined();
+    });
+
+    expect(screen.getByTestId("kernel-live-spec-variant").textContent)
+      .toContain("rig-claude-only.yaml");
+    expect(screen.getByTestId("kernel-live-spec-yaml").textContent)
+      .toContain("runtime: claude-code");
+    expect(screen.getByTestId("kernel-library-template-note").textContent)
+      .toContain("built-in default template");
+    expect(fetchMock.mock.calls.some(([input]) => String(input) === "/api/rigs/kernel-rig-1/spec"))
+      .toBe(true);
+  });
+
   it("service-backed rig shows environment tab with stack details and Copy Setup Prompt copies correct text", async () => {
     let copiedText = "";
     const clipboardMock = { writeText: vi.fn(async (text: string) => { copiedText = text; }) };

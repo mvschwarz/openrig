@@ -16,6 +16,7 @@ import type {
   Snapshot,
   SnapshotData,
   SessionSourceSpec,
+  KernelVariant,
 } from "./types.js";
 
 /**
@@ -220,6 +221,13 @@ export class RigRepository {
     const row = this.db.prepare("SELECT claude_managed_block_file FROM rigs WHERE id = ?")
       .get(rigId) as { claude_managed_block_file: ClaudeManagedBlockFile | null } | undefined;
     return row?.claude_managed_block_file ?? null;
+  }
+
+  /** Persist the built-in kernel variant selected by automatic boot (migration 086). */
+  setRigKernelVariant(rigId: string, variant: KernelVariant): void {
+    if (!this.hasRigColumn("kernel_variant")) return;
+    this.db.prepare("UPDATE rigs SET kernel_variant = ?, updated_at = ? WHERE id = ?")
+      .run(variant, new Date().toISOString(), rigId);
   }
 
   /** Seam B Guard-F1 — persist the RIG-level resolved attachment provenance (migration 058).
@@ -517,14 +525,16 @@ export class RigRepository {
     return rows.map((r) => this.rowToRig(r));
   }
 
-  getRigSummaries(filter?: RigArchiveFilter): Array<{ id: string; name: string; nodeCount: number; latestSnapshotAt: string | null; latestSnapshotId: string | null; hasServices: boolean; archivedAt: string | null }> {
+  getRigSummaries(filter?: RigArchiveFilter): Array<{ id: string; name: string; nodeCount: number; latestSnapshotAt: string | null; latestSnapshotId: string | null; hasServices: boolean; archivedAt: string | null; kernelVariant: KernelVariant | null }> {
     const cond = archiveWhereClause("r.archived_at", filter);
     const where = cond ? `WHERE ${cond}` : "";
+    const kernelVariantColumn = this.hasRigColumn("kernel_variant") ? "r.kernel_variant" : "NULL";
     const rows = this.db.prepare(`
       SELECT
         r.id,
         r.name,
         r.archived_at AS archived_at,
+        ${kernelVariantColumn} AS kernel_variant,
         (SELECT COUNT(*) FROM nodes n WHERE n.rig_id = r.id) AS node_count,
         EXISTS(SELECT 1 FROM rig_services rs WHERE rs.rig_id = r.id) AS has_services,
         ls.id AS latest_snapshot_id,
@@ -538,7 +548,7 @@ export class RigRepository {
       )
       ${where}
       ORDER BY r.created_at
-    `).all() as Array<{ id: string; name: string; archived_at: string | null; node_count: number; has_services: number; latest_snapshot_id: string | null; latest_snapshot_at: string | null }>;
+    `).all() as Array<{ id: string; name: string; archived_at: string | null; kernel_variant: KernelVariant | null; node_count: number; has_services: number; latest_snapshot_id: string | null; latest_snapshot_at: string | null }>;
 
     return rows.map((r) => ({
       id: r.id,
@@ -548,6 +558,7 @@ export class RigRepository {
       latestSnapshotAt: r.latest_snapshot_at,
       latestSnapshotId: r.latest_snapshot_id,
       archivedAt: r.archived_at,
+      kernelVariant: r.kernel_variant,
     }));
   }
 
@@ -647,6 +658,7 @@ export class RigRepository {
       name: row.name,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      kernelVariant: row.kernel_variant ?? null,
     };
   }
 
@@ -737,6 +749,7 @@ interface RigRow {
   name: string;
   created_at: string;
   updated_at: string;
+  kernel_variant?: KernelVariant | null;
 }
 
 interface NodeRow {

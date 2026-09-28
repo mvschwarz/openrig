@@ -3,7 +3,10 @@ export interface Rig {
   name: string;
   createdAt: string;
   updatedAt: string;
+  kernelVariant?: KernelVariant | null;
 }
+
+export type KernelVariant = "rig.yaml" | "rig-claude-only.yaml" | "rig-codex-only.yaml";
 
 export interface Pod {
   id: string;

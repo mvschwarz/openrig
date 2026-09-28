@@ -87,10 +87,11 @@ import { archiveIdentityProvenanceSchema } from "./migrations/082_archive_identi
 import { reviewReadIndexesSchema } from "./migrations/083_review_read_indexes.js";
 import { inventoryEventIndexesSchema } from "./migrations/084_inventory_event_indexes.js";
 import { rigClaudeManagedBlockFileSchema } from "./migrations/085_rig_claude_managed_block_file.js";
+import { rigKernelVariantSchema } from "./migrations/086_rig_kernel_variant.js";
 import { scopedOperatingPostureSchema } from "./migrations/080_scoped_operating_posture.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→085 (068 enforcer decisions, dropped forward by 071; 069/070 W3 launch truth). */
+/** Ordered 001→086 (068 enforcer decisions, dropped forward by 071; 069/070 W3 launch truth). */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -177,4 +178,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   reviewReadIndexesSchema,
   inventoryEventIndexesSchema,
   rigClaudeManagedBlockFileSchema,
+  rigKernelVariantSchema,
 ];

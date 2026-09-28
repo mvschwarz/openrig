@@ -29,6 +29,16 @@ describe("RigRepository", () => {
     expect(rig.createdAt).toBeDefined();
   });
 
+  it("persists the selected kernel variant on the rig and includes it in summaries", () => {
+    const rig = repo.createRig("kernel");
+
+    repo.setRigKernelVariant(rig.id, "rig-claude-only.yaml");
+
+    expect(repo.getRig(rig.id)?.rig.kernelVariant).toBe("rig-claude-only.yaml");
+    expect(repo.getRigSummaries().find((summary) => summary.id === rig.id)?.kernelVariant)
+      .toBe("rig-claude-only.yaml");
+  });
+
   it("addNode persists with rig FK, returns typed Node", () => {
     const rig = repo.createRig("test-rig");
     const node = repo.addNode(rig.id, "orchestrator", {
