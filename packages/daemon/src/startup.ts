@@ -1,3 +1,5 @@
+import { configureShadowCapture } from "./domain/shadow-capture.js";
+import { SeatDeliveryGuard, resolveGuardTarget } from "./domain/seat-delivery-guard.js";
 import { queueRecoveryOwnsWake } from "./domain/queue-wake-ladder.js";
 import { HealthPolicyStore } from "./domain/health-policy.js";
 import { HealthCheckpointSource } from "./domain/health-checkpoints.js";
@@ -29,6 +31,7 @@ import { SnapshotRepository } from "./domain/snapshot-repository.js";
 import { CheckpointStore } from "./domain/checkpoint-store.js";
 import { SnapshotCapture } from "./domain/snapshot-capture.js";
 import { RestoreOrchestrator } from "./domain/restore-orchestrator.js";
+import { ClaudeManagedLaunch } from "./domain/claude-managed-launch.js";
 import { ClaudeResumeAdapter } from "./adapters/claude-resume.js";
 import { CodexResumeAdapter } from "./adapters/codex-resume.js";
 import { codexDaemonSupportProbe } from "./domain/codex-daemon-support.js";
@@ -91,6 +94,7 @@ import { InboxHandler } from "./domain/inbox-handler.js";
 import { OutboxHandler } from "./domain/outbox-handler.js";
 import { ProjectClassifier } from "./domain/project-classifier.js";
 import { ClassifierLeaseManager } from "./domain/classifier-lease-manager.js";
+import { ClassificationAttemptLedger } from "./domain/classification-attempts.js";
 import { ViewProjector } from "./domain/view-projector.js";
 import { wireViewEventBridge } from "./domain/view-event-bridge.js";
 import { WatchdogJobsRepository } from "./domain/watchdog-jobs-repository.js";
@@ -280,6 +284,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const sessionRegistry = new SessionRegistry(db);
   const eventBus = new EventBus(db);
   const streamStore = new StreamStore(db, eventBus);
+  // Explicit source opt-in only. No sink I/O until a separate drain request.
+  const shadow = configureShadowCapture(process.env.OPENRIG_SHADOW_CAPTURE);
   const slowOpRecorder = opts?.slowOpRecorder ?? (dbPath === ":memory:"
     ? undefined
     : new SlowOpRecorder({
@@ -387,6 +393,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
   const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
+  const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
+  deliveryGuard.recoverActivation();
+  tmuxAdapter.deliveryGuard = deliveryGuard;
 
   // Slice 15 — Seat-activity service for the `terminal-active` primitive.
   // Lives at module scope so the projection chain (PsProjectionService,
@@ -505,7 +514,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const snapshotRepo = new SnapshotRepository(db);
   const checkpointStore = new CheckpointStore(db);
   const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });
-  const claudeResume = new ClaudeResumeAdapter(tmuxAdapter);
+  const claudeManagedLaunch = new ClaudeManagedLaunch(db, { ...launchSessionEnv, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }, {
+    OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN: process.env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN,
+  });
+  const claudeResume = new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch });
   const codexResume = new CodexResumeAdapter(tmuxAdapter, { launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH) });
   // OPR.0.4.6.PI1 — the Pi seat-state root + the compiled runner entry (daemon
   // dist). Shared by the Pi runtime adapter, the resume adapter, and the
@@ -653,7 +665,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
-  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
+  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, claudeManagedLaunch, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
   const codexAdapter = new CodexRuntimeAdapter({ tmux: tmuxAdapter, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH), activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs") });
   // OPR.0.4.6.PI1 — the RPC-first Pi adapter (runner-in-a-pane). Same fsOps
   // shape as the Codex adapter; seat isolation roots under piStateRoot.
@@ -1106,6 +1118,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         eventBus,
         slowOpRecorder,
         activityEndpointFile: () => readActivityEndpointFile(OPENRIG_HOME),
+        captureObserver: shadow.capture?.observer,
       });
       // PL-004 Phase A revision (R1): wire QueueRepository's wake-path so
       // create / handoff / handoff-and-complete nudge by default.
@@ -1136,8 +1149,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     queueRepo: queueRepoInstance,
     inboxHandler: new InboxHandler(db, eventBus, queueRepoInstance),
     outboxHandler: outboxHandlerInstance,
+    shadowCapture: shadow.capture,
+    shadowCaptureError: shadow.error,
     classifierLeaseManager: classifierLeaseManagerInstance,
     projectClassifier: new ProjectClassifier(db, eventBus, classifierLeaseManagerInstance),
+    classificationAttemptLedger: new ClassificationAttemptLedger(db, classifierLeaseManagerInstance),
     viewProjector: viewProjectorInstance,
     watchdogJobsRepo: watchdogJobsRepoInstance,
     watchdogHistoryLog: watchdogHistoryLogInstance,
@@ -1824,10 +1840,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             await createContinuityCutoverBaton(continuityAction, queueRepoInstance);
             continuityActionCompleted = true;
           }
-          const result = await sessionTransport.send(
-            targetSession,
-            formatWatchdogDeliveryMessage(source, message),
-          );
+          const deliveryId = `guard-watchdog-${source.occurrenceId ?? source.jobId}`;
+          const previous = outboxHandlerInstance.getById(deliveryId);
+          const payload = previous?.guardBinding ? previous.body : formatWatchdogDeliveryMessage(source, message);
+          const result = await sessionTransport.send(targetSession, payload,
+            { deliveryId, actorSession: "watchdog@system", auditPointer: source.jobId });
+          if (result.outcome === "retained") return { status: "retained", outboxIds: result.outboxIds, continuityActionCompleted };
           return result.ok
             ? { status: "ok", continuityActionCompleted }
             : { status: "failed", error: result.error, continuityActionCompleted };
@@ -2113,10 +2131,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           }
           return { ok: false as const, reason: `runtime ${seat.runtime ?? "unknown"} has no effective-model reader yet` };
         },
-        sendToSession: async (target, message) => {
+        sendToSession: async (target, message, deliveryId) => {
           try {
-            const result = await sessionTransport.send(target, message);
-            return result.ok ? { ok: true } : { ok: false, error: result.error };
+            const previous = deliveryId ? outboxHandlerInstance.getById(deliveryId) : null;
+            const payload = previous?.guardBinding ? previous.body : message;
+            const result = await sessionTransport.send(target, payload, { deliveryId, actorSession: "model-monitor@system", auditPointer: deliveryId });
+            return result.ok ? { ok: true, outcome: result.outcome } : { ok: false, error: result.error };
           } catch (err) {
             return { ok: false, error: err instanceof Error ? err.message : String(err) };
           }

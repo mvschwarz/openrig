@@ -16,7 +16,7 @@ import { fileTargetForPath } from "./reading.js";
 //   - A failed read leaves its portion honest-empty and records a NAMED error.
 import { emptySnapshot } from "./state.js";
 import type { ConfigRead } from "./config/config-model.js";
-import type { ConnectionsRead, ControlPlaneRead } from "./connections/connections-model.js";
+import type { ConnectionsRead, ControlPlaneRead, SlackManifestRead } from "./connections/connections-model.js";
 import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
 import type { AgentRow, FleetSnapshot, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
@@ -471,6 +471,11 @@ export async function hydrateSnapshot(
     wantsConnections ? safe<ConnectionsRead>("connections", () => client.connections()) : Promise.resolve(null),
   ]);
 
+  // Optional: an older daemon has no manifest route; the page then points at the CLI instead.
+  const slackManifest = wantsConnections
+    ? await (client.slackManifest() as Promise<SlackManifestRead>).then((m) => (typeof m?.url === "string" && typeof m?.yaml === "string" ? m : null), () => null)
+    : null;
+
   const agentSpecNames = new Set((library ?? []).filter((entry) => entry.kind === "agent").map((entry) => entry.name));
   if (scopesRead?.sourceObservation?.state === "unavailable") readErrors.push("scopes: proof source updates unavailable; current HTTP basis only");
   if (review?.registryError) readErrors.push(`review-fleet registry: ${review.registryError}`);
@@ -710,6 +715,7 @@ export async function hydrateSnapshot(
   return {
     connections: connectionsRead,
     controlPlane: instanceHealth,
+    slackManifest,
     daemonTarget: (() => { try { const u = new URL(client.baseUrl); return `${u.protocol}//${u.host}${u.pathname}`; } catch { return "unreported"; } })(),
     health: healthProjection
       ? {

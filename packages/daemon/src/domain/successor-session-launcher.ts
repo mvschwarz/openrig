@@ -44,6 +44,7 @@ export interface SuccessorNode {
    *  the successor is a CONTINUITY edge of the same seat, so its policy posture
    *  carries (populated by the caller from node provenance; absent = env decision). */
   launchPosture?: "floor" | "full_bypass";
+  permissionMode?: string;
   /** 0.5.2-07 model fidelity: the seat's SPEC-pinned model (nodes.model). The successor is a continuity
    *  edge of the same seat, so its launch must READ THE SPEC — a launch path that drops it makes the
    *  running topology drift from the founder-designed one. Populated by the caller from node provenance;
@@ -246,7 +247,7 @@ export class SuccessorSessionLauncher {
     //    on ANY launch/readiness failure we do NOT killSession the preserved seat — that would destroy
     //    the retiree's recoverable state. We return the structured failure and leave the re-wakeable
     //    shell in the pane; commit never runs, so the binding is not repointed.
-    const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource);
+    const started = await this.startAgent(input.node, departingSession, pane.id, cwd, input.forkSource, input.occupantGeneration);
     if (!started.ok) {
       return { ok: false, code: started.code, step: "start_agent", message: started.message, replacementStarted: true };
     }
@@ -285,6 +286,7 @@ export class SuccessorSessionLauncher {
     tmuxPane: string,
     cwd: string | undefined,
     forkSource?: ForkSource,
+    launchGeneration?: string | null,
   ): Promise<{ ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: AppliedLaunchObservation } | { ok: false; code: string; message: string }> {
     const adapter = node.runtime ? this.runtimeAdapters[node.runtime] : undefined;
     if (!adapter) {
@@ -313,8 +315,10 @@ export class SuccessorSessionLauncher {
       cmuxSurface: null,
       updatedAt: "",
       cwd: cwd ?? "",
+      launchGeneration: launchGeneration ?? undefined,
       // Seam B: continuity — the successor launches at the departing seat's posture.
       ...(node.launchPosture ? { launchPosture: node.launchPosture } : {}),
+      ...(node.permissionMode ? { permissionMode: node.permissionMode } : {}),
       // 0.5.2-07: the successor reads the seat's SPEC-pinned model (adapter emits -m/--model).
       model: node.model ?? undefined,
       // 0.5.2-07 A4-profile: the successor reads the seat's SPEC-pinned codex config profile (adapter emits -p).

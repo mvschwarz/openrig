@@ -92,6 +92,19 @@ describe("rig terminal CLI", () => {
     expect(process.exitCode).toBeUndefined(); // exit 0 (disclosure, not failure)
   });
 
+  it("open prints the provider's notes (OPR.0.6.0.8: suffixed name, refused focus)", async () => {
+    const { deps } = makeDeps({
+      routes: { "POST /api/terminal/open": { status: 200, data: { ...opened(["a-seat"]), notes: ['A workspace named "acme-build" already exists, so this one is "acme-build (2)".'] } } },
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const program = createProgram({ terminalDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "terminal", "open", "acme-build"]);
+      expect(log.mock.calls.map((c) => String(c[0])).join("\n")).toContain('  note: A workspace named "acme-build" already exists, so this one is "acme-build (2)".');
+    } finally { log.mockRestore(); }
+  });
+
   it("open with ZERO panes opened is a failure — non-zero exit", async () => {
     const { deps } = makeDeps({
       routes: { "POST /api/terminal/open": { status: 200, data: opened([], { ok: false, code: "herdr_unavailable", error: "no binary" }) } },

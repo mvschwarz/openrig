@@ -19,7 +19,7 @@ change in with the least friction on both sides.
 
 ## Setting up
 
-Node `^20 || ^22 || ^24` and a working `tmux` are required. Then:
+Node `^22 || ^24` and a working `tmux` are required. Then:
 
 ```bash
 git clone https://github.com/mvschwarz/openrig.git

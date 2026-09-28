@@ -116,6 +116,13 @@ acceptance, never readership; `transport-failed`, `never-posted`, `still-pending
 and `indeterminate` preserve the request and name the next inspection. Do not
 blindly repeat the create. `rig send` is for agent seats.
 
+`rig slack manifest [--url|--json]` (experimental in 0.6.0) prints the Slack app manifest a user creates
+their own private Socket Mode app from, offline (no daemon, tokens or network).
+`--url` is Slack's create-app link with the manifest prefilled; `--json` adds the
+scope and event lists and why each scope is requested. The same object is served
+read-only at `GET /api/gateway/slack/manifest` for the TUI Connections page. Setup
+steps: `docs/reference/slack-app-setup.md`.
+
 `rig slack enable [--reason <reason>]` seeds existing backlog only on a disabled
 to enabled transition. Repeating enable does not reseed or restart. `rig slack
 disable --reason <reason>` requires a shutdown reason. Both return attributed
@@ -1374,15 +1381,16 @@ Usage: `rig project <subcommand>` — L2 agent-backed classifier with daemon-enf
 
 Subcommands:
 - `lease-acquire [options]` — acquire the active classifier lease for the caller.
-- `lease-heartbeat [options]` — send a heartbeat for an active classifier lease (extends TTL).
+- `lease-heartbeat [options]` — send a heartbeat for an active classifier lease (extends TTL). A lease already past its TTL refuses with `lease_expired`; acquire again instead.
 - `lease-show [options]` — show the currently-active classifier lease.
 - `reclaim-classifier [options]` — operator verb to reclaim the active classifier lease. Use `--if-dead` to refuse if holder is still alive.
-- `classify <streamItemId> [options]` — project a stream item with classification fields. Idempotent on `stream_item_id`; requires an active lease.
-- `list [options]` — list project classifications with filters.
+- `classify <streamItemId> [options]` — project a stream item with classification fields. Idempotent on `stream_item_id` (first write wins). Requires `--lease-id`: the result is refused (`lease_mismatch`, `lease_expired`, `lease_held`) unless that exact lease is active, unexpired and held by `--session` at write time. Optional `--area`, `--scope-ref` (with `--candidate-set-version`), `--duplicate-of`, `--needs-human true|false` (omit when unknown), `--classifier-version`, `--taxonomy-version`, `--attempt-id` with `--execution-id`. Without `--attempt-id` the result is a manual classification, not bound to the attempt ledger. Every supplied field must be a string (IDs and versions non-empty); `--needs-human` omitted means unknown.
+- `list [options]` — list project classifications with filters (`--session`, `--destination`, `--area`, `--scope-ref`, `--needs-human true|false|unknown`).
 - `show <projectId> [options]` — show one project classification.
 
 Notes:
-- Lease semantics: only one classifier holds the active lease at a time. Heartbeats extend TTL; lease expiry frees the slot for the next acquirer.
+- Lease semantics: only one classifier holds the active lease at a time. Heartbeats extend TTL only while the lease is unexpired. Re-acquiring your own expired lease issues a new lease id, so results bound to the old id are refused; another session must use `--evaluate-deadness-first` or the reclaim verb.
+- Attempt ledger (daemon HTTP, used by a classifier occupant): `POST /api/projects/attempts/begin`, `/attempts/:id/abstain`, `/attempts/:id/fail`, `GET /api/projects/eligible`. Abstentions and errors are recorded there, never in the classification row; errors retry with bounded backoff, then end `exhausted`. Every `begin` (including a timeout or error retry) returns a new `executionId`; only the current one can abstain, fail or bind a result (`attempt_superseded` otherwise), because a renewable lease never proves an older execution stopped.
 - `classify` enforces L1→L2 foreign-key existence: the referenced `stream_items` row must exist or the call is rejected before any state mutation.
 - `reclaim-classifier` is the operator-side verb to recover from a hung classifier; `--if-dead` adds a liveness guard so a still-heartbeating classifier is not stolen from.
 

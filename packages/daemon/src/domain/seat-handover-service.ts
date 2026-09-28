@@ -1,4 +1,6 @@
 import type Database from "better-sqlite3";
+import { NativePermissionStore } from "./native-permission-store.js";
+import { permissionBindingOverride } from "./native-permission-selection.js";
 import { ulid } from "ulid";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -325,6 +327,10 @@ export class SeatHandoverService {
     }
 
     const node = this.lookupNode(statusResult.status);
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(node.id)) {
+      return guard.lifecycle([node.id], () => this.handover(input));
+    }
     const latestSession = this.lookupLatestSession(node.id);
     if (!latestSession) {
       return {
@@ -424,6 +430,13 @@ export class SeatHandoverService {
     const successorPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
       ?? this.rigRepo.getRigPolicyProvenance(statusResult.status.rig_id)?.launchPosture
       ?? "floor"; // R2 terminal: absence = the locked floor on the continuity edge too
+    let permissionOverride: ReturnType<typeof permissionBindingOverride>;
+    try {
+      const selection = new NativePermissionStore(this.db).read(node.id);
+      if (selection && selection.runtime !== node.runtime) throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
+      permissionOverride = permissionBindingOverride(selection);
+    } catch (error) { return { ok: false, code: "successor_create_failed", message: `Permission selection: ${(error as Error).message}`,
+      guidance: "No successor was created. Inspect the seat permission selection before a separately authorized retry." }; }
     // The successor must carry its own generation from its first byte. This reservation writes no
     // ledger row; commit consumes it, while every failed pre-commit branch remains unregistered.
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
@@ -433,7 +446,7 @@ export class SeatHandoverService {
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture, model: node.model, codexConfigProfile: node.codex_config_profile ?? undefined },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, launchPosture: successorPosture, ...permissionOverride, model: node.model, codexConfigProfile: node.codex_config_profile ?? undefined },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -687,6 +700,7 @@ export class SeatHandoverService {
       sourceOutcome: input.sourceOutcome,
     });
     if (!committed.ok) return fail(committed);
+    this.tmuxAdapter.deliveryGuard?.rebindLifecycle(input.node.id);
 
     // B2 (discovered): the successor is an operator-prepared live session we did
     // NOT launch, so no launch token was scraped. Best-effort capture its live

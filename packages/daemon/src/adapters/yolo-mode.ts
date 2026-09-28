@@ -38,7 +38,12 @@ export function yoloEnabled(
 export function claudePostureFlag(
   env: NodeJS.ProcessEnv = process.env,
   resolvedPosture?: ResolvedLaunchPosture,
+  permissionMode?: string,
 ): string {
+  if (permissionMode !== undefined) {
+    if (!/^[A-Za-z][A-Za-z0-9]*$/.test(permissionMode)) throw new Error("Invalid Claude permission mode");
+    return `--permission-mode ${permissionMode}`;
+  }
   return yoloEnabled(env, resolvedPosture) ? "--dangerously-skip-permissions" : "--permission-mode acceptEdits";
 }
 
@@ -48,13 +53,15 @@ export function claudePostureFlag(
  * - YOLO ON → ` -s danger-full-access` (maximally-permissive sandbox), overriding even a named profile.
  * - OFF + named profile → the profile (it governs its own sandbox).
  * - OFF + no profile → OpenRig's explicit workspace-only floor ` -s workspace-write`.
- * No forced approval flag on any path — the approval flow is left to Codex, unforced.
+ * Explicit resolved full_bypass selects both sandbox and approval behavior. The legacy
+ * environment-only YOLO path remains sandbox-only; unselected defaults are unchanged.
  */
 export function codexPostureArg(
   profileArg: string,
   env: NodeJS.ProcessEnv = process.env,
   resolvedPosture?: ResolvedLaunchPosture,
 ): string {
+  if (resolvedPosture === "full_bypass") return " -s danger-full-access -a never";
   if (yoloEnabled(env, resolvedPosture)) return " -s danger-full-access";
   return profileArg ? profileArg : " -s workspace-write";
 }

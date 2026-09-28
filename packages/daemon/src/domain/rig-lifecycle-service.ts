@@ -375,6 +375,9 @@ export class RigLifecycleService {
       return { ok: false, code: "node_not_found", error: `Node '${nodeRef}' not found in rig '${rigId}'.` };
     }
 
+    const guard = this.tmuxAdapter?.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(node.node_id)) return guard.lifecycle([node.node_id], () => this.removeNode(rigId, nodeRef, opts));
+
     const fallbackDestination = opts?.fallbackDestination;
     if (fallbackDestination !== undefined) {
       const invalidFallback = await this.validateFallbackDestination(fallbackDestination, new Set([node.node_id]));
@@ -504,6 +507,10 @@ export class RigLifecycleService {
       WHERE n.rig_id = ? AND n.pod_id = ?
       ORDER BY n.logical_id
     `).all(rigId, pod.id) as Array<{ id: string; logical_id: string; latest_session_name: string | null }>;
+
+    const guard = this.tmuxAdapter?.deliveryGuard;
+    const ids = nodes.map(node => node.id);
+    if (guard && ids.some(id => !guard.ownsLifecycle(id))) return guard.lifecycle(ids, () => this.shrinkPod(rigId, podRef, opts));
 
     const fallbackDestination = opts?.fallbackDestination;
     if (fallbackDestination !== undefined) {

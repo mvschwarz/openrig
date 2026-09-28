@@ -30,13 +30,14 @@ function fsFixture(files: Record<string, string | Error>, cwdReadable: boolean |
 const cwd = "/tmp/w3-project";
 const settingsPath = `${cwd}/.claude/settings.local.json`;
 
-describe("applied launch observations use the exact enforcing value", () => {
+describe("applied launch observations retain the emitted argument value", () => {
   it("preserves Claude permission vocabulary", () => {
     expect(observeClaudePermission("--permission-mode acceptEdits")).toEqual({
       runtime: "claude-code",
       axis: "permission",
       state: "observed",
       value: "acceptEdits",
+      reason: "emitted_launch_arguments",
     });
     expect(observeClaudePermission("--dangerously-skip-permissions").value).toBe("bypassPermissions");
   });
@@ -54,7 +55,7 @@ describe("applied launch observations use the exact enforcing value", () => {
   });
 });
 
-describe("strict read-only effective observer", () => {
+describe("read-only configuration comparison and unknown native enforcement", () => {
   it("derives Claude permission vocabulary from the live help shape", () => {
     expect(parseClaudePermissionModes([
       "--permission-mode <mode>  Permission mode to use",
@@ -77,13 +78,12 @@ describe("strict read-only effective observer", () => {
     expect(diagnostic.transport.state).toBe("healthy");
     expect(diagnostic.cwdRead.state).toBe("visible");
     expect(diagnostic.commandPath.state).toBe("available");
-    expect(diagnostic.enforcement).toMatchObject({
-      axis: "permission",
-      state: "drift",
+    expect(diagnostic.configuration).toMatchObject({
+      comparison: "drift",
       expected: "acceptEdits",
       sourcePath: settingsPath,
     });
-    expect(diagnostic.enforcement.effective).toEqual({
+    expect(diagnostic.configuration?.observed).toEqual({
       defaultMode: "manual",
       allow: ["Read(.)"],
       ask: [],
@@ -98,10 +98,11 @@ describe("strict read-only effective observer", () => {
       applied: observeClaudePermission("--permission-mode acceptEdits"),
       fs: fsFixture({ [settingsPath]: JSON.stringify({ permissions: { defaultMode: "acceptEdits" } }) }),
     });
-    expect(diagnostic.enforcement).toMatchObject({ axis: "permission", state: "aligned", expected: "acceptEdits" });
+    expect(diagnostic.configuration).toMatchObject({ comparison: "aligned", expected: "acceptEdits" });
+    expect(diagnostic.enforcement).toMatchObject({ state: "unknown", effective: null });
   });
 
-  it("treats an actually-applied full bypass as authoritative over project policy", () => {
+  it("keeps bypass arguments separate from observed project settings", () => {
     const diagnostic = diagnoseRuntimePosture({
       runtime: "claude-code",
       cwd,
@@ -110,11 +111,11 @@ describe("strict read-only effective observer", () => {
     });
     expect(diagnostic.enforcement).toMatchObject({
       axis: "permission",
-      state: "aligned",
+      state: "unknown",
       expected: "bypassPermissions",
-      effective: "bypassPermissions",
+      effective: null,
       sourcePath: null,
-      reason: "launch_bypasses_project_permissions",
+      reason: "native_permission_effect_unverified",
     });
   });
 
@@ -125,7 +126,8 @@ describe("strict read-only effective observer", () => {
       applied: observeClaudePermission("--permission-mode acceptEdits"),
       fs: fsFixture({ [settingsPath]: JSON.stringify({ permissions: { defaultMode: "manual" } }) }),
     });
-    expect(diagnostic.enforcement).toMatchObject({ state: "drift", expected: "acceptEdits" });
+    expect(diagnostic.configuration).toMatchObject({ comparison: "drift", expected: "acceptEdits" });
+    expect(diagnostic.enforcement.state).toBe("unknown");
   });
 
   it("reports UNKNOWN-EFFECTIVE when live harness semantics cannot be resolved", () => {
@@ -138,7 +140,7 @@ describe("strict read-only effective observer", () => {
         claudePermissionModes: () => null,
       },
     });
-    expect(diagnostic.enforcement).toMatchObject({ state: "unknown", reason: "harness_semantics_unknown" });
+    expect(diagnostic.configuration).toMatchObject({ comparison: "unknown", reason: "harness_semantics_unknown" });
   });
 
   it.each([
@@ -155,7 +157,7 @@ describe("strict read-only effective observer", () => {
       applied: observeClaudePermission("--permission-mode acceptEdits"),
       fs: fsFixture(files as Record<string, string>),
     });
-    expect(diagnostic.enforcement).toMatchObject({ axis: "permission", state: "unknown", reason, sourcePath: settingsPath });
+    expect(diagnostic.configuration).toMatchObject({ comparison: "unknown", reason, sourcePath: settingsPath });
   });
 
   it.each([
@@ -174,7 +176,8 @@ describe("strict read-only effective observer", () => {
     expect(diagnostic.transport.state).toBe("healthy");
     expect(diagnostic.cwdRead.state).toBe(cwdState);
     expect(diagnostic.commandPath.state).toBe(commandState);
-    expect(diagnostic.enforcement.state).toBe("aligned");
+    expect(diagnostic.enforcement.state).toBe("unknown");
+    expect(diagnostic.configuration?.comparison).toBe("aligned");
   });
 
   it("keeps unreadable settings separate from healthy transport, cwd, and command axes", () => {
@@ -191,7 +194,7 @@ describe("strict read-only effective observer", () => {
     expect(diagnostic.transport.state).toBe("healthy");
     expect(diagnostic.cwdRead.state).toBe("visible");
     expect(diagnostic.commandPath.state).toBe("available");
-    expect(diagnostic.enforcement).toMatchObject({ state: "unknown", reason: "settings_unreadable" });
+    expect(diagnostic.configuration).toMatchObject({ comparison: "unknown", reason: "settings_unreadable" });
   });
 
   it("does not render Pi resource trust in a permissions column", () => {

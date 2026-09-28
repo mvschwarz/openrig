@@ -14,6 +14,10 @@ export interface NodeBinding extends Binding {
    * restore). Absent = no policy attached → the env-driven floor/YOLO decision stands.
    * Present = authoritative for this seat (overrides the env read in BOTH directions). */
   launchPosture?: "floor" | "full_bypass";
+  /** Explicit Claude native mode; checked against the bound managed executable. */
+  permissionMode?: string;
+  /** Reserved successor generation; current tenure remains the input fence until commit. */
+  launchGeneration?: string;
   /** #25: the rig's `managed_blocks.claude-code` file. Absent = CLAUDE.md. Only the Claude adapter reads it. */
   claudeManagedBlockFile?: import("./managed-blocks.js").ClaudeManagedBlockFile;
 }
@@ -125,6 +129,8 @@ export interface ForkSource {
  * to the startup orchestrator after checkReady().
  */
 export interface RuntimeAdapter {
+  /** Claude's managed capability/launch seam, shared with seat selection. */
+  readonly claudeManagedLaunch?: import("./claude-managed-launch.js").ClaudeManagedLaunch;
   readonly runtime: string;
 
   /** List currently installed/projected resources for a node. */

@@ -25,7 +25,7 @@ export const WAKE_INTENT_PREFIX = "wake-intent-";
 // nothing to claim and cannot double-send. A crash mid-send leaves the row visibly
 // `sending`; the recovery boundary (`reconcileAbandonedSending`, run once at
 // startup) reconciles it to `indeterminate` — the send is never blindly re-driven.
-export const OUTBOX_DELIVERY_STATES = ["pending", "sending", "delivered", "failed", "indeterminate"] as const;
+export const OUTBOX_DELIVERY_STATES = ["pending", "sending", "delivered", "failed", "indeterminate", "retained", "retired"] as const;
 export type OutboxDeliveryState = (typeof OUTBOX_DELIVERY_STATES)[number];
 
 /**
@@ -57,6 +57,10 @@ export interface OutboxEntry {
   deliveryState: OutboxDeliveryState;
   deliveredAt: string | null;
   auditPointer: string | null;
+  guardBinding?: { nodeId: string; session: string; occupant: string | null; pane: string | null } | null;
+  retiredAt?: string | null;
+  retiredBy?: string | null;
+  retirementReason?: string | null;
 }
 
 interface OutboxEntryRow {
@@ -70,6 +74,10 @@ interface OutboxEntryRow {
   delivery_state: string;
   delivered_at: string | null;
   audit_pointer: string | null;
+  guard_binding?: string | null;
+  retired_at?: string | null;
+  retired_by?: string | null;
+  retirement_reason?: string | null;
 }
 
 export interface OutboxRecordInput {
@@ -168,6 +176,66 @@ export class OutboxHandler {
     return this.getByIdOrThrow(id);
   }
 
+  /** Retention shares the existing outbox ID. Committed wakes preserve each member,
+   * even if guard activation happened after staging and quota is now exhausted. */
+  retain(input: OutboxRecordInput & { outboxId: string }, binding: NonNullable<OutboxEntry["guardBinding"]>, precommitted = false): OutboxEntry {
+    return this.db.transaction(() => {
+      const existing = this.getById(input.outboxId);
+      if (existing) {
+        if (existing.senderSession !== input.senderSession || existing.destinationSession !== input.destinationSession || existing.body !== input.body ||
+            (existing.guardBinding && JSON.stringify(existing.guardBinding) !== JSON.stringify(binding))) {
+          throw new OutboxHandlerError("delivery_identity_conflict", "The delivery ID already names different content or target identity.");
+        }
+        if (existing.deliveryState === "retained" || existing.deliveryState === "retired") return existing;
+        if (existing.deliveryState !== "pending" && existing.deliveryState !== "sending") {
+          throw new OutboxHandlerError("delivery_already_attempted", "This delivery already has a terminal outcome; it cannot be retained or retried.");
+        }
+      } else if (precommitted) {
+        throw new OutboxHandlerError("outbox_not_found", "Precommitted delivery is missing; no replacement custody is created.");
+      }
+      if (!precommitted) this.assertRetentionCapacity(binding.nodeId, input.body);
+      if (!existing) this.record(input);
+      this.db.prepare(`UPDATE outbox_entries SET delivery_state='retained', guard_binding=?, delivered_at=NULL
+        WHERE outbox_id=? AND delivery_state IN ('pending','sending')`)
+        .run(JSON.stringify(binding), input.outboxId);
+      return this.getByIdOrThrow(input.outboxId);
+    })();
+  }
+
+  assertRetentionCapacity(nodeId: string, body: string): void {
+    // Provisional bounded defaults. Historical/retired rows and already committed
+    // overflow are deliberately not evicted to make these active quotas fit.
+    const usage = this.db.prepare(`SELECT count(*) AS count, coalesce(sum(length(CAST(body AS BLOB))),0) AS bytes
+      FROM outbox_entries WHERE delivery_state='retained' AND json_extract(guard_binding,'$.nodeId')=?`)
+      .get(nodeId) as { count: number; bytes: number };
+    const size = Buffer.byteLength(body, "utf8");
+    if (size > 1024 * 1024 || usage.count >= 100 || usage.bytes + size > 8 * 1024 * 1024) {
+      throw new OutboxHandlerError("retained_quota_full", "Held-message quota is full. Retire a specific held message to release active quota; no input was written.");
+    }
+  }
+
+  retire(outboxId: string, actor: string, reason: string): OutboxEntry {
+    if (!actor.trim() || !reason.trim()) throw new OutboxHandlerError("retirement_reason_required", "Actor and reason are required.");
+    const entry = this.getByIdOrThrow(outboxId);
+    if (entry.deliveryState === "retired") return entry;
+    if (entry.deliveryState !== "retained") throw new OutboxHandlerError("delivery_not_retained", "Only retained messages can be retired.");
+    this.db.prepare(`UPDATE outbox_entries SET delivery_state='retired', retired_at=?, retired_by=?, retirement_reason=?
+      WHERE outbox_id=? AND delivery_state='retained'`).run(new Date().toISOString(), actor, reason, outboxId);
+    return this.getByIdOrThrow(outboxId);
+  }
+
+  heldForNode(nodeId: string, limit = 100, offset = 0) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000 || !Number.isInteger(offset) || offset < 0) {
+      throw new OutboxHandlerError("invalid_pagination", "Use limit 1–1000 and a nonnegative offset.");
+    }
+    const total = (this.db.prepare(`SELECT count(*) AS n FROM outbox_entries
+      WHERE delivery_state='retained' AND json_extract(guard_binding,'$.nodeId')=?`).get(nodeId) as { n: number }).n;
+    const rows = this.db.prepare(`SELECT * FROM outbox_entries
+      WHERE delivery_state='retained' AND json_extract(guard_binding,'$.nodeId')=? ORDER BY ts_dispatched,outbox_id LIMIT ? OFFSET ?`)
+      .all(nodeId, limit, offset) as OutboxEntryRow[];
+    return { items: rows.map(r => this.rowToEntry(r)), total, limit, offset, truncated: offset + rows.length < total };
+  }
+
   markDelivered(outboxId: string): OutboxEntry {
     const ts = new Date().toISOString();
     const result = this.db
@@ -247,7 +315,7 @@ export class OutboxHandler {
    * finalizes a row this drainer claimed. `delivered_at` is stamped only for a
    * confirmed delivery.
    */
-  finalizeDelivery(outboxId: string, state: "delivered" | "indeterminate" | "failed"): OutboxEntry {
+  finalizeDelivery(outboxId: string, state: "delivered" | "indeterminate" | "failed" | "retained"): OutboxEntry {
     const deliveredAt = state === "delivered" ? new Date().toISOString() : null;
     const result = this.db
       .prepare(
@@ -344,6 +412,12 @@ export class OutboxHandler {
       deliveryState: parseDeliveryState(row.delivery_state),
       deliveredAt: row.delivered_at,
       auditPointer: row.audit_pointer,
+      ...(row.guard_binding !== undefined ? {
+        guardBinding: row.guard_binding ? JSON.parse(row.guard_binding) : null,
+        retiredAt: row.retired_at ?? null,
+        retiredBy: row.retired_by ?? null,
+        retirementReason: row.retirement_reason ?? null,
+      } : {}),
     };
   }
 }

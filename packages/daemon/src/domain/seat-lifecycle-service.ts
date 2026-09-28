@@ -17,6 +17,8 @@ import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
 import { createHash } from "node:crypto";
+import { NativePermissionStore } from "./native-permission-store.js";
+import { validateNativePermissionSelection, unresolvedClaudePermissionModes } from "./native-permission-selection.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -65,6 +67,7 @@ export interface SeatRefusal {
     | "seat_ambiguous"
     | "missing_model"
     | "missing_reason"
+    | "permission_selection_refused"
     | "no_session"
     | "claimed_session"
     | "session_not_live"
@@ -214,11 +217,57 @@ export class SeatLifecycleService {
     return { ok: true, seat, from, to: model, changed: true };
   }
 
+  async setPermissions(input: { seatRef: string; mode: string; reason: string; actor: string }): Promise<
+    | { ok: true; seat: SeatDescriptor; from: unknown; to: unknown; changed: boolean; effect: string }
+    | SeatRefusal
+  > {
+    input = { ...input };
+    const required = this.requireReason(input.reason);
+    if (required) return required;
+    if (!input.actor.trim()) return { ok: false, code: "permission_selection_refused", message: "Sender identity is required for permission audit." };
+    const resolved = this.resolveSeat(input.seatRef);
+    if ("code" in resolved) return resolved;
+    const seat = this.describe(resolved);
+    const runtime = resolved.entry.runtime ?? "unknown";
+    try {
+      const dynamic = runtime === "claude-code" && !["floor", "full_bypass", "inherit"].includes(input.mode);
+      const managed = this.runtimeAdapters["claude-code"]?.claudeManagedLaunch;
+      if (dynamic && !managed) await unresolvedClaudePermissionModes();
+      const launch = dynamic ? await managed!.prepare({ nodeId: seat.nodeId, cwd: resolved.entry.cwd ?? undefined }, input.mode) : null;
+      const to = input.mode === "inherit" ? null : dynamic ? { runtime: "claude-code" as const, mode: input.mode }
+        : validateNativePermissionSelection(runtime, input.mode);
+      const store = new NativePermissionStore(this.db);
+      let persisted: PersistedEvent | null = null;
+      const result = this.db.transaction(() => {
+        launch?.assertCurrent();
+        const currentRuntime = this.db.prepare("SELECT runtime FROM nodes WHERE id = ?").get(seat.nodeId) as { runtime: string } | undefined;
+        if (currentRuntime?.runtime !== runtime) throw new Error("Seat runtime changed while checking native options; selection was not changed.");
+        const from = store.read(seat.nodeId);
+        const changed = from?.runtime !== to?.runtime || from?.mode !== to?.mode;
+        if (changed) {
+          store.write(seat.nodeId, to, input.actor.trim(), input.reason.trim());
+          persisted = this.eventBus.persistWithinTransaction({ type: "node.permissions_changed", rigId: seat.rigId,
+            nodeId: seat.nodeId, from, to, actor: input.actor.trim(), reason: input.reason.trim(), source: "seat_selection", effect: "future_launches_only" });
+        }
+        return { ok: true as const, seat, from, to, changed,
+          effect: "Future managed launches only. The current native process, history, permission rules and work posture are unchanged; no relaunch was requested." };
+      })();
+      if (persisted) this.eventBus.notifySubscribers(persisted);
+      return result;
+    } catch (error) {
+      return { ok: false, code: "permission_selection_refused", message: (error as Error).message };
+    }
+  }
+
   async stopSeat(input: { seatRef: string; reason: string; operator?: string | null }): Promise<StopSeatResult> {
     const required = this.requireReason(input.reason);
     if (required) return required;
     const resolved = this.resolveSeat(input.seatRef);
     if ("code" in resolved) return resolved;
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(resolved.nodeId)) {
+      return guard.lifecycle([resolved.nodeId], () => this.stopSeat(input));
+    }
     const seat = this.describe(resolved);
 
     const session = this.latestSession(resolved.nodeId);
@@ -256,6 +305,10 @@ export class SeatLifecycleService {
     if (required) return required;
     const resolved = this.resolveSeat(input.seatRef);
     if ("code" in resolved) return resolved;
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(resolved.nodeId)) {
+      return guard.lifecycle([resolved.nodeId], () => this.cleanSeat(input));
+    }
     const seat = this.describe(resolved);
 
     const binding = this.sessionRegistry.getBindingForNode(resolved.nodeId);
@@ -326,6 +379,7 @@ export class SeatLifecycleService {
       });
     });
     tx();
+    this.tmuxAdapter.deliveryGuard?.rebindLifecycle(resolved.nodeId);
     if (persisted) this.eventBus.notifySubscribers(persisted);
 
     return { ok: true, seat, actions: { sessionsExited, bindingCleared: binding !== null } };
@@ -335,6 +389,15 @@ export class SeatLifecycleService {
    * This never launches a process or replays an uncertain/finished delivery.
    */
   async continueFreshStartup(seatRef: string) {
+    const resolved = this.resolveSeat(seatRef);
+    if ("code" in resolved) return resolved;
+    const guard = this.tmuxAdapter.deliveryGuard;
+    return guard
+      ? guard.lifecycle([resolved.nodeId], () => this.continueFreshStartupUnchecked(seatRef))
+      : this.continueFreshStartupUnchecked(seatRef);
+  }
+
+  private async continueFreshStartupUnchecked(seatRef: string) {
     const resolved = this.resolveSeat(seatRef);
     if ("code" in resolved) return resolved;
     const seat = this.describe(resolved);
@@ -387,6 +450,10 @@ export class SeatLifecycleService {
     }
     const resolved = this.resolveSeat(input.seatRef);
     if ("code" in resolved) return resolved;
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(resolved.nodeId)) {
+      return guard.lifecycle([resolved.nodeId], () => this.launchFresh(input));
+    }
     const seat = this.describe(resolved);
     const rig = this.rigRepo.getRig(seat.rigId);
     const node = rig?.nodes.find((candidate) => candidate.id === seat.nodeId);
@@ -711,6 +778,7 @@ export class SeatLifecycleService {
       });
     });
     tx();
+    this.tmuxAdapter.deliveryGuard?.rebindLifecycle(resolved.nodeId);
     if (persisted) this.eventBus.notifySubscribers(persisted);
     return { ok: true, seat, sessionName: session.session_name, sessionId: session.id };
   }

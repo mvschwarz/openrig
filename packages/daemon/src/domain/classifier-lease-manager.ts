@@ -118,16 +118,21 @@ export class ClassifierLeaseManager {
    * caller should first invoke `evaluateDeadness` (which marks it expired)
    * or use the operator reclaim path.
    *
-   * Idempotent for the SAME classifier_session: re-calling acquire on the
-   * lease holder's behalf returns the existing lease unchanged (heartbeat
-   * is updated separately via `heartbeat`).
+   * Idempotent for the SAME classifier_session while its lease is unexpired:
+   * re-calling acquire returns the existing lease unchanged (heartbeat is
+   * updated separately via `heartbeat`). If the holder's own lease has passed
+   * its TTL, acquire expires it and issues a NEW lease id, so a result bound to
+   * the old lease id can no longer be written (S02 P1).
    */
   acquire(classifierSession: string): ClassifierLease {
     const active = this.getActiveLease();
     if (active) {
       if (active.classifierSession === classifierSession) {
-        // Idempotent re-acquire by current holder.
-        return active;
+        if (!this.isPastTtl(active)) {
+          // Idempotent re-acquire by current holder.
+          return active;
+        }
+        return this.replaceExpiredOwnLease(active);
       }
       throw new ClassifierLeaseError(
         "lease_held",
@@ -137,31 +142,54 @@ export class ClassifierLeaseManager {
     }
 
     const leaseId = ulid();
-    const acquiredAt = this.now().toISOString();
-    const expiresAt = new Date(this.now().getTime() + this.ttlMs).toISOString();
-
-    const txn = this.db.transaction(() => {
-      this.db
-        .prepare(
-          `INSERT INTO classifier_leases (
-            lease_id, classifier_session, acquired_at, expires_at,
-            last_heartbeat, state
-          ) VALUES (?, ?, ?, ?, ?, 'active')`
-        )
-        .run(leaseId, classifierSession, acquiredAt, expiresAt, acquiredAt);
-
-      return this.eventBus.persistWithinTransaction({
-        type: "classifier.lease_acquired",
-        leaseId,
-        classifierSession,
-        acquiredAt,
-        expiresAt,
-      });
-    });
-
+    const txn = this.db.transaction(() => this.insertActiveLease(leaseId, classifierSession));
     const persisted = txn();
     this.eventBus.notifySubscribers(persisted);
     return this.getByIdOrThrow(leaseId);
+  }
+
+  /** Expire the caller's own TTL-passed lease and issue a fresh one, atomically. */
+  private replaceExpiredOwnLease(active: ClassifierLease): ClassifierLease {
+    const leaseId = ulid();
+    const nowIso = this.now().toISOString();
+    const txn = this.db.transaction(() => {
+      this.db
+        .prepare(`UPDATE classifier_leases SET state = 'expired' WHERE lease_id = ? AND state = 'active'`)
+        .run(active.leaseId);
+      const expired = this.eventBus.persistWithinTransaction({
+        type: "classifier.lease_expired",
+        leaseId: active.leaseId,
+        classifierSession: active.classifierSession,
+        expiredAt: nowIso,
+      });
+      return [expired, this.insertActiveLease(leaseId, active.classifierSession)];
+    });
+    for (const e of txn()) this.eventBus.notifySubscribers(e);
+    return this.getByIdOrThrow(leaseId);
+  }
+
+  private insertActiveLease(leaseId: string, classifierSession: string): PersistedEvent {
+    const acquiredAt = this.now().toISOString();
+    const expiresAt = new Date(this.now().getTime() + this.ttlMs).toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO classifier_leases (
+          lease_id, classifier_session, acquired_at, expires_at,
+          last_heartbeat, state
+        ) VALUES (?, ?, ?, ?, ?, 'active')`
+      )
+      .run(leaseId, classifierSession, acquiredAt, expiresAt, acquiredAt);
+    return this.eventBus.persistWithinTransaction({
+      type: "classifier.lease_acquired",
+      leaseId,
+      classifierSession,
+      acquiredAt,
+      expiresAt,
+    });
+  }
+
+  private isPastTtl(lease: ClassifierLease): boolean {
+    return this.now().toISOString() > lease.expiresAt;
   }
 
   /**
@@ -183,6 +211,15 @@ export class ClassifierLeaseManager {
       throw new ClassifierLeaseError(
         "lease_not_active",
         `lease ${leaseId} is in state ${lease.state}; cannot heartbeat`,
+      );
+    }
+    // S02 P1: a lease past its TTL cannot be revived by a heartbeat. The holder
+    // must acquire again (which issues a new lease id for its own expired lease).
+    if (this.isPastTtl(lease)) {
+      throw new ClassifierLeaseError(
+        "lease_expired",
+        `lease ${leaseId} expired at ${lease.expiresAt}; acquire a new lease instead of heartbeating`,
+        { expiresAt: lease.expiresAt },
       );
     }
 
@@ -314,8 +351,13 @@ export class ClassifierLeaseManager {
    * Validation hook used by project-classifier: returns the active lease
    * iff the supplied session holds it, else throws. Centralizes the
    * "must hold the lease to project" check.
+   *
+   * With `leaseId` (S02 P1), the caller must also hold THAT lease: a result
+   * computed under a replaced lease is refused with `lease_mismatch`, even when
+   * the same session holds the new lease. Safe to call inside a write
+   * transaction (reads only).
    */
-  requireActiveHolder(classifierSession: string): ClassifierLease {
+  requireActiveHolder(classifierSession: string, leaseId?: string): ClassifierLease {
     const active = this.getActiveLease();
     if (!active) {
       throw new ClassifierLeaseError(
@@ -334,6 +376,13 @@ export class ClassifierLeaseManager {
       throw new ClassifierLeaseError(
         "lease_expired",
         `classifier lease for ${classifierSession} expired at ${active.expiresAt}`,
+      );
+    }
+    if (leaseId !== undefined && active.leaseId !== leaseId) {
+      throw new ClassifierLeaseError(
+        "lease_mismatch",
+        `result is bound to lease ${leaseId}, but the active lease for ${classifierSession} is ${active.leaseId}`,
+        { activeLeaseId: active.leaseId, suppliedLeaseId: leaseId },
       );
     }
     return active;

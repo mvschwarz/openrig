@@ -20,6 +20,7 @@
 // gateway contract lands — no shadow path. Every channel's delivery OUTCOME is recorded on the
 // proclamation event; an unreachable channel is a named failure/deferral, never a silence.
 
+import { createHash } from "node:crypto";
 import { CANONICAL_MODEL_PINS } from "../spec-validation-advisory.js";
 
 export interface PinnedSeat {
@@ -36,7 +37,7 @@ export interface PinnedSeat {
 export interface ChannelOutcome {
   channel: "orchestrator" | "operator" | "oversight" | "slack";
   target: string | null;
-  status: "delivered" | "failed" | "deferred";
+  status: "delivered" | "failed" | "deferred" | "retained";
   detail?: string;
 }
 
@@ -72,7 +73,7 @@ export interface ModelDivergenceMonitorDeps {
    *  into every readEffectiveModel call (lazy: a pass with every seat settled spawns nothing). */
   processCensus?: { cycleLister(): () => Promise<Array<{ pid: number; ppid: number; command: string }>> };
   /** In-daemon send to a session (the watchdog delivery seam). */
-  sendToSession: (sessionName: string, message: string) => Promise<{ ok: boolean; error?: string }>;
+  sendToSession: (sessionName: string, message: string, occurrenceId?: string) => Promise<{ ok: boolean; error?: string; outcome?: string }>;
   /** The seat's own rig's orchestrator seats (session names). */
   resolveOrchSeats: (rigName: string) => string[];
   /** The configured operator seat (derived from config, never hardcoded). Null = unconfigured. */
@@ -213,23 +214,24 @@ export class ModelDivergenceMonitor {
       detectedAt,
     };
     const message = formatProclamation(base);
+    const occurrenceId = createHash("sha256").update(JSON.stringify([seat.nodeId, seat.generation ?? seat.sessionName, seat.pinnedModel, effectiveModel])).digest("hex");
     const channels: ChannelOutcome[] = [];
 
     const orchSeats = this.deps.resolveOrchSeats(seat.rigName);
     if (orchSeats.length === 0) {
       channels.push({ channel: "orchestrator", target: null, status: "failed", detail: `no orch seats found in rig ${seat.rigName}` });
     } else {
-      for (const target of orchSeats) channels.push(await this.deliver("orchestrator", target, message));
+      for (const target of orchSeats) channels.push(await this.deliver("orchestrator", target, message, occurrenceId));
     }
 
     const operator = this.deps.resolveOperatorSeat();
     channels.push(operator
-      ? await this.deliver("operator", operator, message)
+      ? await this.deliver("operator", operator, message, occurrenceId)
       : { channel: "operator", target: null, status: "failed", detail: "no operator seat configured" });
 
     const oversight = this.deps.resolveOversightSeat();
     channels.push(oversight
-      ? await this.deliver("oversight", oversight, message)
+      ? await this.deliver("oversight", oversight, message, occurrenceId)
       : { channel: "oversight", target: null, status: "deferred", detail: "deferred: no oversight route registered from this host" });
 
     // DS2 (founder-locked transport): Slack rides ONLY the M1 gateway contract. Until M1 lands this
@@ -245,9 +247,10 @@ export class ModelDivergenceMonitor {
     return proclamation;
   }
 
-  private async deliver(channel: ChannelOutcome["channel"], target: string, message: string): Promise<ChannelOutcome> {
+  private async deliver(channel: ChannelOutcome["channel"], target: string, message: string, occurrenceId: string): Promise<ChannelOutcome> {
     try {
-      const res = await this.deps.sendToSession(target, message);
+      const res = await this.deps.sendToSession(target, message, `guard-model-${occurrenceId}-${target}`);
+      if (res.outcome === "retained") return { channel, target, status: "retained", detail: "Typing guard: retained, not delivered." };
       return res.ok
         ? { channel, target, status: "delivered" }
         : { channel, target, status: "failed", detail: res.error ?? "send failed" };

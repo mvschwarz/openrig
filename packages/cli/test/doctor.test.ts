@@ -382,6 +382,27 @@ describe("runDoctorChecks", () => {
     expect(cmuxDaemon).toBeUndefined();
   });
 
+  it.each([
+    ["v20.20.2", "fail"],
+    ["v22.22.1", "pass"],
+    ["v23.11.1", "fail"],
+    ["v24.21.0", "pass"],
+    ["v25.8.0", "fail"],
+    ["v26.1.0", "warn"],
+  ] as const)("Node %s → node_version %s", (version, status) => {
+    const saved = process.version;
+    Object.defineProperty(process, "version", { value: version, writable: true });
+    try {
+      const { checks } = runDoctorChecks(makeDeps());
+      const nodeCheck = checks.find((c) => c.name === "node_version");
+      expect(nodeCheck?.status).toBe(status);
+      if (status !== "pass") expect(nodeCheck?.message).toContain(status === "warn" ? "untested" : "not supported");
+      if (status === "fail") expect(nodeCheck?.fix).toContain("Node 22 or 24");
+    } finally {
+      Object.defineProperty(process, "version", { value: saved, writable: true });
+    }
+  });
+
   it("Node version check passes on current Node", () => {
     const deps = makeDeps();
     const { checks } = runDoctorChecks(deps);

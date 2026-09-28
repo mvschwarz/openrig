@@ -7,6 +7,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { slackCommand, type SlackDeps } from "../src/commands/slack.js";
+import { buildSlackAppManifest, FEATURE_SCOPES, BASELINE_REQUIRED_SCOPES } from "@openrig/daemon/gateway-slack";
 const homes: string[] = [];
 afterEach(() => homes.splice(0).forEach((home) => rmSync(home, { recursive: true, force: true })));
 
@@ -33,6 +34,7 @@ function makeDeps(overrides: Partial<SlackDeps> = {}): { deps: SlackDeps; logs: 
       checkEnvFilePermissions: () => null,
       verifyScopes: async () => ({ ok: true, granted: [], missing: [] }),
       verifyChannelMembership: async () => ({ ok: true, isMember: true }),
+      buildSlackAppManifest, FEATURE_SCOPES, BASELINE_REQUIRED_SCOPES,
     }),
     clientFactory: () => ({
       post: async <T>(path: string) => {

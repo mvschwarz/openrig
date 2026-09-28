@@ -1,3 +1,4 @@
+import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -186,8 +187,16 @@ export class ClaimService {
   }): Promise<void> {
     if (!this.tmuxAdapter) return;
     const hint = `--- OpenRig: You have been adopted into rig "${meta.rigName}" as ${meta.logicalId}. Run: rig whoami --json ---`;
-    await this.tmuxAdapter.sendText(tmuxSession, hint);
-    await this.tmuxAdapter.sendKeys(tmuxSession, ["C-m"]);
+    const write = async () => {
+      const sent = await this.tmuxAdapter!.sendText(tmuxSession, hint);
+      if (sent.ok) await this.tmuxAdapter!.sendKeys(tmuxSession, ["C-m"]);
+    };
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard) await guard.operation(tmuxSession, write, async target => {
+      new OutboxHandler(this.db).retain({ outboxId: `guard-claim-${target.nodeId}-${target.occupant ?? "unknown"}`,
+        senderSession: "claim@system", destinationSession: tmuxSession, body: hint }, target);
+    });
+    else await write();
   }
 
   private maybeProvisionContextCollector(runtime: string | null | undefined, cwd: string | null | undefined, tmuxSession: string): void {
@@ -294,6 +303,8 @@ export class ClaimService {
       return { ok: false, code: "node_not_found", error: `Logical ID '${opts.logicalId}' does not exist in rig` };
     }
 
+    const guard = this.tmuxAdapter?.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(node.id)) return guard.lifecycle([node.id], () => this.bind(opts));
     const existingBinding = this.sessionRegistry.getBindingForNode(node.id);
     if (existingBinding?.tmuxSession) {
       return { ok: false, code: "already_bound", error: `Logical ID '${opts.logicalId}' is already bound` };
@@ -338,6 +349,7 @@ export class ClaimService {
 
     try {
       const { nodeId, sessionId } = bindTx();
+      this.tmuxAdapter?.deliveryGuard?.rebindLifecycle(nodeId);
       const event = this.db.prepare("SELECT * FROM events ORDER BY seq DESC LIMIT 1").get() as { seq: number; type: string; rig_id: string; node_id: string; payload: string; created_at: string };
       if (event) {
         this.eventBus.notifySubscribers({
@@ -468,6 +480,8 @@ export class ClaimService {
     if (!this.tmuxAdapter) {
       return { ok: false, code: "reconcile_error", message: "tmux adapter unavailable; cannot verify the live session." };
     }
+    const guard = this.tmuxAdapter.deliveryGuard;
+    const observedTarget = guard?.target(nodeRow.id);
     const alive = await this.tmuxAdapter.hasSession(sessionName);
     if (!alive) {
       return {
@@ -529,7 +543,8 @@ export class ClaimService {
           sessionName,
         });
       });
-      tx();
+      if (guard && observedTarget) guard.reconcileBinding(observedTarget, tx);
+      else tx();
       if (persistedEvent) this.eventBus.notifySubscribers(persistedEvent);
 
       // 5. Best-effort NON-INPUT housekeeping: OpenRig-owned tmux metadata

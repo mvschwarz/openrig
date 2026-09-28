@@ -344,6 +344,8 @@ export interface FleetSnapshot {
   configError?: string;
   connections?: import("./connections/connections-model.js").ConnectionsRead | null;
   controlPlane?: import("./connections/connections-model.js").ControlPlaneRead | null;
+  /** OPR.0.6.0.5 — the shipped Slack app manifest (same object as `rig slack manifest`); null when unavailable. */
+  slackManifest?: import("./connections/connections-model.js").SlackManifestRead | null;
   daemonTarget?: string;
   launchingCli?: string;
   /** Canonical daemon health records. Absent on old/demo snapshots. */
@@ -429,6 +431,8 @@ export type Action =
   | { type: "attention-source"; path: string }
   | { type: "file-open"; target: import("./reading.js").FileTarget }
   | { type: "external-open"; url: string }
+  /** Leave the TUI briefly and print `value` as one unbroken line for exact copying; Enter returns. */
+  | { type: "print-for-copy"; label: string; value: string }
   | { type: "startup"; key: string }
   | { type: "time-setting"; timeZone: string; timeZoneWarning: string | null }
   | { type: "timezone" }

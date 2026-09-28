@@ -9,6 +9,8 @@ export interface AppliedLaunchObservation {
   state: AppliedLaunchState;
   value: string | null;
   reason?: string;
+  /** Emitted Codex approval argument; null/absent does not infer a native default. */
+  approvalPolicy?: "never" | null;
 }
 
 export type TransportState = "healthy" | "connect" | "timeout" | "response";
@@ -37,6 +39,14 @@ export interface PermissionDriftDiagnostic {
   cwdRead: { state: CwdReadState };
   commandPath: { state: CommandPathState };
   enforcement: RuntimeEnforcementDiagnostic;
+  /** File comparison only; neither a settings file nor an argument proves native enforcement. */
+  configuration?: {
+    comparison: EnforcementState;
+    expected: string | null;
+    observed: EffectiveClaudePermission | null;
+    sourcePath: string | null;
+    reason?: string;
+  };
   observedAt: string;
 }
 
@@ -59,11 +69,13 @@ export function parseClaudePermissionModes(help: string): string[] | null {
 }
 
 export function observeClaudePermission(flag: string): AppliedLaunchObservation {
-  if (flag.trim() === "--permission-mode acceptEdits") {
-    return { runtime: "claude-code", axis: "permission", state: "observed", value: "acceptEdits" };
+  const selected = /^--permission-mode ([A-Za-z][A-Za-z0-9]*)$/.exec(flag.trim());
+  if (selected) {
+    return { runtime: "claude-code", axis: "permission", state: "observed", value: selected[1]!,
+      reason: "emitted_launch_arguments" };
   }
   if (flag.trim() === "--dangerously-skip-permissions") {
-    return { runtime: "claude-code", axis: "permission", state: "observed", value: "bypassPermissions" };
+    return { runtime: "claude-code", axis: "permission", state: "observed", value: "bypassPermissions", reason: "emitted_launch_arguments" };
   }
   return { runtime: "claude-code", axis: "permission", state: "unknown", value: null, reason: "unrecognized_launch_argument" };
 }
@@ -71,10 +83,13 @@ export function observeClaudePermission(flag: string): AppliedLaunchObservation 
 export function observeCodexSandbox(arg: string): AppliedLaunchObservation {
   const normalized = arg.trim().replace(/\s+/g, " ");
   if (normalized === "-s workspace-write") {
-    return { runtime: "codex", axis: "sandbox", state: "observed", value: "workspace-write" };
+    return { runtime: "codex", axis: "sandbox", state: "observed", value: "workspace-write", reason: "emitted_launch_arguments" };
   }
   if (normalized === "-s danger-full-access") {
-    return { runtime: "codex", axis: "sandbox", state: "observed", value: "danger-full-access" };
+    return { runtime: "codex", axis: "sandbox", state: "observed", value: "danger-full-access", reason: "emitted_launch_arguments" };
+  }
+  if (normalized === "-s danger-full-access -a never") {
+    return { runtime: "codex", axis: "sandbox", state: "observed", value: "danger-full-access", approvalPolicy: "never", reason: "emitted_launch_arguments" };
   }
   if (normalized.startsWith("-p ")) {
     return { runtime: "codex", axis: "sandbox", state: "unknown", value: null, reason: "named_profile_unresolved" };
@@ -142,17 +157,6 @@ function inspectClaude(
   if (!applied || applied.runtime !== "claude-code" || applied.axis !== "permission" || applied.state !== "observed" || !expected) {
     return unknownEnforcement("permission", expected, sourcePath, applied?.reason ?? "applied_launch_unknown");
   }
-  if (expected === "bypassPermissions") {
-    return {
-      axis: "permission",
-      state: "aligned",
-      expected,
-      effective: expected,
-      sourcePath: null,
-      reason: "launch_bypasses_project_permissions",
-    };
-  }
-
   let raw: string;
   try {
     raw = fs.readFile(sourcePath);
@@ -239,14 +243,30 @@ export function diagnoseRuntimePosture(input: {
   fs: PermissionDriftFs;
   now?: () => Date;
 }): PermissionDriftDiagnostic {
-  const enforcement = input.runtime === "claude-code"
+  // This store records launch arguments, including older records without a reason.
+  // Preserve their bytes; generation matching does not prove native enforcement.
+  const applied = input.applied;
+  const launchArguments = applied?.state === "observed" && applied.runtime === input.runtime
+    && (input.runtime === "claude-code" || input.runtime === "codex");
+  const enforcement = launchArguments
+    ? unknownEnforcement(applied.axis, applied.value, null, "native_permission_effect_unverified")
+    : input.runtime === "claude-code"
     ? inspectClaude(input.cwd, input.applied, input.fs)
     : inspectLaunchBoundRuntime(input.runtime, input.applied);
+  const config = input.runtime === "claude-code" && launchArguments
+    ? inspectClaude(input.cwd, input.applied, input.fs) : null;
   return {
     transport: { state: "healthy" },
     cwdRead: { state: cwdReadState(input.fs, input.cwd) },
     commandPath: { state: commandPathState(input.fs, input.runtime) },
     enforcement,
+    ...(config ? { configuration: {
+      comparison: config.state,
+      expected: config.expected,
+      observed: typeof config.effective === "object" ? config.effective : null,
+      sourcePath: config.sourcePath,
+      ...(config.reason ? { reason: config.reason } : {}),
+    } } : {}),
     observedAt: (input.now?.() ?? new Date()).toISOString(),
   };
 }

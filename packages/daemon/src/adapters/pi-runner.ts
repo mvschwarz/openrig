@@ -258,7 +258,7 @@ export class RunnerCore {
 
   constructor(
     private io: RunnerIo,
-    private identity: { sessionName: string; nodeId?: string; launchId?: string },
+    private identity: { sessionName: string; nodeId?: string; launchId?: string; generation?: string },
     private opts: { catchUpSince?: string } = {},
   ) {
     // The durable cursor seeds from the carried-over value (FR-5) so this
@@ -346,6 +346,7 @@ export class RunnerCore {
         eventFamily: "session_identity",
         sessionName: this.identity.sessionName,
         nodeId: this.identity.nodeId ?? null,
+        generation: this.identity.generation ?? null,
         runtime: "pi",
         hookEvent: "SessionStart",
         sessionId: this.sessionId ?? "unknown",
@@ -416,6 +417,7 @@ export class RunnerCore {
     return {
       sessionName: this.identity.sessionName,
       nodeId: this.identity.nodeId ?? null,
+      generation: this.identity.generation ?? null,
       runtime: "pi",
       hookEvent,
       subtype,
@@ -599,7 +601,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     now: () => new Date().toISOString(),
   };
 
-  const core = new RunnerCore(io, { sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId }, { catchUpSince });
+  const core = new RunnerCore(io, {
+    sessionName: args.sessionName, nodeId: process.env.OPENRIG_NODE_ID, launchId: args.launchId,
+    // Carry the emitting tenure; never infer it from a later daemon read or Pi event.
+    generation: process.env.OPENRIG_OCCUPANT_GENERATION,
+  }, { catchUpSince });
 
   readline.createInterface({ input: child.stdout }).on("line", (line) => core.handlePiLine(line));
   readline.createInterface({ input: child.stderr }).on("line", (line) => {

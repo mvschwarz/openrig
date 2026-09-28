@@ -136,6 +136,8 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     }
     case "file-open":
       return { ...resetContent({ ...next, file: action.target, externalUrl: null, healthOpen: null, recentOpen: null, timeZoneHelp: false }), focusedPane: "content" };
+    case "print-for-copy":
+      return state; // a terminal side effect run by main's perform; never a view-state change
     case "external-open":
       return { ...resetContent({ ...next, externalUrl: action.url, file: null, healthOpen: null, recentOpen: null, timeZoneHelp: false }), focusedPane: "content" };
     case "time-setting":

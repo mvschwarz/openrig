@@ -76,7 +76,7 @@ describe("P16 — AppDeps members with safety semantics are composed (definednes
     "resumeMetadataRefresher", "runtimeAdapters",
     "seatStructuralActivityService",
     "streamStore", "askService", "wakeResolveService", "projectClassifier",
-    "classifierLeaseManager", "viewProjector", "tmuxOptionDefaults",
+    "classifierLeaseManager", "classificationAttemptLedger", "viewProjector", "tmuxOptionDefaults",
   ];
   for (const member of MEMBERS) {
     it(`deps.${String(member)} is constructed by production startup`, () => {

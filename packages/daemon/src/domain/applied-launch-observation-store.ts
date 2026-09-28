@@ -13,11 +13,12 @@ interface ObservationRow {
   observation_state: string;
   value: string | null;
   reason: string | null;
+  approval_policy: "never" | null;
   observed_at: string;
 }
 
 /**
- * Best-effort, generation-scoped persistence for the exact enforcing value
+ * Best-effort, generation-scoped persistence for the exact argument value
  * returned by a successful managed launch. Missing migrations and DB failures
  * degrade to UNKNOWN; they never turn a successful provider launch into a
  * failed launch.
@@ -29,9 +30,9 @@ export class AppliedLaunchObservationStore {
     try {
       const result = this.db.prepare(`
         INSERT INTO applied_launch_observations (
-          generation_uuid, runtime, axis, observation_state, value, reason, observed_at
+          generation_uuid, runtime, axis, observation_state, value, reason, approval_policy, observed_at
         )
-        SELECT ?, ?, ?, ?, ?, ?, datetime('now')
+        SELECT ?, ?, ?, ?, ?, ?, ?, datetime('now')
          WHERE NOT EXISTS (
            SELECT 1
              FROM applied_launch_observation_invalidations
@@ -43,6 +44,7 @@ export class AppliedLaunchObservationStore {
           observation_state = excluded.observation_state,
           value = excluded.value,
           reason = excluded.reason,
+          approval_policy = excluded.approval_policy,
           observed_at = excluded.observed_at
       `).run(
         generationUuid,
@@ -51,6 +53,7 @@ export class AppliedLaunchObservationStore {
         observation.state,
         observation.value,
         observation.reason ?? null,
+        observation.approvalPolicy ?? null,
         generationUuid,
       );
       return result.changes > 0;
@@ -103,6 +106,7 @@ export class AppliedLaunchObservationStore {
         state: row.observation_state as AppliedLaunchState,
         value: row.value,
         ...(row.reason ? { reason: row.reason } : {}),
+        ...(row.approval_policy ? { approvalPolicy: row.approval_policy } : {}),
         observedAt: row.observed_at,
       };
     } catch {

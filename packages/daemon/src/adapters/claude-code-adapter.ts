@@ -15,6 +15,8 @@ import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManage
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
+import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
+import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
 
 export interface ClaudeAdapterFsOps {
@@ -56,6 +58,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private stateDir: string | null;
   private collectorAssetPath: string | null;
   private autoDriveProviderPrompts: boolean;
+  readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
   /** P20 — called after a projected file is written to a target, so the manifest
@@ -70,6 +73,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     stateDir?: string;
     collectorAssetPath?: string;
     autoDriveProviderPrompts?: boolean;
+    claudeManagedLaunch?: ClaudeManagedLaunch;
     /** DI source of the activity-relay.cjs asset (parity with the Codex adapter). */
     activityRelayPath?: string;
     /** DI source of the canonical claude.json hooks manifest — the event vocabulary
@@ -86,6 +90,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.stateDir = deps.stateDir ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
+    this.claudeManagedLaunch = deps.claudeManagedLaunch;
     this.activityRelayPath = deps.activityRelayPath ?? null;
     this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
     this.recordProjection = deps.recordProjection ?? (() => {});
@@ -215,6 +220,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource },
   ): Promise<HarnessLaunchResult> {
+    binding = { ...binding };
+    opts = { ...opts, ...(opts.forkSource ? { forkSource: { ...opts.forkSource } } : {}) };
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session bound — cannot launch Claude Code harness" };
     }
@@ -226,7 +233,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // OPR.0.4.8.2: the acceptEdits floor by default; YOLO (opt-in) swaps in the full-bypass flag.
     // The SAME decision (claudePostureFlag) is used on the restore path (claude-resume.ts).
     // OPR.0.4.8.3 Seam B: a per-seat resolved policy posture (binding.launchPosture) overrides env.
-    const permissionMode = claudePostureFlag(process.env, binding.launchPosture);
+    let managed: Awaited<ReturnType<ClaudeManagedLaunch["prepare"]>> | undefined;
+    if (binding.permissionMode !== undefined) {
+      try {
+        if (!this.claudeManagedLaunch) await unresolvedClaudePermissionModes();
+        managed = await this.claudeManagedLaunch!.prepare({ nodeId: binding.nodeId, cwd: binding.cwd,
+          session: binding.tmuxSession, pane: binding.tmuxPane, generation: binding.launchGeneration }, binding.permissionMode);
+      } catch (error) { return { ok: false, error: (error as Error).message }; }
+    }
+    const permissionMode = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
     const appliedLaunch = observeClaudePermission(permissionMode);
     // OPR.0.5.3.1: classic-renderer env prefix (default on) → native scrollback for every
     // managed launch path (fresh/resume/fork). "" when overridden off → byte-identical command.
@@ -255,12 +270,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!parentId) {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
-      const cmd = `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${parentId} --fork-session --name ${opts.name}`;
-      const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
+      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []),
+        "--resume", parentId, "--fork-session", "--name", opts.name])
+        : `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${parentId} --fork-session --name ${opts.name}`;
+      const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
+        : await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
-      const enterResult = await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
+      const enterResult = managed ? { ok: true as const } : await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
       if (!enterResult.ok) {
         return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
       }
@@ -269,7 +287,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       // token IMMEDIATELY after Enter, which always returned undefined
       // against a real binary. Poll on the
       // verifyResumeLaunch cadence (12 × 500ms = 6s ceiling).
-      const newToken = await this.pollForResumeToken(opts.name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY_MS);
+      const newToken = await this.pollForResumeToken(opts.name, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY_MS, managed?.configDir);
       if (!newToken) {
         return {
           ok: false,
@@ -280,16 +298,18 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
-    const cmd = opts.resumeToken
+    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []),
+      ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name]) : opts.resumeToken
       ? `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${opts.resumeToken} --name ${opts.name}`
       : `${rendererPrefix}claude ${permissionMode}${modelArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
-    const textResult = await this.tmux.sendText(binding.tmuxSession, cmd);
+    const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
+      : await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }
     // Send Enter to execute
-    const enterResult = await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
+    const enterResult = managed ? { ok: true as const } : await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
     if (!enterResult.ok) {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
@@ -302,7 +322,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     // Belt-and-suspenders: prefer an immediately discoverable persisted session,
     // but fall back to the UUID we assigned explicitly at launch time.
-    const token = this.captureResumeToken(opts.name);
+    const token = this.captureResumeToken(opts.name, managed?.configDir);
     return { ok: true, resumeToken: token ?? generatedSessionId ?? undefined, resumeType: "claude_id", appliedLaunch };
   }
 
@@ -576,9 +596,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     expectedName: string,
     attempts: number,
     delayMs: number,
+    configDir?: string,
   ): Promise<string | undefined> {
     for (let attempt = 0; attempt < attempts; attempt++) {
-      const token = this.captureResumeToken(expectedName);
+      const token = this.captureResumeToken(expectedName, configDir);
       if (token) return token;
       if (attempt < attempts - 1) {
         await this.sleep(delayMs);
@@ -587,11 +608,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return undefined;
   }
 
-  private captureResumeToken(expectedName: string): string | undefined {
+  private captureResumeToken(expectedName: string, configDir?: string): string | undefined {
     try {
       const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-      if (!home || !this.fs.readdir) return undefined;
-      const sessDir = nodePath.join(home, ".claude", "sessions");
+      if ((!home && !configDir) || !this.fs.readdir) return undefined;
+      const sessDir = nodePath.join(configDir ?? nodePath.join(home!, ".claude"), "sessions");
       if (!this.fs.exists(sessDir)) return undefined;
       const files = this.fs.readdir(sessDir);
       for (const file of files) {

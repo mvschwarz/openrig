@@ -7,6 +7,7 @@ const CLAUDE_FLOOR_EFFECT = {
   axis: "permission",
   state: "observed",
   value: "acceptEdits",
+  reason: "emitted_launch_arguments",
 } as const;
 
 function mockTmux(overrides?: {

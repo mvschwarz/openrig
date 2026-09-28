@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { parse as parseYaml } from "yaml";
 import type { EventBus } from "./event-bus.js";
 import type { Policy, PolicyEvaluation, PolicyJob } from "./policies/types.js";
@@ -51,13 +52,15 @@ export interface DeliveryRequest {
 }
 
 export interface DeliveryOutcome {
-  status: "ok" | "failed";
+  status: "ok" | "failed" | "retained";
+  outboxIds?: string[];
   error?: string;
   /** Structured continuity custody was durably created or identified. */
   continuityActionCompleted?: boolean;
 }
 
 export interface WatchdogDeliverySource {
+  occurrenceId?: string;
   jobId: string;
   policy: string;
 }
@@ -510,7 +513,7 @@ export class WatchdogPolicyEngine {
         message: outcome.message,
         ...(continuityAction ? { continuityAction } : {}),
       },
-      { jobId: job.jobId, policy: job.policy },
+      { jobId: job.jobId, policy: job.policy, occurrenceId: createHash("sha256").update(JSON.stringify([job.jobId, occupantGeneration, outcome.conditionReceipt ?? (job.policy === "periodic-reminder" ? job.lastFireAt : outcome.message)])).digest("hex") },
     );
     if (
       isContextUsageThreshold &&
@@ -523,7 +526,8 @@ export class WatchdogPolicyEngine {
     const history = this.historyLog.record({
       jobId: job.jobId,
       evaluatedAt,
-      outcome: "sent",
+      outcome: delivery.status === "retained" ? "skipped" : "sent",
+      skipReason: delivery.status === "retained" ? "typing_guard_retained" : null,
       deliveryTargetSession: outcome.target.session,
       deliveryStatus: delivery.status,
       deliveryMessage: outcome.message,
@@ -533,7 +537,7 @@ export class WatchdogPolicyEngine {
       evaluationNotes:
         delivery.error !== undefined
           ? { ...(outcome.notes ?? {}), deliveryReason: delivery.error }
-          : outcome.notes ?? null,
+          : delivery.status === "retained" ? { ...(outcome.notes ?? {}), outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : outcome.notes ?? null,
     });
     if (!isContextUsageThreshold) {
       this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true);

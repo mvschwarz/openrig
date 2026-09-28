@@ -203,8 +203,13 @@ into your project and edit it to taste.
 This records a selection, not a live permission change. Flag-surface policies
 select launch flags; config-surface policies still need native configuration
 application and inspection. In particular, `builtin:yolo` selects Codex's
-`danger-full-access` sandbox without forcing its approval policy, and replaces
+`danger-full-access` sandbox and `never` approval policy, and replaces
 any `codex_config_profile` argument. See [practical permission choices](getting-started.md#opt-in-permissive-operation).
+
+An explicit `rig seat set-permissions` choice overrides member/rig policy for
+future managed launches of that stable seat; it does not rewrite this spec or
+its inherited policy provenance. `inherit` removes that override. See
+[per-seat permission mode](getting-started.md#per-seat-permission-mode).
 
 ### Choosing the Claude instruction file
 

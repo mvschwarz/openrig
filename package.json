@@ -1,6 +1,6 @@
 {
   "name": "openrig",
-  "version": "0.5.17",
+  "version": "0.6.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -28,6 +28,6 @@
     "gate": "node scripts/gate-lane.mjs"
   },
   "engines": {
-    "node": "^20 || ^22 || ^24"
+    "node": "^22 || ^24"
   }
 }

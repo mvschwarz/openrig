@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 // Slice-03 Atom 6 (rig walk) — the pacing primitive. "Walk the seat through it":
 // deliver a sequence of context pieces into a seat's pane, spaced by --pace so
 // the agent can absorb each before the next. Its OWN top-level verb (not an
@@ -231,7 +232,12 @@ initial record is explicitly reported as unverified delivery.`)
             const res = await client.post<Record<string, unknown>>("/api/transport/send", {
               session: seat,
               text: piece.content,
+              deliveryId: randomUUID(),
             }, { headers: terminalAuthHeaders() });
+            if (res.data?.["outcome"] === "retained") {
+              failPiece(i, piece.label, `retained, not delivered (${JSON.stringify(res.data["outboxIds"])}); no further pieces sent. Inspect with rig seat held-messages ${seat}.`);
+              return;
+            }
             if (res.status >= 400) {
               if (res.data?.["reason"] === "submit_failed") sendOutcome = "staged-suspect";
               else {

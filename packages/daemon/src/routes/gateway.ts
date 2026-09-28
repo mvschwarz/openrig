@@ -21,6 +21,7 @@ import { resolveSecret } from "../domain/gateway/slack/secrets.js";
 import { resolveHumanDeliveryReadiness, type HumanDeliveryReadiness } from "../domain/gateway/human-readiness.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
 import { runChannelOperation } from "../domain/gateway/channel-operations.js";
+import { buildSlackAppManifest } from "../domain/gateway/slack/manifest.js";
 
 interface SubsystemHandle {
   restart: () => void;
@@ -41,6 +42,9 @@ export function gatewayRoutes(opts: {
     return c.json(connectionsProjection(opts.home ?? OPENRIG_HOME, status,
       c.get("settingsStore" as never) as SettingsStore | undefined));
   });
+
+  // OPR.0.6.0.5 — read-only: the same manifest `rig slack manifest` prints. No config, no secrets.
+  app.get("/slack/manifest", (c) => c.json(buildSlackAppManifest()));
 
   app.get("/human/:entityId/readiness", async (c) => {
     const entityId = c.req.param("entityId");

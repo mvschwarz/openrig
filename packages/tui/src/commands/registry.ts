@@ -86,6 +86,9 @@ function drillEntry(resource: ResourceKind): CommandEntry {
 export const COMMAND_REGISTRY: readonly CommandEntry[] = [
   { name: "terminals", aliases: [], args: "", description: "browse Saved and Derived terminal views; preview before explicit Open", context: "standard", sample: "terminals", build: () => ({ type: "jump", section: "terminals" }) },
   { name: "terminal-preview", aliases: [], args: "<view>", description: "passively preview a saved:id or rig:name terminal view", context: "standard", sample: "terminal-preview rig:example", build: view => view ? ({ type: "terminal-preview", view }) : ({ type: "error", message: "terminal-preview needs a view" }) },
+  { name: "terminal", aliases: [], args: "<view>", description: "open a rig:name, pod:rig/pod, mission:id, slice:id or saved:id view as tiles in the default provider (herdr)", context: "standard", sample: "terminal rig:example",
+    complete: ({ snapshot }) => snapshot.hosts.flatMap((h) => h.rigs.map((r) => `rig:${r.name}`)),
+    build: view => view ? ({ type: "act", act: "open-terminal", view }) : ({ type: "error", message: "terminal needs a view, for example rig:<name>" }) },
   { name: "attention", aliases: ["needs", "feed"], args: "", description: "inspect human requests and outcome/health updates", context: "standard", sample: "attention", build: () => ({ type: "jump", section: "needs" }) },
   { name: "read", aliases: [], args: "<root>/<path>[#heading]", description: "read a current file within an explicitly configured root", context: "standard", sample: "read workspace/README.md", complete: ({ snapshot }) => (snapshot.fileRoots ?? []).map((root) => `${root.name}/`), build: (value) => {
     const slash = value.indexOf("/");

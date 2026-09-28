@@ -129,6 +129,7 @@ import type { InboxHandler } from "./domain/inbox-handler.js";
 import type { OutboxHandler } from "./domain/outbox-handler.js";
 import type { ProjectClassifier } from "./domain/project-classifier.js";
 import type { ClassifierLeaseManager } from "./domain/classifier-lease-manager.js";
+import type { ClassificationAttemptLedger } from "./domain/classification-attempts.js";
 import type { ViewProjector } from "./domain/view-projector.js";
 import type { WatchdogJobsRepository } from "./domain/watchdog-jobs-repository.js";
 import type { WatchdogHistoryLog } from "./domain/watchdog-history-log.js";
@@ -213,8 +214,12 @@ export interface AppDeps {
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
   inboxHandler?: InboxHandler;
   outboxHandler?: OutboxHandler;
+  shadowCapture?: import("./domain/shadow-capture.js").ShadowCapture;
+  shadowCaptureError?: string;
   projectClassifier?: ProjectClassifier;
   classifierLeaseManager?: ClassifierLeaseManager;
+  /** 0.6.0 S02 P1: durable classification attempt ledger. */
+  classificationAttemptLedger?: ClassificationAttemptLedger;
   viewProjector?: ViewProjector;
   watchdogJobsRepo?: WatchdogJobsRepository;
   watchdogHistoryLog?: WatchdogHistoryLog;
@@ -534,8 +539,11 @@ export function createApp(deps: AppDeps): Hono {
     c.set("queueRepo" as never, deps.queueRepo);
     c.set("inboxHandler" as never, deps.inboxHandler);
     c.set("outboxHandler" as never, deps.outboxHandler);
+    c.set("shadowCapture" as never, deps.shadowCapture);
+    c.set("shadowCaptureError" as never, deps.shadowCaptureError);
     c.set("projectClassifier" as never, deps.projectClassifier);
     c.set("classifierLeaseManager" as never, deps.classifierLeaseManager);
+    c.set("classificationAttemptLedger" as never, deps.classificationAttemptLedger);
     c.set("viewProjector" as never, deps.viewProjector);
     c.set("watchdogJobsRepo" as never, deps.watchdogJobsRepo);
     c.set("watchdogHistoryLog" as never, deps.watchdogHistoryLog);

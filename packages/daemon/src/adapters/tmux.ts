@@ -1,3 +1,4 @@
+import { DeliveryGuardError, type SeatDeliveryGuard } from "../domain/seat-delivery-guard.js";
 import { writeFile as fsWriteFile, unlink as fsUnlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as pathJoin } from "node:path";
@@ -157,6 +158,7 @@ function isTmuxTransportAbsentError(err: unknown): boolean {
 }
 
 function classifyWriteError(err: unknown): TmuxResult {
+  if (err instanceof DeliveryGuardError) return { ok: false, code: err.code, message: err.message };
   if (!(err instanceof Error)) {
     return { ok: false, code: "unknown", message: String(err) };
   }
@@ -239,6 +241,70 @@ function parseLines<T>(output: string, parser: (line: string) => T | null): T[] 
 }
 
 export class TmuxAdapter {
+  deliveryGuard?: SeatDeliveryGuard;
+  private readonly freshProbes = new Map<string, string>();
+  private readonly freshManaged = new Map<string, {nodeId: string; pane: string}>();
+
+  /** Only the private metadata probe uses this door. Success proves allocation,
+   * never authority over a pre-existing or registry-managed target. */
+  async createProbeSession(name: string, cwd?: string): Promise<TmuxResult> {
+    if (this.deliveryGuard?.maybeTarget(name)) return { ok: false, code: "guard_target_managed", message: "A probe cannot reuse a managed seat." };
+    const created = await this.createSessionUnchecked(name, cwd);
+    if (!created.ok) return created;
+    try {
+      const panes = await this.listPanes(name);
+      if (panes.length === 1) { this.freshProbes.set(name, panes[0]!.id); this.freshProbes.set(panes[0]!.id, panes[0]!.id); return created; }
+    } catch { /* no target proof, no input */ }
+    return { ok: false, code: "guard_target_unknown", message: "New probe pane could not be established; no input written." };
+  }
+
+  private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void) => Promise<TmuxResult>, allowAbsent = false): Promise<TmuxResult> {
+    const guard = this.deliveryGuard;
+    if (!guard) return write(target, () => {});
+    try {
+      const probePane = this.freshProbes.get(target);
+      if (probePane && !guard.maybeTarget(target)) {
+        const panes = await this.listPanes(target);
+        if (panes.length !== 1 || panes[0]!.id !== probePane) throw new Error("Private probe target changed; no input written.");
+        return write(probePane, () => {});
+      }
+      const created = this.freshManaged.get(target);
+      const identity = created?.nodeId ?? target;
+      return await guard.input(identity, async () => {
+        const bound = guard.target(identity);
+        const fresh = created?.nodeId === bound.nodeId && guard.ownsLifecycle(bound.nodeId);
+        let panes: TmuxPane[];
+        try { panes = await this.listPanes(fresh ? target : bound.session); }
+        catch (error) {
+          guard.checkInput(identity);
+          const result = classifyWriteError(error);
+          // Only termination consumes positive absence. Unknown probe failures
+          // still refuse, and guard-on never reaches this observation.
+          if (allowAbsent && !result.ok && result.code === "session_not_found"
+            && !/permission denied|operation not permitted|EACCES|EPERM/i.test(result.message)) return result;
+          throw error;
+        }
+        const pane = fresh ? created.pane : bound.pane;
+        if (!pane || panes.length !== 1 || panes[0]!.id !== pane) throw new Error("Managed pane identity unavailable or changed; no input written.");
+        // Revalidate registry/occupant after the asynchronous observation. Write
+        // to the immutable pane ID, not a session name which could be recycled.
+        return guard.input(identity, () => write(pane, () => guard.checkInput(identity)));
+      });
+    } catch (error) {
+      return { ok: false, code: (error as { code?: string }).code ?? "guard_target_unknown", message: String((error as Error).message) };
+    }
+  }
+
+
+  /** Explicit internal human input; transport HTTP options cannot select this. */
+  humanInput<T>(target: string, fn: () => Promise<T>): Promise<T> {
+    return this.deliveryGuard ? this.deliveryGuard.humanInput(target, fn) : fn();
+  }
+
+  operation<T>(target: string, fn: () => Promise<T>): Promise<T> {
+    return this.deliveryGuard ? this.deliveryGuard.operation(target, fn) : fn();
+  }
+
   constructor(private exec: ExecFn, private fileOps: TmuxFileOps = defaultTmuxFileOps()) {}
 
   /** Start an empty native terminal server, without inventing a seat/session. */
@@ -329,6 +395,23 @@ export class TmuxAdapter {
   }
 
   async createSession(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
+    if (this.deliveryGuard && (!env?.OPENRIG_NODE_ID || !this.deliveryGuard.ownsLifecycle(env.OPENRIG_NODE_ID))) {
+      return { ok: false, code: "guard_lease_required", message: "Managed launch requires a lifecycle lease before terminal creation." };
+    }
+    const result = await this.createSessionUnchecked(name, cwd, env);
+    if (result.ok && this.deliveryGuard && env?.OPENRIG_NODE_ID) {
+      try {
+        const panes = await this.listPanes(name);
+        if (panes.length === 1) this.freshManaged.set(name, {nodeId: env.OPENRIG_NODE_ID, pane: panes[0]!.id});
+      } catch { /* no fresh pane proof: subsequent writes remain refused */ }
+    }
+    return result;
+  }
+
+  /** The committed binding now owns identity; this is not filesystem cleanup. */
+  finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
+
+  private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
     const cwdFlag = cwd != null ? ` -c ${shellQuote(cwd)}` : "";
     const envFlags = env
       ? Object.entries(env).map(([k, v]) => ` -e ${shellQuote(`${k}=${v}`)}`).join("")
@@ -358,6 +441,10 @@ export class TmuxAdapter {
    * seats from colliding.
    */
   async sendText(target: string, text: string): Promise<TmuxResult> {
+    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, beforeWrite));
+  }
+
+  private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void): Promise<TmuxResult> {
     const path = this.fileOps.tmpName();
     const buffer = this.fileOps.bufferName();
     let bufferLoaded = false;
@@ -365,6 +452,7 @@ export class TmuxAdapter {
       await this.fileOps.writeFile(path, text);
       await this.exec(`tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
       bufferLoaded = true;
+      beforeWrite();
       await this.exec(`tmux paste-buffer -t ${shellQuote(target)} -b ${shellQuote(buffer)} -d -r -p`);
       return { ok: true };
     } catch (err) {
@@ -391,7 +479,11 @@ export class TmuxAdapter {
    * The shell removes its private script when consumed (not when pasted).
    * A shell that never consumes the invocation leaves the file for diagnosis.
    */
-  async sendShellCommand(target: string, command: string): Promise<TmuxResult> {
+  async sendShellCommand(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
+    return this.guardedInput(target, pane => this.sendShellCommandUnchecked(pane, command, beforeInput));
+  }
+
+  private async sendShellCommandUnchecked(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
     const path = this.fileOps.tmpName();
     const invocation = `/bin/sh ${shellQuote(path)}`;
     if (Buffer.byteLength(invocation, "utf8") > 512) {
@@ -401,9 +493,11 @@ export class TmuxAdapter {
     try {
       await this.fileOps.writeFile(path, `/bin/rm -f -- ${shellQuote(path)}\n${command}\n`, { mode: 0o600, flag: "wx" });
       created = true;
-      const text = await this.sendText(target, invocation);
+      const text = beforeInput ? await this.guardedInput(target, (pane, check) => this.sendTextUnchecked(pane, invocation, () => { check(); beforeInput(); }))
+        : await this.sendText(target, invocation);
       if (!text.ok) return text;
-      const enter = await this.sendKeys(target, ["Enter"]);
+      const enter = beforeInput ? await this.guardedInput(target, pane => { beforeInput(); return this.sendKeysUnchecked(pane, ["Enter"]); })
+        : await this.sendKeys(target, ["Enter"]);
       if (!enter.ok) {
         await this.sendKeys(target, ["C-c"]);
         return enter;
@@ -421,6 +515,10 @@ export class TmuxAdapter {
   }
 
   async sendKeys(target: string, keys: string[]): Promise<TmuxResult> {
+    return this.guardedInput(target, pane => this.sendKeysUnchecked(pane, keys));
+  }
+
+  private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {
     const cmd = `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`;
     try {
       await this.exec(cmd);
@@ -457,9 +555,30 @@ export class TmuxAdapter {
   }
 
   async killSession(name: string): Promise<TmuxResult> {
+    if (this.deliveryGuard) {
+      return this.guardedInput(name, async pane => {
+        const stdout = await this.exec(`tmux display-message -p -t ${shellQuote(pane)} '#{session_id}'`);
+        const sessionId = stdout.trim();
+        if (!/^\$\d+$/.test(sessionId)) return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
+        const kill = async () => {
+          const result = await this.killSessionUnchecked(sessionId);
+          if (result.ok) { this.freshProbes.delete(name); this.freshProbes.delete(pane); this.freshManaged.delete(name); }
+          return result;
+        };
+        if (this.freshProbes.get(name) === pane && !this.deliveryGuard!.maybeTarget(name) && !this.deliveryGuard!.maybeTarget(pane)) return kill();
+        return this.deliveryGuard!.input(this.freshManaged.get(name)?.nodeId ?? name, kill);
+      }, true);
+    }
+    return this.killSessionUnchecked(name);
+  }
+
+  private async killSessionUnchecked(name: string): Promise<TmuxResult> {
     const cmd = `tmux kill-session -t ${shellQuote(name)}`;
     try {
       await this.exec(cmd);
+      const pane = this.freshProbes.get(name);
+      this.freshProbes.delete(name);
+      if (pane) this.freshProbes.delete(pane);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -489,6 +608,10 @@ export class TmuxAdapter {
     command?: string,
     opts?: { cwd?: string; env?: Record<string, string> },
   ): Promise<TmuxResult> {
+    return this.guardedInput(paneTarget, pane => this.respawnPaneUnchecked(pane, command, opts));
+  }
+
+  private async respawnPaneUnchecked(paneTarget: string, command?: string, opts?: { cwd?: string; env?: Record<string, string> }): Promise<TmuxResult> {
     const cwdFlag = opts?.cwd != null ? ` -c ${shellQuote(opts.cwd)}` : "";
     const envFlags = opts?.env
       ? Object.entries(opts.env).map(([k, v]) => ` -e ${shellQuote(`${k}=${v}`)}`).join("")
@@ -532,11 +655,16 @@ export class TmuxAdapter {
    *  exit-in-place, `KILL` for the bounded-timeout force fallback. Resolves the pane pid then `kill`s it;
    *  an unresolvable pid is a structured, non-throwing failure. */
   async signalPaneProcess(paneId: string, signal: "TERM" | "KILL"): Promise<TmuxResult> {
+    return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite));
+  }
+
+  private async signalPaneProcessUnchecked(paneId: string, signal: "TERM" | "KILL", beforeWrite: () => void): Promise<TmuxResult> {
     const pid = await this.getPanePid(paneId);
     if (pid == null) {
       return { ok: false, code: "pane_pid_unavailable", message: `Could not resolve the pane pid for "${paneId}".` };
     }
     try {
+      beforeWrite();
       await this.exec(`kill -${signal} ${pid}`);
       return { ok: true };
     } catch (err) {

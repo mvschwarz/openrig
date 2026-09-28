@@ -290,9 +290,11 @@ describe("herdr layout plan — fresh-tab-on-relaunch (BR-5) + equal auto-grid r
     expect(first.pages[0]!.tabLabel).toBe("openrig:acme-build#l1");
     expect(second.pages[0]!.tabLabel).toBe("openrig:acme-build#l2");
     expect(first.pages[0]!.tabLabel).not.toBe(second.pages[0]!.tabLabel);
-    // Same token → deterministic (same label). The workspace label matches.
+    // Same token → deterministic (same label). OPR.0.6.0.8: the workspace is named for
+    // people (the view id here; the rig name for a rig: view); tabs keep the token.
     expect(planHerdrLayout(view, "l1").pages[0]!.tabLabel).toBe(first.pages[0]!.tabLabel);
-    expect(first.workspaceLabel).toBe("openrig:acme-build#l1");
+    expect(first.workspaceLabel).toBe("acme-build");
+    expect(second.workspaceLabel).toBe("acme-build");
   });
 
   it("one grid root per page (N=2 → 2×1) — pane leaves carry <agent> · <slice> AND the composed shell command via sh -c", () => {
@@ -454,8 +456,11 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     expect(res.ok).toBe(true);
     expect(res.opened).toEqual(["a@r"]);
     expect(res.pages).toBe(1);
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply"]);
-    expect(requests[0]!.params).toEqual({ focus: false, label: "openrig:v#tok" });
+    // OPR.0.6.0.8: after the page is applied, its tab is focused (no blank-tab close here:
+    // this create reply carries no default tab id).
+    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "tab.focus"]);
+    expect(requests[0]!.params).toEqual({ focus: false, label: "v" });
+    expect(requests[2]!.params).toEqual({ tab_id: "wG:t2" });
     expect(requests[1]!.params).toEqual({
       workspace_id: "wG",
       tab_label: "openrig:v#tok",
@@ -477,7 +482,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
       expect(r.method).not.toContain("--help");
       expect(r.method).not.toContain(" ");
     }
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply"]);
+    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "tab.focus"]);
   });
 
   it("a labeled workspace.create failure falls back ONCE to a bare create (uncaptured-param defense)", async () => {
@@ -494,8 +499,10 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     const res = await adapter.openView(view);
     expect(res.ok).toBe(true);
     expect(res.opened).toEqual(["a@r"]);
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "workspace.create", "layout.apply"]);
-    expect((requests[2]!.params as Record<string, unknown>)["workspace_id"]).toBe("wH");
+    // OPR.0.6.0.8: before the bare fallback it checks for a same-named workspace (none here).
+    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "workspace.list", "workspace.create", "layout.apply"]);
+    expect((requests[3]!.params as Record<string, unknown>)["workspace_id"]).toBe("wH");
+    expect(res.notes?.join(" ")).toContain('refused the workspace name "v"');
   });
 
   it("total workspace.create failure degrades EVERY pane honestly (herdr_workspace_failed)", async () => {

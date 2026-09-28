@@ -5,10 +5,11 @@ Start with a repository and one bounded change you can exercise. The shipped
 an independent checker. It uses your installed Codex executable and login;
 terminal-provider support does not change the harness or account being used.
 
-You need Node.js 20, 22 or 24 and tmux, on macOS or Linux. On a Mac with Apple
-silicon, use Node.js 22 (see the [known compatibility
-limitation](../releases/v0.5.15.md#known-compatibility-limitation)). Native
-Windows is not supported yet, and WSL2 has not been tested.
+You need Node.js 22 or 24 and tmux, on macOS or Linux. On a Mac with Apple
+silicon, use Node.js 22 (see the [compatibility
+history](../releases/v0.5.15.md#known-compatibility-limitation)). Native
+Windows is not supported yet, and WSL2 has not been tested. Node 20 is no longer
+supported; Node 26 and other versions are untested.
 
 **Choose permissions before starting the team.** The unchanged starter launches
 Codex with `-s workspace-write`; it leaves approval policy to your native Codex
@@ -319,11 +320,12 @@ rig up ./openrig-specs/rigs/launch/first-project/rig.yaml --cwd . --plan
 rig up ./openrig-specs/rigs/launch/first-project/rig.yaml --cwd .
 ```
 
-OpenRig's separate `permission_policy: builtin:yolo` setting passes only
-`-s danger-full-access` to Codex, **without an approval flag**, and replaces the
-named-profile argument. It does not mean `approval_policy = "never"`. A standalone
-`codex --yolo` command is not an OpenRig launch setting. Use the profile recipe
-above when you want to choose both controls explicitly.
+OpenRig's `permission_policy: builtin:yolo` setting selects
+`-s danger-full-access -a never` on fresh, resume and fork launches, replacing
+the named-profile argument. The profile recipe above remains useful when you
+want to maintain those choices in native configuration. The legacy
+environment-only `OPENRIG_YOLO=1` path remains sandbox-only when no resolved
+policy is present. A standalone `codex --yolo` command is not an OpenRig setting.
 
 To return to a restricted next launch, change the selected profile to:
 
@@ -334,6 +336,57 @@ approval_policy = "on-request"
 [sandbox_workspace_write]
 network_access = false
 ```
+
+### Per-seat permission mode
+
+Permission mode is the native execution choice; work posture is project guidance.
+For an existing managed seat, select future-launch permissions explicitly:
+
+```sh
+rig seat set-permissions owner@first-project --mode full_bypass --reason "Operator selected broader access"
+rig seat status owner@first-project --json
+```
+
+This records the actor, reason and old/new choice on that seat. It does not
+relaunch it, alter native history, change sibling seats, or edit permission
+rules/hooks. A later lifecycle action remains a separate decision. The explicit
+seat choice overrides the inherited member/rig policy; `--mode inherit` clears
+it without changing that inherited policy. `floor` selects the existing normal
+launch path (including a Codex named profile when configured); it does not
+rewrite a native profile or force its approval settings.
+
+Codex and Claude accept `floor` and `full_bypass`. Additional Claude native modes,
+including `auto`, require support advertised by the managed executable's help.
+OpenRig resolves the first executable on its managed launch PATH at the seat's
+absolute working directory, then uses that exact path for discovery and launch.
+It does not use interactive shell aliases or a shell's modified PATH. Relative
+PATH entries and a relative `CLAUDE_CONFIG_DIR` resolve from the seat directory.
+
+For these explicit native modes, fresh, resume, fork and legacy restore use the
+same managed environment: PATH, HOME, `CLAUDE_CONFIG_DIR` (default HOME/.claude)
+and the configured classic-renderer setting. Other shell customizations are
+excluded. The existing managed identity and allowlisted provider-auth channel
+is retained by variable name; credentials are not copied into launch commands
+or capability evidence. Help runs without that credential channel. Existing
+login files remain under the managed home. Configure the daemon's managed
+launch environment deliberately before selecting a mode; this is not a probe
+of an arbitrary interactive shell.
+
+Each selection and each later launch checks support again, without a cache.
+A changed node/occupant, binding, cwd, executable or capability environment
+refuses at the next check: after help, before selection/audit mutation, and
+immediately before paste and Enter. A failure after a valid paste is partial
+input, not a successful launch or a claim that earlier input was rolled back.
+An existing explicit selection is retained on refusal; no fallback is chosen.
+Ordinary and inherited launch paths are unchanged. The status response
+distinguishes desired settings, generation-bound
+launch arguments and an unverified native effect. Inspect the native session
+after an authorized launch before claiming its actual permission behavior.
+
+The rig-level verbs are `rig policy permissions list`, `show`, `current` and
+`apply`. Existing `rig policy list/show/current/apply` remain compatibility
+aliases with the same JSON and exit behavior. Pi resource trust and the per-seat
+typing guard are separate controls.
 
 ### Claude Code: a different launch flag
 

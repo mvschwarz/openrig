@@ -15,6 +15,7 @@ import {
 import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
 import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
+import { classifyNodeVersion } from "../node-support.js";
 
 interface DoctorCheck {
   name: string;
@@ -48,7 +49,6 @@ export interface DoctorDeps {
   fetchLiveLogicalIds?: (rigName: string) => Promise<string[] | null>;
 }
 
-const MIN_NODE_MAJOR = 20;
 const DEFAULT_PORT = 7433;
 
 function defaultCheckPort(port: number, host: string): Promise<boolean> {
@@ -96,16 +96,18 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
   }
 
   // 3. Node version
-  const major = parseInt(process.version.replace(/^v/, ""), 10);
-  if (major >= MIN_NODE_MAJOR) {
+  const nodeSupport = classifyNodeVersion(process.version);
+  if (nodeSupport.kind === "supported") {
     checks.push({ name: "node_version", status: "pass", message: `Node ${process.version}` });
+  } else if (nodeSupport.kind === "untested") {
+    checks.push({ name: "node_version", status: "warn", message: nodeSupport.message! });
   } else {
     checks.push({
       name: "node_version",
       status: "fail",
-      message: `Node ${process.version} is below minimum (v${MIN_NODE_MAJOR}).`,
-      reason: "OpenRig requires Node 20+ for built-in fetch, ESM, and stable API support.",
-      fix: "Install Node 20+ via nvm, fnm, or your package manager.",
+      message: nodeSupport.message!,
+      reason: nodeSupport.reason,
+      fix: nodeSupport.fix,
     });
   }
 

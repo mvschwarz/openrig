@@ -9,6 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getOpenRigHome } from "../../../openrig-compat.js";
 import { OWNER_NOTIFICATION_LEVELS, type OwnerNotificationLevel } from "../../queue-transition-log.js";
+import { BASELINE_REQUIRED_SCOPES } from "./capabilities.js";
 
 export interface SlackConnectorConfig {
   enabled: boolean;
@@ -41,7 +42,7 @@ export const DEFAULT_CONFIG: SlackConnectorConfig = {
   outboundDestinations: [],
   sourceLabel: "openrig",
   channel: null,
-  requiredScopes: ["chat:write", "channels:history", "channels:read"],
+  requiredScopes: [...BASELINE_REQUIRED_SCOPES],
   secretsEnvFile: null,
   queueUrl: null,
   minimumLevelThatPosts: "NOTICE",

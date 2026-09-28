@@ -1,4 +1,4 @@
-// The canonical ordered migration list (001 → 085). SINGLE SOURCE: the daemon boot path
+// The canonical ordered migration list (001 → 089). SINGLE SOURCE: the daemon boot path
 // (startup.ts) and any test/tool that needs a schema-faithful DB both migrate from THIS array,
 // so a reader DB is never seeded from a stale hand-copied subset (the perf-fixture-migration-parity
 // trap). Append new migrations to the END, in order.
@@ -87,10 +87,14 @@ import { archiveIdentityProvenanceSchema } from "./migrations/082_archive_identi
 import { reviewReadIndexesSchema } from "./migrations/083_review_read_indexes.js";
 import { inventoryEventIndexesSchema } from "./migrations/084_inventory_event_indexes.js";
 import { rigClaudeManagedBlockFileSchema } from "./migrations/085_rig_claude_managed_block_file.js";
+import { classificationFieldsAndAttemptsSchema } from "./migrations/086_classification_fields_and_attempts.js";
 import { scopedOperatingPostureSchema } from "./migrations/080_scoped_operating_posture.js";
+import { seatDeliveryGuardSchema } from "./migrations/087_seat_delivery_guard.js";
+import { nodePermissionSelectionsSchema } from "./migrations/088_node_permission_selections.js";
+import { classificationIdentityProvenanceSchema } from "./migrations/089_classification_identity_provenance.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→085 (068 enforcer decisions, dropped forward by 071; 069/070 W3 launch truth). */
+/** Ordered 001→089 (S02 086/089, S09 087, S03 088). */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -177,4 +181,8 @@ export const ALL_MIGRATIONS: Migration[] = [
   reviewReadIndexesSchema,
   inventoryEventIndexesSchema,
   rigClaudeManagedBlockFileSchema,
+  classificationFieldsAndAttemptsSchema,
+  seatDeliveryGuardSchema,
+  nodePermissionSelectionsSchema,
+  classificationIdentityProvenanceSchema,
 ];

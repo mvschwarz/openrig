@@ -8,7 +8,7 @@ OpenRig turns AI coding agents from a pile of terminal sessions into a persisten
 
 ## Install and first run
 
-Requires Node.js 20, 22 or 24 and tmux, on macOS or Linux. On a Mac with Apple silicon, use Node.js 22 ([why](docs/releases/v0.5.15.md#known-compatibility-limitation)). Native Windows is not supported yet, and WSL2 has not been tested. Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
+Requires Node.js 22 or 24 and tmux, on macOS or Linux. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). Native Windows is not supported yet, and WSL2 has not been tested. Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
 
 ```bash
 npm install -g @openrig/cli
@@ -110,14 +110,28 @@ endpoint on GitHub.
 Managed launches supply `HOME`, `CODEX_HOME` and `OPENRIG_*` identity/connection
 variables. Claude uses `--permission-mode acceptEdits` and defaults to the classic
 renderer for terminal scrollback. Codex uses `-s workspace-write` unless a named
-profile governs its sandbox; OpenRig does not force an approval-policy flag.
+profile governs its sandbox; the default does not force an approval-policy flag.
 Fresh Codex launches also add writable access to the workspace's `.git` and the
 pod's shared queue-state directory with `--add-dir`; the shared root comes from
 `OPENRIG_SHARED_DOCS_ROOT` or `~/.openrig/shared-docs`.
-YOLO is **off by default**. Explicit `OPENRIG_YOLO=1` or a full-bypass seat policy
-selects Claude's `--dangerously-skip-permissions` or Codex's
-`-s danger-full-access`; a resolved seat policy takes precedence over the
+YOLO is **off by default**. An explicitly selected full-bypass policy selects
+Claude's `--dangerously-skip-permissions` or Codex's
+`-s danger-full-access -a never`. The legacy environment-only `OPENRIG_YOLO=1`
+path still selects only Codex's sandbox; a resolved policy overrides that
 environment setting.
+
+Permission mode controls native execution permissions; work posture is separate
+project guidance. Use `rig policy permissions list|show|current|apply` for rig
+policy configuration (the four `rig policy` aliases remain compatible). Use
+`rig seat set-permissions <seat> --mode <mode> --reason <text>` for an audited
+future-launch choice: `floor`, `full_bypass`, or `inherit` to clear the seat
+override. Additional Claude modes such as `auto` require support from the exact
+managed Claude executable at the seat's working directory; selection and launch
+each check it. Unsupported or changed contexts refuse without a fallback.
+This does not relaunch the seat
+or change its current native process, history, rules or hooks. `rig seat status`
+separates the desired selection from the last launch arguments; neither proves
+native enforcement. See the [permission guide](docs/reference/getting-started.md#per-seat-permission-mode).
 
 Managed hook blocks target OpenRig's entries and retain unrelated hooks, but
 trust entries, selected resource keys and Claude's existing status-line command
@@ -137,6 +151,8 @@ OpenRig is a multi-agent harness — it manages the system that coding agents fo
 - **Discover** existing Claude Code and Codex sessions in tmux and adopt them into a managed rig
 - **Snapshot** the topology with `rig down --snapshot`, restore by name with `rig up <name>`
 - **Communicate** across agents with `rig send`, `rig broadcast`, and `rig chatroom`
+- **Protect** a seat where you type by hand: `rig seat set-typing-guard <seat> --enabled true --reason <text>` holds automatic messages and wakes instead of typing them into that seat (off by default; see `rig seat set-typing-guard --help`)
+- **Connect** Slack through an app you create in your own workspace; the experimental `rig slack manifest` prints that app's manifest ([setup guide](docs/reference/slack-app-setup.md))
 - **Evolve** running topologies with `rig grow`, `rig shrink`, `rig launch`, `rig remove`
 
 Every agent runs in a tmux session you can attach to, inspect, and work with directly.
@@ -203,7 +219,7 @@ With herdr installed and connected, open the starter's terminals together:
 rig terminal open first-project --provider herdr
 ```
 
-For cmux, use `--provider cmux`. The underlying sessions remain accessible through tmux. See the [terminal workspace guide](docs/reference/getting-started.md#share-the-dashboard-and-return-to-it) for setup and returning to an existing view.
+For cmux, use `--provider cmux`. In the TUI, a rig's detail view has a `term ▸ rig <name>` link that opens every running seat of that rig in the default terminal provider; with herdr that is up to 16 seats per tab, in a workspace named after the rig. The underlying sessions remain accessible through tmux. See the [terminal workspace guide](docs/reference/getting-started.md#share-the-dashboard-and-return-to-it) for setup and returning to an existing view.
 
 ## Key Concepts
 
@@ -230,7 +246,27 @@ Requires Docker for service-backed rigs.
 
 ## Upgrading an existing instance
 
-For an existing installation, follow the [upgrade procedure](skills/_canonical/core/openrig-upgrade/SKILL.md) and the [0.5.14 release notes](docs/releases/v0.5.14.md). Preserve live seats during the upgrade; `rig down` is not an upgrade step.
+For an existing installation, follow the [upgrade procedure](skills/_canonical/core/openrig-upgrade/SKILL.md) and the [0.5.14 release notes](docs/releases/v0.5.14.md). Preserve live seats during the upgrade; `rig down` is not an upgrade step. Upgrading to 0.6.0 also requires Node.js 22 or 24: see [Moving off Node 20](#moving-off-node-20) and the [0.6.0 release notes](docs/releases/v0.6.0.md).
+
+### Moving off Node 20
+
+OpenRig 0.6.0 supports Node.js 22 and 24 only. Its SQLite binding
+(better-sqlite3 13) requires Node 22 or newer. Node 20 is no longer supported;
+the install check refuses it with an explanation.
+
+If you run OpenRig on Node 20, switch Node first, then reinstall the CLI under
+the new Node (a version manager keeps a separate global package set for each
+Node):
+
+```bash
+nvm install 22          # or 24; fnm or your package manager work the same way
+npm install -g @openrig/cli
+rig --version
+```
+
+Your existing OpenRig data stays where it is. The daemon reopens the same
+database under the new binding and applies any pending migrations in place.
+Restart the daemon under the new Node by following the upgrade procedure above.
 
 ### Crossing the 0.5.9 layout boundary
 
@@ -277,7 +313,9 @@ seat, plugin, and release lifecycle actions remain agent-owned.
 
 ## Requirements
 
-- Node.js 20, 22, or 24 (the supported versions in this release). On a Mac with Apple silicon, use Node.js 22: see the [known compatibility limitation](docs/releases/v0.5.15.md#known-compatibility-limitation)
+- Node.js 22 or 24 (the supported versions in this release). Node 20 is no
+  longer supported. Node 26 and other versions are untested. On a Mac with Apple
+  silicon, use Node.js 22: see the [compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation).
 - tmux
 - macOS or Linux. Native Windows is not supported yet, and WSL2 has not been tested
 

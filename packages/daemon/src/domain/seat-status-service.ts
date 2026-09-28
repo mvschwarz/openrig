@@ -2,6 +2,8 @@ import type { RigRepository } from "./rig-repository.js";
 import { getNodeInventory } from "./node-inventory.js";
 import { parseSessionName } from "./session-name.js";
 import type { NodeInventoryEntry } from "./types.js";
+import { NativePermissionStore, type StoredNativePermissionSelection } from "./native-permission-store.js";
+import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 
 const SEAT_LOOKUP_GUIDANCE = "List seats with: rig ps --nodes";
 
@@ -22,6 +24,13 @@ export interface SeatStatus {
   previous_occupant: string | null;
   handover_at: string | null;
   restore_outcome: NodeInventoryEntry["restoreOutcome"];
+  permissions: {
+    selectionState: "explicit" | "inherit" | "unknown";
+    desired: StoredNativePermissionSelection | null;
+    lastLaunchArguments: StoredAppliedLaunchObservation | null;
+    nativeEffect: "unverified";
+    error?: string;
+  };
 }
 
 export type SeatStatusResult =
@@ -108,6 +117,17 @@ export class SeatStatusService {
       previous_occupant: entry.previousOccupant,
       handover_at: entry.handoverAt,
       restore_outcome: entry.restoreOutcome,
+      permissions: this.permissionStatus(entry.nodeId),
     };
+  }
+
+  private permissionStatus(nodeId: string): SeatStatus["permissions"] {
+    const lastLaunchArguments = new AppliedLaunchObservationStore(this.rigRepo.db).readCurrent(nodeId);
+    try {
+      const desired = new NativePermissionStore(this.rigRepo.db).read(nodeId);
+      return { selectionState: desired ? "explicit" : "inherit", desired, lastLaunchArguments, nativeEffect: "unverified" };
+    } catch (error) {
+      return { selectionState: "unknown", desired: null, lastLaunchArguments, nativeEffect: "unverified", error: (error as Error).message };
+    }
   }
 }

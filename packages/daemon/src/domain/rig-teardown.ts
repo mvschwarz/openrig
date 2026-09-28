@@ -74,6 +74,9 @@ export class RigTeardownOrchestrator {
     const rig = this.deps.rigRepo.getRig(rigId);
     if (!rig) throw new RigNotFoundError(rigId);
 
+    const guard = this.deps.tmuxAdapter.deliveryGuard;
+    const ids = rig.nodes.map(node => node.id);
+    if (guard && ids.some(id => !guard.ownsLifecycle(id))) return guard.lifecycle(ids, () => this.teardown(rigId, opts));
     const result: TeardownResult = {
       rigId, sessionsKilled: 0, snapshotId: null,
       deleted: false, deleteBlocked: false, alreadyStopped: false, errors: [],

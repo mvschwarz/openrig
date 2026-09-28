@@ -47,9 +47,13 @@
 // The `workspace.create` response envelope is VM-confirmed (OPR.0.4.7.1):
 // `result.workspace.workspace_id` + `result.tab.tab_id` + `result.root_pane`.
 // Extraction stays null-safe/defensive for older builds (extractWorkspaceId).
-// The create's default tab (a blank pane) is deliberately LEFT ALONE — PM
-// ruling: no tab.close unless live evidence shows a user visibly landing on
-// the blank tab (current evidence shows the populated view tab focused).
+// OPR.0.6.0.8: issue #26 is the live evidence the earlier ruling waited for — users
+// landed on the create's blank default tab. After layout the adapter focuses the
+// first populated tab it knows (tab.focus) and then closes the starting tab (tab.close)
+// only when it is known blank: every page applied and reported a tab id, and none is
+// the starting tab. Otherwise the starting tab is kept and the result says so. Both methods are in
+// herdr 0.7.1's socket API (`herdr tab focus|close <tab_id>`); a refusal of either
+// is reported as a note, never as a failed seat.
 
 import type {
   AbsentSeat,
@@ -167,6 +171,9 @@ export function planHerdrLayout(
   tabPrefix: string = "openrig",
 ): HerdrLayoutPlan {
   const base = `${tabPrefix}:${view.id}#${launchToken}`;
+  // The workspace is named for people: the rig name for a rig view, else the view id.
+  // Tab labels keep the launch token, so every open is still a fresh, distinct space.
+  const workspaceLabel = view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id;
   const pages: HerdrPagePlan[] = view.pages.map((page, pageIndex) => {
     const grid = buildGridRoot(page);
     return {
@@ -175,7 +182,7 @@ export function planHerdrLayout(
       blanks: grid.blanks,
     };
   });
-  return { workspaceLabel: base, pages };
+  return { workspaceLabel, pages };
 }
 
 /**
@@ -215,8 +222,34 @@ export interface HerdrAdapterDeps {
   tabPrefix?: string;
 }
 
+/** Herdr lays out 4×4 per tab (OPR.0.6.0.8); cmux keeps the composer default. */
+export const HERDR_PANES_PER_PAGE = 16;
+
+/** A `tab_id` from a herdr result body (`result.tab.tab_id`, `result.layout.tab_id`, or top-level). */
+export function extractTabId(result: HerdrResult | null | undefined): string | null {
+  if (!result) return null;
+  if (typeof result["tab_id"] === "string" && result["tab_id"]) return result["tab_id"] as string;
+  for (const key of ["tab", "layout"]) {
+    const nested = result[key];
+    if (nested && typeof nested === "object") {
+      const id = (nested as Record<string, unknown>)["tab_id"];
+      if (typeof id === "string" && id) return id;
+    }
+  }
+  return null;
+}
+
+/** Workspace labels from a `workspace.list` result body; [] when the shape is unknown. */
+export function extractWorkspaceLabels(result: HerdrResult | null | undefined): string[] {
+  const list = result?.["workspaces"];
+  if (!Array.isArray(list)) return [];
+  return list.map((w) => (w && typeof w === "object" ? (w as Record<string, unknown>)["label"] : null))
+    .filter((l): l is string => typeof l === "string");
+}
+
 export class HerdrAdapter implements TerminalProvider {
   readonly name = "herdr";
+  readonly panesPerPage = HERDR_PANES_PER_PAGE;
   private readonly transport: HerdrTransport;
   private readonly newLaunchToken: () => string;
   private readonly tabPrefix: string;
@@ -296,25 +329,46 @@ export class HerdrAdapter implements TerminalProvider {
     }
 
     // A fresh workspace per open (BR-5 fresh-on-relaunch, strongest form).
-    // The labeled create is tried first; a failure falls back ONCE to a bare
-    // create before degrading.
+    // The labeled create is tried first. If herdr refuses it and a workspace with
+    // that label already exists, retry once with a numbered suffix and say so;
+    // otherwise fall back ONCE to a bare create before degrading.
+    const notes: string[] = [];
     let workspaceId: string | null = null;
+    let defaultTabId: string | null = null;
     let createErr: unknown = null;
     try {
-      workspaceId = extractWorkspaceId(
-        await this.transport.request("workspace.create", {
-          focus: false,
-          label: plan.workspaceLabel,
-        }),
-      );
+      const created = await this.transport.request("workspace.create", { focus: false, label: plan.workspaceLabel });
+      workspaceId = extractWorkspaceId(created);
+      defaultTabId = extractTabId(created);
     } catch (err) {
       createErr = err;
     }
     if (workspaceId == null) {
+      let existing: string[] = [];
+      try { existing = extractWorkspaceLabels(await this.transport.request("workspace.list", {})); } catch { /* unknown → bare fallback */ }
+      if (existing.includes(plan.workspaceLabel)) {
+        let n = 2;
+        while (existing.includes(`${plan.workspaceLabel} (${n})`)) n++;
+        const suffixed = `${plan.workspaceLabel} (${n})`;
+        try {
+          const created = await this.transport.request("workspace.create", { focus: false, label: suffixed });
+          workspaceId = extractWorkspaceId(created);
+          defaultTabId = extractTabId(created);
+          if (workspaceId != null) {
+            createErr = null;
+            notes.push(`A workspace named "${plan.workspaceLabel}" already exists, so this one is "${suffixed}".`);
+          }
+        } catch (err) {
+          createErr = createErr ?? err;
+        }
+      }
+    }
+    if (workspaceId == null) {
       try {
-        workspaceId = extractWorkspaceId(
-          await this.transport.request("workspace.create", { focus: false }),
-        );
+        const created = await this.transport.request("workspace.create", { focus: false });
+        workspaceId = extractWorkspaceId(created);
+        defaultTabId = extractTabId(created);
+        if (workspaceId != null) notes.push(`herdr refused the workspace name "${plan.workspaceLabel}"; the workspace is unnamed.`);
         createErr = null;
       } catch (err) {
         createErr = createErr ?? err;
@@ -346,19 +400,27 @@ export class HerdrAdapter implements TerminalProvider {
       };
     }
 
+    const appliedTabIds: string[] = [];
+    let firstPopulatedTabId: string | null = null;
+    // The starting tab is known blank only if every page applied AND reported its tab id:
+    // an id-less reply or a failed (possibly still effective) apply may have used it.
+    let everyPageKnown = true;
     for (let pageIndex = 0; pageIndex < plan.pages.length; pageIndex++) {
       const pagePlan = plan.pages[pageIndex]!;
       const pagePanes = view.pages[pageIndex]!;
       try {
         // ONE atomic layout.apply for the whole page (capture-verified shape).
-        await this.transport.request("layout.apply", {
+        const applied = await this.transport.request("layout.apply", {
           workspace_id: workspaceId,
           tab_label: pagePlan.tabLabel,
           focus: true,
           root: pagePlan.root,
         });
+        const tabId = extractTabId(applied);
+        if (tabId) { appliedTabIds.push(tabId); firstPopulatedTabId ??= tabId; } else everyPageKnown = false;
         for (const pane of pagePanes) opened.push(pane.seat);
       } catch (err) {
+        everyPageKnown = false;
         // The whole page failed to apply — degrade its seats honestly.
         for (const pane of pagePanes) {
           degraded.push({
@@ -370,6 +432,25 @@ export class HerdrAdapter implements TerminalProvider {
       }
     }
 
+    // Land on a known populated tab, then remove the create's starting tab (#26) only when it is
+    // known to be blank. When that is uncertain the tab is kept: closing it could remove seats.
+    if (opened.length > 0) {
+      if (firstPopulatedTabId) {
+        try { await this.transport.request("tab.focus", { tab_id: firstPopulatedTabId }); }
+        catch (err) { notes.push(`herdr did not focus the first tab: ${err instanceof Error ? err.message : String(err)}`); }
+      } else {
+        notes.push("herdr returned no tab id for any page, so no tab was focused explicitly.");
+      }
+      if (defaultTabId) {
+        if (!everyPageKnown) {
+          notes.push("The starting tab was kept because it could not be confirmed empty.");
+        } else if (!appliedTabIds.includes(defaultTabId)) {
+          try { await this.transport.request("tab.close", { tab_id: defaultTabId }); }
+          catch (err) { notes.push(`herdr kept the blank starting tab: ${err instanceof Error ? err.message : String(err)}`); }
+        }
+      }
+    }
+
     return {
       provider: this.name,
       ok: opened.length > 0 || view.opened.length === 0,
@@ -377,6 +458,7 @@ export class HerdrAdapter implements TerminalProvider {
       absent,
       degraded,
       pages: plan.pages.length,
+      ...(notes.length ? { notes } : {}),
     };
   }
 }

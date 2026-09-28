@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import type { ConfigStore, RiggedConfig } from "./config-store.js";
 import type { DaemonStatus } from "./daemon-lifecycle.js";
 import { buildTmuxControlFailure, probeTmuxControlAsync } from "./tmux-health.js";
+import { classifyNodeVersion } from "./node-support.js";
 
 export interface PreflightCheck {
   name: string;
@@ -11,6 +12,8 @@ export interface PreflightCheck {
   error?: string;
   reason?: string;
   fix?: string;
+  /** Set on a passing check that carries a qualification (e.g. untested Node major). */
+  warning?: string;
 }
 
 export interface PreflightResult {
@@ -31,16 +34,10 @@ interface RunOverrides {
   host?: string;
 }
 
-const MIN_NODE_MAJOR = 20;
 
 interface WritableHomeCheckDeps {
   mkdirp?: (path: string) => void;
   checkWritable?: (path: string) => void;
-}
-
-function parseNodeMajor(version: string): number {
-  const match = version.match(/^v?(\d+)/);
-  return match ? parseInt(match[1]!, 10) : 0;
 }
 
 function checkPort(host: string, port: number): Promise<boolean> {
@@ -122,16 +119,18 @@ export class SystemPreflight {
     const openrigHome = this.deps.openrigHome ?? this.deps.riggedHome ?? "";
 
     // 1. Node version
-    const major = parseNodeMajor(process.version);
-    if (major >= MIN_NODE_MAJOR) {
+    const nodeSupport = classifyNodeVersion(process.version);
+    if (nodeSupport.kind === "supported") {
       checks.push({ name: "node_version", ok: true });
+    } else if (nodeSupport.kind === "untested") {
+      checks.push({ name: "node_version", ok: true, warning: nodeSupport.message });
     } else {
       checks.push({
         name: "node_version",
         ok: false,
-        error: `Node.js ${process.version} is below the minimum (v${MIN_NODE_MAJOR}.0.0).`,
-        reason: "OpenRig requires Node 20+ for built-in fetch, ESM, and stable API support.",
-        fix: "Install Node 20+ via nvm, fnm, or your package manager.",
+        error: nodeSupport.message,
+        reason: nodeSupport.reason,
+        fix: nodeSupport.fix,
       });
     }
 

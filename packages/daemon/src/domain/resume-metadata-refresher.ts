@@ -241,7 +241,9 @@ export class ResumeMetadataRefresher {
     }
 
     const probeSession = `rigged-refresh-${sanitizeTmuxName(sessionName)}-${Date.now().toString(36)}`;
-    const create = await this.tmuxAdapter.createSession(probeSession, resolveProbeCwd(cwd, this.homeDir));
+    const create = this.tmuxAdapter.deliveryGuard
+      ? await this.tmuxAdapter.createProbeSession(probeSession, resolveProbeCwd(cwd, this.homeDir))
+      : await this.tmuxAdapter.createSession(probeSession, resolveProbeCwd(cwd, this.homeDir));
     if (!create.ok) {
       return "inconclusive";
     }

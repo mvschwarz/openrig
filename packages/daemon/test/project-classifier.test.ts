@@ -7,6 +7,7 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { classifierLeasesSchema } from "../src/db/migrations/029_classifier_leases.js";
 import { projectClassificationsSchema } from "../src/db/migrations/028_project_classifications.js";
+import { classificationFieldsAndAttemptsSchema } from "../src/db/migrations/086_classification_fields_and_attempts.js";
 import { StreamStore } from "../src/domain/stream-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { ClassifierLeaseManager } from "../src/domain/classifier-lease-manager.js";
@@ -39,7 +40,7 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, classifierLeasesSchema, projectClassificationsSchema]);
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, classifierLeasesSchema, projectClassificationsSchema, classificationFieldsAndAttemptsSchema]);
     bus = new EventBus(db);
     leaseMgr = new ClassifierLeaseManager(db, bus);
     classifier = new ProjectClassifier(db, bus, leaseMgr);
@@ -56,6 +57,7 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
     const proj = classifier.classify({
       streamItemId: "stream-1",
       classifierSession: "alice@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
       classificationType: "idea",
       classificationDestination: "planning@rig",
     });
@@ -71,6 +73,7 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
     expect(() => classifier.classify({
       streamItemId: "stream-1",
       classifierSession: "alice@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
     })).toThrow(ClassifierLeaseError);
   });
 
@@ -80,6 +83,7 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
     expect(() => classifier.classify({
       streamItemId: "stream-1",
       classifierSession: "bob@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
     })).toThrow(/lease_held|alice@rig/);
   });
 
@@ -90,6 +94,7 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
       classifier.classify({
         streamItemId: "nonexistent-stream",
         classifierSession: "alice@rig",
+        leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
         classificationType: "idea",
       });
       throw new Error("should have thrown");
@@ -122,17 +127,20 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
     classifier.classify({
       streamItemId: "stream-1",
       classifierSession: "alice@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
       classificationType: "idea",
     });
     expect(() => classifier.classify({
       streamItemId: "stream-1",
       classifierSession: "alice@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
       classificationType: "bug",
     })).toThrow(ProjectClassifierError);
     try {
       classifier.classify({
         streamItemId: "stream-1",
         classifierSession: "alice@rig",
+        leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
         classificationType: "bug",
       });
     } catch (err) {
@@ -146,6 +154,7 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
     const first = classifier.classify({
       streamItemId: "stream-1",
       classifierSession: "alice@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
       classificationType: "idea",
     });
     // Reclaim + new lease + same session can also re-attempt — still rejected.
@@ -155,6 +164,7 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
       classifier.classify({
         streamItemId: "stream-1",
         classifierSession: "bob@rig",
+        leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
         classificationType: "feature-request",
       });
       throw new Error("should have thrown");
@@ -175,6 +185,7 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
     const full = classifier.classify({
       streamItemId: "stream-full",
       classifierSession: "alice@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
       classificationType: "idea",
       classificationUrgency: "high",
       classificationMaturity: "ratified",
@@ -190,6 +201,7 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
     const minimal = classifier.classify({
       streamItemId: "stream-minimal",
       classifierSession: "alice@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
     });
     expect(minimal.classificationType).toBeNull();
     expect(minimal.classificationUrgency).toBeNull();
@@ -204,16 +216,19 @@ describe("ProjectClassifier (PL-004 Phase B; L2 classifier write path)", () => {
     classifier.classify({
       streamItemId: "s1",
       classifierSession: "alice@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
       classificationDestination: "planning@rig",
     });
     classifier.classify({
       streamItemId: "s2",
       classifierSession: "alice@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
       classificationDestination: "delivery@rig",
     });
     classifier.classify({
       streamItemId: "s3",
       classifierSession: "alice@rig",
+      leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
       classificationDestination: "planning@rig",
     });
     const planning = classifier.list({ classificationDestination: "planning@rig" });

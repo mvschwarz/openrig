@@ -8,6 +8,7 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { classifierLeasesSchema } from "../src/db/migrations/029_classifier_leases.js";
 import { projectClassificationsSchema } from "../src/db/migrations/028_project_classifications.js";
+import { classificationFieldsAndAttemptsSchema } from "../src/db/migrations/086_classification_fields_and_attempts.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { ClassifierLeaseManager } from "../src/domain/classifier-lease-manager.js";
 import { ProjectClassifier } from "../src/domain/project-classifier.js";
@@ -51,7 +52,7 @@ describe("projects routes (PL-004 Phase B)", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, classifierLeasesSchema, projectClassificationsSchema]);
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, classifierLeasesSchema, projectClassificationsSchema, classificationFieldsAndAttemptsSchema]);
     bus = new EventBus(db);
     leaseMgr = new ClassifierLeaseManager(db, bus);
     classifier = new ProjectClassifier(db, bus, leaseMgr);
@@ -86,6 +87,7 @@ describe("projects routes (PL-004 Phase B)", () => {
       body: JSON.stringify({
         streamItemId: "stream-x",
         classifierSession: "alice@rig",
+        leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
         classificationType: "idea",
       }),
     });
@@ -99,6 +101,7 @@ describe("projects routes (PL-004 Phase B)", () => {
       body: JSON.stringify({
         streamItemId: "stream-x",
         classifierSession: "alice@rig",
+        leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
         classificationType: "bug",
       }),
     });
@@ -115,6 +118,7 @@ describe("projects routes (PL-004 Phase B)", () => {
       body: JSON.stringify({
         streamItemId: "stream-x",
         classifierSession: "alice@rig",
+        leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
       }),
     });
     expect(res.status).toBe(409);
@@ -135,6 +139,7 @@ describe("projects routes (PL-004 Phase B)", () => {
       body: JSON.stringify({
         streamItemId: "stream-nonexistent",
         classifierSession: "alice@rig",
+        leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
         classificationType: "idea",
       }),
     });
@@ -208,6 +213,7 @@ describe("projects routes (PL-004 Phase B)", () => {
         body: JSON.stringify({
           streamItemId: id,
           classifierSession: "alice@rig",
+          leaseId: leaseMgr.getActiveLease()?.leaseId ?? "none",
           classificationDestination: dest,
         }),
       });

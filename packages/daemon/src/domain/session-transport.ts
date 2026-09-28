@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -9,6 +11,7 @@ import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "..
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
+import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 
 // OPR.0.4.1.10 — send-readiness freshness. The runtime-hook store keeps a 5min freshness for activity
 // DISPLAY, but "safe to send NOW" needs a tight window: a stale "idle" read must not authorize a send
@@ -218,10 +221,29 @@ export async function probeSessionActivity(input: {
   attachmentType: "tmux" | "external_cli" | null | undefined;
   tmuxAdapter: TmuxAdapter;
   now?: Date;
+  /** S01/S02 P2: optional read-only observer of the capture this probe already takes. */
+  captureObserver?: CaptureObserverSink;
+  binding?: Omit<ObservedBinding, "sessionName">;
 }): Promise<AgentActivity> {
-  const sampledAt = (input.now ?? new Date()).toISOString();
+  // Capture routing and observation labels must share the entry context. The
+  // caller may reuse/mutate its input while hasSession is pending.
+  const { sessionName, runtime, attachmentType, tmuxAdapter, now, captureObserver, binding } = input;
+  const sampledAt = (now ?? new Date()).toISOString();
+  // P2: attempt identity frozen at entry, before any await. Early returns below
+  // take no capture and are not observed.
+  const observed = captureObserver ? {
+    attemptId: randomUUID(),
+    binding: Object.freeze({
+      sessionName: sessionName ?? "",
+      nodeId: binding?.nodeId ?? null,
+      occupant: binding?.occupant ?? null,
+      pane: binding?.pane ?? null,
+    }),
+    runtime,
+    sink: captureObserver,
+  } : undefined;
 
-  if (!input.sessionName) {
+  if (!sessionName) {
     return {
       state: "unknown",
       reason: "no_session",
@@ -230,18 +252,18 @@ export async function probeSessionActivity(input: {
       evidence: null,
     };
   }
-  if (input.attachmentType === "external_cli") {
+  if (attachmentType === "external_cli") {
     return {
       state: "unknown",
       reason: "unsupported_attachment",
       evidenceSource: "external_cli",
       sampledAt,
-      evidence: input.sessionName,
+      evidence: sessionName,
     };
   }
-  if (input.runtime === "terminal") {
+  if (runtime === "terminal") {
     try {
-      const paneCommand = await input.tmuxAdapter.getPaneCommand(input.sessionName);
+      const paneCommand = await tmuxAdapter.getPaneCommand(sessionName);
       if (paneCommand && !IDLE_TERMINAL_COMMANDS.has(paneCommand)) {
         return {
           state: "running",
@@ -274,14 +296,14 @@ export async function probeSessionActivity(input: {
   }
 
   try {
-    const exists = await input.tmuxAdapter.hasSession(input.sessionName);
+    const exists = await tmuxAdapter.hasSession(sessionName);
     if (!exists) {
       return {
         state: "unknown",
         reason: "session_missing",
         evidenceSource: "tmux_session",
         sampledAt,
-        evidence: input.sessionName,
+        evidence: sessionName,
       };
     }
   } catch {
@@ -294,27 +316,71 @@ export async function probeSessionActivity(input: {
     };
   }
 
+  const observeProbe = (slot: CaptureSlot, activity: AgentActivity): AgentActivity => {
+    if (observed) {
+      safeRecord(observed.sink, {
+        seam: "probe_activity",
+        attemptId: observed.attemptId,
+        binding: observed.binding,
+        runtime: observed.runtime,
+        sentHash: null,
+        pre: slot,
+        post: { state: "not_requested" },
+        regexResult: { state: activity.state, reason: activity.reason },
+        completedAt: new Date().toISOString(),
+      });
+    }
+    return activity;
+  };
+  const captureSeq = observed ? nextCaptureSeq++ : 0;
   try {
-    const paneContent = await input.tmuxAdapter.capturePaneContent(input.sessionName, 20);
+    const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
+    const capturedAt = new Date().toISOString();
     const classification = classifyPaneActivity(paneContent ?? "");
-    return {
+    return observeProbe(captureSlot(paneContent, capturedAt, captureSeq), {
       state: mapPaneState(classification.state),
       reason: classification.reason,
       evidence: classification.evidence,
       evidenceSource: "pane_heuristic",
       sampledAt,
       fallback: true,
-    };
+    });
   } catch {
-    return {
+    return observeProbe({ state: "unavailable", cause: "capture_error", capturedAt: new Date().toISOString(), captureSeq }, {
       state: "unknown",
       reason: "capture_failed",
       evidenceSource: "pane_heuristic",
       sampledAt,
       evidence: null,
       fallback: true,
-    };
+    });
   }
+}
+
+// Process-local invocation order of observed capture attempts, NOT completion
+// order or a durable/global sequence. attemptId remains the cross-process join.
+let nextCaptureSeq = 1;
+
+/** capturedAt is when the capture returned/threw, not the enclosing send's completion. */
+function captureSlot(content: string | null | undefined, capturedAt: string, captureSeq: number): CaptureSlot {
+  return typeof content === "string"
+    ? { state: "captured", content, capturedAt, captureSeq }
+    : { state: "unavailable", cause: "empty_or_failed", capturedAt, captureSeq };
+}
+
+/** Copy only the verdict fields the caller actually produced; absent stays absent. */
+function pickDefined(result: object, keys: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of keys) {
+    const value = (result as Record<string, unknown>)[key];
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+/** Observation must never alter a transport result: any sink failure is swallowed here. */
+function safeRecord(sink: CaptureObserverSink, input: ObservationInput): void {
+  try { sink.record(input); } catch { /* observer failure never reaches the caller */ }
 }
 
 export function mapPaneState(state: PaneActivityClassification["state"]): AgentActivity["state"] {
@@ -367,6 +433,11 @@ export type ResolveResult =
   | { ok: false; code: "not_found" | "ambiguous"; error: string };
 
 export interface SendOpts {
+  /** Stable caller request ID, reused for readback after transport uncertainty. */
+  deliveryId?: string;
+  auditPointer?: string;
+  /** Internal queue seam: already committed original members, never client-supplied. */
+  committedOutboxIds?: string[];
   verify?: boolean;
   force?: boolean;
   waitForIdleMs?: number;
@@ -423,7 +494,8 @@ export interface SendResult {
    *   set on the send_failed / submit_failed returns for vocabulary symmetry;
    *   their `ok:false` + HTTP mapping is unchanged.
    */
-  outcome?: "delivered" | "rendered-unconfirmed" | "failed";
+  outcome?: "delivered" | "rendered-unconfirmed" | "failed" | "retained";
+  outboxIds?: string[];
   warning?: string;
   error?: string;
   reason?: string;
@@ -447,6 +519,7 @@ export interface CaptureResult {
 export interface BroadcastResult {
   total: number;
   sent: number;
+  retained?: number;
   failed: number;
   results: SendResult[];
 }
@@ -467,11 +540,13 @@ interface SessionTransportDeps {
   sendReadinessFreshnessMs?: number;
   slowOpRecorder?: SlowOperationInstrumentation;
   activityEndpointFile?: () => { baseUrl: string; token: string } | null;
+  /** S01/S02 P2: optional read-only capture observer. Absent by default (no activation). */
+  captureObserver?: CaptureObserverSink;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
-interface SessionMetaRow { runtime: string | null; attachment_type: string | null; }
+interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
 
 export class SessionTransport {
@@ -487,6 +562,7 @@ export class SessionTransport {
   private sendReadinessFreshnessMs: number;
   private slowOpRecorder?: SlowOperationInstrumentation;
   private activityEndpointFile: () => { baseUrl: string; token: string } | null;
+  private captureObserver?: CaptureObserverSink;
 
   constructor(deps: SessionTransportDeps) {
     this.db = deps.db;
@@ -501,6 +577,7 @@ export class SessionTransport {
     this.sendReadinessFreshnessMs = deps.sendReadinessFreshnessMs ?? SEND_READINESS_FRESHNESS_MS;
     this.slowOpRecorder = deps.slowOpRecorder;
     this.activityEndpointFile = deps.activityEndpointFile ?? (() => null);
+    this.captureObserver = deps.captureObserver;
   }
 
   /**
@@ -547,11 +624,19 @@ export class SessionTransport {
     });
   }
 
-  private getSessionMeta(sessionName: string): { runtime: string | null; attachmentType: string | null } {
+  private getSessionMeta(sessionName: string): {
+    runtime: string | null; attachmentType: string | null; nodeId: string | null; pane: string | null; occupant: string | null;
+  } {
+    // One existing statement; P2 reads the binding columns it already joins plus the
+    // same current-occupant subselect the delivery guard uses. No extra query.
     const row = this.db.prepare(`
       SELECT
         n.runtime AS runtime,
-        b.attachment_type AS attachment_type
+        b.attachment_type AS attachment_type,
+        n.id AS node_id,
+        b.tmux_session AS binding_session,
+        b.tmux_pane AS pane,
+        (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id = n.id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant
       FROM sessions s
       JOIN nodes n ON s.node_id = n.id
       LEFT JOIN bindings b ON b.node_id = n.id
@@ -563,6 +648,11 @@ export class SessionTransport {
     return {
       runtime: row?.runtime ?? null,
       attachmentType: row?.attachment_type ?? null,
+      nodeId: row?.node_id ?? null,
+      // The row may be a historical session of a node now bound elsewhere: only a
+      // binding whose session IS this name labels pane/occupant; otherwise unknown.
+      pane: row?.binding_session === sessionName ? row?.pane ?? null : null,
+      occupant: row?.binding_session === sessionName ? row?.occupant ?? null : null,
     };
   }
 
@@ -780,10 +870,108 @@ export class SessionTransport {
     return targets;
   }
 
+  deliveryTarget(sessionName: string) { return this.tmuxAdapter.deliveryGuard?.maybeTarget(sessionName) ?? null; }
+
+  get deliveryGuard() { return this.tmuxAdapter.deliveryGuard; }
+
+  retentionTarget(sessionName: string) {
+    const guard = this.tmuxAdapter.deliveryGuard;
+    const target = guard?.maybeTarget(sessionName);
+    if (!guard || !target) return null;
+    const pref = guard.preference(target.nodeId);
+    return pref.desired || pref.effective ? target : null;
+  }
+
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (!guard) return this.sendUnguarded(sessionName, text, opts);
+    const outbox = new OutboxHandler(this.db);
+    const ids = opts?.committedOutboxIds ?? [opts?.deliveryId ?? `guard-send-${randomUUID()}`];
+    const retainedResult = (): SendResult => ({ ok: true, sessionName, outcome: "retained", sent: false, verified: false,
+      outboxIds: ids, reason: "typing_guard_enabled", warning: `Retained, not delivered. Inspect with rig seat held-messages ${sessionName}; disabling does not replay held messages.` });
+    try {
+      if (opts?.committedOutboxIds) {
+        const target = guard.target(sessionName);
+        for (const id of opts.committedOutboxIds) {
+          const entry = outbox.getById(id);
+          if (!entry || entry.destinationSession !== sessionName) throw new Error("Committed wake target/ID mismatch");
+          if (entry.guardBinding && JSON.stringify(entry.guardBinding) !== JSON.stringify(target)) {
+            return { ok: false, sessionName, sent: false, reason: "guard_target_changed", error: "Committed wake recipient identity changed; no input written." };
+          }
+        }
+      }
+      // Idempotent readback also after disabling: an old retained ID never becomes a new send.
+      // (P2: this readback is NOT a new retention and is outside the retained_no_write seam.)
+      if (!opts?.committedOutboxIds && opts?.deliveryId) {
+        const prior = outbox.getById(opts.deliveryId);
+        if (prior?.guardBinding) {
+          if (prior.body !== text || prior.destinationSession !== sessionName || prior.senderSession !== (opts.actorSession ?? "unknown")) {
+            return { ok: false, sessionName, sent: false, reason: "delivery_identity_conflict", error: "Delivery ID names different content/identity." };
+          }
+          if (prior.deliveryState === "retained" || prior.deliveryState === "retired") return retainedResult();
+        }
+      }
+      return await guard.operation(sessionName, () => this.sendUnguarded(sessionName, text, opts), async target => {
+        if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
+        this.db.transaction(() => {
+          for (const id of ids) {
+            const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;
+            if (opts?.committedOutboxIds && (!prior || prior.destinationSession !== sessionName)) throw new Error("Committed wake target/ID mismatch");
+            outbox.retain(prior ? { ...prior, outboxId: id, tags: prior.tags ?? undefined, auditPointer: prior.auditPointer ?? undefined } : {
+              outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text, auditPointer: opts?.auditPointer,
+            }, target, !!opts?.committedOutboxIds);
+          }
+        })();
+        // P2: observed only after the retention above committed; a submit-only
+        // refusal or a failed retention never reaches here. Never delivery evidence.
+        if (this.captureObserver) {
+          safeRecord(this.captureObserver, {
+            seam: "retained_no_write",
+            attemptId: randomUUID(),
+            binding: { sessionName, nodeId: target.nodeId, occupant: target.occupant, pane: target.pane },
+            runtime: null,
+            sentHash: hashSentText(text),
+            pre: { state: "not_requested" },
+            post: { state: "not_requested" },
+            regexResult: { outcome: "retained", reason: "typing_guard_enabled" },
+            completedAt: this.now().toISOString(),
+          });
+        }
+        return retainedResult();
+      });
+    } catch (error) {
+      return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message };
+    }
+  }
+
+  private async sendUnguarded(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
     const runtime = sessionMeta.runtime;
+    // S01/S02 P2 observation context, frozen at attempt entry before any await.
+    const observed = this.captureObserver ? {
+      attemptId: randomUUID(),
+      binding: Object.freeze({ sessionName, nodeId: sessionMeta.nodeId, occupant: sessionMeta.occupant, pane: sessionMeta.pane }),
+      pre: (opts?.verify ? { state: "not_reached" } : { state: "not_requested" }) as CaptureSlot,
+      post: (opts?.verify ? { state: "not_reached" } : { state: "not_requested" }) as CaptureSlot,
+      sentHash: null as string | null,
+    } : null;
+    const observe = (result: SendResult): SendResult => {
+      if (observed && this.captureObserver) {
+        safeRecord(this.captureObserver, {
+          seam: "send_verify",
+          attemptId: observed.attemptId,
+          binding: observed.binding,
+          runtime,
+          sentHash: observed.sentHash,
+          pre: observed.pre,
+          post: observed.post,
+          regexResult: pickDefined(result, ["ok", "outcome", "verified", "reason"]),
+          completedAt: this.now().toISOString(),
+        });
+      }
+      return result;
+    };
     const waitForIdleMs = opts?.waitForIdleMs;
     const waitMode = waitForIdleMs !== undefined;
     let waitEvidence: Pick<SendResult, "activity" | "waitedMs" | "attempts"> = {};
@@ -969,6 +1157,7 @@ export class SessionTransport {
         runtime,
         attachmentType: sessionMeta.attachmentType,
         timeoutMs: waitForIdleMs,
+        binding: observed?.binding,
       });
       waitEvidence = {
         activity: waitResult.activity,
@@ -1004,6 +1193,7 @@ export class SessionTransport {
         sessionName,
         runtime,
         attachmentType: sessionMeta.attachmentType,
+        binding: observed?.binding,
       });
 
       // Single state dispatch (B1 code-review fix): flattened so `unknown` ALWAYS attaches the advisory
@@ -1071,13 +1261,16 @@ export class SessionTransport {
     }
 
     if (opts?.verify) {
+      const captureSeq = observed ? nextCaptureSeq++ : 0;
       try {
         preVerifyContent = await this.runStage(
           "session_transport.pre_capture",
           () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
         );
+        if (observed) observed.pre = captureSlot(preVerifyContent, this.now().toISOString(), captureSeq);
       } catch {
         preVerifyContent = null;
+        if (observed) observed.pre = { state: "unavailable", cause: "capture_error", capturedAt: this.now().toISOString(), captureSeq };
       }
     }
 
@@ -1090,20 +1283,21 @@ export class SessionTransport {
     }
 
     // 3. Send text (paste)
+    if (observed) observed.sentHash = hashSentText(text);
     const textResult = await this.runStage(
       "session_transport.send_text",
       () => this.tmuxAdapter.sendText(sessionName, text),
       (result) => result.ok ? "ok" : "failed",
     );
     if (!textResult.ok) {
-      return {
+      return observe({
         ok: false,
         sessionName,
         reason: "send_failed",
         outcome: "failed",
         error: `Failed to send text to '${sessionName}': ${textResult.message}`,
         ...(waitMode ? { sent: false, ...waitEvidence } : {}),
-      };
+      });
     }
 
     // 4. Wait 200ms (spike-proven delay)
@@ -1116,14 +1310,14 @@ export class SessionTransport {
       (result) => result.ok ? "ok" : "failed",
     );
     if (!submitResult.ok) {
-      return {
+      return observe({
         ok: false,
         sessionName,
         reason: "submit_failed",
         outcome: "failed",
         error: `Text is visible in '${sessionName}' but was not submitted (Enter failed). The agent may need manual attention.`,
         ...(waitMode ? { sent: true, ...waitEvidence } : {}),
-      };
+      });
     }
 
     // 6. Verify if requested. At this point text + Enter BOTH succeeded, so the
@@ -1132,22 +1326,27 @@ export class SessionTransport {
     // middle outcome `rendered-unconfirmed` — never a failure (OPR.99.0.6.3).
     if (opts?.verify) {
       await this.sleep(500);
+      const captureSeq = observed ? nextCaptureSeq++ : 0;
       try {
         const content = await this.runStage(
           "session_transport.post_capture",
           () => this.tmuxAdapter.capturePaneContent(sessionName, 30),
         );
+        if (observed) observed.post = captureSlot(content, this.now().toISOString(), captureSeq);
         const snippet = text.substring(0, Math.min(text.length, 40));
         const preCount = countOccurrences(preVerifyContent ?? "", snippet);
         const postCount = countOccurrences(content ?? "", snippet);
         const verified = postCount > preCount;
-        return { ok: true, sessionName, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
+        return observe({ ok: true, sessionName, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       } catch {
-        return { ok: true, sessionName, verified: false, outcome: "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
+        if (observed && observed.post.state === "not_reached") {
+          observed.post = { state: "unavailable", cause: "capture_error", capturedAt: this.now().toISOString(), captureSeq };
+        }
+        return observe({ ok: true, sessionName, verified: false, outcome: "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       }
     }
 
-    return { ok: true, sessionName, ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) };
+    return observe({ ok: true, sessionName, ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
   }
 
   private runStage<T>(
@@ -1165,6 +1364,7 @@ export class SessionTransport {
     runtime: string | null;
     attachmentType: string | null;
     timeoutMs: number;
+    binding?: ObservedBinding;
   }): Promise<
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
     | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
@@ -1223,6 +1423,7 @@ export class SessionTransport {
     sessionName: string;
     runtime: string | null;
     attachmentType: string | null;
+    binding?: ObservedBinding;
   }): Promise<AgentActivity> {
     const now = this.now();
     const hookActivity = this.agentActivityStore?.getLatestForNode({
@@ -1261,6 +1462,8 @@ export class SessionTransport {
           attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
           tmuxAdapter: this.tmuxAdapter,
           now,
+          captureObserver: this.captureObserver,
+          binding: input.binding,
         });
         if (paneVeto.state === "needs_input") {
           return paneVeto;
@@ -1275,6 +1478,8 @@ export class SessionTransport {
       attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
       tmuxAdapter: this.tmuxAdapter,
       now,
+      captureObserver: this.captureObserver,
+      binding: input.binding,
     });
   }
 
@@ -1491,13 +1696,15 @@ export class SessionTransport {
         : text;
       // (h) thread the resolved stampISO so send()'s delivered-latency calc measures from the SAME
       // compose stamp the envelope carries (opts may not have carried one; the local stampISO is truth).
-      const result = await this.send(session.sessionName, perRecipientText, { ...opts, stampISO });
+      const result = await this.send(session.sessionName, perRecipientText, { ...opts, stampISO,
+        deliveryId: opts?.deliveryId ? `${opts.deliveryId}:${session.sessionName}` : undefined });
       results.push(result);
     }
 
     return {
       total: results.length,
-      sent: results.filter((r) => r.ok).length,
+      sent: results.filter((r) => r.ok && r.outcome !== "retained").length,
+      retained: results.filter(r => r.outcome === "retained").length,
       failed: results.filter((r) => !r.ok).length,
       results,
     };

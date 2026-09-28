@@ -1,3 +1,4 @@
+import { OutboxHandler } from "../domain/outbox-handler.js";
 import { Hono } from "hono";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
@@ -19,13 +20,64 @@ import { SettingsStore } from "../domain/user-settings/settings-store.js";
 
 export const seatRoutes = new Hono();
 
+// S09 is an independent delivery preference, never a lifecycle or permission change.
+seatRoutes.post("/set-typing-guard/:seatRef", async c => {
+  const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter).deliveryGuard;
+  if (!guard) return c.json({ error: "Delivery guard unavailable" }, 503);
+  const body = await c.req.json<Record<string, unknown>>();
+  if (typeof body.enabled !== "boolean" || typeof body.reason !== "string" || !body.reason.trim()) {
+    return c.json({ error: "enabled boolean and reason required" }, 400);
+  }
+  const actor = c.req.header("x-openrig-session")?.trim();
+  if (!actor) return c.json({ error: "Sender identity required for preference audit" }, 400);
+  try {
+    const target = guard.target(decodeURIComponent(c.req.param("seatRef")));
+    const preference = await guard.set(target.nodeId, body.enabled, actor, body.reason);
+    return c.json({ ...preference, tradeoff: "Automatic terminal input is paused while enabled, even at an empty prompt. Disabling does not replay retained messages." }, preference.pending ? 202 : 200);
+  } catch (error) { return c.json({ error: (error as Error).message }, 409); }
+});
+
+seatRoutes.get("/held-messages/:seatRef", c => {
+  const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter).deliveryGuard;
+  if (!guard) return c.json({ error: "Delivery guard unavailable" }, 503);
+  try {
+    const target = guard.target(decodeURIComponent(c.req.param("seatRef")));
+    const outbox = new OutboxHandler(guard.db);
+    const id = c.req.query("id");
+    if (id) {
+      const entry = outbox.getById(id);
+      if (entry?.guardBinding?.nodeId !== target.nodeId) return c.json({ error: "No retained history for this node and ID" }, 404);
+      return c.json({ entry });
+    }
+    return c.json(outbox.heldForNode(target.nodeId, Number(c.req.query("limit") ?? 100), Number(c.req.query("offset") ?? 0)));
+  } catch (error) { return c.json({ error: (error as Error).message }, 400); }
+});
+
+seatRoutes.post("/retire-held-message/:seatRef/:id", async c => {
+  const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter).deliveryGuard;
+  if (!guard) return c.json({ error: "Delivery guard unavailable" }, 503);
+  const body = await c.req.json<Record<string, unknown>>();
+  const actor = c.req.header("x-openrig-session")?.trim();
+  if (!actor || typeof body.reason !== "string" || !body.reason.trim()) return c.json({ error: "Sender identity and reason required" }, 400);
+  try {
+    const target = guard.target(decodeURIComponent(c.req.param("seatRef")));
+    const outbox = new OutboxHandler(guard.db); const id = c.req.param("id");
+    if (outbox.getById(id)?.guardBinding?.nodeId !== target.nodeId) return c.json({ error: "No held message for this node and ID" }, 404);
+    return c.json({ entry: outbox.retire(id, actor, body.reason), effect: "Retired from active quota; evidence preserved. No delivery, native consumption or work closure is asserted." });
+  } catch (error) { return c.json({ error: (error as Error).message }, 409); }
+});
+
 seatRoutes.get("/status/:seatRef", (c) => {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   const service = new SeatStatusService({ rigRepo });
   const result = service.getStatus(decodeURIComponent(c.req.param("seatRef")!));
 
   if (result.ok) {
-    return c.json(result.status);
+    const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+    const target = guard?.maybeTarget(decodeURIComponent(c.req.param("seatRef")!));
+    return c.json({ ...result.status, ...(guard && target ? { typingGuard: {
+      ...guard.preference(target.nodeId), heldCount: new OutboxHandler(guard.db).heldForNode(target.nodeId, 1).total,
+    } } : {}) });
   }
 
   if (result.code === "seat_ambiguous") {
@@ -188,6 +240,18 @@ function seatLifecycleStatus(code: SeatRefusal["code"]): 400 | 404 | 409 | 500 |
   // nothing_to_clean — state conflicts, not client syntax errors.
   return 409;
 }
+
+seatRoutes.post("/set-permissions/:seatRef", async (c) => {
+  const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
+  const actor = c.req.header("x-openrig-session")?.trim();
+  if (!actor || !body || Array.isArray(body) || typeof body.mode !== "string" || typeof body.reason !== "string") {
+    return c.json({ error: "Sender identity, mode and reason are required" }, 400);
+  }
+  const result = await seatLifecycleService(c).setPermissions({
+    seatRef: decodeURIComponent(c.req.param("seatRef")), mode: body.mode, reason: body.reason, actor,
+  });
+  return c.json(result, result.ok ? 200 : seatLifecycleStatus(result.code));
+});
 
 seatRoutes.post("/set-model/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));

@@ -36,6 +36,7 @@ import { pathToFileURL } from "node:url";
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
 import { MOTION_FRAME_MS } from "./visual-layout.js";
+import { runCopySession, processCopyTerminal } from "./print-for-copy.js";
 
 function argOf(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag);
@@ -74,6 +75,7 @@ async function run(): Promise<void> {
   const client = demo ? null : new DaemonClient({ baseUrl: argOf(args, "--url"), headers: startupHeaders });
   let startup: StartupController | null = null;
   let nativeAttached = false;
+  let shuttingDown = false;
 
   let inputLine = "";
   let completion: ReturnType<typeof completeCommand> | null = null;
@@ -395,9 +397,9 @@ async function run(): Promise<void> {
         const result = await client.openTerminal(action.view, action.expectedPlan);
         view.dispatch({
           type: "terminal-result", view: action.view,
-          message: `${result.absent.length || result.degraded.length ? "Partial Open" : "Opened"}: ${result.opened.length} opened, ${result.absent.length} absent, ${result.degraded.length} degraded · ${action.view}${result.error ? ` · ${result.error}` : ""}${result.degraded.map(m => ` · ${m.seat}: ${m.reason}`).join("")}`,
+          message: `${result.absent.length || result.degraded.length ? "Partial Open" : "Opened"}: ${result.opened.length} opened, ${result.absent.length} absent, ${result.degraded.length} degraded · ${action.view}${result.error ? ` · ${result.error}` : ""}${result.degraded.map(m => ` · ${m.seat}: ${m.reason}`).join("")}${(result.notes ?? []).map(n => ` · ${n}`).join("")}`,
         });
-        if (action.expectedPlan === undefined) view.dispatch({ type: "notice", message: `${result.opened.length} terminals opened; ${result.absent.length} absent; ${result.degraded.length} degraded` });
+        if (action.expectedPlan === undefined) view.dispatch({ type: "notice", message: `${result.opened.length} terminals opened; ${result.absent.length} absent; ${result.degraded.length} degraded${(result.notes ?? []).map(n => ` · ${n}`).join("")}` });
       } else {
         const result = await client.launchNode(action.rigId, action.agent);
         view.dispatch({ type: "notice", message: launchNodeNotice(action.agent, result) });
@@ -411,6 +413,17 @@ async function run(): Promise<void> {
   }
 
   function perform(action: Action): void {
+    if (action.type === "print-for-copy") {
+      // runCopySession never rejects; while suspended, handleInput and draw return early.
+      void runCopySession({
+        terminal: processCopyTerminal(), label: action.label, value: action.value,
+        setSuspended: (on) => { nativeAttached = on; },
+        isShuttingDown: () => shuttingDown,
+        notice: (message) => view.dispatch({ type: "notice", message }),
+        draw,
+      });
+      return;
+    }
     if (action.type === "act") {
       view.dispatch({ type: "notice", message: `${action.act}…` });
       void executeAct(action);
@@ -424,6 +437,7 @@ async function run(): Promise<void> {
   }
 
   async function shutdown(): Promise<void> {
+    shuttingDown = true;
     process.stdout.off("resize", draw);
     if (motionTimer) clearTimeout(motionTimer);
     live?.close();

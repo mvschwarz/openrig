@@ -8,6 +8,62 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.6.0]
+
+- **Breaking:** OpenRig requires Node.js 22 or 24 and uses better-sqlite3 13.
+  Node 20 is no longer supported, and the install check refuses it; Node 26 is
+  untested. Switch Node, then reinstall the CLI; existing
+  data is migrated in place. See [Moving off Node 20](README.md#moving-off-node-20).
+  Thanks to [@jimallen](https://github.com/jimallen) for reporting the Node 26
+  install failure and proposing the upgrade ([#16](https://github.com/mvschwarz/openrig/pull/16)).
+- Choose permissions per seat for future launches with
+  `rig seat set-permissions <seat> --mode <mode> --reason <text>`. Codex
+  `full_bypass` now also sets `-a never`; Claude Code modes such as `auto` are
+  accepted only when the managed executable supports them. Rig-level verbs move
+  to `rig policy permissions …`, with the old verbs kept as aliases. Thanks to
+  [@DoowanKang](https://github.com/DoowanKang) ([#30](https://github.com/mvschwarz/openrig/issues/30))
+  and [@djogss](https://github.com/djogss) ([#33](https://github.com/mvschwarz/openrig/issues/33)).
+- Protect a seat where you type by hand with `rig seat set-typing-guard`. While it
+  is on, automatic messages and wakes are held instead of typed in; the default is
+  unchanged. Thanks to [@some-marketing](https://github.com/some-marketing)
+  ([#48](https://github.com/mvschwarz/openrig/issues/48)).
+- Experimental: `rig slack manifest` prints the Slack app manifest offline, with a
+  prefilled create-app link, and a new setup guide describes the manual steps.
+  Creating the app remains a step you do in Slack, and the steps have not been
+  confirmed against a real app creation. The existing Slack connector is not
+  experimental.
+- Open a whole rig in Herdr from the TUI (`term ▸ rig <name>`), up to 16 seats per
+  tab in a workspace named after the rig; the empty starting tab is closed only
+  when that is confirmed safe. Thanks to [@shintaii](https://github.com/shintaii)
+  ([#26](https://github.com/mvschwarz/openrig/issues/26)).
+- Pi seat activity reports carry the occupant generation and are accepted only
+  for the seat's current occupant. Thanks to
+  [@DoowanKang](https://github.com/DoowanKang) ([#29](https://github.com/mvschwarz/openrig/issues/29)).
+- The kernel starter summary identifies the library preview and explains automatic
+  runtime-variant selection. Thanks to [@tgrundtvig](https://github.com/tgrundtvig)
+  ([#21](https://github.com/mvschwarz/openrig/issues/21)).
+- Codex seats launch with `--no-daemon` when supported. Thanks to
+  [@reisalbuquerque](https://github.com/reisalbuquerque) ([#69](https://github.com/mvschwarz/openrig/issues/69)).
+- Missions without a `metadata` block no longer fail the readiness reader. Thanks
+  to [@shravansumanthanan](https://github.com/shravansumanthanan) for the fix and
+  [@kainne44](https://github.com/kainne44) for the report
+  ([#72](https://github.com/mvschwarz/openrig/issues/72)).
+- Experimental and optional, off by default: a classifier seat can have Jev,
+  through OpenRouter, label Rig Stream observations. Check, turn on or turn off
+  with `rig project experimental status|enable|disable --config <file>`, then run
+  one bounded foreground `rig project wake … --experiment <file>`. Labels are
+  advisory, with no accuracy or reliability claim, and the feature may be
+  incomplete. See [stream classification](docs/reference/stream-classifier-worker.md).
+- Report problems with either experiment through a
+  [GitHub issue](https://github.com/mvschwarz/openrig/issues/new/choose) or a pull
+  request ([CONTRIBUTING.md](CONTRIBUTING.md)).
+
+Includes [#77](https://github.com/mvschwarz/openrig/pull/77),
+[#84](https://github.com/mvschwarz/openrig/pull/84) by
+[@mvdpoel](https://github.com/mvdpoel), [#91](https://github.com/mvschwarz/openrig/pull/91)
+and [#94](https://github.com/mvschwarz/openrig/pull/94).
+<!-- PENDING(Root): the 0.6.0 release pull request number(s). -->
+
 ## [0.5.17]
 
 - Install the CLI with Bun as well as npm: `bun add -g @openrig/cli`. The package

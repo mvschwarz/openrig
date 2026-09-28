@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
+import { NativePermissionStore } from "./native-permission-store.js";
+import { permissionBindingOverride } from "./native-permission-selection.js";
 import type { RigRepository } from "./rig-repository.js";
 import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -232,6 +234,11 @@ export class RestoreOrchestrator {
     if (!rig) {
       return { ok: false, code: "rig_not_found", message: `Rig ${rigId} not found` };
     }
+    const guard = this.tmuxAdapter.deliveryGuard;
+    const guardedIds = rig.nodes.map(node => node.id);
+    if (guard && guardedIds.some(id => !guard.ownsLifecycle(id))) {
+      return guard.lifecycle(guardedIds, () => this.restore(snapshotId, opts));
+    }
     const selectionOutcome = opts?.snapshotSelection ? null : this.snapshotRepo.selectRestoreUsable(rigId, snapshotId);
     if (selectionOutcome && !selectionOutcome.ok) return selectionOutcome;
     const snapshotSelection = opts?.snapshotSelection ?? selectionOutcome?.selection;
@@ -443,6 +450,12 @@ export class RestoreOrchestrator {
     const nonTargetNodes = opts.nonTargetMode === "detach_and_hold"
       ? allNodes.filter((node) => !targetNodes.some((target) => target.id === node.id))
       : [];
+
+    const guard = this.tmuxAdapter.deliveryGuard;
+    const guardedIds = [...targetNodes, ...nonTargetNodes].map(node => node.id);
+    if (guard && guardedIds.some(id => !guard.ownsLifecycle(id))) {
+      return guard.lifecycle(guardedIds, () => this.launchNodeTargets(rigId, logicalIds, opts));
+    }
 
     // Per-target tmux-liveness classification (runtime truth, fail-closed)
     const launched: RestoreNodeResult[] = [];
@@ -1011,6 +1024,7 @@ export class RestoreOrchestrator {
 
     // Clear stale state so NodeLauncher doesn't see already_bound
     this.clearStaleState(nodeId, rigId);
+    this.tmuxAdapter.deliveryGuard?.rebindLifecycle(nodeId);
 
     // Derive canonical session name for pod-aware nodes
     const rig = this.rigRepo.getRig(rigId);
@@ -1589,8 +1603,18 @@ export class RestoreOrchestrator {
     | { kind: "attention_required"; message: string; evidence?: string }
   > {
     const launchGeneration = this.sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid;
+    let permissionMode: string | undefined;
+    try {
+      const selection = new NativePermissionStore(this.db).read(nodeId);
+      const runtime = this.claudeResume.canResume(resumeType, resumeToken) ? "claude-code"
+        : this.codexResume.canResume(resumeType, resumeToken) ? "codex" : "pi";
+      if (selection && selection.runtime !== runtime) throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
+      const override = permissionBindingOverride(selection);
+      resolvedPosture = override.launchPosture ?? resolvedPosture;
+      permissionMode = override.permissionMode;
+    } catch (error) { return { kind: "failed", message: `Permission selection: ${(error as Error).message}` }; }
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
-      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model);
+      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId);
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };

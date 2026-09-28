@@ -24,7 +24,7 @@ beforeEach(() => {
     },
   }) });
   const saved = { id: "fixture", name: "Reading room", members: [
-    ...Array.from({ length: 14 }, (_, i) => ({ seat: `member-${i + 1}`, tmuxSession: `member-${i + 1}`, readOnly: i === 0 })),
+    ...Array.from({ length: 19 }, (_, i) => ({ seat: `member-${i + 1}`, tmuxSession: `member-${i + 1}`, readOnly: i === 0 })),
     { seat: "missing", tmuxSession: "missing" }, { seat: "remote-http", host: "http" },
   ] };
   service = new TerminalService({ resolveProvider: name => name === "herdr" ? provider : null, viewsStore: { get: id => id === "fixture" ? saved : null, list: () => [saved] }, listRigNames: () => ["fixture"], listRigSeats: name => name === "fixture" ? [{ canonicalSessionName: "derived", tmuxSession: "member-1", attachmentType: "tmux", rigName: "fixture", logicalId: "derived" }] : null, listPodSeats: () => null, listScopeSeats: () => null, resolveHost: () => ({ id: "http", transport: "http", url: "http://fixture" }) as any, hasSession: name => name !== "missing" && (alive || name !== "member-1") });
@@ -47,7 +47,7 @@ function draw(cols: number, rows: number) {
 describe("terminal browser → preview → explicit Open", () => {
   it.each([[140, 42], [80, 24]])("uses the opened plan, pages and Back at %ix%i", async (cols, rows) => {
     view.dispatch(parseCommand("terminals", view.get().sections)); await refresh();
-    expect(snap.terminals?.catalog.map(e => [e.kind, e.readinessUnverified, e.members.length])).toEqual([["saved", true, 16], ["derived", true, 0]]);
+    expect(snap.terminals?.catalog.map(e => [e.kind, e.readinessUnverified, e.members.length])).toEqual([["saved", true, 21], ["derived", true, 0]]);
     const savedRow = computeExplorerRows(view.get(), snap).findIndex(r => r.key === "terminal:saved:fixture");
     view.dispatch({ type: "select", index: savedRow });
     const before = view.get();
@@ -57,10 +57,11 @@ describe("terminal browser → preview → explicit Open", () => {
     expect(screen.lines.every(line => line.length <= cols && !/[\r\n]/.test(line))).toBe(true);
     expect(screen.lines.join("\n")).toContain("Open in Herdr");
     const preview = snap.terminals!.preview!;
-    expect(preview.grids.map(g => [g.columns, g.rows, g.blanks])).toEqual([[3, 3, 0], [3, 2, 1]]);
+    // OPR.0.6.0.8: Herdr pages hold 16 (4×4); 19 openable members → 16 + 3 (2×2, one blank).
+    expect(preview.grids.map(g => [g.columns, g.rows, g.blanks])).toEqual([[4, 4, 0], [2, 2, 1]]);
     view.dispatch({ type: "terminal-page", page: 1 }); await refresh();
     const detail = terminalLines(view.get(), snap, 50).map(l => l.text).join("\n");
-    expect(detail).toContain("blank"); expect(detail).toContain("member-14"); expect(detail).toContain("Unavailable · missing"); expect(detail).toContain("remote-http");
+    expect(detail).toContain("blank"); expect(detail).toContain("member-19"); expect(detail).toContain("Unavailable · missing"); expect(detail).toContain("remote-http");
     screen = draw(cols, rows);
     expect(screen.lines.join("\n")).toContain("Page 2/2");
     expect(effects).toEqual([]); expect(requests.every(r => r.startsWith("GET /api/terminal/"))).toBe(true);
@@ -95,7 +96,7 @@ describe("terminal browser → preview → explicit Open", () => {
     expect(effects).toEqual([]);
     const fresh = await client.previewTerminal(p.view);
     expect(fresh.planId).not.toBe(p.planId);
-    expect((await client.openTerminal(fresh.view, fresh.planId)).opened).toHaveLength(13);
+    expect((await client.openTerminal(fresh.view, fresh.planId)).opened).toHaveLength(18); // 19 openable, one now down
   });
 
   it("keeps unavailable-provider preview useful with no Open or recovery effect", async () => {

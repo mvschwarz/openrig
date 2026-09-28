@@ -72,7 +72,7 @@ describe("SystemPreflight", () => {
   });
 
   // Test 2
-  it("Node version below 20 → ready: false with guidance", async () => {
+  it("Node version below 22 → ready: false with guidance", async () => {
     Object.defineProperty(process, "version", { value: "v18.19.0", writable: true });
     const pf = createPreflight();
     const result = await pf.run();
@@ -80,7 +80,24 @@ describe("SystemPreflight", () => {
     const nodeCheck = result.checks.find((c) => c.name === "node_version");
     expect(nodeCheck!.ok).toBe(false);
     expect(nodeCheck!.error).toContain("v18.19.0");
-    expect(nodeCheck!.fix).toContain("Node 20");
+    expect(nodeCheck!.fix).toContain("Node 22 or 24");
+  });
+
+  it.each([
+    ["v20.20.2", false, false],
+    ["v22.22.1", true, false],
+    ["v23.11.1", false, false],
+    ["v24.21.0", true, false],
+    ["v25.8.0", false, false],
+    ["v26.1.0", true, true],
+  ] as const)("Node %s → node_version ok=%s, warning=%s", async (version, ok, warned) => {
+    Object.defineProperty(process, "version", { value: version, writable: true });
+    const result = await createPreflight().run({ port: 0 });
+    const nodeCheck = result.checks.find((c) => c.name === "node_version")!;
+    expect(nodeCheck.ok).toBe(ok);
+    expect(Boolean(nodeCheck.warning)).toBe(warned);
+    if (!ok) expect(nodeCheck.fix).toContain("Node 22 or 24");
+    if (warned) expect(nodeCheck.warning).toContain("untested");
   });
 
   // Test 3

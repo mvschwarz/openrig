@@ -1,3 +1,4 @@
+import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
@@ -1159,6 +1160,8 @@ export async function attachAgentActivity(
     // the per-node tmux capture — needs-input surfaces (useNeedsInputSeats, node
     // detail) request it explicitly.
     captureFallback?: boolean;
+    captureObserver?: Pick<CaptureObserver, "record">;
+    observationBinding?: (entry: NodeInventoryEntry) => Omit<ObservedBinding, "sessionName">;
   },
 ): Promise<NodeInventoryEntry[]> {
   const sampledAt = deps.now ?? new Date();
@@ -1318,6 +1321,8 @@ export async function attachAgentActivity(
       attachmentType: entry.attachmentType,
       tmuxAdapter: deps.tmuxAdapter,
       now: sampledAt,
+      captureObserver: deps.captureObserver,
+      binding: deps.captureObserver ? deps.observationBinding?.(entry) : undefined,
     })),
     };
   }));

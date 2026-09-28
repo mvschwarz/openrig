@@ -15,6 +15,7 @@
 import type { SeenStore, DeadLetterStore, DeadLetterEntry } from "./state-store.js";
 import type { InboundQueuePort } from "./queue-access.js";
 import { createHash } from "node:crypto";
+import { ADMITTED_EVENT_TYPES } from "./capabilities.js";
 
 export interface SlackEvent {
   type?: string;
@@ -51,7 +52,7 @@ export type IngestReason = "type" | "bot_id" | "subtype" | "no-user" | "empty-te
 
 export function ingestDecision(ev: SlackEvent): { ingest: true } | { ingest: false; reason: IngestReason } {
   const hasFiles = Array.isArray(ev.files) && ev.files.length > 0;
-  if (ev.type !== "message" && ev.type !== "app_mention") return { ingest: false, reason: "type" };
+  if (!ev.type || !ADMITTED_EVENT_TYPES.includes(ev.type)) return { ingest: false, reason: "type" };
   if (ev.bot_id) return { ingest: false, reason: "bot_id" }; // never ingest our own / any bot post
   // OPR.0.5.6.2: `file_share` WITH files is the human-upload shape and is admitted;
   // every other subtype (edits, joins, …) stays rejected exactly as before.

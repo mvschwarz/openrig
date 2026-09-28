@@ -4,16 +4,16 @@ name: yolo
 surface: flag
 launch_posture: full_bypass
 policy_schema_version: 1
-description: Permissive launch opt-in. Claude skips permission prompts; Codex selects danger-full-access but retains native approval policy. Pi enables resource trust.
+description: Permissive launch opt-in. Claude skips permission prompts; Codex selects danger-full-access and never approval policy. Pi enables resource trust.
 ---
 
 # YOLO (built-in policy — flag surface)
 
 This built-in selects Claude `--dangerously-skip-permissions`, Codex
-`-s danger-full-access`, or Pi `--approve` (resource trust). Codex receives no
-approval flag and no named-profile argument on this path: its native approval
-settings still apply. This is not a universal promise that nothing prompts or
-is denied. Use only for work and an environment you deliberately trust.
+`-s danger-full-access -a never`, or Pi `--approve` (resource trust). Codex receives
+no named-profile argument on this path. These are launch arguments; native
+managed restrictions still matter. Use only for work and an environment you
+deliberately trust.
 
 **APPLICATION is deterministic, NOT skill-translated.** YOLO is a `surface: flag`
 policy: it resolves to a stable launch flag and is applied directly by the runtime

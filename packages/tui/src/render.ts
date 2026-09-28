@@ -695,7 +695,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
   if (state.recentOpen) return recentDetailLines(state, snap, contentWidth);
   if (state.section === "terminals") return terminalLines(state, snap, contentWidth);
   if (state.section === "config") return configLines(state, snap, contentWidth);
-  if (state.section === "connections") return connectionsLines(snap, contentWidth, state.timeZone);
+  if (state.section === "connections") return connectionsLines(snap, contentWidth, state.timeZone, state.expanded);
   if (state.healthOpen) return healthDetailLines(snap, state.healthOpen, contentWidth, state.timeZone);
   if (state.section === "system") return [{ text: "System · Instance health" }, { text: "" }, ...healthListLines(snap, { kind: "instance", local: true }, contentWidth)];
   // PULSE is a FULL-WIDTH view handled by an early return in renderScreen
@@ -763,6 +763,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
       .filter((a) => !state.filter || a.name.includes(state.filter) || a.pod.includes(state.filter));
     const suffix = `rig ${rig.name}${podFilter ? ` · pod ${podFilter}` : ""}${state.filter ? ` · filter "${state.filter}"` : ""}`;
     lines.push(...tabsLine(state, suffix));
+    // OPR.0.6.0.8: open every live seat of the rig as terminal tiles (Herdr: 4×4 per tab).
+    if (!podFilter) lines.push(fieldLine({ label: "terminal", value: `term ▸ rig ${rig.name}`, link: { type: "act", act: "open-terminal", view: `rig:${rig.name}` } }));
     const healthScope = { kind: "rig" as const, rigId: rig.id ?? rig.name, rigName: rig.name, local: host === snap.hosts[0] };
     if (state.viewTab === "health") return [...lines, { text: "" }, ...healthListLines(snap, healthScope, contentWidth)];
     if (state.viewTab === "recent") {

@@ -55,6 +55,7 @@ export interface TerminalSubscriber {
  * broker is unit-testable with a plain mock; the real TmuxAdapter satisfies it.
  */
 export interface BrokerTmux {
+  humanInput?<T>(name: string, fn: () => Promise<T>): Promise<T>;
   hasSession(name: string): Promise<boolean>;
   setWindowOption(name: string, option: string, value: string): Promise<TmuxResult>;
   resizeWindow(name: string, cols: number, rows: number): Promise<TmuxResult>;
@@ -282,11 +283,12 @@ export class TerminalSessionBroker {
   async input(msg: TerminalInputMessage): Promise<void> {
     if (this.torndown) return;
     await this.enqueueInput(async () => {
-      if (msg.type === "keys") {
-        await this.tmux.sendKeys(this.sessionName, msg.keys);
-      } else if (msg.type === "text") {
-        await this.tmux.sendText(this.sessionName, msg.text);
-      }
+      const write = async () => {
+        if (msg.type === "keys") await this.tmux.sendKeys(this.sessionName, msg.keys);
+        else if (msg.type === "text") await this.tmux.sendText(this.sessionName, msg.text);
+      };
+      if (this.tmux.humanInput) await this.tmux.humanInput(this.sessionName, write);
+      else await write();
     });
   }
 

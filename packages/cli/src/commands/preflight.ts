@@ -43,6 +43,7 @@ export function preflightCommand(depsOverride?: PreflightCommandDeps): Command {
       for (const check of result.checks) {
         if (check.ok) {
           console.log(`✓ ${check.name}`);
+          if (check.warning) console.log(`  Note: ${check.warning}`);
         } else {
           console.log(`✗ ${check.name}: ${check.error}`);
           if (check.reason) console.log(`  Why: ${check.reason}`);

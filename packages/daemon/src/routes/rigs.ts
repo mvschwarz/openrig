@@ -1,3 +1,5 @@
+import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
+import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "../domain/rig-repository.js";
@@ -370,7 +372,7 @@ rigsRoutes.get("/:id/graph", async (c) => {
   // stale-cache protection rather than an inconsistency).
   const seatActivityService = c.get("seatActivityService" as never) as SeatActivityService | undefined;
   const inventoryWithActivityOnly = tmuxAdapter
-    ? await attachAgentActivity(inventory, { tmuxAdapter, activityStore: agentActivityStore, structuralActivity: seatStructuralActivityService, seatActivity: seatActivityService, captureFallback: graphFull })
+    ? await attachAgentActivity(inventory, { ...inventoryCaptureOptions(getRepo(c).db, c.get("shadowCapture" as never) as ShadowCapture | undefined), tmuxAdapter, activityStore: agentActivityStore, structuralActivity: seatStructuralActivityService, seatActivity: seatActivityService, captureFallback: graphFull })
     : inventory;
   const inventoryWithActivity = attachTerminalActivityAndWork(inventoryWithActivityOnly, {
     db: getRepo(c).db,
@@ -426,7 +428,7 @@ rigsRoutes.get("/:id/graph", async (c) => {
   return c.json(projectRigToGraph({ ...rig, sessions, pods: projectedPods }, overlay));
 });
 
-rigsRoutes.delete("/:id", (c) => {
+rigsRoutes.delete("/:id", async (c) => {
   const rigId = c.req.param("id");
   const repo = getRepo(c);
   const eventBus = c.get("eventBus" as never) as EventBus;
@@ -449,10 +451,15 @@ rigsRoutes.delete("/:id", (c) => {
   });
 
   try {
-    const persistedEvent = txn();
-    eventBus.notifySubscribers(persistedEvent);
-    return c.body(null, 204);
+    const remove = async () => {
+      const persistedEvent = txn();
+      eventBus.notifySubscribers(persistedEvent);
+      return c.body(null, 204);
+    };
+    const guard = (c.get("tmuxAdapter" as never) as TmuxAdapter | undefined)?.deliveryGuard;
+    return guard ? await guard.lifecycle(rig.nodes.map(node => node.id), remove) : await remove();
   } catch (err) {
+    if (err instanceof DeliveryGuardError) throw err;
     return c.json({ error: "delete failed" }, 500);
   }
 });

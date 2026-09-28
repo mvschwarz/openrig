@@ -92,6 +92,9 @@ export interface OpenViewResult {
   /** Present only on a hard provider failure (surface unreachable, layout apply refused). */
   error?: string;
   code?: string;
+  /** Plain-language facts about how the open was done that the user should know
+   *  (e.g. a suffixed workspace name, or a focus step the provider refused). */
+  notes?: string[];
 }
 
 /**
@@ -104,6 +107,8 @@ export interface OpenViewResult {
  */
 export interface TerminalProvider {
   readonly name: string;
+  /** Panes per page this provider lays out; the composer uses PANES_PER_PAGE when absent. */
+  readonly panesPerPage?: number;
   status(): Promise<ProviderStatus>;
   liveness(): Promise<ProviderLiveness>;
   openView(view: ComposedView): Promise<OpenViewResult>;

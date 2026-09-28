@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
@@ -461,7 +462,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       let res: { status: number; data: Record<string, unknown> };
       try {
         res = await client.post<Record<string, unknown>>("/api/transport/send", {
-          session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
+          session, text: outboundText, deliveryId: randomUUID(), verify: opts.verify, force: opts.force, waitForIdleMs,
           dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
         }, transportRequestOptions(waitForIdleMs));
       } catch (err) {
@@ -475,6 +476,11 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
           return;
         }
         throw err;
+      }
+
+      if (res.data["outcome"] === "retained") {
+        console.log(opts.json ? JSON.stringify(res.data) : `Retained, not delivered to ${session}. ${String(res.data["warning"] ?? "")}`);
+        return;
       }
 
       // S3 wave-1 fix (r2 F2): effect classification runs BEFORE any output
@@ -824,7 +830,7 @@ async function runHttpHostSend(
   const outboundText = raw ? text : wrapSendBody(originSender, session, text, { stampISO: new Date().toISOString() });
 
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
-    session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
+    session, text: outboundText, deliveryId: randomUUID(), verify: opts.verify, force: opts.force, waitForIdleMs,
     dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
   }, deps, waitForIdleMs !== undefined ? { timeoutMs: waitForIdleMs + WAIT_FOR_IDLE_REQUEST_OVERHEAD_MS } : {});
 
@@ -848,6 +854,10 @@ async function runHttpHostSend(
 
   console.log(`[via host=${host.id} (${hostDisplayTarget(host)})]`);
   const data = (result.data ?? {}) as Record<string, unknown>;
+  if (data["outcome"] === "retained") {
+    console.log(`Retained for ${session}; not delivered. ${data["warning"] ?? ""}`);
+    return;
+  }
   console.log(`Sent to ${session}`);
   const advisory = data["warning"] as string | undefined;
   if (advisory) {
@@ -947,7 +957,7 @@ async function runFanOutSend(params: {
   let effects: Array<{ sessionName: string; effect: EffectCheck }> | undefined;
   if (opts.verify && res.status < 400) {
     effects = [];
-    const okRecipients = ((res.data["results"] as Array<{ sessionName: string; ok: boolean }> | undefined) ?? []).filter((r) => r.ok && r.sessionName);
+    const okRecipients = ((res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string }> | undefined) ?? []).filter((r) => r.ok && r.outcome !== "retained" && r.sessionName);
     for (const r of okRecipients) {
       effects.push({ sessionName: r.sessionName, effect: await classifyDeliveryEffect(client, r.sessionName, stagedIdentityFor(message, message)) });
     }
@@ -958,7 +968,7 @@ async function runFanOutSend(params: {
   if (opts.json) {
     // Round-2 F1: ONE verdict per recipient — a staged-unresolved recipient's
     // row is not a delivery claim in any encoding.
-    const rawResults = (res.data["results"] as Array<{ sessionName: string; ok: boolean }> | undefined) ?? [];
+    const rawResults = (res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string }> | undefined) ?? [];
     const encodedResults = rawResults.map((r) =>
       effectUnresolved(effectBySeat.get(r.sessionName))
         ? { ...r, ok: false, verified: false, outcome: "staged-not-consumed", error: "staged, not consumed (pane effect); the one guarded submit did not clear it" }
@@ -967,9 +977,9 @@ async function runFanOutSend(params: {
     // Round-3 (r2 row 00fb3a68): the machine-readable AGGREGATE derives from
     // the classified encoded outcomes, never the raw transport counts — a
     // staged-unresolved recipient is not sent/delivered in any field.
-    const encodedSent = encodedResults.filter((r) => r.ok).length;
+    const encodedSent = encodedResults.filter((r) => r.ok && r.outcome !== "retained").length;
     console.log(JSON.stringify(effects
-      ? { ...res.data, results: encodedResults, sent: encodedSent, failed: encodedResults.length - encodedSent, effectChecks: effects }
+      ? { ...res.data, results: encodedResults, sent: encodedSent, failed: encodedResults.filter(r => !r.ok).length, retained: encodedResults.filter(r => r.outcome === "retained").length, effectChecks: effects }
       : res.data));
     if (res.status >= 400 || rawResults.some((r) => !r.ok)) process.exitCode = 1;
     if (unresolvedCount > 0) process.exitCode = 1;
@@ -984,11 +994,12 @@ async function runFanOutSend(params: {
   }
 
   const data = res.data;
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string }>) ?? [];
   // Round-2 F1 (desk-binding): ONE verdict line per recipient. A
   // staged-unresolved recipient gets its staged verdict INSTEAD of "sent" —
   // the false delivery claim is suppressed entirely, not qualified.
   for (const r of results) {
+    if (r.outcome === "retained") { console.log(`${r.sessionName}: retained, not delivered; inspect with rig seat held-messages`); continue; }
     if (!r.ok) {
       console.log(`${r.sessionName}: FAILED — ${r.error ?? "unknown error"}`);
       continue;

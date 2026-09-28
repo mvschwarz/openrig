@@ -120,6 +120,18 @@ export function policyCommand(): Command {
     `Teach and record the rig-level permission policy. ${HONESTY_PIN} (The context-mode verb formerly at this name is now: rig mode.)`,
   );
 
+  const permissions = new Command("permissions").description(
+    "Native permission policy: list, show, current and apply. Work posture is separate; this does not relaunch seats.",
+  );
+  registerPermissionCommands(permissions);
+  cmd.addCommand(permissions);
+  // Compatibility aliases share the exact actions and output, including JSON and exit codes.
+  registerPermissionCommands(cmd);
+  return cmd;
+}
+
+function registerPermissionCommands(cmd: Command): void {
+
   cmd
     .command("list")
     .description(`List the built-in permission-policy templates, plus the custom policies visible in a spec context. ${HONESTY_PIN}`)
@@ -313,7 +325,6 @@ export function policyCommand(): Command {
       if (step.status === "fail") process.exitCode = 1;
     });
 
-  return cmd;
 }
 
 // Re-exported so the parity test can assert the twin surface without deep-importing.

@@ -29,6 +29,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     const transport = c.get("sessionTransport" as never) as SessionTransport;
     const body = await c.req.json<{
       session?: string;
+      deliveryId?: string;
       text: string;
       verify?: boolean;
       force?: boolean;
@@ -97,6 +98,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     }
 
     const result = await transport.send(body.session, body.text ?? "", {
+      deliveryId: body.deliveryId,
       verify: body.verify,
       force: body.force,
       waitForIdleMs: body.waitForIdleMs,
@@ -110,8 +112,15 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       expectedStagedLineCount: body.expectedStagedLineCount,
     });
 
+    if (result.outcome === "retained") return c.json(result);
+
     if (!result.ok) {
       const statusMap: Record<string, number> = {
+        typing_guard_enabled: 409,
+        guard_target_unknown: 409,
+        guard_target_changed: 409,
+        delivery_identity_conflict: 409,
+        retained_quota_full: 409,
         session_missing: 404,
         tmux_unavailable: 503,
         transport_unavailable: 409,
@@ -289,7 +298,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       const outbox = c.get("outboxHandler" as never) as OutboxHandler | undefined;
       if (outbox) {
         for (const r of result.results) {
-          if (!r.sessionName) continue;
+          if (!r.sessionName || r.outcome === "retained") continue;
           try {
             const entry = outbox.record({
               senderSession: derivedActor,

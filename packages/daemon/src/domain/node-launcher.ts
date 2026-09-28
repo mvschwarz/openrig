@@ -109,6 +109,11 @@ export class NodeLauncher {
       return { ok: false, code: "node_not_found", message: `Node ${logicalId} not found in rig` };
     }
 
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(node.id)) {
+      return guard.lifecycle([node.id], () => this.launchNode(rigId, logicalId, opts));
+    }
+
     if (node.binding !== null) {
       return { ok: false, code: "already_bound", message: `Node ${logicalId} is already bound` };
     }
@@ -220,6 +225,9 @@ export class NodeLauncher {
         message: err instanceof Error ? err.message : String(err),
       };
     }
+
+    this.tmuxAdapter.deliveryGuard?.rebindLifecycle(node.id);
+    this.tmuxAdapter.finishLaunchBinding?.(sessionName);
 
     // 5. Notify subscribers (best-effort, after commit)
     this.eventBus.notifySubscribers(persistedEvent);

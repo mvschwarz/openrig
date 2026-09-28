@@ -137,6 +137,7 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "027_outbox_entries.sql": "outbox subsystem table — not on the shared core edge (outbox suites migrate it inline).",
   "028_project_classifications.sql": "project-classification subsystem table — classifier suites migrate it inline.",
   "029_classifier_leases.sql": "project-classification subsystem table — classifier-lease suites migrate it inline.",
+  "086_classification_fields_and_attempts.sql": "extends 028 (excluded here) and adds the S02 attempt ledger — classifier suites migrate it inline.",
   "030_views_custom.sql": "custom-views subsystem table — views suites migrate it inline.",
   "032_watchdog_history.sql": "watchdog history table — watchdog suites migrate it inline (watchdog_jobs is the only watchdog base the core edge carries).",
   "033_workflow_specs.sql": "workflow subsystem table — workflow-* suites migrate the workflow schema inline.",

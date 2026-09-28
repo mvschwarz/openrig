@@ -162,17 +162,18 @@ export class RigInstantiator {
     // Check for total launch failure — kill orphan sessions and clean up the rig
     const allFailed = nodeResults.every((n) => n.status === "failed");
     if (allFailed && nodeResults.length > 0) {
-      // Kill orphan tmux sessions (best-effort)
-      if (this.tmuxAdapter) {
-        for (const sessionName of launchedSessionNames) {
-          try { await this.tmuxAdapter.killSession(sessionName); } catch { /* best-effort */ }
+      const cleanup = async () => {
+        if (this.tmuxAdapter) {
+          for (const sessionName of launchedSessionNames) {
+            const stopped = await this.tmuxAdapter.killSession(sessionName);
+            if (!stopped.ok) return; // Preserve custody when termination was refused/unverified.
+          }
         }
-      }
-      try {
         this.rigRepo.deleteRig(rigId!);
-      } catch {
-        // Best-effort cleanup
-      }
+      };
+      const guard = this.tmuxAdapter?.deliveryGuard;
+      if (guard) await guard.lifecycle(Object.values(nodeIdMap), cleanup);
+      else await cleanup();
       return {
         ok: false,
         code: "instantiate_error",
@@ -1135,6 +1136,10 @@ export class PodRigInstantiator {
     { ok: false; code: string; message: string } |
     { ok: true; rigId: string; nodeId: string; logicalId: string; status: "launched"; sessionName?: string; warnings?: string[] }
   > {
+    const guard = this.deps.tmuxAdapter?.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(nodeId)) {
+      return guard.lifecycle([nodeId], () => this.retryFirstStart(rigId, nodeId, memberFragment, rigRoot));
+    }
     const refuse = (message: string) => ({ ok: false as const, code: "first_start_retry_refused", message });
     const rig = this.deps.rigRepo.getRig(rigId);
     const node = rig?.nodes.find(n => n.id === nodeId);
@@ -1524,13 +1529,18 @@ export class PodRigInstantiator {
     const allTerminal = nodeResults.length > 0 && nodeResults.every((n) => n.status === "failed");
 
     if (allTerminal) {
-      // Kill orphan tmux sessions
-      if (this.deps.tmuxAdapter) {
-        for (const sessionName of launchedSessionNames) {
-          try { await this.deps.tmuxAdapter.killSession(sessionName); } catch { /* best-effort */ }
+      const cleanup = async () => {
+        if (this.deps.tmuxAdapter) {
+          for (const sessionName of launchedSessionNames) {
+            const stopped = await this.deps.tmuxAdapter.killSession(sessionName);
+            if (!stopped.ok) return; // Do not forget a still-protected/uncertain session.
+          }
         }
-      }
-      try { this.deps.rigRepo.deleteRig(rigId); } catch { /* best-effort */ }
+        this.deps.rigRepo.deleteRig(rigId);
+      };
+      const guard = this.deps.tmuxAdapter?.deliveryGuard;
+      if (guard) await guard.lifecycle(Object.values(nodeIdMap), cleanup);
+      else await cleanup();
       const details = nodeResults.map((n) => `${n.logicalId}: ${n.error ?? "unknown"}`).join("; ");
       return { ok: false, code: "instantiate_error", message: `all node launches/startups failed — ${details}` };
     }
@@ -1847,6 +1857,10 @@ export class PodRigInstantiator {
     resolveResult?: ReturnType<typeof resolveAgentRef> extends infer T ? T : never;
     configResult?: ReturnType<typeof resolveNodeConfig> extends infer T ? T : never;
   }): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
+    const guard = this.deps.tmuxAdapter?.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(input.nodeId)) {
+      return guard.lifecycle([input.nodeId], () => this.launchExistingAgentMember(input));
+    }
     const resolveResult = input.resolveResult ?? resolveAgentRef(input.member.agentRef, input.rigRoot, this.deps.fsOps);
     if (!resolveResult.ok) {
       const msg = resolveResult.code === "validation_failed"
@@ -2188,6 +2202,10 @@ export class PodRigInstantiator {
     nodeId: string;
     cwdOverride?: string;
   }): Promise<{ status: "launched" | "failed"; error?: string; sessionName?: string; warnings?: string[] }> {
+    const guard = this.deps.tmuxAdapter?.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(input.nodeId)) {
+      return guard.lifecycle([input.nodeId], () => this.launchExistingTerminalMember(input));
+    }
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
     const terminalPolicyAttachment = this.resolveMemberPolicyAttachment(input.member.permissionPolicy, input.rigSpec.permissionPolicy, input.rigRoot);
     if (terminalPolicyAttachment) this.persistNodePolicyProvenance(input.nodeId, terminalPolicyAttachment);

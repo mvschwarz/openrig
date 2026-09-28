@@ -17,11 +17,43 @@ export interface ConnectionsRead {
   humans: Array<{ entityId: string; address: string; displayName: string | null; deliveryClass: string; availability: string; excluded: boolean | null;
     bindings: Array<{ kind: string; ref: string | null; role: string; handle: string | null }> }>;
 }
+/** The daemon's read-only Slack app manifest (GET /api/gateway/slack/manifest). */
+export interface SlackManifestRead { yaml: string; url: string; scopes?: string[]; events?: string[] }
+export const SLACK_MANIFEST_EXPAND_KEY = "slack:manifest";
+
+/** No Slack app yet: neither token resolves. Unknown token state is not "not configured". */
+export function slackNotConfigured(c: ConnectionsRead): boolean {
+  return !!c.configuration && c.configuration.botToken === "missing" && c.configuration.appToken === "missing";
+}
+
+/** Not-configured Slack: the create-your-own-app link as plain selectable text, and a toggle that
+ *  expands the manifest in place. The TUI opens nothing, accepts no tokens and creates nothing. */
+function slackSetupLines(snap: FleetSnapshot, expanded: readonly string[], width: number): ContentLine[] {
+  const m = snap.slackManifest;
+  const lines: ContentLine[] = [fieldLine({ label: "setup", value: "not configured · no Slack app tokens yet" })];
+  if (!m) {
+    lines.push({ text: "  Create your own Slack app first: rig slack manifest --url (this daemon does not serve the manifest)." });
+    return lines;
+  }
+  const open = expanded.includes(SLACK_MANIFEST_EXPAND_KEY);
+  lines.push({ text: "  Create your own private Slack app from OpenRig's manifest, using this link:" },
+    { text: "  ▸ Print link to copy (Enter): leaves this view and shows the link as one line; Enter returns",
+      action: { type: "print-for-copy", label: "Slack create-app link (from OpenRig's manifest):", value: m.url } },
+    { text: "  The link, split into rows with nothing added (or run: rig slack manifest --url):" },
+    // Exact-width chunks with no indent, so the rows concatenate back to the link byte for byte.
+    ...Array.from({ length: Math.ceil(m.url.length / Math.max(8, width)) }, (_, i) =>
+      ({ text: m.url.slice(i * Math.max(8, width), (i + 1) * Math.max(8, width)) })),
+    { text: `  ${open ? "▾ Hide" : "▸ Show"} manifest (Enter)`, action: { type: "toggle-expand", key: SLACK_MANIFEST_EXPAND_KEY } });
+  if (open) for (const line of m.yaml.trimEnd().split("\n")) lines.push({ text: `    ${line}` });
+  lines.push({ text: "  Then: rig slack setup, rig slack verify, rig slack enable. Steps: rig slack manifest --help" });
+  return lines;
+}
+
 export interface ControlPlaneRead {
   status?: string; semver?: string; commit?: string; dirty?: boolean; builtAt?: string;
   selfHostId?: string | null; selfHostIdSource?: string;
 }
-export function connectionsLines(snap: FleetSnapshot, width: number, timeZone = DEFAULT_TIME_ZONE): ContentLine[] {
+export function connectionsLines(snap: FleetSnapshot, width: number, timeZone = DEFAULT_TIME_ZONE, expanded: readonly string[] = []): ContentLine[] {
   const c = snap.connections;
   const h = snap.controlPlane;
   const lines: ContentLine[] = [{ text: "Connections · this daemon's instance" },
@@ -48,6 +80,7 @@ export function connectionsLines(snap: FleetSnapshot, width: number, timeZone = 
     fieldLine({ label: "source", value: `${c.configSource.state} · ${c.configSource.path ?? "unreported"}` }),
     fieldLine({ label: "gateway", value: `${c.running.state} · configuration ${c.running.applied}` }));
   if (c.running.applied === "changed") lines.push({ text: "  Config changed since the wire was built. Inspect before a supported restart; do not assume applied." });
+  if (slackNotConfigured(c)) lines.push(...slackSetupLines(snap, expanded, width));
   const cfg = c.configuration;
   if (cfg) {
     lines.push(fieldLine({ label: "enabled", value: String(cfg.enabled) }),

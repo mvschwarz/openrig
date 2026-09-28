@@ -17,7 +17,7 @@ import { remainingDaemonImports } from "./rewrite-daemon-imports.mjs";
 //      @openrig/daemon;
 //   3. FULL install+LOAD GATE (opt-in RUN_TESTBED_PACK_GATE=1) — the desk-ruled effect proof on a
 //      CLEAN target: install + run a command that LOADS the daemon. It requires TARGET build tools
-//      because better-sqlite3 is NEVER prebuilt and builds fresh on target (desk caveat 1); on a host
+//      because better-sqlite3 builds on target when its bundled prebuilds lack the platform (desk caveat 1); on a host
 //      without them it stops at that native build, so the operator's Debian Docker rerun IS this gate.
 
 const HERE = dirname(fileURLToPath(import.meta.url));

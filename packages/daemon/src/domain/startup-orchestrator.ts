@@ -12,6 +12,7 @@ import type { ProjectionPlan } from "./projection-planner.js";
 import { issueStartupChallenge } from "./startup-proof.js";
 import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
+import { NativePermissionStore } from "./native-permission-store.js";
 import { RigRepository } from "./rig-repository.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 
@@ -125,6 +126,15 @@ export class StartupOrchestrator {
   private readFile: (path: string) => string;
 
   async startNode(input: StartupInput): Promise<StartupResult> {
+    const guard = this.tmuxAdapter.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(input.nodeId)) {
+      return guard.lifecycle([input.nodeId], () => this.startNode(input));
+    }
+    try {
+      input = { ...input, binding: new NativePermissionStore(this.db).apply(input.binding, input.adapter.runtime) };
+    } catch (error) {
+      return this.fail(input, "failed", [`Permission selection: ${(error as Error).message}`]);
+    }
     // #25: launch, restore replay, relaunch, continue and added members deliver
     // guidance through here, so the rig's managed-block destination is bound once
     // for the adapter. Handover does not come here: the successor launches directly

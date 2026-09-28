@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { checkAbi } from "../scripts/check-abi.mjs";
+import { checkAbi, openInChildProcess } from "../scripts/check-abi.mjs";
 
 describe("postinstall ABI check", () => {
   it("passes on supported even-numbered LTS with working native addon", () => {
@@ -10,12 +10,19 @@ describe("postinstall ABI check", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("passes on Node 20 LTS", () => {
+  it("refuses Node 20 before loading the native addon", () => {
+    let addonCalled = false;
     const result = checkAbi({
-      nodeVersion: "v20.18.0",
-      loadNativeAddon: () => {},
+      nodeVersion: "v20.20.2",
+      loadNativeAddon: () => { addonCalled = true; },
     });
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(addonCalled).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain("requires Node.js 22 or 24");
+    expect(result.message).toContain("Node 20 is no longer supported");
+    expect(result.message).toContain("v20.20.2");
+    expect(result.message).toContain("nvm install 22");
   });
 
   it("passes on Node 24 LTS", () => {
@@ -46,13 +53,13 @@ describe("postinstall ABI check", () => {
     expect(result.message).toContain("odd-numbered");
   });
 
-  it("fails on Node below 20 with version-too-low error", () => {
+  it("fails on Node below 22 with version-too-low error", () => {
     const result = checkAbi({
       nodeVersion: "v18.20.0",
       loadNativeAddon: () => {},
     });
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("requires Node.js 20, 22, or 24");
+    expect(result.message).toContain("requires Node.js 22 or 24");
     expect(result.message).toContain("nvm install 22");
   });
 
@@ -112,5 +119,79 @@ describe("postinstall ABI check", () => {
     expect(result.ok).toBe(false);
     // Version check short-circuits before trying to load the addon
     expect(addonCalled).toBe(false);
+  });
+
+  it("warns but passes on an untested even major above 24 when the database opens", () => {
+    const result = checkAbi({
+      nodeVersion: "v26.1.0",
+      loadNativeAddon: () => {},
+      openNativeDatabase: () => ({ ok: true }),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.warning).toContain("Node 26 is untested");
+    expect(result.warning).toContain("Supported: Node.js 22 and 24");
+  });
+
+  it("does not warn on supported majors", () => {
+    const result = checkAbi({
+      nodeVersion: "v24.21.0",
+      loadNativeAddon: () => {},
+      openNativeDatabase: () => ({ ok: true }),
+    });
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("fails when the addon loads but a database cannot be opened", () => {
+    const result = checkAbi({
+      nodeVersion: "v22.22.1",
+      loadNativeAddon: () => {},
+      openNativeDatabase: () => ({ ok: false, detail: "database open was killed by SIGSEGV" }),
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.message).toContain("could not open a database");
+    expect(result.message).toContain("SIGSEGV");
+    expect(result.message).toContain("npm rebuild better-sqlite3");
+  });
+
+  it("does not open a database when the addon fails to load", () => {
+    let opened = false;
+    const result = checkAbi({
+      nodeVersion: "v22.22.1",
+      loadNativeAddon: () => { throw new Error("dlopen failed"); },
+      openNativeDatabase: () => { opened = true; return { ok: true }; },
+    });
+    expect(result.ok).toBe(false);
+    expect(opened).toBe(false);
+  });
+});
+
+describe("openInChildProcess", () => {
+  const fake = (r: Record<string, unknown>) => () => ({ status: null, signal: null, stderr: "", ...r });
+
+  it("reports a native crash signal instead of dying", () => {
+    const out = openInChildProcess("/x/better-sqlite3", fake({ signal: "SIGSEGV" }));
+    expect(out).toEqual({ ok: false, detail: "database open was killed by SIGSEGV" });
+  });
+
+  it("reports a non-zero exit with the tail of stderr", () => {
+    const out = openInChildProcess("/x/better-sqlite3", fake({ status: 1, stderr: "a\nb\nError: boom" }));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.detail).toContain("exited 1");
+    expect(out.detail).toContain("Error: boom");
+  });
+
+  it("passes the resolved addon path to a fresh Node process", () => {
+    let argv: string[] = [];
+    const out = openInChildProcess("/abs/better-sqlite3/lib/index.js", (_cmd: string, args: string[]) => {
+      argv = args;
+      return { status: 0, signal: null, stderr: "" };
+    });
+    expect(out).toEqual({ ok: true });
+    expect(argv[0]).toBe("-e");
+    expect(argv[1]).toContain('require("/abs/better-sqlite3/lib/index.js")');
+    expect(argv[1]).toContain('new Database(":memory:")');
   });
 });

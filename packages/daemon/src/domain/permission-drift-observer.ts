@@ -29,7 +29,7 @@ function commandAvailable(command: string): boolean {
   return false;
 }
 
-async function loadClaudePermissionModes(): Promise<string[] | null> {
+export async function loadClaudePermissionModes(): Promise<string[] | null> {
   return await new Promise((resolve) => {
     execFile("claude", ["--help"], {
       encoding: "utf8",

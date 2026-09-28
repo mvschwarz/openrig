@@ -39,6 +39,7 @@ export interface TerminalOpenResult {
   pages: number;
   error?: string;
   code?: string;
+  notes?: string[];
 }
 
 export interface LaunchNodeResult {
@@ -140,6 +141,7 @@ export class DaemonClient {
 
   humanUpdates() { return this.get("/api/queue/human-updates?limit=20"); }
   connections() { return this.get("/api/gateway/connections"); }
+  slackManifest() { return this.get("/api/gateway/slack/manifest"); }
 
   fileRoots() { return this.get("/api/files/roots") as Promise<{ roots: import("./reading.js").FileRoot[]; hint?: string }>; }
 

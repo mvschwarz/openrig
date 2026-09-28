@@ -85,7 +85,12 @@ describe("rig project CLI (PL-004 Phase B)", () => {
     await program.parseAsync([
       "node", "rig", "project", "classify", "stream-x",
       "--session", "alice@rig",
+      "--lease-id", "L-1",
+      "--attempt-id", "A-1",
+      "--execution-id", "E-1",
       "--type", "idea",
+      "--area", "coordination-stream-queue",
+      "--needs-human", "false",
       "--urgency", "high",
       "--destination", "planning@rig",
       "--json",
@@ -97,6 +102,40 @@ describe("rig project CLI (PL-004 Phase B)", () => {
     expect(body.classificationType).toBe("idea");
     expect(body.classificationUrgency).toBe("high");
     expect(body.classificationDestination).toBe("planning@rig");
+    expect(body.leaseId).toBe("L-1");
+    expect(body.attemptId).toBe("A-1");
+    expect(body.executionId).toBe("E-1");
+    expect(body.area).toBe("coordination-stream-queue");
+    expect(body.needsHuman).toBe(false);
+  });
+
+  it("classify without --lease-id is refused by the CLI before any request", async () => {
+    const { deps, calls } = makeDeps({ routes: {} });
+    const program = createProgram({ projectDeps: deps });
+    program.exitOverride();
+    program.configureOutput({ writeErr: () => {} });
+    for (const sub of program.commands) {
+      sub.exitOverride();
+      sub.configureOutput({ writeErr: () => {} });
+      for (const leaf of sub.commands) { leaf.exitOverride(); leaf.configureOutput({ writeErr: () => {} }); }
+    }
+    await expect(program.parseAsync(["node", "rig", "project", "classify", "stream-x", "--session", "alice@rig"])).rejects.toThrow(/lease-id/);
+    expect(calls.find((c) => c.path === "/api/projects/project")).toBeUndefined();
+  });
+
+  it("classify omits needsHuman when unknown and rejects values other than true/false", async () => {
+    const { deps, calls } = makeDeps({
+      routes: { "POST /api/projects/project": { status: 201, data: { projectId: "P-2" } } },
+    });
+    const program = createProgram({ projectDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "project", "classify", "stream-y", "--session", "alice@rig", "--lease-id", "L-1", "--json"]);
+    const body = calls.find((c) => c.path === "/api/projects/project")!.body as Record<string, unknown>;
+    expect(body.needsHuman).toBeUndefined();
+    const before = calls.length;
+    await program.parseAsync(["node", "rig", "project", "classify", "stream-y", "--session", "alice@rig", "--lease-id", "L-1", "--needs-human", "maybe"]);
+    expect(process.exitCode).toBe(1);
+    expect(calls.length).toBe(before);
   });
 
   it("R1 BLOCKER 1: classify with unknown_stream_item 400 surfaces error + non-zero exit", async () => {
@@ -117,6 +156,7 @@ describe("rig project CLI (PL-004 Phase B)", () => {
     await program.parseAsync([
       "node", "rig", "project", "classify", "stream-nonexistent",
       "--session", "alice@rig",
+      "--lease-id", "L-1",
       "--json",
     ]);
     expect(process.exitCode).toBe(1);
@@ -139,6 +179,7 @@ describe("rig project CLI (PL-004 Phase B)", () => {
     await program.parseAsync([
       "node", "rig", "project", "classify", "stream-x",
       "--session", "alice@rig",
+      "--lease-id", "L-1",
       "--json",
     ]);
     expect(process.exitCode).toBe(1);

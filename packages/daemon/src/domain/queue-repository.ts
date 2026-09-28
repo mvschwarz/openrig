@@ -208,13 +208,15 @@ interface QueueItemRow {
  * minimal shape so test code can supply a stub.
  */
 export interface QueueNudgeTransport {
+  deliveryTarget?(session: string): import("./seat-delivery-guard.js").GuardTarget | null;
+  retentionTarget?(session: string): import("./seat-delivery-guard.js").GuardTarget | null;
   send(
     sessionName: string,
     // (h): stampISO threads the nudge's compose time so the transport's delivered-latency calc can
     // measure the wait for a handoff nudge too (the real impl is SessionTransport, which accepts it).
     text: string,
-    opts?: { verify?: boolean; stampISO?: string }
-  ): Promise<{ ok: boolean; verified?: boolean; error?: string; reason?: string }>;
+    opts?: { verify?: boolean; stampISO?: string; actorSession?: string; committedOutboxIds?: string[]; deliveryId?: string; auditPointer?: string }
+  ): Promise<{ ok: boolean; verified?: boolean; error?: string; reason?: string; outcome?: string }>;
 }
 
 export interface QueueCreateInput {
@@ -865,15 +867,18 @@ export class QueueRepository {
       input.bareBody,
       { stampISO, genUuid },
     );
-    this.outbox.record({
-      outboxId: input.outboxId,
-      senderSession: input.fromSession,
-      destinationSession: input.toSession,
-      body: frozenEnvelope,
-      tags: input.tags,
-      auditPointer: input.auditPointer,
-      identityProvenance: input.identityProvenance,
-    });
+    const record = {
+      outboxId: input.outboxId, senderSession: input.fromSession, destinationSession: input.toSession,
+      body: frozenEnvelope, tags: input.tags, auditPointer: input.auditPointer, identityProvenance: input.identityProvenance,
+    };
+    const target = this.transport?.retentionTarget?.(input.toSession);
+    if (target) this.outbox.retain(record, target);
+    else {
+      this.outbox.record(record);
+      const binding = this.transport?.deliveryTarget?.(input.toSession);
+      if (binding) this.db.prepare("UPDATE outbox_entries SET guard_binding=? WHERE outbox_id=? AND guard_binding IS NULL")
+        .run(JSON.stringify(binding), input.outboxId);
+    }
     return input.outboxId;
   }
 
@@ -960,9 +965,14 @@ export class QueueRepository {
    */
   private async deliverWakeIntent(
     outboxId: string,
-  ): Promise<"delivered" | "indeterminate" | "failed" | "skipped"> {
+  ): Promise<"delivered" | "indeterminate" | "failed" | "skipped" | "retained"> {
     if (!this.outbox) return "skipped";
     if (!this.transport) return "skipped"; // no transport → stays pending for a later drain
+    const alreadyHeld = this.outbox.getById(outboxId);
+    if (alreadyHeld?.deliveryState === "retained" || alreadyHeld?.deliveryState === "retired") {
+      if (alreadyHeld.auditPointer) this.recordNudgeAttempt(alreadyHeld.auditPointer, "retained:typing_guard");
+      return "retained";
+    }
     // MF3: CLAIM (pending→sending) BEFORE the external send so overlapping drains
     // cannot both send. A losing claim — the row is no longer `pending` (already
     // resolved, in-flight under another drainer, or claimed) — simply skips: no
@@ -1022,7 +1032,7 @@ export class QueueRepository {
     const qitemId = intent.auditPointer ?? outboxId;
     // MF4: send the FROZEN envelope stored on the intent verbatim (no re-resolution).
     const outcome = await this.performWakeSend(
-      qitemId, intent.destinationSession, intent.senderSession, undefined, group.map(entry => entry.body).join("\n"),
+      qitemId, intent.destinationSession, intent.senderSession, undefined, group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
     );
     const finalState = outcome.classified === "verified" ? "delivered" : outcome.classified;
     for (const member of group) {
@@ -1140,8 +1150,8 @@ export class QueueRepository {
     return this.outbox.reconcileAbandonedSending(WAKE_INTENT_PREFIX);
   }
 
-  async drainPendingWakeIntents(): Promise<{ delivered: number; indeterminate: number; failed: number }> {
-    const tally = { delivered: 0, indeterminate: 0, failed: 0 };
+  async drainPendingWakeIntents(): Promise<{ delivered: number; indeterminate: number; failed: number; retained: number }> {
+    const tally = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
     if (!this.outbox || !this.transport) return tally;
     const BATCH = 200;
     for (;;) {
@@ -1153,6 +1163,7 @@ export class QueueRepository {
         if (outcome === "delivered") { tally.delivered++; progressed++; }
         else if (outcome === "indeterminate") { tally.indeterminate++; progressed++; }
         else if (outcome === "failed") { tally.failed++; progressed++; }
+        else if (outcome === "retained") { tally.retained++; progressed++; }
       }
       // Nothing left pending changed state this round (e.g. transport gone
       // mid-sweep) — stop rather than spin; the next daemon start retries.
@@ -1216,7 +1227,8 @@ export class QueueRepository {
     sourceSession?: string,
     bodyOverride?: string,
     prebuiltText?: string,
-  ): Promise<{ classified: "verified" | "indeterminate" | "failed"; nudgeResult: string }> {
+    committedOutboxIds?: string[],
+  ): Promise<{ classified: "verified" | "indeterminate" | "failed" | "retained"; nudgeResult: string }> {
     // DEFECT FIX qitem-20260827065907-b9ae334c (S1-class, 3 live specimens): a virtual
     // @external destination has NO pane — the queue row ITSELF is the gateway
     // subsystem's input (the Slack connector polls human-destined rows and its own
@@ -1274,8 +1286,14 @@ export class QueueRepository {
         : undefined;
       text = wrapPaneEnvelope(sourceSession, destinationSession, bareBody, { stampISO, genUuid });
     }
+    const deliveryId = `guard-nudge-${qitemId}-${createHash("sha256").update(JSON.stringify([sourceSession, destinationSession, bodyOverride ?? null])).digest("hex")}`;
+    const held = !committedOutboxIds ? this.outbox?.getById(deliveryId) : null;
+    if (held?.deliveryState === "retained" || held?.deliveryState === "retired") {
+      // Same logical nudge reuses its original frozen envelope, not a new timestamp.
+      text = held.body;
+    }
     try {
-      const res = await this.transport!.send(destinationSession, text, { verify: true, stampISO });
+      const res = await this.transport!.send(destinationSession, text, { verify: true, stampISO, actorSession: sourceSession, committedOutboxIds, deliveryId: committedOutboxIds ? undefined : deliveryId, auditPointer: qitemId });
       // OPR.0.3.2.21.FR-4(c) — wording rename: the prior literal
       // "sent-unverified" read as a failure even in the common case
       // (delivery confirmed but the synchronous ack window expired,
@@ -1283,6 +1301,7 @@ export class QueueRepository {
       // "delivered-ack-pending" reads as healthy. The old "verified"
       // case is unchanged for backward-compat with any tooling that
       // already consumed the positive literal.
+      if (res.outcome === "retained") return { classified: "retained", nudgeResult: "retained:typing_guard" };
       if (res.ok) {
         return res.verified
           ? { classified: "verified", nudgeResult: "verified" }
@@ -2873,7 +2892,9 @@ export class QueueRepository {
         qitemId,
         state: "blocked",
         actorSession: "watchdog@system",
-        transitionNote: `park wake fired: watchdog ${jobId}; delivery=${deliveryStatus}; awaiting owner consumption`,
+        transitionNote: deliveryStatus === "retained"
+          ? `park wake retained: watchdog ${jobId}; not delivered; blocked work unchanged`
+          : `park wake fired: watchdog ${jobId}; delivery=${deliveryStatus}; awaiting owner consumption`,
       });
       this.wakeRepo.record({
         transitionId: transition.transitionId,
@@ -2908,6 +2929,7 @@ export class QueueRepository {
     const parkGeneratedTimer = targets.some(({ kind }) => kind === "timer");
     const events = this.db.transaction(() => {
       const firedEvents = targets.map(recordFired);
+      if (deliveryStatus === "retained") return firedEvents;
       if (usageLimitBlockers.length === 0) {
         if (parkGeneratedTimer && !backOffQueueWait(this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db), jobId, deliveryStatus)) {
           (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).markTerminal(

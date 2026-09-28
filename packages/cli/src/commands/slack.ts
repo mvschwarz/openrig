@@ -22,6 +22,9 @@ import type {
   checkEnvFilePermissions as CheckEnvFn,
   verifyScopes as VerifyScopesFn,
   verifyChannelMembership as VerifyMembershipFn,
+  buildSlackAppManifest as BuildManifestFn,
+  FEATURE_SCOPES as FeatureScopes,
+  BASELINE_REQUIRED_SCOPES as BaselineScopes,
   SlackConnectorConfig,
   FetchImpl,
 } from "@openrig/daemon/gateway-slack";
@@ -39,6 +42,9 @@ interface SlackSurface {
   checkEnvFilePermissions: typeof CheckEnvFn;
   verifyScopes: typeof VerifyScopesFn;
   verifyChannelMembership: typeof VerifyMembershipFn;
+  buildSlackAppManifest: typeof BuildManifestFn;
+  FEATURE_SCOPES: typeof FeatureScopes;
+  BASELINE_REQUIRED_SCOPES: typeof BaselineScopes;
 }
 
 export interface SlackDeps {
@@ -55,6 +61,9 @@ const RETIRED_TEACHING =
   "and consumes Socket Mode inbound itself; there is no relay runner to invoke. " +
   "Check `rig slack status` for configuration, `curl /api/health-summary/gateway` for subsystem health, " +
   "and `rig slack enable` to activate delivery.";
+
+const MANIFEST_FIRST_STEP =
+  "`rig slack manifest --url` prints a link that creates your own Slack app from OpenRig's manifest (see `rig slack manifest --help`)";
 
 function resolveSecrets(surface: SlackSurface, cfg: SlackConnectorConfig): { bot: string | null; app: string | null } {
   const envFile = cfg.secretsEnvFile ?? undefined;
@@ -105,7 +114,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
           effect: channelStateDigest(cur) === channelStateDigest(next) ? "no-op" : "applied" }),
       }, deps.home);
       log(`wrote ${result.value}; receipt ${result.receipt.id} (${result.receipt.effect})`);
-      log(`Next: put SLACK_BOT_TOKEN / SLACK_APP_TOKEN in ${next.secretsEnvFile ?? "<--secrets-env-file> (0600)"}, then \`rig slack verify\`, then \`rig slack enable\`.`);
+      log(`Next: if you have no Slack app yet, start with ${MANIFEST_FIRST_STEP}. Then put SLACK_BOT_TOKEN / SLACK_APP_TOKEN in ${next.secretsEnvFile ?? "<--secrets-env-file> (0600)"}, then \`rig slack verify\`, then \`rig slack enable\`.`);
     });
 
   // ---- status (honest unconfigured, no network) ----
@@ -119,13 +128,47 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       const s = resolveSecrets(surface, cfg);
       const readiness = surface.staticReadiness(cfg, s.bot !== null, s.app !== null);
       const permWarn = cfg.secretsEnvFile ? surface.checkEnvFilePermissions(cfg.secretsEnvFile) : null;
+      const unconfigured = readiness.some((r) => !r.ok);
+      const next = unconfigured ? `First step: ${MANIFEST_FIRST_STEP}.` : null;
       if (opts.json) {
-        log(JSON.stringify({ config: { ...cfg }, readiness, permWarning: permWarn }));
+        log(JSON.stringify({ config: { ...cfg }, readiness, permWarning: permWarn, next }));
       } else {
         log(`slack-connector (config: ${cfg.enabled ? "enabled" : "disabled"}; delivery runs IN-DAEMON — S10 subsystem)`);
         for (const r of readiness) log(`  ${r.ok ? "✓" : "✗"} ${r.label}: ${r.detail}`);
         if (permWarn) log(`  ⚠ ${permWarn}`);
+        if (next) log(`  ${next}`);
       }
+    });
+
+  // ---- manifest (offline: no daemon, no tokens, no network) ----
+  cmd
+    .command("manifest")
+    .description("Print the Slack app manifest for creating your own OpenRig Slack app (offline)")
+    .option("--url", "print Slack's create-app link with the manifest prefilled (URL-encoded)")
+    .option("--json", "JSON output: the manifest plus its bot scopes and bot events")
+    .addHelpText("after", [
+      "",
+      "Creates nothing: open the --url link yourself in a browser signed in to your Slack workspace.",
+      "The app is private to that workspace (Socket Mode; OpenRig hosts nothing and publishes nothing).",
+      "--json lists every requested scope and why. `rig slack verify` checks only the baseline scopes,",
+      "so a READY there does not prove attachments or mentions have their grants.",
+      "Steps after creating the app: docs/reference/slack-app-setup.md",
+      "(installed: $OPENRIG_HOME/reference/slack-app-setup.md).",
+    ].join("\n"))
+    .action(async (opts) => {
+      const surface = await loadSurface();
+      const bundle = surface.buildSlackAppManifest();
+      if (opts.json) {
+        const reasons: Record<string, string> = {};
+        for (const scope of surface.BASELINE_REQUIRED_SCOPES) reasons[scope] = "baseline: checked by `rig slack verify`";
+        for (const f of surface.FEATURE_SCOPES) reasons[f.scope] = `feature, not checked by verify: ${f.usedBy}`;
+        log(JSON.stringify({
+          manifest: bundle.manifest, url: bundle.url, scopes: bundle.scopes, events: bundle.events,
+          why: Object.fromEntries(bundle.scopes.map((scope) => [scope, reasons[scope] ?? "unexplained"])),
+        }));
+      }
+      else if (opts.url) log(bundle.url);
+      else log(bundle.yaml.trimEnd());
     });
 
   // ---- verify (live: GRANTED scopes from headers + channel membership) ----

@@ -13,6 +13,13 @@ export {
   type ReadinessItem,
 } from "./domain/gateway/slack/config.js";
 export { resolveSecret, checkEnvFilePermissions } from "./domain/gateway/slack/secrets.js";
+export {
+  buildSlackAppManifest,
+  CANONICAL_MANIFEST_SOURCES,
+  type SlackAppManifest,
+  type SlackManifestBundle,
+} from "./domain/gateway/slack/manifest.js";
+export { FEATURE_SCOPES, BASELINE_REQUIRED_SCOPES } from "./domain/gateway/slack/capabilities.js";
 export { runChannelOperation, channelStateDigest, type ChannelActor } from "./domain/gateway/channel-operations.js";
 export {
   verifyScopes,

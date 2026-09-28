@@ -8,6 +8,7 @@ import type { ActivityEvidence } from "../domain/activity-taxonomy.js";
 import type { AgentActivity } from "../domain/types.js";
 import * as parkedQuery from "../domain/parked-query.js";
 import { runtimeRungInventory } from "../domain/activity-taxonomy.js";
+import { validateResumeToken } from "../domain/resume-token-validation.js";
 
 // ── S19 A4 — the ingest half of the adapter seam: hook events reach the ONE oracle ──
 // (SeatActivityService) through this translation, so AgentActivityStore is reduced to a
@@ -110,7 +111,29 @@ activityRoutes.post("/hooks", async (c) => {
     // TOKEN for Pi is the session FILE (body.sessionFile), not the session id;
     // it is format-validated before the persist and never echoed on failure.
     if (runtime === "pi") {
-      const { validateResumeToken } = await import("../domain/resume-token-validation.js");
+      // A delayed get_state from a retired runner must not replace the successor's
+      // resume token or publish a current identity. Keep resolution, this check
+      // and both effects synchronous so renewal cannot interleave at an await.
+      const generation = stringOrNull(body.generation);
+      let reason: string | null = null;
+      try {
+        const current = sessionRegistry.currentOccupantTenure(resolved.nodeId);
+        if (!generation) reason = "generation_unverifiable";
+        else if (!current || !sessionRegistry.isOccupantGenerationRegistered(resolved.nodeId, generation)) {
+          reason = "generation_unresolvable";
+        } else if (current.generationUuid !== generation) reason = "generation_mismatch";
+      } catch {
+        return c.json({
+          ok: false, code: "generation_resolver_error", tokenPersisted: false,
+          error: "Pi session identity ignored: occupant generation is unavailable.",
+        }, 503);
+      }
+      if (reason) {
+        return c.json({
+          ok: false, code: reason, tokenPersisted: false,
+          error: "Pi session identity ignored: emitter is not the registered current occupant.",
+        }, 409);
+      }
       const sessionFile = stringOrNull(body.sessionFile);
       const validation = validateResumeToken("pi", sessionFile);
       if (validation.ok) {
@@ -133,7 +156,6 @@ activityRoutes.post("/hooks", async (c) => {
     // correct token value — and a restore path selecting its resume MECHANISM by label would pick the
     // wrong one while looking healthy. The relay only posts session_identity with a runtime present;
     // an unmapped runtime skips the persist (tokenPersisted: false) rather than guessing a label.
-    const { validateResumeToken } = await import("../domain/resume-token-validation.js");
     const validation = validateResumeToken(runtime, sessionId);
     if (validation.ok) {
       sessionRegistry.updateResumeToken(resolved.sessionId, validation.resumeType, validation.token, "hook");

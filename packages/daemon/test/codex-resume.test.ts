@@ -8,6 +8,7 @@ const CODEX_FLOOR_EFFECT = {
   axis: "sandbox",
   state: "observed",
   value: "workspace-write",
+  reason: "emitted_launch_arguments",
 } as const;
 
 function mockTmux(overrides?: {

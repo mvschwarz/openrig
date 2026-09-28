@@ -7,7 +7,7 @@ import { observeClaudePermission, observeCodexSandbox } from "../src/domain/perm
 import { ClaudePermissionModeCache, PermissionDriftObserver } from "../src/domain/permission-drift-observer.js";
 
 describe("PermissionDriftObserver", () => {
-  it("reads only the exact current generation and runtime-native effective surface", () => {
+  it("reads current-generation arguments without claiming native enforcement", () => {
     const db = createFullTestDb();
     try {
       const rigs = new RigRepository(db);
@@ -33,11 +33,11 @@ describe("PermissionDriftObserver", () => {
         transport: { state: "healthy" },
         cwdRead: { state: "visible" },
         commandPath: { state: "available" },
-        enforcement: {
-          axis: "permission",
-          state: "drift",
+        enforcement: { axis: "permission", state: "unknown", expected: "acceptEdits", effective: null },
+        configuration: {
+          comparison: "drift",
           expected: "acceptEdits",
-          effective: { defaultMode: "manual" },
+          observed: { defaultMode: "manual" },
           sourcePath: "/work/project/.claude/settings.local.json",
         },
       });
@@ -92,7 +92,7 @@ describe("PermissionDriftObserver", () => {
       expect(observer.diagnose(node.id)).toMatchObject({
         transport: { state: "healthy" },
         cwdRead: { state: "denied" },
-        enforcement: { axis: "sandbox", state: "aligned" },
+        enforcement: { axis: "sandbox", state: "unknown", expected: "workspace-write", effective: null },
       });
     } finally {
       db.close();
@@ -117,7 +117,7 @@ describe("PermissionDriftObserver", () => {
       expect(observer.diagnose(node.id)).toMatchObject({
         transport: { state: "healthy" },
         cwdRead: { state: "unknown" },
-        enforcement: { axis: "sandbox", state: "aligned" },
+        enforcement: { axis: "sandbox", state: "unknown", expected: "workspace-write", effective: null },
       });
     } finally {
       db.close();

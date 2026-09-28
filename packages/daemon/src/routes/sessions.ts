@@ -1,3 +1,4 @@
+import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
 import { Hono } from "hono";
 import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
 import type { RigRepository } from "../domain/rig-repository.js";
@@ -54,6 +55,7 @@ export const sessionAdminRoutes = new Hono();
 
 function getDeps(c: { get: (key: string) => unknown }) {
   return {
+    shadowCapture: c.get("shadowCapture" as never) as ShadowCapture | undefined,
     rigRepo: c.get("rigRepo" as never) as RigRepository,
     sessionRegistry: c.get("sessionRegistry" as never) as SessionRegistry,
     nodeLauncher: c.get("nodeLauncher" as never) as NodeLauncher,
@@ -133,6 +135,7 @@ nodesRoutes.get("/", async (c) => {
   // latter already implies a fresh sweep above.
   const full = c.req.query("full") === "true" || refresh;
   const withActivity = await attachAgentActivity(inventory, {
+    ...inventoryCaptureOptions(deps.rigRepo.db, deps.shadowCapture),
     tmuxAdapter: deps.tmuxAdapter,
     activityStore: deps.agentActivityStore,
     structuralActivity: deps.seatStructuralActivityService,
@@ -180,7 +183,7 @@ nodesRoutes.get("/:logicalId", async (c) => {
   if (!detail) return c.json({ error: `Node "${logicalId}" not found in rig "${rigId}". Check node IDs with: rig ps --nodes` }, 404);
   // Node DETAIL is a single node — the per-node tmux capture is cheap here, so
   // detail always runs the full fallback (freshest needs_input for the one seat).
-  const [detailWithActivity] = await attachAgentActivity([detail], { tmuxAdapter: deps.tmuxAdapter, activityStore: deps.agentActivityStore, seatActivity: deps.seatActivityService, captureFallback: true });
+  const [detailWithActivity] = await attachAgentActivity([detail], { ...inventoryCaptureOptions(deps.rigRepo.db, deps.shadowCapture), tmuxAdapter: deps.tmuxAdapter, activityStore: deps.agentActivityStore, seatActivity: deps.seatActivityService, captureFallback: true });
   const [detailWithTerminalAndWork] = attachTerminalActivityAndWork(detailWithActivity ? [detailWithActivity] : [detail], {
     db: deps.rigRepo.db,
     seatActivity: deps.seatActivityService,
