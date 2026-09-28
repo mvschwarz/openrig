@@ -62,7 +62,15 @@ Includes [#77](https://github.com/mvschwarz/openrig/pull/77),
 [#84](https://github.com/mvschwarz/openrig/pull/84) by
 [@mvdpoel](https://github.com/mvdpoel), [#91](https://github.com/mvschwarz/openrig/pull/91)
 and [#94](https://github.com/mvschwarz/openrig/pull/94).
-<!-- PENDING(Root): the 0.6.0 release pull request number(s). -->
+
+Release preparation: [#109](https://github.com/mvschwarz/openrig/pull/109).
+An ordinary candidate-tarball install with real postinstall passed on fresh
+macOS 15 ARM64 / Node.js 22.22.1, including SQLite 13, all 89 migrations,
+write/reopen and unauthenticated daemon startup/shutdown. Fresh Node 24 install
+and authenticated native fresh/resume/fork permission enforcement were not
+completed. See the [verification scope](docs/releases/v0.6.0.md#verification-scope)
+and [known limitations](docs/releases/v0.6.0.md#known-limitations). The final
+artifact will be separately bound to the merged release commit.
 
 ## [0.5.17]
 
