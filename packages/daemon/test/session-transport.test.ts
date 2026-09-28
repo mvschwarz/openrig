@@ -67,6 +67,43 @@ describe("agent pane activity classifier", () => {
     expect(result.reason).toBe("idle_status_bar");
   });
 
+  // Codex 0.157 (measured on 0.157.1): empty composer shows a fixed placeholder and the footer
+  // is the same idle and mid-turn; the Working/esc-to-interrupt row tells them apart when shown
+  // (Codex hides it while streaming — the send path guards that case, see send-prompt-guard tests).
+  it("classifies an idle Codex 0.157 composer placeholder as agent_idle", () => {
+    const result = classifyPaneActivity([
+      "  Tip: You can resume a previous conversation by running codex resume",
+      "› Ask Codex to do anything",
+      "  GPT-5.5 medium · ~/code/projects/openrig · Verify assigned outcome",
+      "  ← for agents · ? for shortcuts                       ⚠ 1 warning · f2 to view",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+    expect(result.reason).toBe("idle_prompt");
+  });
+
+  it("keeps a working Codex 0.157 pane with the same placeholder and footer as agent_active", () => {
+    const result = classifyPaneActivity([
+      "◦ Working (11s • esc to interrupt) · 1 background terminal running · /ps to view",
+      "› Ask Codex to do anything",
+      "  GPT-5.5 medium · ~/code/projects/openrig · Verify assigned outcome",
+      "  ← for agents · ? for shortcuts                       ⚠ 1 warning · f2 to view",
+    ].join("\n"));
+
+    expect(result.state).toBe("agent_active");
+    expect(result.reason).toBe("mid_work_pattern");
+  });
+
+  it("does not treat typed Codex 0.157 composer text as the idle placeholder", () => {
+    const result = classifyPaneActivity([
+      "› run the test suite and report",
+      "  GPT-5.5 medium · ~/code/projects/openrig · Verify assigned outcome",
+      "  ← for agents · ? for shortcuts",
+    ].join("\n"));
+
+    expect(result.state).not.toBe("agent_idle");
+  });
+
   it("classifies idle Claude edit-accept footer at the bottom as agent_idle", () => {
     const result = classifyPaneActivity([
       "❯ ",
