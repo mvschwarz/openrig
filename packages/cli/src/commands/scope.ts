@@ -790,7 +790,10 @@ function resolveMissionCreateRoot(override?: string | null): string {
   if (!selected) return resolveMissionsRoot();
 
   const candidate = path.isAbsolute(selected) ? selected : path.resolve(process.cwd(), selected);
-  const directMissionsRoot = path.basename(candidate) === "missions";
+  const childMissionsRoot = path.join(candidate, "missions");
+  const hasChildMissionsRoot =
+    fs.existsSync(childMissionsRoot) && fs.statSync(childMissionsRoot).isDirectory();
+  const directMissionsRoot = path.basename(candidate) === "missions" && !hasChildMissionsRoot;
   const workspaceRoot = directMissionsRoot ? path.dirname(candidate) : candidate;
   if (!fs.existsSync(workspaceRoot) || !fs.statSync(workspaceRoot).isDirectory()) {
     throw new ScopeCliError({
@@ -800,7 +803,7 @@ function resolveMissionCreateRoot(override?: string | null): string {
     });
   }
 
-  const missionsRoot = directMissionsRoot ? candidate : path.join(candidate, "missions");
+  const missionsRoot = directMissionsRoot ? candidate : childMissionsRoot;
   if (fs.existsSync(missionsRoot) && !fs.statSync(missionsRoot).isDirectory()) {
     throw new ScopeCliError({
       fact: `Mission root is not a directory: ${missionsRoot}.`,

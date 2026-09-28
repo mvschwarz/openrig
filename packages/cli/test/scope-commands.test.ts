@@ -742,6 +742,31 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     }
   });
 
+  it("prefers an existing missions child for a workspace named missions", async () => {
+    const workspace = path.join(env.root, "missions");
+    const childMissionsRoot = path.join(workspace, "missions");
+    fs.mkdirSync(childMissionsRoot, { recursive: true });
+
+    const r = await run(
+      ["mission", "create", "nested-workspace-mission", "--json"],
+      childMissionsRoot,
+    );
+
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.mission.path).toBe(path.join(childMissionsRoot, "nested-workspace-mission"));
+    expect(fs.existsSync(path.join(workspace, "nested-workspace-mission"))).toBe(false);
+
+    const shown = await run(
+      ["mission", "show", "nested-workspace-mission", "--json"],
+      childMissionsRoot,
+    );
+    expect(shown.exitCode).toBe(0);
+    expect(JSON.parse(shown.stdout).mission.path).toBe(
+      path.join(childMissionsRoot, "nested-workspace-mission"),
+    );
+  });
+
   it("HG-15: created mission frontmatter has a conformant dot-ID per §1", async () => {
     const r = await run(["mission", "create", "release-0.5.0", "--json"], env.missionsRoot);
     const parsed = JSON.parse(r.stdout);
