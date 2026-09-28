@@ -36,6 +36,12 @@ Fresh seats normally also receive `openrig-onboarding-01.md` and
 Operators who provide equivalent guidance can disable both with
 `onboarding.default_pack.enabled`; this identity pointer remains available.
 
+## When OpenRig itself misbehaves
+
+Read https://www.openrig.dev/help/agents. It routes a symptom to the documentation and known issues for your OpenRig
+version, and says how to send the OpenRig team a useful report when you are still stuck. If `rig --version` and
+`rig doctor --json` run, include their output; if the install is broken or the daemon is down, go to the page anyway.
+
 ## What this file is not
 
 It is not the manual, and these commands are a fraction of what is available.

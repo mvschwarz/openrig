@@ -113,6 +113,12 @@ General engineering skills OpenRig ships as vendored copies. Open when the task 
 - **frontend-design** — designing frontend / UI.
 - **dogfood** — web-QA / dogfooding a shipped UI.
 
+## When OpenRig itself misbehaves
+
+Start at https://www.openrig.dev/help/agents: symptom, then the docs and known issues for your version, then a useful
+report to the OpenRig team if you are still stuck. `rig doctor --json` and the `health-diagnosis.md` reference help
+when the CLI runs; a broken install is not a reason to skip the page.
+
 ## Need more than what ships here?
 
 This index covers the **shipped** surface. A dev host carries far more (factory, architecture, PM-craft, studio skills) reached through the host's own routers/codemaps — if you're on a builder host and need something not listed above, that deeper routing is the next hop, not a wall. (Host-scale routing is the subject of the context-routing architecture doc; at product scale, this one file is the whole map.)
