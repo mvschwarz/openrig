@@ -3,7 +3,7 @@
 This page is for an agent whose user says OpenRig isn't working. It is the one place OpenRig keeps this guidance. The
 copy installed with OpenRig matches that installed version. Read it with `rig context get help`, or open
 `docs/reference/help.md` in the installed package. The same text is online at
-[openrig.dev/help/agents](https://www.openrig.dev/help/agents), which also has a contact form for people.
+[openrig.dev/help/agents](https://www.openrig.dev/help/agents), next to the ways people can contact OpenRig support.
 
 Start with what your user was trying to do. Try the next useful step, check the result, and if you can't finish,
 prepare a message to OpenRig support at **hello@openrig.dev**. Your user doesn't need a GitHub account.
