@@ -137,6 +137,35 @@ describe("Restore check routes", () => {
     fs.rmSync(openRigHome, { recursive: true, force: true });
   });
 
+  it.each(["configured", "legacy"])("resolves spec and queue paths under the %s shared-docs root", async (layout) => {
+    const home = path.join(openRigHome, "isolated-home");
+    const sharedDocs = layout === "configured"
+      ? path.join(openRigHome, "custom shared-docs")
+      : path.join(home, ".openrig", "shared-docs");
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("USERPROFILE", home);
+    vi.stubEnv("OPENRIG_SHARED_DOCS_ROOT", layout === "configured" ? `  ${sharedDocs}  ` : "");
+    try {
+      const rig = rigRepo.createRig("test-rig");
+      rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+      const rigRoot = path.join(sharedDocs, "rigs", "test-rig");
+      const queuePath = path.join(rigRoot, "state", "dev", "impl.queue.md");
+      fs.mkdirSync(path.dirname(queuePath), { recursive: true });
+      fs.writeFileSync(path.join(rigRoot, "rig.yaml"), "name: test-rig\n");
+      fs.writeFileSync(queuePath, "");
+
+      const res = await app.request("/api/restore-check?noHooks=true");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.checks).toEqual(expect.arrayContaining([
+        expect.objectContaining({ check: "rig.test-rig.spec-present", status: "green", evidence: `Spec present at ${path.join(rigRoot, "rig.yaml")}` }),
+        expect.objectContaining({ check: "seat.dev.impl.queue-file", status: "green", evidence: `Queue file exists at ${queuePath}` }),
+      ]));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("GET /api/restore-check returns JSON with verdict + checks + repairPacket", async () => {
     rigRepo.createRig("test-rig");
 

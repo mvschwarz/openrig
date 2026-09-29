@@ -1,8 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
 import { RestoreCheckService, type RestoreCheckDeps, type NodeInventoryEntry, type StartupContextProbeResult } from "../domain/restore-check-service.js";
 import { getNodeInventory } from "../domain/node-inventory.js";
+import { resolveLegacyTopologyRigsRoot } from "../domain/user-settings/settings-store.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
 
@@ -138,6 +140,7 @@ export function createRestoreCheckService(
   snapshotRepo: SnapshotRepository,
 ): RestoreCheckService {
   const serviceDeps: RestoreCheckDeps = {
+    substrateRoot: dirname(resolveLegacyTopologyRigsRoot()),
     listRigs: () => {
       const rigs = rigRepo.listRigs();
       return rigs.map((r) => ({ rigId: r.id, name: r.name }));
