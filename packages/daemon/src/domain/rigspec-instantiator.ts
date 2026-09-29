@@ -1967,10 +1967,13 @@ export class PodRigInstantiator {
       // classified safe_projection and divergent targets overwrote silently.
       // #25: a Claude seat's guidance conflict target is the rig's selected file (rig row,
       // the same source startNode binds for the write).
-      resolveTargetPath: (category, effectiveId, cwd, sourcePath) => claudeConflictTargetPath(
-        category, effectiveId, cwd, sourcePath,
-        input.member.runtime === "claude-code" ? this.deps.rigRepo.getRigClaudeManagedBlockFile(input.rigId) ?? undefined : undefined,
-      ),
+      resolveTargetPath: (category, effectiveId, cwd, sourcePath) =>
+        input.member.runtime === "codex" && category === "skill"
+          ? nodePath.join(cwd, ".agents", "skills", effectiveId, "SKILL.md")
+          : claudeConflictTargetPath(
+            category, effectiveId, cwd, sourcePath,
+            input.member.runtime === "claude-code" ? this.deps.rigRepo.getRigClaudeManagedBlockFile(input.rigId) ?? undefined : undefined,
+          ),
       lastHashLookup: (targetPath) => projectionManifest.lastHash(targetPath),
     });
     if (!planResult.ok) {
@@ -1979,6 +1982,14 @@ export class PodRigInstantiator {
     // P17: a divergent target is never SILENT again — each conflict rides the
     // instantiate warnings surface with the file, reason, and consequence.
     (launchResult.warnings ??= []).push(...projectionConflictWarnings(planResult.plan));
+
+    // Codex project() writes plan entries before startup-file delivery. Protect
+    // edited skills there too; filtering only startup files is insufficient.
+    if (input.member.runtime === "codex" && !input.force) {
+      planResult.plan.entries = planResult.plan.entries.filter(
+        entry => entry.category !== "skill" || entry.classification !== "operator_conflict",
+      );
+    }
 
     const resolvedFiles = this.buildResolvedStartupFiles(
       resolveResult.resolved.spec,
