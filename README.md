@@ -8,6 +8,12 @@ OpenRig turns AI coding agents from a pile of terminal sessions into a persisten
 
 **Guide:** [Getting started](docs/reference/getting-started.md) · **Stuck?** [Help](docs/reference/help.md) · **Questions:** [Q&A](https://github.com/mvschwarz/openrig/discussions/92) · **Updates and demos:** [@_feralmachine on X](https://x.com/_feralmachine)
 
+## See it running
+
+![The OpenRig TUI: the build rig as a graph, then as a table of seats with runtime, model, context and state, then one seat in detail (real recording, 10 seconds)](assets/readme/openrig-agents-working.gif)
+
+**Start here:** [the guided first-use path](docs/reference/getting-started.md): install, launch a two-agent team in your repository, and get one reviewed change.
+
 Not setting this up today? Get the next walkthrough and occasional OpenRig updates → https://openrig.dev/follow
 
 ## Install and first run
@@ -54,10 +60,6 @@ rig queue list --destination dev-owner@first-project --limit 1000
 Sending a message does not itself create a queue item; the owner records the task. Read the final artifact and the review of its exact candidate, then return to the same owner for the next change. [The guided first-use path](docs/reference/getting-started.md) covers readiness, a useful task, a reviewed result, Herdr/cmux terminals and recovery.
 
 Not setting this up today? Get the next walkthrough and occasional OpenRig updates → https://openrig.dev/follow
-
-## See it running
-
-![The OpenRig TUI: the build rig as a graph, then as a table of seats with runtime, model, context and state, then one seat in detail (real recording, 10 seconds)](assets/readme/openrig-agents-working.gif)
 
 ## Community
 
