@@ -2,8 +2,10 @@
 // frontmatter contract (parseSkillFrontmatter: `---` block with name +
 // description, non-empty body). scripts/build-package.sh copies
 // packages/daemon/specs and packages/daemon/assets wholesale into the npm
-// artifact, so those are the roots checked here. The generated
-// context-packs projection is validated by its own manifest parser at build.
+// artifact, so those are the roots checked here. The package-time
+// context-packs projection is generated from packages/daemon/specs/agents/
+// shared/skills (generate-context-packs.mjs), so its source skills are
+// covered by the specs root.
 
 import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
