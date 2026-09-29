@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync, chmodSync, readFileSync, symlinkSync, renameSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, chmodSync, readFileSync, symlinkSync, renameSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
@@ -26,7 +26,7 @@ const fsOps = { readFile: () => { throw Error("forbidden projection"); }, writeF
 const help = '--permission-mode <mode> (choices: "acceptEdits", "auto", "default")';
 
 function fixture() {
-  const root = mkdtempSync(path.join(tmpdir(), "s03-bound-"));
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "s03-bound-")));
   const cwd = path.join(root, "seat's workspace"); mkdirSync(path.join(cwd, "bin"), { recursive: true });
   const executable = path.join(cwd, "bin", "claude"); writeFileSync(executable, "inert fake executable"); chmodSync(executable, 0o700);
   const daemonBin = path.join(root, "daemon-bin"); mkdirSync(daemonBin); writeFileSync(path.join(daemonBin, "claude"), "different daemon executable"); chmodSync(path.join(daemonBin, "claude"), 0o700);

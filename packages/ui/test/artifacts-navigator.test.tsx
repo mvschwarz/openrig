@@ -24,7 +24,7 @@ function jsonResponse(body: unknown, status = 200) {
 // base is missions/release-0.4.1; one slice subtree is included for AC-4.
 const TREE: Record<string, Array<{ name: string; type: "dir" | "file" | "other"; size: number | null; mtime: string | null }>> = {
   "missions/release-0.4.1": [
-    { name: "README.md", type: "file", size: 4096, mtime: "2026-06-23T22:01:00.000Z" },
+    { name: "README.md", type: "file", size: 4096, mtime: "2026-06-23T12:00:00.000Z" },
     { name: "PROGRESS.md", type: "file", size: 3170, mtime: "2026-06-23T05:00:00.000Z" },
     { name: "slices", type: "dir", size: null, mtime: "2026-06-23T22:52:00.000Z" },
     { name: "digital-twin", type: "dir", size: null, mtime: "2026-06-23T22:52:00.000Z" },

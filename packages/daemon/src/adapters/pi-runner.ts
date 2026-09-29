@@ -58,6 +58,11 @@ export function createRunnerInput(
   const editor = readline.createInterface({
     input: keys, output, terminal: true, prompt: "", historySize: 0, crlfDelay: Infinity,
   });
+  // Node forces dumb-terminal mode without editing if TERM=dumb. When terminal: true
+  // was requested, remove the dumb-mode override so VT100 line editing is preserved.
+  if (Object.prototype.hasOwnProperty.call(editor, "_ttyWrite")) {
+    delete (editor as any)._ttyWrite;
+  }
   const decoder = new StringDecoder("utf8");
   let pending = "";
   let paste: string | null = null;
