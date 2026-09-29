@@ -72,6 +72,52 @@ export function resolvesToLocalHost(
   return selfId !== null && hostToken === selfId;
 }
 
+/**
+ * The DAEMON-edge twin of the CLI's self-suffix strip (`cross-host-target.ts`
+ * resolveCrossHostTarget, arch ruling 2e1b737f): a `member@rig@selfId` triple
+ * whose host suffix is THIS host's literal boot-reconciled self-id collapses back
+ * to the bare `member@rig` the founder root invariant (2026-08-27) requires on
+ * every intra-instance surface.
+ *
+ * WHY IT IS NEEDED HERE (and not only in the CLI): the CLI's `senderIdentityHeaders`
+ * appends the local self-id to the wire header whenever it cannot PROVE locality —
+ * `DaemonClient.identityHeaders` races `GET /healthz` against `min(timeoutMs, 1000)`
+ * and falls back to the qualified form when the probe is slow or fails. Under load
+ * (event-loop lag) a LOCAL seat therefore arrives at the daemon already carrying
+ * `seat@rig@selfId` for the very daemon it is talking to, and a byte-for-byte actor
+ * compare against the canonical `seat@rig` on a durable row fails
+ * (`claim_destination_mismatch`). The CLI cannot fix this — it is precisely the case
+ * where the CLI knows least. The daemon is the authority on its OWN id, so it
+ * canonicalizes at the single sender-identity chokepoint.
+ *
+ * FAIL-OPEN, mirroring the CLI twin and resolvesToLocalHost: with no reconciled
+ * self-id (daemon down / pre-reconcile / unknown) the session passes through
+ * EXACTLY as it arrived — a string we cannot prove local is never rewritten.
+ *
+ * LITERAL + CASE-SENSITIVE self-id match ONLY (no alias, no `local` aliasing, no
+ * registry lookup) — the same closed rule as resolvesToLocalHost's self branch, so
+ * the two identity layers can never disagree about what "this host" means. A
+ * FOREIGN host suffix is preserved verbatim: it is real provenance and this daemon
+ * does not own it. `selfId` is passed explicitly (defaulting to the boot-resolved
+ * id) so the predicate stays pure + unit-testable.
+ *
+ * Shape: only a 3-segment `member@rig@host` is a candidate, mirroring the producers
+ * (`stampSelfHostSuffix` stamps a 2-part session; `senderIdentityHeaders` refuses to
+ * append to a 3-part one). Anything else — bare 2-part, a deeper rig token, a
+ * virtual-domain `local@external` ref — is returned unchanged, so a rig name that
+ * happens to end in the self-id cannot be silently re-addressed.
+ */
+export function canonicalizeLocalSession(
+  session: string,
+  selfId: string | null = selfHostId,
+): string {
+  if (typeof selfId !== "string" || selfId.length === 0) return session;
+  const parts = session.split("@");
+  if (parts.length !== 3) return session;
+  if (parts[0] === "" || parts[1] === "" || parts[2] !== selfId) return session;
+  return `${parts[0]}@${parts[1]}`;
+}
+
 /** CLOSED enum (arch pin A). `unsupported-transport` is R15-2's explicit
  *  class (an SSH-declared host is never a silently thinner payload);
  *  `auth-failed` is distinct from `unreachable` because the operator fix

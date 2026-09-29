@@ -1,4 +1,5 @@
 import type { Context } from "hono";
+import { canonicalizeLocalSession } from "../domain/hosts/fanout-contract.js";
 
 /**
  * P21 sender-provenance chokepoint — the ONE shared route helper that generalizes P18's inline
@@ -57,9 +58,19 @@ export function requireSenderIdentity(
     // superseded, not an attack to refuse — the wire decides the actor, the body never does. Deliver
     // under the transport seat identity, preserving any unknown-origin marker; the discrepancy is not
     // persisted (ruling (A) — no new field/schema). `claim` is intentionally ignored on this path.
-    return { ok: true, session, provenance: transportProvenance(c) };
+    //
+    // Self-suffix canonicalization (#131): the CLI host-qualifies the header whenever it cannot PROVE
+    // locality (its `/healthz` race timed out), so a LOCAL seat can arrive as `member@rig@selfId` for
+    // this very daemon. Collapse a suffix that is THIS host's own id back to the bare `member@rig` the
+    // founder root invariant requires on every intra-instance surface, so actor compares against durable
+    // rows stop failing byte-for-byte under load. Fail-open (no self-id ⇒ unchanged) and
+    // foreign-suffix-preserving — a remote origin's provenance is never rewritten.
+    return { ok: true, session: canonicalizeLocalSession(session), provenance: transportProvenance(c) };
   }
   // No transport identity: deliver under the body-declared actor, labelled honestly as claimed-era.
+  // A body-declared actor is a DELIBERATE caller statement, not a stamped wire value, so it is recorded
+  // verbatim — canonicalization belongs to the transport path only, where the id is the daemon's own to
+  // interpret.
   if (claim) return { ok: true, session: claim, provenance: "claimed:v1" };
   // Neither a derived identity nor a declared one — nothing to attribute the row to. Parameter
   // completeness, not distrust.
@@ -123,7 +134,12 @@ export function resolveActorWithDeferral(
     // claim — the 409 identity_mismatch is retired here too, so the two sibling helpers agree that a
     // disagreeing body actor is noise to be superseded, never an attack to refuse. Deliver under the
     // transport seat identity, preserving any unknown-origin marker; the discrepancy is not persisted.
-    return { ok: true, session, provenance: transportProvenance(c) };
+    //
+    // #131 — the SAME self-suffix canonicalization as requireSenderIdentity above, for the same reason:
+    // the two siblings derive the actor from the identical wire header, so they must agree on what that
+    // header MEANS. A self-qualified local seat collapses to bare `member@rig`; a foreign suffix and an
+    // unprovable self-id both pass through unchanged.
+    return { ok: true, session: canonicalizeLocalSession(session), provenance: transportProvenance(c) };
   }
   // Header absent = the browser UI / MCP path → NAMED DEFERRAL (never-break): record the body actor as
   // the DECLARED claimed-era variant `claimed:v1` (not null). A claimed-era actor is still required.
