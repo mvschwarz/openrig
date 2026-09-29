@@ -164,6 +164,36 @@ describe("runner input", () => {
     expect(blocks).toEqual(["raw one", "raw two"]);
     input.end(); editor.close();
   });
+
+  it("preserves terminal line editing under TERM=dumb, while normal terminal and piped input still behave", () => {
+    try {
+      // 1. Under TERM=dumb with TTY streams: editing (type, backspace, retype) must be retained
+      vi.stubEnv("TERM", "dumb");
+      const dumbTerm = terminal();
+      dumbTerm.input.write("hello worlx\u007fd\r");
+      expect(dumbTerm.blocks).toEqual(["hello world"]);
+      dumbTerm.editor.close();
+
+      // 2. Under normal terminal: editing behaves as before
+      vi.stubEnv("TERM", "xterm-256color");
+      const normalTerm = terminal();
+      normalTerm.input.write("normal worlx\u007fd\r");
+      expect(normalTerm.blocks).toEqual(["normal world"]);
+      normalTerm.editor.close();
+
+      // 3. Piped nonterminal input under TERM=dumb: newline-delimited messages behave as before
+      vi.stubEnv("TERM", "dumb");
+      const pipedIn = new PassThrough(), pipedOut = new PassThrough(), pipedBlocks: string[] = [];
+      const pipedEditor = createRunnerInput(pipedIn as unknown as NodeJS.ReadStream,
+        pipedOut as unknown as NodeJS.WriteStream, block => pipedBlocks.push(block));
+      pipedIn.write("piped one\npiped two\n");
+      expect(pipedBlocks).toEqual(["piped one", "piped two"]);
+      pipedIn.end();
+      pipedEditor.close();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 // ── stdin → RPC routing ──────────────────────────────────────────────────────

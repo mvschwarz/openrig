@@ -24,7 +24,7 @@ function jsonResponse(body: unknown, status = 200) {
 // base is missions/release-0.4.1; one slice subtree is included for AC-4.
 const TREE: Record<string, Array<{ name: string; type: "dir" | "file" | "other"; size: number | null; mtime: string | null }>> = {
   "missions/release-0.4.1": [
-    { name: "README.md", type: "file", size: 4096, mtime: "2026-06-23T12:00:00.000Z" },
+    { name: "README.md", type: "file", size: 4096, mtime: "2026-06-23T22:01:00.000Z" },
     { name: "PROGRESS.md", type: "file", size: 3170, mtime: "2026-06-23T05:00:00.000Z" },
     { name: "slices", type: "dir", size: null, mtime: "2026-06-23T22:52:00.000Z" },
     { name: "digital-twin", type: "dir", size: null, mtime: "2026-06-23T22:52:00.000Z" },
@@ -141,8 +141,11 @@ describe("OPR.0.4.1.21 — Artifacts navigator", () => {
     await waitFor(() => expect(screen.getByTestId("artifacts-file-row-README.md")).toBeTruthy());
     expect(screen.getByTestId("artifacts-file-badge-README.md").textContent).toBe("MD");
     expect(screen.getByTestId("artifacts-file-size-README.md").textContent).toBe("4.0 KB");
-    // mtime sourced from the /list entry (formatted), not fabricated.
-    expect(screen.getByTestId("artifacts-file-mtime-README.md").textContent).toMatch(/06-23/);
+    // mtime sourced from the /list entry (formatted in local time), not fabricated.
+    const fileMtime = TREE["missions/release-0.4.1"][0]!.mtime!;
+    const d = new Date(fileMtime);
+    const expectedDate = new RegExp(`${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+    expect(screen.getByTestId("artifacts-file-mtime-README.md").textContent).toMatch(expectedDate);
   });
 
   it("AC-3: lazy-load boundary — landing fetches only /roots + /list(base); NO file bodies, NO tree pre-walk", async () => {
