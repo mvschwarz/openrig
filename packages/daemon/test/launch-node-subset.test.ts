@@ -30,6 +30,20 @@ function makeTmux(overrides?: Partial<Record<string, (...args: unknown[]) => unk
   };
 }
 
+// A fresh pod-aware launch starts its harness through StartupOrchestrator, which needs the
+// node's startup context and a runtime adapter (#107 refuses fresh-primed without them).
+const emptyStartupContext = (runtime: string) => ({ projectionEntries: [], resolvedStartupFiles: [], startupActions: [], runtime });
+function readyAdapter(runtime: string) {
+  return {
+    runtime,
+    listInstalled: vi.fn(async () => []),
+    project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+    deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+    launchHarness: vi.fn(async () => ({ ok: true as const })),
+    checkReady: vi.fn(async () => ({ ready: true })),
+  };
+}
+
 describe("RestoreOrchestrator.launchNodeSubset", () => {
   let db: Database.Database;
   let rigRepo: RigRepository;
@@ -67,7 +81,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
     return { rigId: rig.id, nodeIds: [n1.id, n2.id] };
   }
 
-  function seedSnapshot(rigId: string, nodeIds: string[]) {
+  function seedSnapshot(rigId: string, nodeIds: string[], nodeStartupContext: Record<string, unknown> = {}) {
     const sessions = nodeIds.map((nid, i) => ({
       nodeId: nid,
       id: `sess-${i}`,
@@ -89,7 +103,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       sessions,
       edges: [],
       checkpoints: {},
-      nodeStartupContext: {},
+      nodeStartupContext,
     } as any;
     const snap = snapshotRepo.createSnapshot(rigId, "manual", data);
     return snap.id;
@@ -133,7 +147,7 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
 
   it("single-node launch leaves non-target rows, bindings, startup state, and events unchanged", async () => {
     const { rigId, nodeIds } = seedPodAwareRig();
-    seedSnapshot(rigId, nodeIds);
+    seedSnapshot(rigId, nodeIds, { [nodeIds[0]!]: emptyStartupContext("claude-code") });
     const nonTarget = sessionRegistry.registerSession(nodeIds[1]!, "dev-guard@test-rig");
     sessionRegistry.updateStatus(nonTarget.id, "running");
     sessionRegistry.updateBinding(nodeIds[1]!, { tmuxSession: "dev-guard@test-rig", tmuxPane: "%9" });
@@ -144,12 +158,14 @@ describe("RestoreOrchestrator.launchNodeSubset", () => {
       events: db.prepare("SELECT COUNT(*) AS n FROM events WHERE node_id = ?").get(nodeIds[1]) as { n: number },
     };
 
-    const result = await orchestrator.launchSingleNode(rigId, "dev.driver");
+    const adapter = readyAdapter("claude-code");
+    const result = await orchestrator.launchSingleNode(rigId, "dev.driver", { adapters: { "claude-code": adapter } });
 
     expect(result.ok).toBe(true);
     expect(result.launched).toEqual([
       expect.objectContaining({ logicalId: "dev.driver", status: "fresh-primed" }),
     ]);
+    expect(adapter.launchHarness).toHaveBeenCalledOnce();
     expect(result.nonTargetEffects).toEqual({ mode: "unchanged", reason: null, affected: [] });
     expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(nonTarget.id)).toEqual(before.session);
     expect(db.prepare("SELECT * FROM bindings WHERE node_id = ?").get(nodeIds[1])).toEqual(before.binding);

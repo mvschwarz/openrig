@@ -338,7 +338,9 @@ describe("Session routes", () => {
   });
 
   it("POST .../nodes/launch-subset launches multiple targets with usable snapshot (OPR.0.3.4.11)", async () => {
-    const { app, rigRepo } = createTestApp(db);
+    // A successful fresh launch starts each harness: the route needs runtime adapters (as startup
+    // wires them) and the snapshot needs each node's startup context (#107).
+    const { app, rigRepo } = createTestApp(db, { wireRuntimeAdapters: true });
     const podRepo = new PodRepository(db);
     const rig = rigRepo.createRig("multi-rig");
     const pod = podRepo.createPod(rig.id, "dev", "Development");
@@ -362,6 +364,10 @@ describe("Session routes", () => {
       ],
       edges: [],
       checkpoints: {},
+      nodeStartupContext: {
+        [n1.id]: { projectionEntries: [], resolvedStartupFiles: [], startupActions: [], runtime: "claude-code" },
+        [n2.id]: { projectionEntries: [], resolvedStartupFiles: [], startupActions: [], runtime: "codex" },
+      },
     } as any);
 
     const res = await app.request(`/api/rigs/${rig.id}/nodes/launch-subset`, {
