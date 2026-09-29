@@ -19,6 +19,8 @@ No second scenario engine or synthetic CLI replaces the product.
    fail (step 3). The raw container exits 1; the CI wrapper accepts only that
    specific failure, with the injection receipt and runner ledger. Startup errors,
    timeouts, other failures, or a surviving fault fail the job.
+3. **Healthy again:** another fresh container with fault injection disabled must
+   pass the same scenario. All three logs are retained separately.
 
 This protects installed-package startup and **daemon-owned queue durability**.
 It does not prove native provider sessions, seat resume, restored context,
@@ -40,7 +42,7 @@ unchanged. Logs, the bundle input map, build manifest and image identity are sav
 as `installed-scenario-evidence`, including on failure. The raw result records the
 scenario SHA256, verdict, failing step/diff and injection receipt. The pure
 `scripts/pr-scenarios.test.mjs` controls validate result admission only; they are
-**not** a substitute for the two actual container runs.
+**not** a substitute for the three actual container runs.
 
 ## Remaining authored scenarios
 

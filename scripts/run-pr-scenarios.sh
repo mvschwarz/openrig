@@ -31,20 +31,23 @@ node_modules/.bin/esbuild packages/test-system/ci/run.mjs --bundle --platform=no
 docker build --network none --build-arg TESTBED_IMAGE="$BASE" -t "$IMAGE" "$CONTEXT"
 docker image inspect "$IMAGE" > "$OUT/image-inspect.json"
 
-for mode in healthy lost-baton; do
+attempt=0
+for mode in healthy lost-baton healthy; do
+  attempt=$((attempt + 1))
   status=0
-  CONTAINER="openrig-pr-${SHA:0:12}-$mode-$$"
+  LOG="$OUT/$attempt-$mode.log"
+  CONTAINER="openrig-pr-${SHA:0:12}-$attempt-$$"
   # Fresh writable scratch only. No mounts, host networking, credentials or Docker
   # socket; the container is non-root, resource bounded and removed even on failure.
   timeout --signal=TERM --kill-after=15s 300s docker run --name "$CONTAINER" --network none \
     --read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=512m,mode=1777 \
     --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 \
     --memory 2g --cpus 2 "$IMAGE" node /opt/openrig-testbed/runner.mjs "$mode" \
-    > "$OUT/$mode.log" 2>&1 || status=$?
-  cat "$OUT/$mode.log"
+    > "$LOG" 2>&1 || status=$?
+  cat "$LOG"
   docker rm -f "$CONTAINER" >/dev/null
   CONTAINER=""
-  node --input-type=module - "$mode" "$status" "$OUT/$mode.log" <<'JS'
+  node --input-type=module - "$mode" "$status" "$LOG" <<'JS'
 import { readFileSync } from 'node:fs';
 import { readReport, verifyRun } from './packages/test-system/ci/result.mjs';
 const [mode, status, log] = process.argv.slice(2);
