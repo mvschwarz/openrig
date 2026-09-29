@@ -8,6 +8,7 @@ import type {
   NotificationDeliveryResult,
   NotificationPayload,
 } from "./notification-adapter-types.js";
+import { validateOutboundUrl, redactUrl } from "./outbound-url-validator.js";
 
 export interface WebhookAdapterOpts {
   /** Full webhook endpoint URL. */
@@ -35,6 +36,10 @@ export class WebhookNotificationAdapter implements NotificationAdapter {
   private readonly extraHeaders: Record<string, string>;
 
   constructor(opts: WebhookAdapterOpts) {
+    const validation = validateOutboundUrl(opts.endpointUrl);
+    if (!validation.valid) {
+      throw new Error(`Invalid webhook endpoint URL '${redactUrl(opts.endpointUrl)}': ${validation.reason}`);
+    }
     this.target = opts.endpointUrl;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.extraHeaders = opts.extraHeaders ?? {};
@@ -53,6 +58,7 @@ export class WebhookNotificationAdapter implements NotificationAdapter {
     try {
       const res = await this.fetchImpl(this.target, {
         method: "POST",
+        redirect: "error",
         headers: {
           "Content-Type": "application/json",
           ...this.extraHeaders,

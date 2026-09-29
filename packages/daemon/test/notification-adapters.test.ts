@@ -127,4 +127,77 @@ describe("WebhookNotificationAdapter (PL-005 Phase B)", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("502");
   });
+
+  describe("Target URL Validation", () => {
+    it("refuses non-HTTP protocols with a clear error on startup", () => {
+      for (const target of ["file:///etc/passwd", "ftp://example.com/test", "gopher://example.com"]) {
+        expect(() => new WebhookNotificationAdapter({ endpointUrl: target }))
+          .toThrow(/unsupported_protocol/);
+        expect(() => new NtfyNotificationAdapter({ topicUrl: target }))
+          .toThrow(/unsupported_protocol/);
+      }
+    });
+
+    it("refuses URLs with embedded credentials and redacts credentials in startup error", () => {
+      try {
+        new WebhookNotificationAdapter({
+          endpointUrl: "https://user:secretpassword@example.com/webhook",
+        });
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        const msg = (err as Error).message;
+        expect(msg).toContain("url_credentials_not_allowed");
+        expect(msg).toContain("***:***");
+        expect(msg).not.toContain("secretpassword");
+      }
+
+      try {
+        new NtfyNotificationAdapter({
+          topicUrl: "https://user:secretpassword@ntfy.sh/topic",
+        });
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        const msg = (err as Error).message;
+        expect(msg).toContain("url_credentials_not_allowed");
+        expect(msg).toContain("***:***");
+        expect(msg).not.toContain("secretpassword");
+      }
+    });
+
+    it("rejects redirects during webhook delivery by setting redirect: error", async () => {
+      let passedRedirect: RequestRedirect | undefined;
+      const fakeFetch = (async (_url: string, init?: RequestInit) => {
+        passedRedirect = init?.redirect;
+        return new Response(null, { status: 200 });
+      }) as unknown as typeof fetch;
+
+      const adapter = new WebhookNotificationAdapter({
+        endpointUrl: "https://example.com/webhook",
+        fetchImpl: fakeFetch,
+      });
+      await adapter.send({ title: "test", body: "test" });
+      expect(passedRedirect).toBe("error");
+    });
+
+    it("refuses invalid or malformed URLs with a clear error on startup", () => {
+      expect(() => new WebhookNotificationAdapter({ endpointUrl: "not-a-valid-url" }))
+        .toThrow(/invalid_url_format/);
+      expect(() => new NtfyNotificationAdapter({ topicUrl: "http://" }))
+        .toThrow(/invalid_url_format|missing_hostname/);
+    });
+
+    it("permits self-hosted notifiers on localhost and local network", async () => {
+      const fakeFetch = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+      for (const target of ["http://localhost:8080/hook", "http://127.0.0.1:7433/api", "http://192.168.1.50/ntfy", "http://10.0.0.5:8000/webhook"]) {
+        const webhook = new WebhookNotificationAdapter({ endpointUrl: target, fetchImpl: fakeFetch });
+        const res1 = await webhook.send({ title: "test", body: "test" });
+        expect(res1.ok).toBe(true);
+
+        const ntfy = new NtfyNotificationAdapter({ topicUrl: target, fetchImpl: fakeFetch });
+        const res2 = await ntfy.send({ title: "test", body: "test" });
+        expect(res2.ok).toBe(true);
+      }
+    });
+  });
 });
+

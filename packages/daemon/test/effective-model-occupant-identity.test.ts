@@ -8,6 +8,7 @@ import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
+import { parseSqliteUtcMs } from "../src/domain/sqlite-time.js";
 import { resolveIdentityVerifiedClaudeRecord, type ProcessRow } from "../src/domain/model-divergence/current-generation-record.js";
 import { readClaudeEffectiveModel } from "../src/domain/model-divergence/effective-model-readers.js";
 
@@ -39,7 +40,7 @@ describe("S13 effective-model identity — repository-shaped causal specimen", (
     sessions.updateResumeToken(session.id, "claude_id", reserveId, "scrape");
     sessions.updateBinding(node.id, { tmuxSession: canonicalSession, tmuxPane: "%156" });
     const generation = sessions.currentOccupantTenure(node.id)!;
-    const observedAt = new Date(Date.parse(generation.bootAt) + 60_000).toISOString();
+    const observedAt = new Date(parseSqliteUtcMs(generation.bootAt) + 60_000).toISOString();
     identities.upsert({
       nodeId: node.id,
       verdict: "verified",

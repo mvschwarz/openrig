@@ -10,6 +10,7 @@ import type {
   NotificationDeliveryResult,
   NotificationPayload,
 } from "./notification-adapter-types.js";
+import { validateOutboundUrl, redactUrl } from "./outbound-url-validator.js";
 
 export interface NtfyAdapterOpts {
   /**
@@ -27,6 +28,10 @@ export class NtfyNotificationAdapter implements NotificationAdapter {
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: NtfyAdapterOpts) {
+    const validation = validateOutboundUrl(opts.topicUrl);
+    if (!validation.valid) {
+      throw new Error(`Invalid ntfy topic URL '${redactUrl(opts.topicUrl)}': ${validation.reason}`);
+    }
     this.target = opts.topicUrl;
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }

@@ -80,6 +80,7 @@ import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discov
 import { configRoutes } from "./routes/config.js";
 import { hostsRoutes } from "./routes/hosts.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
+import { apiOriginProtection } from "./middleware/origin-guard.js";
 import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
 import { agentImagesRoutes } from "./routes/agent-images.js";
@@ -621,6 +622,10 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.slowOpRecorder?.recordRequest) {
     app.use("*", createSlowOpRequestMiddleware(deps.slowOpRecorder));
   }
+
+  // Cross-site request forgery and drive-by daemon API protection.
+  // Rejects requests with unauthorized browser Origin headers on all /api/* routes.
+  app.use("/api/*", apiOriginProtection());
 
   // OPR.0.4.6.MH2 FR-2/FR-7 — the single-host READ-THROUGH edge (the read
   // twin of the mission-control remote-forward). Consumes a `?host=<id>`
