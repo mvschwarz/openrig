@@ -1,0 +1,7 @@
+# Thin CI layer over the EXISTING installed-package testbed. No credentials,
+# host mounts, provider binaries or additional package installation.
+ARG TESTBED_IMAGE
+FROM ${TESTBED_IMAGE}
+COPY runner.mjs /opt/openrig-testbed/runner.mjs
+COPY scenarios/ /opt/openrig-testbed/scenarios/
+CMD ["node", "/opt/openrig-testbed/runner.mjs", "healthy"]

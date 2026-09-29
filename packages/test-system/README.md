@@ -1,4 +1,12 @@
-# 51-03 seed scenarios — the ten (+ one)
+# Integration scenarios
+
+The first PR automation increment is described in [ci/README.md](ci/README.md).
+It runs the existing daemon-restart baton fixture plus a fault control in the
+installed-package testbed. Hosted green/red execution is required before claiming
+that increment verified. The eleven authored scenarios below are a broader target;
+they are not eleven admitted CI passes.
+
+## Historical 51-03 seed contract — the ten (+ one)
 
 Compose-only L2 scenario set for the OpenRig containerized test system (mission
 release-0.5.1). Each scenario pins a NAMED defect class from the 0.4.8/0.5.0 marathon
