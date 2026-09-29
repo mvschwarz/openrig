@@ -30,7 +30,7 @@ const pexec = promisify(execFile);
 const SOCK = `openrig-s05e2e-${process.pid}`;
 const cleanEnv: any = { ...process.env };
 delete cleanEnv.TMUX;
-delete cleanEnv.TMUX_TMPDIR;
+// Keep the caller's isolated socket root; -L still names only this test's server.
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const exec = async (cmd: string): Promise<string> => {
   const safe = cmd.startsWith("tmux ") ? `tmux -L ${SOCK} ${cmd.slice(5)}` : cmd;

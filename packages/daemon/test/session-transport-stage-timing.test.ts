@@ -147,9 +147,14 @@ describe("SessionTransport stage timing", () => {
     const timer = new RecordingStageTimer();
     const oldNoKernel = process.env.OPENRIG_NO_KERNEL;
     process.env.OPENRIG_NO_KERNEL = "1";
+    const pane = "%42";
     const daemon = await createTestDaemon({
       dbPath: ":memory:",
-      tmuxExec: async (command: string) => command.includes("capture-pane") ? "idle\n❯ " : "",
+      tmuxExec: async (command: string) => {
+        if (command.includes("capture-pane")) return "idle\n❯ ";
+        if (command.includes("list-panes")) return `${pane}|0|/fixture|80|24|1`;
+        return "";
+      },
       cmuxExec: async () => "",
       slowOpRecorder: timer,
     } as never);
@@ -161,14 +166,14 @@ describe("SessionTransport stage timing", () => {
       });
       const session = daemon.deps.sessionRegistry.registerSession(node.id, "dev-impl@composed-timing-rig");
       daemon.deps.sessionRegistry.updateStatus(session.id, "running");
-      daemon.deps.sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@composed-timing-rig" });
+      daemon.deps.sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@composed-timing-rig", tmuxPane: pane });
 
       const result = await daemon.deps.sessionTransport!.send(
         "dev-impl@composed-timing-rig",
         "hello",
         { verify: true },
       );
-      expect(result.ok).toBe(true);
+      expect(result.ok, JSON.stringify({ reason: result.reason, error: result.error }).slice(0, 1000)).toBe(true);
       expect(timer.records.map((record) => record.site)).toEqual([
         "session_transport.pre_capture",
         "session_transport.send_text",
