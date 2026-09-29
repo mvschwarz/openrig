@@ -10,6 +10,7 @@ import type { AgentActivity } from "./types.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
+import { isShellForeground } from "./shell-classifier.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 
@@ -985,6 +986,20 @@ export class SessionTransport {
       };
     }
 
+    // #142 — an agent seat whose runtime is not running shows a bare shell, and text typed there runs as
+    // shell commands. That is positive evidence, like an interactive prompt, so refuse before any write.
+    // A terminal node's shell is its runtime; an unknown runtime or unreadable pane stays advisory.
+    const bareShell = runtime && runtime !== "terminal" ? await this.bareShellForeground(sessionName) : null;
+    if (bareShell) {
+      return observe({
+        ok: false,
+        sessionName,
+        sent: false,
+        reason: "target_runtime_not_running",
+        error: `Refused: '${sessionName}' shows a bare ${bareShell} shell, so its ${runtime} runtime is not running. Text sent there would run as shell commands. Relaunch the seat first. No text was sent.`,
+      });
+    }
+
     if (waitForIdleMs !== undefined) {
       if (opts?.force) {
         return {
@@ -1416,6 +1431,16 @@ export class SessionTransport {
 
       const remainingMs = input.timeoutMs - waitedMs;
       await this.sleep(Math.min(this.waitForIdlePollMs, Math.max(1, remainingMs)));
+    }
+  }
+
+  /** The shell name when the pane's foreground is a bare shell; null when it is not, or unknown. */
+  private async bareShellForeground(sessionName: string): Promise<string | null> {
+    try {
+      const paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
+      return paneCommand && isShellForeground(paneCommand) ? paneCommand.replace(/^-/, "") : null;
+    } catch {
+      return null;
     }
   }
 
