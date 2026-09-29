@@ -96,6 +96,8 @@ export class SeatIdentityReconciler {
   private readonly store: SeatIdentityStore;
   private readonly listProcesses: NativeProcessLister;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private reconciling = false;
+  private generation = 0;
 
   constructor(deps: SeatIdentityReconcilerDeps) {
     this.db = deps.db;
@@ -121,6 +123,18 @@ export class SeatIdentityReconciler {
 
   /** Reconcile every running tmux-bound seat once and persist the verdicts. */
   async reconcileAll(): Promise<void> {
+    // Skip ticks while actual reads are pending; never release on a deadline
+    // that could leave subprocesses alive. Normal polling cost is unchanged.
+    if (this.reconciling) return;
+    this.reconciling = true;
+    try {
+      await this.reconcileSweep(this.generation);
+    } finally {
+      this.reconciling = false;
+    }
+  }
+
+  private async reconcileSweep(generation: number): Promise<void> {
     const seats = this.runningSeats();
     // Prune verdicts for nodes no longer running (keep the table bounded).
     this.store.pruneExcept(seats.map((s) => s.node_id));
@@ -139,6 +153,7 @@ export class SeatIdentityReconciler {
     } catch {
       liveSessions = null;
     }
+    if (generation !== this.generation) return;
     if (liveSessions === null || liveSessions.size === 0) {
       for (const seat of seats) {
         this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
@@ -157,13 +172,18 @@ export class SeatIdentityReconciler {
       })));
     };
     const first = await sample();
+    if (generation !== this.generation) return;
     const second = await sample();
+    if (generation !== this.generation) return;
     const codexProofs = new Map(codexSeats.map((seat, index) => [seat.node_id,
       first[index] && first[index]?.fingerprint === second[index]?.fingerprint ? second[index]! : null]));
     for (const seat of seats) {
       try {
-        this.store.upsert(await this.computeVerdict(seat, liveSessions, observedAt, codexProofs.get(seat.node_id) ?? null));
+        const verdict = await this.computeVerdict(seat, liveSessions, observedAt, codexProofs.get(seat.node_id) ?? null);
+        if (generation !== this.generation) return;
+        this.store.upsert(verdict);
       } catch {
+        if (generation !== this.generation) return;
         // A single seat's tmux failure must not crash the loop; record it as
         // unavailable observation (non-green for Codex).
         this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
@@ -273,6 +293,8 @@ export class SeatIdentityReconciler {
 
   /** Stop the scheduler. Safe to call before start or multiple times. */
   stop(): void {
+    // Fence old observations without releasing their flight before settlement.
+    this.generation++;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;

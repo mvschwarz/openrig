@@ -341,3 +341,97 @@ describe("seat_identity_verdicts schema (migration 046)", () => {
     db.close();
   });
 });
+
+
+describe("SeatIdentityReconciler — bounded polling", () => {
+  it("holds one sweep through delayed listing and verdict reads, then observes a changed occupant", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1" });
+    const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 42 }, paneCommand: { "%1": "zsh" } });
+    let releaseList!: () => void;
+    let releaseCommand!: () => void;
+    const listGate = new Promise<void>((resolve) => { releaseList = resolve; });
+    const commandGate = new Promise<void>((resolve) => { releaseCommand = resolve; });
+    vi.mocked(tmux.listSessions).mockImplementationOnce(async () => {
+      await listGate;
+      return [{ name: "s1@rig", windows: 1, created: "", attached: false }];
+    });
+    vi.mocked(tmux.getPaneCommand).mockImplementationOnce(async () => { await commandGate; return "claude"; });
+    const rec = new SeatIdentityReconciler({ db, tmux });
+    const store = new SeatIdentityStore(db);
+    rec.start(100);
+    try {
+      await vi.advanceTimersByTimeAsync(2000);
+      // Twenty ticks, but the first availability read is still outstanding.
+      expect(tmux.listSessions).toHaveBeenCalledTimes(1);
+      expect(store.getForNode("n1")).toBeNull();
+      releaseList();
+      await vi.advanceTimersByTimeAsync(1000);
+      // The guard covers the whole sweep, not only its availability probe.
+      expect(tmux.listSessions).toHaveBeenCalledTimes(1);
+      expect(tmux.getPaneCommand).toHaveBeenCalledTimes(1);
+      expect(store.getForNode("n1")).toBeNull();
+      releaseCommand();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(store.getForNode("n1")?.verdict).toBe("verified");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(tmux.listSessions).toHaveBeenCalledTimes(2);
+      expect(store.getForNode("n1")?.verdict).toBe("mismatch");
+    } finally {
+      rec.stop(); releaseList(); releaseCommand();
+      await new Promise((resolve) => setImmediate(resolve));
+      vi.useRealTimers(); db.close();
+    }
+  });
+
+  it("stop/restart fences a pending native observation without releasing its flight early", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "c1", sessionName: "c1@rig", pane: "%1", runtime: "codex" });
+    const tmux = makeTmux({ sessions: ["c1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": "codex" } });
+    const rows = [{ pid: 10, ppid: 1, pgid: 10, tpgid: 10, executableName: "codex", command: "codex", startedAt: "Sat Jan  1 12:00:00 2000" }];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const listProcesses = vi.fn(async () => rows).mockImplementationOnce(async () => { await gate; return rows; });
+    const rec = new SeatIdentityReconciler({ db, tmux, listProcesses });
+    const store = new SeatIdentityStore(db);
+    rec.start(100);
+    try {
+      await vi.advanceTimersByTimeAsync(100);
+      expect(listProcesses).toHaveBeenCalledTimes(1);
+      rec.stop(); rec.start(100);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(tmux.listSessions).toHaveBeenCalledTimes(1);
+      release();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(store.getForNode("c1")).toBeNull();
+      expect(listProcesses).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(listProcesses).toHaveBeenCalledTimes(3); // two fresh observations
+      expect(store.getForNode("c1")?.verdict).toBe("verified");
+    } finally {
+      rec.stop(); release();
+      await new Promise((resolve) => setImmediate(resolve));
+      vi.useRealTimers(); db.close();
+    }
+  });
+
+  it("releases after availability and per-seat failures and recovers on a later sweep", async () => {
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1" });
+    const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 42 }, paneCommand: { "%1": "claude" } });
+    vi.mocked(tmux.listSessions).mockRejectedValueOnce(new Error("unavailable"));
+    vi.mocked(tmux.getPaneCommand).mockRejectedValueOnce(new Error("pane read failed"));
+    const rec = new SeatIdentityReconciler({ db, tmux });
+    const store = new SeatIdentityStore(db);
+    try {
+      await rec.reconcileAll();
+      expect(store.getForNode("n1")?.verdict).toBe("tmux_unavailable");
+      await rec.reconcileAll();
+      expect(store.getForNode("n1")?.verdict).toBe("tmux_unavailable");
+      await rec.reconcileAll();
+      expect(store.getForNode("n1")?.verdict).toBe("verified");
+    } finally { rec.stop(); db.close(); }
+  });
+});

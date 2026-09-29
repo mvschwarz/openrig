@@ -38,6 +38,7 @@ beforeEach(() => {
 
 afterEach(() => {
   clearAllTranscriptRotationsForTest();
+  vi.useRealTimers();
   if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
   // Clear env var overrides set by individual tests.
   delete process.env.OPENRIG_TRANSCRIPTS_LINES;
@@ -323,38 +324,99 @@ describe("startTranscriptRotation — generation guard (r2 HIGH-2: in-flight tic
     expect(fs.existsSync(outputPath)).toBe(false); // no write after stop
   });
 
-  it("a stale in-flight tick from a REPLACED start does not clobber the newer rotation", async () => {
-    let resolveFirst!: (v: string) => void;
-    const firstCapture = new Promise<string>((res) => {
-      resolveFirst = res;
-    });
+  it("a replaced start waits for the old capture to settle and never publishes its stale bytes", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    let release!: (v: string) => void;
+    const firstCapture = new Promise<string>((resolve) => { release = resolve; });
     const adapterA = { capturePaneContent: vi.fn(() => firstCapture) };
-    const outputPath = path.join(tmpDir, "rig", "s.log");
+    const adapterB = makeFakeAdapter("new-gen\n");
+    const outputPath = path.join(tmpDir, "s.log");
+    const opts = { lines: 1000, pollIntervalMs: 100 };
+    startTranscriptRotation(adapterA as unknown as TmuxAdapter, "s@rig", outputPath, opts);
+    startTranscriptRotation(adapterB as unknown as TmuxAdapter, "s@rig", outputPath, opts);
+    try {
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(adapterA.capturePaneContent).toHaveBeenCalledTimes(1);
+      expect(adapterB.capturePaneContent).not.toHaveBeenCalled();
+      expect(getLastCaptureAt("s@rig")).toBeUndefined();
+      expect(fs.existsSync(outputPath)).toBe(false);
+      release("old-gen\n");
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(getLastCaptureAt("s@rig")).toBeUndefined();
+      expect(fs.existsSync(outputPath)).toBe(false);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(adapterB.capturePaneContent).toHaveBeenCalledTimes(1);
+      expect(fs.readFileSync(outputPath, "utf8")).toBe("new-gen\n");
+      expect(getLastCaptureAt("s@rig")).toBe(Date.now());
+    } finally {
+      stopTranscriptRotation("s@rig"); release("old-gen\n");
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  });
+});
 
-    startTranscriptRotation(
-      adapterA as unknown as TmuxAdapter,
-      "s@rig",
-      outputPath,
-      { lines: 1000, pollIntervalMs: 60_000 },
-    );
-    // First tick in-flight; REPLACE with a new start whose capture resolves at once.
-    const adapterB = { capturePaneContent: vi.fn(async () => "new-gen\n") };
-    startTranscriptRotation(
-      adapterB as unknown as TmuxAdapter,
-      "s@rig",
-      outputPath,
-      { lines: 1000, pollIntervalMs: 60_000 },
-    );
-    await new Promise((r) => setImmediate(r));
-    expect(getLastCaptureAt("s@rig")).toBeDefined();
-    expect(fs.readFileSync(outputPath, "utf8")).toBe("new-gen\n");
+describe("startTranscriptRotation — bounded polling", () => {
+  it("holds at most one capture per delayed session without blocking another session", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const adapter = { capturePaneContent: vi.fn(async (session: string) => {
+      if (session !== "fast@rig") await gate;
+      return session;
+    }) };
+    const opts = { lines: 1000, pollIntervalMs: 100 };
+    for (const session of ["a@rig", "b@rig", "fast@rig"]) {
+      startTranscriptRotation(adapter as unknown as TmuxAdapter, session, path.join(tmpDir, session), opts);
+    }
+    try {
+      await vi.advanceTimersByTimeAsync(2000);
+      for (const session of ["a@rig", "b@rig"]) {
+        expect(adapter.capturePaneContent.mock.calls.filter(([s]) => s === session)).toHaveLength(1);
+        expect(getLastCaptureAt(session)).toBeUndefined();
+      }
+      expect(adapter.capturePaneContent.mock.calls.filter(([s]) => s === "fast@rig")).toHaveLength(21);
+      release();
+      await new Promise((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(100);
+      for (const session of ["a@rig", "b@rig"]) {
+        expect(adapter.capturePaneContent.mock.calls.filter(([s]) => s === session)).toHaveLength(2);
+        expect(fs.readFileSync(path.join(tmpDir, session), "utf8")).toBe(session);
+      }
+    } finally {
+      clearAllTranscriptRotationsForTest(); release();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  });
 
-    // Now resolve A's stale capture — it must NOT overwrite B's file or record.
-    resolveFirst("old-gen\n");
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    expect(fs.readFileSync(outputPath, "utf8")).toBe("new-gen\n");
-
-    stopTranscriptRotation("s@rig");
+  it("does not advance freshness on capture or persistence failure; later unchanged success stays fresh", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    const adapter = makeFakeAdapter("first");
+    const outputPath = path.join(tmpDir, "s.log");
+    const tmpPath = `${outputPath}.tmp.${process.pid}`;
+    fs.writeFileSync(outputPath, "--- SESSION BOUNDARY: test\n");
+    startTranscriptRotation(adapter as unknown as TmuxAdapter, "s@rig", outputPath, { lines: 1000, pollIntervalMs: 100 });
+    await new Promise((resolve) => setImmediate(resolve));
+    const firstFreshness = getLastCaptureAt("s@rig");
+    expect(firstFreshness).toBe(Date.now());
+    adapter.capturePaneContent.mockRejectedValueOnce(new Error("capture failed"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(getLastCaptureAt("s@rig")).toBe(firstFreshness);
+    adapter.capturePaneContent.mockResolvedValueOnce(null);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(getLastCaptureAt("s@rig")).toBe(firstFreshness);
+    // A directory at the temp-file path forces actual persistence to fail.
+    fs.mkdirSync(tmpPath);
+    adapter.capturePaneContent.mockResolvedValue("second");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(getLastCaptureAt("s@rig")).toBe(firstFreshness);
+    expect(fs.readFileSync(outputPath, "utf8")).toBe("--- SESSION BOUNDARY: test\nfirst");
+    fs.rmdirSync(tmpPath);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(getLastCaptureAt("s@rig")).toBe(Date.now());
+    expect(fs.readFileSync(outputPath, "utf8")).toBe("--- SESSION BOUNDARY: test\nsecond");
+    const inode = fs.statSync(outputPath).ino;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(getLastCaptureAt("s@rig")).toBe(Date.now());
+    expect(fs.statSync(outputPath).ino).toBe(inode);
   });
 });
