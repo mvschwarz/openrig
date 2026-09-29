@@ -257,6 +257,9 @@ export function createTestApp(
      *  (defaults to daemon-shipped assets). Tests inject fixtures to exercise the nonfatal
      *  delivery-gap warning through the real /api/up route. */
     claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
+    /** Wire the ready runtime adapters into the routes' `runtimeAdapters`, as startup does, so a
+     *  route launch can start harnesses. Off by default: existing tests keep no route adapters. */
+    wireRuntimeAdapters?: boolean;
     /**
      * Agent Starter v1 vertical M2 R2: optionally expose the in-test
      * StartupOrchestrator + PodRigInstantiator so callers can spy on
@@ -425,6 +428,7 @@ export function createTestApp(
     // across the suite). Tests for the observer itself construct it directly
     // and pass it here explicitly.
     permissionDriftObserver: opts?.permissionDriftObserver ?? { diagnose: () => null },
+    runtimeAdapters: opts?.wireRuntimeAdapters ? adapters : undefined,
   });
   return {
     app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,
