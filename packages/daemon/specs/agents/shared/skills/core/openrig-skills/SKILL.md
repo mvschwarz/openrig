@@ -116,8 +116,9 @@ General engineering skills OpenRig ships as vendored copies. Open when the task 
 ## When OpenRig itself misbehaves
 
 Run `rig context get help`: the one help guide for your installed version, from symptom to next step, known problems,
-and a useful report to the OpenRig team if you are still stuck. If `rig` won't run, read `docs/reference/help.md` in
-the installed package or https://www.openrig.dev/help/agents (the same text).
+and a useful report to the OpenRig team if you are still stuck. If `rig` won't run, read
+`daemon/docs/reference/help.md` inside the installed `@openrig/cli` package, or https://www.openrig.dev/help/agents
+(the same text).
 
 ## Need more than what ships here?
 

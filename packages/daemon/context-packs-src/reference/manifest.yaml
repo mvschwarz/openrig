@@ -1,0 +1,16 @@
+# Reference guides the help pack links to, loaded one file or section at a time by address
+# (rig context get reference/<file>#<section>). Each file is a symlink to docs/reference/.
+name: reference
+version: "0"
+taxonomy: world
+purpose: "Version-matched reference guides the help guide links to. Load a single file or section by address; don't load the whole pack."
+files:
+  - path: getting-started.md
+    role: reference
+    summary: "Getting started: setup, first team, recovery after a reboot, and permissions."
+  - path: instance-layout.md
+    role: reference
+    summary: "Where an OpenRig instance keeps its files and configuration."
+  - path: rig-spec.md
+    role: reference
+    summary: "The rig specification format."

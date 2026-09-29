@@ -460,11 +460,11 @@ test("REF COLLISION across sources FAILS THE BUILD with no output mutation (B3)"
   }
 });
 
-test("PRODUCTION LIBRARY: only the public help, onboarding-width, world, and example static packs ship", () => {
+test("PRODUCTION LIBRARY: only the public help, onboarding-width, reference, world, and example static packs ship", () => {
   const out = mkdtempSync(join(tmpdir(), "s05-world-"));
   try {
     run(REAL_SKILLS, out);
-    assert.deepEqual(readdirSync(REAL_STATIC_PACKS).sort(), ["help", "onboarding-width", "world-example", "world-public"]);
+    assert.deepEqual(readdirSync(REAL_STATIC_PACKS).sort(), ["help", "onboarding-width", "reference", "world-example", "world-public"]);
     const helpDir = join(out, "help");
     assert.deepEqual(readdirSync(helpDir).sort(), ["help.md", "manifest.yaml"]);
     assert.ok(!lstatSync(join(helpDir, "help.md")).isSymbolicLink(), "the projected help pack ships a real file");
@@ -557,5 +557,114 @@ test("STATIC PACK SYMLINKS: a link into docs/reference ships as a real file; any
     assert.ok(!existsSync(badOut), "no projection may be written after a refused symlink");
   } finally {
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// S07 F1/F2: the help guide's on-demand guide addresses resolve through the daemon's
+// real address route over the generated packs, and a help read stays small.
+const DIST = join(REPO, "packages/daemon/dist");
+async function addressRouteOver(packsRoot) {
+  const { Hono } = await import("hono");
+  const { contextPacksRoutes } = await import(pathToFileURL(join(DIST, "routes/context-packs.js")).href);
+  const { ContextPackLibraryService } = await import(
+    pathToFileURL(join(DIST, "domain/context-packs/context-pack-library-service.js")).href
+  );
+  const lib = new ContextPackLibraryService({ roots: [{ path: packsRoot, sourceType: "builtin" }] });
+  lib.scan();
+  const app = new Hono();
+  app.use("*", async (c, next) => {
+    c.set("contextPackLibrary", lib);
+    await next();
+  });
+  app.route("/api/context-packs", contextPacksRoutes());
+  return app;
+}
+const taughtAddresses = (text) => [...text.matchAll(/`rig context get (reference\/[^`\s]+)`/g)].map((m) => m[1]);
+async function unresolvedAddresses(app, addresses) {
+  const failures = [];
+  for (const address of addresses) {
+    const res = await app.request(`/api/context-packs/library/resolve-address?address=${encodeURIComponent(address)}`);
+    if (res.status !== 200) failures.push({ address, status: res.status });
+  }
+  return failures;
+}
+
+test("HELP ADDRESSES: every guide address taught in help.md resolves through the real address route; help stays small", async () => {
+  const out = mkdtempSync(join(tmpdir(), "r061-help-addr-"));
+  try {
+    runProduction(out);
+    const helpSource = readFileSync(join(REPO, "docs/reference/help.md"), "utf8");
+    const refDir = join(out, "reference");
+    assert.deepEqual(readdirSync(refDir).sort(), ["getting-started.md", "instance-layout.md", "manifest.yaml", "rig-spec.md"]);
+    for (const f of ["getting-started.md", "instance-layout.md", "rig-spec.md"]) {
+      assert.ok(!lstatSync(join(refDir, f)).isSymbolicLink(), `${f} ships as a real file`);
+      assert.equal(readFileSync(join(refDir, f), "utf8"), readFileSync(join(REPO, "docs/reference", f), "utf8"));
+    }
+    const app = await addressRouteOver(out);
+    const addresses = taughtAddresses(helpSource);
+    assert.deepEqual(addresses.sort(), [
+      "reference/getting-started.md#have-your-agent-configure-permissions",
+      "reference/getting-started.md#incomplete-setup-and-restart",
+      "reference/instance-layout.md",
+      "reference/rig-spec.md",
+    ]);
+    assert.deepEqual(await unresolvedAddresses(app, addresses), []);
+    const section = await (await app.request(
+      `/api/context-packs/library/resolve-address?address=${encodeURIComponent("reference/getting-started.md#incomplete-setup-and-restart")}`,
+    )).json();
+    assert.match(section.text, /^## Incomplete setup and restart/);
+    assert.ok(!section.text.includes("## Kernel framing"), "a section address returns that section, not the file");
+    const whole = await (await app.request(
+      `/api/context-packs/library/resolve-address?address=${encodeURIComponent("reference/rig-spec.md")}`,
+    )).json();
+    assert.equal(whole.text, readFileSync(join(REPO, "docs/reference/rig-spec.md"), "utf8"));
+    const preview = await (await app.request(`/api/context-packs/library/by-ref/preview?ref=help`)).json();
+    assert.deepEqual(preview.files.map((f) => f.path ?? f), ["help.md"]);
+    assert.ok(preview.bundleText.includes("# Help your user get unstuck"));
+    for (const manual of ["# Getting started: one useful change", "# OpenRig Instance Layout", "# RigSpec Reference"]) {
+      assert.ok(!preview.bundleText.includes(manual), `a help read must not include '${manual}'`);
+    }
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("HELP ADDRESSES: the checker fails when a taught address has no target", async () => {
+  const base = mkdtempSync(join(tmpdir(), "r061-help-missing-"));
+  try {
+    const packsRoot = join(base, "packs");
+    mkdirSync(join(packsRoot, "reference"), { recursive: true });
+    writeFileSync(join(packsRoot, "reference/manifest.yaml"),
+      'name: reference\nversion: "1"\ntaxonomy: world\nfiles:\n  - path: getting-started.md\n    role: reference\n');
+    writeFileSync(join(packsRoot, "reference/getting-started.md"), "# G\n\n## Incomplete setup and restart\nbody\n");
+    const app = await addressRouteOver(packsRoot);
+    const failures = await unresolvedAddresses(app, taughtAddresses(
+      "`rig context get reference/getting-started.md#incomplete-setup-and-restart` and `rig context get reference/rig-spec.md`",
+    ));
+    assert.deepEqual(failures.map((f) => f.address), ["reference/rig-spec.md"]);
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("HELP FALLBACK PATHS: source links resolve, and the installed path matches the package copy", async () => {
+  const { parseAddress, resolveAddress } = await import(pathToFileURL(join(DIST, "domain/markdown-address.js")).href);
+  const helpSource = readFileSync(join(REPO, "docs/reference/help.md"), "utf8");
+  for (const [, target] of helpSource.matchAll(/\]\(([a-z-]+\.md(?:#[a-z0-9-]+)?)\)/g)) {
+    const [file, anchor] = target.split("#");
+    const text = readFileSync(join(REPO, "docs/reference", file), "utf8");
+    if (anchor) resolveAddress(text, parseAddress(`${file}#${anchor}`).headerPath);
+  }
+  const buildPackage = readFileSync(join(REPO, "scripts/build-package.sh"), "utf8");
+  assert.match(buildPackage, /cp -r "\$REPO_ROOT\/docs\/reference\/"\* "\$CLI_DIR\/daemon\/docs\/reference\/"/);
+  const fallbacks = [
+    "docs/reference/help.md",
+    "packages/daemon/assets/guidance/openrig-start.md",
+    "packages/daemon/assets/plugins/openrig-core/skills/openrig-skills/SKILL.md",
+  ].map((p) => readFileSync(join(REPO, p), "utf8").replace(/\s+/g, " "));
+  for (const text of fallbacks) {
+    assert.ok(text.includes("`daemon/docs/reference/help.md` inside the installed `@openrig/cli` package"));
+    assert.ok(!text.includes("read `docs/reference/help.md` in the installed package"));
+    assert.ok(!text.includes("open `docs/reference/help.md` in the installed package"));
   }
 });

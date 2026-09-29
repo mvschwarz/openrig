@@ -1,9 +1,13 @@
 # Help your user get unstuck
 
 This page is for an agent whose user says OpenRig isn't working. It is the one place OpenRig keeps this guidance. The
-copy installed with OpenRig matches that installed version. Read it with `rig context get help`, or open
-`docs/reference/help.md` in the installed package. The same text is online at
+copy installed with OpenRig matches that installed version. Read it with `rig context get help`. If `rig` won't run,
+open `daemon/docs/reference/help.md` inside the installed `@openrig/cli` package (under `npm root -g`); in the source
+repository the same file is `docs/reference/help.md`. The same text is online at
 [openrig.dev/help/agents](https://www.openrig.dev/help/agents), next to the ways people can contact OpenRig support.
+
+Each guide this page links to is installed too. Load one only when you need it, with the `rig context get` address
+shown beside its link; the same files sit beside this one in `daemon/docs/reference/`.
 
 Start with what your user was trying to do. Try the next useful step, check the result, and if you can't finish,
 prepare a message to OpenRig support at **hello@openrig.dev**. Your user doesn't need a GitHub account.
@@ -42,14 +46,16 @@ Windows-related pull request fixes it.
 
 ### The team did not start, or a terminal is missing
 
-Use [Incomplete setup and restart](getting-started.md#incomplete-setup-and-restart). Its symptom table separates
+Use [Incomplete setup and restart](getting-started.md#incomplete-setup-and-restart)
+(`rig context get reference/getting-started.md#incomplete-setup-and-restart`). Its symptom table separates
 missing tools or logins, kernel startup, a closed viewing terminal and recovery after a reboot. Match the observation
 before choosing an action. A healthy daemon doesn't by itself mean the project's seats are ready: check
 `rig ps --nodes --rig <rig-name>`.
 
 ### The agent is waiting for permission or can't reach the daemon
 
-Read [Have your agent configure permissions](getting-started.md#have-your-agent-configure-permissions). Identify the
+Read [Have your agent configure permissions](getting-started.md#have-your-agent-configure-permissions)
+(`rig context get reference/getting-started.md#have-your-agent-configure-permissions`). Identify the
 specific prompt or sandbox restriction. Work within the user's chosen permissions; don't switch the whole environment
 to unrestricted access to clear one prompt.
 
@@ -62,7 +68,8 @@ clearing attention doesn't fix an underlying readiness problem.
 
 ### You can't tell which instance or configuration is involved
 
-Read [instance layout](instance-layout.md) and [rig specifications](rig-spec.md). Establish the instance and files
+Read [instance layout](instance-layout.md) (`rig context get reference/instance-layout.md`) and
+[rig specifications](rig-spec.md) (`rig context get reference/rig-spec.md`). Establish the instance and files
 involved before proposing changes.
 
 ## Known problems to compare against
