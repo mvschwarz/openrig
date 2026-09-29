@@ -847,6 +847,7 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       delivered: 1,
       indeterminate: 0,
       failed: 0,
+      retained: 0,
     });
     expect(sent).toHaveLength(1);
     expect(wakes(row.qitemId).at(-1)).toMatchObject({

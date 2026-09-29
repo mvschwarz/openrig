@@ -6,7 +6,7 @@
 // behave unchanged. New file; shipped CLI floors untouched.
 import { describe, it, expect, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -415,27 +415,35 @@ describe("PUBLIC bin ownership (guard finding 1 — the wrapper is the real fron
     // Isolated OPENRIG_HOME so the launched TUI never reads the live rig (fully contained + read-only).
     const session = `frontdoor-pin-${process.pid}`;
     const home = mkdtempSync(join(tmpdir(), "fd-tmux-home-"));
-    spawnSync("tmux", ["kill-session", "-t", session], { encoding: "utf-8" });
-    const run = spawnSync(
-      "tmux",
-      ["new-session", "-d", "-s", session, "-x", "120", "-y", "30",
-        `OPENRIG_HOME=${home} OPENRIG_URL=http://127.0.0.1:9 ${process.execPath} ${binWrapper}; sleep 15`],
-      { encoding: "utf-8", timeout: 10000 },
-    );
-    expect(run.status).toBe(0);
-    let text = "";
-    for (let i = 0; i < 20 && !/EXPLORER|mission control could not start|Usage: rig/.test(text); i++) {
-      spawnSync("sleep", ["0.5"]);
-      text = spawnSync("tmux", ["capture-pane", "-t", session, "-p"], { encoding: "utf-8", timeout: 5000 }).stdout ?? "";
+    // A private server gives this test both a bounded IPC path and useful failure evidence.
+    const socket = join(home, "tmux.sock");
+    const exitFile = join(home, "child-exit");
+    const quote = (s: string) => "'" + s.replaceAll("'", "'\"'\"'") + "'";
+    const tmux = (args: string[]) => spawnSync("tmux", ["-S", socket, ...args], { encoding: "utf-8", timeout: 10000 });
+    const diagnostic = (r: ReturnType<typeof tmux>) => JSON.stringify({
+      status: r.status, signal: r.signal, error: r.error?.message, stderr: r.stderr,
+      childExit: existsSync(exitFile) ? readFileSync(exitFile, "utf8") : "still running or not started",
+    });
+    try {
+      const run = tmux(["new-session", "-d", "-s", session, "-x", "120", "-y", "30",
+        `OPENRIG_HOME=${quote(home)} OPENRIG_URL=http://127.0.0.1:9 ${quote(process.execPath)} ${quote(binWrapper)}; printf '%s' $? > ${quote(exitFile)}; sleep 15`]);
+      expect(run.status, diagnostic(run)).toBe(0);
+      let text = "";
+      for (let i = 0; i < 20 && !/EXPLORER|mission control could not start|Usage: rig/.test(text); i++) {
+        spawnSync("sleep", ["0.5"]);
+        const capture = tmux(["capture-pane", "-t", session, "-p"]);
+        expect(capture.status, diagnostic(capture)).toBe(0);
+        text = capture.stdout ?? "";
+      }
+      // Keep BOTH TTY streams on the child; capture-pane includes terminal error text.
+      // Do not reinterpret an empty capture or failed tmux client as a valid UI result.
+      const pane = tmux(["display-message", "-p", "-t", session, "#{pane_current_command} #{pane_dead} #{pane_dead_status}"]);
+      expect(text, `${diagnostic(pane)} pane=${pane.stdout}`).toMatch(/EXPLORER|mission control could not start/);
+      expect(text).not.toMatch(/Usage: rig \[options\] \[command\]/);
+    } finally {
+      tmux(["kill-server"]); // Only this test's private server.
+      rmSync(home, { recursive: true, force: true });
     }
-    spawnSync("tmux", ["kill-session", "-t", session], { encoding: "utf-8" });
-    rmSync(home, { recursive: true, force: true });
-    // The daemon being unreachable, the front door LAUNCHED the TUI (its universal chrome — the EXPLORER
-    // pane — renders), or degraded honestly if the TUI is not installed. Either proves the PUBLIC bin ran
-    // the front-door path; commander's usage bypass would mean it did NOT. (The crash-cart cockpit render
-    // itself is covered by the TUI's own tests; the launch decision by the deterministic production-path test.)
-    expect(text).toMatch(/EXPLORER|mission control could not start/);
-    expect(text).not.toMatch(/Usage: rig \[options\] \[command\]/);
   });
 
   // (Removed the in-process forced-TTY "reaches the degrade branch" belt: its premise was a FAST

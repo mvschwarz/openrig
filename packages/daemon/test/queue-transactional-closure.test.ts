@@ -448,7 +448,7 @@ describe("W1 MF6 — timeout classifies as indeterminate; retry policy is honest
     h.outcome.mode = "verified";
     const tally = await h.repo.drainPendingWakeIntents();
     // recovery drains only `pending` — a terminal `failed` is left visible, not resent.
-    expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0 });
+    expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0, retained: 0 });
     expect(h.calls).toHaveLength(0);
     expect(h.outbox.getById(`wake-intent-${created.qitemId}`)!.deliveryState).toBe("failed");
   });
@@ -646,7 +646,7 @@ describe("W1 re-seal #3 — real file-backed close/reopen crash boundary", () =>
       expect(reconciled).toBe(1);
       expect(outbox2.getById(intentId)!.deliveryState).toBe("indeterminate");
       expect(calls).toHaveLength(0); // NEVER re-sent across the restart
-      expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0 }); // no re-drive
+      expect(tally).toEqual({ delivered: 0, indeterminate: 0, failed: 0, retained: 0 }); // no re-drive
       db2.close();
     } finally {
       for (const suffix of ["", "-journal", "-wal", "-shm"]) {

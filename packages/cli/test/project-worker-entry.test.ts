@@ -8,7 +8,9 @@ import { Command } from "commander";
 import { DaemonClient } from "../src/client.js";
 import { projectCommand, type ProjectDeps } from "../src/commands/project.js";
 import { projectsRoutes } from "../../daemon/src/routes/projects.js";
-import { ClassifierLeaseError, ClassificationAttemptError, type ClassifierLease } from "@openrig/daemon/stream-classifier";
+// The route under test imports source classes; built exports are different constructor instances.
+import { ClassifierLeaseError, type ClassifierLease } from "../../daemon/src/domain/classifier-lease-manager.js";
+import { ClassificationAttemptError } from "../../daemon/src/domain/classification-attempts.js";
 import { classifierOccupant, sourceHash } from "../../daemon/src/domain/classification-sources.js";
 import { JEV_MODEL, setExperiment } from "../src/commands/project-jev.js";
 

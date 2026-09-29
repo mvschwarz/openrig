@@ -19,7 +19,8 @@ const AUTHORITY_SHA256: Record<string, string> = {
   "locked.policy.md": "dcb38c372def7fe58ddfc9f1f3e97b9ba391ae79a99ef486e44f017cb39e57fe",
   "standard.policy.md": "737d3f56e6d8275fe548a3a06e9b02ede8f328207ec2e6223cea6a83f40f5148",
   "open.policy.md": "bb5fbb18e1f3706bd0676a9e709e29b5754bb6b41b6f304453dd6d73e7a4d62b",
-  "yolo.policy.md": "f0277fc5bb7ecbff88861a042eefc3bd79aa829e00dc4ee342bd82276019f601",
+  // 0.6.0 (#109): accepted Codex full_bypass now includes approval policy never.
+  "yolo.policy.md": "1c34fff0b385426689fd26e20b8b431de6b688028d584924e7d5384fe5ff6d42",
 };
 
 const sha256 = (p: string): string => createHash("sha256").update(readFileSync(p)).digest("hex");

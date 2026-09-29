@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -235,7 +236,7 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
   });
 
   it("hands watchdog provenance to the delivery adapter without changing the authored payload", async () => {
-    let source: { jobId: string; policy: string } | undefined;
+    let source: { jobId: string; policy: string; occurrenceId?: string } | undefined;
     const engine = makeEngine({
       deliver: async (request, deliverySource) => {
         deliveryCalls.push(request);
@@ -253,7 +254,11 @@ describe("WatchdogPolicyEngine (PL-004 Phase C R1)", () => {
 
     await engine.evaluate(job);
 
-    expect(source).toEqual({ jobId: job.jobId, policy: "periodic-reminder" });
+    expect(source).toEqual({
+      jobId: job.jobId,
+      policy: "periodic-reminder",
+      occurrenceId: createHash("sha256").update(JSON.stringify([job.jobId, null, job.lastFireAt])).digest("hex"),
+    });
     expect(deliveryCalls).toEqual([{ targetSession: "alice@rig", message: "Inspect the queue" }]);
     expect(formatWatchdogDeliveryMessage(source!, deliveryCalls[0]!.message)).toBe(
       `[OpenRig watchdog scheduler · policy: periodic-reminder · job: ${job.jobId}]\nInspect the queue`,

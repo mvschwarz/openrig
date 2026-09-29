@@ -53,6 +53,7 @@ import { humanNotificationIntentSchema } from "../../src/db/migrations/081_human
 import { reviewReadIndexesSchema } from "../../src/db/migrations/083_review_read_indexes.js";
 import { inventoryEventIndexesSchema } from "../../src/db/migrations/084_inventory_event_indexes.js";
 import { rigClaudeManagedBlockFileSchema } from "../../src/db/migrations/085_rig_claude_managed_block_file.js";
+import { nodePermissionSelectionsSchema } from "../../src/db/migrations/088_node_permission_selections.js";
 import { rigPolicySchema } from "../../src/db/migrations/041_rig_policy.js";
 import { rigArchiveSchema } from "../../src/db/migrations/042_rig_archive.js";
 import { resumeProvenanceSchema } from "../../src/db/migrations/043_resume_provenance.js";
@@ -115,7 +116,7 @@ import fs from "node:fs";
 
 /** Seam B R6: the canonical full-fixture migration list, exported so file-backed
  *  DB-reopen tests migrate IDENTICALLY to createFullTestDb. */
-export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema, scopedOperatingPostureSchema, humanNotificationIntentSchema, reviewReadIndexesSchema, inventoryEventIndexesSchema, rigClaudeManagedBlockFileSchema];
+export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema, scopedOperatingPostureSchema, humanNotificationIntentSchema, reviewReadIndexesSchema, inventoryEventIndexesSchema, rigClaudeManagedBlockFileSchema, nodePermissionSelectionsSchema];
 
 /**
  * P24 — the DECLARED exclusions for {@link migrationsForFullTestDb}. That list is deliberately a
@@ -138,6 +139,8 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "028_project_classifications.sql": "project-classification subsystem table — classifier suites migrate it inline.",
   "029_classifier_leases.sql": "project-classification subsystem table — classifier-lease suites migrate it inline.",
   "086_classification_fields_and_attempts.sql": "extends 028 (excluded here) and adds the S02 attempt ledger — classifier suites migrate it inline.",
+  "087_seat_delivery_guard.sql": "extends outbox_entries (027 is excluded); delivery-guard suites use ALL_MIGRATIONS. Revisit if a core-fixture consumer uses retained delivery.",
+  "089_classification_identity_provenance.sql": "extends project_classifications (028 is excluded); classifier fixtures migrate it inline.",
   "030_views_custom.sql": "custom-views subsystem table — views suites migrate it inline.",
   "032_watchdog_history.sql": "watchdog history table — watchdog suites migrate it inline (watchdog_jobs is the only watchdog base the core edge carries).",
   "033_workflow_specs.sql": "workflow subsystem table — workflow-* suites migrate the workflow schema inline.",

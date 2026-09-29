@@ -144,7 +144,7 @@ describe("S03 future native permission selections (offline; no native effect cla
     await (RestoreOrchestrator.prototype as any).attemptResume.call(ctx, f.node.id, "seat", runtime === "codex" ? "codex_id" : "claude_id", "original", "/inert", null, "model", "floor");
     expect(resume).toHaveBeenCalledWith(...(runtime === "codex"
       ? ["seat", "codex_id", "original", "/inert", null, "full_bypass", "model"]
-      : ["seat", "claude_id", "original", "/inert", "floor", "model", "auto"]));
+      : ["seat", "claude_id", "original", "/inert", "floor", "model", "auto", f.node.id]));
   });
   it.each(["fresh", "resume", "fork"])("shared startup applies selected Claude auto on %s and keeps inherited posture separate", async path => {
     const f = fixture("claude-code"); await f.service.setPermissions(input("auto"));

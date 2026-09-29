@@ -388,6 +388,7 @@ describe("Lifecycle reboot/recovery scenario matrix (Tier 1)", () => {
             axis: "sandbox",
             state: "observed",
             value: "workspace-write",
+            reason: "emitted_launch_arguments",
           },
         });
       });

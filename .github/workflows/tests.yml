@@ -98,10 +98,13 @@ jobs:
         run: npm run build
       - name: Run the suite without ambient credentials or external network
         run: |
-          mkdir -p "$RUNNER_TEMP/suite-home"
-          env -i HOME="$RUNNER_TEMP/suite-home" PATH="$PATH" TMPDIR="$RUNNER_TEMP" \
+          suite_root=$(mktemp -d "$RUNNER_TEMP/opr-test.XXXXXX")
+          suite_root=$(cd "$suite_root" && pwd -P)
+          mkdir -p "$suite_root/home"
+          # Only this job's temporary sockets (including tmux) are reachable.
+          env -i HOME="$suite_root/home" PATH="$PATH" TMPDIR="$suite_root" TMUX_TMPDIR="$suite_root" \
             CI=true TERM=xterm-256color \
-            sandbox-exec -p '(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))' \
+            sandbox-exec -D IPC_ROOT="$suite_root" -p '(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))(allow network-outbound (subpath (param "IPC_ROOT")))' \
             npm run test -w packages/${{ matrix.package }}
 
   installed-scenario:

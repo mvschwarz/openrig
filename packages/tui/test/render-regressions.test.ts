@@ -42,9 +42,10 @@ describe("live visual regressions", () => {
     screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
 
     const tabIndex = screen.contentTargets.findIndex((target) => target.action.type === "tab");
-    const termIndex = screen.contentTargets.findIndex((target) => target.action.type === "act" && target.action.act === "open-terminal");
+    const rigTermIndex = screen.contentTargets.findIndex((target) => target.action.type === "act" && target.action.act === "open-terminal" && target.action.view === "rig:openrig-build");
+    const termIndex = screen.contentTargets.findIndex((target) => target.action.type === "act" && target.action.act === "open-terminal" && target.action.view !== "rig:openrig-build");
     const rowIndex = screen.contentTargets.findIndex((target) => target.action.type === "drill" && target.action.resource === "agent");
-    expect([tabIndex, termIndex, rowIndex].every((index) => index >= 0)).toBe(true);
+    expect([tabIndex, rigTermIndex, termIndex, rowIndex].every((index) => index >= 0)).toBe(true);
 
     view.dispatch({ type: "content-select", index: tabIndex });
     screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
@@ -52,6 +53,11 @@ describe("live visual regressions", () => {
     // the slice-17 navigator's │ rails would shadow a first-│ split (guard-
     // sanctioned truthful floor update; the assertion is unchanged)
     expect(screen.lines[screen.contentTargets[tabIndex]!.y - 1]!.slice(screen.explorerWidth + 1)).toMatch(/^›/);
+
+    // The rig terminal field is one whole-row action; seat rows have inline action zones.
+    view.dispatch({ type: "content-select", index: rigTermIndex });
+    screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
+    expect(screen.lines[screen.contentTargets[rigTermIndex]!.y - 1]!.slice(screen.explorerWidth + 1)).toMatch(/^›/);
 
     view.dispatch({ type: "content-select", index: termIndex });
     screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });

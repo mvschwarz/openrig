@@ -158,7 +158,7 @@ describe("Seam B R6 — resolved posture drives the REAL launch helpers on all t
 
   it("full_bypass posture lifts a seat even with YOLO OFF (custom flag policy — the ruling)", () => {
     expect(claudePostureFlag(yoloOff, "full_bypass")).toBe("--dangerously-skip-permissions");
-    expect(codexPostureArg("", yoloOff, "full_bypass")).toBe(" -s danger-full-access");
+    expect(codexPostureArg("", yoloOff, "full_bypass")).toBe(" -s danger-full-access -a never");
     expect(piTrust(undefined, yoloOff, "full_bypass")).toBe("approve"); // Pi = resource trust, not a permission policy
   });
 

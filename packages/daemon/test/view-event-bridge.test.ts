@@ -11,6 +11,7 @@ import { inboxEntriesSchema } from "../src/db/migrations/026_inbox_entries.js";
 import { classifierLeasesSchema } from "../src/db/migrations/029_classifier_leases.js";
 import { projectClassificationsSchema } from "../src/db/migrations/028_project_classifications.js";
 import { classificationFieldsAndAttemptsSchema } from "../src/db/migrations/086_classification_fields_and_attempts.js";
+import { classificationIdentityProvenanceSchema } from "../src/db/migrations/089_classification_identity_provenance.js";
 import { viewsCustomSchema } from "../src/db/migrations/030_views_custom.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -46,7 +47,7 @@ describe("view-event-bridge (PL-004 Phase B R1; BLOCKER 2 fix)", () => {
     migrate(db, [
       coreSchema, eventsSchema,
       streamItemsSchema, queueItemsSchema, queueTransitionsSchema, inboxEntriesSchema,
-      classifierLeasesSchema, projectClassificationsSchema, classificationFieldsAndAttemptsSchema, viewsCustomSchema,
+      classifierLeasesSchema, projectClassificationsSchema, classificationFieldsAndAttemptsSchema, classificationIdentityProvenanceSchema, viewsCustomSchema,
     ]);
     bus = new EventBus(db);
     queueRepo = new QueueRepository(db, bus);

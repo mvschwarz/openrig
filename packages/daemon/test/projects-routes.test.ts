@@ -9,6 +9,7 @@ import { streamItemsSchema } from "../src/db/migrations/023_stream_items.js";
 import { classifierLeasesSchema } from "../src/db/migrations/029_classifier_leases.js";
 import { projectClassificationsSchema } from "../src/db/migrations/028_project_classifications.js";
 import { classificationFieldsAndAttemptsSchema } from "../src/db/migrations/086_classification_fields_and_attempts.js";
+import { classificationIdentityProvenanceSchema } from "../src/db/migrations/089_classification_identity_provenance.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { ClassifierLeaseManager } from "../src/domain/classifier-lease-manager.js";
 import { ProjectClassifier } from "../src/domain/project-classifier.js";
@@ -52,7 +53,7 @@ describe("projects routes (PL-004 Phase B)", () => {
 
   beforeEach(() => {
     db = createDb();
-    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, classifierLeasesSchema, projectClassificationsSchema, classificationFieldsAndAttemptsSchema]);
+    migrate(db, [coreSchema, eventsSchema, streamItemsSchema, classifierLeasesSchema, projectClassificationsSchema, classificationFieldsAndAttemptsSchema, classificationIdentityProvenanceSchema]);
     bus = new EventBus(db);
     leaseMgr = new ClassifierLeaseManager(db, bus);
     classifier = new ProjectClassifier(db, bus, leaseMgr);
