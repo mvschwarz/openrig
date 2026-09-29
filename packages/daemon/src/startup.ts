@@ -208,6 +208,10 @@ interface DaemonResult {
 const KNOWN_PROVIDER_AUTH_ENV = new Set([
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
+  // The Claude-side counterpart of OPENAI_BASE_URL: a key or token issued by an
+  // Anthropic-compatible gateway is only valid together with that gateway's
+  // endpoint, so both must be able to reach the seat.
+  "ANTHROPIC_BASE_URL",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",

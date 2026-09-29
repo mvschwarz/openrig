@@ -502,6 +502,20 @@ describe("createDaemon startup composition", () => {
     });
   });
 
+  it("collectAllowlistedProviderAuthEnv forwards ANTHROPIC_BASE_URL only when named", () => {
+    const env = {
+      ANTHROPIC_API_KEY: "gateway-test-key",
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:11434",
+    };
+    expect(collectAllowlistedProviderAuthEnv("ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL", env)).toEqual({
+      ANTHROPIC_API_KEY: "gateway-test-key",
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:11434",
+    });
+    expect(collectAllowlistedProviderAuthEnv("ANTHROPIC_API_KEY", env)).toEqual({
+      ANTHROPIC_API_KEY: "gateway-test-key",
+    });
+  });
+
   it("createDaemon wires node cmux service for POST /api/rigs/:rigId/nodes/:logicalId/open-cmux", async () => {
     const cmuxFactory: CmuxTransportFactory = async () => ({
       request: async (method: string) => {
