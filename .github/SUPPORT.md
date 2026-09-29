@@ -3,6 +3,7 @@
 - **Docs:** https://openrig.dev/docs — getting started, CLI reference, configuration,
   troubleshooting. An index linking to agent-friendly documentation is at
   https://openrig.dev/llms.txt.
+- **Agents helping a user:** read [docs/reference/help.md](../docs/reference/help.md), or run `rig context get help`.
 - **Questions:** [Discussions › Q&A](https://github.com/mvschwarz/openrig/discussions/categories/q-a).
 - **Bugs:** [open an issue](https://github.com/mvschwarz/openrig/issues/new/choose) with the bug
   template. Include `rig --version`, your OS and Node versions, and relevant redacted command output.

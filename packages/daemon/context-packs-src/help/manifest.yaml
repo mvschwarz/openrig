@@ -1,0 +1,9 @@
+# Agent help: the single troubleshooting and escalation guide (docs/reference/help.md).
+name: help
+version: "0"
+taxonomy: world
+purpose: "What an agent does when its user says OpenRig isn't working: diagnose, fix within permissions, verify, and escalate to OpenRig support."
+files:
+  - path: help.md
+    role: reference
+    summary: "Help your user get unstuck: environment checks, version-matched guidance, known problems, and how to reach OpenRig support."

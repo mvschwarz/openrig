@@ -38,9 +38,10 @@ Operators who provide equivalent guidance can disable both with
 
 ## When OpenRig itself misbehaves
 
-Read https://www.openrig.dev/help/agents. It routes a symptom to the documentation and known issues for your OpenRig
-version, and says how to send the OpenRig team a useful report when you are still stuck. If `rig --version` and
-`rig doctor --json` run, include their output; if the install is broken or the daemon is down, go to the page anyway.
+Run `rig context get help`. It is the one help guide, matched to your installed version: check the environment, find
+the next step, compare known problems, and send the OpenRig team a useful report when you are still stuck. If `rig`
+itself won't run, read `docs/reference/help.md` in the installed package, or the same text at
+https://www.openrig.dev/help/agents.
 
 ## What this file is not
 

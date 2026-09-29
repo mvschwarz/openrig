@@ -335,7 +335,7 @@ Before setup or managed launch, review [what OpenRig changes on your machine](#w
 
 Already-running adopted sessions may need restart before they pick up newly written runtime config.
 
-**For agents:** Ask the user whether they want core setup (`rig setup`) or the fuller workstation path (`rig setup --full`) before choosing the invocation. Inspect the result with `--json` and use `rig doctor` to finish any remaining machine-specific issues. When OpenRig itself misbehaves, see [openrig.dev/help/agents](https://www.openrig.dev/help/agents): it routes a symptom to the right docs and known issues for your version, and explains how to reach the team if you're still stuck.
+**For agents:** Ask the user whether they want core setup (`rig setup`) or the fuller workstation path (`rig setup --full`) before choosing the invocation. Inspect the result with `--json` and use `rig doctor` to finish any remaining machine-specific issues. When OpenRig itself misbehaves, read [docs/reference/help.md](docs/reference/help.md) (installed agents can run `rig context get help`; the same text is at [openrig.dev/help/agents](https://www.openrig.dev/help/agents)): it covers the next step, known problems, and how to reach the team if you're still stuck.
 
 ## Comparison with Claude Managed Agents
 

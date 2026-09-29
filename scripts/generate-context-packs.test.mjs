@@ -2,7 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -460,11 +460,19 @@ test("REF COLLISION across sources FAILS THE BUILD with no output mutation (B3)"
   }
 });
 
-test("PRODUCTION LIBRARY: only the public onboarding-width, world, and example static packs ship", () => {
+test("PRODUCTION LIBRARY: only the public help, onboarding-width, world, and example static packs ship", () => {
   const out = mkdtempSync(join(tmpdir(), "s05-world-"));
   try {
     run(REAL_SKILLS, out);
-    assert.deepEqual(readdirSync(REAL_STATIC_PACKS).sort(), ["onboarding-width", "world-example", "world-public"]);
+    assert.deepEqual(readdirSync(REAL_STATIC_PACKS).sort(), ["help", "onboarding-width", "world-example", "world-public"]);
+    const helpDir = join(out, "help");
+    assert.deepEqual(readdirSync(helpDir).sort(), ["help.md", "manifest.yaml"]);
+    assert.ok(!lstatSync(join(helpDir, "help.md")).isSymbolicLink(), "the projected help pack ships a real file");
+    assert.equal(
+      readFileSync(join(helpDir, "help.md"), "utf8"),
+      readFileSync(join(REPO, "docs/reference/help.md"), "utf8"),
+      "the help pack serves docs/reference/help.md byte for byte (one source)",
+    );
     assert.ok(
       !existsSync(join(out, "world/install")),
       "the production builtin library must not publish the internal world/install pack",
@@ -515,6 +523,38 @@ test("OPR.0.5.6.10 GENERATOR STAMPS — skill-projected packs carry pack-level t
     run(source, out);
     const m = parseManifest(readFileSync(join(out, "skills/core/attention-queue/manifest.yaml"), "utf8"), "stamp");
     assert.equal(m.taxonomy, "skills", "generator must stamp pack-level taxonomy: skills (OPR.0.5.6.10)");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("STATIC PACK SYMLINKS: a link into docs/reference ships as a real file; any other link fails the build", () => {
+  const base = mkdtempSync(join(tmpdir(), "r061-static-symlink-"));
+  try {
+    const source = join(base, "skills");
+    skill(source, "core/x", { name: "x", description: "d", files: {} });
+    const staticSrc = join(base, "static");
+    staticWorldPack(staticSrc, "linked");
+    rmSync(join(staticSrc, "linked/b.md"));
+    symlinkSync(join(REPO, "docs/reference/getting-started.md"), join(staticSrc, "linked/b.md"));
+    const out = join(base, "out");
+    runWithStatic(source, staticSrc, out);
+    const shipped = join(out, "linked/b.md");
+    assert.ok(!lstatSync(shipped).isSymbolicLink());
+    assert.equal(readFileSync(shipped, "utf8"), readFileSync(join(REPO, "docs/reference/getting-started.md"), "utf8"));
+
+    rmSync(join(staticSrc, "linked/b.md"));
+    symlinkSync(join(REPO, "README.md"), join(staticSrc, "linked/b.md"));
+    const badOut = join(base, "bad-out");
+    let failure;
+    try {
+      runWithStatic(source, staticSrc, badOut);
+    } catch (error) {
+      failure = error;
+    }
+    assert.ok(failure, "a symlink outside docs/reference must fail the build");
+    assert.match(String(failure.stderr), /must point to a file under docs\/reference/);
+    assert.ok(!existsSync(badOut), "no projection may be written after a refused symlink");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

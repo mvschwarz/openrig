@@ -115,9 +115,9 @@ General engineering skills OpenRig ships as vendored copies. Open when the task 
 
 ## When OpenRig itself misbehaves
 
-Start at https://www.openrig.dev/help/agents: symptom, then the docs and known issues for your version, then a useful
-report to the OpenRig team if you are still stuck. `rig doctor --json` and the `health-diagnosis.md` reference help
-when the CLI runs; a broken install is not a reason to skip the page.
+Run `rig context get help`: the one help guide for your installed version, from symptom to next step, known problems,
+and a useful report to the OpenRig team if you are still stuck. If `rig` won't run, read `docs/reference/help.md` in
+the installed package or https://www.openrig.dev/help/agents (the same text).
 
 ## Need more than what ships here?
 

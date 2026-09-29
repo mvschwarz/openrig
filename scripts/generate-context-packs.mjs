@@ -234,6 +234,20 @@ function findStaticPackDirs(dir, rel = "") {
   return found;
 }
 
+// A static pack may hold a symlink to a file under docs/reference/, so a
+// reference document has one source and still ships as a pack file (the copy
+// below dereferences it). Any other symlink fails the build.
+const REFERENCE_DOCS = path.join(REPO, "docs/reference");
+function isStaticContentFile(dir, entry) {
+  if (entry.isFile()) return true;
+  if (!entry.isSymbolicLink()) return false;
+  const target = fs.realpathSync(path.join(dir, entry.name));
+  if (!target.startsWith(fs.realpathSync(REFERENCE_DOCS) + path.sep) || !fs.statSync(target).isFile()) {
+    throw new Error(`static pack symlink ${path.join(dir, entry.name)} must point to a file under docs/reference/`);
+  }
+  return true;
+}
+
 // A static pack projects VERBATIM: the committed manifest is the authority
 // (atoms graph included); only the version placeholder line is stamped. The
 // complete static source tree is scanned below, regardless of suffix or pack
@@ -256,7 +270,7 @@ function buildStaticPack(pack, version) {
     for (const e of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const childRel = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) walk(path.join(dir, e.name), childRel);
-      else if (e.isFile() && e.name !== "manifest.yaml") contentFiles.push(childRel);
+      else if (isStaticContentFile(dir, e) && e.name !== "manifest.yaml") contentFiles.push(childRel);
     }
   };
   walk(pack.abs);
@@ -280,7 +294,7 @@ function scanStaticSource() {
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
       const child = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(child, childRel);
-      else if (entry.isFile()) files.push({ path: childRel, bytes: fs.readFileSync(child) });
+      else if (isStaticContentFile(dir, entry)) files.push({ path: childRel, bytes: fs.readFileSync(child) });
     }
   };
   walk(STATIC_SOURCE);
