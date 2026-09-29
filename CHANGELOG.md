@@ -8,6 +8,33 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.6.2]
+
+- Start with two Claude Code agents, two Codex agents, or a Claude owner and
+  Codex checker, using the same first-project task and review path. Agent-guided
+  setup recommends a scoped `rig` command allowance after your explicit choice;
+  broader permissions remain separate
+  ([#147](https://github.com/mvschwarz/openrig/pull/147)).
+- Install schema-version-2 bundles into `--target` and launch from those retained
+  files. Local CLI bundle paths resolve from your working directory; conflicting
+  target files are preserved ([#146](https://github.com/mvschwarz/openrig/pull/146)).
+- Refuse message delivery into a bare shell where an agent runtime should be
+  running ([#150](https://github.com/mvschwarz/openrig/pull/150), fixes
+  [#142](https://github.com/mvschwarz/openrig/issues/142)).
+- Preserve the named target during managed launches after a tmux/host restart,
+  instead of confusing it with an old bare pane binding; existing identity checks
+  remain. Thanks to [@diaztunjano](https://github.com/diaztunjano) for reporting
+  [#141](https://github.com/mvschwarz/openrig/issues/141), addressed by
+  [#151](https://github.com/mvschwarz/openrig/pull/151).
+- Repair self-host sender identity, tmux window parsing, Codex hook-path
+  canonicalization, Pi input editing, TUI health display and restore diagnostics;
+  carry runtime hints to Herdr and allow configured Anthropic endpoint forwarding.
+  See the [community fixes and credits](docs/releases/v0.6.2.md#community-fixes).
+
+See [0.6.2 release notes](docs/releases/v0.6.2.md) for usage and compatibility.
+Installed first-use and reboot/power-loss verification remain pending; these
+source changes do not establish those outcomes.
+
 ## [0.6.1]
 
 - One version-matched agent help guide: `rig context get help`, also available
