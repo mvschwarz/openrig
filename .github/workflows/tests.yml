@@ -105,7 +105,24 @@ jobs:
           env -i HOME="$suite_root/home" PATH="$PATH" TMPDIR="$suite_root" TMUX_TMPDIR="$suite_root" \
             CI=true TERM=xterm-256color \
             sandbox-exec -D IPC_ROOT="$suite_root" -p '(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip "localhost:*"))(allow network-outbound (subpath (param "IPC_ROOT")))' \
-            npm run test -w packages/${{ matrix.package }}
+            /bin/bash -s "${{ matrix.package }}" <<'SUITE'
+          # This self-only probe is evidence. Its refusal must not suppress the suite.
+          node <<'PROBE'
+          const { spawnSync } = require('node:child_process');
+          const { statSync } = require('node:fs');
+          const result = {};
+          try {
+            result.mode = (statSync('/bin/ps').mode & 0o7777).toString(8);
+            const r = spawnSync('/bin/ps', ['-p', String(process.pid), '-o', 'pid='], { encoding: 'utf8', timeout: 5000 });
+            Object.assign(result, { status: r.status, signal: r.signal, code: r.error?.code,
+              stderr: (r.stderr ?? '').slice(0, 2048), selfVisible: r.stdout?.trim() === String(process.pid) });
+          } catch (error) {
+            result.error = String(error).slice(0, 2048);
+          }
+          console.log('CI_SELF_PID_PROBE ' + JSON.stringify(result));
+          PROBE
+          exec npm run test -w "packages/$1"
+          SUITE
 
   installed-scenario:
     runs-on: ubuntu-latest
