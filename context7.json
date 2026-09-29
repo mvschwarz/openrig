@@ -11,7 +11,6 @@
     "packages/test-system",
     "skills/_canonical/process",
     "skills/_canonical/pm",
-    ".evidence",
     "spike",
     "docker",
     "**/node_modules",
