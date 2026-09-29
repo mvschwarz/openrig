@@ -80,7 +80,7 @@ Examples:
     .option("--plan", "Plan mode — preview without executing")
     .option("--yes", "Auto-approve trusted actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")
-    .option("--target <root>", "Target root directory for package installation (.rigbundle only; does not change agent cwd)")
+    .option("--target <root>", "Install target for a .rigbundle (default: current directory). A v2 bundle is materialized there and relative member cwds resolve against it; --cwd still overrides launch cwd")
     .option("--existing", "Treat <source> as an existing rig name; bypass library-spec name resolution")
     .option("--fresh <seats...>", "Deliberately fresh-prime the named seats (logical ids) instead of resuming their original sessions (operation B; reported as fresh-primed)")
     .option("--json", "JSON output for agents")
@@ -339,7 +339,7 @@ Examples:
       }
 
       const isRigBundle = !isRigName && /\.rigbundle$/i.test(sourceRef);
-      const targetRoot = opts.target ?? (isRigBundle ? process.cwd() : undefined);
+      const targetRoot = opts.target ? nodePath.resolve(opts.target) : (isRigBundle ? process.cwd() : undefined);
 
       // OPR.0.3.2.22 Bug 3 — extend the bare `rig up <builtin>` default-cwd
       // treatment to path-form. Builtin starter specs declare member-level

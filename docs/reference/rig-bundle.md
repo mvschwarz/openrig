@@ -254,7 +254,7 @@ rig up <bundle-path> [--target <root>] [--cwd <dir>]
 
 - `--target <root>` is the install target described above (for a schema-version-2 bundle, the directory the bundle is copied into and launched from)
 - if `--target` is omitted for a `.rigbundle`, the CLI defaults the install target to the current working directory, so the bundle's files are written there
-- `rig up` sends `--target` as given; pass an absolute path, because a relative one is resolved against the daemon's cwd
+- `rig up` resolves a relative `--target` against your current directory before sending it, like `rig bundle install`; with `--host`, `--target` is sent as given and must be a path that exists on that host
 - `--cwd <dir>` does **not** change the install target; it only overrides the launched members' working directory for that run
 
 ---

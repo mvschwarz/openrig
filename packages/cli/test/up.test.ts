@@ -103,8 +103,10 @@ describe("Up CLI", () => {
     cmd.outputHelp();
     const help = logs.join("");
     expect(help).toContain("Launch a rig or managed app from a spec, library entry, or bundle");
-    expect(help).toContain("Target root directory for package installation");
-    expect(help).toContain("does not change agent cwd");
+    const flat = help.replace(/\s+/g, " ");
+    expect(flat).toContain("Install target for a .rigbundle (default: current directory)");
+    expect(flat).toContain("relative member cwds resolve against it; --cwd still overrides launch cwd");
+    expect(flat).not.toContain("does not change agent cwd");
     expect(help).toContain("--cwd <path>");
     expect(help).toContain("rig up secrets-manager");
   });
@@ -290,6 +292,55 @@ describe("Up CLI", () => {
     });
 
     expect(lastBody.targetRoot).toBe("/tmp/custom-root");
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+  });
+
+  it("up from .rigbundle resolves a relative --target against the client cwd on the local route", async () => {
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/up") {
+        lastBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+      }
+    });
+
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/demo.rigbundle", "--target", "rel/target-root"]);
+    });
+
+    expect(lastBody.targetRoot).toBe(`${process.cwd()}/rel/target-root`);
+
+    server.removeAllListeners("request");
+    for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
+  });
+
+  it("up from .rigbundle with --cwd and no --target keeps the default target and sends --cwd only as cwdOverride", async () => {
+    let lastBody: Record<string, unknown> = {};
+    const origListeners = server.listeners("request");
+    server.removeAllListeners("request");
+    server.on("request", async (req: http.IncomingMessage, res: http.ServerResponse) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      if (req.url === "/api/up") {
+        lastBody = JSON.parse(body);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "completed", runId: "r", rigId: "g", stages: [], errors: [] }));
+      }
+    });
+
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "up", "/tmp/demo.rigbundle", "--cwd", "rel/launch-dir"]);
+    });
+
+    expect(lastBody.targetRoot).toBe(process.cwd());
+    expect(lastBody.cwdOverride).toBe(`${process.cwd()}/rel/launch-dir`);
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
