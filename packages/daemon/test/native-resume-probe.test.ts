@@ -7,6 +7,54 @@ import {
 } from "../src/domain/native-resume-probe.js";
 
 describe("native resume probe", () => {
+  describe("issue116 headerless custom status lines", () => {
+    const reportedFooter = "  5h 71% left · weekly 24% left · GPT-6-Astra high · Context 81% left";
+    it.each(["›", "»"])("recognizes the reported footer below a %s conversation prompt", (prompt) => {
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
+        paneContent: `Restored conversation\n${prompt} Continue\n${reportedFooter}`,
+      })).toMatchObject({ status: "resumed", code: "active_runtime" });
+    });
+    it.each([
+      "  GPT-8-Example medium · /project",
+      "  Context 81% left · gPt-8-Example medium",
+      "  weekly 24% left · GPT-8-Example · Context 81% left",
+    ])("recognizes a delimited model field independently of field order/case: %s", (footer) => {
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
+        paneContent: `› Continue\n${footer}`,
+      }).status).toBe("resumed");
+    });
+    it.each([
+      "› Continue",
+      "› Continue\n  weekly 24% left · Context 81% left",
+      "› Continue\n  Notes · discussing GPT-8-Example medium · more text",
+      "› Continue\n  Notes · gpt-like prose · more text",
+      "› Continue\n  GPT-8-Example medium",
+      reportedFooter,
+      `model: loading\n› Continue\n${reportedFooter}`,
+    ])("does not promote absent, vague or booting corroboration: %s", (paneContent) => {
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent }).status)
+        .toBe("inconclusive");
+    });
+    it.each(["›", "»"])("keeps %s menus blocked with the custom footer", (prompt) => {
+      for (const [panel, code] of [
+        [`${prompt} 1. gpt-8-example\n  2. gpt-8-other`, "model_selection_gate"],
+        [`Do you trust the contents of this directory?\n${prompt} 1. Yes, continue\n  2. No`, "trust_gate"],
+        [`Hooks need review\n${prompt} 1. Trust all and continue\n  2. Cancel`, "hook_trust_gate"],
+      ]) {
+        expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
+          paneContent: `${panel}\n${reportedFooter}`,
+        })).toMatchObject({ status: "inconclusive", code });
+      }
+    });
+    it.each([
+      ["Do you trust the contents of this directory?\n  Yes, continue", "trust_gate"],
+      ["Update available!", "update_gate"],
+    ])("does not let a custom footer dismiss an unresolved gate: %s", (gate, code) => {
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
+        paneContent: `› Earlier conversation prompt\n${gate}\n${reportedFooter}`,
+      })).toMatchObject({ status: "inconclusive", code });
+    });
+  });
   it("accepts a new input prompt after dismissed hook review without requiring another header", () => {
     const paneContent = "OpenAI Codex (v0.153.4)\n1 hook needs review before it can run.\nPress t to trust; esc to go back\n› Ask Codex to do anything\n  gpt-6-astra xhigh · /work";
     expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "node", paneContent }).status).toBe("resumed");
@@ -459,6 +507,30 @@ describe("native resume probe", () => {
           "  gpt-5.4 default · ~/code/openrig",
           "",
           "",
+        ].join("\n"),
+      })
+    ).toEqual({
+      status: "resumed",
+      code: "active_runtime",
+      detail: "Codex is running with an active interactive TUI in the probe pane.",
+    });
+  });
+
+  // Screen-derived regression contributed by Aummadour in PR120.
+  it.each(["codex", "sh"])("classifies a resumed Codex 0.157 TUI with a mixed-case model footer as resumed (pane %s)", (paneCommand) => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "codex",
+        paneCommand,
+        paneContent: [
+          "• Ran echo SHELL-CX-5K2",
+          "  └ SHELL-CX-5K2",
+          "• SHELL-CX-5K2; SKILL-TOKEN-Q7R2; NONCE-CX-8H3",
+          "",
+          "› Ask Codex to do anything",
+          "",
+          "  GPT-5.6-Luna max · ~/project · Recovery",
+          "  ? for shortcuts                                     ⚠ 2 warnings · f2 to view",
         ].join("\n"),
       })
     ).toEqual({

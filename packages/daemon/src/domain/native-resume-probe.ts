@@ -304,7 +304,18 @@ function looksLikeCodexTui(paneContent: string): boolean {
     return hasPrompt && !/^\d+\.\s/.test(text.slice(1).trimStart());
   });
   const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
-  return hasPromptLine && (current.includes("OpenAI Codex (v") || hasModelFooter);
+  // Custom status lines can put the model's display name in any field. Keep
+  // corroboration structural: an indented status row and a whole model field,
+  // not a model mentioned somewhere in conversation prose.
+  // A custom row must not make an unresolved trust/update panel disappear.
+  const hasCustomModelFooter = !looksLikeCodexTrustPrompt(current)
+    && !current.includes("Update available!") && !current.includes("Updating Codex")
+    && recentLines.split("\n").some((line) => {
+      const fields = line.trim().split(" · ");
+      return /^[ \t]{2,}\S/.test(line) && fields.length > 1
+        && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field));
+    });
+  return hasPromptLine && (current.includes("OpenAI Codex (v") || hasModelFooter || hasCustomModelFooter);
 }
 
 // Codex prints these messages when its stored OAuth access token can no
