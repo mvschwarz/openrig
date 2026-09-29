@@ -8,6 +8,48 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.6.1]
+
+- One version-matched agent help guide: `rig context get help`, also available
+  inside the installed package when the CLI cannot run. It links setup, restart,
+  permissions and instance guidance, with a support route at hello@openrig.dev
+  ([#113](https://github.com/mvschwarz/openrig/pull/113)).
+- `rig view show execution --project <catalog-id> --mission <mission>` selects
+  a catalogued project's missions. Thanks to
+  [@dajiaohuang](https://github.com/dajiaohuang)
+  ([#105](https://github.com/mvschwarz/openrig/pull/105)).
+- Recognize the Codex `»` conversation prompt during startup/resume checks,
+  including after a dismissed hook-review panel. Unresolved menus remain gates.
+  Thanks to [@dajiaohuang](https://github.com/dajiaohuang)
+  ([#111](https://github.com/mvschwarz/openrig/pull/111)).
+- Repair the bundled Vault skill's frontmatter and check shipped skill headers
+  ([#115](https://github.com/mvschwarz/openrig/pull/115)); remove historical
+  development evidence from the public source tree
+  ([#118](https://github.com/mvschwarz/openrig/pull/118)) and the retired TUI
+  drivability prototype ([#119](https://github.com/mvschwarz/openrig/pull/119)).
+- Run eight PR test jobs, including the UI suite and one installed queue-durability
+  scenario with an intentional failure control
+  ([#117](https://github.com/mvschwarz/openrig/pull/117)). This does not cover all
+  historical scenarios or every platform.
+- Parse SQLite boot timestamps as UTC on non-UTC hosts so current identity and
+  context readings are compared with the correct generation start time. Thanks
+  to [@Coder8124](https://github.com/Coder8124)
+  ([#124](https://github.com/mvschwarz/openrig/pull/124)).
+- Recognize headerless Codex conversations with custom status-line field order
+  and mixed-case model names ([#125](https://github.com/mvschwarz/openrig/pull/125));
+  thanks to [@Hexgunner69](https://github.com/Hexgunner69) for the report and
+  [@Aummadour](https://github.com/Aummadour) for regression cases. The separate
+  stale restore-warning issue is not fixed by this change.
+- Resolve a linked worktree's Git metadata directories for Codex fresh launches
+  instead of passing its `.git` file as a directory
+  ([#126](https://github.com/mvschwarz/openrig/pull/126)); thanks to
+  [@mgall-ibizdigital](https://github.com/mgall-ibizdigital) for the report and
+  suggested approach.
+
+See [0.6.1 release notes](docs/releases/v0.6.1.md) for changes and compatibility
+limits. Slack manifest/setup assistance and Rig Stream classification remain
+experimental; no new validation of those experiments is claimed.
+
 ## [0.6.0]
 
 - **Breaking:** OpenRig requires Node.js 22 or 24 and uses better-sqlite3 13.
