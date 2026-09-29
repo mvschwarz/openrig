@@ -20,6 +20,7 @@ export interface QueueItem {
   tier?: string | null;
   humanIntent?: "decision" | "update" | null;
   humanDetail?: string | null;
+  replyTo?: string | null;
   summary?: string | null;
   body?: string | null;
   evidenceRef?: string | null;
@@ -87,6 +88,7 @@ function project(q: RepoQueueItem, transition: QueueTransition, entities: readon
     tier: (r.tier as string | null) ?? null,
     humanIntent: q.humanIntent,
     humanDetail: q.humanDetail,
+    replyTo: q.replyTo ?? null,
     summary: (r.summary as string | null) ?? null,
     body: (r.body as string | null) ?? null,
     evidenceRef: (r.evidenceRef as string | null) ?? null,

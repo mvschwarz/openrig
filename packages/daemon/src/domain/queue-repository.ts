@@ -12,6 +12,7 @@ import { lastMeaningfulTransition, readWaitingView, type WaitingView, type Waiti
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
+import { parseReplyToChoice, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
 import { classifyDestination } from "./gateway/destination-resolver.js";
 import {
   computeClosureRequiredAt,
@@ -58,6 +59,23 @@ export function isTerminalState(state: string): boolean {
 export const ACTIVE_QUEUE_STATES = ["pending", "in-progress", "blocked"] as const satisfies readonly QueueState[];
 export function isBlockerLive(state: string): boolean {
   return (ACTIVE_QUEUE_STATES as readonly string[]).includes(state);
+}
+
+/** #96 — a Slack reply routes to the item that owns the thread root, so a later update may
+ *  share that thread only while no reply there could answer a human decision. Deliberately
+ *  BROADER than what makeHumanReplyResolver resolves today (it errs toward refusing): any
+ *  active human-destined decision, or a row blocked on any human-class seat right now. A
+ *  resolved park returns to in-progress; blocked_on alone (which the resolve verb documents
+ *  keeping as provenance) is never a live gate. */
+export function hasLiveHumanGate(item: {
+  humanIntent?: string | null;
+  state: string;
+  destinationSession: string;
+  blockedOn: string | null;
+}): boolean {
+  if (item.humanIntent === "update") return false;
+  if (item.state === "blocked" && item.blockedOn && isHumanSeatSessionRef(item.blockedOn)) return true;
+  return isBlockerLive(item.state) && isHumanSeatSessionRef(item.destinationSession);
 }
 
 const AUTO_UNPARK_WAKE_TAG = "queue:auto-unpark:blocker";
@@ -143,6 +161,11 @@ export interface QueueItem {
   humanIntent?: "decision" | "update" | null;
   /** One authored supplemental thread reply; the body remains a complete brief. */
   humanDetail?: string | null;
+  /** #96 — the earlier qitem whose Slack thread this update posts into; null = own root. */
+  replyTo?: string | null;
+  /** #96 — set on full reads of a replyTo row: why delivery posted top-level instead
+   *  (e.g. `root-missing`), or null when it threaded / has not been delivered. */
+  replyToFallback?: string | null;
   /** Short human-readable subject; null for callers that omit it. */
   summary: string | null;
   /** OPR.0.4.4.19 FR-5 — pointer to the durable artifact a human judges
@@ -185,6 +208,7 @@ interface QueueItemRow {
   body: string;
   human_intent?: "decision" | "update" | null;
   human_detail?: string | null;
+  reply_to?: string | null;
   summary: string | null;
   evidence_ref: string | null;
   closure_reason: string | null;
@@ -242,6 +266,9 @@ export interface QueueCreateInput {
   humanIntent?: "decision" | "update" | null;
   /** Explicit supplemental thread content, never an automatic split of the primary body. */
   humanDetail?: string | null;
+  /** #96 — post this update into the named earlier qitem's Slack thread. Updates only, and
+   *  only when the earlier item has no live human gate (see hasLiveHumanGate). */
+  replyTo?: string | null;
   summary?: string | null;
   /** OPR.0.4.4.19 FR-5 — optional durable-artifact pointer. Persisted when
    *  present; required at the domain layer only for human-routed items. */
@@ -635,10 +662,12 @@ export class QueueRepository {
   private readonly hasTargetRepoColumn: boolean;
   private readonly hasSummaryColumn: boolean;
   private readonly hasHumanIntentColumn: boolean;
+  private readonly hasReplyToColumn: boolean;
   private readonly hasEvidenceRefColumn: boolean;
   private readonly hasMintingGenColumn: boolean;
   private readonly hasClaimedGenColumn: boolean;
   private readonly hasQueueTransitionsTable: boolean;
+  private readonly hasTransitionProvenanceColumn: boolean;
   private readonly hasOwnerNotificationColumns: boolean;
   private readonly loadHumanRegistryFn: () => LoadResult;
   /** OPR.0.4.6.WF3 FR-6 — injected by startup (never imported): the
@@ -693,11 +722,13 @@ export class QueueRepository {
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasHumanIntentColumn = detectQueueColumn(db, "human_intent");
+    this.hasReplyToColumn = detectQueueColumn(db, "reply_to");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
     this.hasQueueTransitionsTable = detectTable(db, "queue_transitions");
     const transitionColumns = this.hasQueueTransitionsTable
       ? new Set((db.prepare("PRAGMA table_info(queue_transitions)").all() as Array<{ name: string }>).map((column) => column.name))
       : new Set<string>();
+    this.hasTransitionProvenanceColumn = transitionColumns.has("identity_provenance");
     this.hasOwnerNotificationColumns = transitionColumns.has("owner_notification_kind")
       && transitionColumns.has("owner_notification_level");
     // GHOST-STAGE (e/Class-B): generation stamps (migration 063). Defensive detect so a pre-063
@@ -1454,6 +1485,7 @@ export class QueueRepository {
       }
       if (!this.hasHumanIntentColumn) throw new QueueRepositoryError("invalid_human_notification", "Human notification fields require the current queue schema; they were not saved.");
     }
+    if (input.replyTo != null) this.validateReplyTo(input.replyTo, input.humanIntent);
     const id = input.qitemId ?? newQitemId();
     const ts = new Date().toISOString();
     const priority = input.priority ?? "routine";
@@ -1490,6 +1522,9 @@ export class QueueRepository {
       this.db.prepare("UPDATE queue_items SET human_intent = ?, human_detail = ? WHERE qitem_id = ?")
         .run(input.humanIntent ?? null, input.humanDetail ?? null, id);
     }
+    if (input.replyTo != null) {
+      this.db.prepare("UPDATE queue_items SET reply_to = ? WHERE qitem_id = ?").run(input.replyTo, id);
+    }
     this.persistMintingGeneration(id, input.sourceSession);
     const notification = this.classifyOwnerNotification({
       action: "create",
@@ -1516,6 +1551,21 @@ export class QueueRepository {
       summary: input.summary ?? null,
     });
     return { qitemId: id, persistedEvent };
+  }
+
+  private validateReplyTo(replyTo: string, humanIntent: QueueCreateInput["humanIntent"]): void {
+    if (humanIntent !== "update") {
+      throw new QueueRepositoryError("reply_to_requires_update", "replyTo is accepted only with humanIntent update; a decision keeps its own thread so its reply stays unambiguous.");
+    }
+    if (!this.hasReplyToColumn) throw new QueueRepositoryError("invalid_human_notification", "replyTo requires the current queue schema; it was not saved.");
+    const ref = this.getById(replyTo);
+    if (!ref) throw new QueueRepositoryError("reply_to_not_found", `replyTo names no qitem on this host: ${replyTo}.`);
+    if (hasLiveHumanGate(ref)) {
+      throw new QueueRepositoryError(
+        "reply_to_open_decision",
+        `qitem ${replyTo} is still waiting on a human decision ('${ref.state}'); a reply under this update would answer that decision. Post the update without replyTo, or after the decision is made.`,
+      );
+    }
   }
 
   /**
@@ -2971,7 +3021,37 @@ export class QueueRepository {
       ...item,
       deliveryOutcome: ledger?.outcome ?? null,
       ...(ledger && ledger.outcome !== "posted" ? { deliveryFailureDetail: ledger.detail } : {}),
+      ...(item.replyTo ? { replyToFallback: this.replyToFallbackFor(item.qitemId) } : {}),
     };
+  }
+
+  /** #96 — the thread choice the daemon recorded before this replyTo update's first post;
+   *  null = not yet chosen. Only an in-process daemon write counts: any HTTP write carries an
+   *  identity provenance (and its actor is caller-asserted), so a note from there could forge
+   *  a thread and is ignored. */
+  replyToChoiceFor(qitemId: string): ReplyToChoice | null {
+    for (const t of this.transitionLog.listForQitem(qitemId).reverse()) {
+      if (t.actorSession !== REPLY_TO_CHOICE_ACTOR || t.identityProvenance !== null) continue;
+      const choice = parseReplyToChoice(t.transitionNote ?? "");
+      if (choice) return choice;
+    }
+    return null;
+  }
+
+  /** #96 — whether some update recorded this Slack root as the thread it posts into. Such a
+   *  root is shared: its owner's next decision must not reuse it (see slack-subsystem). */
+  isReplyToThread(threadTs: string): boolean {
+    if (!this.hasQueueTransitionsTable) return false;
+    // Same trust rule as replyToChoiceFor: a pre-provenance schema reads every row as null.
+    const provenance = this.hasTransitionProvenanceColumn ? " AND identity_provenance IS NULL" : "";
+    return this.db.prepare(
+      `SELECT 1 FROM queue_transitions WHERE transition_note = ? AND actor_session = ?${provenance} LIMIT 1`,
+    ).get(formatReplyToChoice({ kind: "thread", threadTs }), REPLY_TO_CHOICE_ACTOR) !== undefined;
+  }
+
+  private replyToFallbackFor(qitemId: string): string | null {
+    const choice = this.replyToChoiceFor(qitemId);
+    return choice?.kind === "fallback" ? describeReplyToFallback(choice) : null;
   }
 
   list(opts?: QueueListOptions): QueueItem[] {
@@ -3557,6 +3637,7 @@ export class QueueRepository {
       evidenceRef: row.evidence_ref ?? null,
       humanIntent: row.human_intent ?? null,
       humanDetail: row.human_detail ?? null,
+      replyTo: row.reply_to ?? null,
       closureReason: row.closure_reason as ClosureReason | null,
       closureTarget: row.closure_target,
       closureRequiredAt: row.closure_required_at,

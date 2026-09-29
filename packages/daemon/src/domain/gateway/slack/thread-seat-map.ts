@@ -95,6 +95,15 @@ export class ThreadSeatMap {
     return row ? project(row) : null;
   }
 
+  /** #96: the root a conversation opened, open OR closed (the caller decides whether a
+   *  closed root may be reused), newest first; null = the conversation never posted a root. */
+  resolveByConversation(conversationId: string): ThreadMapping | null {
+    const row = this.db
+      .prepare(`SELECT * FROM thread_seat_map WHERE conversation_id = ? ORDER BY opened_at DESC LIMIT 1`)
+      .get(conversationId) as Record<string, unknown> | undefined;
+    return row ? project(row) : null;
+  }
+
   close(threadTs: string): void {
     this.db
       .prepare(`UPDATE thread_seat_map SET state = 'closed', closed_at = ? WHERE thread_ts = ?`)

@@ -39,6 +39,8 @@ export interface VerifiedDeliveryResult {
   connectorAccepted: boolean | null;
   /** A connector receipt can never prove that a person read the message. */
   humanReadership: "unknown";
+  /** #96: present for a --reply-to update once posted; false = it posted top-level instead. */
+  threaded?: boolean;
   detail?: string;
   nextAction: string | null;
 }
@@ -59,7 +61,17 @@ export async function waitForDeliveryOutcome(
       if (response.status !== 200) throw new Error(`receipt lookup returned HTTP ${response.status}`);
       const outcome = response.data.deliveryOutcome;
       if (outcome === "posted") {
-        return { outcome, connectorAccepted: true, humanReadership: "unknown", nextAction: null };
+        // #96: a --reply-to update reports whether it joined the earlier item's thread.
+        const replyTo = typeof response.data.replyTo === "string" ? response.data.replyTo : null;
+        const fallback = typeof response.data.replyToFallback === "string" ? response.data.replyToFallback : null;
+        return {
+          outcome,
+          connectorAccepted: true,
+          humanReadership: "unknown",
+          ...(replyTo ? { threaded: fallback === null } : {}),
+          ...(replyTo && fallback ? { detail: `posted as a new top-level message, not in ${replyTo}'s thread: ${fallback}` } : {}),
+          nextAction: null,
+        };
       }
       if (outcome === "transport-failed" || outcome === "never-posted") {
         return {
@@ -414,6 +426,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--summary <text>", "Short human-readable subject, shown in the needs-you view. For a human destination, --body-file is the complete decision brief or update; keep technical continuation in the owning agent row and evidence.")
     .option("--human-intent <intent>", "decision (default) or update: a quiet informational delivery, never an approval request")
     .option("--human-detail-file <path>", "One explicitly authored supplemental thread reply; keep the complete action/options in --body-file")
+    .option("--reply-to <qitemId>", "Post this update into an earlier qitem's Slack thread (requires --human-intent update; refused while that qitem is a decision still waiting on the human)")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
@@ -436,6 +449,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       targetRepo?: string;
       humanIntent?: string;
       humanDetailFile?: string;
+      replyTo?: string;
       summary?: string;
       evidenceRef?: string;
       host?: string;
@@ -469,6 +483,15 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           emitBodyResolveError(err as Error & { fact?: string; consequence?: string; action?: string }, opts.json ?? false);
           return;
         }
+      }
+      // #96: a thread root routes replies to the item that opened it, so only an update
+      // (which never takes a reply) may join another item's thread. Fail before the daemon.
+      if (opts.replyTo !== undefined && opts.humanIntent !== "update") {
+        const message = "reply_to_requires_update: --reply-to is accepted only with --human-intent update; a decision keeps its own thread so its reply stays unambiguous.";
+        if (opts.json) console.error(JSON.stringify({ error: "reply_to_requires_update", message }));
+        else console.error(message);
+        process.exitCode = 1;
+        return;
       }
       // OPR.0.4.1.18 (FR-7, warn-then-require grace): a summary SHOULD accompany
       // every new qitem (it feeds the Story node + helps humans skim). Warn — to
@@ -523,6 +546,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           body: resolvedBody,
           humanIntent: opts.humanIntent,
           humanDetail: opts.humanDetailFile ? await resolveQueueBody({ bodyFile: opts.humanDetailFile }) : undefined,
+          replyTo: opts.replyTo,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           priority: opts.priority,

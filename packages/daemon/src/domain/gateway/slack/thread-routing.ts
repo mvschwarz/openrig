@@ -41,11 +41,16 @@ export function makeThreadRouteResolver(opts: {
         // (The interim self-host localizer from the L2 first pass was deleted with the root
         // stamping; historical triple rows are the operator adoption's one-time cleanup.)
         const routeClass = mapping.state === "closed" ? "closed-thread" : "existing-thread";
-        log(`inbound routed thread_ts=${threadTs} -> ${mapping.seat} (${routeClass})`);
+        // #96: once an update shares a root, its owner's next decision posts a fresh root. A reply
+        // still arriving in the OLDER root lands on the seat as a message but answers nothing:
+        // only the conversation's newest root correlates to its current human gate.
+        const newest = opts.map.resolveByConversation(mapping.conversationId);
+        const current = !newest || newest.threadTs === threadTs;
+        log(`inbound routed thread_ts=${threadTs} -> ${mapping.seat} (${routeClass}${current ? "" : ", superseded root: no gate correlation"})`);
         return {
           destination: mapping.seat,
           tags: [...BASE_TAGS, "thread", `reply-to:${mapping.conversationId}`],
-          correlationQitemId: mapping.conversationId,
+          ...(current ? { correlationQitemId: mapping.conversationId } : {}),
           routeClass,
         };
       }

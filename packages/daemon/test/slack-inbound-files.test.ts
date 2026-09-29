@@ -70,6 +70,7 @@ function harness(opts?: {
   });
   const threadMap = {
     resolveByThread: (threadTs: string) => (opts?.mapped?.[threadTs] ? { seat: opts.mapped[threadTs]!, state: "open" } : null),
+    resolveByConversation: () => null,
   } as never;
   const router = new InboundRouter({
     queue: { createQitem: async (input: Landed) => { rows.push(input); return `qitem-f-${rows.length}`; } },
