@@ -45,7 +45,7 @@ function buildApp(queueRepo: QueueRepository, bearerToken: string | null, humanR
     c.set("queueRepo" as never, queueRepo);
     await next();
   });
-  app.route("/api/hosts", hostsRoutes({ bearerToken, humanRegistry }));
+  app.route("/api/hosts", hostsRoutes({ bearerToken, humanRegistry, allowPrivateTargets: true }));
   return app;
 }
 

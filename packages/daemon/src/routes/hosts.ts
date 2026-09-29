@@ -72,12 +72,26 @@ interface ClientPair {
 // field on the add body is rejected loudly BEFORE any write.
 const SECRET_SHAPED_FIELDS = ["bearer_value", "bearer_token", "token", "secret", "password"];
 
+
+// SSRF guard: reject private/reserved/link-local addresses before any outbound
+// fetch(). The daemon should never pair with a cloud-metadata, loopback, or
+// RFC-1918 address — those are never legitimate remote daemon endpoints.
+const PRIVATE_HOST_PATTERNS: RegExp[] = [
+  /^127\./, /^10\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./,
+  /^169\.254\./, /^0\./, /^::1$/, /^fc00:/i, /^fd/i, /^fe80:/i,
+];
+
+function isPrivateOrReservedHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase();
+  if (lower === "localhost" || lower.endsWith(".local") || lower.endsWith(".internal")) return true;
+  return PRIVATE_HOST_PATTERNS.some((r) => r.test(lower));
+}
 function deriveHostId(url: URL): string {
   const raw = url.hostname.toLowerCase().replace(/[^a-z0-9.-]/g, "-").replace(/\./g, "-");
   return raw.replace(/^-+|-+$/g, "") || "paired-host";
 }
 
-export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?: () => LoadResult }): Hono {
+export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?: () => LoadResult; allowPrivateTargets?: boolean }): Hono {
   const router = new Hono();
   const bearerToken = opts?.bearerToken ?? null;
   const issued = new Map<string, IssuedPair>();
@@ -254,6 +268,16 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       return c.json({ error: "pair_url_invalid", message: `'${rawUrl}' is not a usable address` }, 400);
     }
     const targetBase = target.origin;
+
+    // SSRF guard: reject private/reserved/link-local targets before any outbound
+    // request. A pairing target is always a remote daemon — never a cloud-metadata
+    // endpoint, loopback service, or RFC-1918 address.
+    if (!opts?.allowPrivateTargets && isPrivateOrReservedHost(target.hostname)) {
+      return c.json({
+        error: "pair_target_private",
+        message: `target '${target.hostname}' is a private or reserved address; pairing targets must be reachable remote daemons, not internal/cloud-metadata endpoints.`,
+      }, 400);
+    }
 
     // B1 fixback (guard code-review 2026-07-07): PREFLIGHT before the
     // target is contacted. The candidate entry runs the SAME validation
