@@ -488,7 +488,11 @@ export class TmuxAdapter {
    * A shell that never consumes the invocation leaves the file for diagnosis.
    */
   async sendShellCommand(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
-    return this.guardedInput(target, pane => this.sendShellCommandUnchecked(pane, command, beforeInput));
+    // Keep the managed selector for nested paste/Enter checks. A resolved pane
+    // ID can also occur in detached bindings after a tmux restart; resolving it
+    // again would lose the unambiguous session/node and its existing lease.
+    // Each nested write still validates the lease and targets its observed pane.
+    return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput));
   }
 
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
