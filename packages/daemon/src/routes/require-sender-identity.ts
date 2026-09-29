@@ -43,6 +43,11 @@ export const ORIGIN_UNKNOWN_HEADER = "x-openrig-origin-unknown";
  * canonical seat. A FOREIGN host qualifier is a genuine cross-host origin and is preserved verbatim; an
  * unqualified name, a pre-boot (null) self id, or a shape that is not member@rig@host is unchanged.
  * Case-sensitive, matching resolvesToLocalHost.
+ *
+ * Scope: this canonicalizes the SENDER only. The CLI cannot fix it at the source, because a slow or
+ * failed locality probe is precisely the case where the CLI knows least; the daemon knows its own id.
+ * Destinations are deliberately untouched: a self-suffixed destination still refuses with the C4
+ * teaching (destinationRigTeaching in queue-repository.ts) and is never auto-stripped here.
  */
 export function canonicalSenderSession(session: string, selfId: string | null = getSelfHostId()): string {
   if (!selfId) return session;
