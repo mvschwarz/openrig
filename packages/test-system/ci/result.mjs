@@ -22,9 +22,13 @@ export function verifyRun(mode, exitCode, report) {
     assert.equal(report.fault?.after, 'pending');
     assert.equal(report.result.verdict, 'FAIL');
     assert.equal(report.result.failedStep, 3); // the queue read AFTER restart
-    assert.match(report.result.diff, /baton-1/);
-    assert.match(report.result.diff, /in-progress/);
-    assert.match(report.result.diff, /pending/);
+    const observation = report.result.observation;
+    assert.equal(observation?.surface, 'queue');
+    assert.ok(Array.isArray(observation.value));
+    const baton = observation.value.filter(row => row?.qitemId === 'baton-1');
+    assert.equal(baton.length, 1);
+    assert.equal(baton[0].destinationSession, 'dev-worker@scn-baton');
+    assert.equal(baton[0].state, 'pending');
   }
 }
 

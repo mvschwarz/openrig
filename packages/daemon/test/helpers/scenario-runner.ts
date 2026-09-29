@@ -50,6 +50,7 @@ export interface RunScenarioResult {
   /** 0-based index of the failing step (FAIL only). */
   failedStep?: number;
   diff?: string;
+  observation?: RunRecord["observation"];
 }
 
 const DURATION_RE = /^(\d+)(ms|s|m|h)?$/;
@@ -78,8 +79,8 @@ export async function runValidatedScenario(
     const value = step[verb];
 
     if (verb === "expect") {
-      const failDiff = await runExpect(value as Record<string, unknown>, deps);
-      if (failDiff !== null) return fail(scenario.scenario, i, failDiff, deps);
+      const failure = await runExpect(value as Record<string, unknown>, deps);
+      if (failure !== null) return fail(scenario.scenario, i, failure.diff, deps, failure.observation);
       continue;
     }
 
@@ -96,11 +97,11 @@ export async function runValidatedScenario(
   return { scenario: scenario.scenario, verdict: "PASS" };
 }
 
-/** Execute one `expect`. Returns null on match, or the DIFF string on failure. */
+/** Execute one `expect`, retaining the actual failed read alongside its DIFF. */
 async function runExpect(
   exp: Record<string, unknown>,
   deps: ScenarioRunnerDeps,
-): Promise<string | null> {
+): Promise<{ diff: string; observation?: RunRecord["observation"] } | null> {
   const surface = exp.surface as ExpectSurface;
   const seat = exp.seat as string | undefined;
   const withinMs = exp.within !== undefined ? parseDuration(String(exp.within)) : deps.defaults.withinMs;
@@ -108,7 +109,8 @@ async function runExpect(
 
   // `equals` compares MULTIPLE surfaces after normalization — a distinct shape.
   if ("equals" in exp) {
-    return runEqualsExpect(exp.equals, { withinMs, pollIntervalMs }, deps);
+    const diff = await runEqualsExpect(exp.equals, { withinMs, pollIntervalMs }, deps);
+    return diff === null ? null : { diff };
   }
 
   const { predicate, expected } = buildSingleSurfacePredicate(exp);
@@ -121,7 +123,7 @@ async function runExpect(
     now: deps.now,
     sleep: deps.sleep,
   });
-  return res.ok ? null : res.diff;
+  return res.ok ? null : { diff: res.diff, observation: { surface, value: res.lastObserved } };
 }
 
 function buildSingleSurfacePredicate(exp: Record<string, unknown>): {
@@ -192,8 +194,10 @@ function fail(
   failedStep: number,
   diff: string,
   deps: ScenarioRunnerDeps,
+  observation?: RunRecord["observation"],
 ): RunScenarioResult {
-  const rec: RunRecord = { scenario, verdict: "FAIL", failedStep, diff };
+  const observed = observation === undefined ? {} : { observation };
+  const rec: RunRecord = { scenario, verdict: "FAIL", failedStep, diff, ...observed };
   deps.appendRecord?.(rec);
-  return { scenario, verdict: "FAIL", failedStep, diff };
+  return { scenario, verdict: "FAIL", failedStep, diff, ...observed };
 }

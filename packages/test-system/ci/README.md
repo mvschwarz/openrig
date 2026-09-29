@@ -17,8 +17,10 @@ No second scenario engine or synthetic CLI replaces the product.
    assertion and a confirmed daemon stop, the test changes exactly one scratch DB
    row from `in-progress` to `pending`. The unchanged post-restart assertion must
    fail (step 3). The raw container exits 1; the CI wrapper accepts only that
-   specific failure, with the injection receipt and runner ledger. Startup errors,
-   timeouts, other failures, or a surviving fault fail the job.
+   specific failure, with the injection receipt and runner ledger. The actual
+   post-restart queue observation must contain `baton-1`, addressed to
+   `dev-worker@scn-baton`, in `pending` state; words in the diff do not qualify.
+   Startup errors, timeouts, other failures, or a surviving fault fail the job.
 3. **Healthy again:** another fresh container with fault injection disabled must
    pass the same scenario. All three logs are retained separately.
 
@@ -40,8 +42,9 @@ The CI layer bundles the existing TypeScript helpers with the lockfile's esbuild
 it needs no development install inside the runtime container. Fixture files travel
 unchanged. Logs, the bundle input map, build manifest and image identity are saved
 as `installed-scenario-evidence`, including on failure. The raw result records the
-scenario SHA256, verdict, failing step/diff and injection receipt. The pure
-`scripts/pr-scenarios.test.mjs` controls validate result admission only; they are
+scenario SHA256, verdict, failing step/diff, structured last observation and
+injection receipt. The pure `scripts/pr-scenarios.test.mjs` controls validate result
+admission only; they are
 **not** a substitute for the three actual container runs.
 
 ## Remaining authored scenarios

@@ -8,6 +8,7 @@
  */
 
 import { appendFileSync, readFileSync } from "node:fs";
+import type { ExpectSurface } from "./scenario-schema.js";
 
 export interface RunRecord {
   /** The scenario name (its defect class). */
@@ -17,6 +18,8 @@ export interface RunRecord {
   failedStep?: number;
   /** The expected-vs-last-observed DIFF (FAIL only). */
   diff?: string;
+  /** Actual last read of a failed single-surface expect, separate from its DIFF. */
+  observation?: { surface: ExpectSurface; value: unknown };
   /** Caller-supplied timestamp (injectable — the runner passes a clock value). */
   at?: string;
   /** Wall-clock-independent run duration in ms, if the caller measured one. */

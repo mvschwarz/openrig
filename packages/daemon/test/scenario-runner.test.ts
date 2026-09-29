@@ -78,12 +78,14 @@ describe("runValidatedScenario", () => {
     expect(r.failedStep).toBe(1);
     expect(r.diff).toContain("in-progress");
     expect(r.diff).toContain("pending");
+    expect(r.observation).toEqual({ surface: "queue", value: { state: "pending" } });
     // stopped before `down`
     expect((deps.runAction as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0])).toEqual(["up"]);
     const rec = deps.records.at(-1)!;
     expect(rec.verdict).toBe("FAIL");
     expect(rec.failedStep).toBe(1);
     expect(rec.diff).toContain("pending");
+    expect(rec).toEqual(r);
   });
 
   it("FAILs when an action returns a non-zero exit", async () => {

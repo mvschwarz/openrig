@@ -10,6 +10,9 @@ const green = report('healthy', { scenario: SCENARIO, verdict: 'PASS' });
 const red = report('lost-baton', {
   scenario: SCENARIO, verdict: 'FAIL', failedStep: 3,
   diff: 'expected baton-1 in-progress; last observed baton-1 pending',
+  observation: { surface: 'queue', value: [
+    { qitemId: 'baton-1', state: 'pending', destinationSession: 'dev-worker@scn-baton' },
+  ] },
 }, { changedRows: 1, before: 'in-progress', after: 'pending' });
 
 test('accepts a healthy run and a specifically observed post-restart lost baton', () => {
@@ -27,8 +30,27 @@ test('refuses timeout, setup error, missing injection, or an unrelated failing a
   assert.throws(() => verifyRun('lost-baton', 1, { ...red, error: 'startup failed' }));
   assert.throws(() => verifyRun('lost-baton', 1, { ...red, fault: null }));
   assert.throws(() => verifyRun('lost-baton', 1, report('lost-baton', {
-    ...red.result, diff: 'HTTP transport failed',
+    ...red.result, observation: undefined, diff: 'HTTP transport failed',
   }, red.fault)));
+});
+test('requires the actual baton state and destination, never tokens in a diff or body', () => {
+  const baton = red.result.observation.value[0];
+  for (const observation of [
+    undefined,
+    { surface: 'pane', value: [baton] },
+    { surface: 'queue', value: 'baton-1 pending dev-worker@scn-baton' },
+    { surface: 'queue', value: [{ ...baton, qitemId: 'other-row' }] },
+    { surface: 'queue', value: [{ ...baton, state: 'done', body: 'pending' }] },
+    { surface: 'queue', value: [{ ...baton, destinationSession: 'other@scn-baton' }] },
+    { surface: 'queue', value: [baton, { ...baton, state: 'done' }] },
+  ]) {
+    assert.throws(() => verifyRun('lost-baton', 1, report('lost-baton', {
+      ...red.result, observation,
+    }, red.fault)));
+  }
+  verifyRun('lost-baton', 1, report('lost-baton', {
+    ...red.result, diff: 'human-readable formatting is not the admission contract',
+  }, red.fault));
 });
 test('requires the actual runner ledger to agree with the returned result', () => {
   assert.throws(() => verifyRun('healthy', 0, { ...green, records: [] }));

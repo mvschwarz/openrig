@@ -33,6 +33,7 @@ jobs:
       - run: npm run build
       - name: Record the published file list of each package
         run: |
+          set -euo pipefail
           mkdir -p pack-lists
           for p in cli daemon tui; do
             (cd packages/$p && npm pack --dry-run --json --ignore-scripts) \
