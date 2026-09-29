@@ -2106,6 +2106,40 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("reports attention_required when a fresh pod-aware launch has no startup context", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-no-startup-context", rig.id, "Dev");
+    const node = rigRepo.addNode(rig.id, "dev.design", { runtime: "claude-code", podId: "pod-no-startup-context" });
+    const session = sessionRegistry.registerSession(node.id, "dev-design@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+    sessionRegistry.updateStatus(session.id, "exited");
+    db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+    const mockAdapter = {
+      runtime: "claude-code",
+      listInstalled: vi.fn(async () => []),
+      project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+      checkReady: vi.fn(async () => ({ ready: true })),
+      launchHarness: vi.fn(async () => ({ ok: true as const })),
+    };
+    const result = await createOrchestrator().restore(snap.id, {
+      adapters: { "claude-code": mockAdapter },
+      freshLogicalIds: [node.logicalId],
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      const nodeResult = result.result.nodes.find((candidate) => candidate.nodeId === node.id);
+      expect(nodeResult).toMatchObject({
+        status: "attention_required",
+        error: "Harness not started: no startup context for dev.design.",
+      });
+      expect(mockAdapter.launchHarness).not.toHaveBeenCalled();
+    }
+  });
+
   // Updated by codex-auth-refusal-attention-required slice (revision 2):
   // pod-aware nodes whose StartupOrchestrator returns
   // `startupStatus: "attention_required"` (any attention-required readiness

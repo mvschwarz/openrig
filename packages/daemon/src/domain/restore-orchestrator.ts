@@ -1275,10 +1275,29 @@ export class RestoreOrchestrator {
     // phase, where its durability primitives live. Deliberate fresh-primed
     // launches are new histories and keep their replay.
     const replayContained = resumeRequested && !!resumeToken;
+    const startupCtx = data.nodeStartupContext?.[node.id] ?? null;
+    const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
+    const startupAdapter = startupRuntime ? opts?.adapters?.[startupRuntime] : undefined;
+
+    // A new pod-aware agent needs a startup context to run StartupOrchestrator.
+    // Do not report a healthy fresh-primed result when that context or adapter
+    // is missing; the pane would contain only a shell with no runtime process.
+    if (
+      isPodAware
+      && launchResult
+      && baseStatus !== "resumed"
+      && startupRuntime !== null
+      && startupRuntime !== "terminal"
+      && (!startupCtx || !startupAdapter)
+    ) {
+      const cause = startupCtx ? `no ${startupRuntime} runtime adapter` : "no startup context";
+      const error = `Harness not started: ${cause} for ${node.logicalId}.`;
+      warnings?.push(`Restore: ${error}`);
+      return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error };
+    }
 
     // Attempt restore-safe startup replay if context available
     if (data.nodeStartupContext && opts?.adapters && launchResult) {
-      const startupCtx = data.nodeStartupContext[node.id];
       if (startupCtx) {
         const adapter = opts.adapters[startupCtx.runtime];
         if (adapter) {
