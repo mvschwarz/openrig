@@ -1,7 +1,7 @@
 # RigBundle Reference
 
 Version: 2 (pod-aware)
-Last validated against code: 2026-04-11
+Last validated against code: 2026-09-29 (install paths and `--target` only; other sections last checked 2026-04-11)
 Source of truth: `packages/daemon/src/domain/bundle-types.ts`, `packages/daemon/src/domain/bundle-archive.ts`, `packages/daemon/src/domain/pod-bundle-assembler.ts`
 
 A `.rigbundle` is a self-contained distributable archive that packages a rig spec, all referenced agent specs, their resources (skills, guidance, startup files), culture file, documentation, and an integrity manifest into a single file. The recipient can install and launch the rig without needing the original source tree.
@@ -180,6 +180,13 @@ If any check fails, extraction is aborted and an error is thrown.
 
 ## CLI Surface
 
+### Paths
+
+`rig bundle create`, `inspect` and `install` resolve every path you give them (`<spec-path>`, `-o`, `--rig-root`,
+`<bundle-path>`, `--target`) to an absolute path against **your** current directory before sending the request. The
+daemon then reads and writes those paths on **its own host**: nothing is uploaded, so the files must already exist
+where the daemon runs.
+
 ### Create a bundle
 
 ```bash
@@ -211,7 +218,7 @@ The create command:
 rig bundle inspect <bundle-path> [--json]
 ```
 
-Shows the manifest, digest validity, and integrity verification result. Inspect extracts the archive into a temporary directory for safe validation, then cleans that directory up. It does not install the bundle.
+Shows the manifest, digest validity, and integrity verification result. Inspect extracts the archive into a temporary directory for safe validation, then cleans that directory up. It does not install or launch anything.
 
 ### Install a bundle
 
@@ -222,12 +229,20 @@ rig bundle install <bundle-path> [--plan] [--yes] [--target <root>] [--json]
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
 | `<bundle-path>` | yes | — | Path to the `.rigbundle` file. |
-| `--plan` | no | `false` | Preview the bootstrap plan without installing or launching. |
+| `--plan` | no | `false` | Preview without installing or launching. Not side-effect free: it runs the preflight, which executes the members' runtime `--version` probes, and it records a bootstrap run. It writes nothing to the target. |
 | `--yes` | no | `false` | Auto-approve trusted actions during apply mode. |
-| `--target <root>` | yes in apply mode | — | Target root directory for package installation. Required unless `--plan` is used. |
+| `--target <root>` | yes in apply mode | — | Directory the bundle is installed into and launched from. Required unless `--plan` is used. |
 | `--json` | no | `false` | Emit machine-readable JSON. |
 
-Extracts the bundle, validates integrity, and bootstraps the rig. In apply mode, the daemon requires `targetRoot`, so `rig bundle install` must be given `--target <root>` unless you are running with `--plan`.
+Install **launches the rig**; it does not just unpack it. It extracts the bundle to a temporary directory, validates integrity, and bootstraps the rig. In apply mode, the daemon requires `targetRoot`, so `rig bundle install` must be given `--target <root>` unless you are running with `--plan`.
+
+For a pod-aware (schema version 2) bundle, apply copies the extracted contents (`bundle.yaml`, `rig.yaml`, `agents/`, culture and docs files) into the target and launches from there, then removes the temporary extraction. So:
+
+- the target becomes the rig root: `agent_ref` paths resolve inside it, and a member with `cwd: "."` (or no `cwd`) starts in the target;
+- an absolute member `cwd` stays as authored, and `rig up --cwd <dir>` still overrides every member's cwd;
+- if the target already has a file with **different** content at any bundle path (for example its own `rig.yaml`), install refuses with `target_conflict` and writes nothing. Identical files are accepted, so reinstalling the same bundle into the same target works. Use an empty or dedicated directory as the target.
+
+Legacy (schema version 1) bundles keep their old behavior: `--target` is only where packages are installed.
 
 ### Launch directly
 
@@ -237,8 +252,9 @@ rig up <bundle-path> [--target <root>] [--cwd <dir>]
 
 `rig up` auto-detects `.rigbundle` files and routes them through the bundle bootstrap path.
 
-- `--target <root>` controls where packaged files are installed
-- if `--target` is omitted for a `.rigbundle`, the CLI defaults the install target to the current working directory
+- `--target <root>` is the install target described above (for a schema-version-2 bundle, the directory the bundle is copied into and launched from)
+- if `--target` is omitted for a `.rigbundle`, the CLI defaults the install target to the current working directory, so the bundle's files are written there
+- `rig up` sends `--target` as given; pass an absolute path, because a relative one is resolved against the daemon's cwd
 - `--cwd <dir>` does **not** change the install target; it only overrides the launched members' working directory for that run
 
 ---
@@ -364,4 +380,4 @@ Equivalent explicit form:
 rig up /path/to/my-team.rigbundle --target ~/projects/my-project
 ```
 
-The bundle is extracted to a temporary directory, integrity is verified, packaged files are installed into the target root, and the rig is bootstrapped with all agents and resources from the bundle. If you also want agents to launch with a different working directory for that run, pass `--cwd <dir>` separately.
+The bundle is extracted to a temporary directory and its integrity is verified. A schema-version-2 bundle is then copied into the target root (refused if the target holds different files at the same paths) and the rig is launched from there, with all agents and resources from the bundle. If you also want agents to launch with a different working directory for that run, pass `--cwd <dir>` separately.

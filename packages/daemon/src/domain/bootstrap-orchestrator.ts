@@ -15,7 +15,7 @@ import { resolvePackage, type ResolveResult } from "./package-resolve-helper.js"
 import type { BootstrapStatus } from "./bootstrap-types.js";
 // TODO: AS-T12 — migrate to pod-aware bundle source resolver
 import type { LegacyBundleSourceResolver as BundleSourceResolver, BundleResolvedSource } from "./bundle-source-resolver.js";
-import type { PodBundleSourceResolver } from "./bundle-source-resolver.js";
+import { materializePodBundle, type PodBundleSourceResolver } from "./bundle-source-resolver.js";
 import { unpack } from "./bundle-archive.js";
 import { parsePodBundleManifest } from "./bundle-types.js";
 import os from "node:os";
@@ -170,6 +170,24 @@ export class BootstrapOrchestrator {
                 return { runId: run.id, status: "failed" as BootstrapStatus, stages, errors, warnings };
               }
             } catch { /* YAML parse failure — let handlePodAwareSpec deal with it */ }
+
+            // Apply with an explicit target: launch from a copy of the bundle in the
+            // target, not from the temp extraction removed in the finally below —
+            // otherwise `cwd: "."`, the spec dir and agent refs point at a deleted dir.
+            if (opts.mode === "apply" && opts.targetRoot) {
+              const targetRoot = nodePath.resolve(opts.targetRoot);
+              const materialized = materializePodBundle(podSource.tempDir, targetRoot);
+              if (!materialized.ok) {
+                const shown = materialized.conflicts.slice(0, 10).join(", ");
+                const more = materialized.conflicts.length > 10 ? ` (and ${materialized.conflicts.length - 10} more)` : "";
+                const msg = `Install target ${targetRoot} already has different content at bundle path(s): ${shown}${more}. Nothing was written. Choose an empty or dedicated --target directory.`;
+                stages.push({ stage: "resolve_spec", status: "failed", detail: { code: "target_conflict", error: msg, conflicts: materialized.conflicts } });
+                errors.push(msg);
+                this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+                return { runId: run.id, status: "failed" as BootstrapStatus, stages, errors, warnings };
+              }
+              specDir = nodePath.dirname(nodePath.join(targetRoot, podSource.manifest.rigSpec));
+            }
 
             return await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings);
           } finally {

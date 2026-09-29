@@ -194,3 +194,53 @@ export class PodBundleSourceResolver {
     }
   }
 }
+
+/**
+ * Copy an extracted (already verified) pod bundle into a stable target root so
+ * the rig launched from it keeps a live spec dir, agent refs and `cwd: "."`
+ * after the temp extraction is removed.
+ *
+ * Refuses — writing nothing — when any bundle file would land on a path in the
+ * target that holds different content (or a directory). Identical files are
+ * left as they are, so re-installing the same bundle into the same target works.
+ */
+export function materializePodBundle(
+  extractedDir: string,
+  targetRoot: string,
+): { ok: true } | { ok: false; conflicts: string[] } {
+  const files: string[] = [];
+  (function walk(dir: string, prefix: string) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const rel = prefix ? nodePath.join(prefix, entry.name) : entry.name;
+      if (entry.isDirectory()) walk(nodePath.join(dir, entry.name), rel);
+      else if (entry.isFile()) files.push(rel);
+    }
+  })(extractedDir, "");
+
+  const conflicts = new Set<string>();
+  for (const rel of files) {
+    const dest = nodePath.join(targetRoot, rel);
+    const stat = fs.statSync(dest, { throwIfNoEntry: false });
+    if (!stat) {
+      // A missing file is fine unless the nearest existing parent is not a directory.
+      let parent = nodePath.dirname(dest);
+      while (parent.length > targetRoot.length && !fs.existsSync(parent)) parent = nodePath.dirname(parent);
+      if (parent.length > targetRoot.length && !fs.statSync(parent).isDirectory()) {
+        conflicts.add(nodePath.relative(targetRoot, parent));
+      }
+      continue;
+    }
+    if (!stat.isFile() || !fs.readFileSync(dest).equals(fs.readFileSync(nodePath.join(extractedDir, rel)))) {
+      conflicts.add(rel);
+    }
+  }
+  if (conflicts.size > 0) return { ok: false, conflicts: [...conflicts] };
+
+  for (const rel of files) {
+    const dest = nodePath.join(targetRoot, rel);
+    if (fs.existsSync(dest)) continue;
+    fs.mkdirSync(nodePath.dirname(dest), { recursive: true });
+    fs.copyFileSync(nodePath.join(extractedDir, rel), dest);
+  }
+  return { ok: true };
+}

@@ -85,8 +85,10 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       // bundle sizes; if a bundle author hits this, the daemon-side
       // operation is async-completable in a future /bundles/jobs/<id>
       // surface (not in slice-05 scope).
+      // Paths are resolved here, against the operator's cwd: the daemon would otherwise resolve
+      // them against ITS cwd. Nothing is uploaded — the files must exist on the daemon's host.
       const res = await client.post<Record<string, unknown>>("/api/bundles/create", {
-        specPath: spec, bundleName: opts.name, bundleVersion: opts.bundleVersion, outputPath: opts.output,
+        specPath: nodePath.resolve(spec), bundleName: opts.name, bundleVersion: opts.bundleVersion, outputPath: nodePath.resolve(opts.output),
         includePackages: opts.includePackages,
         rigRoot: opts.rigRoot ? nodePath.resolve(opts.rigRoot) : undefined,
         provenance: buildClientProvenance(opts.notes),
@@ -117,7 +119,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
 
-      const res = await client.post<Record<string, unknown>>("/api/bundles/inspect", { bundlePath });
+      const res = await client.post<Record<string, unknown>>("/api/bundles/inspect", { bundlePath: nodePath.resolve(bundlePath) });
 
       // Check for structured failures (200 with error or failed integrity)
       const hasError = typeof res.data["error"] === "string";
@@ -166,7 +168,8 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       // daemon completed the mutating install — operator-unsafe retry
       // path (rig_name_collision on second attempt). Bumped to 120s.
       const res = await client.post<Record<string, unknown>>("/api/bundles/install", {
-        bundlePath, plan: opts.plan ?? false, autoApprove: opts.yes ?? false, targetRoot: opts.target,
+        bundlePath: nodePath.resolve(bundlePath), plan: opts.plan ?? false, autoApprove: opts.yes ?? false,
+        targetRoot: opts.target ? nodePath.resolve(opts.target) : undefined,
         // Item 2 / slice-05 Checkpoint 3.3: send CLI version + skip flag for the
         // daemon-side install-time compatibility check. CLI version read at call
         // time (no module-level constant) via the existing getCliVersion helper.

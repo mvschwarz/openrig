@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
+import nodePath from "node:path";
 import { Command } from "commander";
 import { bundleCommand } from "../src/commands/bundle.js";
 import { DaemonClient } from "../src/client.js";
@@ -60,6 +61,7 @@ function runningDeps(port: number): StatusDeps {
 let capturedCreateBodies: Record<string, unknown>[] = [];
 // Captured install bodies for assertion (Item 2 Checkpoint 3.3)
 let capturedInstallBodies: Record<string, unknown>[] = [];
+let capturedInspectBodies: Record<string, unknown>[] = [];
 
 describe("Bundle CLI", () => {
   let server: http.Server;
@@ -97,6 +99,7 @@ describe("Bundle CLI", () => {
         }));
       } else if (req.url === "/api/bundles/inspect" && req.method === "POST") {
         const parsed = JSON.parse(body || "{}");
+        capturedInspectBodies.push(parsed);
         if (String(parsed.bundlePath ?? "").includes("bad")) {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Inspect failed" }));
@@ -270,6 +273,45 @@ describe("Bundle CLI", () => {
     });
     expect(JSON.parse(logs.join("")).error).toBe("blocked");
     expect(exitCode).toBe(1);
+  });
+
+  // The daemon resolves any relative path against ITS OWN cwd, so every path the CLI sends must
+  // already be absolute (resolved against the operator's cwd). Files are not transported.
+  it("bundle create/inspect/install send spec, output, bundle, and target as client-absolute paths", async () => {
+    capturedCreateBodies = [];
+    capturedInspectBodies = [];
+    capturedInstallBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "rel/rig.yaml", "-o", "out/rel.rigbundle"]);
+      await makeCmd().parseAsync(["node", "rig", "bundle", "inspect", "out/rel.rigbundle"]);
+      await makeCmd().parseAsync(["node", "rig", "bundle", "install", "out/rel.rigbundle", "--yes", "--target", "proj"]);
+    });
+    const sent = {
+      specPath: capturedCreateBodies.at(-1)?.["specPath"],
+      outputPath: capturedCreateBodies.at(-1)?.["outputPath"],
+      inspectBundlePath: capturedInspectBodies.at(-1)?.["bundlePath"],
+      installBundlePath: capturedInstallBodies.at(-1)?.["bundlePath"],
+      targetRoot: capturedInstallBodies.at(-1)?.["targetRoot"],
+    };
+    console.log(`[client-paths] cwd=${process.cwd()} sent=${JSON.stringify(sent)}`);
+    expect(sent).toEqual({
+      specPath: nodePath.resolve("rel/rig.yaml"),
+      outputPath: nodePath.resolve("out/rel.rigbundle"),
+      inspectBundlePath: nodePath.resolve("out/rel.rigbundle"),
+      installBundlePath: nodePath.resolve("out/rel.rigbundle"),
+      targetRoot: nodePath.resolve("proj"),
+    });
+  });
+
+  it("control: bundle install --plan without --target still sends no targetRoot", async () => {
+    capturedInstallBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "install", "/tmp/test.rigbundle", "--plan"]);
+    });
+    const body = capturedInstallBodies.at(-1)!;
+    expect(body["plan"]).toBe(true);
+    expect(body["targetRoot"]).toBeUndefined();
+    expect(body["bundlePath"]).toBe("/tmp/test.rigbundle");
   });
 
   // T6: bundle create --rig-root passes rigRoot in request body
