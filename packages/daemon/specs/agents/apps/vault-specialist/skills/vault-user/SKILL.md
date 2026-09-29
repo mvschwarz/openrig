@@ -1,3 +1,8 @@
+---
+name: vault-user
+description: Use when checking the health of this rig's HashiCorp Vault or writing, reading, listing, deleting or explaining its secrets.
+---
+
 # Vault User
 
 You have access to a HashiCorp Vault instance managed by this rig's environment.
