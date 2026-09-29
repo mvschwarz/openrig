@@ -37,6 +37,31 @@ read [references/worked-example.md](references/worked-example.md). Installed cop
 `rig context get skills/core/openrig-software-factory/references/worked-example.md`.
 A roadmap, YAML file or wake does not execute work or authorize a new outcome.
 
+## Choose the first project's providers
+
+Ask which working account(s) the user wants: Claude Code, Codex, or both. Reuse
+an explicit choice and recommend the account they already have working. Use
+`first-project-claude` (two Claude), `first-project` (two Codex), or
+`first-project-mixed` (Claude owner, Codex checker). All share the same task and
+owner/checker culture. Check only selected CLIs/logins; request `claude auth login`
+or `codex login` once when that selected login is missing. No credential copying,
+unused provider prerequisite or silent model/provider fallback.
+
+Read the compatible getting-started guide's **Choose your providers** and
+**Kernel startup stays automatic** sections before launch. The choice selects
+the two project agents. Kernel auto-boot independently uses available
+authenticated accounts, so it may use both even when the project uses one.
+Do not add an unused-provider login gate or manual kernel setup to this path.
+An instance-wide provider restriction is a separate request. Preserve an
+existing kernel and working user rigs.
+
+Show the chosen recipe, resolved runtimes/models and exact
+`rig up <starter> --cwd . --plan` / `rig up <starter> --cwd .` commands. Codex seats
+retain `gpt-6-astra`; Claude seats use the configured native default without an
+OpenRig model override. Confirm that model with the user and its availability;
+verify the native session's actual model before consequential work. Use the
+chosen rig name in owner/checker addresses throughout the same task and return.
+
 ## Establish the working agreement
 
 Read the repository instructions, current work and desired user-visible result.
@@ -51,12 +76,18 @@ model turns, but delivered wakes and resumed work **can spend tokens**. Prefer
 an event-driven wait to frequent empty reminders. Wakes cannot answer a user
 question, clear a permission prompt or guarantee progress.
 
-**Choose permissions before launching or assigning work.** Offer ordinary prompts,
-persistent rules for selected commands, or deliberately broader access. Follow
-[Applying a permission policy](#find-the-compatible-permission-guide) to perform
-the user's choice and verify it in the target conversation. Preserve restrictions
-and unrelated settings. A whole `rig` allowance covers every verb, not just reads;
-it does not grant new product authority or change everyone else's defaults.
+**Ask once before launching or assigning work:** “Allow your agents to run
+OpenRig commands without repeated permission prompts?” **Yes — recommended** /
+**No — keep prompts**. Reuse an existing explicit choice for this scope. Explain
+that this covers all `rig` verbs, including starting/stopping agents and changing
+configuration, at personal project scope unless the user explicitly chooses
+user-wide sessions. It is not global YOLO or permission to invent work.
+On an actual Yes, follow [Applying a permission policy](#find-the-compatible-permission-guide)
+to add existing native rules, preserve stricter/unrelated settings, and verify
+the target conversation. No or no answer leaves settings alone and continues
+with existing prompts. Remember the explicit choice and exact additions in the
+existing onboarding context; “Undo the OpenRig command allowances added by this
+setup” removes only those additions. Broader access remains a separate opt-in.
 
 Keep purpose, acceptance, decisions and evidence in existing project files.
 Deliver selected context and obtain each seat's scope reaction; retrieval alone

@@ -1,12 +1,13 @@
 ---
 name: applying-a-permission-policy
 description: >-
-  Use when a user asks an agent to configure OpenRig command permissions, reduce
-  repeated native approval prompts, or apply a selected rig/seat permission policy.
+  Use before launching a team during agent-guided setup, or when a user asks to
+  configure OpenRig command permissions, reduce repeated native approval prompts,
+  or apply a selected rig/seat permission policy.
 metadata:
   openrig:
     stage: established
-    docs_checked: "2026-09-25"
+    docs_checked: "2026-09-29"
     verification_status: "Verify the installed harness version and effective settings; a rule-parser result is not a native permission test."
 ---
 
@@ -17,10 +18,40 @@ OpenRig operating posture, native command rules, sandbox access and launch flags
 are separate controls. A command rule grants execution capability, not authority
 to invent tasks, publish work or change another host.
 
+## Ask once before team launch
+
+Reuse an existing explicit choice for these harnesses and this scope from the
+user's onboarding context; do not ask again. Existing rules are configuration,
+not evidence of consent to expand their scope. Preserve them without expansion.
+If the choice is unknown, briefly explain:
+
+> This allows the whole `rig` command family, including starting/stopping agents,
+> changing OpenRig configuration and launching processes. It is not global YOLO
+> or permission to invent work. The scope is your personal settings for this
+> project unless you explicitly choose your user-wide sessions instead.
+>
+> Allow your agents to run OpenRig commands without repeated permission prompts?
+> **Yes — recommended** / **No — keep prompts**
+
+- **Yes:** require an actual affirmative answer, then apply the procedure below
+  at that scope for the selected harnesses. Never substitute user-wide rules
+  when project rules are unsupported. Native restrictions still apply.
+- **No:** leave permission settings unchanged and continue with existing prompts.
+- **No answer:** make no settings change, infer no consent and continue with
+  existing prompts. Do not keep asking during this setup.
+
+Remember an explicit Yes or No in the existing onboarding/project context the
+agent already reads: choice, harnesses and scope. For Yes, record the exact files
+and entries added, any pre-existing equivalents, and the loading/verification
+result. Do not add a preference service or native configuration key. No answer
+is not a remembered No. Offer broader permissive operation only as a separate
+explicit opt-in; the setup question does not select a builtin policy or mode.
+
 ## Choose the intended scope
 
-Use an existing explicit choice; otherwise explain these options and ask which
-the user wants. Do not ask again for routine steps already authorized.
+Outside the setup question above, use an existing explicit choice; otherwise
+explain these options and ask which the user wants. Do not reopen the menu after
+an answered setup question or ask again for routine steps already authorized.
 
 | Choice | What the agent configures |
 | --- | --- |
@@ -47,7 +78,14 @@ execution, an entire interpreter or a generic shell wrapper.
    hooks, auth, MCP, model settings and unrelated values. An allow must not erase
    a stricter rule or managed requirement. Report a real conflict instead of
    silently bypassing it.
+   Check both bare and actual absolute command spellings: a restriction on one
+   may not match the other. If a new allowance would evade a stricter restriction,
+   leave that addition unapplied and report the conflict; do not switch spellings
+   to bypass it.
 4. Back up touched files and merge only authorized additions, avoiding duplicates.
+   Recognize equivalent existing entries (including Claude's legacy `Bash(rig:*)`);
+   leave their markers untouched. Reapplying the same choice must be a no-op when
+   the required entries already exist, including no timestamp-only rewrite.
    The agent performs these edits; hand-editing is an option, not a required user
    chore. Apply the selected scope without another conversational permission round.
    Native enforcement still applies.
@@ -60,8 +98,15 @@ execution, an entire interpreter or a generic shell wrapper.
    not destructive probes. Report effective settings and remaining prompts.
    A parser match alone does not establish native behavior.
 
-For rollback, remove only this setup's additions, preserving later unrelated
-edits. Builtin policy specs remain read-only; customize in user space.
+Give the user this short undo: **“Undo the OpenRig command allowances added by
+this setup; keep my other rules.”** The agent removes only the recorded entries
+from their exact files, preserving pre-existing rules and subsequent edits.
+For Codex remove those `prefix_rule` entries; for Claude remove those
+`permissions.allow` entries. Delete a newly created rules file only if it still
+contains solely this setup's additions. Never restore the entire backup over
+later changes. Record the changed choice in the same context and verify native
+reloading/revocation; other pre-existing allowances may still permit `rig`.
+Builtin policy specs remain read-only; customize in user space.
 
 ## Codex command rules
 
@@ -103,8 +148,10 @@ codex execpolicy check --pretty --rules /absolute/path/to/openrig.rules -- print
 ```
 
 Inspect matches, not only exit status; repeat `--rules` for other effective
-files. A matching `prompt` or `forbidden` overrides allow. Verify rule loading
-in the target conversation after the required reload. For project-only scope,
+files. A matching `prompt` or `forbidden` overrides allow. The official procedure
+loads `.rules` at session startup; a file edit alone does not reload this turn.
+Preserve the conversation and use an authorized supported resume when needed,
+then verify loading in the target conversation. For project-only scope,
 confirm the layer is active there and absent from an unrelated project's active
 layers. An evaluator given an explicit `--rules` file proves matching, not that
 scope or automatic loading. Existing user-wide rules may already permit the
@@ -134,7 +181,9 @@ Current syntax uses ` *` for a command family; `Bash(rig:*)` is also supported.
 Narrower examples are `Bash(rig ps *)` and `Bash(rig queue list *)`.
 Preserve `deny`/`ask` entries and `defaultMode`; do not add `Bash(*)` or switch
 to bypass to resolve a mismatch. Inspect native `/permissions` and verify the
-actual command spelling.
+actual command spelling. A bare rule does not cover every absolute invocation:
+derive the actual executable and, after the stricter-rule check above, add its
+exact `Bash(/actual/path/to/rig *)` spelling if needed. Do not use a path wildcard.
 
 Choose scope using the [settings reference](https://code.claude.com/docs/en/settings):
 `.claude/settings.local.json` for personal project settings,
@@ -143,6 +192,9 @@ Choose scope using the [settings reference](https://code.claude.com/docs/en/sett
 Confirm the effective project root, especially for worktrees. Keep personal
 settings out of commits. Managed restrictions and sandbox/network controls
 still apply; a Bash allow is not a general network policy.
+Current Claude settings documentation describes live reload of permission
+edits. Confirm the rule's source in `/permissions` and repeated harmless calls
+in the target conversation; do not claim prompt behavior from JSON validity.
 
 ## Existing policies and broader modes
 
@@ -154,9 +206,10 @@ is unavailable, explain the remaining choice instead of selecting broader access
 
 For explicitly chosen broader operation, inspect
 `rig policy current --spec <user-owned-rig.yaml>` and the compatible getting-started guide's **Opt-in permissive
-operation** section. OpenRig's Codex `builtin:yolo` supplies `-s danger-full-access`;
-it does not itself select `approval_policy` and replaces a named
-`codex_config_profile` argument. Claude's corresponding launch flag is
+operation** section. OpenRig's Codex `builtin:yolo` supplies
+`-s danger-full-access -a never` and replaces a named `codex_config_profile`
+argument. The legacy environment-only YOLO path selects only the sandbox.
+Claude's corresponding launch flag is
 `--dangerously-skip-permissions`. Neither a resource `profile: default` nor OpenRig
 operating posture is a native permission policy. Do not change shipped defaults
 or assume editing a launch spec changes an existing seat.

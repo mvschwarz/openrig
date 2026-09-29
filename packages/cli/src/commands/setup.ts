@@ -710,11 +710,12 @@ export function goldenPathNextSteps(): string[] {
   return [
     "Next steps (the guided path; full reference: docs/reference/getting-started.md):",
     "  1. cd <your-repository>             Choose the code the team will work on",
-    "  2. rig up first-project --cwd .     Launch an owner + checker (Codex); auto-starts daemon and kernel",
-    "  3. rig status                       Check daemon/kernel readiness; rig ps --nodes --rig first-project checks the team",
-    "  4. rig send dev-owner@first-project '<one useful change, boundaries, and how to check it>'",
+    "  2. Choose first-project (two Codex), first-project-claude (two Claude), or first-project-mixed; check only selected logins",
+    "     Preview rig up <starter> --cwd . --plan, then rig up <starter> --cwd .; daemon and kernel start automatically",
+    "  3. rig status                       Check daemon/kernel readiness; rig ps --nodes --rig <starter> checks the team",
+    "  4. rig send dev-owner@<starter> '<one useful change, boundaries, and how to check it>'",
     "  5. rig tui --shared                  Join the kernel dashboard; plain rig tui opens your own view",
-    "  Next: rig queue list --rig first-project; rig workspace doctor; rig scope ...; rig workflow specs",
+    "  Next: rig queue list --destination dev-owner@<starter>; rig workspace doctor; rig scope ...; rig workflow specs",
   ];
 }
 
@@ -729,6 +730,15 @@ export function goldenPathNextSteps(): string[] {
  */
 export function permissionPolicyMenuLines(): string[] {
   return [
+    "Before team launch, your agent asks once (reuse an existing explicit choice):",
+    "  Allow your agents to run OpenRig commands without repeated permission prompts?",
+    "  Yes — recommended / No — keep prompts. No answer leaves settings unchanged too.",
+    "  Includes all rig verbs, lifecycle/config changes and launching processes; not global YOLO or authority to invent work.",
+    "  Personal project scope unless you explicitly choose user-wide sessions. On Yes, the agent adds native rules, preserving stricter rules.",
+    "  Procedure: rig context get skills/applying-a-permission-policy/SKILL.md",
+    "  Undo: ask your agent to remove only the OpenRig command allowances added by this setup.",
+    "  This printed guidance collects no answer and writes no native rules; --policy below is a separate spec choice.",
+    "",
     "Permission policy (optional — recording is a thought, not a gate; `rig up` always works without one):",
     "  Policy Mode:",
     "    Locked            The most restrictive built-in policy.",

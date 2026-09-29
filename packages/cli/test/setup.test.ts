@@ -219,8 +219,12 @@ describe("rig setup", () => {
     expect(wsIdx).toBeGreaterThan(statusIdx);
     expect(wfIdx).toBeGreaterThan(wsIdx);
     expect(scopeIdx).toBeGreaterThan(wsIdx);
-    expect(out).toContain("rig up first-project --cwd .");
-    expect(out).toContain("rig send dev-owner@first-project");
+    expect(out).toContain("rig up <starter> --cwd . --plan");
+    for (const name of ["first-project", "first-project-claude", "first-project-mixed"]) expect(out).toContain(name);
+    expect(out).toContain("check only selected logins");
+    expect(out).toContain("rig send dev-owner@<starter>");
+    expect(out).toContain("rig queue list --destination dev-owner@<starter>");
+    expect(out).not.toContain("rig queue list --rig");
     expect(out).toContain("rig tui --shared");
     expect(out).toContain("docs/reference/getting-started.md");
     // no magic mega-command - the path is existing verbs only

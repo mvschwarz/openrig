@@ -1,9 +1,9 @@
 # Getting started: one useful change in your repository
 
 Start with a repository and one bounded change you can exercise. The shipped
-`first-project` starter provides two native Codex seats: an outcome owner and
-an independent checker. It uses your installed Codex executable and login;
-terminal-provider support does not change the harness or account being used.
+first-project recipes provide the same two seats: an outcome owner and an
+independent checker. Choose Claude Code, Codex, or one of each using the accounts
+you already have. Terminal-provider support does not change the harness or login.
 
 You need Node.js 22 or 24 and tmux, on macOS or Linux. On a Mac with Apple
 silicon, use Node.js 22 (see the [compatibility
@@ -11,14 +11,17 @@ history](../releases/v0.5.15.md#known-compatibility-limitation)). Native
 Windows is not supported yet, and WSL2 has not been tested. Node 20 is no longer
 supported; Node 26 and other versions are untested.
 
-**Choose permissions before starting the team.** The unchanged starter launches
-Codex with `-s workspace-write`; it leaves approval policy to your native Codex
-configuration. Network access is normally off in that sandbox, including access
-to the local OpenRig daemon. Its `profile: default` selects OpenRig resources,
-not a Codex permission profile. Ordinary permission prompts are therefore expected.
-You can keep those prompts, remember selected commands, or choose broader access.
-[Ask your agent to configure that choice](#have-your-agent-configure-permissions);
-OpenRig does not choose permissive operation for everyone.
+**Choose permissions before starting the team.** Ordinary OpenRig launches use
+Codex's `-s workspace-write`, with approval policy from your native configuration,
+or Claude Code's `acceptEdits`, which still leaves commands subject to native
+rules and prompts. Codex's sandbox normally blocks network access, including the
+local OpenRig daemon. A command allowance does not change general sandbox/network
+settings. The starter's `profile: default` selects OpenRig resources, not a native
+permission profile.
+Agent-guided setup [asks once](#have-your-agent-configure-permissions): “Allow
+your agents to run OpenRig commands without repeated permission prompts?”
+**Yes — recommended** / **No — keep prompts**. An existing explicit choice is
+reused; No or no answer leaves settings unchanged. Broader access is separate.
 
 > Everything below reports **what is currently true**, never a guarantee that
 > downstream work will succeed. "Daemon up" does not mean every agent is healthy;
@@ -57,33 +60,69 @@ to return (tmux defaults to Ctrl-b, then d). Decide native trust/auth prompts
 there. If a fresh start paused before context delivery, **c** finishes that
 delivery to the same occupant. **r** reads actual state again; **d** expands details.
 
-Install OpenRig and inspect `rig setup --dry-run` before applying machine
-changes. Check `tmux -V`, `codex --version` and `codex login status` in your
-launch shell; install missing prerequisites and complete `codex login` when
-needed. This starter needs tmux and Codex, without a Claude login or Herdr
-plugin. The kernel selects its available native runtime variant separately.
+### Choose your providers
 
-`rig setup` currently installs/checks both harnesses and cmux. Use it when you
-want that full environment. Its overall failure can include an optional
-component for this starter: read the individual result and verify the three
-prerequisites above rather than treating a missing Claude login as broken
-Codex. A missing Codex login remains a real launch blocker.
+Ask: **“Which working account do you want this team to use: Claude Code, Codex,
+or both?”** Reuse an explicit choice already made. Recommend the account the
+user already has working; a second subscription is not a prerequisite.
+
+| Choice | Starter name | Owner / checker runtime and model |
+| --- | --- | --- |
+| Two Codex agents (existing route) | `first-project` | Both `codex`, pinned `gpt-6-astra` |
+| Two Claude agents | `first-project-claude` | Both `claude-code`, configured native default model |
+| One of each | `first-project-mixed` | Claude owner (native default); Codex checker (`gpt-6-astra`) |
+
+Claude uses the same unpinned model convention as the existing Claude kernel and
+implementation-pair recipes: OpenRig does not pass a model override. Read the
+selected harness's configured model and show it alongside the recipe and launch
+command before proceeding. Confirm account access to any pin; if unavailable,
+ask for a supported model choice rather than silently substituting a model or
+provider. After launch, confirm the actual native model before assigning work.
+
+Install OpenRig and check `tmux -V`. Check **only the selected providers**:
+
+- Claude Code: `claude --version` and `claude auth status`. If sign-in is missing,
+  ask once: “Please run `claude auth login` in your launch environment.”
+- Codex: `codex --version` and `codex login status`. If sign-in is missing,
+  ask once: “Please run `codex login` in your launch environment.”
+
+Install a missing selected CLI using its provider's installation instructions.
+The other provider's CLI/login and Herdr/cmux are optional. Do not copy credentials
+or start repeated sign-in attempts. Recheck the selected login after the user
+completes it. `rig setup --dry-run` previews the broader setup; applying
+`rig setup` installs/checks **both** harnesses and cmux, so it is optional for
+this selected-provider path, not a requirement to fix an unused provider.
+
+### Kernel startup stays automatic
+
+On a fresh instance, ordinary daemon startup chooses the kernel variant from
+successful native auth probes: Claude alone, Codex alone, or both. Thus an absent
+unused provider is fine. The project recipe does **not** constrain that probe:
+if both accounts are authenticated, automatic kernel startup uses both, even
+when the two project agents use just one provider. No manual kernel setup is
+needed for this journey. The starter choice is not an instance-wide provider
+restriction; a request to use only one provider for everything is separate.
+Preserve any existing managed kernel and working rigs.
+
+### Launch the two project seats
+
+Set `starter` to the chosen name from the table; the existing Codex route remains:
 
 ```sh
 cd <your-repository>
-rig specs preview first-project
-rig up first-project --cwd . --plan
-rig up first-project --cwd .
+starter=first-project  # or first-project-claude or first-project-mixed
+rig specs preview "$starter" --kind rig
+rig up "$starter" --cwd . --plan
+rig up "$starter" --cwd .
 rig status
-rig ps --nodes --rig first-project
+rig ps --nodes --rig "$starter"
 ```
 
-Preview the starter's seats and resources; plan checks resolution and
-preflight for the selected working directory. Launch starts the daemon if needed; the kernel boots in the
-background. Read readiness for the project seats, not only daemon health. If a
-seat has an authentication, trust or permission prompt, resolve the named
-prompt before assigning it work. A model pin is configuration; the native
-harness must report the intended model before consequential work.
+Preview the selected seats, models and resources. Plan checks resolution and
+preflight for the working directory. Launch starts the daemon if needed, with
+the kernel behavior above. Read readiness for the project seats, not only daemon
+health. Resolve a named authentication, trust or permission prompt before giving
+that seat work. No new team is needed when returning to an existing project.
 
 When a seat pauses, open its existing terminal with **o** in the startup view.
 Read the proposed command, working directory and target instance. For an intended
@@ -100,7 +139,7 @@ already have taken effect. A delivered message or disappearing prompt alone is
 not progress. If startup is still waiting for context delivery, use **c** for the
 same occupant, then **r** to refresh. Do not start another seat to clear a prompt.
 
-`first-project` is a deliberately small starting point, not a universal team.
+These starters are deliberately small starting points, not universal teams.
 For a different installed runtime or team shape, inspect `rig specs ls --kind
 rig` and `rig specs preview <name>` before selecting it. A seven-seat showcase
 is optional and consumes more concurrent capacity.
@@ -110,7 +149,7 @@ is optional and consumes more concurrent capacity.
 For example, in a project that imports CSV files:
 
 ```sh
-rig send dev-owner@first-project 'Improve the CSV import error when a required column is missing: name the column and leave the existing data unchanged. Add a regression check, ask dev-check for an independent check of the exact candidate, and record the result and how I can try it. Keep the change local; do not publish.'
+rig send "dev-owner@$starter" 'Improve the CSV import error when a required column is missing: name the column and leave the existing data unchanged. Add a regression check, ask dev-check for an independent check of the exact candidate, and record the result and how I can try it. Keep the change local; do not publish.'
 ```
 
 Replace the example with a real problem in your repository. Include what the
@@ -120,11 +159,12 @@ independent check. You should not have to relay the review between terminals.
 `rig send` is the initial conversation; the queue and repository artifacts
 retain the work. An unbound shell does not need to impersonate a queue owner.
 
-From an actual `first-project` seat, follow the work with
+Use the chosen rig name in its seat addresses (for example,
+`dev-owner@first-project-claude`). From an actual project seat, follow the work with
 `rig queue list --limit 1000`: its default scope is the caller's current rig.
 `queue list` has no `--rig` option. From an observer shell or another rig, use
-`rig queue list --destination dev-owner@first-project --limit 1000` and the same
-command for `dev-check@first-project`, after verifying those live addresses.
+`rig queue list --destination "dev-owner@$starter" --limit 1000` and the same
+command for `"dev-check@$starter"`, after verifying those live addresses.
 These show each destination's obligations, not a whole-rig view. An unbound shell
 must not pretend to be a seat to change scope; use `--all-rigs` only when that
 broader view is intended. Then read `rig queue show <id> --full` and
@@ -150,7 +190,7 @@ start or replace a terminal, so a missing binding is reported with recovery
 guidance rather than creating a second kernel.
 
 Herdr users follow the same launch and task path. To place the managed team in
-Herdr, use `rig terminal open first-project --provider herdr`; for the shared
+Herdr, use `rig terminal open "$starter" --provider herdr`; for the shared
 dashboard, use `rig terminal open kernel --provider herdr`. The equivalent
 cmux provider is also available. Read the opened/absent/degraded result: a
 partial terminal view is not a healthy team. Repeated terminal-open calls can
@@ -244,18 +284,30 @@ shows a small reviewed example and how to retain custody through a genuine wait.
 
 ## Have your agent configure permissions
 
-You choose the scope; the agent inspects the target harness and applies it.
-For example:
+Before team launch, your agent asks once, unless you already made an explicit
+choice for these harnesses and this scope:
 
-> Configure persistent permission for OpenRig commands in this project. Explain
-> what the whole `rig` family allows and offer narrower verbs if appropriate.
-> Preserve existing deny/ask rules and unrelated settings, back up touched files,
-> apply my choice, then verify repeated ordinary reads without extra approvals.
+> Allow your agents to run OpenRig commands without repeated permission prompts?
+> **Yes — recommended** / **No — keep prompts**
 
-Allowing all `rig` commands includes lifecycle, topology and configuration
-operations, not only reads. Keeping prompts or selecting broader permissive
-operation are also valid choices. An existing explicit choice authorizes the
-routine setup; the agent need not ask you to approve each file edit again.
+This covers the entire `rig` family, including starting/stopping agents,
+configuration and launching processes. It is not global YOLO or permission to
+invent work. The scope is your personal settings for this project unless you
+explicitly choose user-wide sessions, which can affect your other projects.
+
+On an actual **Yes**, the agent backs up the relevant files, adds the existing
+native rules without duplicates, and preserves stricter rules and unrelated
+settings. It checks bare and actual absolute-path invocations, rule loading and
+repeated harmless reads in the target conversation. No or no answer leaves
+settings alone and continues with existing prompts. Unsupported scope or a
+managed restriction is reported; it is not permission to grant broader access.
+
+The agent remembers an explicit choice, scope and exact additions in existing
+onboarding context, so setup does not ask again. You do not need to approve each
+routine edit separately. To undo, say **“Undo the OpenRig command allowances
+added by this setup; keep my other rules.”** The agent removes only its recorded
+additions, preserves earlier rules and later edits, and verifies reloading.
+Other pre-existing allowances may still permit commands after this undo.
 
 Use the maintained **Applying a permission policy** procedure:
 

@@ -1,0 +1,31 @@
+version: "0.2"
+name: first-project-mixed
+summary: >
+  A Claude Code owner and a Codex checker in your repository: an outcome owner and an
+  independent checker. Give the owner one bounded change; follow the durable result and
+  continue at the same address. See docs/reference/getting-started.md.
+
+# Culture mirrors first-project/CULTURE.md; equality is checked in first-project-providers.test.ts.
+culture_file: CULTURE.md
+
+pods:
+  - id: dev
+    label: Project
+    members:
+      - id: owner
+        agent_ref: "local:../../../agents/development/implementer"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+      - id: check
+        agent_ref: "local:../../../agents/development/qa"
+        runtime: codex
+        model: gpt-6-astra
+        profile: default
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: owner
+        to: check
+
+edges: []
