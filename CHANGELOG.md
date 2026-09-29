@@ -18,6 +18,7 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 - Install schema-version-2 bundles into `--target` and launch from those retained
   files. Local CLI bundle paths resolve from your working directory; conflicting
   target files are preserved ([#146](https://github.com/mvschwarz/openrig/pull/146)).
+  Without `--target`, `rig up <file>.rigbundle` installs into your current directory, so run it from the project folder you want.
 - Refuse message delivery into a bare shell where an agent runtime should be
   running ([#150](https://github.com/mvschwarz/openrig/pull/150), fixes
   [#142](https://github.com/mvschwarz/openrig/issues/142)).
