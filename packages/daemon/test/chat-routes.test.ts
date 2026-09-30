@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -50,6 +50,15 @@ describe("chat routes", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it("watch disconnect during history releases the subscription", async () => {
+    chatRepo.send(rigId, "alice", "existing history");
+    const before = eventBus.subscriberCount;
+    const res = await app.request(`/api/rigs/${rigId}/chat/watch`);
+    expect(eventBus.subscriberCount).toBe(before + 1);
+    await res.body?.cancel();
+    await vi.waitFor(() => expect(eventBus.subscriberCount).toBe(before), { timeout: 1000 });
   });
 
   it("POST /send persists + returns", async () => {

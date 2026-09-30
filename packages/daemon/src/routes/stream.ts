@@ -167,22 +167,24 @@ export function streamRoutes(): Hono {
         }
       });
 
-      const initial = store.list({ limit: 50 });
-      const sentIds = new Set<string>();
-      for (const item of initial) {
-        await stream.writeSSE({ id: item.streamItemId, data: JSON.stringify(item) });
-        sentIds.add(item.streamItemId);
-      }
-
-      initialDone.value = true;
-      for (const p of pending) {
-        if (!sentIds.has(p.id)) await stream.writeSSE(p);
-      }
+      const aborted = new Promise<void>((resolve) => {
+        stream.onAbort(() => resolve());
+      });
 
       try {
-        await new Promise<void>((resolve) => {
-          stream.onAbort(() => resolve());
-        });
+        const initial = store.list({ limit: 50 });
+        const sentIds = new Set<string>();
+        for (const item of initial) {
+          await stream.writeSSE({ id: item.streamItemId, data: JSON.stringify(item) });
+          sentIds.add(item.streamItemId);
+        }
+
+        initialDone.value = true;
+        for (const p of pending) {
+          if (!sentIds.has(p.id)) await stream.writeSSE(p);
+        }
+
+        await aborted;
       } finally {
         unsubscribe();
       }

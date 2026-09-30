@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import type { Hono } from "hono";
 import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
@@ -144,6 +144,16 @@ describe("SSE events route", () => {
     const uniqueSeqs = new Set(seqs);
     expect(uniqueSeqs.size).toBe(seqs.length); // no duplicates
     expect(events.length).toBe(2);
+  });
+
+  it("client disconnect during replay releases the subscription", async () => {
+    const rig = rigRepo.createRig("r01");
+    eventBus.emit({ type: "rig.created", rigId: rig.id });
+    const countBefore = eventBus.subscriberCount;
+    const res = await app.request(`/api/events?rigId=${rig.id}`);
+    expect(eventBus.subscriberCount).toBe(countBefore + 1);
+    await res.body?.cancel();
+    await vi.waitFor(() => expect(eventBus.subscriberCount).toBe(countBefore), { timeout: 1000 });
   });
 
   it("client disconnect -> subscriber cleaned up (subscriberCount drops)", async () => {
