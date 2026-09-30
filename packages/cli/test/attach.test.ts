@@ -60,6 +60,7 @@ function runningDeps(port: number): StatusDeps {
 describe("Attach CLI", () => {
   let server: http.Server;
   let port: number;
+  let receivedBody: Record<string, unknown>;
 
   beforeAll(async () => {
     server = http.createServer(async (req, res) => {
@@ -68,6 +69,7 @@ describe("Attach CLI", () => {
 
       if (req.url === "/api/rigs/rig-1/attach-self" && req.method === "POST") {
         const parsed = body ? JSON.parse(body) : {};
+        receivedBody = parsed;
         const logicalId = parsed.logicalId ?? `${parsed.podNamespace}.${parsed.memberName}`;
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
@@ -119,6 +121,16 @@ describe("Attach CLI", () => {
     expect(output).toContain("inbound tmux transport unavailable");
   });
 
+  it("attach --self --node accepts the advertised runtime guard", async () => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "attach", "--self", "--rig", "rig-1", "--node", "orch1.lead", "--runtime", "codex"]);
+    });
+
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain("Attached this shell to node orch1.lead");
+    expect(receivedBody).toMatchObject({ logicalId: "orch1.lead", runtime: "codex" });
+  });
+
   it("attach --self --print-env prints shell exports only", async () => {
     const { logs, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "attach", "--self", "--rig", "rig-1", "--node", "orch1.lead", "--print-env"]);
@@ -138,6 +150,14 @@ describe("Attach CLI", () => {
 
     expect(exitCode).toBeUndefined();
     expect(logs).toEqual([]);
+  });
+
+  it.each(["--pod", "--member"])("attach rejects node mode combined with %s", async (flag) => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "attach", "--self", "--rig", "rig-1", "--node", "orch1.lead", "--runtime", "codex", flag, "orch1"]);
+    });
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("Specify either");
   });
 
   it("attach rejects incomplete pod mode before calling the daemon", async () => {

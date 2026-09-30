@@ -575,7 +575,7 @@ rigsRoutes.post("/:id/attach-self", async (c) => {
   const tmuxPane = typeof body["tmuxPane"] === "string" ? body["tmuxPane"].trim() : "";
 
   const hasNodeTarget = logicalId.length > 0;
-  const hasPodFields = podNamespace.length > 0 || memberName.length > 0 || runtime.length > 0;
+  const hasPodFields = podNamespace.length > 0 || memberName.length > 0;
 
   if (hasNodeTarget && hasPodFields) {
     return c.json({ error: "Specify either logicalId or podNamespace + memberName + runtime" }, 400);
