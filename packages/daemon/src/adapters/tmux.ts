@@ -104,9 +104,10 @@ const WINDOW_FORMAT = [
   "#{window_panes}",
   "#{window_active}",
 ].join(TMUX_FIELD_SEPARATOR);
-// tmux 3.6 sanitizes literal control characters in -F output to underscores,
-// so tab-delimited session and pane rows become unparseable. Use a printable
-// delimiter for these adapter-owned formats instead.
+// tmux 3.6 sanitizes literal control characters in -F output to underscores, and
+// tmux 3.3a replaces tabs with underscores, so tab-delimited rows become
+// unparseable on those versions. EVERY adapter-owned format uses the printable
+// delimiter instead.
 const PANE_FORMAT = [
   "#{pane_id}",
   "#{pane_index}",
@@ -115,7 +116,16 @@ const PANE_FORMAT = [
   "#{pane_height}",
   "#{pane_active}",
 ].join(TMUX_FIELD_SEPARATOR);
-const CLIENT_FORMAT = "#{client_name}\t#{client_session}";
+const CLIENT_FORMAT = [
+  "#{client_name}",
+  "#{client_session}",
+].join(TMUX_FIELD_SEPARATOR);
+const CURSOR_FORMAT = [
+  "#{cursor_x}",
+  "#{cursor_y}",
+  "#{pane_width}",
+  "#{pane_height}",
+].join(TMUX_FIELD_SEPARATOR);
 
 function isNoServerError(err: unknown): boolean {
   return err instanceof Error && err.message.includes("no server running");
@@ -196,13 +206,14 @@ function parseSessionLine(line: string): TmuxSession | null {
 }
 
 function parseClientLine(line: string): TmuxClient | null {
-  const parts = line.split("\t");
-  if (parts.length < 2) return null;
-  const name = parts[0]!;
-  if (name === "") return null;
+  // First-separator split keeps any separator inside the session name intact.
+  const separator = line.indexOf(TMUX_FIELD_SEPARATOR);
+  if (separator <= 0) return null;
+  const session = line.slice(separator + 1);
+  if (session === "") return null;
   return {
-    name,
-    session: parts[1]!,
+    name: line.slice(0, separator),
+    session,
   };
 }
 
@@ -796,9 +807,9 @@ export class TmuxAdapter {
   async getPaneCursorPosition(paneId: string): Promise<TmuxCursorPosition | null> {
     try {
       const output = await this.exec(
-        `tmux display-message -p -t ${shellQuote(paneId)} "#{cursor_x}\t#{cursor_y}\t#{pane_width}\t#{pane_height}"`,
+        `tmux display-message -p -t ${shellQuote(paneId)} "${CURSOR_FORMAT}"`,
       );
-      const [xRaw, yRaw, widthRaw, heightRaw] = output.trim().split("\t");
+      const [xRaw, yRaw, widthRaw, heightRaw] = output.trim().split(TMUX_FIELD_SEPARATOR);
       const x = Number.parseInt(xRaw ?? "", 10);
       const y = Number.parseInt(yRaw ?? "", 10);
       const width = Number.parseInt(widthRaw ?? "", 10);
