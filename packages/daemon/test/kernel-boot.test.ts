@@ -16,7 +16,10 @@ import {
   selectVariant,
   kernelAlreadyManaged,
   authBlockMessage,
+  probeCodexReadiness,
+  selectCodexProviderAuth,
   type KernelBootDeps,
+  type RuntimeAuthStatus,
 } from "../src/domain/kernel-boot.js";
 import type { RigRepository } from "../src/domain/rig-repository.js";
 import type { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
@@ -239,6 +242,89 @@ describe("bootKernelIfNeeded — fire-and-forget bootstrap", () => {
   it("uses the codex-only variant when only Codex is available", async () => {
     const tracker = await bootKernelIfNeeded(makeBaseDeps({
       probeRuntimes: async () => ({ claudeCode: "unavailable", codex: "ok" }),
+    }, tmpSpecsDir));
+    expect(tracker.getStatus().variant).toBe("rig-codex-only.yaml");
+    tracker.stop();
+  });
+});
+
+// Issue #194 — a Codex provider that does not use an OpenAI login.
+const BEDROCK_CONFIG = [
+  'model_provider = "bedrock-runtime-us"',
+  "",
+  "[model_providers.bedrock-runtime-us]",
+  'name = "Amazon Bedrock Runtime"',
+  'env_key = "AWS_BEARER_TOKEN_BEDROCK"',
+  'wire_api = "responses"',
+  "requires_openai_auth = false",
+  "",
+].join("\n");
+
+function codexProbe(opts: { config: string | null; env?: Record<string, string>; loggedIn?: boolean; installed?: boolean }) {
+  const ran: string[] = [];
+  const run = async (cmd: string): Promise<RuntimeAuthStatus> => {
+    ran.push(cmd);
+    if (opts.installed === false) return "unavailable";
+    if (cmd === "codex login status") return opts.loggedIn ? "ok" : "unavailable";
+    return "ok";
+  };
+  return { ran, deps: { run, readConfig: () => opts.config, env: opts.env ?? {} } };
+}
+
+describe("selectCodexProviderAuth — provider-aware Codex readiness (#194)", () => {
+  it("uses the credential variable only for an explicit non-OpenAI provider with env_key", () => {
+    expect(selectCodexProviderAuth(BEDROCK_CONFIG)).toEqual({
+      kind: "env-key", providerId: "bedrock-runtime-us", envKey: "AWS_BEARER_TOKEN_BEDROCK",
+    });
+  });
+
+  it("keeps the OpenAI login check for every unresolved or OpenAI-auth case", () => {
+    expect(selectCodexProviderAuth(null)).toEqual({ kind: "openai-login" });
+    expect(selectCodexProviderAuth('model_provider = "openai"\n')).toEqual({ kind: "openai-login" });
+    expect(selectCodexProviderAuth(BEDROCK_CONFIG.replace("requires_openai_auth = false", "requires_openai_auth = true")).kind).toBe("openai-login");
+    expect(selectCodexProviderAuth(BEDROCK_CONFIG.replace("requires_openai_auth = false", "")).kind).toBe("openai-login");
+    expect(selectCodexProviderAuth(BEDROCK_CONFIG.replace('env_key = "AWS_BEARER_TOKEN_BEDROCK"', "")).kind).toBe("openai-login");
+    expect(selectCodexProviderAuth(BEDROCK_CONFIG.replace('model_provider = "bedrock-runtime-us"', 'model_provider = "missing"')).kind).toBe("openai-login");
+    expect(selectCodexProviderAuth('model_provider = "__proto__"\n')).toEqual({ kind: "openai-login" });
+    expect(selectCodexProviderAuth("model_provider = [broken")).toEqual({ kind: "openai-login", unresolved: "config.toml could not be parsed" });
+    expect(selectCodexProviderAuth(`profile = "work"\n${BEDROCK_CONFIG}`).kind).toBe("openai-login");
+  });
+});
+
+describe("probeCodexReadiness — the kernel's Codex probe (#194)", () => {
+  it("reports ok for the Bedrock provider with its token set and no OpenAI login, without running codex login status", async () => {
+    const probe = codexProbe({ config: BEDROCK_CONFIG, env: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-token" }, loggedIn: false });
+    expect(await probeCodexReadiness(probe.deps)).toBe("ok");
+    expect(probe.ran).toEqual(["codex --version"]);
+  });
+
+  it("reports unavailable when the provider's variable is missing or blank", async () => {
+    for (const env of [{}, { AWS_BEARER_TOKEN_BEDROCK: "   " }]) {
+      const probe = codexProbe({ config: BEDROCK_CONFIG, env, loggedIn: true });
+      expect(await probeCodexReadiness(probe.deps)).toBe("unavailable");
+      expect(probe.ran).not.toContain("codex login status");
+    }
+  });
+
+  it("reports unavailable when the Codex executable is missing even with the token set", async () => {
+    const probe = codexProbe({ config: BEDROCK_CONFIG, env: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-token" }, installed: false });
+    expect(await probeCodexReadiness(probe.deps)).toBe("unavailable");
+  });
+
+  it("keeps the OpenAI login result for default, OpenAI-auth and malformed configurations", async () => {
+    for (const config of [null, 'model_provider = "openai"\n', "model_provider = [broken"]) {
+      for (const loggedIn of [true, false]) {
+        const probe = codexProbe({ config, env: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-token" }, loggedIn });
+        expect(await probeCodexReadiness(probe.deps)).toBe(loggedIn ? "ok" : "unavailable");
+        expect(probe.ran).toEqual(["codex login status"]);
+      }
+    }
+  });
+
+  it("lets the kernel select the Codex variant for a Bedrock-only machine", async () => {
+    const probe = codexProbe({ config: BEDROCK_CONFIG, env: { AWS_BEARER_TOKEN_BEDROCK: "synthetic-token" }, loggedIn: false });
+    const tracker = await bootKernelIfNeeded(makeBaseDeps({
+      probeRuntimes: async () => ({ claudeCode: "unavailable", codex: await probeCodexReadiness(probe.deps) }),
     }, tmpSpecsDir));
     expect(tracker.getStatus().variant).toBe("rig-codex-only.yaml");
     tracker.stop();

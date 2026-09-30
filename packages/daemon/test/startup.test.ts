@@ -487,6 +487,39 @@ describe("createDaemon startup composition", () => {
     }
   });
 
+  it("forwards the Codex Bedrock bearer token into a launched session only when the operator names it (#194)", async () => {
+    const launchCommand = async (allowlist: string) => {
+      vi.stubEnv("OPENRIG_RECOVERY_PROVIDER_AUTH_ENV_ALLOWLIST", allowlist);
+      vi.stubEnv("AWS_BEARER_TOKEN_BEDROCK", "synthetic-bedrock-token");
+      vi.stubEnv("AWS_SECRET_ACCESS_KEY", "synthetic-unrelated-secret");
+      const cmuxFactory: CmuxTransportFactory = async () => {
+        throw Object.assign(new Error(""), { code: "ENOENT" });
+      };
+      const tmuxExec = vi.fn<ExecFn>(async () => "");
+      const { db, deps } = await createDaemon({ cmuxFactory, tmuxExec });
+      try {
+        const rig = deps.rigRepo.createRig("bedrock-forwarding-rig");
+        deps.rigRepo.addNode(rig.id, "worker", { runtime: "codex" });
+        expect((await deps.nodeLauncher.launchNode(rig.id, "worker")).ok).toBe(true);
+        return tmuxExec.mock.calls.map((call) => call[0]).find((cmd) => cmd.includes("tmux new-session")) ?? "";
+      } finally {
+        db.close();
+      }
+    };
+
+    try {
+      const optedIn = await launchCommand("AWS_BEARER_TOKEN_BEDROCK,AWS_SECRET_ACCESS_KEY");
+      expect(optedIn).toContain("-e 'AWS_BEARER_TOKEN_BEDROCK=synthetic-bedrock-token'");
+      expect(optedIn).not.toContain("AWS_SECRET_ACCESS_KEY");
+
+      const notNamed = await launchCommand("OPENAI_API_KEY");
+      expect(notNamed).toContain("tmux new-session");
+      expect(notNamed).not.toContain("AWS_BEARER_TOKEN_BEDROCK");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("collectAllowlistedProviderAuthEnv ignores empty, invalid, and unknown names", () => {
     expect(collectAllowlistedProviderAuthEnv(
       "ANTHROPIC_API_KEY, nope, ../BAD, OPENAI_API_KEY, BOGUS_TOKEN, CLAUDE_CODE_OAUTH_TOKEN",

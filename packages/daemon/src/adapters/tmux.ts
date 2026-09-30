@@ -257,13 +257,49 @@ export class TmuxAdapter {
    * never authority over a pre-existing or registry-managed target. */
   async createProbeSession(name: string, cwd?: string): Promise<TmuxResult> {
     if (this.deliveryGuard?.maybeTarget(name)) return { ok: false, code: "guard_target_managed", message: "A probe cannot reuse a managed seat." };
-    const created = await this.createSessionUnchecked(name, cwd);
-    if (!created.ok) return created;
+    // #188: the create itself reports the new session's id and creation time, the only identity a rollback
+    // uses. An id alone is unique only for one server's lifetime.
+    let created: { id: string; at: string } | null;
+    try {
+      const out = await this.exec(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
+      const match = /^(\$\d+) (\d+)$/.exec(out.trim());
+      created = match ? { id: match[1]!, at: match[2]! } : null;
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+    let message = "New probe pane could not be established; no input written.";
+    let pane: string | null = null;
     try {
       const panes = await this.listPanes(name);
-      if (panes.length === 1) { this.freshProbes.set(name, panes[0]!.id); this.freshProbes.set(panes[0]!.id, panes[0]!.id); return created; }
+      pane = panes.length === 1 ? panes[0]!.id : null;
+      // #188: a fresh tmux server reuses pane ids, so a stale seat binding can name the new pane. That
+      // probe could not be cleaned up safely later, so it is not used.
+      if (pane && this.deliveryGuard?.maybeTarget(pane)) message = "New probe pane is named by a managed record; no input written.";
+      else if (pane) { this.freshProbes.set(name, pane); this.freshProbes.set(pane, pane); return { ok: true }; }
     } catch { /* no target proof, no input */ }
-    return { ok: false, code: "guard_target_unknown", message: "New probe pane could not be established; no input written." };
+    // #188: remove the unusable helper by the id its own create returned, unless a managed record has
+    // since claimed its name (a binding naming only the reused pane id, under another session name, is
+    // stale: that pane belongs to this session). A name reused by another session has a different id.
+    const byPane = pane ? this.deliveryGuard?.maybeTarget(pane) : null;
+    if (!created || this.deliveryGuard?.maybeTarget(name) || byPane?.session === name) {
+      return { ok: false, code: "guard_target_unknown", message: `${message} The helper session was left in place: its ownership could not be proven.` };
+    }
+    const removed = await this.removeCreatedSession(name, created);
+    if (!removed.ok && removed.code !== "session_not_found") message += ` The helper session was not removed: ${removed.message}`;
+    return { ok: false, code: "guard_target_unknown", message };
+  }
+
+  /** #188: kill the session this adapter created only while its id still names that session. tmux checks
+   *  the name and creation time and kills in one command, so a later server that reuses the id is safe. */
+  private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
+    const same = `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},${created.at}}}`;
+    try {
+      const out = await this.exec(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`);
+      if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
   }
 
   private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void) => Promise<TmuxResult>, allowAbsent = false): Promise<TmuxResult> {
@@ -274,7 +310,8 @@ export class TmuxAdapter {
       if (probePane && !guard.maybeTarget(target)) {
         const panes = await this.listPanes(target);
         if (panes.length !== 1 || panes[0]!.id !== probePane) throw new Error("Private probe target changed; no input written.");
-        return write(probePane, () => {});
+        // Awaited so a refusal inside the write (#188: the probe kill) returns as a result, not a throw.
+        return await write(probePane, () => {});
       }
       const created = this.freshManaged.get(target);
       const identity = created?.nodeId ?? target;
