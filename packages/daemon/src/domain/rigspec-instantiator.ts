@@ -460,6 +460,16 @@ export type AddMemberOutcome =
  * Pod-aware rig instantiator. Creates pods, nodes, edges, and runs
  * startup orchestration per node with resolved agent specs.
  */
+/** #141: rig names with a YAML import in progress, per daemon database. */
+const importsInFlight = new WeakMap<Database.Database, Set<string>>();
+
+/** #141: the same-name rigs changed between the stopped check and the create transaction. */
+class GenerationChanged extends Error {
+  constructor(name: string) {
+    super(`The rigs named "${name}" changed while this import was checking them. Nothing was created; retry the import.`);
+  }
+}
+
 export class PodRigInstantiator {
   readonly db: Database.Database;
   private deps: PodInstantiatorDeps;
@@ -1220,6 +1230,32 @@ export class PodRigInstantiator {
   }
 
   async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
+    // #141: while an import may archive a stopped same-name generation, allow one import per rig name at
+    // a time on this daemon. Otherwise two imports could each replace it, or one could archive the other's
+    // in-progress replacement. Unrelated names are unaffected; an adapter that cannot probe keeps today's
+    // behavior.
+    let name: string | null = null;
+    if (this.deps.tmuxAdapter?.probeSession) {
+      try {
+        const parsed = PodRigSpecCodec.parse(rigSpecYaml) as { name?: unknown };
+        name = typeof parsed?.name === "string" ? parsed.name : null;
+      } catch { /* the import below reports the parse error */ }
+    }
+    if (!name) return this.instantiateOnce(rigSpecYaml, rigRoot, opts);
+    let inFlight = importsInFlight.get(this.db);
+    if (!inFlight) importsInFlight.set(this.db, (inFlight = new Set()));
+    if (inFlight.has(name)) {
+      return { ok: false, code: "generation_unconfirmed", message: `Another import of rig "${name}" is in progress. Nothing was created; retry once it finishes.` };
+    }
+    inFlight.add(name);
+    try {
+      return await this.instantiateOnce(rigSpecYaml, rigRoot, opts);
+    } finally {
+      inFlight.delete(name);
+    }
+  }
+
+  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1290,9 +1326,14 @@ export class PodRigInstantiator {
     let createdRigId: string | null = null;
     try {
       const create = this.db.transaction(() => {
-        for (const id of archivedGenerations) {
-          if (makeRunningSessionCounter(this.db)(id) > 0) throw new Error(`rig ${id} started running during import`);
-          this.deps.rigRepo.archiveRig(id);
+        if (tmuxProbe) {
+          // #141: apply the stopped decision only to the same-name rigs it was made for, and archive
+          // only rows this import changes, so a rollback restores exactly what it archived.
+          const current = this.deps.rigRepo.findUnarchivedRigsByName(rigSpec.name).map((rig) => rig.id).sort();
+          if (current.join(",") !== [...priorGenerations].sort().join(",")) throw new GenerationChanged(rigSpec.name);
+          for (const id of archivedGenerations) {
+            if (makeRunningSessionCounter(this.db)(id) > 0 || !this.deps.rigRepo.archiveRig(id)) throw new GenerationChanged(rigSpec.name);
+          }
         }
         return this.deps.rigRepo.createRig(rigSpec.name);
       });
@@ -1324,6 +1365,7 @@ export class PodRigInstantiator {
         });
       }
     } catch (err) {
+      if (err instanceof GenerationChanged) return { ok: false, code: "generation_unconfirmed", message: err.message };
       // #141: a replacement that failed to finish creating must not leave the prior generation hidden.
       if (createdRigId && archivedGenerations.length > 0) { this.deps.rigRepo.deleteRig(createdRigId); restoreArchived(); }
       return { ok: false, code: "instantiate_error", message: (err as Error).message };
@@ -1613,6 +1655,8 @@ export class PodRigInstantiator {
         message: `${attentionNodes.length} node${attentionNodes.length === 1 ? " requires" : "s require"} attention before becoming interactive. Inspect the affected sessions and reasons before choosing recovery.`,
         rigId,
         attentionNodes,
+        // #141: the replacement is kept on this path, so its archive notice must reach the user too.
+        ...(archivedGenerations.length > 0 ? { warnings: podInstantiateWarnings } : {}),
       };
     }
 

@@ -1296,6 +1296,8 @@ export type InstantiateOutcome =
       message: string;
       rigId: string;
       attentionNodes: AttentionNode[];
+      /** #141: notices that must reach the user even though the import stopped for attention. */
+      warnings?: string[];
     };
 
 export interface AttentionNode {

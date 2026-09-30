@@ -32,7 +32,7 @@ function runtimeAdapter(launchOk = true): RuntimeAdapter {
   } as unknown as RuntimeAdapter;
 }
 
-function setup(probe: Probe | undefined, opts: { launchOk?: boolean } = {}) {
+function setup(probe: Probe | undefined, opts: { launchOk?: boolean; attention?: boolean } = {}) {
   const db = createFullTestDb();
   const rigRepo = new RigRepository(db);
   const sessionRegistry = new SessionRegistry(db);
@@ -48,10 +48,17 @@ function setup(probe: Probe | undefined, opts: { launchOk?: boolean } = {}) {
     sendKeys: vi.fn(async () => ({ ok: true as const })),
     ...(probe ? { probeSession: vi.fn(probe) } : {}),
   } as unknown as TmuxAdapter;
+  const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux });
+  if (opts.attention) {
+    startupOrchestrator.startNode = async (input) => {
+      sessionRegistry.updateStartupStatus(input.sessionId, "attention_required");
+      return { ok: false, startupStatus: "attention_required", errors: ["Harness launch requires attention: trust_gate"], evidence: "waiting for workspace trust" } as never;
+    };
+  }
   const inst = new PodRigInstantiator({
     db, rigRepo, podRepo: new PodRepository(db), sessionRegistry, eventBus,
     nodeLauncher: new NodeLauncher({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux }),
-    startupOrchestrator: new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter: tmux }),
+    startupOrchestrator,
     fsOps: {
       readFile: (p: string) => { if (p === `${RIG_ROOT}/agents/impl/agent.yaml`) return 'name: impl\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []'; throw new Error(`Not found: ${p}`); },
       exists: (p: string) => p === `${RIG_ROOT}/agents/impl/agent.yaml`,
@@ -143,6 +150,17 @@ describe("#141 explicit YAML import over a stopped same-name generation", () => 
     f.db.close();
   });
 
+  it("when every replacement seat needs attention, the replacement is kept and the archive notice still reaches the user", async () => {
+    const f = setup(async () => ({ state: "absent" }), { attention: true });
+    const oldId = f.priorGeneration();
+    const result = await f.inst.instantiate(f.yaml, RIG_ROOT);
+
+    expect(result).toMatchObject({ ok: false, code: "attention_required" });
+    expect(f.archivedAt(oldId)).not.toBeNull();
+    expect(!result.ok && "warnings" in result ? (result.warnings ?? []).join("\n") : "").toContain(`rig unarchive ${oldId}`);
+    f.db.close();
+  });
+
   it("control: a running prior generation is still refused by the running-name guard", async () => {
     const f = setup(async () => ({ state: "absent" }));
     const oldId = f.priorGeneration("running");
@@ -171,6 +189,74 @@ describe("#141 explicit YAML import over a stopped same-name generation", () => 
     expect(result.ok).toBe(true);
     expect(f.rigsNamed().map((r) => r.archived_at)).toEqual([null, null]);
     expect(f.rigsNamed()[0]!.id).toBe(oldId);
+    f.db.close();
+  });
+});
+
+describe("#141 P1 correction: concurrent same-name imports", () => {
+  function gate() { let release!: () => void; const wait = new Promise<void>((r) => { release = r; }); return { wait, release }; }
+
+  it("while one import awaits its stopped-generation probe, a same-name import is refused; one replacement results", async () => {
+    const g = gate(); let calls = 0;
+    const f = setup(async () => { calls++; if (calls === 1) await g.wait; return { state: "absent" }; });
+    const oldId = f.priorGeneration();
+    const first = f.inst.instantiate(f.yaml, RIG_ROOT);
+    await vi.waitFor(() => expect(calls).toBe(1));
+    const second = await f.inst.instantiate(f.yaml, RIG_ROOT);
+    g.release();
+    const firstResult = await first;
+
+    expect(firstResult.ok).toBe(true);
+    expect(second).toMatchObject({ ok: false, code: "generation_unconfirmed" });
+    expect(f.rigsNamed().filter((r) => r.archived_at === null)).toHaveLength(1);
+    expect(f.archivedAt(oldId)).not.toBeNull();
+    f.db.close();
+  });
+
+  it("while one import's replacement waits in its prelaunch hook, a same-name import neither archives it nor adds another", async () => {
+    const g = gate(); let hookEntered = false;
+    const f = setup(async () => ({ state: "absent" }));
+    const oldId = f.priorGeneration();
+    const first = f.inst.instantiate(f.yaml, RIG_ROOT, { prelaunchHook: async () => { hookEntered = true; await g.wait; return { ok: true }; } });
+    await vi.waitFor(() => expect(hookEntered).toBe(true));
+    const second = await f.inst.instantiate(f.yaml, RIG_ROOT);
+    g.release();
+    const firstResult = await first;
+
+    expect(firstResult.ok).toBe(true);
+    expect(second).toMatchObject({ ok: false, code: "generation_unconfirmed" });
+    expect(f.rigsNamed().filter((r) => r.archived_at === null)).toEqual([{ id: firstResult.ok ? firstResult.result.rigId : "", archived_at: null }]);
+    expect(f.archivedAt(oldId)).not.toBeNull();
+    f.db.close();
+  });
+
+  it("rollback restores only archives this import made (another actor archived the old rig meanwhile)", async () => {
+    const g = gate(); let calls = 0;
+    const f = setup(async () => { calls++; await g.wait; return { state: "absent" }; });
+    const oldId = f.priorGeneration();
+    const first = f.inst.instantiate(f.yaml, RIG_ROOT, { prelaunchHook: async () => ({ ok: false, code: "svc", message: "service failed" }) });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    f.rigRepo.archiveRig(oldId);
+    g.release();
+    const result = await first;
+
+    expect(result.ok).toBe(false);
+    expect(f.archivedAt(oldId)).not.toBeNull();
+    f.db.close();
+  });
+
+  it("an import of an unrelated name proceeds while another import is in flight", async () => {
+    const g = gate(); let calls = 0;
+    const f = setup(async () => { calls++; if (calls === 1) await g.wait; return { state: "absent" }; });
+    f.priorGeneration();
+    const first = f.inst.instantiate(f.yaml, RIG_ROOT);
+    await vi.waitFor(() => expect(calls).toBe(1));
+    expect(f.yaml).toContain("name: test-rig");
+    const other = await f.inst.instantiate(f.yaml.replace("name: test-rig", "name: other-rig"), RIG_ROOT);
+    g.release();
+
+    expect(other.ok).toBe(true);
+    expect((await first).ok).toBe(true);
     f.db.close();
   });
 });
