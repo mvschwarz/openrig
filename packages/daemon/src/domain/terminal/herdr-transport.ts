@@ -101,6 +101,7 @@ export function createHerdrSocketRpc(
   return (req) =>
     new Promise<HerdrResult>((resolve, reject) => {
       const conn = net.createConnection({ path: socketPath });
+      conn.setEncoding("utf8"); // decode across chunks, so a split multi-byte character stays intact
       let buf = "";
       let settled = false;
       const finish = (fn: () => void) => {
@@ -115,8 +116,8 @@ export function createHerdrSocketRpc(
         timeoutMs,
       );
       conn.on("connect", () => conn.write(`${JSON.stringify(req)}\n`));
-      conn.on("data", (chunk: Buffer) => {
-        buf += chunk.toString("utf8");
+      conn.on("data", (chunk: string) => {
+        buf += chunk;
         let nl: number;
         while ((nl = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, nl).trim();
