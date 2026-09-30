@@ -142,7 +142,8 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
   const matches: { process: NativeProcessRow; chain: NativeProcessRow[] }[] = [];
   const executable = runtime === "claude-code" ? "claude" : "codex";
   for (const row of rows) {
-    if (row.executableName !== executable || executableName(tokens(row.command)[0] ?? "") !== executable
+    const osExecutable = runtime === "claude-code" ? executableName(row.executableName ?? "") : row.executableName;
+    if (osExecutable !== executable || executableName(tokens(row.command)[0] ?? "") !== executable
       || row.pgid !== root.tpgid || row.tpgid !== root.tpgid) continue;
     const chain: NativeProcessRow[] = [];
     const visited = new Set<number>();

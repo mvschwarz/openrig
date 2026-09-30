@@ -199,6 +199,19 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     expect(listProcesses).toHaveBeenCalledTimes(2);
   });
 
+  // #197 C1: Root observed macOS ucomm "claude.exe" with argv basename
+  // "claude". A versioned argv fixture alone did not exercise this OS-name axis.
+  it.each(["--session-id", "--resume"])("#197 accepts observed Claude OS name with %s", async identityFlag => {
+    const rows = claudeProcesses().map(row => row.pid === 1205
+      ? { ...row, executableName: "claude.exe",
+        command: `/opt/runtime/bin/claude --permission-mode acceptEdits --model claude-opus-5-5 ${identityFlag} ${nativeToken} --name dev-check@my-rig` } : row);
+    const { transport, sendText, sendKeys, listProcesses } = wrappedClaude(vi.fn(async () => rows));
+    expect((await transport.send("dev-check@my-rig", "existing review")).ok).toBe(true);
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendKeys).toHaveBeenCalledOnce();
+    expect(listProcesses).toHaveBeenCalledTimes(2);
+  });
+
   const unprovedClaude: [string, (rows: NativeProcessRow[]) => NativeProcessRow[]][] = [
     ...unproved,
     ["wrong Claude identity", rows => rows.map(r => r.pid === 1205 ? { ...r, command: "/opt/bin/claude --session-id other" } : r)],
