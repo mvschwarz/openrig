@@ -1194,7 +1194,7 @@ function stripCodexActivityHooks(content: string): string {
     "m"
   );
   if (!pattern.test(content)) return content;
-  return content.replace(pattern, "\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
+  return content.replace(pattern, "\n");
 }
 
 /** Ensure `[features].hooks = true` (canonical key; not the deprecated codex_hooks alias). */

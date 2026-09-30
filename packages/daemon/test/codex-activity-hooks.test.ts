@@ -221,4 +221,26 @@ describe("OPR.0.4.1.10 B3 — durable disable via removeCodexActivityHooks", () 
     makeAdapter(fs2).removeCodexActivityHooks();
     expect(fs2._store[CONFIG]).toBe('[features]\nhooks = true\n'); // untouched
   });
+
+  // Regression: the strip must excise ONLY the managed block (plus the blank-line separator it was
+  // appended with). A global \n{3,} collapse on the whole document silently mutated user content.
+  const MANAGED_BLOCK =
+    "# BEGIN OPENRIG MANAGED ACTIVITY HOOKS\n" +
+    "[[hooks.Stop]]\n" +
+    `command = 'node "${RELAY}"'\n` +
+    "# END OPENRIG MANAGED ACTIVITY HOOKS\n";
+
+  it("preserves runs of 3+ newlines between unrelated user sections when stripping the block", () => {
+    const userContent = '[features]\nhooks = true\n\n\n\n[projects."/x"]\ntrust_level = "trusted"\n';
+    const fs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: `${userContent}\n${MANAGED_BLOCK}` });
+    makeAdapter(fs).removeCodexActivityHooks();
+    expect(fs._store[CONFIG]).toBe(userContent); // the 3-blank-line gap survives byte-for-byte
+  });
+
+  it("preserves blank lines inside TOML multiline strings when stripping the block", () => {
+    const userContent = 'instructions = """line1\n\n\nline2"""\n';
+    const fs = mockCodexFs({ [RELAY]: "// relay", [CONFIG]: `${userContent}\n${MANAGED_BLOCK}` });
+    makeAdapter(fs).removeCodexActivityHooks();
+    expect(fs._store[CONFIG]).toBe(userContent); // the parsed value of `instructions` is unchanged
+  });
 });
