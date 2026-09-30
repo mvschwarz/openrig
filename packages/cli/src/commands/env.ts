@@ -58,6 +58,12 @@ Examples:
       }
 
       const receipt = res.data["receipt"] as Record<string, unknown> | null;
+      const probeStatus = res.data["probeStatus"];
+      if (probeStatus === "stale" || probeStatus === "no_orchestrator") {
+        const probeError = res.data["probeError"];
+        console.error(`Service status is ${probeStatus === "stale" ? "stale" : "unverified"} (probe: ${probeStatus}); ${receipt ? "showing the saved receipt" : "no saved receipt is available"}.${typeof probeError === "string" && probeError ? ` ${probeError}` : ""}`);
+      }
+
       if (!receipt) {
         console.log("Services configured but no receipt available yet.");
         return;
