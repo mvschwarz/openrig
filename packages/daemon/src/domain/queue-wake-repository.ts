@@ -126,6 +126,12 @@ export class QueueWakeRepository {
          JOIN queue_items q ON q.qitem_id = w.qitem_id
         WHERE w.phase = 'armed' AND w.wake_ref = ?
           AND w.wake_kind IN ('watchdog', 'timer') AND q.state = 'blocked'
+          -- An operator-owned job can outlive the park that attached it.
+          -- Only the latest armed continuation owns this row's wake receipt.
+          AND w.transition_id = (
+            SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+             WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
+          )
           AND (? OR NOT EXISTS (
             SELECT 1 FROM queue_transition_wakes f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'

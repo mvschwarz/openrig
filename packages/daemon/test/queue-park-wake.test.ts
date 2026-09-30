@@ -607,6 +607,27 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(jobs.getById(job.jobId)!.state).toBe("active");   // still the operator's
   });
 
+  it("a superseded operator watchdog cannot write a fired receipt for the new park", async () => {
+    const job = jobs.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: worker@rig\nmessage: old operator reminder\n",
+      targetSession: "worker@rig", intervalSeconds: 600, registeredBySession: "operator@rig",
+    });
+    const row = await item("worker@rig");
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:first", transitionNote: "park on old watchdog", wakeWatchdogId: job.jobId } as never);
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:second", transitionNote: "new timer owns continuation", wakeAfterSeconds: 90 } as never);
+    const current = repo.getParkWakeStatus(row.qitemId)!;
+    const before = wakes(row.qitemId);
+    repo.recordWatchdogWakeAttempt(job.jobId, "sent");
+    expect(wakes(row.qitemId)).toEqual(before);
+    expect(repo.getParkWakeStatus(row.qitemId)?.ref).toBe(current.ref);
+    expect(jobs.getById(job.jobId)?.state).toBe("active");
+    repo.recordWatchdogWakeAttempt(current.ref, "sent");
+    expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({ ref: current.ref, phase: "fired" });
+  });
+
   it("OPR.0.5.8.1 S1b — the S16 provider-limit path is UNCHANGED, and stays distinguishable", async () => {
     // Contract item 3 asked me to state whether this repair touches S16 and pin
     // it either way. It does not: provider-limit timers already ended after
