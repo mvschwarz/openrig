@@ -293,7 +293,16 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
     if (entry.category === "skill") {
       const targetDir = nodePath.join(binding.cwd, ".openrig", "stub", "skills", entry.effectiveId);
       this.fsOps.mkdirp(targetDir);
-      const isDir = this.fsOps.listFiles ? this.fsOps.listFiles(entry.absolutePath).length > 0 : false;
+      let isDir = false;
+      if (this.fsOps.listFiles) {
+        try {
+          isDir = this.fsOps.listFiles(entry.absolutePath).length > 0;
+        } catch {
+          // File-shaped sources make the production listFiles (recursive
+          // fs.readdirSync walk) throw ENOTDIR — treat the entry as file-shaped.
+          isDir = false;
+        }
+      }
       if (isDir && this.fsOps.listFiles) {
         for (const file of this.fsOps.listFiles(entry.absolutePath)) {
           const dest = nodePath.join(targetDir, file);

@@ -1731,4 +1731,40 @@ describe("Codex runtime adapter", () => {
     );
     logSpy.mockRestore();
   });
+
+  // File-shaped subagent under PRODUCTION listFiles semantics: the in-memory
+  // mockFs returns [] for a file path, but production wires listFiles to a
+  // recursive fs.readdirSync walk (startup.ts), which throws ENOTDIR on a file —
+  // an unguarded probe lands the entry in ProjectionResult.failed and it is never
+  // projected. This drives project() through a real-fs-backed listFiles.
+  it("projects file-shaped subagent when listFiles throws ENOTDIR (production readdirSync semantics)", async () => {
+    const tempRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-codex-projection-"));
+    const srcFile = nodePath.join(tempRoot, "agents", "base", "subagents", "reviewer.yaml");
+    fs.mkdirSync(nodePath.dirname(srcFile), { recursive: true });
+    fs.writeFileSync(srcFile, "name: reviewer");
+    const cwd = nodePath.join(tempRoot, "project");
+    fs.mkdirSync(cwd, { recursive: true });
+
+    const adapter = new CodexRuntimeAdapter({
+      tmux: mockTmux(),
+      fsOps: {
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+        writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+        exists: (p: string) => fs.existsSync(p),
+        mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+        listFiles: (dir: string) => fs.readdirSync(dir),
+      },
+    });
+    const plan: ProjectionPlan = {
+      runtime: "codex", cwd,
+      entries: [makeEntry({ category: "subagent", effectiveId: "reviewer", absolutePath: srcFile, resourcePath: "subagents/reviewer.yaml" })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    const result = await adapter.project(plan, makeBinding(cwd));
+
+    expect(result.failed).toEqual([]);
+    expect(result.projected).toEqual(["reviewer"]);
+    expect(fs.readFileSync(nodePath.join(cwd, ".agents", "reviewer.yaml"), "utf-8")).toBe("name: reviewer");
+  });
 });
