@@ -11,7 +11,7 @@ import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "..
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
-import { verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
+import { verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 
@@ -993,7 +993,7 @@ export class SessionTransport {
     }
 
     // #142 — an agent seat whose runtime is not running shows a bare shell, and text typed there runs as
-    // shell commands. A Codex launch wrapper can have the same label: only positive native
+    // shell commands. A managed launch wrapper can have the same label: only positive native
     // process proof clears that refusal. A terminal's shell is its runtime; unreadable stays advisory.
     const bareShell = runtime && runtime !== "terminal"
       ? await this.bareShellForeground(sessionName, runtime, sessionMeta.pane, sessionMeta.resumeToken) : null;
@@ -1450,11 +1450,12 @@ export class SessionTransport {
       return null;
     }
     if (!paneCommand || !isShellForeground(paneCommand)) return null;
-    if (runtime === "codex" && pane) {
-      // Reuse the identity reconciler's stable, foreground, pane-descendant proof.
-      // A resumed process must also name this session's token. Stale UI, a Node
+    if ((runtime === "codex" || runtime === "claude-code") && pane) {
+      // Reuse stable, foreground, pane-descendant proof. Claude fresh/resume and
+      // Codex resume must name this session's token. Stale UI, a Node
       // launcher alone, missing observations or a native process elsewhere cannot clear it.
-      const native = await verifyCodexPaneProcess({ target: sessionName, tmux: this.tmuxAdapter,
+      const verify = runtime === "codex" ? verifyCodexPaneProcess : verifyClaudePaneProcess;
+      const native = await verify({ target: sessionName, tmux: this.tmuxAdapter,
         listProcesses: this.listProcesses, expectedToken: resumeToken });
       if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
     }
