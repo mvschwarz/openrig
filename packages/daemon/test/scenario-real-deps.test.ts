@@ -97,6 +97,25 @@ describe("buildRealDeps runAction verb->rig map", () => {
     expect(deps.defaults.withinMs).toBeGreaterThan(0);
     expect(deps.defaults.pollIntervalMs).toBeGreaterThan(0);
   });
+
+  it("binds a named seed to the caller's fault controller and preserves its failure", async () => {
+    const result = { code: 1, stdout: "", stderr: "fault could not be armed" };
+    const seedRegression = vi.fn(async () => result);
+    const runRig = vi.fn(async () => ok());
+    const deps = buildRealDeps({ daemon: fakeDaemon(), rigBin: "/bin/rig", topologyPath: "/t.yaml", runRig, seedRegression });
+    expect(await deps.runAction("seed_regression", { class: "baton-drop" })).toBe(result);
+    expect(seedRegression).toHaveBeenCalledExactlyOnceWith("baton-drop");
+    expect(runRig).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed seed before invoking the fault controller", async () => {
+    const seedRegression = vi.fn(async () => ok());
+    const deps = buildRealDeps({ daemon: fakeDaemon(), rigBin: "/bin/rig", topologyPath: "/t.yaml", seedRegression });
+    for (const payload of [undefined, {}, { class: "" }, { class: 42 }]) {
+      expect((await deps.runAction("seed_regression", payload)).code).toBe(1);
+    }
+    expect(seedRegression).not.toHaveBeenCalled();
+  });
 });
 
 describe("D2 — the unbound-verb message states WHY and names the v1 path", () => {

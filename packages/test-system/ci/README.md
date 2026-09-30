@@ -47,15 +47,28 @@ injection receipt. The pure `scripts/pr-scenarios.test.mjs` controls validate re
 admission only; they are
 **not** a substitute for the three actual container runs.
 
-## Remaining authored scenarios
+## Library scenario increment
 
-The eleven YAML scenarios in `../scenarios/` remain unchanged and **unadmitted**.
-All currently reach `seed_regression`, which `scenario-real-deps.ts` rejects as
-unbound. Several additionally require step-time `emit`, `policy`, `mutate`, or
-`restore`, and `kill-daemon-mid-handoff` still has its documented setup/observable
-gaps. The bounded daemon-restart fixture used here is not the original seat-resume
-scenario's full contract. Do not count this increment as eleven passing scenarios,
-strip their assertions, or convert unsupported actions into no-ops.
+The same job also runs `../scenarios/queue-baton-survives-restart.yaml` in three
+fresh containers: healthy, `baton-drop`, healthy again. It brings up the library's
+two-seat stub rig and asserts the exact `dev-qa@dev-pair-stub` claim after restart.
+The original fixture and its three controls remain unchanged.
+
+`seed_regression` now calls an explicit fault controller supplied through the
+pipeline. With no controller it still fails loudly. The library baton declares
+its seed **before** restart, not after the assertions; the controller records the
+healthy control or arms the stopped-DB mutation. Unknown classes, a missing seed,
+an injection failure, a surviving fault, or an unrelated failing observation fail
+the job. Assertions continue to use the shipped queue read, never a fake observer.
+
+The other ten library scenarios are **unadmitted**. Several need step-time `emit`,
+`policy`, `mutate`, or `restore`. Others have incomplete assertions or setup:
+clean-lifecycle has no post-down residue assertion, ps-scope neither brings up its
+second topology nor excludes extra rows, and the home/preseed and send/render
+scenarios need input behavior from the stub. `kill-daemon-mid-handoff` still has
+its documented setup/observable gaps. A callback binding does not fix these gaps.
+Do not count this increment as eleven passing scenarios or native seat-resume
+coverage. Container evidence for each selected case is required for admission.
 
 The existing CLI `run-scenarios.mjs` still accepts paths only; `--container` is
 refused. This job runs the helper *inside* the isolated image, so it does not depend

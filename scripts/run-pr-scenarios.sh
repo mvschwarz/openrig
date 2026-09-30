@@ -23,6 +23,7 @@ cleanup() {
 trap cleanup EXIT
 cp docker/testbed/Dockerfile.scenarios "$CONTEXT/Dockerfile"
 cp -R packages/daemon/test/fixtures/scenarios "$CONTEXT/scenarios"
+cp -R packages/test-system/scenarios "$CONTEXT/library"
 # esbuild already ships in the lockfile through tsx. Bundle the existing helper
 # closure (including YAML) so the container needs no source tree or dev install.
 node_modules/.bin/esbuild packages/test-system/ci/run.mjs --bundle --platform=node \
@@ -32,26 +33,28 @@ docker build --network none --build-arg TESTBED_IMAGE="$BASE" -t "$IMAGE" "$CONT
 docker image inspect "$IMAGE" > "$OUT/image-inspect.json"
 
 attempt=0
+for scenario in fixture library; do
 for mode in healthy lost-baton healthy; do
   attempt=$((attempt + 1))
   status=0
-  LOG="$OUT/$attempt-$mode.log"
+  LOG="$OUT/$attempt-$scenario-$mode.log"
   CONTAINER="openrig-pr-${SHA:0:12}-$attempt-$$"
   # Fresh writable scratch only. No mounts, host networking, credentials or Docker
   # socket; the container is non-root, resource bounded and removed even on failure.
   timeout --signal=TERM --kill-after=15s 300s docker run --name "$CONTAINER" --network none \
     --read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=512m,mode=1777 \
     --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 \
-    --memory 2g --cpus 2 "$IMAGE" node /opt/openrig-testbed/runner.mjs "$mode" \
+    --memory 2g --cpus 2 "$IMAGE" node /opt/openrig-testbed/runner.mjs "$mode" "$scenario" \
     > "$LOG" 2>&1 || status=$?
   cat "$LOG"
   docker rm -f "$CONTAINER" >/dev/null
   CONTAINER=""
-  node --input-type=module - "$mode" "$status" "$LOG" <<'JS'
+  node --input-type=module - "$mode" "$status" "$LOG" "$scenario" <<'JS'
 import { readFileSync } from 'node:fs';
 import { readReport, verifyRun } from './packages/test-system/ci/result.mjs';
-const [mode, status, log] = process.argv.slice(2);
-verifyRun(mode, Number(status), readReport(readFileSync(log, 'utf8')));
-console.log(`${mode}: ${mode === 'healthy' ? 'healthy scenario passed' : 'seeded durability regression caught at the expected assertion'}`);
+const [mode, status, log, scenario] = process.argv.slice(2);
+verifyRun(mode, Number(status), readReport(readFileSync(log, 'utf8')), scenario);
+console.log(`${scenario}/${mode}: ${mode === 'healthy' ? 'healthy scenario passed' : 'seeded durability regression caught at the expected assertion'}`);
 JS
+done
 done

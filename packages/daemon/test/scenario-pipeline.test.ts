@@ -33,6 +33,23 @@ function write(name: string, body: string): string {
 }
 
 describe("loadScenarioFile", () => {
+  it("threads the explicit seed controller through the pipeline without a live daemon", async () => {
+    const { runScenarioFile } = await import("./helpers/scenario-pipeline.js");
+    const p = write("seed.yaml", "scenario: seeded\ntopology: ./unused.yaml\nsteps:\n  - seed_regression: {class: baton-drop}\n");
+    const seedRegression = vi.fn(async () => ({ code: 0, stdout: "armed", stderr: "" }));
+    const result = await runScenarioFile(p, {
+      rigBin: "/not-executed",
+      deps: { seedRegression },
+      daemon: async scaffold => ({
+        port: 9, baseUrl: "http://127.0.0.1:9", readEnv: scaffold.env,
+        sigterm: async () => {}, restart: async () => {},
+        stop: async () => scaffold.cleanup(),
+      }),
+    });
+    expect(result).toEqual({ scenario: "seeded", verdict: "PASS" });
+    expect(seedRegression).toHaveBeenCalledExactlyOnceWith("baton-drop");
+  });
+
   it("parses a valid scenario and resolves topology relative to the scenario file", () => {
     const p = write("s.yaml", [
       "scenario: baton-survives",

@@ -215,8 +215,8 @@ export interface RunScenarioFileOptions {
   topologyKind?: "stub" | "real";
   /** Base environment for the hermetic scaffold (HOME/PATH/TERM). */
   baseEnv?: Record<string, string | undefined>;
-  /** Overrides forwarded to buildRealDeps (clock/sleep/appendRecord/defaults/normalizer). */
-  deps?: Partial<Pick<RealDepsOptions, "now" | "sleep" | "appendRecord" | "defaults" | "normalizer">>;
+  /** Overrides forwarded to buildRealDeps, including an explicit test fault controller. */
+  deps?: Partial<Pick<RealDepsOptions, "now" | "sleep" | "appendRecord" | "defaults" | "normalizer" | "seedRegression">>;
   /**
    * 51-04 opt-in: how the scenario-local daemon is stood up. ABSENT => host-mode,
    * byte-identical to pre-51-04 (`defaultHostDaemon` = spawnScenarioDaemon with rigBin).

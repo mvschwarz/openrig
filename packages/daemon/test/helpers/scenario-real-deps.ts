@@ -17,7 +17,9 @@
  *   down          → rig down <rigName|rigId> --json --force
  *   daemon {op}   → the ScenarioDaemon lifecycle (sigterm | restart)
  *
- * restore/emit/mutate/policy/seed_regression have NO shipped runtime binding at v1
+ * seed_regression calls an explicitly supplied test fault controller. With no
+ * controller it fails loud; a declaration alone never counts as a seeded test.
+ * restore/emit/mutate/policy have NO shipped runtime binding at v1
  * (they ride 51-03 / A5 items 6-8) — the adapter FAILS LOUD with a named
  * UnboundActionError rather than fabricating a call (same floor as the FLAG-1
  * `proof` surface: unbound is never silently-skipped).
@@ -92,6 +94,10 @@ export interface RealDepsOptions {
   /** The mission scope reads audit (D3) — threaded from the scenario's
    *  env.scope_mission into `rig scope audit --mission <name> --json`. */
   scopeMission?: string;
+  /** Arm a named, scenario-local test fault (or explicitly record its healthy
+   * control). The paired harness owns injection timing and verifies the actual
+   * failing observation; this must never invoke a production `rig` command. */
+  seedRegression?: (regressionClass: string) => Promise<ActionResult>;
 }
 
 /** `rig up` is heavy (real tmux seat launch) — give it a generous ceiling. */
@@ -153,8 +159,17 @@ export function buildRealDeps(opts: RealDepsOptions): ScenarioRunnerDeps {
         if (op === "restart") { await daemon.restart(); return { code: 0, stdout: "", stderr: "" }; }
         return fail(`daemon: unknown op ${JSON.stringify(op)} (allowed: sigterm, restart)`);
       }
+      case "seed_regression": {
+        const regressionClass = payload && typeof payload === "object"
+          ? (payload as { class?: unknown }).class : undefined;
+        if (typeof regressionClass !== "string" || regressionClass.length === 0) {
+          return fail("seed_regression: a non-empty class is required");
+        }
+        if (!opts.seedRegression) throw new UnboundActionError(verb);
+        return opts.seedRegression(regressionClass);
+      }
       default:
-        // restore / emit / mutate / policy / seed_regression — no shipped binding at v1.
+        // restore / emit / mutate / policy — no shipped binding at v1.
         throw new UnboundActionError(verb);
     }
   };

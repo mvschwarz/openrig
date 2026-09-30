@@ -19,6 +19,24 @@ test('accepts a healthy run and a specifically observed post-restart lost baton'
   verifyRun('healthy', 0, green);
   verifyRun('lost-baton', 1, red);
 });
+test('library admission requires its own seed, failing step, and exact destination', () => {
+  const libraryGreen = { ...green, caseName: 'library', seed: { class: 'baton-drop', enabled: false } };
+  const result = {
+    ...red.result, failedStep: 4,
+    observation: { surface: 'queue', value: [
+      { qitemId: 'baton-1', state: 'pending', destinationSession: 'dev-qa@dev-pair-stub' },
+    ] },
+  };
+  const libraryRed = { ...report('lost-baton', result, red.fault), caseName: 'library', seed: { class: 'baton-drop', enabled: true } };
+  verifyRun('healthy', 0, libraryGreen, 'library');
+  verifyRun('lost-baton', 1, libraryRed, 'library');
+  for (const seed of [undefined, { class: 'typo', enabled: true }, { class: 'baton-drop', enabled: false }]) {
+    assert.throws(() => verifyRun('lost-baton', 1, { ...libraryRed, seed }, 'library'));
+  }
+  assert.throws(() => verifyRun('healthy', 0, libraryGreen));
+  assert.throws(() => verifyRun('lost-baton', 1, { ...libraryRed, result: red.result, records: [red.result] }, 'library'));
+  assert.throws(() => verifyRun('healthy', 0, green, 'unknown'));
+});
 test('rejects a surviving mutant and a failure before the seeded boundary', () => {
   assert.throws(() => verifyRun('lost-baton', 0, { ...green, mode: 'lost-baton' }));
   assert.throws(() => verifyRun('lost-baton', 1, report('lost-baton', {

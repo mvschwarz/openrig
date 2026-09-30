@@ -33,6 +33,9 @@ steps:
         - qitemId: baton-1
           state: in-progress
           destinationSession: dev-qa@dev-pair-stub
+  # Arm the paired harness BEFORE the affected action. Healthy runs record a
+  # disabled fault; seeded runs reset this exact claim while the daemon is down.
+  - seed_regression: {class: baton-drop}
   - daemon: { op: restart }
   # the baton MUST survive the restart: same item, still in-progress, still owned
   - expect:
@@ -46,5 +49,4 @@ steps:
   #   expect { surface: pane, seat: qa, contains: "restored" }. The stub-runner at the
   #   current tip emits only READY/EXITED; the `restore` behavior that prints the
   #   "restored" pane marker is A5 items 6-8. Lights up when they land.
-  - seed_regression: {class: baton-drop}
   - down: {}
