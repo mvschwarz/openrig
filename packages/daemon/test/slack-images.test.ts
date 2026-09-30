@@ -138,6 +138,46 @@ describe("#47 — a non-image https evidenceRef never becomes a Block Kit image 
     expect(local.evidenceLink).toBeUndefined(); // local refs keep the upload-flow handling
   });
 
+  it.each([
+    ["https://example.png", false],
+    ["https://example.invalid/PROOF.md?image=shot.png#preview.png", false],
+    ["https://example.invalid/shot%20one.PNG?caption=%3F%23#part%2F", true],
+    ["https://example.invalid/shot%2Epng", false],
+    ["https://example.invalid/shot.png%3Fdownload=1", false],
+    ["https://[invalid]/shot.png", false],
+    ["https://example.invalid:99999/shot.png", false],
+    ["https:///shot.png", false],
+  ])("classifies only the parsed URL pathname: %s", (url, expected) => {
+    expect(isHttpsImageRef(url)).toBe(expected);
+  });
+
+  it.each([
+    "https://user:password@example.invalid/proof",
+    "https://user:password@example.invalid/shot.png",
+    "https://user%3Apassword@example.invalid/shot.png",
+  ])("omits URL userinfo before posting evidence: %s", async (url) => {
+    const { fetchImpl, calls } = slackFetch();
+    const out = await makeDeliver(fetchImpl)(decision(url));
+    expect(out.ok).toBe(true);
+    expect(calls.map((call) => call.url)).toEqual(["https://slack.com/api/chat.postMessage"]);
+    expect(JSON.stringify(calls[0]!.body)).not.toContain(url);
+    expect(JSON.stringify(calls[0]!.body)).not.toContain("Evidence:");
+    expect((calls[0]!.body as { blocks: { type: string }[] }).blocks.some((block) => block.type === "image")).toBe(false);
+  });
+
+  it.each([
+    { name: "evidence context", evidenceRef: "https://example.invalid/" + "a".repeat(3000), body: "b", error: /evidence context/ },
+    { name: "escaped evidence context", evidenceRef: "https://example.invalid/?" + "&".repeat(600), body: "b", error: /evidence context/ },
+    { name: "complete fallback", evidenceRef: "https://example.invalid/" + "a".repeat(1500), body: "b".repeat(2500), error: /complete fallback/ },
+  ])("rejects an oversized $name in preflight before any Slack request", async ({ evidenceRef, body, error }) => {
+    const { fetchImpl, calls } = slackFetch();
+    const outbound = decision(evidenceRef);
+    outbound.payload = { ...(outbound.payload as Record<string, unknown>), body };
+    const out = await makeDeliver(fetchImpl)(outbound);
+    expect(out).toMatchObject({ ok: false, class: "human-message-unrenderable", detail: expect.stringMatching(error) });
+    expect(calls).toHaveLength(0);
+  });
+
   it("a GitLab issue-link evidenceRef posts with NO image block and a plain evidence link", async () => {
     const { fetchImpl, calls } = slackFetch();
     const out = await makeDeliver(fetchImpl)(decision("https://gitlab.com/acme/team/-/work_items/10"));

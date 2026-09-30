@@ -113,8 +113,11 @@ export function isHttpsImageRef(ref: unknown): boolean {
   if (typeof ref !== "string") return false;
   const url = ref.trim();
   if (!/^https:\/\/\S+$/.test(url)) return false;
-  const bare = url.split(/[?#]/, 1)[0] ?? "";
-  return LOCAL_IMAGE_EXT.has(path.extname(bare).toLowerCase());
+  try {
+    return LOCAL_IMAGE_EXT.has(path.extname(new URL(url).pathname).toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 /** #47 — split an evidenceRef into an image attachment vs. a plain link. An explicit

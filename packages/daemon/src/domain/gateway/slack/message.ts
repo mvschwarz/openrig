@@ -81,7 +81,7 @@ export function buildImageBlocks(mediaRefs: readonly SlackMediaRef[] | undefined
   for (const m of mediaRefs) {
     const url = String(m.imageUrl || "");
     // Only forward a clean https URL that carries no secret (defense-in-depth, item 7).
-    if (!/^https:\/\/\S+$/.test(url) || containsSecret(url)) continue;
+    if (!isSafeHttpsUrl(url)) continue;
     blocks.push({
       type: "image",
       image_url: url,
@@ -133,6 +133,16 @@ function inert(text: string): string {
   return escapeSlackText(redactSecrets(text));
 }
 
+function isSafeHttpsUrl(url: string): boolean {
+  if (!/^https:\/\/\S+$/.test(url) || containsSecret(url)) return false;
+  try {
+    const parsed = new URL(url);
+    return !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
+}
+
 /** #47 — render a non-image https evidenceRef as a plain link instead of a Block Kit
  *  `image` block. The URL arrives pre-validated as `^https://\S+$` from the delivery
  *  layer; item-7 hygiene still applies (a secret-bearing URL is refused, never
@@ -140,11 +150,11 @@ function inert(text: string): string {
  *  plain text rather than a link. Returns null when there is nothing safe to render. */
 function buildEvidenceLink(url: string | null | undefined): { text: string; block: unknown } | null {
   const ref = typeof url === "string" ? url.trim() : "";
-  if (!ref || !/^https:\/\/\S+$/.test(ref) || containsSecret(ref)) return null;
-  const text = `Evidence: ${inert(ref)}`;
-  const block = /[<>|]/.test(ref)
-    ? { type: "context", elements: [{ type: "mrkdwn", text }] }
-    : { type: "context", elements: [{ type: "mrkdwn", text: `Evidence: <${ref}|evidence>` }] };
+  if (!ref || !isSafeHttpsUrl(ref)) return null;
+  const escapedRef = inert(ref);
+  const text = `Evidence: ${escapedRef}`;
+  const context = bounded(/[<>|]/.test(ref) ? text : `Evidence: <${escapedRef}|evidence>`, SLACK_SECTION_CAP, "evidence context");
+  const block = { type: "context", elements: [{ type: "mrkdwn", text: context }] };
   return { text, block };
 }
 
