@@ -108,7 +108,9 @@ export class ChatRepository {
 
     // Timestamp filter
     if (since) {
-      conditions.push("created_at >= ?");
+      // SQLite datetime('now') stores a space separator; ISO callers use T
+      // and may carry a UTC offset. Compare instants, not mixed text formats.
+      conditions.push("julianday(created_at) >= julianday(?)");
       params.push(since);
     }
 
