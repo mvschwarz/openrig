@@ -85,6 +85,28 @@ describe("thread↔seat map — exact-lookup semantics", () => {
     expect(map.resolveByThread("T1")!.seat).toBe("s1");
     expect(map.resolveByThread("T2")!.seat).toBe("s2-live"); // untouched
   });
+
+  it("newest root is Slack's latest thread_ts, not when a rebuild happened to re-insert it", () => {
+    const root = (threadTs: string) => formatPostedStamp({ threadTs, messageTs: threadTs, channel: "C1", human: "h1", seat: "s1", conversationId: "q1" });
+    // Named per lookup, so a failure says which one picked the wrong root.
+    const newest = (map: ThreadSeatMap) => ({
+      byConversation: map.resolveByConversation("q1")!.threadTs,
+      openForConversation: map.resolveOpenForConversation("h1", "s1", "q1")!.threadTs,
+      openForPair: map.resolveOpenForPair("h1", "s1")!.threadTs,
+    });
+    const allNewest = { byConversation: "1700000100.000200", openForConversation: "1700000100.000200", openForPair: "1700000100.000200" };
+    // A rebuild stamps opened_at with rebuild time, so an older root read later looks newer.
+    let tick = 0;
+    const ticking = new ThreadSeatMap(mapDb(), () => new Date(Date.UTC(2026, 7, 27, 0, 0, tick++)));
+    ticking.rebuildFromStamps([root("1700000100.000200"), root("1700000000.000100")]);
+    expect(newest(ticking)).toEqual(allNewest);
+    // Equal opened_at (one fast rebuild): still Slack's order, whichever row went in first.
+    for (const order of [["1700000100.000200", "1700000000.000100"], ["1700000000.000100", "1700000100.000200"]]) {
+      const tied = new ThreadSeatMap(mapDb(), clock);
+      tied.rebuildFromStamps(order.map(root));
+      expect(newest(tied)).toEqual(allNewest);
+    }
+  });
 });
 
 describe("inbound routing — the four classes, wrong-seat ABSENCE pinned", () => {

@@ -11,6 +11,11 @@
 
 import type Database from "better-sqlite3";
 
+// Newest root = Slack's own post time (thread_ts), never opened_at: a rebuild re-stamps
+// opened_at with rebuild time, so an older root re-read later would look newer, and roots
+// rebuilt in one burst tie. thread_ts is unique, so the text tie-break settles equal floats.
+const NEWEST_ROOT_FIRST = "CAST(thread_ts AS REAL) DESC, thread_ts DESC";
+
 export interface ThreadMapping {
   threadTs: string;
   channel: string;
@@ -76,7 +81,7 @@ export class ThreadSeatMap {
   /** Outbound thread reuse: the OPEN conversation for (human, seat), newest first. */
   resolveOpenForPair(human: string, seat: string): ThreadMapping | null {
     const row = this.db
-      .prepare(`SELECT * FROM thread_seat_map WHERE human = ? AND seat = ? AND state = 'open' ORDER BY opened_at DESC LIMIT 1`)
+      .prepare(`SELECT * FROM thread_seat_map WHERE human = ? AND seat = ? AND state = 'open' ORDER BY ${NEWEST_ROOT_FIRST} LIMIT 1`)
       .get(human, seat) as Record<string, unknown> | undefined;
     return row ? project(row) : null;
   }
@@ -89,7 +94,7 @@ export class ThreadSeatMap {
       .prepare(
         `SELECT * FROM thread_seat_map
           WHERE human = ? AND seat = ? AND conversation_id = ? AND state = 'open'
-          ORDER BY opened_at DESC LIMIT 1`,
+          ORDER BY ${NEWEST_ROOT_FIRST} LIMIT 1`,
       )
       .get(human, seat, conversationId) as Record<string, unknown> | undefined;
     return row ? project(row) : null;
@@ -99,7 +104,7 @@ export class ThreadSeatMap {
    *  closed root may be reused), newest first; null = the conversation never posted a root. */
   resolveByConversation(conversationId: string): ThreadMapping | null {
     const row = this.db
-      .prepare(`SELECT * FROM thread_seat_map WHERE conversation_id = ? ORDER BY opened_at DESC LIMIT 1`)
+      .prepare(`SELECT * FROM thread_seat_map WHERE conversation_id = ? ORDER BY ${NEWEST_ROOT_FIRST} LIMIT 1`)
       .get(conversationId) as Record<string, unknown> | undefined;
     return row ? project(row) : null;
   }

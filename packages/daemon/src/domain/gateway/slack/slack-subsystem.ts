@@ -288,6 +288,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         if (root.state === "closed") return { kind: "fallback", reason: "root-closed", threadTs: root.threadTs };
         if (root.channel !== cfg.channel) return { kind: "fallback", reason: "root-other-channel", threadTs: root.threadTs };
         if (root.human !== (p.destinationSession ?? "")) return { kind: "fallback", reason: "root-other-human", threadTs: root.threadTs };
+        if (root.seat !== (p.sourceSession ?? "")) return { kind: "fallback", reason: "root-other-seat", threadTs: root.threadTs };
         return { kind: "thread", threadTs: root.threadTs };
       }
       if (!item.replyTo) return { kind: "fallback", reason: "root-missing", qitemId: item.qitemId };

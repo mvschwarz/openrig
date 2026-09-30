@@ -85,8 +85,11 @@ accepted only with `--human-intent update`, and refused while the earlier item
 still waits on the human (a pending human decision, or a row parked on the
 human): a reply in that thread would answer the decision. Name the item whose
 thread the human saw, such as the parked row, and create the update on the
-same host as that item. If the earlier thread is missing or closed, the update
-posts as a new message and the `--verify` result says `threaded: false` with
+same host as that item. Send the update from the seat that owns that thread:
+the seat that parked the row, or the author of the earlier item. A human reply
+in a thread reaches its owning seat, so an update from any other seat posts as
+a new message. It also posts as a new message if the earlier thread is missing
+or closed. In every such case the `--verify` result says `threaded: false` with
 the reason.
 
 If an existing agent-owned row must wait for a **decision**, block it on the **new live qitem ID**

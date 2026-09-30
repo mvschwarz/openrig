@@ -18,6 +18,7 @@ export type ReplyToQitemFallbackReason =
 export type ReplyToRootFallbackReason =
   | "root-closed"
   | "root-other-human" // the root was addressed to a different human
+  | "root-other-seat" // the root belongs to another agent seat: a reply there would reach that seat
   | "root-other-channel"; // the root lives in a channel other than the configured one
 
 export type ReplyToFallback =
@@ -27,7 +28,7 @@ export type ReplyToFallback =
 export type ReplyToChoice = { kind: "thread"; threadTs: string } | ReplyToFallback;
 
 const QITEM_REASONS: readonly string[] = ["root-missing", "reference-has-live-gate", "chain-too-long"] satisfies ReplyToQitemFallbackReason[];
-const ROOT_REASONS: readonly string[] = ["root-closed", "root-other-human", "root-other-channel"] satisfies ReplyToRootFallbackReason[];
+const ROOT_REASONS: readonly string[] = ["root-closed", "root-other-human", "root-other-seat", "root-other-channel"] satisfies ReplyToRootFallbackReason[];
 
 export function formatReplyToChoice(choice: ReplyToChoice): string {
   if (choice.kind === "thread") return `${REPLY_TO_CHOICE_PREFIX} kind=thread thread_ts=${choice.threadTs}`;

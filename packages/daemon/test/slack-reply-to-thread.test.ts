@@ -117,6 +117,15 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       await vi.waitFor(() => expect(repo.getById(qitemId)?.deliveryOutcome).toBe("posted"));
     }
 
+    // What the outbound driver would do next: post the item's pending notice, if it has one.
+    async function postPendingNotice(qitemId: string): Promise<void> {
+      const pending = async () => (await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({})).find((q) => q.qitemId === qitemId);
+      const alert = await pending();
+      if (!alert) return;
+      wire.dispatcher.dispatch("post_message", human, alert);
+      await vi.waitFor(async () => expect(await pending()).toBeUndefined()); // receipt written: any root it opened is mapped
+    }
+
     it("posts the update under the resolved decision's root and opens no root of its own", async () => {
       const decision = await repo.create(request);
       await deliver(decision.qitemId);
@@ -137,7 +146,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(posts[0]?.thread_ts).toBeUndefined();
       await resolvePark(work.qitemId);
 
-      const update = await repo.create({ ...request, humanIntent: "update", body: "Merged.", replyTo: work.qitemId });
+      const update = await repo.create({ ...request, sourceSession: "worker@rig", humanIntent: "update", body: "Merged.", replyTo: work.qitemId });
       await deliver(update.qitemId);
       expect(posts.at(-1)?.thread_ts).toBe("1.1");
       expect(repo.getById(update.qitemId)).toMatchObject({ state: "done", replyToFallback: null });
@@ -147,7 +156,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       const work = await park();
       await deliver(work.qitemId);
       await resolvePark(work.qitemId);
-      const update = await repo.create({ ...request, humanIntent: "update", body: "Merged.", replyTo: work.qitemId });
+      const update = await repo.create({ ...request, sourceSession: "worker@rig", humanIntent: "update", body: "Merged.", replyTo: work.qitemId });
       await deliver(update.qitemId);
       expect(posts.at(-1)?.thread_ts).toBe("1.1");
 
@@ -157,7 +166,8 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(new ThreadSeatMap(db).resolveByThread(`${posts.length}.1`)?.conversationId).toBe(work.qitemId);
     });
 
-    it("a reply in the old shared root never answers the re-parked decision; a reply in its fresh root does", async () => {
+    // Rebuild the wire with inbound Socket Mode on a fake socket; returns a human-reply sender.
+    async function connectInbound(): Promise<(threadTs: string, ts: string) => Promise<void>> {
       const secrets = join(home, "fake.env");
       writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\nSLACK_APP_TOKEN=xapp-EXAMPLE-fake\n");
       const sockets: WsLike[] = [];
@@ -180,11 +190,16 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
         sockets[0]!.onmessage?.({ data: JSON.stringify({ envelope_id: `e-${ts}`, type: "events_api", payload: { event: { type: "message", user: "UFOUNDER", text: "thanks", ts, thread_ts: threadTs, channel: "C-TEST" } } }) });
         await new Promise((r) => setTimeout(r, 50));
       };
+      return humanReply;
+    }
+
+    it("a reply in the old shared root never answers the re-parked decision; a reply in its fresh root does", async () => {
+      const humanReply = await connectInbound();
 
       const work = await park();
       await deliver(work.qitemId);
       await resolvePark(work.qitemId);
-      const update = await repo.create({ ...request, humanIntent: "update", body: "Merged.", replyTo: work.qitemId });
+      const update = await repo.create({ ...request, sourceSession: "worker@rig", humanIntent: "update", body: "Merged.", replyTo: work.qitemId });
       await deliver(update.qitemId);
       repo.update({ qitemId: work.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "human-founder@kernel", summary: "Deploy it too?", evidenceRef: "/proof/deploy.md", transitionNote: "parked again" });
       await deliver(work.qitemId);
@@ -194,6 +209,53 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(repo.getById(work.qitemId)?.state).toBe("blocked");
       await humanReply(freshRoot, "900.2"); // an answer in the new decision's own thread
       await vi.waitFor(() => expect(repo.getById(work.qitemId)?.state).toBe("in-progress"));
+    });
+
+    it("without --reply-to: once a conversation has a newer root, a reply in its older root no longer answers the gate", async () => {
+      const humanReply = await connectInbound();
+      const work = await park();
+      await deliver(work.qitemId); // root 1.1
+      await resolvePark(work.qitemId);
+      new ThreadSeatMap(db).close("1.1"); // the conversation's first root is closed ...
+      repo.update({ qitemId: work.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "human-founder@kernel", summary: "Deploy it too?", evidenceRef: "/proof/deploy.md", transitionNote: "parked again" });
+      await deliver(work.qitemId); // ... so the re-park opens a second root for the SAME conversation
+      const newerRoot = `${posts.length}.1`;
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(new ThreadSeatMap(db).resolveByThread(newerRoot)?.conversationId).toBe(work.qitemId);
+
+      await humanReply("1.1", "901.1"); // a late reply in the older root
+      expect(repo.getById(work.qitemId)?.state).toBe("blocked");
+      await humanReply(newerRoot, "901.2");
+      await vi.waitFor(() => expect(repo.getById(work.qitemId)?.state).toBe("in-progress"));
+    });
+
+    it("a decision the human answered by replying in Slack still takes the update in its root", async () => {
+      const humanReply = await connectInbound();
+      const decision = await repo.create(request);
+      await deliver(decision.qitemId);
+      await humanReply("1.1", "902.1");
+      await vi.waitFor(() => expect(repo.getById(decision.qitemId)?.state).toBe("done"));
+      await postPendingNotice(decision.qitemId); // none: a done row's "resolved" notice opens no root of its own
+
+      const update = await repo.create({ ...request, humanIntent: "update", body: "Merged.", replyTo: decision.qitemId });
+      await deliver(update.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBe("1.1");
+      expect(repo.getById(update.qitemId)?.replyToFallback).toBeNull();
+    });
+
+    it("a resolved park's 'resolved' notice stays in the park's root, so the worker's update still threads there", async () => {
+      const work = await park();
+      await deliver(work.qitemId);
+      await resolvePark(work.qitemId);
+      const before = posts.length;
+      await postPendingNotice(work.qitemId);
+      expect(posts.length).toBe(before + 1); // the notice did post ...
+      expect(posts.at(-1)?.thread_ts).toBe("1.1"); // ... inside the park's root, opening none of its own
+
+      const update = await repo.create({ ...request, sourceSession: "worker@rig", humanIntent: "update", body: "Merged.", replyTo: work.qitemId });
+      await deliver(update.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBe("1.1");
+      expect(repo.getById(update.qitemId)?.replyToFallback).toBeNull();
     });
 
     it("follows a chain of threaded updates back to the original root", async () => {
@@ -260,6 +322,16 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       expect(posts.at(-1)).toMatchObject({ channel: "C-OTHER" });
       expect(posts.at(-1)?.thread_ts).toBeUndefined();
       expect(repo.getById(update.qitemId)?.replyToFallback).toBe("root-other-channel (thread 1.1)");
+    });
+
+    it("falls back when the referenced root belongs to a different seat: a reply there would reach that seat", async () => {
+      const decision = await repo.create(request);
+      await deliver(decision.qitemId);
+      resolveDecision(decision.qitemId);
+      const update = await repo.create({ ...request, sourceSession: "other@rig", humanIntent: "update", replyTo: decision.qitemId });
+      await deliver(update.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(repo.getById(update.qitemId)?.replyToFallback).toBe("root-other-seat (thread 1.1)");
     });
 
     it("names a chain past the walk bound as chain-too-long, not a missing root", async () => {
