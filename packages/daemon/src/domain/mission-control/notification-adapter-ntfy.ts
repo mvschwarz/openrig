@@ -61,5 +61,5 @@ export class NtfyNotificationAdapter implements NotificationAdapter {
 /** ntfy headers must be ASCII single-line; truncate + strip newlines. */
 function truncateHeader(s: string, max: number): string {
   const cleaned = s.replace(/[\r\n]+/g, " ").trim();
-  return cleaned.length > max ? cleaned.slice(0, max - 1) + "…" : cleaned;
+  return cleaned.length > max ? cleaned.slice(0, max - 3) + "..." : cleaned;
 }
