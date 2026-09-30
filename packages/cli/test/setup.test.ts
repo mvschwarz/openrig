@@ -1043,7 +1043,7 @@ describe("codex_auth — provider-aware Codex readiness (#194)", () => {
     }
   });
 
-  it("does not let a malformed config earn a pass: it falls back to the OpenAI login and says why", async () => {
+  it("reports a malformed-config explanation when the fallback OpenAI login fails", async () => {
     const env = { HOME: "/synthetic/home", CODEX_HOME, AWS_BEARER_TOKEN_BEDROCK: TOKEN };
     const { deps } = providerDeps({ config: "model_provider = [broken", env, loggedIn: false });
     const step = codexAuthStep(await runSetup(deps, {}));

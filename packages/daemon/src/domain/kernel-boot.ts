@@ -190,7 +190,7 @@ export async function defaultProbeRuntimes(): Promise<RuntimeProbeResult> {
  *  `requires_openai_auth = false` and an `env_key` uses its credential
  *  variable. Everything else (no file, a parse error, a legacy top-level
  *  `profile`, a built-in or undeclared provider) keeps the OpenAI login check,
- *  so an unresolved config never earns readiness. Other Codex config layers
+ *  so an unresolved config does not take the env-key shortcut; readiness still follows the login result. Other Codex config layers
  *  (project, system or managed config, requirements, `-c`, `--profile`) are not
  *  resolved here. The CLI's `rig setup` carries the same rule. */
 export type CodexProviderAuth =
