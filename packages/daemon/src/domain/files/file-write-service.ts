@@ -146,6 +146,8 @@ export class FileWriteService {
     try {
       tmpFd = fs.openSync(tmpPath, "w");
       fs.writeFileSync(tmpFd, req.content);
+      // Replacing the inode must preserve the existing file's ordinary permissions.
+      fs.fchmodSync(tmpFd, prevStat.mode & 0o777);
       fs.fsyncSync(tmpFd);
     } catch (err) {
       // Clean up temp file if it was partially created.
