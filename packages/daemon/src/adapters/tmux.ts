@@ -227,16 +227,16 @@ function parsePaneLine(line: string): TmuxPane | null {
   const parts = line.split(TMUX_FIELD_SEPARATOR);
   if (parts.length < 6) return null;
   const index = parseInt(parts[1]!, 10);
-  const width = parseInt(parts[3]!, 10);
-  const height = parseInt(parts[4]!, 10);
+  const width = parseInt(parts.at(-3)!, 10);
+  const height = parseInt(parts.at(-2)!, 10);
   if (isNaN(index) || isNaN(width) || isNaN(height)) return null;
   return {
     id: parts[0]!,
     index,
-    cwd: parts[2]!,
+    cwd: parts.slice(2, -3).join(TMUX_FIELD_SEPARATOR),
     width,
     height,
-    active: parts[5] === "1",
+    active: parts.at(-1) === "1",
   };
 }
 
