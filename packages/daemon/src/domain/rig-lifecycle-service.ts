@@ -533,8 +533,13 @@ export class RigLifecycleService {
       if (invalidFallback) return invalidFallback;
     }
 
+    // #141: the same ownership rule as removeNode. A member's session name that another unarchived node owns
+    // (for example the live replacement of an archived generation) addresses that node's work, which this
+    // shrink neither counts nor reroutes.
     const activeQitemIds = this.activeQitemIdsForSessionNames(
-      nodes.flatMap((node) => node.latest_session_name ? [node.latest_session_name] : []),
+      nodes.flatMap((node) => node.latest_session_name
+        && !findOtherSessionOwner(this.db, node.latest_session_name, node.id, { ignoreArchived: true })
+        ? [node.latest_session_name] : []),
     );
     if (activeQitemIds.length > 0 && fallbackDestination === undefined) {
       return {

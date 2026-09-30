@@ -1115,6 +1115,57 @@ describe("SeatHandoverService", () => {
     expect(durableRows()).toBe(before);
   });
 
+  // #141: a YAML re-import archives the stopped earlier generation, which keeps its binding to the seat's
+  // canonical session name. A composer-launched successor reuses that name, so the archived shadow must not
+  // reject the live seat's handover after the successor has already replaced the process.
+  function seedArchivedGeneration(): void {
+    const old = rigRepo.createRig("seat-rig");
+    const oldNode = rigRepo.addNode(old.id, "dev.impl", { runtime: "codex", cwd: "/project" });
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(oldNode.id, "dev-impl@seat-rig").id, "exited");
+    sessionRegistry.updateBinding(oldNode.id, { tmuxSession: "dev-impl@seat-rig", tmuxPane: "%0" });
+    rigRepo.archiveRig(old.id);
+  }
+
+  it.each(["fresh", "rebuild"] as const)("#141: an archived earlier generation's binding does not block a %s handover of the live seat", async (source) => {
+    seedArchivedGeneration();
+    const { node } = seedSeat();
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(respawnPane).toHaveBeenCalledTimes(1);
+    expect(killSession).not.toHaveBeenCalled();
+    expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
+    const nodeRow = db.prepare("SELECT handover_result FROM nodes WHERE id = ?").get(node.id) as { handover_result: string | null };
+    expect(nodeRow.handover_result).toBe("complete");
+  });
+
+  it("#141 control: another UNARCHIVED rig's binding to the seat's session name still blocks a fresh handover", async () => {
+    seedSeat();
+    const otherRig = rigRepo.createRig("other-rig");
+    const otherNode = rigRepo.addNode(otherRig.id, "dev.other", { runtime: "codex" });
+    sessionRegistry.updateBinding(otherNode.id, { tmuxSession: "dev-impl@seat-rig" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result).toMatchObject({ ok: false, code: "successor_already_managed" });
+  });
+
+  it("#141 control: an archived rig's binding still blocks a DISCOVERED successor of that name", async () => {
+    seedSeat();
+    const discovered = seedDiscovery();
+    const archivedRig = rigRepo.createRig("archived-rig");
+    const archivedNode = rigRepo.addNode(archivedRig.id, "dev.other", { runtime: "codex" });
+    sessionRegistry.updateBinding(archivedNode.id, { tmuxSession: "successor-session" });
+    rigRepo.archiveRig(archivedRig.id);
+    const before = durableRows();
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: `discovered:${discovered.id}` });
+
+    expect(result).toMatchObject({ ok: false, code: "successor_already_managed" });
+    expect(durableRows()).toBe(before);
+  });
+
   it("fails before mutation when the seat has no current occupant", async () => {
     seedSeat({ withSession: false });
     const discovered = seedDiscovery();
