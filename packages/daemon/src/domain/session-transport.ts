@@ -11,7 +11,7 @@ import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "..
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
-import { verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
+import { findExactNativeResumeProcess, verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 
@@ -1450,13 +1450,32 @@ export class SessionTransport {
       return null;
     }
     if (!paneCommand || !isShellForeground(paneCommand)) return null;
-    if (runtime === "codex" && pane) {
+    if ((runtime === "codex" || runtime === "claude-code") && pane) {
       // Reuse the identity reconciler's stable, foreground, pane-descendant proof.
       // A resumed process must also name this session's token. Stale UI, a Node
       // launcher alone, missing observations or a native process elsewhere cannot clear it.
-      const native = await verifyCodexPaneProcess({ target: sessionName, tmux: this.tmuxAdapter,
-        listProcesses: this.listProcesses, expectedToken: resumeToken });
-      if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
+      if (runtime === "codex") {
+        const native = await verifyCodexPaneProcess({ target: sessionName, tmux: this.tmuxAdapter,
+          listProcesses: this.listProcesses, expectedToken: resumeToken });
+        if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
+      } else if (resumeToken) {
+        // Managed Claude launches wrap `claude` in /bin/sh (#197), so the pane
+        // foreground reads as a bare shell while the runtime runs beneath it.
+        // The same token-bound pane-descendant proof clears it: findExactNativeResumeProcess
+        // has no fingerprint form, so this is a single observation. Without a
+        // registered token there is nothing to match, and the refusal stands.
+        const panePid = await this.tmuxAdapter.getPanePid(pane).catch(() => null);
+        const listProcesses = this.listProcesses;
+        if (panePid && listProcesses) {
+          let rows: Awaited<ReturnType<NativeProcessLister>> = [];
+          try {
+            rows = await listProcesses();
+          } catch {
+            rows = [];
+          }
+          if (findExactNativeResumeProcess(rows, panePid, runtime, resumeToken)) return null;
+        }
+      }
     }
     return paneCommand.replace(/^-/, "");
   }

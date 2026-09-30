@@ -183,6 +183,82 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     });
 });
 
+// #197 — a managed Claude launch wraps `claude` in /bin/sh, so the pane
+// foreground reads as a bare shell while the runtime runs beneath it. The
+// token-bound pane-descendant proof (findExactNativeResumeProcess, the same
+// reconciler the identity path uses) clears the refusal; without a matching
+// registered token the refusal stands.
+describe("#197 managed Claude behind a shell wrapper still receives sends", () => {
+  let db: Database.Database;
+  let rigRepo: RigRepository;
+  let sessionRegistry: SessionRegistry;
+
+  beforeEach(() => {
+    db = createFullTestDb();
+    rigRepo = new RigRepository(db);
+    sessionRegistry = new SessionRegistry(db);
+  });
+  afterEach(() => db.close());
+
+  // The watchdog's deliver() makes exactly this call (startup.ts parked-owner delivery).
+  const watchdogSend = (transport: SessionTransport, name: string) =>
+    transport.send(name, "[OpenRig watchdog scheduler · policy: parked-owner-consumer] You are parked", {
+      deliveryId: "guard-watchdog-job-1", actorSession: "watchdog@system", auditPointer: "job-1",
+    });
+
+  const claudeToken = "sess_9f2c41aa-7b3e-4d18-9c1e-55aa02f3c7d1";  function claudeWrapperProcesses(): NativeProcessRow[] {
+    const startedAt = "Tue Sep 30 12:00:00 2026";
+    return [
+      { pid: 1135, ppid: 1, pgid: 1135, tpgid: 1196, executableName: "zsh", command: "-zsh", startedAt },
+      { pid: 1196, ppid: 1135, pgid: 1196, tpgid: 1196, executableName: "sh", command: "/bin/sh /tmp/openrig-tmux-send-1-abc.txt", startedAt },
+      { pid: 1205, ppid: 1196, pgid: 1196, tpgid: 1196, executableName: "claude", command: `claude --permission-mode auto --session-id ${claudeToken} --name orch-lead@my-rig`, startedAt },
+    ];
+  }
+
+  function claudeWrappedSeat(listProcesses = vi.fn(async () => claudeWrapperProcesses())) {
+    const rig = rigRepo.createRig("my-rig");
+    const node = rigRepo.addNode(rig.id, "orch.lead", { role: "worker", runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "orch-lead@my-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "orch-lead@my-rig", tmuxPane: "%1" });
+    sessionRegistry.updateResumeToken(session.id, "claude-code", claudeToken);
+    const ports = tmuxWithPane(async () => "sh");
+    ports.tmux.getPanePid = vi.fn(async () => 1135);
+    const deps = { db, rigRepo, sessionRegistry, tmuxAdapter: ports.tmux, listProcesses, sleep: async () => {} };
+    return { ...ports, session, listProcesses, transport: new SessionTransport(deps) };
+  }
+
+  it.each(["ordinary verified send", "queue nudge", "watchdog wake"])("wrapped native Claude receives %s", async kind => {
+    const { transport, sendText, sendKeys } = claudeWrappedSeat();
+    const result = kind === "watchdog wake"
+      ? await watchdogSend(transport, "orch-lead@my-rig")
+      : await transport.send("orch-lead@my-rig", "existing review", {
+        verify: true, ...(kind === "queue nudge" ? { actorSession: "dev-owner@my-rig", auditPointer: "existing-review", deliveryId: "nudge-1" } : {}),
+      });
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendKeys).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["wrong resume identity", rows => rows.map(r => r.pid === 1205 ? { ...r, command: "claude --permission-mode auto --session-id other" } : r)],
+    ["exited native with stale UI", rows => rows.slice(0, -1)],
+  ])("shell label still refuses Claude %s without input", async (_name, mutate) => {
+    const { transport, sendText, sendKeys } = claudeWrappedSeat(vi.fn(async () => mutate(claudeWrapperProcesses())));
+    expect(await watchdogSend(transport, "orch-lead@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_not_running" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("refuses a managed Claude wrapper with no registered token", async () => {
+    const { transport, session, sendText, sendKeys } = claudeWrappedSeat();
+    sessionRegistry.clearResumeToken(session.id);
+    expect(await watchdogSend(transport, "orch-lead@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_not_running" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+});
+
 describe("#142 the parked-owner wake records the refusal honestly and does not retry into the shell", () => {
   const SEAT = "dev-impl@my-rig";
   const ROW = "qitem-owed-1";
