@@ -107,7 +107,9 @@ export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
       return stdout;
     });
     return output.split("\n").slice(1).flatMap((line) => {
-      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/);
+      // ucomm may contain spaces (e.g. vitest retitles its worker "node (vitest 1)").
+      // It is anchored on the fixed-format lstart date that always follows it.
+      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(.+?)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/);
       return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), tpgid: Number(match[4]), executableName: match[5]!, startedAt: match[6]!, command: match[7]! }] : [];
     });
   } catch { return []; }

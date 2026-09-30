@@ -19,6 +19,7 @@ it("reads foreground identity through the real async executable and parser path"
     "102 101 102 102 node Sat Jan  1 12:00:00 2000 node /opt/bin/codex -C /project",
     "103 102 102 102 codex Sat Jan  1 12:00:00 2000 /opt/vendor/bin/codex -C /project",
     "104 1 104 -1 node Sat Jan  1 12:00:00 2000 node /tmp/other.js --label codex",
+    "106 1 106 102 node (vitest 1) Sat Jan  1 12:00:00 2000 node (vitest 1)",
     "broken row",
     "105 1 105 0",
   ];
@@ -34,6 +35,7 @@ it("reads foreground identity through the real async executable and parser path"
     { pid: 102, ppid: 101, pgid: 102, tpgid: 102, executableName: "node", startedAt: "Sat Jan  1 12:00:00 2000", command: "node /opt/bin/codex -C /project" },
     { pid: 103, ppid: 102, pgid: 102, tpgid: 102, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000", command: "/opt/vendor/bin/codex -C /project" },
     { pid: 104, ppid: 1, pgid: 104, tpgid: -1, executableName: "node", startedAt: "Sat Jan  1 12:00:00 2000", command: "node /tmp/other.js --label codex" },
+    { pid: 106, ppid: 1, pgid: 106, tpgid: 102, executableName: "node (vitest 1)", startedAt: "Sat Jan  1 12:00:00 2000", command: "node (vitest 1)" },
   ]);
   fs.writeFileSync(path.join(scratch, "ps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
   expect(await defaultListProcesses()).toEqual([]);
