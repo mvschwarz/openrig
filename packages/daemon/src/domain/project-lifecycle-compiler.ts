@@ -1,4 +1,4 @@
-import { readMissionReadiness, type MissionReadiness } from "./proof/judgments.js";
+import { readMissionReadiness, resolveProjectRoot, type MissionReadiness } from "./proof/judgments.js";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -57,7 +57,7 @@ export function compileProjectLifecycle(input: {
 }): LifecycleCompilation {
   const missionPath = resolveManifest(input.missionPath, "mission.yaml");
   const missionDir = dirname(missionPath);
-  const workspaceRoot = dirname(dirname(missionDir));
+  const workspaceRoot = resolveProjectRoot(missionDir);
   const projectPath = join(workspaceRoot, "project.yaml");
   const project = readManifest(projectPath, "project");
   const mission = readManifest(missionPath, "mission");

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDb } from "../src/db/connection.js";
@@ -74,6 +74,27 @@ execution:
       queue: (subject.db.prepare("select count(*) n from queue_items").get() as { n: number }).n,
     }).toEqual(before);
     subject.db.close();
+  });
+
+  it.each(["work/initiatives", "."])("finds the owning project for missions.root %s", (missionsRoot) => {
+    const parent = join(root, missionsRoot);
+    mkdirSync(parent, { recursive: true });
+    const moved = join(parent, "release-1.0.0");
+    renameSync(missionDir, moved);
+    missionDir = moved;
+    writeFileSync(join(root, "project.yaml"), `schema: openrig.project/v0alpha1
+kind: project
+metadata: { id: demo }
+missions: { root: "${missionsRoot}" }
+lifecycle: { profile: release-boundary-v0 }
+`);
+    const subject = runtime();
+    try {
+      const compiled = subject.runtime.compileLifecycle(missionDir, "release-op");
+      expect(compiled.eligible).toBe(true);
+      expect(compiled.identity).toEqual({ project: "demo", mission: "release-1.0.0", lifecycleProfile: "release-boundary-v0" });
+      expect(compiled.sources.find(source => source.kind === "project")?.path).toBe(realpathSync(join(root, "project.yaml")));
+    } finally { subject.db.close(); }
   });
 
   it("keeps an invalid dependency graph inspectable but ineligible", () => {
