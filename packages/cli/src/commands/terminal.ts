@@ -106,6 +106,10 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
       await withClient(deps, async (client) => {
         const body = { view, ...(opts.provider ? { provider: opts.provider } : {}) };
         const res = await client.post<OpenViewResult>("/api/terminal/open", body);
+        if (res.status >= 400) {
+          printResult(opts.json ?? false, res.data, res.status);
+          return;
+        }
         printOpen(opts.json ?? false, res.data, res.status);
       });
     });

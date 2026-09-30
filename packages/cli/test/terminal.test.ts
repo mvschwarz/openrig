@@ -126,6 +126,17 @@ describe("rig terminal CLI", () => {
     expect(logs.join("\n")).toContain("view_not_found");
   });
 
+  it.each([false, true])("open reports a bare HTTP503 service error (json=%s)", async (json) => {
+    const { deps } = makeDeps({ routes: { "POST /api/terminal/open": { status: 503, data: { error: "terminal_service_unavailable" } } } });
+    const program = createProgram({ terminalDeps: deps });
+    program.exitOverride();
+    await expect(program.parseAsync(["node", "rig", "terminal", "open", "acme-build", ...(json ? ["--json"] : [])])).resolves.toBeDefined();
+    expect(process.exitCode).toBe(2);
+    const output = [...logs, ...vi.mocked(console.error).mock.calls.map(args => args.join(" "))].join("\n");
+    expect(output).toContain("terminal_service_unavailable");
+    if (json) expect(JSON.parse(logs[0]!)).toEqual({ error: "terminal_service_unavailable" });
+  });
+
   it("views GETs /api/terminal/views", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/terminal/views": { status: 200, data: { saved: [], rigs: ["acme-build"] } } },
