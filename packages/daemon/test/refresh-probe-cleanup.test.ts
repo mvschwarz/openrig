@@ -27,8 +27,10 @@ class FakeTmux {
     const byTarget = () => [...this.sessions.entries()].find(([name, s]) => name === target || s.pane === target || s.id === target);
     if (command.startsWith("tmux new-session")) {
       const name = /-s '([^']+)'/.exec(command)![1]!;
-      this.sessions.set(name, { id: `$${this.nextSession++}`, pane: `%${this.nextPane++}` });
-      return "";
+      if (this.sessions.has(name)) throw new Error(`duplicate session: ${name}`);
+      const id = `$${this.nextSession++}`;
+      this.sessions.set(name, { id, pane: `%${this.nextPane++}` });
+      return command.includes(" -P") ? `${id}\n` : "";
     }
     if (command.startsWith("tmux list-panes")) {
       if (this.listPanesFails) throw new Error("list-panes: transient failure");
@@ -47,6 +49,11 @@ class FakeTmux {
     }
     return "";
   };
+
+  /** Kill `name` and start a different session under the same name (new id and pane). */
+  replace(name: string): void {
+    this.sessions.set(name, { id: `$${this.nextSession++}`, pane: `%${this.nextPane++}` });
+  }
 
   probes(): string[] { return [...this.sessions.keys()].filter((name) => name.startsWith("rigged-refresh-")); }
 }
@@ -149,6 +156,40 @@ describe("#188 snapshot refresh probe cleanup", () => {
     expect(tmux.commands.some((c) => c.startsWith("tmux kill-session"))).toBe(false);
   });
 
+  it("rollback control (a): a probe adopted by a managed record while its pane is observed is never killed", async () => {
+    const tmux = new FakeTmux(40);
+    const seat = claudeSeat("%7");
+    tmux.onCommand = (command) => {
+      const name = /list-panes -t '(rigged-refresh-[^']+)'/.exec(command)?.[1];
+      if (!name || tmux.sessions.get(name) === undefined) return;
+      const rig = rigRepo.createRig("adopter");
+      const node = rigRepo.addNode(rig.id, "dev.adopted", { role: "worker", runtime: "claude-code" });
+      sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: tmux.sessions.get(name)!.pane });
+    };
+    await expect(refresher(tmux).refresh([seat])).resolves.toBeUndefined();
+
+    expect(tmux.probes()).toHaveLength(1);
+    expect(tmux.commands.some((c) => c.startsWith("tmux kill-session"))).toBe(false);
+  });
+
+  it("rollback control (b): a different session that took the probe's name before rollback is never killed", async () => {
+    const tmux = new FakeTmux(40);
+    tmux.listPanesFails = true;
+    const seat = claudeSeat("%7");
+    let replacement: { id: string; pane: string } | undefined;
+    tmux.onCommand = (command) => {
+      const name = /list-panes -t '(rigged-refresh-[^']+)'/.exec(command)?.[1];
+      if (!name || replacement) return;
+      tmux.replace(name);
+      replacement = { ...tmux.sessions.get(name)! };
+    };
+    await expect(refresher(tmux).refresh([seat])).resolves.toBeUndefined();
+
+    const [name] = tmux.probes();
+    expect(name).toBeDefined();
+    expect(tmux.sessions.get(name!)).toEqual(replacement);
+  });
+
   it("allocation that cannot prove its pane is still removed (failure before the probe's try)", async () => {
     const tmux = new FakeTmux(40);
     tmux.listPanesFails = true;
@@ -156,5 +197,7 @@ describe("#188 snapshot refresh probe cleanup", () => {
     await refresher(tmux).refresh([seat]);
 
     expect(tmux.probes()).toEqual([]);
+    // The rollback uses the id the create returned, never the name.
+    expect(tmux.commands.filter((c) => c.startsWith("tmux kill-session"))).toEqual([expect.stringMatching(/^tmux kill-session -t '\$\d+'$/)]);
   });
 });
