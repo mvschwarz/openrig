@@ -79,6 +79,34 @@ describe("SnapshotRepository", () => {
     expect(latest!.id).toBe("snap-new");
   });
 
+  it("same-second snapshots select and retain the last inserted capture", () => {
+    const insert = db.prepare("INSERT INTO snapshots (id, rig_id, kind, data, created_at) VALUES (?, 'rig-1', 'auto-pre-down', ?, '2026-09-30 01:00:00')");
+    insert.run("snap-z-first", JSON.stringify(sampleData()));
+    insert.run("snap-a-second", JSON.stringify(sampleData()));
+    expect(repo.getLatestSnapshot("rig-1")?.id).toBe("snap-a-second");
+    expect(repo.findLatestAutoPreDown("rig-1")?.id).toBe("snap-a-second");
+    expect(repo.findLatestRestoreUsable("rig-1")?.id).toBe("snap-a-second");
+    expect(repo.listSnapshots("rig-1").map(s => s.id)).toEqual(["snap-a-second", "snap-z-first"]);
+    expect(repo.pruneSnapshotsByKind("rig-1", "auto-pre-down", 1)).toBe(1);
+    expect(repo.getSnapshot("snap-a-second")).not.toBeNull();
+  });
+
+  it("same-second explicit selection discloses a newer usable insertion", () => {
+    const insert = db.prepare("INSERT INTO snapshots (id, rig_id, kind, data, created_at) VALUES (?, 'rig-1', 'manual', ?, '2026-09-30 01:00:00')");
+    insert.run("snap-z-first", JSON.stringify(sampleData()));
+    insert.run("snap-a-second", JSON.stringify(sampleData()));
+    const outcome = repo.selectRestoreUsable("rig-1", "snap-z-first");
+    expect(outcome.ok && outcome.selection.newerUsableAlternative?.snapshotId).toBe("snap-a-second");
+  });
+
+  it("same-second unscoped pruning also preserves the newest capture", () => {
+    const insert = db.prepare("INSERT INTO snapshots (id, rig_id, kind, data, created_at) VALUES (?, 'rig-1', 'manual', ?, '2026-09-30 01:00:00')");
+    insert.run("snap-z-first", JSON.stringify(sampleData()));
+    insert.run("snap-a-second", JSON.stringify(sampleData()));
+    expect(repo.pruneSnapshots("rig-1", 1)).toBe(1);
+    expect(repo.getSnapshot("snap-a-second")).not.toBeNull();
+  });
+
   it("getLatestSnapshot with no snapshots -> null", () => {
     expect(repo.getLatestSnapshot("rig-1")).toBeNull();
   });

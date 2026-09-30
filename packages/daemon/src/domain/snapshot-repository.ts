@@ -58,7 +58,7 @@ export class SnapshotRepository {
    * pre_restore, and auto-rehydrate remain below the tier (unchanged).
    *
    * The SQL query orders by `(kind IN ('auto-pre-down','auto-periodic')) DESC,
-   * created_at DESC, id DESC`. The in-memory loop validates each candidate and
+   * created_at DESC, rowid DESC`. The in-memory loop validates each candidate and
    * skips snapshots with corrupted JSON or missing topology metadata, returning
    * the first usable row. Returns null when no usable snapshot exists.
    *
@@ -71,7 +71,7 @@ export class SnapshotRepository {
   findLatestRestoreUsable(rigId: string): Snapshot | null {
     const rows = this.db
       .prepare(
-        "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic')) DESC, created_at DESC, id DESC"
+        "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic')) DESC, created_at DESC, rowid DESC"
       )
       .all(rigId) as SnapshotRow[];
 
@@ -106,9 +106,11 @@ export class SnapshotRepository {
       if (!snapshot) return { ok: false, code: "no_usable_snapshot", message: `No usable snapshot for rig ${rigId}` };
     }
 
-    const newer = this.listSnapshots(rigId)
-      .filter((candidate) => candidate.id !== snapshot!.id)
-      .filter((candidate) => Date.parse(sqliteUtc(candidate.createdAt)) > Date.parse(sqliteUtc(snapshot!.createdAt)))
+    // The list uses the same insertion-order tie-break as restore ranking.
+    // Equal second-resolution timestamps can still contain a newer capture.
+    const chronological = this.listSnapshots(rigId);
+    const selectedIndex = chronological.findIndex((candidate) => candidate.id === snapshot!.id);
+    const newer = chronological.slice(0, selectedIndex)
       .find((candidate) => isRestoreUsableSnapshotData(candidate.data));
     const mode = snapshotId ? "explicit" as const : "automatic" as const;
     return {
@@ -143,7 +145,7 @@ export class SnapshotRepository {
       params.push(opts.kind);
     }
 
-    sql += " ORDER BY created_at DESC";
+    sql += " ORDER BY created_at DESC, rowid DESC";
 
     if (opts?.limit) {
       sql += " LIMIT ?";
