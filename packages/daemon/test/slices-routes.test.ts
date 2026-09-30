@@ -274,6 +274,33 @@ describe("PL-slice-story-view-v0 slices routes", () => {
       expect(body[99]).toBe(99);
     });
 
+    it.each(["bytes=-0", "bytes=1000-"])("rejects unsatisfiable proof asset range %s", async (range) => {
+      writeSlice(slicesRoot, "invalid-range-slice", { "README.md": "---\n---\n" });
+      const dir = path.join(dogfoodRoot, "invalid-range-slice-20260504", "videos");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "demo.mp4"), Buffer.alloc(1000));
+      const res = await app.request("/api/slices/invalid-range-slice/proof-asset/videos/demo.mp4", {
+        headers: { Range: range },
+      });
+      expect(res.status).toBe(416);
+      expect(res.headers.get("Content-Range")).toBe("bytes */1000");
+    });
+
+    it.each(["bytes=-1000", "bytes=-2000"])("serves a whole proof asset for long suffix %s", async (range) => {
+      writeSlice(slicesRoot, "suffix-video-slice", { "README.md": "---\n---\n" });
+      const dir = path.join(dogfoodRoot, "suffix-video-slice-20260504", "videos");
+      fs.mkdirSync(dir, { recursive: true });
+      const bytes = Buffer.from(Array.from({ length: 1000 }, (_, i) => i % 251));
+      fs.writeFileSync(path.join(dir, "demo.mp4"), bytes);
+      const res = await app.request("/api/slices/suffix-video-slice/proof-asset/videos/demo.mp4", {
+        headers: { Range: range },
+      });
+      expect(res.status).toBe(206);
+      expect(res.headers.get("Content-Range")).toBe("bytes 0-999/1000");
+      expect(res.headers.get("Content-Length")).toBe("1000");
+      expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array(bytes));
+    });
+
     it("rejects path-traversal attempts with 400", async () => {
       writeSlice(slicesRoot, "trav-slice", { "README.md": "---\n---\n" });
       const dir = path.join(dogfoodRoot, "trav-slice-20260504");

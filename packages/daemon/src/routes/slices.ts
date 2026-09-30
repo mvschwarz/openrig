@@ -236,7 +236,7 @@ function fileAssetResponse(absPath: string, contentType: string, rangeHeader?: s
 
   if (rangeHeader) {
     const m = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
-    const start = m && m[1] !== "" ? Number(m[1]) : m && m[2] !== "" ? size - Number(m[2]) : NaN;
+    const start = m && m[1] !== "" ? Number(m[1]) : m && m[2] !== "" ? Math.max(0, size - Number(m[2])) : NaN;
     const end = m && m[1] !== "" && m[2] !== "" ? Number(m[2]) : size - 1;
     if (!m || Number.isNaN(start) || start < 0 || start >= size || end < start) {
       return new Response(null, {
