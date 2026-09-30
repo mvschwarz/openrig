@@ -259,11 +259,18 @@ export class TmuxAdapter {
     if (this.deliveryGuard?.maybeTarget(name)) return { ok: false, code: "guard_target_managed", message: "A probe cannot reuse a managed seat." };
     const created = await this.createSessionUnchecked(name, cwd);
     if (!created.ok) return created;
+    let message = "New probe pane could not be established; no input written.";
     try {
       const panes = await this.listPanes(name);
-      if (panes.length === 1) { this.freshProbes.set(name, panes[0]!.id); this.freshProbes.set(panes[0]!.id, panes[0]!.id); return created; }
+      // #188: a fresh tmux server reuses pane ids, so a stale seat binding can name the new pane. That
+      // probe could not be cleaned up safely later, so it is not used.
+      if (panes.length === 1 && this.deliveryGuard?.maybeTarget(panes[0]!.id)) message = "New probe pane is named by a managed record; no input written.";
+      else if (panes.length === 1) { this.freshProbes.set(name, panes[0]!.id); this.freshProbes.set(panes[0]!.id, panes[0]!.id); return created; }
     } catch { /* no target proof, no input */ }
-    return { ok: false, code: "guard_target_unknown", message: "New probe pane could not be established; no input written." };
+    // #188: this call just created `name` (tmux refuses a duplicate name) and it is no managed target,
+    // so remove the unusable helper now instead of leaving it running.
+    await this.killSessionUnchecked(name);
+    return { ok: false, code: "guard_target_unknown", message };
   }
 
   private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void) => Promise<TmuxResult>, allowAbsent = false): Promise<TmuxResult> {
@@ -274,7 +281,8 @@ export class TmuxAdapter {
       if (probePane && !guard.maybeTarget(target)) {
         const panes = await this.listPanes(target);
         if (panes.length !== 1 || panes[0]!.id !== probePane) throw new Error("Private probe target changed; no input written.");
-        return write(probePane, () => {});
+        // Awaited so a refusal inside the write (#188: the probe kill) returns as a result, not a throw.
+        return await write(probePane, () => {});
       }
       const created = this.freshManaged.get(target);
       const identity = created?.nodeId ?? target;
