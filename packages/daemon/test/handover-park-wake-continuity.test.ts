@@ -12,6 +12,9 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import { DefaultOccupantInvalidator } from "../src/domain/occupant-invalidator.js";
 import { diagnoseSeatParked } from "../src/domain/parked-query.js";
+import { WatchdogPolicyEngine } from "../src/domain/watchdog-policy-engine.js";
+import { WatchdogHistoryLog } from "../src/domain/watchdog-history-log.js";
+import { watchdogHistorySchema } from "../src/db/migrations/032_watchdog_history.js";
 
 const SEAT = "dev-impl@seat-rig";
 const OTHER = "dev-qa@seat-rig";
@@ -23,11 +26,14 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
   let invalidator: DefaultOccupantInvalidator;
   let gen: (session: string) => string | null;
   let seatNodeId: string;
+  let sessionRegistry: SessionRegistry;
+  let bus: EventBus;
 
   beforeEach(() => {
     db = createFullTestDb();
+    db.exec(watchdogHistorySchema.sql); // the engine audits each evaluation; the full test DB does not include this table
     const rigRepo = new RigRepository(db);
-    const sessionRegistry = new SessionRegistry(db);
+    sessionRegistry = new SessionRegistry(db);
     const rig = rigRepo.createRig("seat-rig");
     for (const [logicalId, session] of [["dev.impl", SEAT], ["dev.qa", OTHER]] as const) {
       const node = rigRepo.addNode(rig.id, logicalId, { runtime: "codex" });
@@ -35,7 +41,8 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
       if (session === SEAT) seatNodeId = node.id;
     }
     gen = (session) => sessionRegistry.currentOccupantGenerationForSession(session);
-    queue = new QueueRepository(db, new EventBus(db), { validateRig: () => true, resolveOccupantGeneration: gen });
+    bus = new EventBus(db);
+    queue = new QueueRepository(db, bus, { validateRig: () => true, resolveOccupantGeneration: gen });
     jobs = new WatchdogJobsRepository(db, undefined, gen);
     queue.attachWatchdogJobsRepository(jobs);
     invalidator = new DefaultOccupantInvalidator({
@@ -126,7 +133,45 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
 
     swap();
 
-    expect(jobState(wakeRef)).toBe("stopped");
+    expect(jobState(wakeRef)).not.toBe("active");
+  });
+
+  // review-r2 (PR #242): a rerouted row's park timer must not keep waking the OLD owner. The scheduler evaluates
+  // active jobs; this evaluates every active job, due or not, through the real engine and pre-delivery check.
+  async function fireAllActive() {
+    const deliveries: Array<{ targetSession: string; message: string }> = [];
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo: jobs, historyLog: new WatchdogHistoryLog(db), eventBus: bus,
+      deliver: async (request) => { deliveries.push(request); return { status: "ok" }; },
+      resolvePreDeliveryTerminalReason: ({ jobId }: { jobId: string }) => queue.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      onWakeAttempt: ({ jobId, deliveryStatus }) => queue.recordWatchdogWakeAttempt(jobId, deliveryStatus),
+    });
+    for (const job of jobs.listActive()) await engine.evaluate(job);
+    return deliveries;
+  }
+
+  it("park, reroute, fire: nothing reaches the old owner (no handover)", async () => {
+    const { qitemId, wakeRef } = await park();
+
+    queue.routeToFallback(qitemId, OTHER, "test reroute");
+
+    expect(jobState(wakeRef)).not.toBe("active");
+    expect((await fireAllActive()).filter((d) => d.targetSession === SEAT)).toEqual([]);
+  });
+
+  it("park, swap (timer kept), reroute, swap, fire: nothing reaches the old owner", async () => {
+    const { qitemId, wakeRef } = await park();
+    swap();
+    expect(jobState(wakeRef)).toBe("active");
+    queue.routeToFallback(qitemId, OTHER, "test reroute");
+    const firstGeneration = gen(SEAT);
+    sessionRegistry.updateStatus(sessionRegistry.registerSession(seatNodeId, SEAT).id, "running");
+    expect(gen(SEAT)).not.toBe(firstGeneration);
+
+    swap();
+
+    expect(jobState(wakeRef)).not.toBe("active");
+    expect((await fireAllActive()).filter((d) => d.targetSession === SEAT)).toEqual([]);
   });
 
   it("control: a stale timer that is no longer the row's current wake still stops", async () => {

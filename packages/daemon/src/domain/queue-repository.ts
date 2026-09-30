@@ -3391,6 +3391,9 @@ export class QueueRepository {
            WHERE qitem_id = ?`
         )
         .run(fallbackDestination, ts, newChain, `fallback: ${reason}`, qitemId);
+      // A park timer targets the owner that parked the row. Once the row belongs to someone else it must not keep
+      // waking the old owner, so it ends here like any other exit from the park.
+      this.retireParkGeneratedTimer(qitemId, "park_rerouted");
 
       this.transitionLog.append({
         qitemId,
