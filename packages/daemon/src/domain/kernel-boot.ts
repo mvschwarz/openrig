@@ -17,7 +17,9 @@
 // rather than "daemon failed to start".
 
 import nodePath from "node:path";
-import { existsSync } from "node:fs";
+import os from "node:os";
+import { existsSync, readFileSync } from "node:fs";
+import { parse as parseToml } from "smol-toml";
 import type { RigRepository } from "./rig-repository.js";
 import type { BootstrapOrchestrator } from "./bootstrap-orchestrator.js";
 import type { EventBus } from "./event-bus.js";
@@ -168,12 +170,70 @@ export async function defaultProbeRuntimes(): Promise<RuntimeProbeResult> {
     }
   }
 
+  const codexHome = process.env.CODEX_HOME || nodePath.join(os.homedir(), ".codex");
   const [claudeCode, codex] = await Promise.all([
     tryProbe("claude auth status"),
-    tryProbe("codex login status"),
+    probeCodexReadiness({
+      run: tryProbe,
+      readConfig: () => {
+        try { return readFileSync(nodePath.join(codexHome, "config.toml"), "utf-8"); } catch { return null; }
+      },
+      env: process.env,
+    }),
   ]);
 
   return { claudeCode, codex };
+}
+
+/** Issue #194 — how the Codex provider selected in `$CODEX_HOME/config.toml`
+ *  authenticates. Only an explicit provider entry with
+ *  `requires_openai_auth = false` and an `env_key` uses its credential
+ *  variable. Everything else (no file, a parse error, a legacy top-level
+ *  `profile`, a built-in or undeclared provider) keeps the OpenAI login check,
+ *  so an unresolved config does not take the env-key shortcut; readiness still follows the login result. Other Codex config layers
+ *  (project, system or managed config, requirements, `-c`, `--profile`) are not
+ *  resolved here. The CLI's `rig setup` carries the same rule. */
+export type CodexProviderAuth =
+  | { kind: "openai-login"; unresolved?: string }
+  | { kind: "env-key"; providerId: string; envKey: string };
+
+export function selectCodexProviderAuth(configToml: string | null): CodexProviderAuth {
+  if (configToml === null) return { kind: "openai-login" };
+  let config: Record<string, unknown>;
+  try {
+    config = parseToml(configToml) as Record<string, unknown>;
+  } catch {
+    return { kind: "openai-login", unresolved: "config.toml could not be parsed" };
+  }
+  if (Object.hasOwn(config, "profile")) {
+    return { kind: "openai-login", unresolved: "config.toml selects a legacy profile, which is not resolved here" };
+  }
+  const providerId = config["model_provider"];
+  const providers = config["model_providers"];
+  if (typeof providerId !== "string" || !providers || typeof providers !== "object" || !Object.hasOwn(providers, providerId)) {
+    return { kind: "openai-login" };
+  }
+  const entry = (providers as Record<string, unknown>)[providerId];
+  if (!entry || typeof entry !== "object") return { kind: "openai-login" };
+  const { requires_openai_auth: requiresOpenAiAuth, env_key: envKey } = entry as Record<string, unknown>;
+  if (requiresOpenAiAuth !== false || typeof envKey !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(envKey)) {
+    return { kind: "openai-login" };
+  }
+  return { kind: "env-key", providerId, envKey };
+}
+
+/** Codex half of the kernel runtime probe. An env-key provider is ready when
+ *  its variable is nonblank and the executable answers; this is local
+ *  credential availability, not a remote authentication or inference check. */
+export async function probeCodexReadiness(deps: {
+  run: (cmd: string) => Promise<RuntimeAuthStatus>;
+  readConfig: () => string | null;
+  env: Record<string, string | undefined>;
+}): Promise<RuntimeAuthStatus> {
+  const auth = selectCodexProviderAuth(deps.readConfig());
+  if (auth.kind === "openai-login") return deps.run("codex login status");
+  if (!deps.env[auth.envKey]?.trim()) return "unavailable";
+  return deps.run("codex --version");
 }
 
 /** Honest 3-part-error message for the auth-block path. Per IMPL-PRD

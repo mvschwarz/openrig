@@ -950,3 +950,115 @@ describe("rig setup permission-policy menu copy (frozen)", () => {
     }
   });
 });
+
+// Issue #194 — a Codex provider that does not use an OpenAI login.
+describe("codex_auth — provider-aware Codex readiness (#194)", () => {
+  const CODEX_HOME = "/synthetic/codex-cli-home";
+  const BEDROCK_CONFIG = [
+    'model_provider = "bedrock-runtime-us"',
+    "",
+    "[model_providers.bedrock-runtime-us]",
+    'name = "Amazon Bedrock Runtime"',
+    'env_key = "AWS_BEARER_TOKEN_BEDROCK"',
+    'wire_api = "responses"',
+    "requires_openai_auth = false",
+    "",
+  ].join("\n");
+  const TOKEN = "synthetic-bedrock-token-value";
+
+  function providerDeps(opts: {
+    config?: string | null;
+    env?: NodeJS.ProcessEnv;
+    loggedIn?: boolean;
+    codexInstalled?: boolean;
+  }) {
+    const commands: string[] = [];
+    const reads: string[] = [];
+    const base = makeDeps();
+    const deps = makeDeps({
+      env: opts.env ?? { HOME: "/synthetic/home", CODEX_HOME },
+      readFile: (p: string) => {
+        reads.push(p);
+        return p === `${CODEX_HOME}/config.toml` ? (opts.config ?? null) : null;
+      },
+      exec: (cmd: string) => {
+        commands.push(cmd);
+        if (cmd === "codex --version" && opts.codexInstalled === false) throw new Error("codex: command not found");
+        if (cmd === "npm install -g @openai/codex" && opts.codexInstalled === false) throw new Error("install refused in test");
+        if (cmd === "codex login status" && !opts.loggedIn) throw new Error("Not logged in");
+        return base.exec(cmd);
+      },
+    });
+    return { deps, commands, reads };
+  }
+
+  const codexAuthStep = (result: SetupResult) => result.steps.find((s) => s.id === "codex_auth");
+
+  it("passes the explicit Bedrock provider from the selected CODEX_HOME without an OpenAI login", async () => {
+    const { deps, commands, reads } = providerDeps({
+      config: BEDROCK_CONFIG,
+      env: { HOME: "/synthetic/home", CODEX_HOME, AWS_BEARER_TOKEN_BEDROCK: TOKEN },
+      loggedIn: false,
+    });
+    const result = await runSetup(deps, {});
+    const step = codexAuthStep(result);
+    expect(step?.status).toBe("pass");
+    expect(step?.message).toContain("AWS_BEARER_TOKEN_BEDROCK");
+    expect(step?.message).toContain("not that the provider accepts it");
+    expect(JSON.stringify(result)).not.toContain(TOKEN);
+    expect(commands).not.toContain("codex login status");
+    expect(reads).toContain(`${CODEX_HOME}/config.toml`);
+    expect(reads).not.toContain("/synthetic/home/.codex/config.toml");
+  });
+
+  it("fails with the provider's variable named, never its value, when the token is missing or blank", async () => {
+    for (const env of [
+      { HOME: "/synthetic/home", CODEX_HOME },
+      { HOME: "/synthetic/home", CODEX_HOME, AWS_BEARER_TOKEN_BEDROCK: "   " },
+    ]) {
+      const { deps, commands } = providerDeps({ config: BEDROCK_CONFIG, env, loggedIn: true });
+      const result = await runSetup(deps, {});
+      const step = codexAuthStep(result);
+      expect(step?.status).toBe("fail");
+      expect(step?.message).toContain("AWS_BEARER_TOKEN_BEDROCK");
+      expect(step?.fixHint).toContain("Export AWS_BEARER_TOKEN_BEDROCK");
+      expect(step?.fixHint).not.toContain("codex login");
+      expect(result.ready).toBe(false);
+      expect(commands).not.toContain("codex login status");
+    }
+  });
+
+  it("keeps the OpenAI login check for the default provider and for providers that require it", async () => {
+    const requiresLogin = BEDROCK_CONFIG.replace("requires_openai_auth = false", "requires_openai_auth = true");
+    for (const config of [null, 'model_provider = "openai"\n', requiresLogin]) {
+      const env = { HOME: "/synthetic/home", CODEX_HOME, AWS_BEARER_TOKEN_BEDROCK: TOKEN };
+      const ok = providerDeps({ config, env, loggedIn: true });
+      expect(codexAuthStep(await runSetup(ok.deps, {}))?.status).toBe("pass");
+      expect(ok.commands).toContain("codex login status");
+
+      const notLoggedIn = providerDeps({ config, env, loggedIn: false });
+      const step = codexAuthStep(await runSetup(notLoggedIn.deps, {}));
+      expect(step?.status).toBe("fail");
+      expect(step?.fixHint).toContain("codex login");
+    }
+  });
+
+  it("reports a malformed-config explanation when the fallback OpenAI login fails", async () => {
+    const env = { HOME: "/synthetic/home", CODEX_HOME, AWS_BEARER_TOKEN_BEDROCK: TOKEN };
+    const { deps } = providerDeps({ config: "model_provider = [broken", env, loggedIn: false });
+    const step = codexAuthStep(await runSetup(deps, {}));
+    expect(step?.status).toBe("fail");
+    expect(step?.message).toContain("config.toml could not be parsed");
+  });
+
+  it("skips the provider check when the Codex executable is missing", async () => {
+    const { deps } = providerDeps({
+      config: BEDROCK_CONFIG,
+      env: { HOME: "/synthetic/home", CODEX_HOME, AWS_BEARER_TOKEN_BEDROCK: TOKEN },
+      codexInstalled: false,
+    });
+    const result = await runSetup(deps, {});
+    expect(result.steps.find((s) => s.id === "codex_install")?.status).toBe("fail");
+    expect(codexAuthStep(result)?.status).toBe("skipped");
+  });
+});

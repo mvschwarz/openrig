@@ -1100,7 +1100,7 @@ export class SeatLifecycleService {
     const parsed = parseSessionName(ref);
     if (parsed.kind === "canonical") {
       const localRef = parsed.member;
-      const rigs = this.rigRepo.findRigsByName(parsed.rig);
+      const rigs = this.rigRepo.findUnarchivedRigsByName(parsed.rig);
       return rigs.flatMap((rig) => getNodeInventory(this.db, rig.id).filter((entry) =>
         entry.canonicalSessionName === ref
         || deriveCanonicalFromEntry(entry) === ref

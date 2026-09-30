@@ -8,6 +8,34 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.6.3]
+
+- Recognize running managed Claude Code seats behind OpenRig's shell wrappers
+  using pane lineage, foreground process and native session identity checks.
+  This repairs the 0.6.2 messaging refusal reported by
+  [@dmelo](https://github.com/dmelo) in
+  [#197](https://github.com/mvschwarz/openrig/issues/197)
+  ([#220](https://github.com/mvschwarz/openrig/pull/220)).
+- Clean up unusable snapshot helpers when their ownership is proven, instead
+  of accumulating them on repeated attempts. Thanks to
+  [@z4cc](https://github.com/z4cc) for
+  [#188](https://github.com/mvschwarz/openrig/issues/188)
+  ([#189](https://github.com/mvschwarz/openrig/pull/189)).
+- Keep archived duplicate rigs out of seat-reference resolution and preserve
+  another live seat's session and queue work when removing a stale node.
+  Thanks to [@Farkinell](https://github.com/Farkinell) for
+  [#174](https://github.com/mvschwarz/openrig/issues/174)
+  ([#181](https://github.com/mvschwarz/openrig/pull/181)).
+
+- Protect proof media from artifact writes: reject binary artifact bodies and
+  require an explicit `--replace` to overwrite an existing Markdown artifact
+  ([#177](https://github.com/mvschwarz/openrig/pull/177)). Repository script tests
+  also run serially to prevent interference from shared build outputs
+  ([#221](https://github.com/mvschwarz/openrig/pull/221)).
+
+See [0.6.3 release notes](docs/releases/v0.6.3.md) for the verification limits.
+Source regression coverage does not establish installed Claude/Fedora delivery.
+
 ## [0.6.2]
 
 - Start with two Claude Code agents, two Codex agents, or a Claude owner and

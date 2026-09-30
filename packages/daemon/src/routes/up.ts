@@ -443,8 +443,9 @@ upRoutes.post("/", async (c) => {
       const hasConflict = result.stages.some((s) => {
         if (s.status !== "failed" || s.stage !== "import_rig") return false;
         const detail = s.detail as { code?: string; message?: string } | undefined;
-        if (detail?.code !== "rig_name_running") return false;
-        topLevelCode ??= "rig_name_running";
+        // #141: an import refused because a same-name rig could not be confirmed stopped is a conflict too.
+        if (detail?.code !== "rig_name_running" && detail?.code !== "generation_unconfirmed") return false;
+        topLevelCode ??= detail.code;
         conflictError ??= detail.message ?? result.errors[0];
         return true;
       });

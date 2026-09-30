@@ -7,6 +7,15 @@ import { randomUUID } from "node:crypto";
 export type ExecFn = (cmd: string) => Promise<string>;
 
 /**
+ * Argv exec: run the multiplexer WITHOUT a shell (execFile-style — the
+ * binary is argv[0], the rest are verbatim arguments, no quoting layer).
+ * This is the Windows/psmux path: POSIX shells, single-quote quoting and
+ * `/dev/null` redirections do not exist there. Opt-in via the constructor;
+ * when absent every method uses the legacy shell-string path unchanged.
+ */
+export type ArgvExecFn = (argv: string[]) => Promise<string>;
+
+/**
  * Injectable file/buffer operations for `sendText`.
  * Split out so tests can observe temp-file writes and unique-name generation
  * without touching the real filesystem; production wires node fs + os.tmpdir.
@@ -192,6 +201,18 @@ function shellQuote(s: string): string {
   return "'" + s.replace(/'/g, "'\"'\"'") + "'";
 }
 
+/** Elements safe to leave bare in a POSIX shell word list. */
+const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/** Join argv for a POSIX shell — the legacy string form. Only used when
+ *  no ArgvExecFn is wired. Flags and safe words stay bare (matching the
+ *  historical template strings); anything else is single-quoted. The argv
+ *  arrays stay the single source of truth for what is EXECUTED on either
+ *  path — this join only renders them for a shell. */
+function posixJoinArgv(argv: string[]): string {
+  return argv.map((a) => (SHELL_SAFE.test(a) ? a : shellQuote(a))).join(" ");
+}
+
 function parseSessionLine(line: string): TmuxSession | null {
   const parts = line.split(TMUX_FIELD_SEPARATOR);
   if (parts.length < 4) return null;
@@ -268,13 +289,49 @@ export class TmuxAdapter {
    * never authority over a pre-existing or registry-managed target. */
   async createProbeSession(name: string, cwd?: string): Promise<TmuxResult> {
     if (this.deliveryGuard?.maybeTarget(name)) return { ok: false, code: "guard_target_managed", message: "A probe cannot reuse a managed seat." };
-    const created = await this.createSessionUnchecked(name, cwd);
-    if (!created.ok) return created;
+    // #188: the create itself reports the new session's id and creation time, the only identity a rollback
+    // uses. An id alone is unique only for one server's lifetime.
+    let created: { id: string; at: string } | null;
+    try {
+      const out = await this.exec(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
+      const match = /^(\$\d+) (\d+)$/.exec(out.trim());
+      created = match ? { id: match[1]!, at: match[2]! } : null;
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+    let message = "New probe pane could not be established; no input written.";
+    let pane: string | null = null;
     try {
       const panes = await this.listPanes(name);
-      if (panes.length === 1) { this.freshProbes.set(name, panes[0]!.id); this.freshProbes.set(panes[0]!.id, panes[0]!.id); return created; }
+      pane = panes.length === 1 ? panes[0]!.id : null;
+      // #188: a fresh tmux server reuses pane ids, so a stale seat binding can name the new pane. That
+      // probe could not be cleaned up safely later, so it is not used.
+      if (pane && this.deliveryGuard?.maybeTarget(pane)) message = "New probe pane is named by a managed record; no input written.";
+      else if (pane) { this.freshProbes.set(name, pane); this.freshProbes.set(pane, pane); return { ok: true }; }
     } catch { /* no target proof, no input */ }
-    return { ok: false, code: "guard_target_unknown", message: "New probe pane could not be established; no input written." };
+    // #188: remove the unusable helper by the id its own create returned, unless a managed record has
+    // since claimed its name (a binding naming only the reused pane id, under another session name, is
+    // stale: that pane belongs to this session). A name reused by another session has a different id.
+    const byPane = pane ? this.deliveryGuard?.maybeTarget(pane) : null;
+    if (!created || this.deliveryGuard?.maybeTarget(name) || byPane?.session === name) {
+      return { ok: false, code: "guard_target_unknown", message: `${message} The helper session was left in place: its ownership could not be proven.` };
+    }
+    const removed = await this.removeCreatedSession(name, created);
+    if (!removed.ok && removed.code !== "session_not_found") message += ` The helper session was not removed: ${removed.message}`;
+    return { ok: false, code: "guard_target_unknown", message };
+  }
+
+  /** #188: kill the session this adapter created only while its id still names that session. tmux checks
+   *  the name and creation time and kills in one command, so a later server that reuses the id is safe. */
+  private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
+    const same = `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},${created.at}}}`;
+    try {
+      const out = await this.exec(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`);
+      if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
   }
 
   private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void) => Promise<TmuxResult>, allowAbsent = false): Promise<TmuxResult> {
@@ -285,7 +342,8 @@ export class TmuxAdapter {
       if (probePane && !guard.maybeTarget(target)) {
         const panes = await this.listPanes(target);
         if (panes.length !== 1 || panes[0]!.id !== probePane) throw new Error("Private probe target changed; no input written.");
-        return write(probePane, () => {});
+        // Awaited so a refusal inside the write (#188: the probe kill) returns as a result, not a throw.
+        return await write(probePane, () => {});
       }
       const created = this.freshManaged.get(target);
       const identity = created?.nodeId ?? target;
@@ -324,14 +382,35 @@ export class TmuxAdapter {
     return this.deliveryGuard ? this.deliveryGuard.operation(target, fn) : fn();
   }
 
-  constructor(private exec: ExecFn, private fileOps: TmuxFileOps = defaultTmuxFileOps()) {}
+  constructor(
+    private exec: ExecFn,
+    private fileOps: TmuxFileOps = defaultTmuxFileOps(),
+    private argvExec?: ArgvExecFn,
+  ) {}
+
+  /**
+   * Run a multiplexer command. `argv` is what is EXECUTED on both paths:
+   * elements are verbatim (no quoting layer) when argvExec is wired;
+   * otherwise they are POSIX-joined — byte-identical to the legacy
+   * template strings for all current call sites (the suite pins them).
+   * `legacy` overrides the joined form only where history quoted
+   * differently (the `-F "..."` double-quoted formats); pass it ONLY to
+   * preserve an exact legacy string, never to smuggle new semantics.
+   */
+  private async run(argv: string[], legacy?: string): Promise<string> {
+    if (this.argvExec) return this.argvExec(argv);
+    return this.exec(legacy ?? posixJoinArgv(argv));
+  }
 
   /** Start an empty native terminal server, without inventing a seat/session. */
   async startServer(): Promise<TmuxResult> {
     const probeName = `openrig-startup-${randomUUID()}`;
     try {
       if ((await this.probeSession(probeName)).state !== "transport_unavailable") return { ok: true };
-      // tmux -D keeps an empty server alive. Native socket ownership arbitrates
+      // tmux -D keeps an empty server alive. Stays on the shell-string path
+      // deliberately: detach + stdio redirection have no argv equivalent,
+      // and server bootstrap is POSIX-specific (psmux auto-starts its own).
+      // Native socket ownership arbitrates
       // concurrent starts; the readback below, not shell exit, proves availability.
       await this.exec("tmux -D </dev/null >/dev/null 2>&1 &");
       for (let attempt = 0; attempt < 20; attempt++) {
@@ -346,7 +425,8 @@ export class TmuxAdapter {
 
   async listSessions(): Promise<TmuxSession[]> {
     try {
-      const output = await this.exec(`tmux list-sessions -F "${SESSION_FORMAT}"`);
+      const output = await this.run(["tmux", "list-sessions", "-F", SESSION_FORMAT],
+        `tmux list-sessions -F "${SESSION_FORMAT}"`);
       return parseLines(output, parseSessionLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
@@ -356,7 +436,8 @@ export class TmuxAdapter {
 
   async listWindows(sessionName: string): Promise<TmuxWindow[]> {
     try {
-      const output = await this.exec(`tmux list-windows -t ${shellQuote(sessionName)} -F "${WINDOW_FORMAT}"`);
+      const output = await this.run(["tmux", "list-windows", "-t", sessionName, "-F", WINDOW_FORMAT],
+        `tmux list-windows -t ${shellQuote(sessionName)} -F "${WINDOW_FORMAT}"`);
       return parseLines(output, parseWindowLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
@@ -366,7 +447,8 @@ export class TmuxAdapter {
 
   async listPanes(target: string): Promise<TmuxPane[]> {
     try {
-      const output = await this.exec(`tmux list-panes -t ${shellQuote(target)} -F "${PANE_FORMAT}"`);
+      const output = await this.run(["tmux", "list-panes", "-t", target, "-F", PANE_FORMAT],
+        `tmux list-panes -t ${shellQuote(target)} -F "${PANE_FORMAT}"`);
       return parseLines(output, parsePaneLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
@@ -389,7 +471,8 @@ export class TmuxAdapter {
       // Use `tmux has-session` directly for reliable existence check — avoids
       // parsing format-string output from `list-sessions` which can fail when
       // tab delimiters are malformed across tmux versions.
-      await this.exec(`tmux has-session -t ${shellQuote(name)}`);
+      await this.run(["tmux", "has-session", "-t", name],
+        `tmux has-session -t ${shellQuote(name)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       if (isSessionAbsenceError(err)) {
@@ -431,13 +514,14 @@ export class TmuxAdapter {
   finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
 
   private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
-    const cwdFlag = cwd != null ? ` -c ${shellQuote(cwd)}` : "";
-    const envFlags = env
-      ? Object.entries(env).map(([k, v]) => ` -e ${shellQuote(`${k}=${v}`)}`).join("")
-      : "";
-    const cmd = `tmux new-session -d -s ${shellQuote(name)}${cwdFlag}${envFlags}`;
+    const argv = ["tmux", "new-session", "-d", "-s", name];
+    if (cwd != null) argv.push("-c", cwd);
+    if (env) for (const [k, v] of Object.entries(env)) argv.push("-e", `${k}=${v}`);
+    const legacyParts = ["tmux", "new-session", "-d", "-s", shellQuote(name)];
+    if (cwd != null) legacyParts.push("-c", shellQuote(cwd));
+    if (env) for (const [k, v] of Object.entries(env)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
     try {
-      await this.exec(cmd);
+      await this.run(argv, legacyParts.join(" "));
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -469,17 +553,20 @@ export class TmuxAdapter {
     let bufferLoaded = false;
     try {
       await this.fileOps.writeFile(path, text);
-      await this.exec(`tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
+      await this.run(["tmux", "load-buffer", "-b", buffer, path],
+        `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
       bufferLoaded = true;
       beforeWrite();
-      await this.exec(`tmux paste-buffer -t ${shellQuote(target)} -b ${shellQuote(buffer)} -d -r -p`);
+      await this.run(["tmux", "paste-buffer", "-t", target, "-b", buffer, "-d", "-r", "-p"],
+        `tmux paste-buffer -t ${shellQuote(target)} -b ${shellQuote(buffer)} -d -r -p`);
       return { ok: true };
     } catch (err) {
       if (bufferLoaded) {
         // paste failed after load - `-d` never ran, so the buffer is still
         // resident. Best-effort delete to avoid leaking it.
         try {
-          await this.exec(`tmux delete-buffer -b ${shellQuote(buffer)}`);
+          await this.run(["tmux", "delete-buffer", "-b", buffer],
+        `tmux delete-buffer -b ${shellQuote(buffer)}`);
         } catch { /* best-effort cleanup */ }
       }
       return classifyWriteError(err);
@@ -542,9 +629,9 @@ export class TmuxAdapter {
   }
 
   private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {
-    const cmd = `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`;
     try {
-      await this.exec(cmd);
+      await this.run(["tmux", "send-keys", "-t", target, ...keys],
+        `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -552,9 +639,9 @@ export class TmuxAdapter {
   }
 
   async setWindowOption(target: string, option: string, value: string): Promise<TmuxResult> {
-    const cmd = `tmux set-option -w -t ${shellQuote(target)} ${shellQuote(option)} ${shellQuote(value)}`;
     try {
-      await this.exec(cmd);
+      await this.run(["tmux", "set-option", "-w", "-t", target, option, value],
+        `tmux set-option -w -t ${shellQuote(target)} ${shellQuote(option)} ${shellQuote(value)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -568,9 +655,8 @@ export class TmuxAdapter {
     if (!Number.isFinite(rows) || !Number.isInteger(rows) || rows < 1) {
       return { ok: false, code: "validation_error", message: `resizeWindow: rows must be a positive integer, got ${rows}` };
     }
-    const cmd = `tmux resize-window -t ${shellQuote(target)} -x ${cols} -y ${rows}`;
     try {
-      await this.exec(cmd);
+      await this.run(["tmux", "resize-window", "-t", target, "-x", String(cols), "-y", String(rows)]);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -580,7 +666,7 @@ export class TmuxAdapter {
   async killSession(name: string): Promise<TmuxResult> {
     if (this.deliveryGuard) {
       return this.guardedInput(name, async pane => {
-        const stdout = await this.exec(`tmux display-message -p -t ${shellQuote(pane)} '#{session_id}'`);
+        const stdout = await this.run(["tmux", "display-message", "-p", "-t", pane, "#{session_id}"], `tmux display-message -p -t ${shellQuote(pane)} '#{session_id}'`);
         const sessionId = stdout.trim();
         if (!/^\$\d+$/.test(sessionId)) return { ok: false, code: "guard_target_unknown", message: "Cannot establish immutable session identity; no session killed." };
         const kill = async () => {
@@ -596,9 +682,9 @@ export class TmuxAdapter {
   }
 
   private async killSessionUnchecked(name: string): Promise<TmuxResult> {
-    const cmd = `tmux kill-session -t ${shellQuote(name)}`;
     try {
-      await this.exec(cmd);
+      await this.run(["tmux", "kill-session", "-t", name],
+        `tmux kill-session -t ${shellQuote(name)}`);
       const pane = this.freshProbes.get(name);
       this.freshProbes.delete(name);
       if (pane) this.freshProbes.delete(pane);
@@ -635,14 +721,17 @@ export class TmuxAdapter {
   }
 
   private async respawnPaneUnchecked(paneTarget: string, command?: string, opts?: { cwd?: string; env?: Record<string, string> }): Promise<TmuxResult> {
-    const cwdFlag = opts?.cwd != null ? ` -c ${shellQuote(opts.cwd)}` : "";
-    const envFlags = opts?.env
-      ? Object.entries(opts.env).map(([k, v]) => ` -e ${shellQuote(`${k}=${v}`)}`).join("")
-      : "";
-    const commandArg = command != null && command.length > 0 ? ` ${shellQuote(command)}` : "";
-    const cmd = `tmux respawn-pane -t ${shellQuote(paneTarget)}${cwdFlag}${envFlags}${commandArg}`;
+    const argv = ["tmux", "respawn-pane", "-t", paneTarget];
+    if (opts?.cwd != null) argv.push("-c", opts.cwd);
+    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
+    // The respawn command is ONE argv unit: tmux runs it via the shell.
+    if (command != null && command.length > 0) argv.push(command);
+    const legacyRespawn = ["tmux", "respawn-pane", "-t", shellQuote(paneTarget)];
+    if (opts?.cwd != null) legacyRespawn.push("-c", shellQuote(opts.cwd));
+    if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", shellQuote(`${k}=${v}`));
+    if (command != null && command.length > 0) legacyRespawn.push(shellQuote(command));
     try {
-      await this.exec(cmd);
+      await this.run(argv, legacyRespawn.join(" "));
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -654,9 +743,9 @@ export class TmuxAdapter {
    *  Set to `on` BEFORE the retiree is signalled to exit (else the pane is destroyed on exit and there
    *  is nothing to respawn into). */
   async setRemainOnExit(paneTarget: string, on: boolean): Promise<TmuxResult> {
-    const cmd = `tmux set-option -p -t ${shellQuote(paneTarget)} remain-on-exit ${on ? "on" : "off"}`;
     try {
-      await this.exec(cmd);
+      await this.run(["tmux", "set-option", "-p", "-t", paneTarget, "remain-on-exit", on ? "on" : "off"],
+        `tmux set-option -p -t ${shellQuote(paneTarget)} remain-on-exit ${on ? "on" : "off"}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -667,7 +756,8 @@ export class TmuxAdapter {
    *  remain-on-exit)? A known-missing pane also proves physical cutover; unknown probe errors stay false. */
   async isPaneDead(paneId: string): Promise<boolean> {
     try {
-      const output = await this.exec(`tmux display-message -p -t ${shellQuote(paneId)} "#{pane_dead}"`);
+      const output = await this.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_dead}"],
+        `tmux display-message -p -t ${shellQuote(paneId)} "#{pane_dead}"`);
       return output.trim() === "1";
     } catch (error) {
       return isNoServerError(error) || isPaneAbsenceError(error);
@@ -676,7 +766,9 @@ export class TmuxAdapter {
 
   /** Seat-handover cutover: signal the pane's foreground process (the retiree) — `TERM` for the graceful
    *  exit-in-place, `KILL` for the bounded-timeout force fallback. Resolves the pane pid then `kill`s it;
-   *  an unresolvable pid is a structured, non-throwing failure. */
+   *  an unresolvable pid is a structured, non-throwing failure.
+   *  Stays on the shell-string path deliberately: this is a Unix `kill`,
+   *  not a multiplexer command (Windows needs taskkill — named follow-up). */
   async signalPaneProcess(paneId: string, signal: "TERM" | "KILL"): Promise<TmuxResult> {
     return this.guardedInput(paneId, (pane, beforeWrite) => this.signalPaneProcessUnchecked(pane, signal, beforeWrite));
   }
@@ -698,7 +790,8 @@ export class TmuxAdapter {
   /** Get the PID of the foreground process in a pane. Returns null if unavailable. */
   async getPanePid(paneId: string): Promise<number | null> {
     try {
-      const output = await this.exec(`tmux display-message -p -t ${shellQuote(paneId)} "#{pane_pid}"`);
+      const output = await this.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_pid}"],
+        `tmux display-message -p -t ${shellQuote(paneId)} "#{pane_pid}"`);
       const trimmed = output.trim();
       const parsed = parseInt(trimmed, 10);
       return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -712,7 +805,7 @@ export class TmuxAdapter {
    *  command the pane was created with. Returns null if unavailable (caller falls back). */
   async getDefaultShell(): Promise<string | null> {
     try {
-      const output = await this.exec(`tmux show-options -gv default-shell`);
+      const output = await this.run(["tmux", "show-options", "-gv", "default-shell"]);
       const trimmed = output.trim();
       return trimmed || null;
     } catch {
@@ -723,7 +816,8 @@ export class TmuxAdapter {
   /** Get the current foreground command in a pane. Returns null if unavailable. */
   async getPaneCommand(paneId: string): Promise<string | null> {
     try {
-      const output = await this.exec(`tmux display-message -p -t ${shellQuote(paneId)} "#{pane_current_command}"`);
+      const output = await this.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_current_command}"],
+        `tmux display-message -p -t ${shellQuote(paneId)} "#{pane_current_command}"`);
       const trimmed = output.trim();
       return trimmed || null;
     } catch {
@@ -738,7 +832,8 @@ export class TmuxAdapter {
    *  nonzero lookup exit. */
   async hasSessionEnv(sessionName: string, varName: string): Promise<boolean | null> {
     try {
-      const output = await this.exec(`tmux show-environment -t ${shellQuote(sessionName)}`);
+      const output = await this.run(["tmux", "show-environment", "-t", sessionName],
+        `tmux show-environment -t ${shellQuote(sessionName)}`);
       const prefix = `${varName}=`;
       return output.split(/\r?\n/).some(
         (line) => line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0,
@@ -753,9 +848,13 @@ export class TmuxAdapter {
     // Shell-quote the path for safe injection into the pipe-pane command.
     // The entire pipe command is passed as a single argument to tmux,
     // which executes it via sh -c. We use shellQuote on the path.
-    const cmd = `tmux pipe-pane -t ${shellQuote(sessionName)} ${shellQuote("cat >> " + shellQuote(outputPath))}`;
+    // The sink travels as ONE argv unit: the multiplexer runs it via a
+    // shell, so its inner quoting stays POSIX here (psmux documents the same
+    // `cat >` server-side form for its own path).
+    const sink = "cat >> " + shellQuote(outputPath);
     try {
-      await this.exec(cmd);
+      await this.run(["tmux", "pipe-pane", "-t", sessionName, sink],
+        `tmux pipe-pane -t ${shellQuote(sessionName)} ${shellQuote(sink)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -764,9 +863,9 @@ export class TmuxAdapter {
 
   /** Stop pipe-pane on a session. */
   async stopPipePane(sessionName: string): Promise<TmuxResult> {
-    const cmd = `tmux pipe-pane -t ${shellQuote(sessionName)}`;
     try {
-      await this.exec(cmd);
+      await this.run(["tmux", "pipe-pane", "-t", sessionName],
+        `tmux pipe-pane -t ${shellQuote(sessionName)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -776,7 +875,8 @@ export class TmuxAdapter {
   /** Capture pane content (last N lines). Returns null if unavailable. */
   async capturePaneContent(paneId: string, lines: number = 20): Promise<string | null> {
     try {
-      const output = await this.exec(`tmux capture-pane -p -t ${shellQuote(paneId)} -S -${lines}`);
+      const output = await this.run(["tmux", "capture-pane", "-p", "-t", paneId, "-S", `-${lines}`],
+        `tmux capture-pane -p -t ${shellQuote(paneId)} -S -${lines}`);
       return output || null;
     } catch {
       return null;
@@ -791,7 +891,8 @@ export class TmuxAdapter {
    */
   async capturePaneScreen(paneId: string): Promise<string | null> {
     try {
-      const output = await this.exec(`tmux capture-pane -p -t ${shellQuote(paneId)}`);
+      const output = await this.run(["tmux", "capture-pane", "-p", "-t", paneId],
+        `tmux capture-pane -p -t ${shellQuote(paneId)}`);
       return output || null;
     } catch {
       return null;
@@ -806,7 +907,8 @@ export class TmuxAdapter {
    */
   async getPaneCursorPosition(paneId: string): Promise<TmuxCursorPosition | null> {
     try {
-      const output = await this.exec(
+      const output = await this.run(
+        ["tmux", "display-message", "-p", "-t", paneId, CURSOR_FORMAT],
         `tmux display-message -p -t ${shellQuote(paneId)} "${CURSOR_FORMAT}"`,
       );
       const [xRaw, yRaw, widthRaw, heightRaw] = output.trim().split(TMUX_FIELD_SEPARATOR);
@@ -831,9 +933,9 @@ export class TmuxAdapter {
    * scopes are never crossed (guard b2).
    */
   async setSessionOption(sessionName: string, key: string, value: string): Promise<TmuxResult> {
-    const cmd = `tmux set-option -t ${shellQuote(sessionName)} ${shellQuote(key)} ${shellQuote(value)}`;
     try {
-      await this.exec(cmd);
+      await this.run(["tmux", "set-option", "-t", sessionName, key, value],
+        `tmux set-option -t ${shellQuote(sessionName)} ${shellQuote(key)} ${shellQuote(value)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -848,9 +950,9 @@ export class TmuxAdapter {
    * Used for `set-clipboard` / `copy-command`.
    */
   async setServerOption(option: string, value: string): Promise<TmuxResult> {
-    const cmd = `tmux set-option -s ${shellQuote(option)} ${shellQuote(value)}`;
     try {
-      await this.exec(cmd);
+      await this.run(["tmux", "set-option", "-s", option, value],
+        `tmux set-option -s ${shellQuote(option)} ${shellQuote(value)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -864,7 +966,8 @@ export class TmuxAdapter {
    */
   async showServerOption(option: string): Promise<string | null> {
     try {
-      const output = await this.exec(`tmux show-options -sv ${shellQuote(option)}`);
+      const output = await this.run(["tmux", "show-options", "-sv", option],
+        `tmux show-options -sv ${shellQuote(option)}`);
       const v = output.trim();
       return v.length > 0 ? v : null;
     } catch {
@@ -875,7 +978,8 @@ export class TmuxAdapter {
   /** Get a session-scoped user option value. Returns null if not set or error. */
   async getSessionOption(sessionName: string, key: string): Promise<string | null> {
     try {
-      const output = await this.exec(`tmux show-option -v -t ${shellQuote(sessionName)} ${shellQuote(key)}`);
+      const output = await this.run(["tmux", "show-option", "-v", "-t", sessionName, key],
+        `tmux show-option -v -t ${shellQuote(sessionName)} ${shellQuote(key)}`);
       return output.trim() || null;
     } catch {
       return null;
@@ -905,7 +1009,8 @@ export class TmuxAdapter {
    */
   async readPaneLastActivity(paneId: string): Promise<number | null> {
     try {
-      const output = await this.exec(
+      const output = await this.run(
+        ["tmux", "display-message", "-p", "-t", paneId, "#{window_activity}"],
         `tmux display-message -p -t ${shellQuote(paneId)} '#{window_activity}'`,
       );
       const trimmed = output.trim();
@@ -928,7 +1033,8 @@ export class TmuxAdapter {
    */
   async listClients(): Promise<TmuxClient[]> {
     try {
-      const output = await this.exec(`tmux list-clients -F "${CLIENT_FORMAT}"`);
+      const output = await this.run(["tmux", "list-clients", "-F", CLIENT_FORMAT],
+        `tmux list-clients -F "${CLIENT_FORMAT}"`);
       return parseLines(output, parseClientLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
@@ -943,9 +1049,9 @@ export class TmuxAdapter {
    * kills, or rebinds a session and never touches OpenRig routing/identity.
    */
   async switchClient(client: string, target: string): Promise<TmuxResult> {
-    const cmd = `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(target)}`;
     try {
-      await this.exec(cmd);
+      await this.run(["tmux", "switch-client", "-c", client, "-t", target],
+        `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(target)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);

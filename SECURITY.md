@@ -39,6 +39,10 @@ could do. A proof of concept is welcome; a working exploit against a third party
 
 ## Scope notes
 
+- OpenRig is designed for your own machine or a trusted private network, for you and people you trust, not for the
+  open internet. We assess reports by their practical impact on a user in that setup. Exposing an install to the open
+  internet isn't a supported deployment. OpenRig's own gateway integrations with outside services, such as Slack, and
+  anything that lets an untrusted party reach the daemon or an agent are in scope.
 - OpenRig assumes the machine and the accounts it runs under are trusted by their owner. Reports
   that require a hostile local user with the same account are still welcome but are unlikely to be
   treated as high severity.

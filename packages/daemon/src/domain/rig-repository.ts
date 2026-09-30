@@ -517,6 +517,15 @@ export class RigRepository {
     return rows.map((r) => this.rowToRig(r));
   }
 
+  /** #174: seat-ref resolution sees only unarchived rigs, as default reads do since migration 042. */
+  findUnarchivedRigsByName(name: string): Rig[] {
+    const archived = this.hasRigColumn("archived_at") ? " AND archived_at IS NULL" : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM rigs WHERE name = ?${archived} ORDER BY created_at`)
+      .all(name) as RigRow[];
+    return rows.map((r) => this.rowToRig(r));
+  }
+
   getRigSummaries(filter?: RigArchiveFilter): Array<{ id: string; name: string; nodeCount: number; latestSnapshotAt: string | null; latestSnapshotId: string | null; hasServices: boolean; archivedAt: string | null }> {
     const cond = archiveWhereClause("r.archived_at", filter);
     const where = cond ? `WHERE ${cond}` : "";

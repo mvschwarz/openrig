@@ -130,8 +130,9 @@ export interface QueueItem {
   deliveryFailureDetail?: string;
   tags: string[] | null;
   blockedOn: string | null;
-  /** S04 — the DERIVED pickup receipt (unclaimed/working/stalled-after-claim/parked). Never
-   *  stored: computed at projection time from claimed_at + the transition log + heartbeat. */
+  /** S04 — the DERIVED pickup receipt (unclaimed/working/stalled-after-claim/parked/terminal).
+   *  Never stored: computed at projection time from state + claimed_at + the transition log
+   *  + heartbeat; a closed row is terminal, never stalled. */
   pickup?: PickupReceipt;
   waiting?: WaitingView;
   handedOffTo: string | null;

@@ -1012,6 +1012,41 @@ describe("Daemon Lifecycle", () => {
 
     expect(isAlive(123)).toBe(true);
   });
+
+  it("readProcessState reads the ps state column on POSIX", async () => {
+    const { readProcessState } = await import("../src/commands/daemon.js");
+    const calls: Array<{ file: string; args: string[] }> = [];
+    const state = readProcessState(123, "linux", (file, args) => {
+      calls.push({ file, args });
+      return "S\n";
+    });
+
+    expect(state).toBe("S\n");
+    expect(calls).toEqual([{ file: "ps", args: ["-o", "state=", "-p", "123"] }]);
+  });
+
+  it("readProcessState returns null on POSIX when ps fails", async () => {
+    const { readProcessState } = await import("../src/commands/daemon.js");
+    const state = readProcessState(123, "darwin", () => {
+      throw new Error("no such process");
+    });
+
+    expect(state).toBeNull();
+  });
+
+  it("readProcessState does not shell out to ps on Windows", async () => {
+    const { readProcessState, createIsProcessAlive } = await import("../src/commands/daemon.js");
+    const run = () => {
+      throw new Error("ps must not run on win32");
+    };
+
+    expect(readProcessState(123, "win32", run)).toBe("R");
+    const isAlive = createIsProcessAlive({
+      signalCheck: () => true,
+      readProcessState: (pid) => readProcessState(pid, "win32", run),
+    });
+    expect(isAlive(123)).toBe(true);
+  });
 });
 
 describe("resolveDaemonPath", () => {

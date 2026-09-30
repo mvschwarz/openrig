@@ -1280,6 +1280,9 @@ export type InstantiateOutcome =
   // teaches the running rig's identity and the supported alternatives.
   // (Additive variant per orch-lead territory ruling on row r054-s5b-build.)
   | { ok: false; code: "rig_name_running"; message: string; runningRig: { id: string; name: string; runningSessionCount: number } }
+  // #141: an unarchived same-name rig exists but could not be confirmed stopped, so the YAML import
+  // neither archives it nor creates another same-name generation beside it.
+  | { ok: false; code: "generation_unconfirmed"; message: string }
   // OPR.0.3.2.CT (conveyor-trust-minimal-fix):
   // When every launched node reaches a recoverable attention_required
   // state (e.g., workspace-trust prompt), do NOT tear the rig down.
@@ -1293,6 +1296,8 @@ export type InstantiateOutcome =
       message: string;
       rigId: string;
       attentionNodes: AttentionNode[];
+      /** #141: notices that must reach the user even though the import stopped for attention. */
+      warnings?: string[];
     };
 
 export interface AttentionNode {

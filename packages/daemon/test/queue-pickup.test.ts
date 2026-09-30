@@ -7,7 +7,9 @@
 //                          the threshold — the anti-noise direction);
 //   stalled-after-claim  — claimed, past threshold, zero substantive motion; evidence named;
 //   parked               — state=blocked only. Wake health is a separate `rig parked`
-//                          diagnosis; a wakeless blocked row still projects as parked.
+//                          diagnosis; a wakeless blocked row still projects as parked;
+//   terminal             — the obligation is closed (done/handed-off/failed/denied/canceled):
+//                          no pickup question is outstanding, regardless of claim age.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
@@ -22,7 +24,7 @@ import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 const THRESHOLD_ENV = "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES";
 
 interface PickupShape {
-  state: "unclaimed" | "working" | "stalled-after-claim" | "parked";
+  state: "unclaimed" | "working" | "stalled-after-claim" | "parked" | "terminal";
   evidence?: string;
 }
 const pickupOf = (item: QueueItem): PickupShape | undefined =>
@@ -127,6 +129,39 @@ describe("S04 pickup receipts — derived, visible, threshold-honest", () => {
     ageClaim(row.qitemId, 60);
     const item = repo.getById(row.qitemId)!;
     expect(pickupOf(item)?.state).toBe("parked");
+  });
+
+  it("TERMINAL: a claimed-and-closed done row past the threshold stops reading stalled-after-claim", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "done", closureReason: "no-follow-on", transitionNote: "closed" });
+    // Age the WHOLE history 60 min: the closed row must not fall through to the
+    // stall timer once its last meaningful change is older than the threshold.
+    ageClaim(row.qitemId, 60);
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE qitem_id = ? AND state = 'done'")
+      .run(new Date(Date.now() - 60 * 60_000).toISOString(), row.qitemId);
+    const item = repo.getById(row.qitemId)!;
+    expect(item.state).toBe("done");
+    expect(pickupOf(item)?.state).toBe("terminal");
+  });
+
+  it("TERMINAL: every closed state derives terminal, and a terminal row is never a stalled finding", async () => {
+    const mod = (await import("../src/domain/queue-pickup.js")) as {
+      derivePickup: (facts: {
+        state: string; claimedAt: string | null; lastHeartbeat: string | null;
+        postClaimMotionCount: number; lastMeaningfulAt?: string;
+      }) => PickupShape;
+      stalledPickupFinding: (item: QueueItem) => { kind: string } | null;
+    };
+    const old = new Date(Date.now() - 60 * 60_000).toISOString();
+    for (const state of ["done", "failed", "denied", "canceled", "handed-off"]) {
+      expect(mod.derivePickup({ state, claimedAt: old, lastHeartbeat: null, postClaimMotionCount: 0 }))
+        .toEqual({ state: "terminal", evidence: `closed (${state})` });
+    }
+    // A terminal row never feeds the S02 sweep as a stalled-claim finding.
+    const done = await mkRow();
+    repo.update({ qitemId: done.qitemId, actorSession: "daemon@kernel", state: "done", closureReason: "no-follow-on", transitionNote: "closed" });
+    expect(mod.stalledPickupFinding(repo.getById(done.qitemId)!)).toBeNull();
   });
 
   it("THRESHOLD from CONFIG, observed by EFFECT: raising the threshold flips a stalled row back to working", async () => {

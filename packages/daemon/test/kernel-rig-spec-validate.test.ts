@@ -115,6 +115,17 @@ describe("kernel agents — profile.uses references resolve against shared pool"
     }
   });
 
+  function usedRuntimeResources(yamlPath: string): { profile: string; runtimeResources: string[] }[] {
+    const doc = parseYaml(readFileSync(yamlPath, "utf-8")) as {
+      profiles?: Record<string, { uses?: { runtime_resources?: string[] } }>;
+    };
+    const out: { profile: string; runtimeResources: string[] }[] = [];
+    for (const [profile, p] of Object.entries(doc.profiles ?? {})) {
+      out.push({ profile, runtimeResources: p?.uses?.runtime_resources ?? [] });
+    }
+    return out;
+  }
+
   for (const agentPath of KERNEL_AGENT_PATHS) {
     const label = agentPath
       .replace(KERNEL_AGENTS_DIR + "/", "")
@@ -133,6 +144,26 @@ describe("kernel agents — profile.uses references resolve against shared pool"
         throw new Error(
           `${label} references skills not in shared pool:\n  - ${missing.join("\n  - ")}`,
         );
+      }
+    });
+  }
+
+  // #160 — a kernel seat running the Claude runtime must report activity out of
+  // the box. Every profile that opts into the shared Claude defaults must also
+  // opt into the shared activity hooks; without the relay the daemon's freshness
+  // gate records every hookless Claude kernel seat as `unknown`.
+  for (const agentPath of KERNEL_AGENT_PATHS) {
+    const label = agentPath
+      .replace(KERNEL_AGENTS_DIR + "/", "")
+      .replace("/agent.yaml", "")
+      .replace("/", ".");
+    it(`${label}: claude-default profiles include shared:claude-activity-hooks`, () => {
+      expect(poolIds(SHARED_AGENT_YAML, "runtime_resources").has("claude-activity-hooks")).toBe(true);
+      const claudeProfiles = usedRuntimeResources(agentPath)
+        .filter(({ runtimeResources }) => runtimeResources.includes("shared:claude-default-settings"));
+      expect(claudeProfiles.length, `${label} declares no claude-default profile`).toBeGreaterThan(0);
+      for (const { profile, runtimeResources } of claudeProfiles) {
+        expect(runtimeResources, `${label} profile=${profile}`).toContain("shared:claude-activity-hooks");
       }
     });
   }

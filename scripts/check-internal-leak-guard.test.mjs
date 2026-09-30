@@ -247,7 +247,8 @@ test("Plain B keeps guard enforcement out of root test:repo while fixture tests 
   const pkg = JSON.parse(readFileSync("package.json", "utf8"));
   const command = pkg.scripts["test:repo"];
 
-  assert.match(command, /node --test scripts\/\*\.test\.mjs/);
+  // Packaging tests rebuild daemon/dist while other script tests import it.
+  assert.match(command, /node --test --test-concurrency=1 scripts\/\*\.test\.mjs/);
   assert.doesNotMatch(command, /node scripts\/check-internal-leak-guard\.mjs/);
 });
 

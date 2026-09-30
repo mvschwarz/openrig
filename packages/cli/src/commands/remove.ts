@@ -51,6 +51,9 @@ export function removeCommand(depsOverride?: StatusDeps): Command {
       }
 
       console.log(`Removed node ${res.data["logicalId"]} from rig ${res.data["rigId"]} (${res.data["sessionsKilled"]} session killed)`);
+      if (typeof res.data["sessionKeptFor"] === "string") {
+        console.log(`Session kept: owned by ${res.data["sessionKeptFor"]}`);
+      }
     });
 
   return cmd;
