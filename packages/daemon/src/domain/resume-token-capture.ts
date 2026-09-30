@@ -31,6 +31,24 @@ export interface ResumeTokenCaptureDeps {
   piRunnerStateStore?: {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   } | null;
+  /** Muse session-id reader (the Muse adapter exposes it; backed by
+   *  session JSONL logs — a read, same posture as the claude-code
+   *  status-line sidecar). Absent = silent no-op. `readSessionIdForCwd`
+   *  is the workspace_root-filtered variant; preferred whenever the
+   *  caller knows the seat cwd. */
+  museSessionStore?: {
+    readSessionId(sessionName: string): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+    readSessionIdForCwd?(cwd: string | null): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+  } | null;
+  /** OpenCode session-id reader (the OpenCode adapter exposes it; backed by
+   *  a read-only query of the opencode.db `session` table — a read, same
+   *  posture as the claude-code status-line sidecar). Absent = silent no-op.
+   *  `readSessionIdForCwd` is the seat-precise variant (rows key on
+   *  directory); preferred whenever the caller knows the seat cwd. */
+  opencodeSessionStore?: {
+    readSessionId(sessionName: string): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+    readSessionIdForCwd?(cwd: string | null): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+  } | null;
 }
 
 export type ResumeTokenDeriveResult =
@@ -48,18 +66,20 @@ export type ResumeTokenDeriveResult =
  *   claude-code → the status-line sidecar's session_id (a file read)
  *   codex       → the thread id derived from live pid-keyed logs
  *   pi          → the pi-runner state sidecar's sessionFile (a file read)
+ *   muse        → the Muse session id via `muse session-message list` / JSONL logs (a read)
+ *   opencode    → the OpenCode session id via a read-only opencode.db query (a read)
  * Returns a structured outcome; never throws for a missing/invalid token
  * (those are honest skips). ANY unexpected throw from a dependency is the
  * caller's to swallow (capture must never fail or block its lifecycle op).
  */
 export async function deriveResumeToken(
-  input: { runtime: string | null; sessionName: string },
+  input: { runtime: string | null; sessionName: string; cwd?: string | null },
   deps: ResumeTokenCaptureDeps,
 ): Promise<ResumeTokenDeriveResult> {
   const resumeType = resumeTypeForRuntime(input.runtime);
   if (!resumeType) return { outcome: "exempt" }; // terminal / unknown — exempt, not a failure
 
-  const runtime = input.runtime as string; // non-null: resumeType is set only for claude-code / codex / pi
+  const runtime = input.runtime as string; // non-null: resumeType is set only for claude-code / codex / pi / muse / opencode
 
   let token: string | undefined;
   if (runtime === "claude-code") {
@@ -82,6 +102,34 @@ export async function deriveResumeToken(
       return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
     }
     if (state.sessionFile.trim().length > 0) token = state.sessionFile.trim();
+    else return { outcome: "skipped", reason: "missing_sidecar" };
+  } else if (runtime === "muse") {
+    if (!deps.museSessionStore) return { outcome: "noop" }; // dep absent — silent no-op
+    // Prefer the workspace_root-filtered read when the caller knows the
+    // seat cwd; without it (or without the method on older wirings), fall
+    // back to the global-newest read.
+    const scopedMuse = input.cwd ? deps.museSessionStore.readSessionIdForCwd : undefined;
+    const state = scopedMuse
+      ? await scopedMuse.call(deps.museSessionStore, input.cwd ?? null)
+      : await deps.museSessionStore.readSessionId(input.sessionName);
+    if (!state.ok) {
+      return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
+    }
+    if (state.sessionId.trim().length > 0) token = state.sessionId.trim();
+    else return { outcome: "skipped", reason: "missing_sidecar" };
+  } else if (runtime === "opencode") {
+    if (!deps.opencodeSessionStore) return { outcome: "noop" }; // dep absent — silent no-op
+    // Prefer the cwd-scoped read when the caller knows the seat cwd: rows
+    // key on directory, so multi-seat rigs sharing a HOME store stay
+    // seat-precise. Without a cwd, fall back to the global-newest read.
+    const scoped = input.cwd ? deps.opencodeSessionStore.readSessionIdForCwd : undefined;
+    const state = scoped
+      ? await scoped.call(deps.opencodeSessionStore, input.cwd ?? null)
+      : await deps.opencodeSessionStore.readSessionId(input.sessionName);
+    if (!state.ok) {
+      return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
+    }
+    if (state.sessionId.trim().length > 0) token = state.sessionId.trim();
     else return { outcome: "skipped", reason: "missing_sidecar" };
   } else {
     return { outcome: "noop" }; // resumeType set but runtime is not one we derive — defensive

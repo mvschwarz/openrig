@@ -584,4 +584,104 @@ describe("ResumeMetadataRefresher", () => {
       expect(sessionRegistry.updateResumeToken).not.toHaveBeenCalled();
     });
   });
+
+  describe("opencode seats", () => {
+    const seat = (overrides?: Record<string, unknown>) => ({
+      sessionId: "sess-o", sessionName: "dev-owner@oc-rig", runtime: "opencode",
+      resumeType: null, resumeToken: null, cwd: "/repo",
+      sessionCreatedAt: "2026-09-23 17:34:12", ...overrides,
+    });
+
+    it("null token fills cwd-scoped from the store with scrape provenance", async () => {
+      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const seen: Array<[string | null, number | null | undefined]> = [];
+      const refresher = new ResumeMetadataRefresher({
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        opencodeSessionStore: {
+          readSessionIdForCwd: async (cwd: string | null, minTime?: number | null) => {
+            seen.push([cwd, minTime]);
+            return { ok: true as const, sessionId: "ses_live123" };
+          },
+        },
+        sleep: async () => {},
+      });
+      await refresher.refresh([seat()], { fillNullOnly: true });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]![0]).toBe("/repo");
+      // Launch boundary: only rows created after the seat qualify.
+      expect(seen[0]![1]).toBe(Date.parse("2026-09-23T17:34:12Z"));
+      expect(sessionRegistry.updateResumeToken).toHaveBeenCalledWith(
+        "sess-o", "opencode_session_id", "ses_live123", "scrape",
+      );
+    });
+
+    it("parseSessionCreatedAtMs parses UTC session timestamps, null otherwise", async () => {
+      const { parseSessionCreatedAtMs } = await import("../src/domain/resume-metadata-refresher.js");
+      expect(parseSessionCreatedAtMs("2026-09-23 17:34:12")).toBe(Date.parse("2026-09-23T17:34:12Z"));
+      expect(parseSessionCreatedAtMs(null)).toBeNull();
+      expect(parseSessionCreatedAtMs("")).toBeNull();
+      expect(parseSessionCreatedAtMs("not-a-date")).toBeNull();
+    });
+
+    it("present + matching token re-stamps freshness, never rewrites", async () => {
+      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const refresher = new ResumeMetadataRefresher({
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        opencodeSessionStore: {
+          readSessionIdForCwd: async () => ({ ok: true as const, sessionId: "ses_live123" }),
+        },
+        sleep: async () => {},
+      });
+      await refresher.refresh([seat({ resumeToken: "ses_live123" })], { fillNullOnly: true });
+      expect(sessionRegistry.markResumeProbeResult).toHaveBeenCalledWith("sess-o", "resumable");
+      expect(sessionRegistry.updateResumeToken).not.toHaveBeenCalled();
+    });
+
+    it("present + different token leaves the ledger alone (no clobber)", async () => {
+      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const refresher = new ResumeMetadataRefresher({
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        opencodeSessionStore: {
+          readSessionIdForCwd: async () => ({ ok: true as const, sessionId: "ses_other" }),
+        },
+        sleep: async () => {},
+      });
+      await refresher.refresh([seat({ resumeToken: "ses_live123" })], { fillNullOnly: true });
+      expect(sessionRegistry.markResumeProbeResult).not.toHaveBeenCalled();
+      expect(sessionRegistry.updateResumeToken).not.toHaveBeenCalled();
+    });
+
+    it("unwired store is a silent no-op", async () => {
+      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const refresher = new ResumeMetadataRefresher({
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        sleep: async () => {},
+      });
+      await refresher.refresh([seat()], { fillNullOnly: true });
+      expect(sessionRegistry.updateResumeToken).not.toHaveBeenCalled();
+      expect(sessionRegistry.markResumeProbeResult).not.toHaveBeenCalled();
+    });
+
+    it("absent cwd skips both read paths (global-latest is not seat-precise)", async () => {
+      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const readSessionIdForCwd = vi.fn(async () => ({ ok: true as const, sessionId: "ses_live123" }));
+      const refresher = new ResumeMetadataRefresher({
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        opencodeSessionStore: { readSessionIdForCwd },
+        sleep: async () => {},
+      });
+      await refresher.refresh([seat({ cwd: null })], { fillNullOnly: true });
+      await refresher.refresh([seat({ cwd: null, resumeToken: "ses_live123" })], { fillNullOnly: true });
+      // Unparseable seat timestamp: no launch boundary, so no bounded read.
+      await refresher.refresh([seat({ sessionCreatedAt: "junk" })], { fillNullOnly: true });
+      expect(readSessionIdForCwd).not.toHaveBeenCalled();
+      expect(sessionRegistry.updateResumeToken).not.toHaveBeenCalled();
+      expect(sessionRegistry.markResumeProbeResult).not.toHaveBeenCalled();
+    });
+  });
 });

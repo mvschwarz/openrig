@@ -154,7 +154,11 @@ export async function defaultProbeRuntimes(): Promise<RuntimeProbeResult> {
 
   async function tryProbe(cmd: string): Promise<RuntimeAuthStatus> {
     try {
-      const { stdout, stderr } = await execAsync(cmd, { timeout: 5000 });
+      // 15s: Windows cold starts through npm shims (codex.cmd -> node) measured
+      // at ~7.5s on the validation box — the previous 5s budget SIGTERM'd a
+      // healthy `codex login status` and reported the runtime unavailable
+      // (kernel auth_blocked, issue #1).
+      const { stdout, stderr } = await execAsync(cmd, { timeout: 15000 });
       const out = `${stdout}\n${stderr}`.toLowerCase();
       // Conservative parse: any indicator the CLI considers itself
       // unauthenticated marks the runtime unavailable. Tighter parsing
