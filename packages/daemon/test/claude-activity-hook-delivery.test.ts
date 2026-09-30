@@ -15,7 +15,7 @@
 // path is preserved). Malformed settings are preserved (fail-closed). Missing
 // source produces NO dangling commands and NO false projected claim.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { shellQuote } from "../src/adapters/shell-quote.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
@@ -284,6 +284,25 @@ describe("Claude activity-hook delivery — hardening (guard r3 findings)", () =
       expect(res.skipped).toContain("claude-activity-hooks");
     });
   }
+});
+
+// Regression: a seat whose cwd resolves to '/' has no project workspace. Delivery used to
+// mkdir '/.openrig/hooks/scripts' and log ENOENT; it must skip with a clear reason instead.
+describe("Claude activity-hook delivery — no project workspace", () => {
+  it("a binding cwd at the filesystem root writes nothing, reports skipped, and says why", async () => {
+    const fs = enableFs();
+    const before = Object.keys(fs._store).sort();
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await makeAdapter(fs).project(plan([activityEntry()]), binding("/"));
+      expect(Object.keys(fs._store).sort()).toEqual(before);
+      expect(res.projected).not.toContain("claude-activity-hooks");
+      expect(res.skipped).toContain("claude-activity-hooks");
+      expect(log.mock.calls.flat().join("\n")).toMatch(/claude activity hooks skipped: cwd '\/' .*filesystem root/);
+    } finally {
+      log.mockRestore();
+    }
+  });
 });
 
 // M1 (R1 verdict): ownership must ROUND-TRIP shellQuote. A cwd containing a legal apostrophe

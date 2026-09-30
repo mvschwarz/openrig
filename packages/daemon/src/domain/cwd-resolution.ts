@@ -25,11 +25,21 @@ export function isPathInsideRoot(candidatePath: string, rootPath: string): boole
   return relative === "" || (!relative.startsWith("..") && !nodePath.isAbsolute(relative));
 }
 
+export function isFilesystemRoot(cwd: string): boolean {
+  const resolved = nodePath.resolve(cwd);
+  return resolved === nodePath.parse(resolved).root;
+}
+
 export function getOpenRigInstallCwdError(
   resolvedCwd: string,
   cwdOverride?: string | null,
   installRoot: string = getOpenRigInstallRoot(),
 ): string | null {
+  // Checked before the override bypass: `rig up` defaults the override to the
+  // caller's process.cwd(), so a launch from '/' arrives as an override.
+  if (isFilesystemRoot(resolvedCwd)) {
+    return `Resolved cwd '${nodePath.resolve(resolvedCwd)}' is the filesystem root, which is not a valid project workspace. Pass --cwd <path> to launch into your project directory.`;
+  }
   if (cwdOverride && cwdOverride.trim().length > 0) {
     return null;
   }
