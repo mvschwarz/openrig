@@ -250,13 +250,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       launchId,
     });
 
-    const textResult = await this.tmux.sendText(sessionName, cmd);
+    // Stage the command so canonical tty limits cannot truncate runner arguments.
+    const textResult = await this.tmux.sendShellCommand(sessionName, cmd);
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
-    }
-    const enterResult = await this.tmux.sendKeys(sessionName, ["Enter"]);
-    if (!enterResult.ok) {
-      return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
     // The runner writes the sidecar after its first successful get_state;
