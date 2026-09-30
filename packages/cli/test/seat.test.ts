@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Command } from "commander";
+import { DaemonClient } from "../src/client.js";
 import { seatCommand, handoverCommand } from "../src/commands/seat.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
@@ -208,6 +209,7 @@ const FRESH_LAUNCH_RESULT = {
 
 describe("rig seat status", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -337,6 +339,63 @@ describe("rig seat status", () => {
     expect(output).toContain("Fresh occupant ready: dev.impl@seat-rig (dev-impl@seat-rig)");
     expect(output).toContain("Generation: gen-fresh; model: gpt-5.6-codex");
     expect(output).toContain("No continuity source was used; siblings and durable work were preserved.");
+  });
+
+  it("launch waits for a ready response beyond the default five-second timeout", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(Response.json(FRESH_LAUNCH_RESULT)), 6_000);
+      init!.signal!.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(init!.signal!.reason);
+      }, { once: true });
+    }));
+    const deps = makeDeps({ status: 200, data: FRESH_LAUNCH_RESULT }, []);
+    deps.clientFactory = url => new DaemonClient(url, { fetchImpl });
+    const result = captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "launch", "dev-impl@seat-rig",
+      "--fresh", "--stop", "--reason", "deliberate blank restart", "--json",
+    ]).then(() => undefined)).catch(error => ({ error }));
+
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    const output = await result;
+    expect(output).toMatchObject({ errors: [], exitCode: undefined });
+    if (!("logs" in output)) throw output.error;
+    expect(JSON.parse(output.logs.join("\n"))).toMatchObject({ status: "ready", generation: "gen-fresh" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])("launch reports an unknown outcome without retrying on timeout (json=%s)", async json => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+    }));
+    const deps = makeDeps({ status: 200, data: FRESH_LAUNCH_RESULT }, []);
+    deps.clientFactory = url => new DaemonClient(url, { fetchImpl });
+    const result = captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "launch", "dev-impl@seat-rig",
+      "--fresh", "--stop", "--reason", "deliberate blank restart", ...(json ? ["--json"] : []),
+    ]).then(() => undefined)).catch(error => ({ error }));
+
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    const output = await result;
+    expect(output).toMatchObject({ exitCode: 1 });
+    if (!("logs" in output)) throw output.error;
+    if (json) {
+      expect(output.errors).toEqual([]);
+      expect(JSON.parse(output.logs.join("\n"))).toMatchObject({
+        status: "unknown",
+        code: "launch_outcome_unknown",
+        guidance: expect.stringContaining("rig seat status dev-impl@seat-rig"),
+      });
+    } else {
+      expect(output.logs).toEqual([]);
+      expect(output.errors.join("\n")).toContain("may still be in progress");
+      expect(output.errors.join("\n")).toContain("rig seat status dev-impl@seat-rig");
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("handover --dry-run --json prints the stable planner shape", async () => {
