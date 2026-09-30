@@ -175,7 +175,9 @@ export class ComposeServicesAdapter {
   /** Probe a TCP wait target. Returns true if the port is open. */
   async probeTcp(target: string, timeoutMs: number = 5000): Promise<boolean> {
     try {
-      const [host, portStr] = target.split(":");
+      const match = /^(?:\[([^\]]+)\]|([^:]+)):([^:]+)$/.exec(target);
+      const host = match?.[1] ?? match?.[2];
+      const portStr = match?.[3];
       if (!host || !portStr) return false;
       const cmd = `nc -z -w ${Math.ceil(timeoutMs / 1000)} ${sq(host)} ${sq(portStr)} 2>/dev/null`;
       await this.exec(cmd);
