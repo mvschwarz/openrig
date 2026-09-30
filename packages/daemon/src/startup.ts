@@ -226,6 +226,10 @@ const KNOWN_PROVIDER_AUTH_ENV = new Set([
   "OPENROUTER_API_KEY",
   "ZAI_API_KEY",
   "KIMI_API_KEY",
+  // Issue #194: the bearer token of a Codex Amazon Bedrock provider
+  // (`env_key = "AWS_BEARER_TOKEN_BEDROCK"`). Still forwarded only when the
+  // operator names it in recovery.provider_auth_env_allowlist.
+  "AWS_BEARER_TOKEN_BEDROCK",
 ]);
 
 export function collectAllowlistedProviderAuthEnv(
