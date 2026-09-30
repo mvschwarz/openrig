@@ -131,7 +131,10 @@ export function checkLocalPath(raw: string): PathCheck {
       error: `refused: '${raw}' resolves into the active OPENRIG_HOME (${activeOpenRigHome}) — live OpenRig state is not a copy source/target in v0 (crash-safety). This is the FR-4 default-deny wall (a short closed list; extension requires a ruling).`,
     };
   }
-  return { ok: true, normalizedPath: resolved };
+  // rsync distinguishes a directory from its contents by the source's trailing separator.
+  const normalizedPath = raw.endsWith(path.sep) && !resolved.endsWith(path.sep)
+    ? resolved + path.sep : resolved;
+  return { ok: true, normalizedPath };
 }
 
 /** Remote side: posix-normalize, then the wall — absolute-only (arch Q5),
