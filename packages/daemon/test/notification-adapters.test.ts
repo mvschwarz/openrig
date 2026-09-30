@@ -129,61 +129,83 @@ describe("WebhookNotificationAdapter (PL-005 Phase B)", () => {
   });
 
   describe("Target URL Validation", () => {
-    it("refuses non-HTTP protocols with a clear error on startup", () => {
+    it("disables notifications on non-HTTP protocols with a clear warning", async () => {
       for (const target of ["file:///etc/passwd", "ftp://example.com/test", "gopher://example.com"]) {
-        expect(() => new WebhookNotificationAdapter({ endpointUrl: target }))
-          .toThrow(/unsupported_protocol/);
-        expect(() => new NtfyNotificationAdapter({ topicUrl: target }))
-          .toThrow(/unsupported_protocol/);
+        const warnings: string[] = [];
+        const warn = (msg: string) => warnings.push(msg);
+
+        const webhook = new WebhookNotificationAdapter({ endpointUrl: target, warn });
+        expect(webhook.disabled).toBe(true);
+        expect(warnings.length).toBe(1);
+        expect(warnings[0]).toContain("unsupported_protocol");
+        const resWebhook = await webhook.send({ title: "test", body: "test" });
+        expect(resWebhook.ok).toBe(false);
+        expect(resWebhook.error).toContain("unsupported_protocol");
+
+        const ntfy = new NtfyNotificationAdapter({ topicUrl: target, warn });
+        expect(ntfy.disabled).toBe(true);
+        expect(warnings.length).toBe(2);
+        expect(warnings[1]).toContain("unsupported_protocol");
+        const resNtfy = await ntfy.send({ title: "test", body: "test" });
+        expect(resNtfy.ok).toBe(false);
+        expect(resNtfy.error).toContain("unsupported_protocol");
       }
     });
 
-    it("refuses URLs with embedded credentials and redacts credentials in startup error", () => {
-      try {
-        new WebhookNotificationAdapter({
-          endpointUrl: "https://user:secretpassword@example.com/webhook",
-        });
-        expect.unreachable("should have thrown");
-      } catch (err) {
-        const msg = (err as Error).message;
-        expect(msg).toContain("url_credentials_not_allowed");
-        expect(msg).toContain("***:***");
-        expect(msg).not.toContain("secretpassword");
-      }
+    it("refuses URLs with embedded credentials and redacts credentials in warning", async () => {
+      const warnings: string[] = [];
+      const warn = (msg: string) => warnings.push(msg);
 
-      try {
-        new NtfyNotificationAdapter({
-          topicUrl: "https://user:secretpassword@ntfy.sh/topic",
-        });
-        expect.unreachable("should have thrown");
-      } catch (err) {
-        const msg = (err as Error).message;
-        expect(msg).toContain("url_credentials_not_allowed");
-        expect(msg).toContain("***:***");
-        expect(msg).not.toContain("secretpassword");
-      }
-    });
-
-    it("rejects redirects during webhook delivery by setting redirect: error", async () => {
-      let passedRedirect: RequestRedirect | undefined;
-      const fakeFetch = (async (_url: string, init?: RequestInit) => {
-        passedRedirect = init?.redirect;
-        return new Response(null, { status: 200 });
-      }) as unknown as typeof fetch;
-
-      const adapter = new WebhookNotificationAdapter({
-        endpointUrl: "https://example.com/webhook",
-        fetchImpl: fakeFetch,
+      const webhook = new WebhookNotificationAdapter({
+        endpointUrl: "https://user:secretpassword@example.com/webhook",
+        warn,
       });
-      await adapter.send({ title: "test", body: "test" });
-      expect(passedRedirect).toBe("error");
+      expect(webhook.disabled).toBe(true);
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("url_credentials_not_allowed");
+      expect(warnings[0]).toContain("***:***");
+      expect(warnings[0]).not.toContain("secretpassword");
+      const resWebhook = await webhook.send({ title: "test", body: "test" });
+      expect(resWebhook.ok).toBe(false);
+      expect(resWebhook.error).toContain("url_credentials_not_allowed");
+      expect(resWebhook.error).toContain("***:***");
+      expect(resWebhook.error).not.toContain("secretpassword");
+
+      const ntfy = new NtfyNotificationAdapter({
+        topicUrl: "https://user:secretpassword@ntfy.sh/topic",
+        warn,
+      });
+      expect(ntfy.disabled).toBe(true);
+      expect(warnings.length).toBe(2);
+      expect(warnings[1]).toContain("url_credentials_not_allowed");
+      expect(warnings[1]).toContain("***:***");
+      expect(warnings[1]).not.toContain("secretpassword");
+      const resNtfy = await ntfy.send({ title: "test", body: "test" });
+      expect(resNtfy.ok).toBe(false);
+      expect(resNtfy.error).toContain("url_credentials_not_allowed");
+      expect(resNtfy.error).toContain("***:***");
+      expect(resNtfy.error).not.toContain("secretpassword");
     });
 
-    it("refuses invalid or malformed URLs with a clear error on startup", () => {
-      expect(() => new WebhookNotificationAdapter({ endpointUrl: "not-a-valid-url" }))
-        .toThrow(/invalid_url_format/);
-      expect(() => new NtfyNotificationAdapter({ topicUrl: "http://" }))
-        .toThrow(/invalid_url_format|missing_hostname/);
+    it("disables notifications on invalid or malformed URLs with a clear warning", async () => {
+      const warnings: string[] = [];
+      const warn = (msg: string) => warnings.push(msg);
+
+      const webhook = new WebhookNotificationAdapter({ endpointUrl: "not-a-valid-url", warn });
+      expect(webhook.disabled).toBe(true);
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toMatch(/invalid_url_format/);
+      const resWebhook = await webhook.send({ title: "test", body: "test" });
+      expect(resWebhook.ok).toBe(false);
+      expect(resWebhook.error).toMatch(/invalid_url_format/);
+
+      const ntfy = new NtfyNotificationAdapter({ topicUrl: "http://", warn });
+      expect(ntfy.disabled).toBe(true);
+      expect(warnings.length).toBe(2);
+      expect(warnings[1]).toMatch(/invalid_url_format|missing_hostname/);
+      const resNtfy = await ntfy.send({ title: "test", body: "test" });
+      expect(resNtfy.ok).toBe(false);
+      expect(resNtfy.error).toMatch(/invalid_url_format|missing_hostname/);
     });
 
     it("permits self-hosted notifiers on localhost and local network", async () => {

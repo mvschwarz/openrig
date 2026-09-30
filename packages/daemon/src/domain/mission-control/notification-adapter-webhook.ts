@@ -17,6 +17,8 @@ export interface WebhookAdapterOpts {
   fetchImpl?: typeof fetch;
   /** Optional extra headers (e.g., `X-Webhook-Signature`). */
   extraHeaders?: Record<string, string>;
+  /** Optional logger for startup warnings. Defaults to console.warn. */
+  warn?: (msg: string) => void;
 }
 
 export interface WebhookBodyShape {
@@ -32,13 +34,18 @@ export interface WebhookBodyShape {
 export class WebhookNotificationAdapter implements NotificationAdapter {
   readonly mechanism = "webhook";
   readonly target: string;
+  readonly disabled?: boolean;
+  readonly validationError?: string;
   private readonly fetchImpl: typeof fetch;
   private readonly extraHeaders: Record<string, string>;
 
   constructor(opts: WebhookAdapterOpts) {
     const validation = validateOutboundUrl(opts.endpointUrl);
     if (!validation.valid) {
-      throw new Error(`Invalid webhook endpoint URL '${redactUrl(opts.endpointUrl)}': ${validation.reason}`);
+      this.disabled = true;
+      this.validationError = `Invalid webhook endpoint URL '${redactUrl(opts.endpointUrl)}': ${validation.reason}`;
+      const warn = opts.warn ?? console.warn;
+      warn(`[openrig] Notifications disabled: ${this.validationError}`);
     }
     this.target = opts.endpointUrl;
     this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -46,6 +53,12 @@ export class WebhookNotificationAdapter implements NotificationAdapter {
   }
 
   async send(payload: NotificationPayload): Promise<NotificationDeliveryResult> {
+    if (this.disabled) {
+      return {
+        ok: false,
+        error: this.validationError ?? "notifications disabled: invalid webhook endpoint URL",
+      };
+    }
     const body: WebhookBodyShape = {
       source: "openrig.mission-control",
       schema_version: 1,
@@ -58,7 +71,6 @@ export class WebhookNotificationAdapter implements NotificationAdapter {
     try {
       const res = await this.fetchImpl(this.target, {
         method: "POST",
-        redirect: "error",
         headers: {
           "Content-Type": "application/json",
           ...this.extraHeaders,

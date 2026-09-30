@@ -20,23 +20,36 @@ export interface NtfyAdapterOpts {
   topicUrl: string;
   /** Optional fetch override for tests. */
   fetchImpl?: typeof fetch;
+  /** Optional logger for startup warnings. Defaults to console.warn. */
+  warn?: (msg: string) => void;
 }
 
 export class NtfyNotificationAdapter implements NotificationAdapter {
   readonly mechanism = "ntfy";
   readonly target: string;
+  readonly disabled?: boolean;
+  readonly validationError?: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(opts: NtfyAdapterOpts) {
     const validation = validateOutboundUrl(opts.topicUrl);
     if (!validation.valid) {
-      throw new Error(`Invalid ntfy topic URL '${redactUrl(opts.topicUrl)}': ${validation.reason}`);
+      this.disabled = true;
+      this.validationError = `Invalid ntfy topic URL '${redactUrl(opts.topicUrl)}': ${validation.reason}`;
+      const warn = opts.warn ?? console.warn;
+      warn(`[openrig] Notifications disabled: ${this.validationError}`);
     }
     this.target = opts.topicUrl;
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
   async send(payload: NotificationPayload): Promise<NotificationDeliveryResult> {
+    if (this.disabled) {
+      return {
+        ok: false,
+        error: this.validationError ?? "notifications disabled: invalid topic URL",
+      };
+    }
     const headers: Record<string, string> = {
       Title: truncateHeader(payload.title, 250),
     };
