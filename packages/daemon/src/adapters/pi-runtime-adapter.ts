@@ -388,7 +388,16 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       const { agentDir } = piSeatPaths(this.stateRoot, binding.tmuxSession);
       const targetDir = nodePath.join(agentDir, "skills", entry.effectiveId);
       this.fs.mkdirp(targetDir);
-      const isDir = this.fs.listFiles ? this.fs.listFiles(entry.absolutePath).length > 0 : false;
+      let isDir = false;
+      if (this.fs.listFiles) {
+        try {
+          isDir = this.fs.listFiles(entry.absolutePath).length > 0;
+        } catch {
+          // File-shaped sources make the production listFiles (recursive
+          // fs.readdirSync walk) throw ENOTDIR — treat the entry as file-shaped.
+          isDir = false;
+        }
+      }
       if (isDir && this.fs.listFiles) {
         for (const file of this.fs.listFiles(entry.absolutePath)) {
           const dest = nodePath.join(targetDir, file);

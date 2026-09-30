@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { DaemonClient, terminalAuthHeaders } from "../client.js";
+import { DaemonClient, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -477,10 +477,26 @@ Examples:
     const daemon = await getDaemonStatus(deps.lifecycleDeps);
     if (!daemonStatusGuard(daemon)) return;
     const client = deps.clientFactory(getDaemonUrl(daemon));
-    const res = await client.post<Record<string, unknown>>(
-      `/api/seat/${path}/${encodeURIComponent(seat)}`,
-      body,
-    );
+    let res;
+    try {
+      const route = `/api/seat/${path}/${encodeURIComponent(seat)}`;
+      res = path === "launch"
+        ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 120_000 })
+        : await client.post<Record<string, unknown>>(route, body);
+    } catch (err) {
+      if (path !== "launch" || !(err instanceof DaemonTimeoutError)) throw err;
+      const error = {
+        ok: false as const,
+        code: "launch_outcome_unknown",
+        status: "unknown",
+        message: "The CLI timed out waiting for the daemon; the launch may still be in progress.",
+        guidance: `Check the outcome before retrying: rig seat status ${seat}`,
+      };
+      if (opts.json) console.log(JSON.stringify(error, null, 2));
+      else printSeatError(error, error.message);
+      process.exitCode = 1;
+      return;
+    }
     if (opts.json) {
       console.log(JSON.stringify(res.data, null, 2));
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;

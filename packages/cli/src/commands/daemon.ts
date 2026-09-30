@@ -32,6 +32,22 @@ export function createIsProcessAlive(deps: ProcessAliveDeps): (pid: number) => b
   };
 }
 
+type ExecFile = (file: string, args: string[], options: { encoding: "utf-8" }) => string;
+
+// Windows has no ps(1) and no zombie state, so the signal probe alone decides liveness there.
+export function readProcessState(
+  pid: number,
+  platform: NodeJS.Platform = process.platform,
+  run: ExecFile = execFileSync,
+): string | null {
+  if (platform === "win32") return "R";
+  try {
+    return run("ps", ["-o", "state=", "-p", String(pid)], { encoding: "utf-8" });
+  } catch {
+    return null;
+  }
+}
+
 export function realDeps(): LifecycleDeps {
   const isProcessAlive = createIsProcessAlive({
     signalCheck: (pid) => {
@@ -42,13 +58,7 @@ export function realDeps(): LifecycleDeps {
         return false;
       }
     },
-    readProcessState: (pid) => {
-      try {
-        return execFileSync("ps", ["-o", "state=", "-p", String(pid)], { encoding: "utf-8" });
-      } catch {
-        return null;
-      }
-    },
+    readProcessState: (pid) => readProcessState(pid),
   });
 
   return {

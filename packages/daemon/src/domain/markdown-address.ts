@@ -116,7 +116,8 @@ function scanHeaders(lines: string[]): HeaderScan {
       const length = fenceMatch[1]!.length;
       if (!fence) {
         fence = { marker, length, line: i };
-      } else if (fence.marker === marker && length >= fence.length) {
+      } else if (fence.marker === marker && length >= fence.length
+        && /^[ \t\r]*$/.test(line.slice(fenceMatch[0].length))) {
         fence = null;
       }
       continue;

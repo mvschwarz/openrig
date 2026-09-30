@@ -181,6 +181,25 @@ describe("Rig CRUD routes", () => {
     expect(body.env.OPENRIG_SESSION_NAME).toBe("orch1-lead@rigged-buildout");
   });
 
+  it.each(["claude-code", "codex"])("attach-self checks the optional existing-node runtime guard %s", async (runtime) => {
+    const rig = repo.createRig("runtime-guard");
+    const node = repo.addNode(rig.id, "dev.worker", { runtime: "claude-code" });
+    const res = await app.request(`/api/rigs/${rig.id}/attach-self`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ logicalId: "dev.worker", runtime, displayName: "worker@runtime-guard" }),
+    });
+    if (runtime === "claude-code") {
+      expect(res.status).toBe(201);
+      expect((await res.json()).nodeId).toBe(node.id);
+      expect(sessionRegistry.getBindingForNode(node.id)).toBeTruthy();
+    } else {
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe("runtime_mismatch");
+      expect(sessionRegistry.getBindingForNode(node.id)).toBeFalsy();
+    }
+  });
+
   it("POST /api/rigs/:id/attach-self can self-attach a tmux-backed shell without discovery", async () => {
     const rig = repo.createRig("rigged-buildout");
     const node = repo.addNode(rig.id, "dev1.impl2", { runtime: "claude-code" });
@@ -257,6 +276,18 @@ describe("Rig CRUD routes", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain("either logicalId");
+  });
+
+  it("attach-self still requires a runtime when creating a pod member", async () => {
+    const rig = repo.createRig("missing-pod-runtime");
+    db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("guard-pod", rig.id, "dev", "Dev");
+    const res = await app.request(`/api/rigs/${rig.id}/attach-self`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ podNamespace: "dev", memberName: "worker" }),
+    });
+    expect(res.status).toBe(400);
+    expect(repo.getRig(rig.id)?.nodes).toHaveLength(0);
   });
 
   it("POST /api/rigs/:id/attach-self returns 409 when the target node is already bound", async () => {

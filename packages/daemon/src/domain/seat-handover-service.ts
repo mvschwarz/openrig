@@ -655,7 +655,10 @@ export class SeatHandoverService {
     const runtimeMismatch = this.checkRuntimeMismatch(input.node.runtime, discovered.runtimeHint);
     if (runtimeMismatch) return fail(runtimeMismatch);
 
-    const managedOwner = this.lookupManagedOwner(discovered.tmuxSession, input.node.id);
+    // #141: a composer-launched successor reuses the seat's own session name, which an archived earlier
+    // generation still names in its kept binding. Owners in archived rigs are skipped there, as in removeNode
+    // (#174). A discovered successor is a separate session, so any other owner still blocks it.
+    const managedOwner = this.lookupManagedOwner(discovered.tmuxSession, input.node.id, input.reportedSource.mode !== "discovered");
     if (managedOwner) {
       return fail({
         ok: false,
@@ -891,8 +894,8 @@ export class SeatHandoverService {
     ).get(nodeId) as SessionRow | undefined ?? null;
   }
 
-  private lookupManagedOwner(tmuxSession: string, targetNodeId: string): BindingOwnerRow | null {
-    return findOtherSessionOwner(this.db, tmuxSession, targetNodeId);
+  private lookupManagedOwner(tmuxSession: string, targetNodeId: string, ignoreArchived: boolean): BindingOwnerRow | null {
+    return findOtherSessionOwner(this.db, tmuxSession, targetNodeId, { ignoreArchived });
   }
 
   private commit(input: {

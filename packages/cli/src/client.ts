@@ -77,7 +77,7 @@ export class DaemonTimeoutError extends DaemonConnectionError {
 }
 
 /**
- * Bad-response: the daemon replied, but the body could not be read as JSON
+ * Bad-response: the daemon replied, but the body could not be read or parsed as JSON
  * (truncated / unparseable / non-JSON — a real symptom under daemon saturation).
  * DISTINCT from a stopped or unreachable daemon: the request WAS delivered and
  * the outcome is unknown, so this must never render as daemon-not-running.
@@ -216,7 +216,7 @@ export class DaemonClient {
     }, options);
   }
 
-  private async fetch(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<Response> {
+  private async fetch(path: string, init: RequestInit, options?: DaemonRequestOptions, consumeResponse?: (response: Response) => Promise<void>): Promise<Response> {
     const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
     if (options?.headers) {
       init = { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), ...options.headers } };
@@ -226,6 +226,7 @@ export class DaemonClient {
     // Known remote or unproved direct endpoints carry origin; proven local requests remain bare.
     this.identity ??= this.identityHeaders();
     init = { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), ...await this.identity } };
+    let responseStatus: number | undefined;
     try {
       const response = await fetchWithTimeout(
         this.fetchImpl,
@@ -233,6 +234,10 @@ export class DaemonClient {
         init,
         {
           timeoutMs,
+          consumeResponse: consumeResponse ? async (response) => {
+            responseStatus = response.status;
+            await consumeResponse(response);
+          } : undefined,
           timeoutMessage: `Request to ${this.baseUrl}${path} timed out after ${timeoutMs}ms`,
         },
       );
@@ -249,18 +254,21 @@ export class DaemonClient {
       if (err instanceof FetchTimeoutError) {
         throw new DaemonTimeoutError(`The OpenRig daemon at ${this.baseUrl} did not respond in time: ${msg}`);
       }
+      // Headers prove that the daemon received the request, but not that a write
+      // finished. A dropped body must preserve unknown-outcome guidance.
+      if (responseStatus !== undefined) throw new DaemonResponseError(responseStatus, "");
       throw new DaemonConnectionError(`Cannot connect to the OpenRig daemon at ${this.baseUrl}: ${msg}`);
     }
   }
 
   private async requestJson<T>(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<DaemonResponse<T>> {
-    const res = await this.fetch(path, init, options);
+    let text = "";
+    const res = await this.fetch(path, init, options, async (response) => { text = await response.text(); });
     // Read the raw body once, THEN parse — so a truncated / unparseable response
     // (a real symptom under daemon saturation) surfaces as a typed
     // DaemonResponseError carrying the status + a bounded snippet, instead of a
     // raw SyntaxError bubbling to a cryptic (json) or silent (human) CLI exit.
     // A well-formed non-2xx body still parses and returns {status,data}; 204 has none.
-    const text = await res.text();
     if (res.status === 204) return { status: res.status, data: undefined as T };
     try {
       return { status: res.status, data: JSON.parse(text) as T };
@@ -270,8 +278,8 @@ export class DaemonClient {
   }
 
   private async requestText(path: string, init: RequestInit, options?: DaemonRequestOptions): Promise<DaemonResponse<string>> {
-    const res = await this.fetch(path, init, options);
-    const data = await res.text();
+    let data = "";
+    const res = await this.fetch(path, init, options, async (response) => { data = await response.text(); });
     return { status: res.status, data };
   }
 }

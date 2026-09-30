@@ -533,8 +533,14 @@ export class RigLifecycleService {
       if (invalidFallback) return invalidFallback;
     }
 
+    // #141: the same ownership rule as removeNode, applied to the whole shrink target. A member's session name
+    // that an unarchived node OUTSIDE the target owns (for example the live replacement of an archived
+    // generation) addresses that node's work, which this shrink neither counts nor reroutes. Another member of
+    // the target sharing the name doesn't take the name's work out of this check.
     const activeQitemIds = this.activeQitemIdsForSessionNames(
-      nodes.flatMap((node) => node.latest_session_name ? [node.latest_session_name] : []),
+      nodes.flatMap((node) => node.latest_session_name
+        && !findOtherSessionOwner(this.db, node.latest_session_name, node.id, { ignoreArchived: true, excludeNodeIds: ids })
+        ? [node.latest_session_name] : []),
     );
     if (activeQitemIds.length > 0 && fallbackDestination === undefined) {
       return {

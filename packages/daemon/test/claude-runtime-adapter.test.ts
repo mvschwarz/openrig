@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import type { NodeBinding, ResolvedStartupFile } from "../src/domain/runtime-adapter.js";
@@ -334,6 +337,43 @@ describe("Claude Code runtime adapter", () => {
     await adapter.project(plan, makeBinding());
     const store = (fs as unknown as { _store: Record<string, string> })._store;
     expect(store["/project/.claude/agents/reviewer.yaml"]).toBe("name: reviewer");
+  });
+
+  // T9c: file-shaped subagent under PRODUCTION listFiles semantics. The in-memory
+  // mockFs above returns [] for a file path, but production wires listFiles to a
+  // recursive fs.readdirSync walk (startup.ts), which throws ENOTDIR on a file —
+  // an unguarded probe lands the entry in ProjectionResult.failed and it is never
+  // projected. This drives project() through a real-fs-backed listFiles.
+  it("projects file-shaped subagent when listFiles throws ENOTDIR (production readdirSync semantics)", async () => {
+    const tempRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "openrig-claude-projection-"));
+    const srcFile = nodePath.join(tempRoot, "agents", "base", "subagents", "reviewer.yaml");
+    fs.mkdirSync(nodePath.dirname(srcFile), { recursive: true });
+    fs.writeFileSync(srcFile, "name: reviewer");
+    const cwd = nodePath.join(tempRoot, "project");
+    fs.mkdirSync(cwd, { recursive: true });
+
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: {
+        readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+        writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
+        exists: (p: string) => fs.existsSync(p),
+        mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+        copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest),
+        listFiles: (dir: string) => fs.readdirSync(dir),
+      },
+    });
+    const plan: ProjectionPlan = {
+      runtime: "claude-code", cwd,
+      entries: [makeEntry({ category: "subagent", effectiveId: "reviewer", absolutePath: srcFile, resourcePath: "subagents/reviewer.yaml" })],
+      startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+    };
+
+    const result = await adapter.project(plan, makeBinding(cwd));
+
+    expect(result.failed).toEqual([]);
+    expect(result.projected).toEqual(["reviewer"]);
+    expect(fs.readFileSync(nodePath.join(cwd, ".claude", "agents", "reviewer.yaml"), "utf-8")).toBe("name: reviewer");
   });
 
   it("applies claude_settings_fragment runtime resources to project-local Claude settings", async () => {

@@ -1,5 +1,6 @@
 // OPR.0.3.3.13.1 - CLI surface-detection parser POC tests (AC-1..AC-5).
-import { describe, it, expect } from "vitest";
+import { beforeAll, describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -29,6 +30,25 @@ function readSource(rel: string): { name: string; text: string } {
 
 const FROM = "v0.3.1";
 const TO = "v0.3.2";
+
+function hasRef(ref: string): boolean {
+  try {
+    execFileSync("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: here, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The worked example and determinism checks diff two real release tags. Forks and shallow or
+// --no-tags clones lack them, and a throw while collecting a describe fails the whole file,
+// unit tests included. Skip those two blocks locally when the tags are absent; CI clones with
+// full history, so there a missing tag still fails loudly.
+const hasReleaseTags = hasRef(FROM) && hasRef(TO);
+const skipTagTests = !hasReleaseTags && process.env.CI !== "true";
+if (skipTagTests) {
+  console.warn(`release-surface: tags ${FROM}/${TO} not found; skipping tag-diff tests (git fetch --tags to run them)`);
+}
 
 describe("release-surface parser - extract (unit)", () => {
   it("AC-2 crux: emits the registration name `mode`, never the filename `rig-mode` (verb renamed from `policy`, B7)", () => {
@@ -95,8 +115,11 @@ describe("release-surface parser - diff (AC-1)", () => {
   });
 });
 
-describe("release-surface parser - v0.3.1..v0.3.2 worked example (AC-2)", () => {
-  const diff = generateSurfaceDiff({ from: FROM, to: TO, cwd: here });
+describe.skipIf(skipTagTests)("release-surface parser - v0.3.1..v0.3.2 worked example (AC-2)", () => {
+  let diff: SurfaceDiff;
+  beforeAll(() => {
+    diff = generateSurfaceDiff({ from: FROM, to: TO, cwd: here });
+  });
 
   it("emits exactly `policy` and `scope` as new top-level commands (no false positives, no filename)", () => {
     const names = diff.added_commands.map((c) => c.name).sort();
@@ -147,7 +170,7 @@ describe("release-surface parser - v0.3.1..v0.3.2 worked example (AC-2)", () => 
   });
 });
 
-describe("release-surface parser - determinism (AC-4)", () => {
+describe.skipIf(skipTagTests)("release-surface parser - determinism (AC-4)", () => {
   it("produces byte-identical YAML across two runs on the same refs", () => {
     const a = diffToYaml(generateSurfaceDiff({ from: FROM, to: TO, cwd: here }));
     const b = diffToYaml(generateSurfaceDiff({ from: FROM, to: TO, cwd: here }));

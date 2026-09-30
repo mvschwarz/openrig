@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import {
   parseFilePathArg,
   checkLocalPath,
@@ -315,6 +316,26 @@ describe("classifyRsyncResult / runFileCopy", () => {
   });
 });
 
+
+describe("file copy output byte boundaries", () => {
+  it("preserves split UTF-8 on both rsync output pipes", async () => {
+    const text = "copied café/日本語.md 🙂\n";
+    const spawn = (() => {
+      const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
+      child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      queueMicrotask(() => {
+        for (const byte of Buffer.from(text)) {
+          child.stdout.emit("data", Buffer.from([byte]));
+          child.stderr.emit("data", Buffer.from([byte]));
+        }
+        child.emit("close", 0);
+      });
+      return child;
+    }) as unknown as NonNullable<Parameters<typeof runFileCopy>[1]>["spawn"];
+    const result = await runFileCopy({ src: local("/tmp/src"), dst: local("/tmp/dst"), dryRun: true }, { spawn });
+    expect(result).toMatchObject({ ok: true, stdout: text, stderr: text });
+  });
+});
 
 let rsyncAvailable = false;
 try { execFileSync("rsync", ["--version"], { stdio: "ignore" }); rsyncAvailable = true; }

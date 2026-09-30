@@ -680,7 +680,7 @@ export class BootstrapOrchestrator {
           stages,
           rigId: (outcome as { rigId: string }).rigId,
           errors: [attentionMsg],
-          warnings,
+          warnings: [...warnings, ...((outcome as { warnings?: string[] }).warnings ?? [])],
         };
       }
       const outErrors = outcome.code === "validation_failed" || outcome.code === "preflight_failed"

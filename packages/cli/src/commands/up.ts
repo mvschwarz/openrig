@@ -451,6 +451,10 @@ Examples:
           for (const node of nodes ?? []) {
             console.error(`  ${node.logicalId}${node.sessionName ? ` (${node.sessionName})` : ""}: ${node.reason}`);
           }
+          // #141: the rig is kept on this path, so its warnings (e.g. the archived earlier generation) still apply.
+          for (const w of (res.data["warnings"] as string[]) ?? []) {
+            console.error(`  warning: ${w}`);
+          }
         } else if (code === "cycle_error") {
           console.error("Cycle detected in rig topology. Check edge definitions for circular dependencies.");
         } else if (code === "validation_failed") {
@@ -464,11 +468,12 @@ Examples:
         } else if (code === "invalid_topology_manifest") {
           const errors = (res.data["errors"] as string[]) ?? [];
           console.error(`Topology manifest invalid:\n${errors.map((e) => `  ${e}`).join("\n")}\nFix: the manifest key set is CLOSED — rigs[]{source, host?} plus optional concurrency.`);
-        } else if (code === "rig_name_running") {
+        } else if (code === "rig_name_running" || code === "generation_unconfirmed") {
           // S5b final-fix F1 (OPR.0.5.4.11): the guard's teaching refusal is
           // self-describing (running rig identity, what was checked,
           // nothing-created, alternatives) — render it verbatim, never the
-          // generic unknown-error/validate-your-spec fallback.
+          // generic unknown-error/validate-your-spec fallback. #141's
+          // generation_unconfirmed refusal is self-describing the same way.
           const teaching = String(res.data["error"] ?? ((res.data["errors"] as string[]) ?? [])[0] ?? "A rig with this name is already running.");
           console.error(teaching);
         } else {

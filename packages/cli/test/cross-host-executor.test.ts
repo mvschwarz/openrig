@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { spawn as spawnChild } from "node:child_process";
 import {
   runCrossHostCommand,
   classifyResult,
@@ -339,5 +340,54 @@ describe("D13 — remote rig resolution + loud 127", () => {
   it("control: non-127 remote failures keep their existing classification", () => {
     expect(d13Classify(1, "", "boom").failedStep).toBe("remote-command-failed");
     expect(d13Classify(255, "", "Permission denied (publickey)").failedStep).toBe("permission-gate");
+  });
+});
+
+
+describe("remote output byte boundaries", () => {
+  it("preserves UTF-8 from real child stdout and stderr pipes", async () => {
+    const expected = "界🙂café";
+    const spawn: SpawnFn = () => spawnChild(process.execPath, ["-e", `
+      const bytes = Buffer.from(${JSON.stringify(expected)});
+      let i = 0;
+      const timer = setInterval(() => {
+        process.stdout.write(bytes.subarray(i, i + 1));
+        process.stderr.write(bytes.subarray(i, i + 1));
+        if (++i === bytes.length) clearInterval(timer);
+      }, 20);
+    `]);
+    const result = await runCrossHostCommand(HOST, ["rig", "capture", "dev@rig"], { spawn });
+    expect(result).toMatchObject({ ok: true, stdout: expected, stderr: expected });
+  });
+
+  it("flushes an incomplete final UTF-8 character from both pipes on close", async () => {
+    const spawn: SpawnFn = () => {
+      const child = makeMockChild();
+      queueMicrotask(() => {
+        child.stdout.emit("data", Buffer.from([0xe7]));
+        child.stderr.emit("data", Buffer.from([0xf0, 0x9f]));
+        child.emit("close", 0);
+      });
+      return child as never;
+    };
+    const result = await runCrossHostCommand(HOST, ["rig", "capture", "dev@rig"], { spawn });
+    expect(result).toMatchObject({ ok: true, stdout: "\ufffd", stderr: "\ufffd" });
+  });
+
+  it.each([0, 1])("preserves split UTF-8 on both pipes for exit %s", async (exitCode) => {
+    const stdout = '{"content":"界🙂café"}\n';
+    const stderr = "diagnostic: naïve 日本語\n";
+    const spawn: SpawnFn = () => {
+      const child = makeMockChild();
+      queueMicrotask(() => {
+        for (const byte of Buffer.from(stdout)) child.stdout.emit("data", Buffer.from([byte]));
+        for (const byte of Buffer.from(stderr)) child.stderr.emit("data", Buffer.from([byte]));
+        child.emit("close", exitCode);
+      });
+      return child as never;
+    };
+    const result = await runCrossHostCommand(HOST, ["rig", "capture", "dev@rig", "--json"], { spawn });
+    expect(result).toMatchObject({ stdout, stderr });
+    expect(result.failedStep).toBe(exitCode === 0 ? "none" : "remote-command-failed");
   });
 });

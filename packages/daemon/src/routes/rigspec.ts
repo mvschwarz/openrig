@@ -93,8 +93,10 @@ rigspecImportRoutes.post("/", async (c) => {
         // S5b final-fix F1: the running-name guard refusal is a conflict on the
         // direct instantiation route too — never a 500 (map consistency).
         : outcome.code === "rig_name_running" ? 409
+        // #141: an import refused because a same-name rig could not be confirmed stopped.
+        : outcome.code === "generation_unconfirmed" ? 409
         : 500;
-      const body = outcome.code === "rig_name_running"
+      const body = outcome.code === "rig_name_running" || outcome.code === "generation_unconfirmed"
         ? { ...outcome, error: outcome.message }
         : outcome;
       return c.json(body, status);

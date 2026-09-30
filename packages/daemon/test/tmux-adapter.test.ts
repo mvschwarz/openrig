@@ -963,10 +963,10 @@ describe("TmuxAdapter", () => {
 
   describe("getPaneCursorPosition", () => {
     const EXPECTED_CMD =
-      `tmux display-message -p -t '%0' "#{cursor_x}\t#{cursor_y}\t#{pane_width}\t#{pane_height}"`;
+      `tmux display-message -p -t '%0' "#{cursor_x}|#{cursor_y}|#{pane_width}|#{pane_height}"`;
 
-    it("constructs the tab-delimited display-message command and parses {x,y,width,height}", async () => {
-      const exec = vi.fn<ExecFn>().mockResolvedValue("4\t7\t120\t40\n");
+    it("constructs the printable-delimited display-message command and parses {x,y,width,height}", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("4|7|120|40\n");
       const adapter = new TmuxAdapter(exec);
 
       const pos = await adapter.getPaneCursorPosition("%0");
@@ -976,7 +976,7 @@ describe("TmuxAdapter", () => {
     });
 
     it("accepts a zero cursor origin (x=0,y=0 valid)", async () => {
-      const adapter = new TmuxAdapter(mockExec({ "display-message": { stdout: "0\t0\t80\t24\n" } }));
+      const adapter = new TmuxAdapter(mockExec({ "display-message": { stdout: "0|0|80|24\n" } }));
       expect(await adapter.getPaneCursorPosition("%0")).toEqual({ x: 0, y: 0, width: 80, height: 24 });
     });
 
@@ -993,9 +993,9 @@ describe("TmuxAdapter", () => {
     });
 
     it("returns null on out-of-range geometry (width<1 / negative coords)", async () => {
-      const zeroWidth = new TmuxAdapter(mockExec({ "display-message": { stdout: "1\t1\t0\t40\n" } }));
+      const zeroWidth = new TmuxAdapter(mockExec({ "display-message": { stdout: "1|1|0|40\n" } }));
       expect(await zeroWidth.getPaneCursorPosition("%0")).toBeNull();
-      const negX = new TmuxAdapter(mockExec({ "display-message": { stdout: "-1\t1\t80\t24\n" } }));
+      const negX = new TmuxAdapter(mockExec({ "display-message": { stdout: "-1|1|80|24\n" } }));
       expect(await negX.getPaneCursorPosition("%0")).toBeNull();
     });
   });
@@ -1011,14 +1011,14 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-clients -F "#{client_name}\t#{client_session}"'
+        'tmux list-clients -F "#{client_name}|#{client_session}"'
       );
     });
 
     it("parses output into typed TmuxClient objects (name + session)", async () => {
       const output = [
-        "/dev/ttys003\tdev-impl@my-rig",
-        "/dev/ttys007\tother-session",
+        "/dev/ttys003|dev-impl@my-rig",
+        "/dev/ttys007|other-session",
       ].join("\n");
 
       const adapter = new TmuxAdapter(mockExec({ "list-clients": { stdout: output } }));
@@ -1027,6 +1027,14 @@ describe("TmuxAdapter", () => {
       expect(clients).toHaveLength(2);
       expect(clients[0]).toEqual({ name: "/dev/ttys003", session: "dev-impl@my-rig" });
       expect(clients[1]).toEqual({ name: "/dev/ttys007", session: "other-session" });
+    });
+
+    it("preserves separators inside client session names", async () => {
+      const adapter = new TmuxAdapter(
+        mockExec({ "list-clients": { stdout: "/dev/ttys009|rig|view" } })
+      );
+
+      expect(await adapter.listClients()).toEqual([{ name: "/dev/ttys009", session: "rig|view" }]);
     });
 
     it("returns empty array on 'no server running' error (no attachable client)", async () => {
@@ -1049,7 +1057,7 @@ describe("TmuxAdapter", () => {
     });
 
     it("skips malformed (single-field) lines", async () => {
-      const output = ["garbage-no-tab", "/dev/ttys003\tdev-impl@my-rig", ""].join("\n");
+      const output = ["garbage-no-separator", "/dev/ttys003|dev-impl@my-rig", ""].join("\n");
       const adapter = new TmuxAdapter(mockExec({ "list-clients": { stdout: output } }));
       const clients = await adapter.listClients();
       expect(clients).toEqual([{ name: "/dev/ttys003", session: "dev-impl@my-rig" }]);
