@@ -11,6 +11,7 @@
 //      crossing either line routes to arch-lead BEFORE building.
 // The only non-grammar verb is "state" — a read-only state query (OBSERVE).
 import net from "node:net";
+import { StringDecoder } from "node:string_decoder";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -94,8 +95,9 @@ export async function createControlSocket(options: {
 
   const server = net.createServer((conn) => {
     let buf = "";
+    const decoder = new StringDecoder("utf8");
     conn.on("data", (d) => {
-      buf += d.toString("utf8");
+      buf += decoder.write(d);
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, nl).trim();
