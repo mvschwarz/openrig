@@ -721,11 +721,29 @@ export async function runSeatHandover(seat: string, opts: HandoverActionOpts, de
     operator: opts.operator,
     dryRun: opts.dryRun === true,
   };
-  // #260: a mutating handover launches and readies the successor, so it gets the
-  // launch request window. A dry run only plans, and keeps the default deadline.
-  const res = opts.dryRun === true
-    ? await client.post<SeatHandoverPlan | SeatHandoverMutationResult | SeatStatusError>(handoverRoute, handoverBody)
-    : await client.post<SeatHandoverPlan | SeatHandoverMutationResult | SeatStatusError>(handoverRoute, handoverBody, { timeoutMs: 120_000 });
+  let res;
+  try {
+    // #260: a mutating handover launches and readies the successor, so it gets the
+    // launch request window. A dry run only plans, and keeps the default deadline.
+    res = opts.dryRun === true
+      ? await client.post<SeatHandoverPlan | SeatHandoverMutationResult | SeatStatusError>(handoverRoute, handoverBody)
+      : await client.post<SeatHandoverPlan | SeatHandoverMutationResult | SeatStatusError>(handoverRoute, handoverBody, { timeoutMs: 120_000 });
+  } catch (err) {
+    // The daemon keeps working when the client stops waiting, so reaching the bound leaves a
+    // mutating handover's outcome unknown. One request; no retry.
+    if (opts.dryRun === true || !(err instanceof DaemonTimeoutError)) throw err;
+    const error = {
+      ok: false as const,
+      code: "handover_outcome_unknown",
+      status: "unknown",
+      message: "The CLI stopped waiting for the daemon after 120 seconds, so the handover outcome is unknown. The daemon may still be working on it.",
+      guidance: `Inspect the seat before considering another handover: rig seat status ${seat}. A handover result shown there may belong to an earlier attempt.`,
+    };
+    if (opts.json) console.log(JSON.stringify(error, null, 2));
+    else printSeatError(error, error.message);
+    process.exitCode = 1;
+    return;
+  }
 
   if (opts.json) {
     console.log(JSON.stringify(res.data, null, 2));
