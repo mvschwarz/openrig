@@ -93,12 +93,13 @@ export class SnapshotRepository {
   selectRestoreUsable(rigId: string, snapshotId?: string, nowMs: number = Date.now()): RestoreSnapshotSelectionOutcome {
     let snapshot: Snapshot | null;
     if (snapshotId) {
-      snapshot = this.getSnapshot(snapshotId);
-      if (!snapshot) return { ok: false, code: "snapshot_not_found", message: `Snapshot ${snapshotId} not found` };
-      if (snapshot.rigId !== rigId) {
-        return { ok: false, code: "snapshot_wrong_rig", message: `Snapshot ${snapshotId} belongs to rig ${snapshot.rigId}, not ${rigId}` };
+      const row = this.db.prepare("SELECT * FROM snapshots WHERE id = ?").get(snapshotId) as SnapshotRow | undefined;
+      if (!row) return { ok: false, code: "snapshot_not_found", message: `Snapshot ${snapshotId} not found` };
+      if (row.rig_id !== rigId) {
+        return { ok: false, code: "snapshot_wrong_rig", message: `Snapshot ${snapshotId} belongs to rig ${row.rig_id}, not ${rigId}` };
       }
-      if (!isRestoreUsableSnapshotData(snapshot.data)) {
+      snapshot = this.restoreUsableRow(row);
+      if (!snapshot) {
         return { ok: false, code: "snapshot_unusable", message: `Snapshot ${snapshotId} is not structurally restore-usable` };
       }
     } else {
@@ -106,7 +107,14 @@ export class SnapshotRepository {
       if (!snapshot) return { ok: false, code: "no_usable_snapshot", message: `No usable snapshot for rig ${rigId}` };
     }
 
-    const newer = this.listSnapshots(rigId)
+    // Restore tolerates a damaged snapshot without making generic list/get
+    // silently omit corrupt audit rows. Alternative discovery has the same guard.
+    const candidates = this.db.prepare("SELECT * FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC")
+      .all(rigId) as SnapshotRow[];
+    const newer = candidates.flatMap((row) => {
+      const candidate = this.restoreUsableRow(row);
+      return candidate ? [candidate] : [];
+    })
       .filter((candidate) => candidate.id !== snapshot!.id)
       .filter((candidate) => Date.parse(sqliteUtc(candidate.createdAt)) > Date.parse(sqliteUtc(snapshot!.createdAt)))
       .find((candidate) => isRestoreUsableSnapshotData(candidate.data));
@@ -209,6 +217,16 @@ export class SnapshotRepository {
     return toDelete.length;
   }
 
+  private restoreUsableRow(row: SnapshotRow): Snapshot | null {
+    let snapshot: Snapshot;
+    try { snapshot = this.rowToSnapshot(row); }
+    catch (err) {
+      if (err instanceof SyntaxError) return null;
+      throw err;
+    }
+    return isRestoreUsableSnapshotData(snapshot.data) ? snapshot : null;
+  }
+
   private rowToSnapshot(row: SnapshotRow): Snapshot {
     return {
       id: row.id,
@@ -284,6 +302,7 @@ export function isRestoreUsableSnapshotData(data: unknown): data is SnapshotData
   }
   if (d.topologyRoster !== undefined) {
     const roster = d.topologyRoster;
+    if (!roster || typeof roster !== "object" || Array.isArray(roster)) return false;
     const allowedSources = new Set(["materialized_topology", "operator_explicit", "legacy_current_nodes"]);
     if (roster.version !== 1 || !allowedSources.has(roster.source) || !Array.isArray(roster.intendedNodeIds)) return false;
     if (!roster.intendedNodeIds.every((nodeId) => typeof nodeId === "string" && nodeId.length > 0)) return false;
