@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import type { HostEntry } from "./host-registry.js";
 
 /**
@@ -114,14 +115,16 @@ export async function runCrossHostCommand(
 
   let stdout = "";
   let stderr = "";
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
   if (child.stdout) {
     child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout += typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+      stdout += typeof chunk === "string" ? chunk : stdoutDecoder.write(chunk);
     });
   }
   if (child.stderr) {
     child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr += typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+      stderr += typeof chunk === "string" ? chunk : stderrDecoder.write(chunk);
     });
   }
 
@@ -133,6 +136,8 @@ export async function runCrossHostCommand(
     });
   });
 
+  stdout += stdoutDecoder.end();
+  stderr += stderrDecoder.end();
   return classifyResult(exitCode, stdout, stderr);
 }
 
