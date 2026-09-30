@@ -26,6 +26,7 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
   let invalidator: DefaultOccupantInvalidator;
   let gen: (session: string) => string | null;
   let seatNodeId: string;
+  let otherNodeId: string;
   let sessionRegistry: SessionRegistry;
   let bus: EventBus;
 
@@ -38,7 +39,7 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
     for (const [logicalId, session] of [["dev.impl", SEAT], ["dev.qa", OTHER]] as const) {
       const node = rigRepo.addNode(rig.id, logicalId, { runtime: "codex" });
       sessionRegistry.updateStatus(sessionRegistry.registerSession(node.id, session).id, "running");
-      if (session === SEAT) seatNodeId = node.id;
+      if (session === SEAT) seatNodeId = node.id; else otherNodeId = node.id;
     }
     gen = (session) => sessionRegistry.currentOccupantGenerationForSession(session);
     bus = new EventBus(db);
@@ -64,7 +65,7 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
   const jobState = (jobId: string) => (db.prepare("SELECT state FROM watchdog_jobs WHERE job_id = ?").get(jobId) as { state: string }).state;
   const activeJobsFor = (session: string) => (db.prepare("SELECT COUNT(*) AS n FROM watchdog_jobs WHERE state = 'active' AND target_session = ?").get(session) as { n: number }).n;
   const wakeLive = (qitemId: string) => (queue.getParkWakeStatus(qitemId) as { live: boolean }).live;
-  const parkedWhenIdle = () => diagnoseSeatParked({
+  const parkedWhenIdle = (session = SEAT) => diagnoseSeatParked({
     getSeatState: () => ({ activity: "idle-at-prompt", needsInput: { count: 0, reason: null }, decidedBy: "test" }) as never,
     listOpenObligations: (destinationSession, limit) => ({
       rows: queue.list({ destinationSession, state: ["pending", "in-progress", "blocked"], limit })
@@ -72,7 +73,7 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
       limit,
     }),
     getParkWake: (qitemId) => queue.getParkWakeStatus(qitemId),
-  }, { seatNodeId, sessionName: SEAT });
+  }, { seatNodeId: session === SEAT ? seatNodeId : otherNodeId, sessionName: session });
 
   it.each([false, true])("the still-owned blocked row keeps its one live timer (repeating=%s)", async (repeating) => {
     const { qitemId, wakeRef } = await park({ repeating });
@@ -144,6 +145,7 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
       jobsRepo: jobs, historyLog: new WatchdogHistoryLog(db), eventBus: bus,
       deliver: async (request) => { deliveries.push(request); return { status: "ok" }; },
       resolvePreDeliveryTerminalReason: ({ jobId }: { jobId: string }) => queue.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      resolveQueueWait: (input: { jobId: string }) => queue.evaluateWaitReminder(input),
       onWakeAttempt: ({ jobId, deliveryStatus }) => queue.recordWatchdogWakeAttempt(jobId, deliveryStatus),
     });
     for (const job of jobs.listActive()) await engine.evaluate(job);
@@ -156,6 +158,8 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
     queue.routeToFallback(qitemId, OTHER, "test reroute");
 
     expect(jobState(wakeRef)).not.toBe("active");
+    expect(wakeLive(qitemId)).toBe(false);
+    expect(parkedWhenIdle(OTHER).obligations.unhealthyHeldCount).toBe(1);
     expect((await fireAllActive()).filter((d) => d.targetSession === SEAT)).toEqual([]);
   });
 
@@ -171,7 +175,24 @@ describe("#handover-wake: a blocked row's park timer across an occupant swap", (
     swap();
 
     expect(jobState(wakeRef)).not.toBe("active");
+    expect(wakeLive(qitemId)).toBe(false);
+    expect(parkedWhenIdle(OTHER).obligations.unhealthyHeldCount).toBe(1);
     expect((await fireAllActive()).filter((d) => d.targetSession === SEAT)).toEqual([]);
+  });
+
+  it.each([false, true])("a repeating wait survives the reroute and wakes only the new owner (swaps=%s)", async (withSwaps) => {
+    const { qitemId, wakeRef } = await park({ repeating: true });
+    if (withSwaps) swap();
+    queue.routeToFallback(qitemId, OTHER, "test reroute");
+    if (withSwaps) {
+      sessionRegistry.updateStatus(sessionRegistry.registerSession(seatNodeId, SEAT).id, "running");
+      swap();
+    }
+
+    expect(jobState(wakeRef)).toBe("active");
+    expect(wakeLive(qitemId)).toBe(true);
+    const deliveries = await fireAllActive();
+    expect(deliveries.map((d) => d.targetSession)).toEqual([OTHER]);
   });
 
   it("control: a stale timer that is no longer the row's current wake still stops", async () => {
