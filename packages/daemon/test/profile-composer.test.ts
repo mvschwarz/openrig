@@ -11,6 +11,10 @@
 // composition never silently truncates (mini-req 9, D2: budgets flag, never govern).
 
 import { describe, it, expect } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { makeProfileReadFile } from "../src/domain/context-packs/profile-source-resolver.js";
 import type { ContextPackAtom } from "../src/domain/context-packs/context-pack-types.js";
 import { composeProfile, ProfileComposeError } from "../src/domain/context-packs/profile-composer.js";
 
@@ -109,6 +113,24 @@ describe("composeProfile — runtime split (mini-req 3)", () => {
 });
 
 describe("composeProfile — fail-loud resolution (the Atom-1 contract carried through)", () => {
+  it("composes a real section after a fenced example containing a marker with trailing text", () => {
+    const root = mkdtempSync(join(tmpdir(), "profile-fence-"));
+    try {
+      writeFileSync(join(root, "walk.md"), [
+        "## Example", "```markdown", "```language", "## Example-only heading", "```",
+        "## Instructions", "continue with the real instructions",
+      ].join("\n"));
+      const readFile = makeProfileReadFile({ packDir: root, roots: {} });
+      const composed = composeProfile({
+        atoms: [atom({ id: "instructions", address: "walk.md#instructions" })],
+        situation: "fresh", runtime: "claude", readFile,
+      });
+      expect(composed.pieces[0]?.text).toBe("## Instructions\ncontinue with the real instructions");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("a missing file stops the compose with the atom named", () => {
     const graph = [atom({ id: "ghosty", address: "ghost.md#nope", order: 1 })];
     expect(() => composeProfile({ atoms: graph, situation: "fresh", runtime: "claude", readFile }))
