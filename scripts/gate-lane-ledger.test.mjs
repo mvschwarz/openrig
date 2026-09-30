@@ -96,3 +96,18 @@ test("EMPTY SEED — zero residents + any failure → FAIL (the gate is strict b
   const r = resolveGateWithLedger({ failures: ["anything"], ledger: [], now: "2025-08-10", cutCeiling: CEIL });
   assert.equal(r.gate, "fail");
 });
+
+// Invalid exclusion data must never turn a failing suite into a passing gate.
+test("rail 3 — expiry must be a calendar date, not a coerced or truncated value", () => {
+  for (const expiry of [false, 0, true, 123, {}, [], "invalid", "2025-00-10", "2025-02-29", "2025-04-31", "2025-08-20junk", "2025-08-20T00:00:00Z"]) {
+    const r = resolveGateWithLedger({ failures: ["flaky-suite"], ledger: [ok({ expiry })], now: "2025-08-10", cutCeiling: CEIL });
+    assert.equal(r.gate, "fail", `invalid expiry ${JSON.stringify(expiry)} must refuse`);
+    assert.equal(r.validity.valid, false);
+    assert.ok(r.validity.errors.some((e) => e.includes("expiry")));
+  }
+});
+
+test("rail 3 — leap days validate only in leap years", () => {
+  assert.equal(validateLedger([ok({ expiry: "2024-02-29" })], { cutCeiling: CEIL }).valid, true);
+  assert.equal(validateLedger([ok({ expiry: "2025-02-29" })], { cutCeiling: CEIL }).valid, false);
+});

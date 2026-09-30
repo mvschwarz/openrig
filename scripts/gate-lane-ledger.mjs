@@ -21,6 +21,12 @@ export const CUT_CEILING_ISO = "2026-09-30";
 // Date-only lexicographic compare: for YYYY-MM-DD, string order IS chronological order.
 const day = (d) => String(d).slice(0, 10);
 
+function isCalendarDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 /**
  * Rail 3 + Rail 4 static validation: every resident MUST carry the full schema, and its expiry MUST
  * NOT outlive the cut ceiling. Returns { valid, errors } — an invalid ledger is a loud gate failure,
@@ -36,7 +42,9 @@ export function validateLedger(ledger = [], { cutCeiling = CUT_CEILING_ISO } = {
         errors.push(`${tag}: missing required field "${field}"`);
       }
     }
-    if (entry && entry.expiry && day(entry.expiry) > day(cutCeiling)) {
+    if (!isCalendarDate(entry?.expiry)) {
+      errors.push(`${tag}: expiry must be a valid YYYY-MM-DD calendar date`);
+    } else if (day(entry.expiry) > day(cutCeiling)) {
       errors.push(`${tag}: expiry ${day(entry.expiry)} exceeds the 0.5.2 cut ceiling ${day(cutCeiling)}`);
     }
   });
