@@ -22,12 +22,17 @@ import { dirname } from "node:path";
  */
 
 /** P3 — the one named lock: the port number IS the lock name (fixed, from config). */
-export const GATE_LANE_PORT = Number.parseInt(process.env.OPENRIG_GATE_LANE_PORT ?? "40404", 10);
+export const GATE_LANE_PORT = Number(process.env.OPENRIG_GATE_LANE_PORT ?? "40404");
 
 /**
  * @returns {Promise<{ok:true, release:()=>Promise<void>} | {ok:false, reason:"gate-holder"|"foreign-holder"|"bind-error", holder?:{pid:number,startedAt:string}, message?:string}>}
  */
 export async function acquireGateLane({ port = GATE_LANE_PORT, holderInfoPath }) {
+  // Port zero selects a fresh ephemeral port and defeats the shared lock name.
+  // Refuse bad configuration before bind or the naming-only holder-file write.
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return { ok: false, reason: "bind-error", message: "Gate lane port must be an integer from 1 to 65535." };
+  }
   // P1 + P2: bind 127.0.0.1 explicitly; do NOT pass reusePort — exclusivity is the mutex.
   const server = net.createServer();
   const bound = await new Promise((resolve) => {
