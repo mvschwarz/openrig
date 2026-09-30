@@ -33,6 +33,7 @@ describe("TmuxOptionDefaultsApplier", () => {
     // mouse + status are SESSION-scope on the exact session name.
     expect(setSessionOption).toHaveBeenCalledWith("r01-dev1@rig", "mouse", "on");
     expect(setSessionOption).toHaveBeenCalledWith("r01-dev1@rig", "status", "off");
+    expect(setSessionOption).toHaveBeenCalledWith("r01-dev1@rig", "detach-on-destroy", "on");
     // set-clipboard + copy-command are SERVER-scope — never via setSessionOption.
     const sessionKeys = setSessionOption.mock.calls.map((c) => c[1]);
     expect(sessionKeys).not.toContain("set-clipboard");

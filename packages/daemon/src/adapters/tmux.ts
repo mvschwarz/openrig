@@ -710,6 +710,15 @@ export class TmuxAdapter {
   }
 
   private async killSessionUnchecked(name: string): Promise<TmuxResult> {
+    // Detach first so `detach-on-destroy off` cannot switch views onto another session.
+    try {
+      await this.run(["tmux", "detach-client", "-s", name],
+        `tmux detach-client -s ${shellQuote(name)}`);
+    } catch (err) {
+      // tmux 3.7 says "no current client" when nothing is attached (and for a missing session, which the kill classifies).
+      const message = err instanceof Error ? err.message : String(err);
+      if (!message.toLowerCase().includes("no current client")) return classifyWriteError(err);
+    }
     try {
       await this.run(["tmux", "kill-session", "-t", name],
         `tmux kill-session -t ${shellQuote(name)}`);
