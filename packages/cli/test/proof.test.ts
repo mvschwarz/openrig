@@ -384,3 +384,108 @@ describe("proof add — pristine-scaffold contract never canonical (KI-5.3-2 sec
     expect((out.contractItemsCovered ?? []).join(" ")).toContain("REAL ITEM ONE");
   });
 });
+
+describe("rig proof add binary file protection & .md naming & overwrite guards (issue #170)", () => {
+  let workRoot: string;
+  let sliceDir: string;
+  let logs: string[];
+  let errs: string[];
+
+  beforeEach(() => {
+    workRoot = fs.mkdtempSync(path.join(os.tmpdir(), "proof-binary-"));
+    sliceDir = path.join(workRoot, "missions", "release-x", "slices", "19-signal-layer");
+    fs.mkdirSync(sliceDir, { recursive: true });
+    fs.writeFileSync(path.join(workRoot, "missions", "release-x", "README.md"), "---\nid: OPR.X\n---\n# m\n");
+    fs.writeFileSync(path.join(sliceDir, "README.md"), "---\nid: OPR.X.19\nstatus: building\n---\n# slice\n");
+    logs = [];
+    errs = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => { logs.push(a.join(" ")); });
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { errs.push(a.join(" ")); });
+    process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(workRoot, { recursive: true, force: true });
+    process.exitCode = undefined;
+  });
+
+  async function runAdd(extraArgs: string[]): Promise<void> {
+    const cmd = proofCommand();
+    cmd.exitOverride();
+    await cmd.parseAsync([
+      "node", "proof", "--workspace", workRoot,
+      "add", "19-signal-layer", "--mission", "release-x",
+      "--artifact-type", "qa", "--verdict", "CLEAR",
+      "--candidate-sha", "abc1234", "--money-evidence", "m",
+      ...extraArgs,
+    ]);
+  }
+
+  it("rejects passing a binary file (.png) as --file and advises using --media", async () => {
+    const fakePng = path.join(sliceDir, "proof", "shot.png");
+    fs.mkdirSync(path.join(sliceDir, "proof"), { recursive: true });
+    fs.writeFileSync(fakePng, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00]));
+    const originalBytes = fs.readFileSync(fakePng);
+
+    await runAdd(["--file", fakePng]);
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toContain("appears to be a binary file");
+    expect(errs.join("\n")).toContain("--media");
+    // Ensure the binary file was NOT overwritten or corrupted
+    expect(fs.readFileSync(fakePng)).toEqual(originalBytes);
+  });
+
+  it("rejects passing a file with NUL bytes as --file", async () => {
+    const binFile = path.join(workRoot, "data.bin");
+    fs.writeFileSync(binFile, Buffer.from("hello\0world"));
+
+    await runAdd(["--file", binFile]);
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toContain("appears to be a binary file");
+  });
+
+  it("rejects --name without .md extension", async () => {
+    await runAdd(["--body", "some text", "--name", "screenshot.png"]);
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toContain("does not end with '.md'");
+  });
+
+  it("defaults non-.md text file basename to .md", async () => {
+    const txtFile = path.join(workRoot, "notes.txt");
+    fs.writeFileSync(txtFile, "my plain text notes", "utf8");
+
+    await runAdd(["--file", txtFile]);
+    expect(process.exitCode).toBeUndefined();
+    const target = path.join(sliceDir, "proof", "notes.md");
+    expect(fs.existsSync(target)).toBe(true);
+    expect(fs.readFileSync(target, "utf8")).toContain("my plain text notes");
+  });
+
+  it("refuses to overwrite existing proof artifact without --replace flag", async () => {
+    const proofDir = path.join(sliceDir, "proof");
+    fs.mkdirSync(proofDir, { recursive: true });
+    const existing = path.join(proofDir, "qa-clear.md");
+    fs.writeFileSync(existing, "original content", "utf8");
+
+    await runAdd(["--body", "new content", "--name", "qa-clear.md"]);
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toContain("already exists");
+    expect(errs.join("\n")).toContain("--replace");
+    expect(fs.readFileSync(existing, "utf8")).toBe("original content");
+  });
+
+  it("allows overwriting existing proof artifact when --replace flag is provided", async () => {
+    const proofDir = path.join(sliceDir, "proof");
+    fs.mkdirSync(proofDir, { recursive: true });
+    const existing = path.join(proofDir, "qa-clear.md");
+    fs.writeFileSync(existing, "original content", "utf8");
+
+    await runAdd(["--body", "new content", "--name", "qa-clear.md", "--replace"]);
+    expect(process.exitCode).toBeUndefined();
+    const updated = fs.readFileSync(existing, "utf8");
+    expect(updated).toContain("new content");
+    expect(updated).not.toContain("original content");
+  });
+});
+

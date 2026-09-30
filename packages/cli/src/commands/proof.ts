@@ -99,6 +99,24 @@ function isVideoFile(filePath: string): boolean {
   return VIDEO_EXTENSIONS.has(path.extname(filePath).toLowerCase());
 }
 
+/** Known binary file extensions to refuse for --file (point to --media instead). */
+const KNOWN_BINARY_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".tiff", ".tif",
+  ".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv", ".mp3", ".wav", ".ogg", ".flac",
+  ".pdf", ".zip", ".tar", ".gz", ".tgz", ".7z", ".rar", ".bz2", ".xz",
+  ".bin", ".exe", ".dll", ".so", ".dylib", ".wasm", ".iso", ".dmg",
+  ".sqlite", ".sqlite3", ".db",
+]);
+
+/** Check if a buffer contains NUL bytes or binary characters in its leading window. */
+export function isBinaryBuffer(buf: Buffer): boolean {
+  const len = Math.min(buf.length, 8000);
+  for (let i = 0; i < len; i++) {
+    if (buf[i] === 0) return true;
+  }
+  return false;
+}
+
 export function proofCommand(): Command {
   const cmd = new Command("proof").description(
     "Capture evidence (add), record an attributed item judgment (judge), and read derived readiness (show). Capture, policy acceptance, higher outcome judgment and publication are separate."
@@ -187,6 +205,7 @@ checkboxes do not accept an item under the selected proof policy.
     .option("--evidences <refs>", "D2 attestation: comma-separated proof-contract item refs this artifact covers (item text or 1-based index)")
     .option("--self-check <text>", "D2 attestation: the agent's assertion that it LOOKED at the evidence and confirmed it shows the claim")
     .option("--media <refs>", "Corrective §3.4: comma-separated media refs (relative to the slice proof/ dir) this drop stands behind — appended to the artifact body as markdown refs so the composer curates them into delivered.items[].proof")
+    .option("--replace", "Overwrite existing artifact if it already exists in proof/")
     .option("--json", "JSON output for agents")
     .action(async (slicePath: string, opts: {
       mission?: string;
@@ -201,6 +220,7 @@ checkboxes do not accept an item under the selected proof policy.
       evidences?: string;
       selfCheck?: string;
       media?: string;
+      replace?: boolean;
       json?: boolean;
     }, command: Command) => {
       const json = Boolean(opts.json);
@@ -228,7 +248,16 @@ checkboxes do not accept an item under the selected proof policy.
               action: "Point --file at the evidence file, or use --body.",
             });
           }
-          body = fs.readFileSync(opts.file, "utf8");
+          const fileExt = path.extname(opts.file).toLowerCase();
+          const fileBuf = fs.readFileSync(opts.file);
+          if (KNOWN_BINARY_EXTENSIONS.has(fileExt) || isBinaryBuffer(fileBuf)) {
+            throw new ScopeCliError({
+              fact: `--file '${opts.file}' appears to be a binary file.`,
+              consequence: "The artifact was NOT dropped — proof artifacts are markdown text documents with C1 frontmatter.",
+              action: "Pass a text or markdown file to --file. To attach binary media (e.g. screenshots, videos), copy them into the slice's proof/ dir and pass --media <filename>.",
+            });
+          }
+          body = fileBuf.toString("utf8");
         } else if (opts.body) {
           body = opts.body;
         }
@@ -402,7 +431,23 @@ checkboxes do not accept an item under the selected proof policy.
         // Write the artifact: YAML frontmatter + body into proof/.
         const proofDir = path.join(slice.absPath, "proof");
         const defaultName = `${opts.artifactType}-${opts.verdict}-${new Date().toISOString().replace(/[:.]/g, "-")}.md`;
-        const fileName = opts.name ?? (opts.file ? path.basename(opts.file) : defaultName);
+        let fileName: string;
+        if (opts.name) {
+          fileName = opts.name;
+          if (!fileName.toLowerCase().endsWith(".md")) {
+            throw new ScopeCliError({
+              fact: `--name '${fileName}' does not end with '.md'.`,
+              consequence: "The artifact was NOT dropped — proof artifacts must be markdown (.md) documents.",
+              action: `Pass a filename ending in .md (e.g. --name ${path.parse(fileName).name || "artifact"}.md).`,
+            });
+          }
+        } else if (opts.file) {
+          const base = path.basename(opts.file);
+          fileName = base.toLowerCase().endsWith(".md") ? base : `${path.parse(base).name}.md`;
+        } else {
+          fileName = defaultName;
+        }
+
         // rev1-r2 BLOCKING fix (a7dedd93 review): --name is a FILENAME, never
         // a path. Reject separators / dot-dot / absolute shapes BEFORE any
         // filesystem effect, so the drop can only land inside proof/ (the
@@ -426,6 +471,16 @@ checkboxes do not accept an item under the selected proof policy.
             action: "Pass a bare filename; the drop path owns the directory.",
           });
         }
+
+        // Prevent accidental overwrite of existing artifacts unless --replace is explicitly passed.
+        if (fs.existsSync(target) && !opts.replace) {
+          throw new ScopeCliError({
+            fact: `Artifact '${fileName}' already exists in ${path.relative(process.cwd(), proofDir)}.`,
+            consequence: "The artifact was NOT dropped — existing proof artifacts are preserved by default.",
+            action: "Pass --replace to deliberately overwrite the existing artifact, or choose a different --name.",
+          });
+        }
+
         fs.mkdirSync(proofDir, { recursive: true });
         const frontmatter = YAML.stringify(header).trimEnd();
         fs.writeFileSync(target, `---\n${frontmatter}\n---\n\n${body}`, "utf8");
