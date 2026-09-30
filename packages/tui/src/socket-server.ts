@@ -90,7 +90,6 @@ export async function createControlSocket(options: {
     );
   }
   fs.mkdirSync(path.dirname(socketPath), { recursive: true });
-  if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
 
   const server = net.createServer((conn) => {
     let buf = "";
@@ -124,19 +123,36 @@ export async function createControlSocket(options: {
     });
   });
 
-  return new Promise((resolve, reject) => {
+  const listen = () => new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, () => {
-      resolve({
-        path: socketPath,
-        close: () =>
-          new Promise<void>((res) => {
-            server.close(() => {
-              if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
-              res();
-            });
-          }),
-      });
+      server.removeListener("error", reject);
+      resolve();
     });
   });
+  try {
+    await listen();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    // An existing path may belong to another running TUI. Only a refused
+    // connection to an unchanged, owned socket proves a stale launcher.
+    const before = fs.lstatSync(socketPath);
+    if (!before.isSocket() || (process.getuid && before.uid !== process.getuid())) throw error;
+    const stale = await new Promise<boolean>((resolve) => {
+      const probe = net.createConnection(socketPath);
+      probe.setTimeout(1000);
+      const finish = (value: boolean) => { probe.destroy(); resolve(value); };
+      probe.once("connect", () => finish(false));
+      probe.once("timeout", () => finish(false));
+      probe.once("error", (cause: NodeJS.ErrnoException) => finish(cause.code === "ECONNREFUSED"));
+    });
+    const after = fs.lstatSync(socketPath);
+    if (!stale || before.dev !== after.dev || before.ino !== after.ino) throw error;
+    fs.unlinkSync(socketPath);
+    await listen();
+  }
+  return {
+    path: socketPath,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
 }
