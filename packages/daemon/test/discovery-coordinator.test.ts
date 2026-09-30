@@ -3,6 +3,8 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { DiscoveryCoordinator } from "../src/domain/discovery-coordinator.js";
+import { ClaimService } from "../src/domain/claim-service.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
 import { DiscoveryRepository } from "../src/domain/discovery-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -184,6 +186,69 @@ describe("DiscoveryCoordinator", () => {
     // Second scan should not re-discover it
     const second = await coordinator.scanOnce();
     expect(second).toHaveLength(0);
+  });
+
+  it("preserves a claim accepted while a rescan is fingerprinting", async () => {
+    const pane = makePane({ activeCommand: "sh" });
+    let releaseFingerprint!: () => void;
+    let fingerprintEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { fingerprintEntered = resolve; });
+    const paused = new Promise<void>((resolve) => { releaseFingerprint = resolve; });
+    const fingerprinter = mockFingerprinter("unknown");
+    (fingerprinter.fingerprint as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      fingerprintEntered();
+      await paused;
+      return { runtimeHint: "unknown", confidence: "low", evidence: { layerUsed: 1 } };
+    });
+    const { coordinator, discoveryRepo, sessionRegistry, eventBus } = buildCoordinator({
+      scanner: mockScanner([pane]), fingerprinter,
+    });
+    const discovered = discoveryRepo.upsertDiscoveredSession({
+      ...pane, cwd: "/before", runtimeHint: "unknown", confidence: "low",
+    });
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-1", "r01");
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES (?, ?, ?)").run("n-1", "rig-1", "first");
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES (?, ?, ?)").run("n-2", "rig-1", "second");
+    const claims = new ClaimService({
+      db, discoveryRepo, sessionRegistry, eventBus, rigRepo: new RigRepository(db),
+    });
+
+    const scan = coordinator.scanOnce();
+    await entered;
+    try {
+      expect(await claims.bind({ discoveredId: discovered.id, rigId: "rig-1", logicalId: "first" }))
+        .toMatchObject({ ok: true, nodeId: "n-1" });
+    } finally {
+      releaseFingerprint();
+    }
+    const results = await scan;
+    const duplicate = await claims.bind({ discoveredId: discovered.id, rigId: "rig-1", logicalId: "second" });
+
+    expect(duplicate).toMatchObject({ ok: false, code: "not_active" });
+    expect(discoveryRepo.getDiscoveredSession(discovered.id)).toMatchObject({
+      status: "claimed", claimedNodeId: "n-1", cwd: pane.cwd,
+    });
+    expect(results).toHaveLength(0);
+    expect(db.prepare("SELECT node_id, tmux_session FROM bindings").all()).toEqual([
+      { node_id: "n-1", tmux_session: pane.tmuxSession },
+    ]);
+  });
+
+  it("reactivates vanished discoveries and allows explicitly released claims to be rescanned", () => {
+    const repo = new DiscoveryRepository(db);
+    const data = { tmuxSession: "organic", tmuxPane: "%0", runtimeHint: "unknown" as const, confidence: "low" as const };
+    const first = repo.upsertDiscoveredSession(data);
+    repo.markVanished([first.id]);
+    expect(repo.upsertDiscoveredSession(data)).toMatchObject({
+      id: first.id, firstSeenAt: first.firstSeenAt, status: "active", claimedNodeId: null,
+    });
+    db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-1", "r01");
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES (?, ?, ?)").run("n-1", "rig-1", "dev");
+    repo.markClaimed(first.id, "n-1");
+    repo.releaseClaimByNodeId("n-1");
+    expect(repo.upsertDiscoveredSession({ ...data, cwd: "/updated" })).toMatchObject({
+      id: first.id, status: "active", claimedNodeId: null, cwd: "/updated",
+    });
   });
 
   // T7: scanOnce returns active sessions

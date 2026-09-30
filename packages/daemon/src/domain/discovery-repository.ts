@@ -51,7 +51,8 @@ export class DiscoveryRepository {
         `UPDATE discovered_sessions SET
           tmux_window = ?, pid = ?, cwd = ?, active_command = ?,
           runtime_hint = ?, confidence = ?, evidence_json = ?, config_json = ?,
-          last_seen_at = datetime('now'), status = 'active'
+          last_seen_at = datetime('now'),
+          status = CASE WHEN status = 'claimed' THEN 'claimed' ELSE 'active' END
         WHERE id = ?`
       ).run(
         data.tmuxWindow ?? null, data.pid ?? null, data.cwd ?? null, data.activeCommand ?? null,
