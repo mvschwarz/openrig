@@ -257,11 +257,13 @@ export class TmuxAdapter {
    * never authority over a pre-existing or registry-managed target. */
   async createProbeSession(name: string, cwd?: string): Promise<TmuxResult> {
     if (this.deliveryGuard?.maybeTarget(name)) return { ok: false, code: "guard_target_managed", message: "A probe cannot reuse a managed seat." };
-    // #188: the create itself reports the new session's immutable id, the only identity a rollback uses.
-    let sessionId: string | null;
+    // #188: the create itself reports the new session's id and creation time, the only identity a rollback
+    // uses. An id alone is unique only for one server's lifetime.
+    let created: { id: string; at: string } | null;
     try {
-      const out = await this.exec(`tmux new-session -d -P -F ${shellQuote("#{session_id}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
-      sessionId = /^\$\d+$/.test(out.trim()) ? out.trim() : null;
+      const out = await this.exec(`tmux new-session -d -P -F ${shellQuote("#{session_id} #{session_created}")} -s ${shellQuote(name)}${cwd != null ? ` -c ${shellQuote(cwd)}` : ""}`);
+      const match = /^(\$\d+) (\d+)$/.exec(out.trim());
+      created = match ? { id: match[1]!, at: match[2]! } : null;
     } catch (err) {
       return classifyWriteError(err);
     }
@@ -279,12 +281,25 @@ export class TmuxAdapter {
     // since claimed its name (a binding naming only the reused pane id, under another session name, is
     // stale: that pane belongs to this session). A name reused by another session has a different id.
     const byPane = pane ? this.deliveryGuard?.maybeTarget(pane) : null;
-    if (!sessionId || this.deliveryGuard?.maybeTarget(name) || byPane?.session === name) {
+    if (!created || this.deliveryGuard?.maybeTarget(name) || byPane?.session === name) {
       return { ok: false, code: "guard_target_unknown", message: `${message} The helper session was left in place: its ownership could not be proven.` };
     }
-    const removed = await this.killSessionUnchecked(sessionId);
-    if (!removed.ok && removed.code !== "session_not_found") message += ` Removing the helper session failed: ${removed.message}`;
+    const removed = await this.removeCreatedSession(name, created);
+    if (!removed.ok && removed.code !== "session_not_found") message += ` The helper session was not removed: ${removed.message}`;
     return { ok: false, code: "guard_target_unknown", message };
+  }
+
+  /** #188: kill the session this adapter created only while its id still names that session. tmux checks
+   *  the name and creation time and kills in one command, so a later server that reuses the id is safe. */
+  private async removeCreatedSession(name: string, created: { id: string; at: string }): Promise<TmuxResult> {
+    const same = `#{&&:#{==:#{session_name},${name}},#{==:#{session_created},${created.at}}}`;
+    try {
+      const out = await this.exec(`tmux if-shell -F -t ${shellQuote(created.id)} ${shellQuote(same)} ${shellQuote(`kill-session -t '${created.id}'`)} ${shellQuote("display-message -p kept")}`);
+      if (out.includes("kept")) return { ok: false, code: "guard_target_changed", message: `its id ${created.id} no longer names it (it may already be gone); nothing was killed.` };
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
   }
 
   private async guardedInput(target: string, write: (pane: string, beforeWrite: () => void) => Promise<TmuxResult>, allowAbsent = false): Promise<TmuxResult> {

@@ -12,13 +12,22 @@ import { TmuxAdapter, type TmuxFileOps } from "../src/adapters/tmux.js";
 
 /** A minimal tmux: sessions with one pane each; pane ids count up from `firstPane` like a fresh server. */
 class FakeTmux {
-  sessions = new Map<string, { id: string; pane: string }>();
+  sessions = new Map<string, { id: string; pane: string; created: number }>();
   commands: string[] = [];
   listPanesFails = false;
   onCommand?: (command: string) => void;
   private nextPane: number;
   private nextSession = 1;
-  constructor(firstPane = 0) { this.nextPane = firstPane; }
+  private clock = 1_790_000_000;
+  constructor(private firstPane = 0) { this.nextPane = firstPane; }
+
+  /** The server dies and a new one starts: no sessions, ids and pane ids count from the start again. */
+  resetServer(): void { this.sessions.clear(); this.nextSession = 1; this.nextPane = this.firstPane; }
+
+  /** Another client creates an unrelated session. */
+  create(name: string): void {
+    this.sessions.set(name, { id: `$${this.nextSession++}`, pane: `%${this.nextPane++}`, created: this.clock++ });
+  }
 
   exec = async (command: string): Promise<string> => {
     this.commands.push(command);
@@ -28,9 +37,10 @@ class FakeTmux {
     if (command.startsWith("tmux new-session")) {
       const name = /-s '([^']+)'/.exec(command)![1]!;
       if (this.sessions.has(name)) throw new Error(`duplicate session: ${name}`);
-      const id = `$${this.nextSession++}`;
-      this.sessions.set(name, { id, pane: `%${this.nextPane++}` });
-      return command.includes(" -P") ? `${id}\n` : "";
+      this.create(name);
+      const made = this.sessions.get(name)!;
+      if (!command.includes(" -P")) return "";
+      return command.includes("session_created") ? `${made.id} ${made.created}\n` : `${made.id}\n`;
     }
     if (command.startsWith("tmux list-panes")) {
       if (this.listPanesFails) throw new Error("list-panes: transient failure");
@@ -41,6 +51,15 @@ class FakeTmux {
     if (command.startsWith("tmux display-message") && command.includes("session_id")) return `${byTarget()?.[1].id ?? ""}\n`;
     if (command.startsWith("tmux display-message") && command.includes("pane_current_command")) return byTarget() ? "zsh\n" : "";
     if (command.startsWith("tmux capture-pane")) return byTarget() ? "user@host ~ % \n" : "";
+    if (command.startsWith("tmux if-shell -F")) {
+      // Real tmux expands the format against the target session, then runs one branch in the same command.
+      const found = byTarget();
+      if (!found) throw new Error(`can't find session: ${target}`);
+      const wantName = /#\{==:#\{session_name\},([^}]+)\}/.exec(command)?.[1];
+      const wantCreated = /#\{==:#\{session_created\},(\d+)\}/.exec(command)?.[1];
+      if (found[0] === wantName && String(found[1].created) === wantCreated) { this.sessions.delete(found[0]); return ""; }
+      return "kept\n";
+    }
     if (command.startsWith("tmux kill-session")) {
       const found = byTarget();
       if (!found) throw new Error(`can't find session: ${target}`);
@@ -52,7 +71,8 @@ class FakeTmux {
 
   /** Kill `name` and start a different session under the same name (new id and pane). */
   replace(name: string): void {
-    this.sessions.set(name, { id: `$${this.nextSession++}`, pane: `%${this.nextPane++}` });
+    this.sessions.delete(name);
+    this.create(name);
   }
 
   probes(): string[] { return [...this.sessions.keys()].filter((name) => name.startsWith("rigged-refresh-")); }
@@ -190,6 +210,20 @@ describe("#188 snapshot refresh probe cleanup", () => {
     expect(tmux.sessions.get(name!)).toEqual(replacement);
   });
 
+  it("rollback control (c): after a server reset, an unrelated session that reuses the saved id is never killed", async () => {
+    const tmux = new FakeTmux(40);
+    tmux.listPanesFails = true;
+    const seat = claudeSeat("%7");
+    tmux.onCommand = (command) => {
+      if (!/list-panes -t 'rigged-refresh-/.test(command) || tmux.sessions.has("unrelated")) return;
+      tmux.resetServer();
+      tmux.create("unrelated"); // the new server hands out the helper's id again
+    };
+    await expect(refresher(tmux).refresh([seat])).resolves.toBeUndefined();
+
+    expect(tmux.sessions.get("unrelated")?.id).toBe("$1");
+  });
+
   it("allocation that cannot prove its pane is still removed (failure before the probe's try)", async () => {
     const tmux = new FakeTmux(40);
     tmux.listPanesFails = true;
@@ -197,7 +231,11 @@ describe("#188 snapshot refresh probe cleanup", () => {
     await refresher(tmux).refresh([seat]);
 
     expect(tmux.probes()).toEqual([]);
-    // The rollback uses the id the create returned, never the name.
-    expect(tmux.commands.filter((c) => c.startsWith("tmux kill-session"))).toEqual([expect.stringMatching(/^tmux kill-session -t '\$\d+'$/)]);
+    // The rollback targets the id the create returned, and tmux checks the name and creation time in the
+    // same command; it never kills by name.
+    expect(tmux.commands.filter((c) => c.startsWith("tmux kill-session"))).toEqual([]);
+    expect(tmux.commands.filter((c) => c.startsWith("tmux if-shell"))).toEqual([
+      expect.stringMatching(/^tmux if-shell -F -t '\$\d+' '#\{&&:#\{==:#\{session_name\},rigged-refresh-[^}]+\},#\{==:#\{session_created\},\d+\}\}'/),
+    ]);
   });
 });
