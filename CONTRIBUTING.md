@@ -17,6 +17,27 @@ change in with the least friction on both sides.
 - **Questions:** use [Discussions › Q&A](https://github.com/mvschwarz/openrig/discussions/categories/q-a),
   not an issue.
 
+## Before a security or integration PR
+
+OpenRig connects your coding agents to each other: shared context, messaging, coordination and long-running seats.
+It's designed for your own machine or a trusted private network, for you and people you trust, not for the open
+internet. It doesn't try to act for you in the outside world; your agents already have tools for that.
+
+**Security-related PRs.** If you've found something exploitable, report it privately first (see
+[SECURITY.md](SECURITY.md)) rather than in a public PR. For hardening changes, tell us in the PR description:
+
+- the scenario: how this goes wrong for someone using OpenRig as it's designed to be used, and the evidence you have
+- who or what causes it, and how they reach the install
+- what the change costs everyone else: a refusal, an extra step, a new setting
+
+We look at the finding and the fix separately. We may agree with a finding and fix it differently, or decide the fix
+costs more than it protects. If the answers are missing we'll ask once, and close the PR with thanks if they don't
+come.
+
+**Integrations with other tools or projects.** Open an issue or an Ideas Discussion and wait for a maintainer's yes on
+scope before you build it; an issue on its own isn't a yes. Often the best home for an integration is your own
+repository, and we're happy to link to it.
+
 ## Setting up
 
 Node `^22 || ^24` and a working `tmux` are required. Then:

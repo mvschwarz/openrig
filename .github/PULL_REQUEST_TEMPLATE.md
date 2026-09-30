@@ -12,6 +12,10 @@
 
 <!-- Design choices, edge cases you did not cover, places a reviewer should look hardest. Empty is a fine answer. -->
 
+## If this is security-related
+
+<!-- Exploitable? Report it privately first (SECURITY.md). Otherwise: how does this go wrong for someone using OpenRig as designed (your own machine or a trusted private network), with evidence? Who causes it, and how do they reach the install? What does the change cost everyone else? See CONTRIBUTING.md. -->
+
 - [ ] One concern per PR; no version bump; no `CHANGELOG.md` edit
 - [ ] Tests added or updated where the change is testable
 - [ ] I listed the checks I ran, their results, and any checks I could not run
