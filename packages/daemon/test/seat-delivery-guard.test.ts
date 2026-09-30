@@ -407,6 +407,14 @@ it("automatic reminder records retained custody and no delivered fire or input",
   expect(await tmux.sendKeys("probe",["Enter"])).toMatchObject({ok:false});expect(commands).toHaveLength(count);db.close();
  });
 
+ it("a probe whose pane cannot be proven is killed, not left running",async()=>{
+  const {db,guard}=fixture();const commands:string[]=[];
+  const tmux=new TmuxAdapter(async command=>{commands.push(command);return command.includes("display-message")?"$66\n":"";});tmux.deliveryGuard=guard;
+  vi.spyOn(tmux,"listPanes").mockResolvedValue([{id:"%66"} as never,{id:"%67"} as never]);
+  expect(await tmux.createProbeSession("probe")).toMatchObject({ok:false,code:"guard_target_unknown"});
+  expect(commands.some(command=>command.startsWith("tmux kill-session"))).toBe(true);db.close();
+ });
+
  it("claim hint is one retained notification, not an injected adoption message",async()=>{
   const f=queueFixture();await f.guard.set("a",true,"person","draft");
   const claim=new ClaimService({db:f.db,rigRepo:f.rigRepo,sessionRegistry:f.sessionRegistry,discoveryRepo:new DiscoveryRepository(f.db),eventBus:f.bus,tmuxAdapter:f.tmux});

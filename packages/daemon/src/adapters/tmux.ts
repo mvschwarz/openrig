@@ -263,6 +263,9 @@ export class TmuxAdapter {
       const panes = await this.listPanes(name);
       if (panes.length === 1) { this.freshProbes.set(name, panes[0]!.id); this.freshProbes.set(panes[0]!.id, panes[0]!.id); return created; }
     } catch { /* no target proof, no input */ }
+    // The session exists but its pane is unproven, so nothing may be written to it and no
+    // caller can identify it later. Leaving it would strand a session no one owns.
+    await this.killSessionUnchecked(name);
     return { ok: false, code: "guard_target_unknown", message: "New probe pane could not be established; no input written." };
   }
 
