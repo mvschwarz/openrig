@@ -1501,6 +1501,9 @@ export class QueueRepository {
     if (input.replyTo != null) this.validateReplyTo(input.replyTo, input.humanIntent);
     let humanQuestions: HumanQuestion[] | null = null;
     if (input.humanQuestions != null) {
+      if (!isHumanSeatSessionRef(input.destinationSession)) {
+        throw new QueueRepositoryError("invalid_human_questions", "humanQuestions require a human destination: only a human can click the options.");
+      }
       // Omitted intent is a decision (legacy behavior), so it may carry questions too.
       if (input.humanIntent === "update") {
         throw new QueueRepositoryError("invalid_human_questions", "humanQuestions are refused on an update: they ask the human to decide. Use humanIntent decision.");

@@ -72,10 +72,16 @@ export function parseHumanQuestions(value: unknown): HumanQuestionsParse {
   return { ok: true, questions };
 }
 
+/** The recorded option for a question. Own keys only: a question id like "constructor" must
+ *  not read the inherited Object.prototype member as an answer. */
+function ownAnswer(answers: HumanAnswers, questionId: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(answers, questionId) ? answers[questionId] : undefined;
+}
+
 /** One "question: chosen label" line per answered question, in question order. */
 export function formatHumanAnswers(questions: readonly HumanQuestion[], answers: HumanAnswers): string[] {
   return questions.flatMap((q) => {
-    const optionId = answers[q.id];
+    const optionId = ownAnswer(answers, q.id);
     if (optionId == null) return [];
     return [`${q.question}: ${q.options.find((o) => o.id === optionId)?.label ?? optionId}`];
   });
@@ -83,5 +89,5 @@ export function formatHumanAnswers(questions: readonly HumanQuestion[], answers:
 
 /** The questions still waiting for an answer. */
 export function unansweredQuestions(questions: readonly HumanQuestion[], answers: HumanAnswers): HumanQuestion[] {
-  return questions.filter((q) => answers[q.id] == null);
+  return questions.filter((q) => ownAnswer(answers, q.id) == null);
 }

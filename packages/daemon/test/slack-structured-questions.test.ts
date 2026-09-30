@@ -68,6 +68,10 @@ describe("structured human questions (#193)", () => {
       await expect(repo.create({ ...request, humanIntent: "update", humanQuestions: questions })).rejects.toMatchObject({ code: "invalid_human_questions" });
     });
 
+    it("refuses questions sent to an agent: no human is there to click", async () => {
+      await expect(repo.create({ ...request, destinationSession: "worker@rig", humanQuestions: questions })).rejects.toMatchObject({ code: "invalid_human_questions" });
+    });
+
     it("accepts questions when the intent is omitted: that is a decision (the CLI's documented default)", async () => {
       const created = await repo.create({ ...request, humanQuestions: questions });
       expect(repo.getById(created.qitemId)?.humanQuestions).toEqual(questions);
@@ -101,6 +105,13 @@ describe("structured human questions (#193)", () => {
       // A click after the last answer (e.g. while the hand-back is being retried) changes nothing.
       expect(answer(qitemId, "ship", "no")).toMatchObject({ status: "recorded", answers: { db: "pg", ship: "yes" }, complete: true });
       expect(repo.getById(qitemId)?.humanAnswers).toEqual({ db: "pg", ship: "yes" });
+    });
+
+    it("does not count a question named like a built-in object property as answered", async () => {
+      const builtinNamed = [{ ...questions[0]!, id: "constructor" }, questions[1]!];
+      const { qitemId } = await repo.create({ ...request, humanIntent: "decision", humanQuestions: builtinNamed });
+      expect(answer(qitemId, "ship", "yes")).toMatchObject({ status: "recorded", answers: { ship: "yes" }, complete: false });
+      expect(answer(qitemId, "constructor", "pg")).toMatchObject({ status: "recorded", answers: { ship: "yes", constructor: "pg" }, complete: true });
     });
 
     it("records nothing for another human, or once the decision is no longer pending", async () => {
