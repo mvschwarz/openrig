@@ -30,10 +30,11 @@ export interface OccupantInvalidatorDeps {
   /** (e/Class-B) durable watchdog_jobs store — armed jobs registered by the retiring generation are
    *  stopped at swap (a stale wake into the successor's context is the ghost). Optional: absent ⇒ the
    *  watchdog branch is skipped (never a name-scoped fallback). */
-  watchdog?: { dropArmedByRegisteringGeneration(generationUuid: string): number };
+  watchdog?: { dropArmedByRegisteringGeneration(generationUuid: string, keepJobIds?: readonly string[]): number };
   /** (e/Class-B) durable queue_items store — in-progress items claimed by the retiring generation are
-   *  RELEASED to pending (never dropped: the role work is durable, the successor re-claims). Optional. */
-  queue?: { releaseClaimsByGeneration(generationUuid: string): number };
+   *  RELEASED to pending (never dropped: the role work is durable, the successor re-claims). Its current
+   *  park timers (blocked rows' wakes) are role work too, so the watchdog drop keeps them. Optional. */
+  queue?: { releaseClaimsByGeneration(generationUuid: string): number; currentParkTimerIds?(): string[] };
   log?: (msg: string) => void;
 }
 
@@ -65,8 +66,10 @@ export class DefaultOccupantInvalidator implements OccupantInvalidator {
     // atom-B present → Class-B gen-scoped invalidation.
     // Watchdog (3b): stop every ARMED job registered by the retiring generation — a stale wake firing
     // into the successor's context is the specimen; the successor re-arms its own. Gen-scoped so the
-    // successor's OWN armed jobs (same name, live gen) are untouched.
-    const stopped = this.deps.watchdog?.dropArmedByRegisteringGeneration(retiringGeneration) ?? 0;
+    // successor's OWN armed jobs (same name, live gen) are untouched. A blocked row's current park timer
+    // is kept: it wakes the seat that owns the row, and nothing re-arms it if it stops.
+    const keepJobIds = this.deps.queue?.currentParkTimerIds?.() ?? [];
+    const stopped = this.deps.watchdog?.dropArmedByRegisteringGeneration(retiringGeneration, keepJobIds) ?? 0;
     if (stopped > 0) {
       log(
         `[occupant-invalidator] Class-B: stopped ${stopped} armed watchdog job(s) registered by retired ` +

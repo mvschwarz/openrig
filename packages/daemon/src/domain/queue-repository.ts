@@ -2849,6 +2849,12 @@ export class QueueRepository {
     return this.wakeRepo.getStatus(qitemId);
   }
 
+  /** Park timers a seat swap keeps: each is still its blocked row's current wake and still targets the
+   *  row's owner (see QueueWakeRepository.currentParkTimerIds). */
+  currentParkTimerIds(): string[] {
+    return this.wakeRepo.currentParkTimerIds();
+  }
+
   /** Refuse a legacy park-generated timer only when every row bound to it is
    *  terminal. Current exits retire these timers transactionally; this is the
    *  delivery-seam backstop for residue persisted by an older daemon. A timer

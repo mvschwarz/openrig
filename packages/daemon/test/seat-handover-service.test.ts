@@ -17,6 +17,8 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import { observeCodexSandbox } from "../src/domain/permission-drift.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { DefaultOccupantInvalidator, type OccupantInvalidator } from "../src/domain/occupant-invalidator.js";
 
 describe("SeatHandoverService", () => {
   let db: Database.Database;
@@ -96,7 +98,7 @@ describe("SeatHandoverService", () => {
     return { runtime: "codex", launchHarness, checkReady } as unknown as RuntimeAdapter;
   }
 
-  function newService(adapter: TmuxAdapter = tmux()): SeatHandoverService {
+  function newService(adapter: TmuxAdapter = tmux(), occupantInvalidator: OccupantInvalidator = { invalidateRetiringOccupant }): SeatHandoverService {
     return new SeatHandoverService({
       db,
       rigRepo,
@@ -109,7 +111,7 @@ describe("SeatHandoverService", () => {
       runtimeAdapters: { codex: codexAdapter() },
       contextUsageStore: { readSidecar } as never,
       resumeTokenCapturer: { captureCodexThreadId } as never,
-      occupantInvalidator: { invalidateRetiringOccupant },
+      occupantInvalidator,
       activityOracle: { declareOccupantSwap },
       predecessorRecapResolver: resolvePredecessorRecap as never,
       readinessTimeoutMs: 50,
@@ -1164,6 +1166,26 @@ describe("SeatHandoverService", () => {
 
     expect(result).toMatchObject({ ok: false, code: "successor_already_managed" });
     expect(durableRows()).toBe(before);
+  });
+
+  it("a successful fresh handover keeps the seat's blocked row's park timer live (real invalidator and repositories)", async () => {
+    seedSeat();
+    const gen = (session: string) => sessionRegistry.currentOccupantGenerationForSession(session);
+    const queue = new QueueRepository(db, eventBus, { validateRig: () => true, resolveOccupantGeneration: gen });
+    const jobs = new WatchdogJobsRepository(db, undefined, gen);
+    queue.attachWatchdogJobsRepository(jobs);
+    const row = await queue.create({ sourceSession: "orch-lead@seat-rig", destinationSession: "dev-impl@seat-rig", body: "work" } as never);
+    queue.update({ qitemId: row.qitemId, actorSession: "dev-impl@seat-rig", state: "blocked", blockedOn: "external:ci", transitionNote: "continuation: check CI", wakeAfterSeconds: 1800 } as never);
+    const timer = (queue.getParkWakeStatus(row.qitemId) as { ref: string }).ref;
+    const handover = newService(tmux(), new DefaultOccupantInvalidator({
+      enforcer: { invalidateOccupant() {} }, contextUsage: { invalidateOccupantSidecar() {} }, watchdog: jobs, queue,
+    }));
+
+    const result = await handover.handover({ seatRef: "dev-impl@seat-rig", reason: "context-wall", source: "fresh" });
+
+    expect(result.ok).toBe(true);
+    expect(jobs.getById(timer)?.state).toBe("active");
+    expect((queue.getParkWakeStatus(row.qitemId) as { live: boolean }).live).toBe(true);
   });
 
   it("fails before mutation when the seat has no current occupant", async () => {
