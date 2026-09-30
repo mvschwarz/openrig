@@ -427,6 +427,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--human-intent <intent>", "decision (default) or update: a quiet informational delivery, never an approval request")
     .option("--human-detail-file <path>", "One explicitly authored supplemental thread reply; keep the complete action/options in --body-file")
     .option("--reply-to <qitemId>", "Post this update into an earlier qitem's Slack thread (requires --human-intent update; posts as a new top-level message instead if that thread can't be used, e.g. it is missing or still has an open human decision; --verify reports why)")
+    .option("--human-questions-file <path>", "#193: JSON array of 1-4 questions for a decision, each {id, question, options: [{id, label, recommended?}]} with 2-4 options; Slack shows them as buttons")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
@@ -450,6 +451,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       humanIntent?: string;
       humanDetailFile?: string;
       replyTo?: string;
+      humanQuestionsFile?: string;
       summary?: string;
       evidenceRef?: string;
       host?: string;
@@ -492,6 +494,26 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         else console.error(message);
         process.exitCode = 1;
         return;
+      }
+      // #193 — read and parse the questions locally too; the daemon validates their shape.
+      let humanQuestions: unknown;
+      if (opts.humanQuestionsFile) {
+        let text: string;
+        try {
+          text = await resolveQueueBody({ bodyFile: opts.humanQuestionsFile });
+        } catch (err) {
+          emitBodyResolveError(err as Error & { fact?: string; consequence?: string; action?: string }, opts.json ?? false);
+          return;
+        }
+        try {
+          humanQuestions = JSON.parse(text);
+        } catch (err) {
+          emitBodyResolveError(Object.assign(new Error(`--human-questions-file ${opts.humanQuestionsFile} is not valid JSON: ${(err as Error).message}`), {
+            consequence: "The queue command did not run; the daemon was not contacted.",
+            action: "Pass a JSON array of questions, each {id, question, options: [{id, label, recommended?}]}.",
+          }), opts.json ?? false);
+          return;
+        }
       }
       // OPR.0.4.1.18 (FR-7, warn-then-require grace): a summary SHOULD accompany
       // every new qitem (it feeds the Story node + helps humans skim). Warn — to
@@ -547,6 +569,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           humanIntent: opts.humanIntent,
           humanDetail: opts.humanDetailFile ? await resolveQueueBody({ bodyFile: opts.humanDetailFile }) : undefined,
           replyTo: opts.replyTo,
+          humanQuestions,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           priority: opts.priority,

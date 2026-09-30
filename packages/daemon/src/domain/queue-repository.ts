@@ -27,6 +27,7 @@ import {
 } from "./queue-wake-repository.js";
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
+import { parseHumanQuestions, unansweredQuestions, type HumanQuestion, type HumanAnswers, type RecordHumanAnswerResult } from "./human-questions.js";
 
 export const QUEUE_STATES = [
   "pending",
@@ -167,6 +168,10 @@ export interface QueueItem {
   /** #96 — set on full reads of a replyTo row: why delivery posted top-level instead
    *  (e.g. `root-missing`), or null when it threaded / has not been delivered. */
   replyToFallback?: string | null;
+  /** #193 — structured questions on a decision (clickable options in Slack). */
+  humanQuestions?: HumanQuestion[] | null;
+  /** #193 — answers recorded from clicks, questionId → optionId; null until the first click. */
+  humanAnswers?: HumanAnswers | null;
   /** Short human-readable subject; null for callers that omit it. */
   summary: string | null;
   /** OPR.0.4.4.19 FR-5 — pointer to the durable artifact a human judges
@@ -210,6 +215,8 @@ interface QueueItemRow {
   human_intent?: "decision" | "update" | null;
   human_detail?: string | null;
   reply_to?: string | null;
+  human_questions?: string | null;
+  human_answers?: string | null;
   summary: string | null;
   evidence_ref: string | null;
   closure_reason: string | null;
@@ -271,6 +278,8 @@ export interface QueueCreateInput {
    *  that thread can't be used (e.g. a live human gate, see hasLiveHumanGate), it posts
    *  top-level and the row records why. */
   replyTo?: string | null;
+  /** #193 — 1–4 structured questions; accepted only with humanIntent "decision". */
+  humanQuestions?: HumanQuestion[] | null;
   summary?: string | null;
   /** OPR.0.4.4.19 FR-5 — optional durable-artifact pointer. Persisted when
    *  present; required at the domain layer only for human-routed items. */
@@ -665,6 +674,7 @@ export class QueueRepository {
   private readonly hasSummaryColumn: boolean;
   private readonly hasHumanIntentColumn: boolean;
   private readonly hasReplyToColumn: boolean;
+  private readonly hasHumanQuestionsColumn: boolean;
   private readonly hasEvidenceRefColumn: boolean;
   private readonly hasMintingGenColumn: boolean;
   private readonly hasClaimedGenColumn: boolean;
@@ -725,6 +735,7 @@ export class QueueRepository {
     this.hasSummaryColumn = detectQueueColumn(db, "summary");
     this.hasHumanIntentColumn = detectQueueColumn(db, "human_intent");
     this.hasReplyToColumn = detectQueueColumn(db, "reply_to");
+    this.hasHumanQuestionsColumn = detectQueueColumn(db, "human_questions");
     this.hasEvidenceRefColumn = detectQueueColumn(db, "evidence_ref");
     this.hasQueueTransitionsTable = detectTable(db, "queue_transitions");
     const transitionColumns = this.hasQueueTransitionsTable
@@ -1488,6 +1499,17 @@ export class QueueRepository {
       if (!this.hasHumanIntentColumn) throw new QueueRepositoryError("invalid_human_notification", "Human notification fields require the current queue schema; they were not saved.");
     }
     if (input.replyTo != null) this.validateReplyTo(input.replyTo, input.humanIntent);
+    let humanQuestions: HumanQuestion[] | null = null;
+    if (input.humanQuestions != null) {
+      // Omitted intent is a decision (legacy behavior), so it may carry questions too.
+      if (input.humanIntent === "update") {
+        throw new QueueRepositoryError("invalid_human_questions", "humanQuestions are refused on an update: they ask the human to decide. Use humanIntent decision.");
+      }
+      const parsed = parseHumanQuestions(input.humanQuestions);
+      if (!parsed.ok) throw new QueueRepositoryError("invalid_human_questions", parsed.error);
+      if (!this.hasHumanQuestionsColumn) throw new QueueRepositoryError("invalid_human_questions", "humanQuestions require the current queue schema; they were not saved.");
+      humanQuestions = parsed.questions;
+    }
     const id = input.qitemId ?? newQitemId();
     const ts = new Date().toISOString();
     const priority = input.priority ?? "routine";
@@ -1526,6 +1548,9 @@ export class QueueRepository {
     }
     if (input.replyTo != null) {
       this.db.prepare("UPDATE queue_items SET reply_to = ? WHERE qitem_id = ?").run(input.replyTo, id);
+    }
+    if (humanQuestions) {
+      this.db.prepare("UPDATE queue_items SET human_questions = ? WHERE qitem_id = ?").run(JSON.stringify(humanQuestions), id);
     }
     this.persistMintingGeneration(id, input.sourceSession);
     const notification = this.classifyOwnerNotification({
@@ -3011,6 +3036,34 @@ export class QueueRepository {
     for (const event of events) this.eventBus.notifySubscribers(event);
   }
 
+  /**
+   * #193 — record one clicked answer on a pending decision that carries structured questions.
+   * Only the decision's own human may answer, and only while it is pending. A click may change
+   * an earlier answer until the set is complete; from then on the answers are FINAL, and any
+   * further click returns them unchanged so the caller can retry the continuation (reply row +
+   * resolve) with exactly what the seat will read. Anything else is not-applicable (a forged
+   * id, a stranger, a decision already resolved), never an error the socket must retry.
+   */
+  recordHumanAnswer(input: { qitemId: string; actorSession: string; questionId: string; optionId: string }): RecordHumanAnswerResult {
+    if (!this.hasHumanQuestionsColumn) return { status: "not-applicable", reason: "schema" };
+    return this.db.transaction(() => {
+      const item = this.getById(input.qitemId);
+      if (!item?.humanQuestions?.length) return { status: "not-applicable" as const, reason: "no-questions" };
+      if (item.state !== "pending") return { status: "not-applicable" as const, reason: `state-${item.state}` };
+      if (item.destinationSession !== input.actorSession) return { status: "not-applicable" as const, reason: "not-the-asked-human" };
+      const question = item.humanQuestions.find((q) => q.id === input.questionId);
+      if (!question?.options.some((o) => o.id === input.optionId)) return { status: "not-applicable" as const, reason: "unknown-option" };
+      const recorded = item.humanAnswers ?? {};
+      if (unansweredQuestions(item.humanQuestions, recorded).length === 0) {
+        return { status: "recorded" as const, answers: recorded, complete: true, questions: item.humanQuestions };
+      }
+      const answers: HumanAnswers = { ...(item.humanAnswers ?? {}), [input.questionId]: input.optionId };
+      this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?").run(JSON.stringify(answers), input.qitemId);
+      const complete = unansweredQuestions(item.humanQuestions, answers).length === 0;
+      return { status: "recorded" as const, answers, complete, questions: item.humanQuestions };
+    })();
+  }
+
   getById(qitemId: string): QueueItem | null {
     const row = this.db
       .prepare("SELECT * FROM queue_items WHERE qitem_id = ?")
@@ -3647,6 +3700,8 @@ export class QueueRepository {
       humanIntent: row.human_intent ?? null,
       humanDetail: row.human_detail ?? null,
       replyTo: row.reply_to ?? null,
+      humanQuestions: row.human_questions ? (JSON.parse(row.human_questions) as HumanQuestion[]) : null,
+      humanAnswers: row.human_answers ? (JSON.parse(row.human_answers) as HumanAnswers) : null,
       closureReason: row.closure_reason as ClosureReason | null,
       closureTarget: row.closure_target,
       closureRequiredAt: row.closure_required_at,

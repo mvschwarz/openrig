@@ -16,14 +16,14 @@ import { channelStateDigest } from "../channel-operations.js";
 import path from "node:path";
 import fs from "node:fs";
 import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from "../gateway-subsystem.js";
-import { downloadPrivateFile } from "./slack-api.js";
+import { downloadPrivateFile, postChatMessage } from "./slack-api.js";
 import { loadConfig } from "./config.js";
 import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore, InboundReceiptStore } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
 import { subsystemSlackDeliver } from "./slack-delivery.js";
-import { InboundRouter, type SlackEvent, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
+import { InboundRouter, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
 import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
 import { makeThreadRouteResolver } from "./thread-routing.js";
@@ -571,6 +571,19 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // or human-initiated → the configured orchestrator slot as an unrouted-signal row.
       resolveRoute: makeThreadRouteResolver({ map: threadMap, unroutedDestination: cfg.inboundDestination, log }),
       resolveHumanReply: opts.resolveHumanReply,
+      // #193 — a button click records its answer on the decision the clicked root belongs to;
+      // a failed hand-back is retried with the event dead-letters, and each click is confirmed
+      // in the decision's thread (a bot post, so inbound never ingests it).
+      recordHumanAnswer: (input) => opts.queueRepo.recordHumanAnswer(input),
+      actionDeadLetter: new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl")),
+      ...(bot ? {
+        acknowledgeAnswer: async ({ channel, threadTs, text }: { channel?: string; threadTs: string; text: string }) => {
+          const target = channel ?? cfg.channel;
+          if (!target) return;
+          const r = await postChatMessage(bot, { channel: target, thread_ts: threadTs, text }, opts.fetchImpl);
+          if (!r.ok) log(`answer acknowledgement not posted thread=${threadTs}: ${r.error}`);
+        },
+      } : {}),
       // OPR.0.5.6.2 — inbound file transfer: wired only when the bot token exists
       // (downloads need `files:read`); absent → the router's own named-failure
       // arm keeps failure honest. Media lives beside the gateway's other durable

@@ -141,6 +141,25 @@ describe("rig queue CLI", () => {
     }
   });
 
+  it("create --human-questions-file sends the parsed questions; unreadable JSON is refused before any request", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "queue-human-questions-"));
+    const file = path.join(directory, "questions.json");
+    const questions = [{ id: "db", question: "Which database?", options: [{ id: "pg", label: "Postgres", recommended: true }, { id: "sqlite", label: "SQLite" }] }];
+    fs.writeFileSync(file, JSON.stringify(questions));
+    const broken = path.join(directory, "broken.json");
+    fs.writeFileSync(broken, "{ not json");
+    try {
+      const { deps, calls } = makeDeps();
+      await createProgram({ queueDeps: deps }).parseAsync(["node", "rig", "queue", "create", "--destination", "human-founder@external", "--body", "Pick one.", "--human-intent", "decision", "--human-questions-file", file, "--json"]);
+      expect(calls.find((c) => c.path === "/api/queue/create")?.body).toMatchObject({ humanIntent: "decision", humanQuestions: questions });
+
+      const again = makeDeps();
+      await createProgram({ queueDeps: again.deps }).parseAsync(["node", "rig", "queue", "create", "--destination", "human-founder@external", "--body", "Pick one.", "--human-intent", "decision", "--human-questions-file", broken, "--json"]);
+      expect(process.exitCode).toBe(1);
+      expect(again.calls.find((c) => c.path === "/api/queue/create")).toBeUndefined();
+    } finally { process.exitCode = undefined; fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+
   // Slice-03 Atom 6b — --body-context snapshot + provenance rule.
   it("create preserves explicit human intent and authored supplemental file bytes", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "queue-human-detail-"));

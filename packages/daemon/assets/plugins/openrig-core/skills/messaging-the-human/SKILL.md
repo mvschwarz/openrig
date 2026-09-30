@@ -92,6 +92,17 @@ the human (a pending human decision, or a row parked on the human), since a
 reply in that thread would answer the decision. In every such case the
 `--verify` result says `threaded: false` with the reason.
 
+A **decision** with a few clear choices can carry `--human-questions-file <path>`:
+a JSON array of 1–4 questions, each
+`{"id", "question", "options": [{"id", "label", "recommended"?}]}` with 2–4
+options (labels up to 75 characters, at most one recommended). Slack shows each
+question as a row of buttons. Each click records that answer on the item, and
+the decision resolves once every question has one. You then receive one reply
+row listing the answers, and the item's `humanAnswers` holds the option ids. The
+human may instead type a reply in the thread; that resolves the decision as
+usual, so read the reply rather than assuming an option was picked. Keep the
+brief complete: the questions add buttons, they do not replace the explanation.
+
 If an existing agent-owned row must wait for a **decision**, block it on the **new live qitem ID**
 (`rig queue block <work-id> --on <human-qitem-id> ...`), not on the human address.
 Completion of the human qitem resumes its dependants. Blocking on the human as

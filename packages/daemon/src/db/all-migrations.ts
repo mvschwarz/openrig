@@ -93,9 +93,10 @@ import { seatDeliveryGuardSchema } from "./migrations/087_seat_delivery_guard.js
 import { nodePermissionSelectionsSchema } from "./migrations/088_node_permission_selections.js";
 import { classificationIdentityProvenanceSchema } from "./migrations/089_classification_identity_provenance.js";
 import { humanReplyToSchema } from "./migrations/090_human_reply_to.js";
+import { humanQuestionsSchema } from "./migrations/091_human_questions.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→090 (S02 086/089, S09 087, S03 088, #96 090). */
+/** Ordered 001→091 (S02 086/089, S09 087, S03 088, #96 090, #193 091). */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -187,4 +188,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodePermissionSelectionsSchema,
   classificationIdentityProvenanceSchema,
   humanReplyToSchema,
+  humanQuestionsSchema,
 ];
