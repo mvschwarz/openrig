@@ -502,6 +502,15 @@ describe("PsProjectionService", () => {
       expect(seatNeedsAttention(baseEntry(), idleActivity("idle"))).toBe(false);
       expect(seatNeedsAttention(baseEntry(), idleActivity("unknown"))).toBe(false);
     });
+    it("#81: counts an ARBITRATED needs_input (pane chrome) even with no hook store", () => {
+      expect(seatNeedsAttention(baseEntry(), null, true)).toBe(true);
+    });
+    it("#81: an arbitrated clear answer SUPERSEDES a stale needs_input hook (row and total agree)", () => {
+      expect(seatNeedsAttention(baseEntry(), idleActivity("needs_input"), false)).toBe(false);
+    });
+    it("#81: no arbitrated answer falls back to the hook signal (honest degrade)", () => {
+      expect(seatNeedsAttention(baseEntry(), idleActivity("needs_input"), null)).toBe(true);
+    });
 
     it("getEntries: multi-signal seat counts ONCE; healthy peers count zero", () => {
       const rigId = seedRig("attn-once");
@@ -540,6 +549,56 @@ describe("PsProjectionService", () => {
 
       emit(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()); // stale (latest row now old)
       expect(withStore.getEntries().find((e) => e.rigId === rigId)!.attentionCount).toBe(0);
+    });
+
+    it("#81: getEntries reads the ARBITRATED needs_input the per-seat row shows (pane chrome, hook-silent seat)", () => {
+      const rigId = seedRig("attn-arbitrated");
+      const n = seedNode(rigId, "dev");
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))")
+        .run("s-arb", n, "dev@attn-arbitrated", "running", "ready");
+      // The row-facing oracle: a seat frozen at a permission prompt with no hook
+      // traffic — exactly the reported case where the row said needs-input x1
+      // and the rig total said 0.
+      const seatActivity = {
+        getSeatActivity: () => null,
+        getSeatStateBySession: (sessionName: string) => sessionName === "dev@attn-arbitrated"
+          ? {
+              seatNodeId: n, activity: "idle-at-prompt",
+              needsInput: { count: 1, reason: "selection_prompt" },
+              decidedBy: "needs-input-chrome", seq: 1,
+              changedAt: new Date().toISOString(), rungs: [], lastSwap: null,
+            }
+          : null,
+      };
+      const entries = new PsProjectionService({ db, seatActivity: seatActivity as never }).getEntries();
+      expect(entries.find((e) => e.rigId === rigId)!.attentionCount).toBe(1);
+    });
+
+    it("#81: getEntries takes the arbitrated answer over a stale needs_input hook", () => {
+      const rigId = seedRig("attn-stale-hook");
+      const n = seedNode(rigId, "dev");
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))")
+        .run("s-stale", n, "dev@attn-stale-hook", "running", "ready");
+      const eventBus = new EventBus(db);
+      const store = new AgentActivityStore({ db, eventBus });
+      eventBus.emit({
+        type: "agent.activity", rigId, nodeId: n, sessionName: "dev@attn-stale-hook", runtime: "claude-code",
+        activity: { state: "needs_input", reason: "permission_prompt", evidenceSource: "runtime_hook",
+          sampledAt: new Date().toISOString(), eventAt: new Date().toISOString(), evidence: "permission_prompt", fallback: false, stale: false },
+      } as never);
+      // The hook store still carries needs_input, but the seat's arbitrated state
+      // (what its row renders) is already clear — the totals must agree.
+      const seatActivity = {
+        getSeatActivity: () => null,
+        getSeatStateBySession: () => ({
+          seatNodeId: n, activity: "working",
+          needsInput: { count: 0, reason: null },
+          decidedBy: "self-report", seq: 2,
+          changedAt: new Date().toISOString(), rungs: [], lastSwap: null,
+        }),
+      };
+      const entries = new PsProjectionService({ db, agentActivity: store, seatActivity: seatActivity as never }).getEntries();
+      expect(entries.find((e) => e.rigId === rigId)!.attentionCount).toBe(0);
     });
 
     it("getEntries: store absent -> needs_input contributes false (honest degrade), other signals still count", () => {
