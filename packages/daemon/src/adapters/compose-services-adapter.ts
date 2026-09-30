@@ -166,7 +166,7 @@ export class ComposeServicesAdapter {
       const cmd = `curl -sf -o /dev/null -w '%{http_code}' --max-time ${Math.ceil(timeoutMs / 1000)} ${sq(url)} 2>/dev/null`;
       const output = await this.exec(cmd);
       const code = parseInt(output.trim(), 10);
-      return code >= 200 && code < 400;
+      return code >= 200 && code < 300;
     } catch {
       return false;
     }
