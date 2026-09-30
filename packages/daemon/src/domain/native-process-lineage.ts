@@ -121,7 +121,8 @@ export function findExactNativeResumeProcess(
 export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
   try {
     const output = await runAsyncSite("codex.runtime.list_processes", async () => {
-      const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,pgid,tpgid,ucomm,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
+      // lstart is locale-formatted; the child-only C locale keeps the English date the parser expects.
+      const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,pgid,tpgid,ucomm,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
       return stdout;
     });
     return output.split("\n").slice(1).flatMap((line) => {
