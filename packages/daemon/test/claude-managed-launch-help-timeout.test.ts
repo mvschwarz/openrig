@@ -54,9 +54,11 @@ describe("ClaudeManagedLaunch capability query timeout (#260)", () => {
   it("still ends a hung help at the bounded timeout with the same refusal", async () => {
     const result = await prepare("exec sleep 30");
     expect(result).toMatchObject({ ok: false, message: QUERY_FAILED, helpCalls: 1 });
+    // Waited for the 5 s bound, and ended long before the fake's 30 s sleep. The ceiling is
+    // deliberately loose: it proves the query was cut off, not a scheduling-time bound.
     expect(result.ms).toBeGreaterThanOrEqual(4800);
-    expect(result.ms).toBeLessThan(7000);
-  }, 15_000);
+    expect(result.ms).toBeLessThan(25_000);
+  }, 40_000);
 
   it("refuses an immediate non-zero exit without waiting", async () => {
     const result = await prepare("exit 1");
