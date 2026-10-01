@@ -19,6 +19,7 @@ import { ALL_MIGRATIONS } from "./db/all-migrations.js";
 import { RigRepository } from "./domain/rig-repository.js";
 import { SessionRegistry } from "./domain/session-registry.js";
 import { isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
+import { deriveCanonicalFromEntry, getNodeInventory } from "./domain/node-inventory.js";
 import { resolveExternal } from "./domain/gateway/external-admission.js";
 import { loadHumanRegistry } from "./domain/gateway/human-registry.js";
 import { EventBus } from "./domain/event-bus.js";
@@ -326,8 +327,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     console.error("[slow-operation] setDegradedHandler registration failed", error);
   }
   // PL-004 Phase A revision (R1): topology-backed validateRig.
-  // Reject `<member>@<unknown-rig>` shapes by checking the rig portion
-  // against the rig registry. Bare ids without `@` are also rejected
+  // Reject destinations without a persisted seat in the named rig.
+  // Stopped and never-launched seats remain valid. Bare ids without `@` are rejected
   // (no canonical rig binding).
   // OPR.0.4.6.MH1 FR-8: this gate is the ARCHETYPE consumer of the shared
   // parse contract — human-seat classification BEFORE parse, then the
@@ -348,7 +349,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     }
     if (isHumanSeatSessionRef(sessionRef)) return true;
     if (parsed.kind !== "canonical") return false;
-    return rigRepo.findRigsByName(parsed.rig).length > 0;
+    return rigRepo.findRigsByName(parsed.rig).some((rig) =>
+      getNodeInventory(db, rig.id).some((entry) =>
+        entry.canonicalSessionName === sessionRef
+        || deriveCanonicalFromEntry(entry) === sessionRef
+        || entry.logicalId === parsed.member,
+      ),
+    );
   };
   // PL-004 Phase A — shared coordination services. Constructed early so
   // both the queueRepo dep slot and inboxHandler can share one instance.

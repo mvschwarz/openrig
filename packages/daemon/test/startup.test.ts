@@ -275,6 +275,79 @@ describe("createDaemon startup composition", () => {
     db.close();
   });
 
+  it("queue admission rejects missing seats without writing or closing a handoff source", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error("no socket"), { code: "ENOENT" });
+    };
+    const daemon = await createDaemon({ cmuxFactory, tmuxExec: async () => "" });
+    const { app, db, deps } = daemon;
+    try {
+      const source = deps.rigRepo.createRig("membership-source");
+      deps.rigRepo.addNode(source.id, "sender.ba", { runtime: null });
+      const target = deps.rigRepo.createRig("membership-target");
+      deps.rigRepo.addNode(target.id, "product.ba", { runtime: null });
+      const stopped = deps.rigRepo.addNode(target.id, "product.stopped", { runtime: null });
+      const session = deps.sessionRegistry.registerSession(stopped.id, "product-stopped@membership-target");
+      deps.sessionRegistry.updateStatus(session.id, "exited");
+      deps.rigRepo.addNode(target.id, "product.member.dot", { runtime: null });
+      deps.rigRepo.addNode(target.id, "flat", { runtime: null });
+      const adopted = deps.rigRepo.addNode(target.id, "product.adopted", { runtime: null });
+      deps.sessionRegistry.registerSession(adopted.id, "adopted-alias@membership-target");
+      const sender = "sender-ba@membership-source";
+      const post = (url: string, body: Record<string, unknown>) => app.request(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": sender },
+        body: JSON.stringify({ nudge: false, ...body }),
+      });
+      const create = (destinationSession: string) => post("/api/queue/create", {
+        destinationSession, body: "queue membership fixture",
+      });
+      const counts = () => ({
+        items: (db.prepare("SELECT COUNT(*) count FROM queue_items").get() as { count: number }).count,
+        transitions: (db.prepare("SELECT COUNT(*) count FROM queue_transitions").get() as { count: number }).count,
+      });
+
+      for (const destination of ["product-ba@unknown", "prodcut-ba@membership-target", "missing@membership-source"]) {
+        const before = counts();
+        const response = await create(destination);
+        expect(response.status).toBe(400);
+        expect((await response.json()).error).toBe("unknown_destination_rig");
+        expect(counts()).toEqual(before);
+      }
+      for (const destination of ["product-ba@membership-target", "product-stopped@membership-target",
+        "product-member.dot@membership-target", "flat@membership-target", "adopted-alias@membership-target"]) {
+        expect((await create(destination)).status, destination).toBe(201);
+      }
+      const beforeTransaction = counts();
+      expect(() => db.transaction(() => deps.queueRepo.createWithinTransaction({
+        sourceSession: sender, destinationSession: "prodcut-ba@membership-target",
+        body: "transaction membership fixture", nudge: false,
+      }))()).toThrow(/unknown rig/);
+      expect(counts()).toEqual(beforeTransaction);
+
+      for (const verb of ["handoff", "handoff-and-complete"]) {
+        const original = await create(sender);
+        expect(original.status).toBe(201);
+        const { qitemId } = await original.json() as { qitemId: string };
+        const row = () => db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(qitemId);
+        const before = { counts: counts(), source: row() };
+        const rejected = await post(`/api/queue/${qitemId}/${verb}`, { toSession: "prodcut-ba@membership-target" });
+        expect(rejected.status).toBe(400);
+        expect((await rejected.json()).error).toBe("unknown_destination_rig");
+        expect({ counts: counts(), source: row() }).toEqual(before);
+        const accepted = await post(`/api/queue/${qitemId}/${verb}`, { toSession: "product-stopped@membership-target" });
+        expect(accepted.status).toBe(201);
+        expect((await accepted.json()).created.destinationSession).toBe("product-stopped@membership-target");
+        expect((row() as { state: string }).state).toBe(verb === "handoff" ? "handed-off" : "done");
+      }
+    } finally {
+      daemon.eventLoopMonitor.stop();
+      daemon.contextMonitor.stop();
+      deps.seatActivityService?.stop();
+      db.close();
+    }
+  }, 30000);
+
   it("createDaemon app: GET /api/adapters/cmux/status returns 200 (adapter routes mounted)", async () => {
     const cmuxFactory: CmuxTransportFactory = async () => {
       throw Object.assign(new Error(""), { code: "ENOENT" });
