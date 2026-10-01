@@ -2885,8 +2885,10 @@ export class QueueRepository {
    *  audited. The queue transition records that attempt independently of
    *  whether the HELD row's owner consumed it. */
   recordWatchdogWakeAttempt(jobId: string, deliveryStatus: string): void {
-    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId);
-    if (targets.length === 0) return;
+    const bindings = this.wakeRepo.findBlockedQitemsByWatchdog(jobId);
+    if (bindings.length === 0) return;
+    // Receipt ownership follows the latest park; timer lifecycle follows all bindings.
+    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
     const recordFired = ({ qitemId, kind }: (typeof targets)[number]): PersistedEvent => {
       const transition = this.transitionLog.append({
         qitemId,
@@ -2915,7 +2917,7 @@ export class QueueRepository {
         summary: this.getById(qitemId)?.summary ?? null,
       });
     };
-    const usageLimitBlockers = targets.filter(({ qitemId }) =>
+    const usageLimitBlockers = bindings.filter(({ qitemId }) =>
       this.getById(qitemId)?.tags?.includes(USAGE_LIMIT_BLOCKER_TAG),
     );
     // OPR.0.5.8.1 S1b — a park-generated timer is ONE-SHOT. `periodic-reminder`
@@ -2926,7 +2928,7 @@ export class QueueRepository {
     // behaviour is UNCHANGED by this repair and pinned as unchanged. This widens
     // the same act to ordinary park timers, without their blocker resolution —
     // resolving the blocker is a provider-limit outcome, not a timer one.
-    const parkGeneratedTimer = targets.some(({ kind }) => kind === "timer");
+    const parkGeneratedTimer = bindings.some(({ kind }) => kind === "timer");
     const events = this.db.transaction(() => {
       const firedEvents = targets.map(recordFired);
       if (deliveryStatus === "retained") return firedEvents;
@@ -3489,10 +3491,7 @@ export class QueueRepository {
   evaluateWaitReminder(input: { jobId: string }) {
     if (this.wakeRepo.findQitemsByAttachedWatchdog(input.jobId).length > 0
       && this.wakeRepo.findQitemsByGeneratedTimer(input.jobId).every(row => row.state !== "blocked")) return null;
-    const currentBindings = this.wakeRepo.findBlockedQitemsByWatchdog(input.jobId);
-    const binding = currentBindings.find(row => row.kind === "timer");
-    // Reattaching a generated timer as a watchdog transfers its current wait ownership.
-    if (!binding && currentBindings.some(row => row.kind === "watchdog")) return null;
+    const binding = this.wakeRepo.findBlockedQitemsByWatchdog(input.jobId).find(row => row.kind === "timer");
     const result = evaluateQueueWait(this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db), input.jobId, binding ? this.waitingView(binding.qitemId) : null);
     // Only an already-admitted send reads prose: healthy silence, receipts and
     // failed-delivery retries remain owned by the existing wait evaluator.

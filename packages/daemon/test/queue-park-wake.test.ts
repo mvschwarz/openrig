@@ -628,17 +628,17 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({ ref: current.ref, phase: "fired" });
   });
 
-  it("keeps a shared repeating watchdog active when its original row reattaches the same job", async () => {
+  it.each([false, true])("preserves timer lifecycle after the original row reattaches its shared job (repeating=%s)", async (repeating) => {
     repo.attachWatchdogJobsRepository(jobs);
     const owner = "shared-owner@rig";
     const original = await item(owner);
     repo.update({ qitemId: original.qitemId, actorSession: owner, state: "blocked",
-      blockedOn: "external:cooldown", transitionNote: "original repeating wait",
-      wakeAfterSeconds: 30, wakeMaxSeconds: 120 } as never);
+      blockedOn: "external:cooldown", transitionNote: "original wait",
+      wakeAfterSeconds: 30, ...(repeating ? { wakeMaxSeconds: 120 } : {}) } as never);
     const jobId = repo.getParkWakeStatus(original.qitemId)!.ref;
     const attached = await item(owner);
     repo.update({ qitemId: attached.qitemId, actorSession: owner, state: "blocked",
-      blockedOn: "external:cooldown", transitionNote: "attach shared repeating watchdog",
+      blockedOn: "external:cooldown", transitionNote: "attach shared watchdog",
       wakeWatchdogId: jobId } as never);
     repo.update({ qitemId: original.qitemId, actorSession: owner, state: "blocked",
       blockedOn: "external:cooldown", transitionNote: "original row reattaches the same watchdog",
@@ -651,18 +651,24 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
       onWakeAttempt: ({ jobId, deliveryStatus }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus),
       deliver: async request => { deliveries.push(request); return { status: "ok" }; },
     });
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const result = await engine.evaluate(jobs.getByIdOrThrow(jobId));
-      expect(result.outcome.action).toBe("send");
-      expect(jobs.getById(jobId)?.state).toBe("active");
+    expect(jobs.getByIdOrThrow(jobId).intervalSeconds).toBe(30);
+    expect((await engine.evaluate(jobs.getByIdOrThrow(jobId))).outcome.action).toBe("send");
+    if (repeating) {
+      expect(jobs.getByIdOrThrow(jobId)).toMatchObject({ state: "active", intervalSeconds: 60 });
+      expect((await engine.evaluate(jobs.getByIdOrThrow(jobId))).outcome)
+        .toMatchObject({ action: "skip", reason: "queue_wait_already_presented" });
+      expect(jobs.getByIdOrThrow(jobId)).toMatchObject({ state: "active", intervalSeconds: 120 });
+    } else {
+      expect(jobs.getByIdOrThrow(jobId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_fired_once" });
     }
-    expect(deliveries).toHaveLength(2);
-    expect(deliveries.every(request => request.targetSession === owner)).toBe(true);
-    const originalReceipts = wakes(original.qitemId).filter(w => w.phase === "fired" && w.wake_ref === jobId);
-    expect(originalReceipts).toHaveLength(2);
-    expect(originalReceipts.every(w => w.wake_kind === "watchdog")).toBe(true);
-    expect(wakes(attached.qitemId).filter(w => w.phase === "fired" && w.wake_ref === jobId))
-      .toHaveLength(2);
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.targetSession).toBe(owner);
+    for (const row of [original, attached]) {
+      const receipts = wakes(row.qitemId).filter(w => w.phase === "fired" && w.wake_ref === jobId);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]!.wake_kind).toBe("watchdog");
+      expect(repo.getById(row.qitemId)?.state).toBe("blocked");
+    }
   });
 
   it("OPR.0.5.8.1 S1b — the S16 provider-limit path is UNCHANGED, and stays distinguishable", async () => {
