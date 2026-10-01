@@ -22,7 +22,6 @@ import {
 } from "./dot-id.js";
 import { deriveMissionDependencyGraph, type MissionDependencyGraph } from "./scope-audit.js";
 
-const FRONTMATTER_DELIM = "---\n";
 const SLICE_DIRNAME_RE = /^(\d+)-(.+)$/;
 
 // ---------------------------------------------------------------------
@@ -35,21 +34,15 @@ export function splitFrontmatter(content: string): {
   frontmatter: Record<string, unknown>;
   body: string;
 } {
-  if (!content.startsWith(FRONTMATTER_DELIM)) {
-    return { frontmatter: {}, body: content };
-  }
-  const rest = content.slice(FRONTMATTER_DELIM.length);
-  const endIdx = rest.indexOf(`\n${FRONTMATTER_DELIM.trim()}\n`);
-  if (endIdx === -1) {
-    // Allow trailing `---` without a final newline (last char of file).
-    const endIdx2 = rest.indexOf(`\n---`);
-    if (endIdx2 === -1) return { frontmatter: {}, body: content };
-    const raw = rest.slice(0, endIdx2);
-    return { frontmatter: parseYamlSafely(raw), body: rest.slice(endIdx2 + 4).replace(/^\n/, "") };
-  }
-  const raw = rest.slice(0, endIdx);
-  const body = rest.slice(endIdx + `\n${FRONTMATTER_DELIM.trim()}\n`.length);
-  return { frontmatter: parseYamlSafely(raw), body };
+  const opening = /^---\r?\n/.exec(content);
+  if (!opening) return { frontmatter: {}, body: content };
+  const rest = content.slice(opening[0].length);
+  const closing = /^---(?:\r?\n|$)/m.exec(rest);
+  if (!closing) return { frontmatter: {}, body: content };
+  return {
+    frontmatter: parseYamlSafely(rest.slice(0, closing.index)),
+    body: rest.slice(closing.index + closing[0].length),
+  };
 }
 
 function parseYamlSafely(raw: string): Record<string, unknown> {
