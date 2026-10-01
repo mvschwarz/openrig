@@ -1,5 +1,5 @@
 import type { RigRepository } from "./rig-repository.js";
-import { getNodeInventory } from "./node-inventory.js";
+import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { parseSessionName } from "./session-name.js";
 import type { NodeInventoryEntry } from "./types.js";
 import { NativePermissionStore, type StoredNativePermissionSelection } from "./native-permission-store.js";
@@ -84,7 +84,9 @@ export class SeatStatusService {
       const rigName = parsed.rig;
       const rigs = this.rigRepo.findUnarchivedRigsByName(rigName);
       return rigs.flatMap((rig) => this.entriesForRig(rig.id).filter((entry) =>
-        entry.canonicalSessionName === ref || entry.logicalId === localRef
+        entry.canonicalSessionName === ref
+        || deriveCanonicalFromEntry(entry) === ref
+        || entry.logicalId === localRef
       ).map((entry) => ({ entry })));
     }
 
