@@ -11,7 +11,7 @@ import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "..
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
-import { verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
+import { verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 
@@ -992,18 +992,18 @@ export class SessionTransport {
       };
     }
 
-    // #142 — an agent seat whose runtime is not running shows a bare shell, and text typed there runs as
-    // shell commands. A Codex launch wrapper can have the same label: only positive native
-    // process proof clears that refusal. A terminal's shell is its runtime; unreadable stays advisory.
-    const bareShell = runtime && runtime !== "terminal"
-      ? await this.bareShellForeground(sessionName, runtime, sessionMeta.pane, sessionMeta.resumeToken) : null;
-    if (bareShell) {
+    // #142 — a shell label may be an idle shell or a managed launch wrapper.
+    // Only positive native process proof clears the refusal, but missing proof
+    // does not establish that the runtime stopped. Terminal/unreadable behavior is unchanged.
+    const unverifiedShell = runtime && runtime !== "terminal"
+      ? await this.unverifiedShellForeground(sessionName, runtime, sessionMeta.pane, sessionMeta.resumeToken) : null;
+    if (unverifiedShell) {
       return observe({
         ok: false,
         sessionName,
         sent: false,
-        reason: "target_runtime_not_running",
-        error: `Refused: '${sessionName}' shows a bare ${bareShell} shell, so its ${runtime} runtime is not running. Text sent there would run as shell commands. Relaunch the seat first. No text was sent.`,
+        reason: "target_runtime_unverified",
+        error: `Refused: '${sessionName}' reports ${unverifiedShell} as the foreground command, but OpenRig could not verify its expected ${runtime} agent in the bound pane. The agent may still be running behind a wrapper. No text was sent.`,
       });
     }
 
@@ -1441,8 +1441,9 @@ export class SessionTransport {
     }
   }
 
-  /** The shell name when the pane's foreground is a bare shell; null when it is not, or unknown. */
-  private async bareShellForeground(sessionName: string, runtime: string, pane: string | null, resumeToken: string | null): Promise<string | null> {
+  /** Shell label without positive native proof; not proof of an idle shell or stopped agent.
+   * Null when no shell label is observed, or the expected native process is verified. */
+  private async unverifiedShellForeground(sessionName: string, runtime: string, pane: string | null, resumeToken: string | null): Promise<string | null> {
     let paneCommand: string | null;
     try {
       paneCommand = await this.tmuxAdapter.getPaneCommand(sessionName);
@@ -1450,11 +1451,12 @@ export class SessionTransport {
       return null;
     }
     if (!paneCommand || !isShellForeground(paneCommand)) return null;
-    if (runtime === "codex" && pane) {
-      // Reuse the identity reconciler's stable, foreground, pane-descendant proof.
-      // A resumed process must also name this session's token. Stale UI, a Node
+    if ((runtime === "codex" || runtime === "claude-code") && pane) {
+      // Reuse stable, foreground, pane-descendant proof. Claude fresh/resume and
+      // Codex resume must name this session's token. Stale UI, a Node
       // launcher alone, missing observations or a native process elsewhere cannot clear it.
-      const native = await verifyCodexPaneProcess({ target: sessionName, tmux: this.tmuxAdapter,
+      const verify = runtime === "codex" ? verifyCodexPaneProcess : verifyClaudePaneProcess;
+      const native = await verify({ target: sessionName, tmux: this.tmuxAdapter,
         listProcesses: this.listProcesses, expectedToken: resumeToken });
       if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
     }

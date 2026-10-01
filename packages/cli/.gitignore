@@ -2,5 +2,6 @@
 daemon/
 ui/
 
-# Root license copied by the CLI build
+# Root license and README copied by the CLI build
 /LICENSE
+/README.md

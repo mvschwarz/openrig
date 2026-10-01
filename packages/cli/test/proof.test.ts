@@ -145,6 +145,52 @@ describe("rig proof add (fs-level, temp workspace)", () => {
     expect(process.exitCode).toBeUndefined();
   });
 
+  it("rejects a screenshot passed as --file without changing its bytes", async () => {
+    const proofDir = path.join(sliceDir, "proof");
+    fs.mkdirSync(proofDir);
+    const screenshot = path.join(proofDir, "shot.png");
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+    fs.writeFileSync(screenshot, bytes);
+    await run([
+      "add", "19-signal-layer", "--mission", "release-x",
+      "--artifact-type", "qa", "--verdict", "CLEAR",
+      "--candidate-sha", "abc1234", "--money-evidence", "m",
+      "--file", screenshot,
+    ]);
+    expect(process.exitCode).toBe(1);
+    expect(fs.readFileSync(screenshot)).toEqual(bytes);
+    expect(fs.readdirSync(proofDir)).toEqual(["shot.png"]);
+    expect(errs.join("\n")).toContain("--media");
+
+    process.exitCode = undefined;
+    await run(baseArgs(["--name", "shot.png"]));
+    expect(process.exitCode).toBe(1);
+    expect(fs.readFileSync(screenshot)).toEqual(bytes);
+  });
+
+  it("uses a Markdown name for a text file and requires --replace to overwrite it", async () => {
+    const source = path.join(workRoot, "notes.txt");
+    fs.writeFileSync(source, "first proof");
+    const fromFile = [
+      "add", "19-signal-layer", "--mission", "release-x",
+      "--artifact-type", "qa", "--verdict", "CLEAR",
+      "--candidate-sha", "abc1234", "--money-evidence", "m",
+      "--file", source,
+    ];
+    await run(fromFile);
+    const target = path.join(sliceDir, "proof", "notes.md");
+    expect(process.exitCode).toBeUndefined();
+    expect(fs.readFileSync(target, "utf8")).toContain("first proof");
+    fs.writeFileSync(source, "revised proof");
+    await run(fromFile);
+    expect(process.exitCode).toBe(1);
+    expect(fs.readFileSync(target, "utf8")).not.toContain("revised proof");
+    process.exitCode = undefined;
+    await run([...fromFile, "--replace"]);
+    expect(process.exitCode).toBeUndefined();
+    expect(fs.readFileSync(target, "utf8")).toContain("revised proof");
+  });
+
   it("out-of-set verdict is rejected naming the allowed values; nothing written; exit 1", async () => {
     await run([
       "add", "19-signal-layer", "--mission", "release-x",

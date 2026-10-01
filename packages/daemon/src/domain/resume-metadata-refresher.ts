@@ -331,7 +331,8 @@ export async function defaultListProcessesStrict(): Promise<Array<{ pid: number;
     // lstart = the process START TIME — the identity half of pid+start-time
     // (r1's pid-reuse remedy): a reused pid changes lstart, so a consumer
     // holding last cycle's identity can invalidate without any extra spawn.
-    const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
+    // lstart is locale-formatted; the child-only C locale keeps the English date the parser expects.
+    const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
     return stdout;
   });
   return output

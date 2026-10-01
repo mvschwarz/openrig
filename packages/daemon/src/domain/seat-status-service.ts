@@ -82,7 +82,7 @@ export class SeatStatusService {
     if (parsed.kind === "canonical") {
       const localRef = parsed.member;
       const rigName = parsed.rig;
-      const rigs = this.rigRepo.findRigsByName(rigName);
+      const rigs = this.rigRepo.findUnarchivedRigsByName(rigName);
       return rigs.flatMap((rig) => this.entriesForRig(rig.id).filter((entry) =>
         entry.canonicalSessionName === ref || entry.logicalId === localRef
       ).map((entry) => ({ entry })));

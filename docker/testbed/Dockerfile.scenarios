@@ -4,4 +4,5 @@ ARG TESTBED_IMAGE
 FROM ${TESTBED_IMAGE}
 COPY runner.mjs /opt/openrig-testbed/runner.mjs
 COPY scenarios/ /opt/openrig-testbed/scenarios/
+COPY library/ /opt/openrig-testbed/library/
 CMD ["node", "/opt/openrig-testbed/runner.mjs", "healthy"]

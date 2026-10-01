@@ -11,10 +11,11 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { seatLifecycleService } from "../src/routes/seat.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 
-// Never run a provider, shell, tmux or startup. OS confinement also denies them.
+// No provider, tmux or startup. Config-selection cases execute only a private
+// fake Claude through the generated shell command; other child calls are mocked.
 vi.mock("node:child_process", () => ({ execFile: vi.fn() }));
-// sandbox-exec deliberately denies execute eligibility too. Only that access
-// check is simulated; path resolution/stat/replacement use private real files.
+// Simulate eligibility for inert fixtures; path resolution/stat/replacement use
+// private real files. Config-selection cases additionally execute their fake.
 vi.mock("node:fs", async importOriginal => {
   const fs = await importOriginal<typeof import("node:fs")>();
   return { ...fs, accessSync: (file: string) => { if (!(fs.statSync(file).mode & 0o111)) throw Error("not executable"); } };
@@ -65,6 +66,58 @@ function fixture() {
 const input = { seatRef: "owner@rig", mode: "auto", actor: "operator", reason: "deliberate choice" };
 
 describe("S03 production managed capability selection", () => {
+  it.each([
+    ["unset", undefined], ["relative", "./config"],
+    ["absolute", "/inert/explicit-config"], ["empty", ""],
+  ])("preserves %s config selection in help and the executed launch", async (_label, selected) => {
+    const f = fixture();
+    if (selected === undefined) delete f.env.CLAUDE_CONFIG_DIR;
+    else f.env.CLAUDE_CONFIG_DIR = selected;
+    const helpReceipt = path.join(f.cwd, "help-env.json");
+    // Observe the actual child environment, using only synthetic credentials.
+    writeFileSync(f.executable, `#!${process.execPath}\n
+const fs = require('node:fs');
+const keys = ['CLAUDE_CONFIG_DIR', 'HOME', 'ANTHROPIC_API_KEY', 'OPENRIG_HOME',
+  'OPENRIG_NODE_ID', 'OPENRIG_RUNTIME', 'OPENRIG_SESSION_NAME', 'OPENRIG_OCCUPANT_GENERATION'];
+const env = Object.fromEntries(keys.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]]));
+if (process.argv.includes('--help')) {
+  fs.writeFileSync(${JSON.stringify(helpReceipt)}, JSON.stringify(env));
+  console.log(${JSON.stringify(help)});
+} else console.log(JSON.stringify({ env, args: process.argv.slice(2), cwd: process.cwd() }));
+`);
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    vi.mocked(execFile).mockImplementation(native.execFile);
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    const configDir = path.resolve(f.cwd, selected ?? path.join(f.env.HOME!, ".claude"));
+    expect(prepared.configDir).toBe(configDir);
+    const args = ["--permission-mode", "auto", "--name", "seat's literal name"];
+    const command = prepared.command(args);
+    expect(command).not.toContain(f.env.ANTHROPIC_API_KEY);
+    const stdout = await new Promise<string>((resolve, reject) => {
+      native.execFile("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 3000,
+        env: { ...f.env, CLAUDE_CONFIG_DIR: "/inert/not-the-managed-selection", OPENRIG_NODE_ID: "not-the-target" } },
+      (error, out) => error ? reject(error) : resolve(out));
+    });
+    const launched = JSON.parse(stdout);
+    const queried = JSON.parse(readFileSync(helpReceipt, "utf8"));
+    for (const env of [queried, launched.env]) {
+      if (selected === undefined) expect.soft(env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
+      else expect(env.CLAUDE_CONFIG_DIR).toBe(configDir);
+    }
+    if (selected === undefined) expect.soft(command).not.toContain("CLAUDE_CONFIG_DIR=");
+    expect(queried).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(launched).toMatchObject({ cwd: f.cwd, args, env: {
+      HOME: f.env.HOME, ANTHROPIC_API_KEY: f.env.ANTHROPIC_API_KEY, OPENRIG_HOME: f.env.OPENRIG_HOME,
+      OPENRIG_NODE_ID: "node", OPENRIG_RUNTIME: "claude-code", OPENRIG_SESSION_NAME: "seat",
+      OPENRIG_OCCUPANT_GENERATION: "generation-1",
+    } });
+  });
+  it("detects unset config becoming explicit even when the storage directory stays the same", async () => {
+    const f = fixture(); delete f.env.CLAUDE_CONFIG_DIR;
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat" }, "auto");
+    f.env.CLAUDE_CONFIG_DIR = path.join(f.env.HOME!, ".claude");
+    expect(() => prepared.command([])).toThrow(/context changed/);
+  });
   it("selects and audits through the production service/adapter seam, without launch or secret copies", async () => {
     const f = fixture(); vi.stubEnv("PATH", f.daemonBin);
     expect(await f.service.setPermissions(input)).toEqual(expect.objectContaining({ ok: true, changed: true, to: { runtime: "claude-code", mode: "auto" } }));
@@ -145,10 +198,12 @@ describe("S03 bound launch across existing paths", () => {
     expect(f.calls[0]).toContain("'OPENRIG_OCCUPANT_GENERATION=reserved-next'");
     expect(f.db.prepare("SELECT generation_uuid FROM occupant_tenures").get()).toEqual({ generation_uuid: "generation-1" });
   });
-  it("captures the fork token only from the bound config root and preserves call-entry arguments", async () => {
+  it.each(["unset", "explicit"])("captures the fork token from the %s config root and preserves call-entry arguments", async selection => {
     const f = fixture(); const reads: string[] = [];
+    if (selection === "unset") delete f.env.CLAUDE_CONFIG_DIR;
+    const configDir = selection === "unset" ? path.join(f.env.HOME!, ".claude") : path.join(f.cwd, "config");
     const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, claudeManagedLaunch: f.managed, fsOps: { ...fsOps,
-      homedir: "/different/daemon/home", exists: p => p === path.join(f.cwd,"config","sessions"), readdir: () => ["token.json"],
+      homedir: "/different/daemon/home", exists: p => p === path.join(configDir,"sessions"), readdir: () => ["token.json"],
       readFile: p => { reads.push(p); return JSON.stringify({ name: "original", sessionId: "new-fork-token" }); } } });
     const opts = { name: "original", forkSource: { kind: "native_id" as const, value: "original-parent" } };
     vi.mocked(execFile).mockImplementation(((_f: string, _a: string[], _o: any, done: any) => {
@@ -156,7 +211,7 @@ describe("S03 bound launch across existing paths", () => {
       opts.name = "changed"; opts.forkSource.value = "other-history"; done(null, help);
     }) as any);
     expect(await adapter.launchHarness(f.binding, opts)).toMatchObject({ ok: true, resumeToken: "new-fork-token" });
-    expect(reads).toEqual([path.join(f.cwd,"config","sessions","token.json")]);
+    expect(reads).toEqual([path.join(configDir,"sessions","token.json")]);
     expect(f.calls[0]).toContain("'--resume' 'original-parent'"); expect(f.calls[0]).toContain("'--name' 'original'");
     expect(f.calls[0]).not.toContain("other-history"); expect(f.calls[0]).not.toContain("other-model");
   });

@@ -2,8 +2,9 @@
 
 The first PR automation increment is described in [ci/README.md](ci/README.md).
 It runs the existing daemon-restart baton fixture plus a fault control in the
-installed-package testbed. Hosted green/red execution is required before claiming
-that increment verified. The eleven authored scenarios below are a broader target;
+installed-package testbed, now alongside the library's queue-baton scenario and
+its explicit seed binding. Hosted green/red execution is required before claiming
+either verified. The eleven authored scenarios below are a broader target;
 they are not eleven admitted CI passes.
 
 ## Historical 51-03 seed contract — the ten (+ one)
@@ -41,6 +42,12 @@ Every scenario carries a `seed_regression: {class: …}` step and, in its header
 scenario's `expect` legs MUST catch it. Acceptance per scenario = the PAIR: GREEN on the
 shipped tip + RED on the seeded run whose runner diff (expected vs last-observed) names
 the class. A scenario that cannot be shown RED is not delivered.
+
+For executable seeds, place the step before the affected action and supply the
+pipeline's `deps.seedRegression` controller. It must arm a real local fault in the
+seeded run and explicitly record that fault as disabled in the healthy run. The
+paired harness verifies the injection receipt and the specific failed observation.
+The remaining historical markers after their assertions are not executable proofs.
 
 ## Run status honesty (authored before the runner exists)
 YAML authoring is cleared ahead of the 51-02 runner (dispatch authority). These files

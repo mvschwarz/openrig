@@ -39,6 +39,7 @@
 
 import os from "node:os";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { spawn as nodeSpawn } from "node:child_process";
 import { loadHostRegistry, resolveHost, type SshHostEntry } from "./../host-registry.js";
 import { looksLikePermissionGate } from "./../cross-host-executor.js";
@@ -131,7 +132,10 @@ export function checkLocalPath(raw: string): PathCheck {
       error: `refused: '${raw}' resolves into the active OPENRIG_HOME (${activeOpenRigHome}) — live OpenRig state is not a copy source/target in v0 (crash-safety). This is the FR-4 default-deny wall (a short closed list; extension requires a ruling).`,
     };
   }
-  return { ok: true, normalizedPath: resolved };
+  // rsync distinguishes a directory from its contents by the source's trailing separator.
+  const normalizedPath = raw.endsWith(path.sep) && !resolved.endsWith(path.sep)
+    ? resolved + path.sep : resolved;
+  return { ok: true, normalizedPath };
 }
 
 /** Remote side: posix-normalize, then the wall — absolute-only (arch Q5),
@@ -328,12 +332,14 @@ export async function runFileCopy(plan: CopyPlan, deps: { spawn?: SpawnFn } = {}
 
   let stdout = "";
   let stderr = "";
+  const stdoutDecoder = new StringDecoder("utf8");
+  const stderrDecoder = new StringDecoder("utf8");
   let spawnFailed: NodeJS.ErrnoException | null = null;
   child.stdout?.on("data", (chunk: Buffer | string) => {
-    stdout += typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+    stdout += typeof chunk === "string" ? chunk : stdoutDecoder.write(chunk);
   });
   child.stderr?.on("data", (chunk: Buffer | string) => {
-    stderr += typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+    stderr += typeof chunk === "string" ? chunk : stderrDecoder.write(chunk);
   });
 
   const exitCode: number | null = await new Promise((resolve) => {
@@ -344,6 +350,8 @@ export async function runFileCopy(plan: CopyPlan, deps: { spawn?: SpawnFn } = {}
     child.on("close", (code: number | null) => resolve(code));
   });
 
+  stdout += stdoutDecoder.end();
+  stderr += stderrDecoder.end();
   if (spawnFailed !== null && (spawnFailed as NodeJS.ErrnoException).code === "ENOENT") {
     return {
       ok: false,

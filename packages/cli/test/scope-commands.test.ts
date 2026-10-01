@@ -461,6 +461,24 @@ describe("rig scope slice move (HG-7)", () => {
   beforeEach(() => { env = seedSubstrate(); });
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
 
+  it.each([true, false])("warns about source siblings whose dependency becomes dangling (json=%s)", async (json) => {
+    const dependent = path.join(env.missionsRoot, "backlog", "slices", "02-tests", "README.md");
+    writeFile(dependent, "---\nid: OPR.99.0.1.2\ndepends_on: [OPR.99.0.1.1]\n---\n# tests\n");
+    const original = fs.readFileSync(dependent, "utf8");
+    const args = ["slice", "move", "01-debt-foo", "release-0.3.2", "--mission", "backlog"];
+    if (json) args.push("--json");
+    const result = await run(args, env.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    expect(fs.readFileSync(dependent, "utf8")).toBe(original);
+    expect(result.stdout).toContain("OPR.99.0.1.2");
+    expect(result.stdout).toContain("OPR.99.0.1.1");
+    expect(result.stdout).toContain("depends_on");
+    if (json) expect(JSON.parse(result.stdout).warnings).toEqual([
+      expect.stringContaining("OPR.99.0.1.2"),
+    ]);
+    else expect(result.stdout).toContain("Warning:");
+  });
+
   it("moves between missions; auto-renumber; frontmatter.mission updates", async () => {
     seedMissionComposition(env.missionsRoot, "backlog", [
       { ref: "slices/01-debt-foo/slice.yaml", order: 10, active: true },

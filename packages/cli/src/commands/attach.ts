@@ -84,7 +84,7 @@ export function attachCommand(depsOverride?: StatusDeps): Command {
       }
 
       const hasNode = !!opts.node;
-      const hasPodFields = !!opts.pod || !!opts.member || !!opts.runtime;
+      const hasPodFields = !!opts.pod || !!opts.member;
       if (hasNode && hasPodFields) {
         console.error("Specify either --node or --pod + --member + --runtime, not both.");
         process.exitCode = 1;

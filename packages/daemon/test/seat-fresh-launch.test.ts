@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import path from "node:path";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -75,6 +76,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       }),
       probeSession: vi.fn(async (name: string) => alive.has(name) ? { state: "present" as const } : { state: "absent" as const }),
       hasSession: vi.fn(async (name: string) => alive.has(name)),
+      startServer: vi.fn(async (): Promise<TmuxResult> => ({ ok: true })),
       listSessions: vi.fn(async () => [...alive].map((name) => ({ name, windows: 1, created: "", attached: false }))),
       listWindows: vi.fn(async () => []),
       listPanes: vi.fn(async (name: string) => {
@@ -319,6 +321,144 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed" });
     expect(alive.has(seat.sessionName)).toBe(false);
     expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(tmux.startServer).not.toHaveBeenCalled();
+  });
+
+  // Real tmux ends its server when the last session goes (exit-empty), and a
+  // probe then fails "no server running": transport_unavailable, never absence.
+  // new-session and startServer() each bring a server back.
+  function modelServerLifetime() {
+    const server = { up: true, starts: 0 };
+    const createSession = vi.mocked(tmux.createSession).getMockImplementation()!;
+    vi.mocked(tmux.createSession).mockImplementation(async (...args) => {
+      server.up = true;
+      return createSession(...args);
+    });
+    vi.mocked(tmux.killSession).mockImplementation(async (name: string) => {
+      killed.push(name);
+      alive.delete(name);
+      livePanes.delete(name);
+      if (alive.size === 0) server.up = false;
+      return { ok: true };
+    });
+    vi.mocked(tmux.probeSession).mockImplementation(async (name: string) => {
+      if (!server.up) return { state: "transport_unavailable", cause: "no server running on /tmp/tmux-1000/default" };
+      return alive.has(name) ? { state: "present" } : { state: "absent" };
+    });
+    vi.mocked(tmux.hasSession).mockImplementation(async (name: string) => server.up && alive.has(name));
+    vi.mocked(tmux.startServer).mockImplementation(async () => {
+      if (!server.up) {
+        server.up = true;
+        server.starts += 1;
+      }
+      return { ok: true };
+    });
+    return server;
+  }
+
+  describe("when stopping the managed occupant ends the tmux server", () => {
+    it.each(["sole", "pair"] as const)("continues the requested fresh launch for a %s seat", async (shape) => {
+      const seat = seedSeat();
+      const retiringGeneration = sessionRegistry.currentOccupantTenure(seat.node.id)!.generationUuid;
+      if (shape === "pair") alive.add("dev-qa@fresh-rig");
+      const server = modelServerLifetime();
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "sole-seat fresh" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      if (!result.ok) return;
+      expect(killed).toEqual([seat.sessionName]);
+      expect(server.starts).toBe(shape === "sole" ? 1 : 0);
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(alive.has(seat.sessionName)).toBe(true);
+      expect(result.generation).not.toBe(retiringGeneration);
+      expect(result.supersededSessionIds).toContain(seat.session!.id);
+      expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxPane).toBe("%fresh");
+    });
+
+    it("proves older non-terminal rows absent on the restored server before superseding them", async () => {
+      const seat = seedSeat({ clean: true });
+      const older = sessionRegistry.registerSession(seat.node.id, "r00-dev-impl@fresh-rig");
+      sessionRegistry.updateStatus(older.id, "running");
+      const current = sessionRegistry.registerSession(seat.node.id, seat.sessionName);
+      sessionRegistry.updateStatus(current.id, "running");
+      sessionRegistry.updateBinding(seat.node.id, { tmuxSession: seat.sessionName, tmuxPane: "%old" });
+      alive.add(seat.sessionName);
+      livePanes.set(seat.sessionName, "%old");
+      const server = modelServerLifetime();
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "old-row history" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready" });
+      if (!result.ok) return;
+      expect(server.starts).toBe(1);
+      expect(vi.mocked(tmux.probeSession).mock.calls.map(([name]) => name)).toContain("r00-dev-impl@fresh-rig");
+      expect(result.supersededSessionIds).toEqual(expect.arrayContaining([older.id, current.id]));
+      expect(killed).toEqual([seat.sessionName]);
+    });
+
+    it("still refuses a same-name session that appears on the restored server", async () => {
+      const seat = seedSeat();
+      const server = modelServerLifetime();
+      vi.mocked(tmux.startServer).mockImplementation(async () => {
+        server.up = true;
+        server.starts += 1;
+        alive.add(seat.sessionName);
+        livePanes.set(seat.sessionName, "%recreated");
+        return { ok: true };
+      });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "recreated occupant" });
+
+      expect(result).toMatchObject({ ok: false, code: "unmanaged_session_collision" });
+      expect(killed).toEqual([seat.sessionName]);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(livePanes.get(seat.sessionName)).toBe("%recreated");
+    });
+
+    it.each([
+      ["the server cannot be restored", () => undefined],
+      ["the probe fails with a permission error", () => { throw new Error("permission denied"); }],
+    ])("keeps the transport refusal when %s", async (_label, afterStop) => {
+      const seat = seedSeat();
+      const server = modelServerLifetime();
+      const probe = vi.mocked(tmux.probeSession).getMockImplementation()!;
+      vi.mocked(tmux.probeSession).mockImplementation(async (name: string) => {
+        if (!server.up) afterStop();
+        return probe(name);
+      });
+      vi.mocked(tmux.startServer).mockResolvedValue({ ok: false, code: "tmux_unavailable", message: "The terminal server did not become available." });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "transport stays down" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+      expect(killed).toEqual([seat.sessionName]);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
+
+    it("neither stops nor starts a server when stop was not requested", async () => {
+      const seat = seedSeat();
+      const server = modelServerLifetime();
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "no stop" });
+
+      expect(result).toMatchObject({ ok: false, code: "session_live" });
+      expect(killed).toEqual([]);
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(server).toEqual({ up: true, starts: 0 });
+    });
+
+    it("does not start a server it did not stop: a seat with no server stays a transport refusal", async () => {
+      seedSeat({ clean: true });
+      const server = modelServerLifetime();
+      server.up = false;
+
+      const result = await service.launchFresh({ seatRef: "dev.impl", fresh: true, reason: "server already down" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
   });
 
   it("stops exactly the managed pod-aware occupant, launches fresh, and preserves sibling/work state", async () => {
@@ -431,5 +571,84 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(sessions[0]).toMatchObject({ status: "exited", startupStatus: "failed" });
     expect(sessionRegistry.currentOccupantTenure(seat.node.id)?.kind).toBe("fresh");
     expect(db.prepare("SELECT COUNT(*) AS c FROM events WHERE type = 'seat.fresh_launch_failed'").get()).toEqual({ c: 1 });
+  });
+
+  // #261: a fresh launch delivers stored built-in startup files from the RUNNING install;
+  // a custom rig file with the same basename is delivered exactly as stored.
+  it("#261 delivers stored built-ins from the running install and leaves custom files untouched", async () => {
+    const seat = seedSeat({ clean: true });
+    const oldAssets = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/assets";
+    const running = path.resolve(import.meta.dirname, "../assets");
+    const meta = { deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] };
+    const stored = [
+      { path: "CULTURE-default.md", absolutePath: `${oldAssets}/guidance/CULTURE-default.md`, ownerRoot: oldAssets, ...meta },
+      { path: "openrig-onboarding-01.md", absolutePath: `${oldAssets}/onboarding/01-world-and-purpose.md`, ownerRoot: oldAssets, ...meta },
+      { path: "CULTURE-default.md", absolutePath: "/project/CULTURE-default.md", ownerRoot: "/project", ...meta },
+    ];
+    db.prepare("UPDATE node_startup_context SET resolved_files_json=? WHERE node_id=?").run(JSON.stringify(stored), seat.node.id);
+    const delivered: Array<{ path: string; absolutePath: string; ownerRoot: string; required: boolean }> = [];
+    adapter.deliverStartup = async (files) => { delivered.push(...(files as typeof delivered)); return { delivered: files.length, failed: [] }; };
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "issue 261" });
+    expect(result.ok).toBe(true);
+    expect(delivered.map((f) => f.absolutePath).sort()).toEqual([
+      "/project/CULTURE-default.md",
+      `${running}/guidance/CULTURE-default.md`,
+      `${running}/onboarding/01-world-and-purpose.md`,
+    ].sort());
+    expect(delivered.every((f) => f.required)).toBe(true);
+    const persisted = JSON.parse((db.prepare("SELECT resolved_files_json AS j FROM node_startup_context WHERE node_id=?").get(seat.node.id) as { j: string }).j) as Array<{ absolutePath: string }>;
+    expect(persisted.some((f) => f.absolutePath.startsWith(oldAssets))).toBe(false);
+  });
+
+  // #261 extension: shipped-spec projection resources follow the running install; a plugin stored
+  // outside daemon/specs and user resources are projected exactly as stored.
+  it("#261 projects shipped-spec resources from the running install and leaves plugin/user entries untouched", async () => {
+    const seat = seedSeat({ clean: true });
+    const oldSpecs = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/specs";
+    const runningSpecs = path.resolve(import.meta.dirname, "../specs");
+    const entry = (over: Record<string, string>) => ({ category: "runtime_resource", effectiveId: "x", sourceSpec: "shared", resourcePath: "r", ...over });
+    const stored = [
+      entry({ effectiveId: "shared:claude-default-settings", sourcePath: `${oldSpecs}/agents/shared`, absolutePath: `${oldSpecs}/agents/shared/runtime/claude-settings.fragment.json`, resourceType: "claude_settings_fragment" }),
+      entry({ category: "plugin", effectiveId: "shared:openrig-core", sourcePath: `${oldSpecs}/agents/shared`, absolutePath: "/home/u/.openrig/plugins/openrig-core" }),
+      entry({ category: "guidance", effectiveId: "role", sourceSpec: "dev.impl", sourcePath: "/project/agents/impl", absolutePath: "/project/agents/impl/guidance/role.md" }),
+    ];
+    db.prepare("UPDATE node_startup_context SET projection_entries_json=? WHERE node_id=?").run(JSON.stringify(stored), seat.node.id);
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "issue 261 projection" });
+    expect(result.ok).toBe(true);
+    const byId = Object.fromEntries((projectedPlan?.entries ?? []).map((e) => [e.effectiveId, e]));
+    expect(byId["shared:claude-default-settings"]).toMatchObject({
+      sourcePath: `${runningSpecs}/agents/shared`, absolutePath: `${runningSpecs}/agents/shared/runtime/claude-settings.fragment.json`,
+      resourceType: "claude_settings_fragment", category: "runtime_resource",
+    });
+    expect(byId["shared:openrig-core"]).toMatchObject({ sourcePath: `${oldSpecs}/agents/shared`, absolutePath: "/home/u/.openrig/plugins/openrig-core" });
+    expect(byId["role"]).toMatchObject({ absolutePath: "/project/agents/impl/guidance/role.md" });
+  });
+
+  // #261 startup extension: shipped-spec startup files (kernel culture, agent role/startup context) follow the running install.
+  it("#261 delivers shipped-spec startup files (pre- and post-launch) from the running install", async () => {
+    const seat = seedSeat({ clean: true });
+    const oldSpecs = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/specs";
+    const runningSpecs = path.resolve(import.meta.dirname, "../specs");
+    const kernel = "rigs/launch/kernel";
+    const agent = `${kernel}/agents/advisor/lead`;
+    const stored = [
+      { path: "culture/CULTURE.md", absolutePath: `${oldSpecs}/${kernel}/culture/CULTURE.md`, ownerRoot: `${oldSpecs}/${kernel}`, deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] },
+      { path: "guidance/role.md", absolutePath: `${oldSpecs}/${agent}/guidance/role.md`, ownerRoot: `${oldSpecs}/${agent}`, deliveryHint: "send_text", required: true, appliesOn: ["fresh_start", "restore"] },
+      { path: "culture/CULTURE.md", absolutePath: "/project/culture/CULTURE.md", ownerRoot: "/project", deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] },
+    ];
+    db.prepare("UPDATE node_startup_context SET resolved_files_json=? WHERE node_id=?").run(JSON.stringify(stored), seat.node.id);
+    const delivered: string[] = [];
+    adapter.deliverStartup = async (files) => { delivered.push(...files.map((f) => f.absolutePath)); return { delivered: files.length, failed: [] }; };
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "issue 261 shipped specs" });
+    expect(result.ok).toBe(true);
+    // Pre-launch culture and the post-launch send_text role both arrive at the running install; custom is as stored.
+    expect(delivered.sort()).toEqual([
+      `${runningSpecs}/${agent}/guidance/role.md`,
+      `${runningSpecs}/${kernel}/culture/CULTURE.md`,
+      "/project/culture/CULTURE.md",
+    ].sort());
+    const persisted = JSON.parse((db.prepare("SELECT resolved_files_json AS j FROM node_startup_context WHERE node_id=?").get(seat.node.id) as { j: string }).j) as Array<{ path: string; absolutePath: string; deliveryHint: string }>;
+    expect(persisted.find((f) => f.path === "guidance/role.md")).toMatchObject({ absolutePath: `${runningSpecs}/${agent}/guidance/role.md`, deliveryHint: "send_text" });
+    expect(persisted.some((f) => f.absolutePath.startsWith(oldSpecs))).toBe(false);
   });
 });

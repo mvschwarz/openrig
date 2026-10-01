@@ -1,6 +1,6 @@
 {
   "name": "openrig",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -13,7 +13,7 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm run test:repo && npm run test:workspaces",
-    "test:repo": "npm run build -w packages/daemon && node --test scripts/*.test.mjs && node scripts/check-docs-guard.mjs && node scripts/mirror-skills.mjs --check && node scripts/generate-context-packs.mjs --check",
+    "test:repo": "npm run build -w packages/daemon && node --test --test-concurrency=1 scripts/*.test.mjs && node scripts/check-docs-guard.mjs && node scripts/mirror-skills.mjs --check && node scripts/generate-context-packs.mjs --check",
     "test:workspaces": "npm run test -w packages/daemon -w packages/cli -w packages/tui",
     "test:ui": "npm run test -w packages/ui",
     "typecheck:prep": "npm run build -w packages/daemon",

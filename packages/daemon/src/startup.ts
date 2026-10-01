@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { configureShadowCapture } from "./domain/shadow-capture.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "./domain/seat-delivery-guard.js";
 import { queueRecoveryOwnsWake } from "./domain/queue-wake-ladder.js";
@@ -8,7 +9,7 @@ import { HealthDiagnosisService } from "./domain/health-diagnosis.js";
 import { readHealthArtifact, healthAuthority, healthHumanReadiness } from "./domain/health-context.js";
 import type { Hono } from "hono";
 import type Database from "better-sqlite3";
-import type { ExecFn } from "./adapters/tmux.js";
+import type { ArgvExecFn, ExecFn } from "./adapters/tmux.js";
 import type { CmuxTransportFactory } from "./adapters/cmux.js";
 import { createDb } from "./db/connection.js";
 import { migrate } from "./db/migrate.js";
@@ -25,7 +26,7 @@ import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
-import { execCommand } from "./adapters/tmux-exec.js";
+import { execArgvCommand, execCommand } from "./adapters/tmux-exec.js";
 import { createCmuxCliTransport } from "./adapters/cmux-transport.js";
 import { SnapshotRepository } from "./domain/snapshot-repository.js";
 import { CheckpointStore } from "./domain/checkpoint-store.js";
@@ -172,6 +173,8 @@ interface DaemonOptions {
    *  listeners by binding evidence. Absent (tests/legacy) = healthz body unchanged. */
   bindPlan?: import("./domain/bind-plan.js").BindPlan;
   tmuxExec?: ExecFn;
+  /** Optional shell-free tmux executor; selected by default on Windows. */
+  argvExec?: ArgvExecFn;
   cmuxExec?: ExecFn;
   cmuxFactory?: CmuxTransportFactory;
   cmuxTimeoutMs?: number;
@@ -226,6 +229,10 @@ const KNOWN_PROVIDER_AUTH_ENV = new Set([
   "OPENROUTER_API_KEY",
   "ZAI_API_KEY",
   "KIMI_API_KEY",
+  // Issue #194: the bearer token of a Codex Amazon Bedrock provider
+  // (`env_key = "AWS_BEARER_TOKEN_BEDROCK"`). Still forwarded only when the
+  // operator names it in recovery.provider_auth_env_allowlist.
+  "AWS_BEARER_TOKEN_BEDROCK",
 ]);
 
 export function collectAllowlistedProviderAuthEnv(
@@ -396,7 +403,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   watchdogAutoRegistration.assertLiveSeatCoverage();
   const watchdogHistoryLogInstance = new WatchdogHistoryLog(db);
 
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand);
+  const argvExec = opts?.argvExec
+    ?? (opts?.tmuxExec ? undefined : process.platform === "win32" ? execArgvCommand : undefined);
+  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;
@@ -920,7 +929,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       sessionRegistry,
       eventBus,
       bootstrapOrchestrator,
-      specsDir: nodePath.resolve(nodePath.dirname(new URL(import.meta.url).pathname), "..", "specs"),
+      specsDir: nodePath.resolve(nodePath.dirname(fileURLToPath(new URL(import.meta.url))), "..", "specs"),
       // V0.3.1 slice 05 — kernel members run against the operator's
       // workspace, not the daemon installation tree. Without this
       // cwdOverride, BootstrapOrchestrator refuses with
@@ -1790,7 +1799,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // the same daemon endpoint.
     deps.skillLibraryDiscoveryService = new SkillLibraryDiscoveryService({
       sharedSkillsDir: nodePath.resolve(
-        nodePath.dirname(new URL(import.meta.url).pathname),
+        nodePath.dirname(fileURLToPath(new URL(import.meta.url))),
         "..",
         "specs",
         "agents",

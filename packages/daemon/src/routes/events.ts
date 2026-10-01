@@ -40,6 +40,10 @@ eventsRoute.get("/", (c) => {
       }
     });
 
+    const aborted = new Promise<void>((resolve) => {
+      stream.onAbort(() => resolve());
+    });
+
     try {
       // 2. Replay missed events from DB
       const missed = rigId
@@ -66,9 +70,7 @@ eventsRoute.get("/", (c) => {
       replaying = false;
 
       // 4. Keep stream alive until client disconnects
-      await new Promise<void>((resolve) => {
-        stream.onAbort(() => resolve());
-      });
+      await aborted;
     } finally {
       unsubscribe();
     }

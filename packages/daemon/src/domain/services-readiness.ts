@@ -44,8 +44,12 @@ export async function evaluateWaitTargets(
         detail: ok ? null : `TCP probe failed: ${target.tcp}`,
       });
     } else if (target.condition === "healthy" && target.service) {
-      // Compose health check — look at compose ps output
-      const svc = composeStatuses?.find((s) => s.name === target.service);
+      // Every replica must be healthy. An unhealthy replica takes priority
+      // over a starting replica, regardless of Compose's row order.
+      const replicas = composeStatuses?.filter((s) => s.name === target.service) ?? [];
+      const svc = replicas.find((s) => s.health !== "healthy" && s.health !== "starting")
+        ?? replicas.find((s) => s.health === "starting")
+        ?? replicas[0];
       if (!svc) {
         results.push({ target, status: "unhealthy", detail: `Service '${target.service}' not found in compose status` });
       } else if (svc.health === "healthy") {

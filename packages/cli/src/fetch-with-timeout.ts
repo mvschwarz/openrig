@@ -8,6 +8,8 @@ export class FetchTimeoutError extends Error {
 export interface FetchWithTimeoutOptions {
   timeoutMs: number;
   timeoutMessage: string;
+  /** Consume finite response bodies before releasing the request deadline. */
+  consumeResponse?: (response: Response) => Promise<void>;
 }
 
 export async function fetchWithTimeout(
@@ -38,7 +40,9 @@ export async function fetchWithTimeout(
   }
 
   try {
-    return await fetchImpl(url, { ...init, signal: controller.signal });
+    const response = await fetchImpl(url, { ...init, signal: controller.signal });
+    await options.consumeResponse?.(response);
+    return response;
   } catch (err) {
     if (err instanceof FetchTimeoutError) throw err;
     if (err instanceof Error && err.name === "AbortError") {

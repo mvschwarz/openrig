@@ -19,6 +19,7 @@ type ShrinkResponse = {
     nodeId: string;
     status: "removed" | "failed";
     sessionsKilled: number;
+    sessionKeptFor?: string;
     error?: string;
   }>;
   error?: string;
@@ -74,7 +75,8 @@ export function shrinkCommand(depsOverride?: StatusDeps): Command {
         for (const node of res.data.nodes ?? []) {
           const icon = node.status === "removed" ? "OK" : "FAIL";
           const error = node.error ? ` — ${node.error}` : "";
-          console.log(`  [${icon}] ${node.logicalId}${error}`);
+          const kept = node.sessionKeptFor ? ` (session kept: owned by ${node.sessionKeptFor})` : "";
+          console.log(`  [${icon}] ${node.logicalId}${kept}${error}`);
         }
         process.exitCode = 1;
         return;
@@ -83,6 +85,9 @@ export function shrinkCommand(depsOverride?: StatusDeps): Command {
       console.log(
         `Removed pod ${res.data.namespace} from rig ${res.data.rigId} (${res.data.removedLogicalIds?.length ?? 0} node(s), ${res.data.sessionsKilled} session killed)`
       );
+      for (const node of res.data.nodes ?? []) {
+        if (node.sessionKeptFor) console.log(`  ${node.logicalId}: session kept, owned by ${node.sessionKeptFor}`);
+      }
     });
 
   return cmd;

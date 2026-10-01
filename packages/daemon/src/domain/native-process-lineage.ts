@@ -68,6 +68,24 @@ function codexResumeToken(args: string[]): string | null | undefined {
   return null;
 }
 
+// Managed fresh/resume launches name the current Claude identity explicitly.
+// A fork's --resume names its parent, so it cannot prove the new occupant.
+function claudeSessionToken(args: string[]): string | null {
+  let token: string | null = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
+    if (["--permission-mode", "--model", "--name"].includes(arg)) { index += 1; continue; }
+    if (/^--(?:permission-mode|model|name)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
+    if (!identity) return null; // Unknown argv is not positive identity proof.
+    const value = identity[1] ?? args[++index];
+    if (token !== null || !value || value.startsWith("-")) return null;
+    token = value;
+  }
+  return token;
+}
+
 /** Require a live process in the pane's own lineage whose argv names both the
  * declared runtime and the exact native resume identity. */
 export function findExactNativeResumeProcess(
@@ -76,7 +94,7 @@ export function findExactNativeResumeProcess(
   runtime: string | null,
   expectedToken: string,
 ): NativeProcessRow | null {
-  if (runtime === "codex") return selectCodexProcess(processes, panePid, expectedToken, true)?.process ?? null;
+  if (runtime === "codex") return selectNativeProcess(processes, panePid, expectedToken, true)?.process ?? null;
   if (runtime !== "claude-code") return null;
   const byParent = new Map<number, NativeProcessRow[]>();
   for (const process of processes) {
@@ -103,26 +121,35 @@ export function findExactNativeResumeProcess(
 export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
   try {
     const output = await runAsyncSite("codex.runtime.list_processes", async () => {
-      const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,pgid,tpgid,ucomm,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024 });
+      // lstart is locale-formatted; the child-only C locale keeps the English date the parser expects.
+      const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,pgid,tpgid,ucomm,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
       return stdout;
     });
     return output.split("\n").slice(1).flatMap((line) => {
-      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(\S+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/);
+      // ucomm may contain spaces on every platform: macOS app helpers (`Slack Helper`), and on
+      // Linux task names set by prctl(PR_SET_NAME) or process.title (`tmux: server`,
+      // `node (vitest 1)`). lstart always begins with a weekday word and runs to the year, and
+      // ucomm (16 bytes at most) is too short to contain such a date, so matching ucomm lazily
+      // up to the first date is exact.
+      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(.+?)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/);
       return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), tpgid: Number(match[4]), executableName: match[5]!, startedAt: match[6]!, command: match[7]! }] : [];
     });
   } catch { return []; }
 }
 
 export type NativeProcessLister = () => NativeProcessRow[] | Promise<NativeProcessRow[]>;
-export type CodexProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string };
+export type NativeProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string };
+export type CodexProcessObservation = NativeProcessObservation;
 
-function selectCodexProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false): CodexProcessObservation | null {
+function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex"): NativeProcessObservation | null {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const root = byPid.get(panePid);
   if (byPid.size !== rows.length || !root?.startedAt || !root.tpgid || root.tpgid <= 0) return null;
   const matches: { process: NativeProcessRow; chain: NativeProcessRow[] }[] = [];
+  const executable = runtime === "claude-code" ? "claude" : "codex";
   for (const row of rows) {
-    if (row.executableName !== "codex" || executableName(tokens(row.command)[0] ?? "") !== "codex"
+    const osExecutable = runtime === "claude-code" ? executableName(row.executableName ?? "") : row.executableName;
+    if (osExecutable !== executable || executableName(tokens(row.command)[0] ?? "") !== executable
       || row.pgid !== root.tpgid || row.tpgid !== root.tpgid) continue;
     const chain: NativeProcessRow[] = [];
     const visited = new Set<number>();
@@ -136,31 +163,50 @@ function selectCodexProcess(rows: NativeProcessRow[], panePid: number, expectedT
   }
   if (matches.length !== 1) return null;
   const { process, chain } = matches[0]!;
-  const resumeToken = codexResumeToken(tokens(process.command).slice(1));
-  if (requireResume && !expectedToken) return null;
-  if ((requireResume || (expectedToken !== undefined && resumeToken !== undefined))
-    && (!expectedToken || resumeToken !== expectedToken)) return null;
+  if (runtime === "claude-code") {
+    if (!expectedToken || claudeSessionToken(tokens(process.command).slice(1)) !== expectedToken) return null;
+  } else {
+    const resumeToken = codexResumeToken(tokens(process.command).slice(1));
+    if (requireResume && !expectedToken) return null;
+    if ((requireResume || (expectedToken !== undefined && resumeToken !== undefined))
+      && (!expectedToken || resumeToken !== expectedToken)) return null;
+  }
   return { panePid, process, fingerprint: JSON.stringify(chain.map((row) => [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command])) };
 }
 
-export async function observeCodexPaneProcess(input: {
+async function observeNativePaneProcess(input: {
   target: string;
   tmux: { getPanePid(target: string): Promise<number | null> };
   listProcesses?: NativeProcessLister;
   expectedToken?: string | null;
   requireResume?: boolean;
-}): Promise<CodexProcessObservation | null> {
+}, runtime: NativeRuntime): Promise<NativeProcessObservation | null> {
   try {
     const pid = await input.tmux.getPanePid(input.target);
     if (!pid) return null;
     const rows = await (input.listProcesses ?? listNativeProcesses)();
-    return selectCodexProcess(rows, pid, input.expectedToken, input.requireResume);
+    return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime);
   } catch { return null; }
+}
+
+export async function observeCodexPaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<CodexProcessObservation | null> {
+  return observeNativePaneProcess(input, "codex");
 }
 
 export async function verifyCodexPaneProcess(input: Parameters<typeof observeCodexPaneProcess>[0]): Promise<CodexProcessObservation | null> {
   const first = await observeCodexPaneProcess(input);
   if (!first) return null;
   const second = await observeCodexPaneProcess(input);
+  return second?.fingerprint === first.fingerprint ? second : null;
+}
+
+export async function observeClaudePaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
+  return observeNativePaneProcess(input, "claude-code");
+}
+
+export async function verifyClaudePaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
+  const first = await observeClaudePaneProcess(input);
+  if (!first) return null;
+  const second = await observeClaudePaneProcess(input);
   return second?.fingerprint === first.fingerprint ? second : null;
 }

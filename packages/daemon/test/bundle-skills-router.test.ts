@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import nodePath from "node:path";
+import realFs from "node:fs";
+import os from "node:os";
 import { routeSkills, type SkillsRouterFsOps, type RouteSkillsInput } from "../src/domain/bundle-skills-router.js";
 
 // Item 6 / slice-05 Checkpoint 7.2: bundle-skills-router pure-function tests.
@@ -11,12 +13,11 @@ function mockFs(initialFiles: Record<string, string> = {}): SkillsRouterFsOps & 
     _written: written,
     _mkdirpCalls: mkdirpCalls,
     exists: (p: string) => written.has(p),
-    readFile: (p: string) => {
-      const v = written.get(p);
-      if (v === undefined) throw new Error(`File not found in mock: ${p}`);
-      return v;
+    copyFile: (src: string, dest: string) => {
+      const v = written.get(src);
+      if (v === undefined) throw new Error(`File not found in mock: ${src}`);
+      written.set(dest, v);
     },
-    writeFile: (p: string, c: string) => { written.set(p, c); },
     mkdirp: (p: string) => { mkdirpCalls.push(p); },
   };
 }
@@ -171,5 +172,27 @@ describe("routeSkills", () => {
     expect(result).toMatchObject({ routedCount: 1, rejectedCount: 0 });
     expect(result.records[0]!.installedAt).toBe(`${packageRoot}/test-pkg/skills/DUAL.md`);
     expect(fs._written.get(`${packageRoot}/test-pkg/skills/DUAL.md`)).toBe("dual");
+  });
+});
+
+describe("routeSkills copies bytes through the real filesystem", () => {
+  it("a non-UTF-8 file arrives byte-identical", () => {
+    const root = realFs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-skills-router-bytes-"));
+    try {
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x80, 0x00, 0xc3, 0x28, 0xff, 0xfe]);
+      const bundleRoot = nodePath.join(root, "bundle");
+      realFs.mkdirSync(nodePath.join(bundleRoot, "skills/blob"), { recursive: true });
+      realFs.writeFileSync(nodePath.join(bundleRoot, "skills/blob", "logo.png"), bytes);
+      const target = nodePath.join(root, "target");
+      const result = routeSkills(
+        { ...makeInput(), bundleRoot, declaredSkills: ["skills/blob/logo.png"], targetSkillsDir: target },
+        { exists: realFs.existsSync, mkdirp: (p) => realFs.mkdirSync(p, { recursive: true }), copyFile: realFs.copyFileSync },
+      );
+      expect(result.routedCount).toBe(1);
+      const installedAt = result.records[0]!.installedAt!;
+      expect(realFs.readFileSync(installedAt).equals(bytes)).toBe(true);
+    } finally {
+      realFs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

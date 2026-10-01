@@ -215,15 +215,23 @@ export class SeatDeliveryGuard {
 }
 
 /** Current binding, never a latest historical session-name guess. Unbound seats
- * resolve by node/canonical address for preferences and lifecycle preflight. */
+ * resolve by node/canonical address for preferences and lifecycle preflight.
+ * #174: an archived rig can keep a binding to the same session name as a live
+ * seat, so unarchived matches win; archived ones count only when nothing else
+ * matches. Exactly one match is still required. */
 export function resolveGuardTarget(db: Database.Database, name: string): GuardTarget | null {
   const rows = db.prepare(`SELECT n.id AS nodeId,
       coalesce(b.tmux_session, replace(n.logical_id,'.','-') || '@' || r.name) AS session,
       b.tmux_pane AS pane,
-      (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id=n.id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant
+      (SELECT generation_uuid FROM occupant_tenures t WHERE t.node_id=n.id ORDER BY generation_ordinal DESC LIMIT 1) AS occupant,
+      r.archived_at AS archivedAt
     FROM nodes n JOIN rigs r ON r.id=n.rig_id LEFT JOIN bindings b ON b.node_id=n.id
     WHERE n.id=? OR b.tmux_session=? OR b.tmux_pane=? OR n.logical_id=?
       OR (b.tmux_session IS NULL AND replace(n.logical_id,'.','-') || '@' || r.name=?)`)
-    .all(name, name, name, name, name) as GuardTarget[];
-  return rows.length === 1 ? rows[0]! : null;
+    .all(name, name, name, name, name) as Array<GuardTarget & { archivedAt: string | null }>;
+  const unarchived = rows.filter((row) => row.archivedAt === null);
+  const pool = unarchived.length > 0 ? unarchived : rows;
+  if (pool.length !== 1) return null;
+  const { archivedAt: _archivedAt, ...target } = pool[0]!;
+  return target;
 }

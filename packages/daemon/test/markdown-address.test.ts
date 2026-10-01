@@ -85,6 +85,29 @@ describe("parseMarkdownSections — code-fence-protected header tree", () => {
       "reference/commands-flags",
     ]);
   });
+  it.each(["```", "~~~"])("keeps a %s fence open when a marker line has trailing text", (marker) => {
+    const text = [
+      "## Actual", `${marker}text`, `${marker} not a closing fence`,
+      "## Example heading", marker, "## Next", "real prose",
+    ].join("\n");
+    expect(parseMarkdownSections(text).map((section) => section.headerPath)).toEqual([["actual"], ["next"]]);
+    expect(resolveAddress(text, ["actual"]).text).toContain("## Example heading");
+    expect(() => resolveAddress(text, ["example-heading"])).toThrow(AddressResolutionError);
+    expect(resolveAddress(text, ["next"]).text).toContain("real prose");
+    expect(validateMarkdownAddressability(text)).toEqual([]);
+  });
+
+  it.each(["```", "~~~"])("preserves %s info strings, marker matching, length and CRLF whitespace closers", (marker) => {
+    const other = marker === "```" ? "~~~" : "```";
+    const text = [
+      "## Actual", `${marker}${marker[0]}language`, marker, "## Too short", other,
+      "## Different marker", `${marker}${marker[0]}${marker[0]} \t`, "## Next", "prose",
+    ].join("\r\n");
+    expect(parseMarkdownSections(text).map((section) => section.headerPath)).toEqual([["actual"], ["next"]]);
+    expect(resolveAddress(text, ["actual"]).text).toContain("## Different marker");
+    expect(validateMarkdownAddressability(text)).toEqual([]);
+  });
+
   it("spans terminate at the next SAME-OR-HIGHER header (Q1), own text at ANY header", () => {
     const sections = parseMarkdownSections(CORPUS);
     const gettingStarted = sections.find((s) => s.headerPath.join("/") === "getting-started")!;

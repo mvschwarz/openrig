@@ -5,6 +5,11 @@ import type Database from "better-sqlite3";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { OutboxHandler } from "../src/domain/outbox-handler.js";
+import { migrate } from "../src/db/migrate.js";
+import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 import {
   makeParkedOwnerConsumerPolicy,
   makeRigAnchor,
@@ -67,8 +72,8 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     const { tmux, sendText, sendKeys } = tmuxWithPane(async () => shell);
     const result = await watchdogSend(new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux }), "dev-impl@my-rig");
 
-    expect(result).toMatchObject({ ok: false, sent: false, reason: "target_runtime_not_running" });
-    expect(result.error).toContain(`bare ${shell.replace(/^-/, "")} shell`);
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
+    expect(result.error).toContain(`${shell.replace(/^-/, "")} as the foreground command`);
     expect(result.error).toContain("No text was sent");
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
@@ -146,7 +151,7 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
   ];
   it.each(unproved)("shell label still refuses %s without input", async (_name, mutate) => {
     const { transport, sendText, sendKeys } = wrappedSeat(vi.fn(async () => mutate(wrapperProcesses())));
-    expect(await watchdogSend(transport, "dev-check@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_not_running" });
+    expect(await watchdogSend(transport, "dev-check@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
   });
@@ -158,9 +163,119 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     if (kind === "missing resume identity") sessionRegistry.clearResumeToken(session.id);
     if (kind === "changed process") listProcesses.mockResolvedValueOnce(wrapperProcesses()).mockResolvedValueOnce(wrapperProcesses().slice(0, -1));
     if (kind === "unavailable processes") listProcesses.mockRejectedValue(new Error("process observation failed"));
-    expect(await watchdogSend(transport, "dev-check@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_not_running" });
+    expect(await watchdogSend(transport, "dev-check@my-rig")).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  // #197: reported pane -> managed sh -> native Claude. The OS metadata is
+  // synthetic; argv follows the managed fresh/resume commands in the adapter.
+  function claudeProcesses(identity = `--session-id ${nativeToken}`): NativeProcessRow[] {
+    return wrapperProcesses().filter(row => row.pid !== 1199).map(row => row.pid === 1205
+      ? { ...row, ppid: 1196, executableName: "claude",
+        command: `/opt/bin/claude --permission-mode auto ${identity} --name dev-check@my-rig` } : row);
+  }
+
+  function wrappedClaude(listProcesses = vi.fn(async () => claudeProcesses())) {
+    const { node, session } = seat("claude-code", "dev-check@my-rig");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-check@my-rig", tmuxPane: "%1" });
+    sessionRegistry.updateResumeToken(session.id, "claude_id", nativeToken);
+    const ports = tmuxWithPane(async () => "sh");
+    ports.tmux.getPanePid = vi.fn(async () => 1135);
+    return { ...ports, node, session, listProcesses,
+      transport: new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: ports.tmux, listProcesses, sleep: async () => {} }) };
+  }
+
+  it.each(["fresh", "resume", "versioned process title", "queue nudge"])("#197 wrapped Claude receives %s", async kind => {
+    const rows = claudeProcesses(kind === "resume" ? `--resume ${nativeToken}` : `--session-id ${nativeToken}`);
+    if (kind === "versioned process title") rows.at(-1)!.command = rows.at(-1)!.command.replace("/opt/bin/claude", "claude (2.1.284)");
+    const { transport, sendText, sendKeys, listProcesses } = wrappedClaude(vi.fn(async () => rows));
+    const result = await transport.send("dev-check@my-rig", "existing review", {
+      verify: true, ...(kind === "queue nudge" ? { actorSession: "dev-owner@my-rig", auditPointer: "existing-review", deliveryId: "nudge-claude" } : {}),
+    });
+    expect(result.ok).toBe(true);
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendKeys).toHaveBeenCalledOnce();
+    expect(listProcesses).toHaveBeenCalledTimes(2);
+  });
+
+  // #197 C1: Root observed macOS ucomm "claude.exe" with argv basename
+  // "claude". A versioned argv fixture alone did not exercise this OS-name axis.
+  it.each(["--session-id", "--resume"])("#197 accepts observed Claude OS name with %s", async identityFlag => {
+    const rows = claudeProcesses().map(row => row.pid === 1205
+      ? { ...row, executableName: "claude.exe",
+        command: `/opt/runtime/bin/claude --permission-mode acceptEdits --model claude-opus-5-5 ${identityFlag} ${nativeToken} --name dev-check@my-rig` } : row);
+    const { transport, sendText, sendKeys, listProcesses } = wrappedClaude(vi.fn(async () => rows));
+    expect((await transport.send("dev-check@my-rig", "existing review")).ok).toBe(true);
+    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendKeys).toHaveBeenCalledOnce();
+    expect(listProcesses).toHaveBeenCalledTimes(2);
+  });
+
+  const unprovedClaude: [string, (rows: NativeProcessRow[]) => NativeProcessRow[]][] = [
+    ...unproved,
+    ["wrong Claude identity", rows => rows.map(r => r.pid === 1205 ? { ...r, command: "/opt/bin/claude --session-id other" } : r)],
+    ["argv label without native executable", rows => rows.map(r => r.pid === 1205 ? { ...r, executableName: "echo" } : r)],
+    ["ambiguous native children", rows => [...rows, { ...rows.at(-1)!, pid: 1206 }]],
+    ["fork with only parent identity", () => claudeProcesses(`--resume ${nativeToken} --fork-session`)],
+    ["conflicting identity arguments", () => claudeProcesses(`--resume other --session-id ${nativeToken}`)],
+    ["identity flag only in name value", () => claudeProcesses(`--name --session-id ${nativeToken}`)],
+  ];
+  it.each(unprovedClaude)("#197 retains refusal for %s", async (_label, mutate) => {
+    const { transport, sendText, sendKeys } = wrappedClaude(vi.fn(async () => mutate(claudeProcesses())));
+    const result = await transport.send("dev-check@my-rig", "existing review");
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
+    expect(result.error).toContain("could not verify");
+    expect(result.error).not.toMatch(/runtime is not running|Relaunch the seat|would run as shell commands/);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing identity", "changed process", "changed bound pane", "process lookup failed"])("#197 refuses %s", async kind => {
+    const { transport, session, tmux, listProcesses, sendText, sendKeys } = wrappedClaude();
+    if (kind === "missing identity") sessionRegistry.clearResumeToken(session.id);
+    if (kind === "changed process") listProcesses.mockResolvedValueOnce(claudeProcesses()).mockResolvedValueOnce(claudeProcesses().slice(0, -1));
+    if (kind === "changed bound pane") tmux.getPanePid = async target => target === "%1" ? 999 : 1135;
+    if (kind === "process lookup failed") listProcesses.mockRejectedValue(new Error("unavailable"));
+    const result = await transport.send("dev-check@my-rig", "existing review");
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
+    expect(result.error).toContain("could not verify");
+    expect(result.error).not.toMatch(/runtime is not running|Relaunch the seat|would run as shell commands/);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("#197 still refuses native approval after proving the Claude wrapper", async () => {
+    const { transport, tmux, sendText, sendKeys } = wrappedClaude();
+    tmux.capturePaneContent = async () => "Would you like to run the following command?\n› 1. Yes, proceed (y)\n2. No\nPress enter to confirm or esc to cancel";
+    expect(await transport.send("dev-check@my-rig", "existing review")).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("#197 queue handoff records actual wrapper delivery (matching identity: %s)", async matching => {
+    migrate(db, [outboxEntriesSchema]);
+    const { transport, sendText, sendKeys } = wrappedClaude(vi.fn(async () =>
+      claudeProcesses(`--resume ${matching ? nativeToken : "other"}`)));
+    const repo = new QueueRepository(db, new EventBus(db), {
+      transport, loadHumanRegistry: () => ({ ok: true, entities: [] }),
+    });
+    repo.attachOutbox(new OutboxHandler(db));
+    const source = await repo.create({ sourceSession: "orch@my-rig", destinationSession: "dev-owner@my-rig", body: "review", nudge: false });
+    const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "dev-owner@my-rig", toSession: "dev-check@my-rig" });
+    const stored = repo.getById(created.qitemId)!;
+    expect(stored.lastNudgeAttempt).not.toBeNull();
+    if (matching) {
+      expect(stored.lastNudgeResult).toBe("delivered-ack-pending");
+      expect(sendText).toHaveBeenCalledOnce();
+      expect(sendText).toHaveBeenCalledWith("dev-check@my-rig", expect.stringContaining(`Queue handoff: ${created.qitemId}`));
+      expect(sendKeys).toHaveBeenCalledOnce();
+    } else {
+      expect(stored.lastNudgeResult).toContain("failed:");
+      expect(stored.lastNudgeResult).toContain("could not verify");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    }
   });
 
   it("negative: a terminal node's shell is its runtime, so it still receives text", async () => {
@@ -213,7 +328,7 @@ describe("#142 the parked-owner wake records the refusal honestly and does not r
 
     const first = await makeParkedOwnerConsumerPolicy(deps()).evaluate(job);
     expect(first.action).toBe("send");
-    const refusal = `Refused: '${SEAT}' shows a bare zsh shell, so its claude-code runtime is not running. Text sent there would run as shell commands. Relaunch the seat first. No text was sent.`;
+    const refusal = `Refused: '${SEAT}' reports zsh as the foreground command, but OpenRig could not verify its expected claude-code agent in the bound pane. The agent may still be running behind a wrapper. No text was sent.`;
     history.push({
       historyId: "h1", jobId: "job-1", evaluatedAt: new Date().toISOString(), outcome: "sent", skipReason: null,
       deliveryTargetSession: SEAT, deliveryStatus: "failed", deliveryMessage: "wake",
@@ -223,7 +338,7 @@ describe("#142 the parked-owner wake records the refusal honestly and does not r
     const second = await makeParkedOwnerConsumerPolicy(deps()).evaluate(job);
     expect(second.action).toBe("skip");
     expect(JSON.stringify(second.notes)).toMatch(/already[-_]woken/);
-    expect(transitions.some((t) => t.transitionNote?.startsWith(FAILED_PREFIX) && t.transitionNote.includes("runtime is not running"))).toBe(true);
-    expect(nudges.some((n) => n.startsWith(NUDGE_FAIL_PREFIX) && n.includes("runtime is not running"))).toBe(true);
+    expect(transitions.some((t) => t.transitionNote?.startsWith(FAILED_PREFIX) && t.transitionNote.includes("could not verify"))).toBe(true);
+    expect(nudges.some((n) => n.startsWith(NUDGE_FAIL_PREFIX) && n.includes("could not verify"))).toBe(true);
   });
 });

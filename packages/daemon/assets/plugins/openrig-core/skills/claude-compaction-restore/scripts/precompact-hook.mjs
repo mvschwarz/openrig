@@ -3,8 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
-const skillRoot = path.resolve(new URL("..", import.meta.url).pathname);
+const skillRoot = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const restoreScript = path.join(skillRoot, "scripts", "restore-from-jsonl.mjs");
 // P6(C) injectable output-root: the packet base defaults to the shared
 // /tmp/claude-compaction-restore (production), but becomes per-run isolated when the

@@ -174,6 +174,25 @@ export class QueueWakeRepository {
     });
   }
 
+  /** Active park-generated timers that are still their blocked row's current wake and still target the
+   *  row's owner. These wake the seat that owns the row, not a particular occupant, so a seat swap keeps
+   *  them; any other job the retiring occupant registered still stops. */
+  currentParkTimerIds(): string[] {
+    if (!this.available) return [];
+    return this.db.prepare(
+      `SELECT w.wake_ref
+         FROM queue_transition_wakes w
+         JOIN queue_items q ON q.qitem_id = w.qitem_id
+         JOIN watchdog_jobs j ON j.job_id = w.wake_ref
+        WHERE w.phase = 'armed' AND w.wake_kind = 'timer'
+          AND q.state = 'blocked' AND j.state = 'active' AND j.target_session = q.destination_session
+          AND w.transition_id = (
+            SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+             WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
+          )`,
+    ).all().map((row) => (row as { wake_ref: string }).wake_ref);
+  }
+
   private isLive(kind: ParkWakeKind, ref: string): boolean {
     if (kind === "blocker") {
       const row = this.db.prepare("SELECT state FROM queue_items WHERE qitem_id = ?").get(ref) as

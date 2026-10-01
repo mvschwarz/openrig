@@ -338,6 +338,15 @@ export class RunnerCore {
   }
 
   private handleResponse(record: Record<string, unknown>): void {
+    if (record.success === false || record.error != null) {
+      if (record.id === GET_STATE_ID) {
+        this.ready = false;
+        this.writeSidecar({});
+      }
+      const message = typeof record.error === "string" ? record.error : "request failed";
+      this.io.mirrorLine(`${PI_RUNNER_ERROR_MARKER} rpc: ${message}`);
+      return;
+    }
     if (record.id === GET_STATE_ID) {
       const data = (record.data ?? record.state ?? record) as Record<string, unknown>;
       const sessionFile = typeof data.sessionFile === "string" ? data.sessionFile : undefined;
@@ -372,11 +381,6 @@ export class RunnerCore {
         this.writeSidecar({});
       }
       return;
-    }
-    // Other responses (prompt accepted, …) — surface errors.
-    if (record.success === false || record.error != null) {
-      const message = typeof record.error === "string" ? record.error : "request failed";
-      this.io.mirrorLine(`${PI_RUNNER_ERROR_MARKER} rpc: ${message}`);
     }
   }
 

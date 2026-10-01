@@ -72,3 +72,48 @@ export function checkRunningNameGuard(deps: RunningNameGuardDeps, name: string):
   }
   return { ok: true };
 }
+
+export type StoppedGenerationsVerdict =
+  | { ok: true; rigIds: string[] }
+  | { ok: false; rigId: string; reason: string };
+
+/**
+ * #141: before an explicit YAML import creates a replacement generation, find the unarchived same-name
+ * generations it may archive. Each must have no running sessions (the guard above) and, for every
+ * session name it has used, this daemon's tmux must report positive absence or, on the same socket the
+ * launch uses, "no server running". Any other probe result is uncertainty, not absence. This is a
+ * generation-management rule for the daemon's own tmux namespace, not proof that no process is alive.
+ * `probe` is undefined when the adapter cannot probe; the caller then keeps its existing behavior.
+ */
+export async function confirmStoppedGenerations(
+  db: Database.Database,
+  unarchivedRigIds: string[],
+  probe: (sessionName: string) => Promise<{ state: string; cause?: string }>,
+): Promise<StoppedGenerationsVerdict> {
+  const running = makeRunningSessionCounter(db);
+  for (const rigId of unarchivedRigIds) {
+    if (running(rigId) > 0) return { ok: false, rigId, reason: "it has a running session" };
+    const names = (db.prepare(`
+      SELECT b.tmux_session AS name FROM bindings b JOIN nodes n ON n.id = b.node_id WHERE n.rig_id = ? AND b.tmux_session IS NOT NULL
+      UNION SELECT s.session_name FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE n.rig_id = ?
+    `).all(rigId, rigId) as Array<{ name: string }>).map((row) => row.name);
+    for (const name of names) {
+      let result: { state: string; cause?: string };
+      try {
+        result = await probe(name);
+      } catch (err) {
+        return { ok: false, rigId, reason: `tmux could not check session ${name}: ${(err as Error).message}` };
+      }
+      if (result.state === "absent") continue;
+      if (result.state === "transport_unavailable" && result.cause?.includes("no server running")) continue;
+      return {
+        ok: false,
+        rigId,
+        reason: result.state === "present"
+          ? `tmux session ${name} still exists`
+          : `tmux could not check session ${name}${result.cause ? `: ${result.cause}` : ""}`,
+      };
+    }
+  }
+  return { ok: true, rigIds: unarchivedRigIds };
+}

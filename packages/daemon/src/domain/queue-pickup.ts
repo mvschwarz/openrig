@@ -9,7 +9,10 @@
 // Otherwise the grace follows the latest meaningful queue change; an old note
 // cannot keep the row working forever. Stalled-after-claim names this evidence
 // without inferring idle/dead from age. Blocked remains parked; wake health is
-// derived separately. Legacy callers without timestamps retain count semantics.
+// derived separately. A CLOSED row is terminal: the stall timer answers "is a
+// claimant holding this obligation", and no obligation survives closure — a
+// done item must never contradict its own waiting.state with stalled-after-claim.
+// Legacy callers without timestamps retain count semantics.
 // Queue-row last_heartbeat is formally superseded (2026-08-30, S24 F-14); readers remain
 // null-tolerant. Wiring reopens only for the 0.5.7 mechanized-pull turn-end hook that knows the in-flight row,
 // the first honest row-scoped writer. daemon-lifecycle-store.recordHeartbeat remains live and distinct.
@@ -20,10 +23,16 @@ export const PICKUP_STALL_THRESHOLD_KEY = "queue.pickup_stall_threshold_minutes"
 export const DEFAULT_PICKUP_STALL_THRESHOLD_MINUTES = 3;
 
 export interface PickupReceipt {
-  state: "unclaimed" | "working" | "stalled-after-claim" | "parked";
-  /** Present iff stalled: the named evidence replacing the manual cross-surface join. */
+  state: "unclaimed" | "working" | "stalled-after-claim" | "parked" | "terminal";
+  /** Present iff stalled or terminal: the named evidence replacing the manual cross-surface join. */
   evidence?: string;
 }
+
+/** The closed states. The waiting view already reports every state outside
+ *  pending/in-progress/blocked as "none (terminal obligation)"; the pickup
+ *  receipt must not contradict it with a stall timer. `blocked` is NOT closed
+ *  (it reads parked, and its wake health is derived separately). */
+const CLOSED_PICKUP_STATES = ["done", "failed", "denied", "canceled", "handed-off"] as const;
 
 /** Threshold, FRESH-READ per call (the terminal.status_bar precedent: a config flip applies
  *  to the next read, no restart). Fail-open to the default on any resolution error. */
@@ -54,6 +63,9 @@ export interface PickupFacts {
  *  S02 finding input) calls this same function, so the rule cannot drift between surfaces. */
 export function derivePickup(facts: PickupFacts): PickupReceipt {
   if (facts.state === "blocked") return { state: "parked" };
+  if ((CLOSED_PICKUP_STATES as readonly string[]).includes(facts.state)) {
+    return { state: "terminal", evidence: `closed (${facts.state})` };
+  }
   if (!facts.claimedAt) return { state: "unclaimed" };
   const now = facts.now ?? new Date();
   const claimedMs = Date.parse(facts.claimedAt);

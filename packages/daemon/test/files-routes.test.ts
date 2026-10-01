@@ -13,7 +13,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { filesRoutes } from "../src/routes/files.js";
@@ -207,6 +208,25 @@ describe("UI Enhancement Pack v0 — /api/files routes", () => {
       // the DECLARED claimed-era variant `claimed:v1` (PM pin — never null; null now = pre-sweep-legacy
       // ONLY, so a legacy row and a founder UI tap today stay distinguishable). Never refused/broken.
       expect((row as { identity_provenance: string | null }).identity_provenance).toBe("claimed:v1");
+    });
+
+    it.skipIf(process.platform === "win32")("preserves executable permissions when replacing a workspace script", async () => {
+      const target = join(tempDir, "workspace", "check.sh");
+      writeFileSync(target, "#!/bin/sh\nprintf old\n");
+      chmodSync(target, 0o755);
+      const expectedMtime = statSync(target).mtime.toISOString();
+      const expectedContentHash = sha256(readFileSync(target));
+      const res = await app.request("/api/files/write", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          root: "workspace", path: "check.sh", content: "#!/bin/sh\nprintf updated\n",
+          expectedMtime, expectedContentHash, actor: "test@r",
+        }),
+      });
+      expect(res.status).toBe(200);
+      expect(statSync(target).mode & 0o777).toBe(0o755);
+      expect(execFileSync(target, { encoding: "utf8" })).toBe("updated");
     });
 
     // P21 I5 — files write is a founder-visible surface; resolveActorWithDeferral splits the two paths:

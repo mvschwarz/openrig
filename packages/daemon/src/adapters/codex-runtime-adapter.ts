@@ -563,7 +563,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (!targetDir) return true;
 
     this.fs.mkdirp(targetDir);
-    const isDir = this.fs.listFiles ? this.fs.listFiles(entry.absolutePath).length > 0 : false;
+    let isDir = false;
+    if (this.fs.listFiles) {
+      try {
+        isDir = this.fs.listFiles(entry.absolutePath).length > 0;
+      } catch {
+        // File-shaped sources make the production listFiles (recursive
+        // fs.readdirSync walk) throw ENOTDIR — treat the entry as file-shaped.
+        isDir = false;
+      }
+    }
 
     if (isDir && this.fs.listFiles) {
       for (const file of this.fs.listFiles(entry.absolutePath)) {
@@ -1194,7 +1203,7 @@ function stripCodexActivityHooks(content: string): string {
     "m"
   );
   if (!pattern.test(content)) return content;
-  return content.replace(pattern, "\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "");
+  return content.replace(pattern, "\n");
 }
 
 /** Ensure `[features].hooks = true` (canonical key; not the deprecated codex_hooks alias). */

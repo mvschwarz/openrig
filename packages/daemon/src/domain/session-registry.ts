@@ -351,6 +351,15 @@ export class SessionRegistry {
     return true;
   }
 
+  /** Test durable identity without returning the stored credential or changing
+   *  its provenance. An equal protected token needs no lower-ranked write. */
+  resumeTokenMatches(sessionId: string, type: string, token: string): boolean {
+    if (!type.trim() || !token.trim()) return false;
+    return Boolean(this.db.prepare(
+      "SELECT 1 FROM sessions WHERE id = ? AND resume_type = ? AND resume_token = ?",
+    ).get(sessionId, type, token));
+  }
+
   /** Preserve a resume target that was attempted but not verified.
    *
    * Attention outcomes include live chooser prompts, runner exits, and

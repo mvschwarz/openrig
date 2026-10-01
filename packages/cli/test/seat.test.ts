@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { Command } from "commander";
+import { DaemonClient } from "../src/client.js";
 import { seatCommand, handoverCommand } from "../src/commands/seat.js";
 import { STATE_FILE, type DaemonState, type LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
@@ -208,6 +209,7 @@ const FRESH_LAUNCH_RESULT = {
 
 describe("rig seat status", () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -337,6 +339,63 @@ describe("rig seat status", () => {
     expect(output).toContain("Fresh occupant ready: dev.impl@seat-rig (dev-impl@seat-rig)");
     expect(output).toContain("Generation: gen-fresh; model: gpt-5.6-codex");
     expect(output).toContain("No continuity source was used; siblings and durable work were preserved.");
+  });
+
+  it("launch waits for a ready response beyond the default five-second timeout", async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(Response.json(FRESH_LAUNCH_RESULT)), 6_000);
+      init!.signal!.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(init!.signal!.reason);
+      }, { once: true });
+    }));
+    const deps = makeDeps({ status: 200, data: FRESH_LAUNCH_RESULT }, []);
+    deps.clientFactory = url => new DaemonClient(url, { fetchImpl });
+    const result = captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "launch", "dev-impl@seat-rig",
+      "--fresh", "--stop", "--reason", "deliberate blank restart", "--json",
+    ]).then(() => undefined)).catch(error => ({ error }));
+
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    const output = await result;
+    expect(output).toMatchObject({ errors: [], exitCode: undefined });
+    if (!("logs" in output)) throw output.error;
+    expect(JSON.parse(output.logs.join("\n"))).toMatchObject({ status: "ready", generation: "gen-fresh" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([false, true])("launch reports an unknown outcome without retrying on timeout (json=%s)", async json => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+    }));
+    const deps = makeDeps({ status: 200, data: FRESH_LAUNCH_RESULT }, []);
+    deps.clientFactory = url => new DaemonClient(url, { fetchImpl });
+    const result = captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "launch", "dev-impl@seat-rig",
+      "--fresh", "--stop", "--reason", "deliberate blank restart", ...(json ? ["--json"] : []),
+    ]).then(() => undefined)).catch(error => ({ error }));
+
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    const output = await result;
+    expect(output).toMatchObject({ exitCode: 1 });
+    if (!("logs" in output)) throw output.error;
+    if (json) {
+      expect(output.errors).toEqual([]);
+      expect(JSON.parse(output.logs.join("\n"))).toMatchObject({
+        status: "unknown",
+        code: "launch_outcome_unknown",
+        guidance: expect.stringContaining("rig seat status dev-impl@seat-rig"),
+      });
+    } else {
+      expect(output.logs).toEqual([]);
+      expect(output.errors.join("\n")).toContain("may still be in progress");
+      expect(output.errors.join("\n")).toContain("rig seat status dev-impl@seat-rig");
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("handover --dry-run --json prints the stable planner shape", async () => {
@@ -683,5 +742,90 @@ describe("rig seat switch-client", () => {
 
     expect(exitCode).toBe(2);
     expect(errors.join("\n")).toContain("tmux switch-client failed");
+  });
+});
+
+// #260: the daemon may hold a dynamic Claude permission request for up to 5 s while it
+// queries `claude --help`; a mutating handover launches and readies a successor. These
+// bind the per-call request deadlines with fake timers (no wall-clock bound).
+describe("seat request deadlines (#260)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const QUERY_REFUSAL = {
+    ok: false,
+    code: "permission_selection_refused",
+    message: "Claude managed capability query failed; no fallback was selected.",
+  };
+
+  function slowClient(respondAfterMs: number | null, response: () => Response) {
+    const fetchImpl = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = respondAfterMs === null ? undefined : setTimeout(() => resolve(response()), respondAfterMs);
+      init!.signal!.addEventListener("abort", () => {
+        if (timer) clearTimeout(timer);
+        reject(init!.signal!.reason);
+      }, { once: true });
+    }));
+    const deps = makeDeps({ status: 200, data: {} }, []);
+    deps.clientFactory = url => new DaemonClient(url, { fetchImpl });
+    return { deps, fetchImpl };
+  }
+
+  async function run(deps: StatusDeps, argv: string[], advanceMs: number) {
+    const result = captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", ...argv]).then(() => undefined))
+      .catch(error => ({ error: error as Error }));
+    await vi.advanceTimersByTimeAsync(advanceMs);
+    return result;
+  }
+
+  const SET_PERMISSIONS = ["seat", "set-permissions", "dev-impl@seat-rig", "--mode", "auto", "--reason", "slow help", "--json"];
+  const HANDOVER = ["seat", "handover", "dev-impl@seat-rig", "--reason", "context-wall", "--json"];
+
+  it("set-permissions receives the daemon's capability-query refusal after the 5 s default would have aborted", async () => {
+    vi.useFakeTimers();
+    const { deps, fetchImpl } = slowClient(5_010, () => Response.json(QUERY_REFUSAL, { status: 409 }));
+    const output = await run(deps, SET_PERMISSIONS, 5_010);
+    if (!("logs" in output)) throw output.error;
+    expect(JSON.parse(output.logs.join("\n"))).toMatchObject(QUERY_REFUSAL);
+    expect(output.exitCode).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("set-permissions is still bounded, at 10 s", async () => {
+    vi.useFakeTimers();
+    const { deps, fetchImpl } = slowClient(null, () => Response.json({}));
+    const output = await run(deps, SET_PERMISSIONS, 10_000);
+    expect(output).toHaveProperty("error");
+    expect((output as { error: Error }).error.message).toContain("timed out after 10000ms");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("a mutating handover gets the 120 s launch window", async () => {
+    vi.useFakeTimers();
+    const { deps, fetchImpl } = slowClient(null, () => Response.json({}));
+    const output = await run(deps, HANDOVER, 120_000);
+    expect(output).toHaveProperty("error");
+    expect((output as { error: Error }).error.message).toContain("timed out after 120000ms");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("a mutating handover receives a response that arrives after five seconds", async () => {
+    vi.useFakeTimers();
+    const { deps } = slowClient(6_000, () => Response.json({ ok: false, code: "handover_refused", message: "synthetic slow refusal" }, { status: 409 }));
+    const output = await run(deps, HANDOVER, 6_000);
+    if (!("logs" in output)) throw output.error;
+    expect(JSON.parse(output.logs.join("\n"))).toMatchObject({ code: "handover_refused" });
+  });
+
+  it.each([
+    ["dry-run handover", [...HANDOVER, "--dry-run"]],
+    ["set-model", ["seat", "set-model", "dev-impl@seat-rig", "--model", "m", "--reason", "r", "--json"]],
+  ])("%s keeps the 5 s default deadline", async (_name, argv) => {
+    vi.useFakeTimers();
+    const { deps } = slowClient(null, () => Response.json({}));
+    const output = await run(deps, argv as string[], 5_000);
+    expect(output).toHaveProperty("error");
+    expect((output as { error: Error }).error.message).toContain("timed out after 5000ms");
   });
 });

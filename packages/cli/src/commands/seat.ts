@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { DaemonClient, terminalAuthHeaders } from "../client.js";
+import { DaemonClient, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -477,10 +477,30 @@ Examples:
     const daemon = await getDaemonStatus(deps.lifecycleDeps);
     if (!daemonStatusGuard(daemon)) return;
     const client = deps.clientFactory(getDaemonUrl(daemon));
-    const res = await client.post<Record<string, unknown>>(
-      `/api/seat/${path}/${encodeURIComponent(seat)}`,
-      body,
-    );
+    let res;
+    try {
+      const route = `/api/seat/${path}/${encodeURIComponent(seat)}`;
+      res = path === "launch"
+        ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 120_000 })
+        // #260: a dynamic Claude mode waits up to 5 s for the capability query before the
+        // daemon answers, so the 5 s default deadline would abort before its refusal arrives.
+        : path === "set-permissions"
+          ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 10_000 })
+          : await client.post<Record<string, unknown>>(route, body);
+    } catch (err) {
+      if (path !== "launch" || !(err instanceof DaemonTimeoutError)) throw err;
+      const error = {
+        ok: false as const,
+        code: "launch_outcome_unknown",
+        status: "unknown",
+        message: "The CLI timed out waiting for the daemon; the launch may still be in progress.",
+        guidance: `Check the outcome before retrying: rig seat status ${seat}`,
+      };
+      if (opts.json) console.log(JSON.stringify(error, null, 2));
+      else printSeatError(error, error.message);
+      process.exitCode = 1;
+      return;
+    }
     if (opts.json) {
       console.log(JSON.stringify(res.data, null, 2));
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
@@ -694,12 +714,18 @@ export async function runSeatHandover(seat: string, opts: HandoverActionOpts, de
   if (!daemonStatusGuard(daemon)) return; // B8-1b: epistemic-matched
 
   const client = deps.clientFactory(getDaemonUrl(daemon));
-  const res = await client.post<SeatHandoverPlan | SeatHandoverMutationResult | SeatStatusError>(`/api/seat/handover/${encodeURIComponent(seat)}`, {
+  const handoverRoute = `/api/seat/handover/${encodeURIComponent(seat)}`;
+  const handoverBody = {
     source: opts.source,
     reason: opts.reason,
     operator: opts.operator,
     dryRun: opts.dryRun === true,
-  });
+  };
+  // #260: a mutating handover launches and readies the successor, so it gets the
+  // launch request window. A dry run only plans, and keeps the default deadline.
+  const res = opts.dryRun === true
+    ? await client.post<SeatHandoverPlan | SeatHandoverMutationResult | SeatStatusError>(handoverRoute, handoverBody)
+    : await client.post<SeatHandoverPlan | SeatHandoverMutationResult | SeatStatusError>(handoverRoute, handoverBody, { timeoutMs: 120_000 });
 
   if (opts.json) {
     console.log(JSON.stringify(res.data, null, 2));

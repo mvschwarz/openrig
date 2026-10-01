@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import { defaultHostDaemon, runScenarioFile } from '../../daemon/test/helpers/scenario-pipeline.ts';
-import { RESULT_PREFIX } from './result.mjs';
+import { CASES, RESULT_PREFIX } from './result.mjs';
 
 assert.equal(process.platform, 'linux', 'container execution only');
 assert.notEqual(process.getuid(), 0, 'run as the unprivileged testbed user');
@@ -15,11 +15,14 @@ assert.ok(Object.values(networkInterfaces()).flat().every(address => address.int
   'requires --network none');
 const mode = process.argv[2];
 assert.ok(['healthy', 'lost-baton'].includes(mode), 'expected healthy or lost-baton');
+const caseName = process.argv[3] ?? 'fixture';
+const selected = CASES[caseName];
+assert.ok(selected, 'unknown scenario case');
 const rigBin = realpathSync('/usr/local/bin/rig');
-const scenario = '/opt/openrig-testbed/scenarios/scenario-02-baton.yaml';
+const scenario = join('/opt/openrig-testbed', selected.file);
 const records = [];
 const report = {
-  mode, records, fault: null,
+  mode, caseName, records, fault: null,
   scenarioSha256: createHash('sha256').update(readFileSync(scenario)).digest('hex'),
 };
 
@@ -27,13 +30,23 @@ try {
   report.result = await runScenarioFile(scenario, {
     rigBin,
     baseEnv: { PATH: '/usr/local/bin:/usr/bin:/bin', TERM: 'xterm-256color' },
-    deps: { appendRecord: record => records.push(record) },
+    deps: {
+      appendRecord: record => records.push(record),
+      seedRegression: async regressionClass => {
+        assert.equal(regressionClass, selected.seed, 'unsupported regression class');
+        assert.equal(report.seed, undefined, 'seed must be armed exactly once');
+        report.seed = { class: regressionClass, enabled: mode !== 'healthy' };
+        return { code: 0, stdout: JSON.stringify(report.seed), stderr: '' };
+      },
+    },
     daemon: async (scaffold, options) => {
       const daemon = await defaultHostDaemon(scaffold, options);
       if (mode === 'healthy') return daemon;
       return {
         ...daemon,
         restart: async () => {
+          if (selected.seed) assert.deepEqual(report.seed, { class: selected.seed, enabled: true },
+            'the scenario must arm its fault before restart');
           await daemon.sigterm();
           await assert.rejects(fetch(`${daemon.baseUrl}/healthz`),
             error => error.cause?.code === 'ECONNREFUSED', 'daemon must be stopped before fault injection');
@@ -42,8 +55,9 @@ try {
           const Database = createRequire(rigBin)('better-sqlite3');
           const db = new Database(join(scaffold.stateDir, 'scenario.db'), { fileMustExist: true });
           try {
-            const before = db.prepare('SELECT state FROM queue_items WHERE qitem_id = ?').get('baton-1');
+            const before = db.prepare('SELECT state, destination_session FROM queue_items WHERE qitem_id = ?').get('baton-1');
             assert.equal(before?.state, 'in-progress');
+            assert.equal(before.destination_session, selected.destination);
             const { changes } = db.prepare("UPDATE queue_items SET state = 'pending' WHERE qitem_id = ? AND state = 'in-progress'").run('baton-1');
             assert.equal(changes, 1);
             report.fault = {

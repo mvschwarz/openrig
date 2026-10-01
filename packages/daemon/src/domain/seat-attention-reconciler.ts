@@ -10,7 +10,8 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { defaultListProcesses } from "./resume-metadata-refresher.js";
-import { verifyCodexPaneProcess, type NativeProcessRow, type NativeProcessLister, findExactNativeResumeProcess } from "./native-process-lineage.js";
+import { verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessRow, type NativeProcessLister, findExactNativeResumeProcess } from "./native-process-lineage.js";
+import { isShellForeground } from "./shell-classifier.js";
 
 type PaneIdentityTmux = Pick<TmuxAdapter, "listPanes" | "getPanePid" | "getPaneCommand">;
 type ProcessRow = NativeProcessRow;
@@ -82,6 +83,15 @@ export async function rebindAndVerifyPaneIdentity(input: {
     const native = await verifyCodexPaneProcess({ target: pane.id, tmux: input.tmux,
       listProcesses: input.listProcesses, expectedToken: expectedResumeToken,
       requireResume: input.requireExactResumeLineage === true });
+    const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
+    if (native?.panePid === pid && currentPanes.length === 1 && currentPanes[0]?.id === pane.id) lineageMatch = native.process;
+  } else if (pid !== null && input.runtime === "claude-code" && strictNativeLineage
+    && runtimeMatch === "mismatch" && isShellForeground(normalizedCommand)) {
+    // A managed shell wrapper is not a contradiction when the stable foreground
+    // native child proves the exact saved session in this same sole pane.
+    runtimeMatch = "match";
+    const native = await verifyClaudePaneProcess({ target: pane.id, tmux: input.tmux,
+      listProcesses: input.listProcesses, expectedToken: expectedResumeToken });
     const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
     if (native?.panePid === pid && currentPanes.length === 1 && currentPanes[0]?.id === pane.id) lineageMatch = native.process;
   } else if (pid !== null && runtimeMatch === "match" && strictNativeLineage) {

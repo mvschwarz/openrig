@@ -22,6 +22,7 @@ import type { JsonlExchange } from "./session-jsonl.js";
 import type { PersistedEvent } from "./types.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
+import { findOtherSessionOwner } from "./session-owner.js";
 
 /** A bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
  *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path).
@@ -654,7 +655,10 @@ export class SeatHandoverService {
     const runtimeMismatch = this.checkRuntimeMismatch(input.node.runtime, discovered.runtimeHint);
     if (runtimeMismatch) return fail(runtimeMismatch);
 
-    const managedOwner = this.lookupManagedOwner(discovered.tmuxSession, input.node.id);
+    // #141: a composer-launched successor reuses the seat's own session name, which an archived earlier
+    // generation still names in its kept binding. Owners in archived rigs are skipped there, as in removeNode
+    // (#174). A discovered successor is a separate session, so any other owner still blocks it.
+    const managedOwner = this.lookupManagedOwner(discovered.tmuxSession, input.node.id, input.reportedSource.mode !== "discovered");
     if (managedOwner) {
       return fail({
         ok: false,
@@ -890,25 +894,8 @@ export class SeatHandoverService {
     ).get(nodeId) as SessionRow | undefined ?? null;
   }
 
-  private lookupManagedOwner(tmuxSession: string, targetNodeId: string): BindingOwnerRow | null {
-    const bindingOwner = this.db.prepare(`
-      SELECT n.id AS node_id, n.logical_id, r.name AS rig_name
-      FROM bindings b
-      JOIN nodes n ON n.id = b.node_id
-      JOIN rigs r ON r.id = n.rig_id
-      WHERE b.tmux_session = ? AND n.id != ?
-      LIMIT 1
-    `).get(tmuxSession, targetNodeId) as BindingOwnerRow | undefined;
-    if (bindingOwner) return bindingOwner;
-
-    return this.db.prepare(`
-      SELECT n.id AS node_id, n.logical_id, r.name AS rig_name
-      FROM sessions s
-      JOIN nodes n ON n.id = s.node_id
-      JOIN rigs r ON r.id = n.rig_id
-      WHERE s.session_name = ? AND n.id != ? AND s.status NOT IN ('superseded', 'detached', 'exited')
-      LIMIT 1
-    `).get(tmuxSession, targetNodeId) as BindingOwnerRow | undefined ?? null;
+  private lookupManagedOwner(tmuxSession: string, targetNodeId: string, ignoreArchived: boolean): BindingOwnerRow | null {
+    return findOtherSessionOwner(this.db, tmuxSession, targetNodeId, { ignoreArchived });
   }
 
   private commit(input: {

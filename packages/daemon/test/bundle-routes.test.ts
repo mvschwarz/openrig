@@ -300,6 +300,97 @@ describe("Bundle API routes", () => {
     expect(body.digestValid).toBe(false);
   });
 
+  it.each([false, true])("saves a recovery bundle with durable unresolved-skill warnings (imported=%s)", async (imported) => {
+    const agentDir = path.join(tmpDir, "agents", "impl");
+    const skillAgentDir = imported ? path.join(agentDir, "shared") : agentDir;
+    fs.mkdirSync(skillAgentDir, { recursive: true });
+    const skillAgent = [
+      "name: skill-owner", 'version: "1.0.0"',
+      "resources:", "  skills:", "    - id: greet", "      path: skills/missing",
+      "    - id: review", "      path: skills/also-missing",
+      "profiles:", "  default:", "    uses:", "      skills: [greet]",
+    ].join("\n");
+    fs.writeFileSync(path.join(skillAgentDir, "agent.yaml"), skillAgent);
+    fs.writeFileSync(path.join(skillAgentDir, "README.md"), "# Surviving recovery context\nKeep this local context.");
+    if (imported) {
+      fs.writeFileSync(path.join(agentDir, "agent.yaml"), [
+        "name: impl", 'version: "1.0.0"', "imports:", "  - ref: local:shared",
+        "resources:", "  skills: []", "profiles:", "  default:", "    uses:", "      skills: []",
+      ].join("\n"));
+    }
+    const specPath = path.join(tmpDir, "rig.yaml");
+    fs.writeFileSync(specPath, [
+      'version: "0.2"', "name: missing-skill-rig", "pods:", "  - id: dev", "    label: Dev",
+      "    members:", "      - id: impl", "        agent_ref: local:agents/impl",
+      "        profile: default", "        runtime: claude-code", "        cwd: .",
+      "    edges: []", "edges: []",
+    ].join("\n"));
+    const outputPath = path.join(tmpDir, "existing.rigbundle");
+    fs.writeFileSync(outputPath, "previous bundle");
+    fs.writeFileSync(`${outputPath}.sha256`, "previous digest");
+    const res = await app.request("/api/bundles/create", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: "missing-skill", bundleVersion: "0.1.0", outputPath, ...(imported ? {} : { provenance: { notes: "Operator recovery note" } }) }),
+    });
+    expect(res.status).toBe(201);
+    const created = await res.json();
+    const warnings = [
+      'Agent "skill-owner" has unresolved declared skill "greet" at "skills/missing" (missing or inaccessible)',
+      'Agent "skill-owner" has unresolved declared skill "review" at "skills/also-missing" (missing or inaccessible)',
+    ];
+    expect(created.warning).toBe(warnings.join("; "));
+    const recoveryInspect = await app.request("/api/bundles/inspect", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundlePath: outputPath }),
+    });
+    expect(recoveryInspect.status).toBe(200);
+    const recovery = await recoveryInspect.json();
+    expect(recovery.digestValid).toBe(true);
+    expect(recovery.integrityResult.passed).toBe(true);
+    const expectedNotes = `${imported ? "" : "Operator recovery note | "}${warnings.join("; ")}`;
+    expect(recovery.manifest.provenance.notes).toBe(expectedNotes);
+
+    // The archive itself carries the caveat and surviving context for later recovery.
+    const { unpack } = await import("../src/domain/bundle-archive.js");
+    const restoreDir = path.join(tmpDir, "restored");
+    await unpack(outputPath, restoreDir);
+    const { parsePodBundleManifest } = await import("../src/domain/bundle-types.js");
+    const restoredManifest = parsePodBundleManifest(fs.readFileSync(path.join(restoreDir, "bundle.yaml"), "utf8")) as { provenance: { notes: string } };
+    expect(restoredManifest.provenance.notes).toBe(expectedNotes);
+    expect(fs.readFileSync(path.join(restoreDir, "agents/skill-owner/README.md"), "utf8")).toContain("Keep this local context");
+    expect(fs.readFileSync(path.join(restoreDir, "agents/skill-owner/agent.yaml"), "utf8")).toContain("skills/also-missing");
+
+    // Existing skill directories remain valid, including skills owned by an imported agent.
+    fs.mkdirSync(path.join(skillAgentDir, "skills/also-missing"), { recursive: true });
+    fs.writeFileSync(path.join(skillAgentDir, "skills/also-missing/SKILL.md"), "# Review\nA complete review skill.");
+    fs.mkdirSync(path.join(skillAgentDir, "skills/missing"), { recursive: true });
+    fs.writeFileSync(path.join(skillAgentDir, "skills/missing/SKILL.md"), "# Greet\nA complete skill.");
+    const valid = await app.request("/api/bundles/create", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: "complete-skill", bundleVersion: "0.1.0", outputPath }),
+    });
+    expect(valid.status).toBe(201);
+    expect((await valid.json()).warning).toBeUndefined();
+    const inspected = await app.request("/api/bundles/inspect", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundlePath: outputPath }),
+    });
+    expect(inspected.status).toBe(200);
+    const complete = await inspected.json();
+    expect(complete.integrityResult.passed).toBe(true);
+    expect(complete.manifest.provenance).toBeUndefined();
+
+    // A genuinely invalid agent still fails before the finalized archive/digest are replaced.
+    const previousArchive = fs.readFileSync(outputPath);
+    const previousDigest = fs.readFileSync(`${outputPath}.sha256`);
+    fs.writeFileSync(path.join(agentDir, "agent.yaml"), "invalid: agent");
+    const invalid = await app.request("/api/bundles/create", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: "invalid-agent", bundleVersion: "0.1.0", outputPath }),
+    });
+    expect(invalid.status).toBe(500);
+    expect(fs.readFileSync(outputPath)).toEqual(previousArchive);
+    expect(fs.readFileSync(`${outputPath}.sha256`)).toEqual(previousDigest);
+  });
+
   // T6-AS-T12: Pod-aware bundle create
   it("POST /api/bundles/create with pod-aware spec returns schemaVersion:2", async () => {
     // Seed a pod-aware rig spec + agent on disk

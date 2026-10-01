@@ -613,6 +613,12 @@ function buildSliceMoveCommand(): Command {
         const newName = `${pad2(newNN)}-${slug}`;
         const destAbs = path.join(targetSlicesDir, newName);
         const sourceMission = findMission(missionsRoot, slice.missionName);
+        // Cross-mission dependencies cannot remain sibling edges. Name affected dependents at the move.
+        const dependencyWarnings = slice.id === null ? [] : listSlices(sourceMission, "all")
+          .filter((sibling) => sibling.absPath !== slice.absPath
+            && Array.isArray(sibling.frontmatter.depends_on)
+            && sibling.frontmatter.depends_on.includes(slice.id))
+          .map((sibling) => `${sibling.id ?? sibling.name} still has depends_on ${slice.id}; the moved slice is no longer a sibling. Review depends_on in ${sibling.readmePath ?? sibling.absPath}.`);
         const edits = [
           planMissionMembershipRemove(sourceMission.absPath, sliceManifestRef(sourceMission.absPath, slice.absPath)),
           planMissionMembershipAdd(target.absPath, `slices/${newName}/slice.yaml`, nextMissionMembershipOrder(target.absPath)),
@@ -637,6 +643,7 @@ function buildSliceMoveCommand(): Command {
           const { usedGit, repoRoot } = moveResult;
           emit(out, {
             ok: true,
+            warnings: dependencyWarnings,
             moved: {
               from: { mission: slice.missionName, name: slice.name, id: slice.id },
               to: { mission: target.name, name: newName, id: newSliceId, path: destAbs },
@@ -646,6 +653,7 @@ function buildSliceMoveCommand(): Command {
             `Moved ${slice.missionName}/${slice.name} → ${target.name}/slices/${newName}`,
             `  id: ${newSliceId}`,
             `  git: ${usedGit ? "git mv" : "fs.rename (not in a git repo)"}`,
+            ...dependencyWarnings.map((warning) => `Warning: ${warning}`),
           ]);
         } catch (error) {
           if (moveResult) rollbackMovedSlice(slice.absPath, destAbs, moveResult);

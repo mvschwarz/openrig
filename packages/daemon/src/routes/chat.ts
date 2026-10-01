@@ -97,26 +97,28 @@ export function chatRoutes(): Hono {
         }
       });
 
-      // Send initial batch
-      const initial = chatRepo.latest(rigId, 20);
-      const sentIds = new Set<string>();
-      for (const msg of initial) {
-        await stream.writeSSE({ id: msg.id, data: JSON.stringify(msg) });
-        sentIds.add(msg.id);
-      }
-
-      // Flush any messages received during initial batch, dedup by ID
-      initialDone = true;
-      for (const pending of pendingMessages) {
-        if (!sentIds.has(pending.id)) {
-          await stream.writeSSE(pending);
-        }
-      }
+      const aborted = new Promise<void>((resolve) => {
+        stream.onAbort(() => resolve());
+      });
 
       try {
-        await new Promise<void>((resolve) => {
-          stream.onAbort(() => resolve());
-        });
+        // Send initial batch
+        const initial = chatRepo.latest(rigId, 20);
+        const sentIds = new Set<string>();
+        for (const msg of initial) {
+          await stream.writeSSE({ id: msg.id, data: JSON.stringify(msg) });
+          sentIds.add(msg.id);
+        }
+
+        // Flush any messages received during initial batch, dedup by ID
+        initialDone = true;
+        for (const pending of pendingMessages) {
+          if (!sentIds.has(pending.id)) {
+            await stream.writeSSE(pending);
+          }
+        }
+
+        await aborted;
       } finally {
         unsubscribe();
       }

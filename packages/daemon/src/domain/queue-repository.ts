@@ -25,7 +25,7 @@ import {
   type ParkWakeStatus,
 } from "./queue-wake-repository.js";
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
-import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait } from "./queue-wait-backoff.js";
+import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
 
 export const QUEUE_STATES = [
   "pending",
@@ -130,8 +130,9 @@ export interface QueueItem {
   deliveryFailureDetail?: string;
   tags: string[] | null;
   blockedOn: string | null;
-  /** S04 — the DERIVED pickup receipt (unclaimed/working/stalled-after-claim/parked). Never
-   *  stored: computed at projection time from claimed_at + the transition log + heartbeat. */
+  /** S04 — the DERIVED pickup receipt (unclaimed/working/stalled-after-claim/parked/terminal).
+   *  Never stored: computed at projection time from state + claimed_at + the transition log
+   *  + heartbeat; a closed row is terminal, never stalled. */
   pickup?: PickupReceipt;
   waiting?: WaitingView;
   handedOffTo: string | null;
@@ -2848,6 +2849,12 @@ export class QueueRepository {
     return this.wakeRepo.getStatus(qitemId);
   }
 
+  /** Park timers a seat swap keeps: each is still its blocked row's current wake and still targets the
+   *  row's owner (see QueueWakeRepository.currentParkTimerIds). */
+  currentParkTimerIds(): string[] {
+    return this.wakeRepo.currentParkTimerIds();
+  }
+
   /** Refuse a legacy park-generated timer only when every row bound to it is
    *  terminal. Current exits retire these timers transactionally; this is the
    *  delivery-seam backstop for residue persisted by an older daemon. A timer
@@ -3384,6 +3391,12 @@ export class QueueRepository {
            WHERE qitem_id = ?`
         )
         .run(fallbackDestination, ts, newChain, `fallback: ${reason}`, qitemId);
+      // A park timer targets the owner that parked the row. Once the row belongs to someone else it must not keep
+      // waking the old owner, so it ends here like any other exit from the park. A repeating wait is left running:
+      // it resolves its recipient from the row's current owner at delivery (evaluateQueueWait).
+      const armed = this.wakeRepo.getStatus(qitemId);
+      const armedJob = armed?.kind === "timer" ? (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).getById(armed.ref) : null;
+      if (!armedJob || !isQueueWait(armedJob.specYaml)) this.retireParkGeneratedTimer(qitemId, "park_rerouted");
 
       this.transitionLog.append({
         qitemId,

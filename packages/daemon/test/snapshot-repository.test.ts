@@ -107,6 +107,40 @@ describe("SnapshotRepository", () => {
     expect(repo.getSnapshot("snap-a-second")).not.toBeNull();
   });
 
+  it("restore selection skips malformed JSON without hiding corrupt generic reads", () => {
+    const good = repo.createSnapshot("rig-1", "auto-pre-down", sampleData());
+    db.prepare("INSERT INTO snapshots (id, rig_id, kind, data, created_at) VALUES ('corrupt', 'rig-1', 'manual', '{broken', '2099-01-01 00:00:00')").run();
+    const selection = repo.selectRestoreUsable("rig-1");
+    expect(selection.ok && selection.snapshot.id).toBe(good.id);
+    expect(selection.ok && selection.selection.newerUsableAlternative).toBeNull();
+    expect(repo.selectRestoreUsable("rig-1", "corrupt")).toEqual(expect.objectContaining({ ok: false, code: "snapshot_unusable" }));
+    expect(() => repo.listSnapshots("rig-1")).toThrow();
+  });
+
+  it("malformed nested roster data cannot throw or block a healthy fallback", () => {
+    const good = repo.createSnapshot("rig-1", "manual", sampleData());
+    db.prepare("UPDATE snapshots SET created_at = '2026-01-01 00:00:00' WHERE id = ?").run(good.id);
+    const bad = repo.createSnapshot("rig-1", "auto-pre-down", { ...sampleData(), topologyRoster: null } as unknown as SnapshotData);
+    expect(repo.findLatestRestoreUsable("rig-1")?.id).toBe(good.id);
+    expect(repo.selectRestoreUsable("rig-1", bad.id)).toEqual(expect.objectContaining({ ok: false, code: "snapshot_unusable" }));
+    expect(repo.selectRestoreUsable("rig-1").ok).toBe(true);
+  });
+
+  it("same-second alternative discovery skips damaged rows before and after the newest usable insertion", () => {
+    const insert = db.prepare("INSERT INTO snapshots (id, rig_id, kind, data, created_at) VALUES (?, 'rig-1', 'manual', ?, '2026-09-30 01:00:00')");
+    insert.run("snap-z-first", JSON.stringify(sampleData()));
+    insert.run("broken-json-middle", "{broken");
+    insert.run("bad-roster-middle", JSON.stringify({ ...sampleData(), topologyRoster: null }));
+    insert.run("snap-a-second", JSON.stringify(sampleData()));
+    insert.run("broken-json-last", "{broken");
+    const explicit = repo.selectRestoreUsable("rig-1", "snap-z-first");
+    expect(explicit.ok && explicit.selection.newerUsableAlternative?.snapshotId).toBe("snap-a-second");
+    const automatic = repo.selectRestoreUsable("rig-1");
+    expect(automatic.ok && automatic.snapshot.id).toBe("snap-a-second");
+    expect(automatic.ok && automatic.selection.newerUsableAlternative).toBeNull();
+    expect(() => repo.listSnapshots("rig-1")).toThrow();
+  });
+
   it("getLatestSnapshot with no snapshots -> null", () => {
     expect(repo.getLatestSnapshot("rig-1")).toBeNull();
   });

@@ -346,6 +346,8 @@ function podAssemblerFsOps(): PodAssemblerFsOps {
   return {
     ...assemblerFsOps(),
     readFile: (p) => fs.readFileSync(p, "utf-8"),
+    readFileBuffer: (p) => fs.readFileSync(p),
+    writeFile: (p, c) => fs.writeFileSync(p, c),
     exists: (p) => fs.existsSync(p),
     listFiles: (dir) => realFsOps().listFiles!(dir),
   };
@@ -365,8 +367,7 @@ function pluginsRouterFsOps(): PluginsRouterFsOps {
 function workflowSpecsRouterFsOps(): WorkflowSpecsRouterFsOps {
   return {
     exists: (p) => fs.existsSync(p),
-    readFile: (p) => fs.readFileSync(p, "utf-8"),
-    writeFile: (p, c) => fs.writeFileSync(p, c, "utf-8"),
+    copyFile: (s, d) => fs.copyFileSync(s, d),
     mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
   };
 }
@@ -592,8 +593,7 @@ async function routePluginsAfterBootstrap(bundlePath: string): Promise<RoutePlug
 function skillsRouterFsOps(): SkillsRouterFsOps {
   return {
     exists: (p) => fs.existsSync(p),
-    readFile: (p) => fs.readFileSync(p, "utf-8"),
-    writeFile: (p, c) => fs.writeFileSync(p, c, "utf-8"),
+    copyFile: (s, d) => fs.copyFileSync(s, d),
     mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
   };
 }
@@ -1058,7 +1058,8 @@ bundleRoutes.post("/create", async (c) => {
         assertShippableStagingTree(tmpStaging);
         const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
         eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
-        return c.json({ bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length, ...(driftWarning ? { warning: driftWarning } : {}) }, 201);
+        const warning = [driftWarning, ...(result.warnings ?? [])].filter(Boolean).join("; ");
+        return c.json({ bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length, ...(warning ? { warning } : {}) }, 201);
       } finally {
         fs.rmSync(tmpStaging, { recursive: true, force: true });
       }

@@ -7,8 +7,10 @@ import { serializePodBundleManifest, type PodBundleManifest, type PodBundleAgent
 import type { RigSpec, StartupBlock } from "./types.js";
 
 export interface PodAssemblerFsOps extends AgentResolverFsOps {
+  /** Raw bytes, for files the bundle copies verbatim (agent packages, culture, docs, startup files). */
+  readFileBuffer(path: string): Uint8Array;
   mkdirp(path: string): void;
-  writeFile(path: string, content: string): void;
+  writeFile(path: string, content: string | Uint8Array): void;
   copyDir(src: string, dest: string): void;
   listFiles(dirPath: string): string[];
 }
@@ -39,6 +41,7 @@ export interface PodAssembleOptions {
 export interface PodAssembleResult {
   manifest: PodBundleManifest;
   collectedFiles: string[];
+  warnings?: string[];
 }
 
 /**
@@ -75,6 +78,7 @@ export class PodBundleAssembler {
     const collectedFiles: string[] = [];
     const agentEntries: PodBundleAgentEntry[] = [];
     const resolvedAgentPaths = new Set<string>();
+    const unresolvedSkills = new Set<string>();
 
     // 2a. Rig spec — written after ref rewriting (deferred to step 4)
     this.fs.mkdirp(opts.outputDir);
@@ -120,6 +124,16 @@ export class PodBundleAssembler {
         const result = resolveAgentRef(member.agentRef, opts.rigRoot, this.fs);
         if (!result.ok) {
           throw new Error(`Failed to resolve agent_ref "${member.agentRef}" for member ${pod.id}.${member.id}: ${result.code === "validation_failed" ? (result as { errors: string[] }).errors.join("; ") : (result as { error: string }).error}`);
+        }
+
+        // Preserve recovery exports while recording unresolved skills, including imports.
+        for (const agent of [result.resolved, ...result.imports]) {
+          for (const skill of agent.spec.resources.skills) {
+            const skillPath = nodePath.resolve(agent.sourcePath, skill.path);
+            if (!this.fs.exists(skillPath)) {
+              unresolvedSkills.add(`Agent "${agent.spec.name}" has unresolved declared skill "${skill.id}" at "${skill.path}" (missing or inaccessible)`);
+            }
+          }
         }
 
         // Dedup: skip if already collected (but still record rewrite)
@@ -194,6 +208,15 @@ export class PodBundleAssembler {
         createdAt: opts.provenance.createdAt ?? createdAt,
       };
     }
+    const warnings = [...unresolvedSkills];
+    if (warnings.length > 0) {
+      // Reuse durable provenance notes so inspect and recovery see the same caveat.
+      const warning = warnings.join("; ");
+      manifest.provenance = {
+        ...(manifest.provenance ?? { createdAt }),
+        notes: manifest.provenance?.notes ? `${manifest.provenance.notes} | ${warning}` : warning,
+      };
+    }
     if (opts.compatibility) {
       manifest.compatibility = { ...opts.compatibility };
     }
@@ -205,7 +228,7 @@ export class PodBundleAssembler {
     );
     collectedFiles.push("bundle.yaml");
 
-    return { manifest, collectedFiles };
+    return { manifest, collectedFiles, ...(warnings.length > 0 ? { warnings } : {}) };
   }
 
   private collectRigFile(relPath: string, rigRoot: string, outputDir: string, collected: string[]): void {
@@ -214,7 +237,7 @@ export class PodBundleAssembler {
       throw new Error(`Path traversal detected: "${relPath}" escapes rig root`);
     }
     if (!this.fs.exists(absPath)) return; // optional files may not exist
-    const content = this.fs.readFile(absPath);
+    const content = this.fs.readFileBuffer(absPath);
     assertShippableSubstance([{ path: relPath, bytes: content }]);
     this.fs.mkdirp(nodePath.dirname(nodePath.join(outputDir, relPath)));
     this.fs.writeFile(nodePath.join(outputDir, relPath), content);
@@ -232,7 +255,7 @@ export class PodBundleAssembler {
     const files = this.fs.listFiles(srcDir);
     const sources = files.map((file) => ({
       file,
-      content: this.fs.readFile(nodePath.join(srcDir, file)),
+      content: this.fs.readFileBuffer(nodePath.join(srcDir, file)),
     }));
     assertShippableSubstance(sources.map(({ file, content }) => ({
       path: nodePath.join(relPrefix, file),

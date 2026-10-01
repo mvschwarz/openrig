@@ -49,8 +49,11 @@ export class ClaudeManagedLaunch {
     // Relative/empty PATH entries are interpreted at the intended seat cwd,
     // including for /usr/bin/env shebangs inside the selected executable.
     const search = PATH.split(path.delimiter).map(p => path.resolve(cwd, p));
-    const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME,
-      CLAUDE_CONFIG_DIR: path.resolve(cwd, CLAUDE_CONFIG_DIR ?? path.join(HOME, ".claude")) };
+    const configDir = path.resolve(cwd, CLAUDE_CONFIG_DIR ?? path.join(HOME, ".claude"));
+    const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME };
+    // Session storage needs a directory, but exporting the default changes
+    // Claude's global config selection. Preserve an unset native selection.
+    if (CLAUDE_CONFIG_DIR !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
     if (claudeClassicRendererEnvPrefix(this.rendererEnv)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     let executable: string | undefined;
     for (const dir of search) {
@@ -64,7 +67,7 @@ export class ClaudeManagedLaunch {
       const s = statSync(file);
       return [realpathSync(file), s.dev, s.ino, s.mode, s.size, s.mtimeMs, s.ctimeMs];
     };
-    return Object.freeze({ env: Object.freeze(env), executable,
+    return Object.freeze({ env: Object.freeze(env), configDir, executable,
       fileIdentity: Object.freeze(identity(executable)), cwdIdentity: Object.freeze(identity(cwd).slice(0, 3)) });
   }
 
@@ -97,7 +100,7 @@ export class ClaudeManagedLaunch {
       }
     };
     const help = await new Promise<string>((resolve, reject) => {
-      execFile(context.executable, ["--help"], { cwd, env: context.env, encoding: "utf8", timeout: 1000, maxBuffer: 1024 * 1024 },
+      execFile(context.executable, ["--help"], { cwd, env: context.env, encoding: "utf8", timeout: 5000, maxBuffer: 1024 * 1024 },
         (error, stdout) => error ? reject(new Error("Claude managed capability query failed; no fallback was selected.")) : resolve(stdout));
     });
     assertCurrent();
@@ -108,7 +111,7 @@ export class ClaudeManagedLaunch {
       ...(generation ? { OPENRIG_OCCUPANT_GENERATION: generation } : {}) };
     const assignments = Object.entries({ ...context.env, ...identity }).map(([key, value]) => shellQuote(`${key}=${value}`));
     const forwarded = inherited.filter(key => !(key in identity)).map(key => `"${key}=\${${key}-}"`);
-    return Object.freeze({ assertCurrent, configDir: context.env.CLAUDE_CONFIG_DIR!, command: (args: readonly string[]) => {
+    return Object.freeze({ assertCurrent, configDir: context.configDir, command: (args: readonly string[]) => {
       assertCurrent();
       return `cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
     } });

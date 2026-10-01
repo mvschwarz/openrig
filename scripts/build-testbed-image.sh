@@ -13,9 +13,15 @@ STUB_ASSETS_LIST="${TESTBED_DIR}/stub-assets.list"
 OUT_DIR="${1:-${REPO_ROOT}/dist/testbed-image}"
 
 command -v docker >/dev/null 2>&1 || {
-  echo "[testbed] docker not found — run this build HOST-side (locus ruling), not in the VM seat" >&2
+  echo "[testbed] Docker client not found; select the prepared disposable executor" >&2
   exit 3
 }
+
+# Resolve the daemon's platform BEFORE building locally. A remote amd64 daemon
+# reached from an arm64 Mac needs amd64 Node; client uname is not the target.
+mkdir -p "${OUT_DIR}"
+TARGET_PLATFORM="$(node "${REPO_ROOT}/scripts/scenario-executor.mjs" platform "${OUT_DIR}/docker-server.json")"
+TARGETARCH="${TARGET_PLATFORM#linux/}"
 
 # --- identity from the tree: the image is built AT this git sha, so gitSha == openrigSha ---
 GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
@@ -31,7 +37,15 @@ NODE_VERSION="$(sed -n 's/^ARG NODE_VERSION=\([0-9][0-9.]*\).*/\1/p' "${TESTBED_
 
 # --- assemble a clean build context: Dockerfile + entrypoint + the openrig pack + staged stub assets ---
 CONTEXT="$(mktemp -d)"
-trap 'rm -rf "${CONTEXT}"' EXIT
+LOAD_CONTAINER=""
+cleanup() {
+  if [ -n "${LOAD_CONTAINER}" ]; then
+    node "${REPO_ROOT}/scripts/scenario-executor.mjs" timeout 30 docker rm -f "${LOAD_CONTAINER}" >/dev/null ||
+      echo "[testbed] cleanup incomplete; retained container name: ${LOAD_CONTAINER}" >&2
+  fi
+  rm -rf "${CONTEXT}"
+}
+trap cleanup EXIT
 cp "${TESTBED_DIR}/Dockerfile" "${TESTBED_DIR}/entrypoint.sh" "${CONTEXT}/"
 
 # OpenRig CLI from the TREE (never the npm registry). ASSEMBLE the publishable @openrig/cli first
@@ -57,18 +71,8 @@ STUB_FILES_JSON="$(node -e \
   'const fs=require("fs");const l=fs.readFileSync(process.argv[1],"utf8").split("\n").map(s=>s.replace(/#.*/,"").trim()).filter(Boolean);process.stdout.write(JSON.stringify(l))' \
   "${STUB_ASSETS_LIST}")"
 
-# --- resolve the target arch HOST-side and pass it EXPLICITLY (builder-agnostic: correct on the
-# legacy builder — which NEVER populates the automatic TARGETARCH build-arg — AND on BuildKit). Fail
-# CLOSED on an unknown arch rather than letting the Dockerfile silently default to amd64, which fetches
-# x64 Node into an arm64 image and dies with a Rosetta/ELF failure (exit 133).
-case "$(uname -m)" in
-  x86_64|amd64) TARGETARCH=amd64 ;;
-  arm64|aarch64) TARGETARCH=arm64 ;;
-  *) echo "[testbed] cannot resolve a supported TARGETARCH from 'uname -m'=$(uname -m); refusing to build (a silent amd64 default installs wrong-arch Node = exit 133)" >&2; exit 4 ;;
-esac
-
 # --- build (host-side) ---
-docker build \
+docker build --platform "${TARGET_PLATFORM}" \
   --build-arg BASE_IMAGE="${BASE_IMAGE}" \
   --build-arg NODE_VERSION="${NODE_VERSION}" \
   --build-arg OPENRIG_TARBALL=openrig.tgz \
@@ -92,7 +96,23 @@ echo "[testbed] effect proof: daemon LOAD inside the container (better-sqlite3 m
 # kernel, confirm readiness by hitting /healthz DIRECTLY (deterministic — no fixed sleep), then daemon
 # status; an EXIT trap stops the daemon so a failed assertion still tears down. A broken native install
 # fails `rig daemon start` here → set -e → non-zero → the build verb fails BEFORE the A/B pin.
-docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges "${IMAGE_TAG}" bash -lc 'set -euo pipefail; trap "rig daemon stop >/dev/null 2>&1 || true" EXIT; rig --version; rig daemon start --no-kernel; curl -fsS http://127.0.0.1:7433/healthz; rig daemon status'
+LOAD_CONTAINER="openrig-testbed-load-$(node -p 'require("node:crypto").randomUUID()')"
+printf '%s\n' "${LOAD_CONTAINER}" > "${OUT_DIR}/image-load.container-name.txt"
+load_status=0
+node "${REPO_ROOT}/scripts/scenario-executor.mjs" timeout 120 docker run --name "${LOAD_CONTAINER}" \
+  --platform "${TARGET_PLATFORM}" --network none --cap-drop ALL --security-opt no-new-privileges \
+  --cpus 2 --memory 2g --memory-swap 2g --pids-limit 256 "${IMAGE_TAG}" bash -lc \
+  'set -euo pipefail; trap "rig daemon stop >/dev/null 2>&1 || true" EXIT; rig --version; rig daemon start --no-kernel; curl -fsS http://127.0.0.1:7433/healthz; rig daemon status' \
+  > "${OUT_DIR}/image-load.log" 2>&1 || load_status=$?
+printf '%s\n' "${load_status}" > "${OUT_DIR}/image-load.exit-code.txt"
+cat "${OUT_DIR}/image-load.log" >&2
+inspect_status=0
+node "${REPO_ROOT}/scripts/scenario-executor.mjs" timeout 30 docker inspect "${LOAD_CONTAINER}" \
+  > "${OUT_DIR}/image-load.container.json" || inspect_status=$?
+[ "${load_status}" -eq 0 ] || exit "${load_status}"
+[ "${inspect_status}" -eq 0 ] || exit "${inspect_status}"
+node "${REPO_ROOT}/scripts/scenario-executor.mjs" timeout 30 docker rm -f "${LOAD_CONTAINER}" >/dev/null
+LOAD_CONTAINER=""
 
 # --- emit the reproducible manifest + census receipt via the tested node orchestrator ---
 INPUTS="$(mktemp)"

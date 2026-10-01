@@ -63,6 +63,15 @@ describe("GET /api/files/asset — Range + render opt-in", () => {
     expect(suffix.headers.get("Content-Range")).toBe("bytes 950-999/1000");
   });
 
+  it.each(["bytes=-1000", "bytes=-2000"])("serves the whole representation for a satisfiable long suffix %s", async (range) => {
+    const res = await app.request(url("media/clip.mp4"), { headers: { Range: range } });
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe("bytes 0-999/1000");
+    expect(res.headers.get("Content-Length")).toBe("1000");
+    const body = new Uint8Array(await res.arrayBuffer());
+    expect(body).toEqual(Uint8Array.from({ length: 1000 }, (_, i) => i % 251));
+  });
+
   it("clamps an over-long end and rejects unsatisfiable ranges with 416", async () => {
     const clamped = await app.request(url("media/clip.mp4"), { headers: { Range: "bytes=900-5000" } });
     expect(clamped.status).toBe(206);
@@ -71,6 +80,10 @@ describe("GET /api/files/asset — Range + render opt-in", () => {
     const past = await app.request(url("media/clip.mp4"), { headers: { Range: "bytes=1000-" } });
     expect(past.status).toBe(416);
     expect(past.headers.get("Content-Range")).toBe("bytes */1000");
+
+    const zeroSuffix = await app.request(url("media/clip.mp4"), { headers: { Range: "bytes=-0" } });
+    expect(zeroSuffix.status).toBe(416);
+    expect(zeroSuffix.headers.get("Content-Range")).toBe("bytes */1000");
 
     const garbage = await app.request(url("media/clip.mp4"), { headers: { Range: "bytes=zz" } });
     expect(garbage.status).toBe(416);

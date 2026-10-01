@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -50,6 +50,23 @@ describe("chat routes", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it("watch disconnect during history releases the subscription", async () => {
+    chatRepo.send(rigId, "alice", "existing history");
+    const before = eventBus.subscriberCount;
+    const res = await app.request(`/api/rigs/${rigId}/chat/watch`);
+    expect(eventBus.subscriberCount).toBe(before + 1);
+    await res.body?.cancel();
+    await vi.waitFor(() => expect(eventBus.subscriberCount).toBe(before), { timeout: 1000 });
+  });
+
+  it("history returns same-day rows after an ISO UTC cutoff", async () => {
+    const message = chatRepo.send(rigId, "alice", "same day");
+    db.prepare("UPDATE chat_messages SET created_at = '2026-09-30 12:00:00' WHERE id = ?").run(message.id);
+    const response = await app.request(`/api/rigs/${rigId}/chat/history?since=${encodeURIComponent("2026-09-30T11:00:00Z")}`);
+    expect(response.status).toBe(200);
+    expect((await response.json()).map((row: { id: string }) => row.id)).toEqual([message.id]);
   });
 
   it("POST /send persists + returns", async () => {

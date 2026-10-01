@@ -593,16 +593,18 @@ export class WatchdogJobsRepository {
    * successor re-arms its own. Gen-scoped, NEVER name-scoped (the successor shares the seat name, so a
    * name-scoped stop would kill the successor's own jobs). A NULL/empty generation never matches
    * (UNKNOWN ≠ retired — note-2). Returns the count stopped. Auditable (terminal_reason), not a hard
-   * delete — the row stays for forensics. Pre-063 dbs no-op.
+   * delete — the row stays for forensics. Pre-063 dbs no-op. `keepJobIds` are left running: the queue's
+   * current park timers wake the seat that owns a still-blocked row, which the successor inherits.
    */
-  dropArmedByRegisteringGeneration(generationUuid: string): number {
+  dropArmedByRegisteringGeneration(generationUuid: string, keepJobIds: readonly string[] = []): number {
     if (!this.hasGenColumn || !generationUuid) return 0;
+    const keep = keepJobIds.length > 0 ? ` AND job_id NOT IN (${keepJobIds.map(() => "?").join(", ")})` : "";
     const res = this.db
       .prepare(
         `UPDATE watchdog_jobs SET state = 'stopped', terminal_reason = 'registering generation retired (seat handover)'
-         WHERE state = 'active' AND registered_by_generation_uuid = ?`,
+         WHERE state = 'active' AND registered_by_generation_uuid = ?${keep}`,
       )
-      .run(generationUuid);
+      .run(generationUuid, ...keepJobIds);
     return res.changes;
   }
 }
