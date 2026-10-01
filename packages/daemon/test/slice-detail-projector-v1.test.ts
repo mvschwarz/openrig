@@ -370,10 +370,14 @@ describe("release-0.4.7 intent-stage — buildAcceptance edits (T4) + byte-ident
     expect(a.items[0]!.source.file).toBe("README.md");
   });
 
+  // Persisted pre-proof-authority scaffolds keep their historical classifier
+  // semantics even though new slice templates no longer seed these rows.
+  const legacyProgress = "# Progress\n\n## Acceptance\n\n- [ ] Implementation complete\n- [ ] Tests passing\n- [ ] Review approved\n";
+
   it("T4c: ONE checked generic row makes all three real (engagement breaks pristine)", () => {
     writeSlice("98-accept", {
       "README.md": acceptTpl.readme,
-      "PROGRESS.md": acceptTpl.progress.replace("- [ ] Implementation complete", "- [x] Implementation complete"),
+      "PROGRESS.md": legacyProgress.replace("- [ ] Implementation complete", "- [x] Implementation complete"),
     });
     const a = acceptanceOf("98-accept");
     const progressItems = a.items.filter((i) => i.source.file === "PROGRESS.md");
@@ -384,7 +388,7 @@ describe("release-0.4.7 intent-stage — buildAcceptance edits (T4) + byte-ident
   it("T4d (AR-6): an ADDED PROGRESS row with the triple untouched makes all four real", () => {
     writeSlice("98-accept", {
       "README.md": acceptTpl.readme,
-      "PROGRESS.md": acceptTpl.progress.replace(
+      "PROGRESS.md": legacyProgress.replace(
         "- [ ] Review approved",
         "- [ ] Review approved\n- [ ] Wire the modal",
       ),
@@ -398,7 +402,7 @@ describe("release-0.4.7 intent-stage — buildAcceptance edits (T4) + byte-ident
   it("T4e: an EDITED generic-row text breaks pristine — all rows count", () => {
     writeSlice("98-accept", {
       "README.md": acceptTpl.readme,
-      "PROGRESS.md": acceptTpl.progress.replace("- [ ] Tests passing", "- [ ] Tests passing in CI"),
+      "PROGRESS.md": legacyProgress.replace("- [ ] Tests passing", "- [ ] Tests passing in CI"),
     });
     const a = acceptanceOf("98-accept");
     expect(a.items.filter((i) => i.source.file === "PROGRESS.md")).toHaveLength(3);

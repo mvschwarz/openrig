@@ -38,15 +38,16 @@ describe("FR-4 — scaffold output parses into the expected UI tree", () => {
     expect(file.counts.done).toBe(0);
   });
 
-  it("slice scaffold parses into a non-null title + checkbox rows", () => {
+  it("slice scaffold parses into a title and outcome sections without generic acceptance rows", () => {
     const dir = path.join(root, "slices", "01-x");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "PROGRESS.md"), renderSliceProgressTemplate("Slice X"), "utf8");
 
     const file = indexerFor().scan().files.find((f) => f.relPath.includes("01-x"))!;
     expect(file.title).toBe("Progress — Slice X");
-    expect(file.rows.some((r) => r.kind === "heading" && r.text === "Acceptance")).toBe(true);
-    expect(file.counts.total).toBe(3);
+    expect(file.rows.some((r) => r.kind === "heading" && r.text === "Current state")).toBe(true);
+    expect(file.rows.some((r) => r.kind === "heading" && r.text === "Outcomes")).toBe(true);
+    expect(file.counts.total).toBe(0);
   });
 });
 
@@ -57,7 +58,8 @@ describe("FR-4 — verb output parses into the expected UI tree", () => {
 
     // Real verb logic applied to the real scaffold.
     let content = renderSliceProgressTemplate("Slice Updated");
-    content = setProgressRow(content, { text: "Implementation complete", status: "done" }).content;
+    content = addProgressRow(content, { section: "Outcomes", text: "API behavior verified", status: "active" }).content;
+    content = setProgressRow(content, { text: "API behavior verified", status: "done" }).content;
     content = addProgressRow(content, { section: "Rail", text: "Active thing", status: "active" }).content;
     content = addProgressRow(content, { section: "Rail", text: "Blocked thing", status: "blocked" }).content;
     fs.writeFileSync(path.join(dir, "PROGRESS.md"), content, "utf8");
@@ -66,7 +68,7 @@ describe("FR-4 — verb output parses into the expected UI tree", () => {
     expect(file.title).toBe("Progress — Slice Updated");
 
     const byText = (t: string) => file.rows.find((r) => r.kind === "checkbox" && r.text === t);
-    expect(byText("Implementation complete")!.status).toBe("done");
+    expect(byText("API behavior verified")!.status).toBe("done");
     expect(byText("Active thing")!.status).toBe("active");
     expect(byText("Blocked thing")!.status).toBe("blocked");
     // The verb created a `## Rail` heading node.

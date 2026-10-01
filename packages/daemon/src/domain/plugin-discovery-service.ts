@@ -18,7 +18,8 @@
 //     and summarizes the tree (skills/, hooks, mcp_servers, etc.) so the UI
 //     viewer can show what the plugin ships without re-reading files.
 //   - For findUsedBy(id), parses agent.yaml files in the spec library and
-//     walks resources.plugins[].id to collect references. Operates on parsed
+//     walks resource declarations and profile uses.plugins[] to collect references.
+//     Profile consumers are distinct from definition-only resource pools. Operates on parsed
 //     YAML structure (NOT string-grep) so comments + adjacent text don't
 //     produce false positives.
 //
@@ -151,6 +152,8 @@ export interface AgentReference {
   sourcePath: string;
   /** profile names that include this plugin in their uses.plugins[]. */
   profiles: string[];
+  /** Profile consumer, or a resource declaration with no consuming profile. */
+  kind?: "consumer" | "definition";
 }
 
 export interface PluginDiscoveryServiceOpts {
@@ -160,13 +163,10 @@ export interface PluginDiscoveryServiceOpts {
   claudeCacheDir: string;
   /** Root directory for Codex plugin cache (typically ~/.codex/plugins/cache). */
   codexCacheDir: string;
-  /**
-   * Spec library directory containing agent.yaml files (recursively scanned).
-   * Typically the daemon's resolved spec library root. May be a single root
-   * for v0; expand to multi-root in a later slice if the spec library hooks
-   * its full root list through.
-   */
+  /** User spec library directory containing agent.yaml files (recursively scanned). */
   specLibraryDir: string;
+  /** Additional spec roots visible in the library, including built-in and legacy user specs. */
+  additionalSpecLibraryDirs?: string[];
   /**
    * Slice 3.3 fix-C — optional rig cwd roots whose `.claude/plugins/*` +
    * `.codex/plugins/*` subdirectories get scanned for rig-bundled
@@ -373,20 +373,23 @@ export class PluginDiscoveryService {
 
   findUsedBy(pluginId: string): AgentReference[] {
     const refs: AgentReference[] = [];
-    if (!existsSync(this.opts.specLibraryDir)) return refs;
-
-    for (const candidate of walkAgentYamls(this.opts.specLibraryDir)) {
+    const roots = new Set([this.opts.specLibraryDir, ...(this.opts.additionalSpecLibraryDirs ?? [])]);
+    const seen = new Set<string>();
+    const candidates = [...roots].flatMap((root) => walkAgentYamls(root));
+    for (const candidate of candidates) {
+      if (seen.has(candidate.path)) continue;
+      seen.add(candidate.path);
       const parsed = safeParseYaml(candidate.content);
       if (!parsed || typeof parsed !== "object") continue;
 
       const resourcesPlugins = readResourcesPlugins(parsed);
       const declaresThisPlugin = resourcesPlugins.some((p) => p === pluginId);
-      if (!declaresThisPlugin) continue;
-
       const profiles = readProfilesUsingPlugin(parsed, pluginId);
+      if (!declaresThisPlugin && profiles.length === 0) continue;
       const agentName = readField(parsed, "name");
       if (!agentName) continue;
-      refs.push({ agentName, sourcePath: candidate.path, profiles });
+      refs.push({ agentName, sourcePath: candidate.path, profiles,
+        kind: profiles.length > 0 ? "consumer" : "definition" });
     }
     return refs;
   }
@@ -807,7 +810,7 @@ function readProfilesUsingPlugin(spec: unknown, pluginId: string): string[] {
     if (!uses || typeof uses !== "object") continue;
     const usesPlugins = (uses as Record<string, unknown>)["plugins"];
     if (!Array.isArray(usesPlugins)) continue;
-    if (usesPlugins.some((p) => p === pluginId)) {
+    if (usesPlugins.some((p) => p === pluginId || p === `shared:${pluginId}`)) {
       matched.push(profileName);
     }
   }

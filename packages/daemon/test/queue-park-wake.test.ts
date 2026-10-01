@@ -607,6 +607,70 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(jobs.getById(job.jobId)!.state).toBe("active");   // still the operator's
   });
 
+  it("a superseded operator watchdog cannot write a fired receipt for the new park", async () => {
+    const job = jobs.register({
+      policy: "periodic-reminder",
+      specYaml: "policy: periodic-reminder\ntarget:\n  session: worker@rig\nmessage: old operator reminder\n",
+      targetSession: "worker@rig", intervalSeconds: 600, registeredBySession: "operator@rig",
+    });
+    const row = await item("worker@rig");
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:first", transitionNote: "park on old watchdog", wakeWatchdogId: job.jobId } as never);
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "external:second", transitionNote: "new timer owns continuation", wakeAfterSeconds: 90 } as never);
+    const current = repo.getParkWakeStatus(row.qitemId)!;
+    const before = wakes(row.qitemId);
+    repo.recordWatchdogWakeAttempt(job.jobId, "sent");
+    expect(wakes(row.qitemId)).toEqual(before);
+    expect(repo.getParkWakeStatus(row.qitemId)?.ref).toBe(current.ref);
+    expect(jobs.getById(job.jobId)?.state).toBe("active");
+    repo.recordWatchdogWakeAttempt(current.ref, "sent");
+    expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({ ref: current.ref, phase: "fired" });
+  });
+
+  it.each([false, true])("preserves timer lifecycle after the original row reattaches its shared job (repeating=%s)", async (repeating) => {
+    repo.attachWatchdogJobsRepository(jobs);
+    const owner = "shared-owner@rig";
+    const original = await item(owner);
+    repo.update({ qitemId: original.qitemId, actorSession: owner, state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "original wait",
+      wakeAfterSeconds: 30, ...(repeating ? { wakeMaxSeconds: 120 } : {}) } as never);
+    const jobId = repo.getParkWakeStatus(original.qitemId)!.ref;
+    const attached = await item(owner);
+    repo.update({ qitemId: attached.qitemId, actorSession: owner, state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "attach shared watchdog",
+      wakeWatchdogId: jobId } as never);
+    repo.update({ qitemId: original.qitemId, actorSession: owner, state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "original row reattaches the same watchdog",
+      wakeWatchdogId: jobId } as never);
+    const deliveries: Array<{ targetSession: string; message: string }> = [];
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo: jobs, historyLog: new WatchdogHistoryLog(db), eventBus: bus,
+      resolveQueueWait: input => repo.evaluateWaitReminder(input),
+      resolvePreDeliveryTerminalReason: ({ jobId }) => repo.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      onWakeAttempt: ({ jobId, deliveryStatus }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus),
+      deliver: async request => { deliveries.push(request); return { status: "ok" }; },
+    });
+    expect(jobs.getByIdOrThrow(jobId).intervalSeconds).toBe(30);
+    expect((await engine.evaluate(jobs.getByIdOrThrow(jobId))).outcome.action).toBe("send");
+    if (repeating) {
+      expect(jobs.getByIdOrThrow(jobId)).toMatchObject({ state: "active", intervalSeconds: 60 });
+      expect((await engine.evaluate(jobs.getByIdOrThrow(jobId))).outcome)
+        .toMatchObject({ action: "skip", reason: "queue_wait_already_presented" });
+      expect(jobs.getByIdOrThrow(jobId)).toMatchObject({ state: "active", intervalSeconds: 120 });
+    } else {
+      expect(jobs.getByIdOrThrow(jobId)).toMatchObject({ state: "terminal", terminalReason: "park_timer_fired_once" });
+    }
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.targetSession).toBe(owner);
+    for (const row of [original, attached]) {
+      const receipts = wakes(row.qitemId).filter(w => w.phase === "fired" && w.wake_ref === jobId);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]!.wake_kind).toBe("watchdog");
+      expect(repo.getById(row.qitemId)?.state).toBe("blocked");
+    }
+  });
+
   it("OPR.0.5.8.1 S1b — the S16 provider-limit path is UNCHANGED, and stays distinguishable", async () => {
     // Contract item 3 asked me to state whether this repair touches S16 and pin
     // it either way. It does not: provider-limit timers already ended after

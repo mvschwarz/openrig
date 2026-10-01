@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createDb } from "../src/db/connection.js";
@@ -8,6 +8,8 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
+import { Hono } from "hono";
+import { workflowRoutes } from "../src/routes/workflow.js";
 
 describe("project lifecycle compiler", () => {
   let root: string;
@@ -51,6 +53,27 @@ execution:
     return { db, runtime: new WorkflowRuntime({ db, eventBus: bus, queueRepo: queue }) };
   }
 
+  it("keeps a missing project manifest a structured lifecycle 404", async () => {
+    rmSync(join(root, "project.yaml"));
+    const subject = runtime();
+    const app = new Hono();
+    const projectPath = join(realpathSync(root), "project.yaml");
+    app.use("*", async (c, next) => { c.set("workflowRuntime" as never, subject.runtime as never); await next(); });
+    app.route("/api/workflow", workflowRoutes());
+    try {
+      const response = await app.request("/api/workflow/compile", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ missionPath: missionDir, operationKey: "release-op" }),
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        error: "lifecycle_manifest_missing", kind: "project",
+        message: `project manifest not found at ${projectPath}`,
+        path: projectPath,
+      });
+    } finally { subject.db.close(); }
+  });
+
   it("is deterministic and performs zero database writes", () => {
     const subject = runtime();
     const before = {
@@ -74,6 +97,27 @@ execution:
       queue: (subject.db.prepare("select count(*) n from queue_items").get() as { n: number }).n,
     }).toEqual(before);
     subject.db.close();
+  });
+
+  it.each(["work/initiatives", "."])("finds the owning project for missions.root %s", (missionsRoot) => {
+    const parent = join(root, missionsRoot);
+    mkdirSync(parent, { recursive: true });
+    const moved = join(parent, "release-1.0.0");
+    renameSync(missionDir, moved);
+    missionDir = moved;
+    writeFileSync(join(root, "project.yaml"), `schema: openrig.project/v0alpha1
+kind: project
+metadata: { id: demo }
+missions: { root: "${missionsRoot}" }
+lifecycle: { profile: release-boundary-v0 }
+`);
+    const subject = runtime();
+    try {
+      const compiled = subject.runtime.compileLifecycle(missionDir, "release-op");
+      expect(compiled.eligible).toBe(true);
+      expect(compiled.identity).toEqual({ project: "demo", mission: "release-1.0.0", lifecycleProfile: "release-boundary-v0" });
+      expect(compiled.sources.find(source => source.kind === "project")?.path).toBe(realpathSync(join(root, "project.yaml")));
+    } finally { subject.db.close(); }
   });
 
   it("keeps an invalid dependency graph inspectable but ineligible", () => {

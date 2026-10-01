@@ -2,9 +2,11 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import { describe, expect, it } from "vitest";
 import { CodexRuntimeAdapter } from "../src/adapters/codex-runtime-adapter.js";
+import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
+import { piSeatPaths } from "../src/adapters/pi-runner-protocol.js";
 import { hashContent } from "../src/domain/conflict-detector.js";
 import { claudeConflictTargetPath, planProjection, projectionConflictWarnings, type ProjectionInput, type ProjectionPlan } from "../src/domain/projection-planner.js";
-import type { NodeBinding } from "../src/domain/runtime-adapter.js";
+import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 
 const sourceFile = "/fixture/shared/skills/shared-skill/SKILL.md";
 const claudeFile = "/fixture/project/.claude/skills/shared-skill/SKILL.md";
@@ -21,7 +23,7 @@ const end = instantiator.indexOf("    const resolvedFiles = this.buildResolvedSt
 if (start < 0 || end < start) throw new Error("Production projection planning block not found");
 const buildPlan = new Function(
   "planProjection", "claudeConflictTargetPath", "projectionConflictWarnings", "nodePath",
-  "input", "configResult", "resolveResult", "projectionManifest", "launchResult", "canonicalSessionName",
+  "input", "configResult", "resolveResult", "projectionManifest", "launchResult", "canonicalSessionName", "adapter",
   instantiator.slice(start, end) + "\nreturn planResult.plan;",
 );
 
@@ -61,7 +63,7 @@ function fixture(target: "absent" | "identical" | "edited", runtime = "codex", f
     claudeConflictTargetPath, projectionConflictWarnings, nodePath,
     { member: { runtime }, rigId: "fixture", force }, { config }, { collisions: [] },
     { lastHash: (path: string) => path === codexFile ? hashContent(sourceText) : null },
-    { warnings: [] }, "dev-check@fixture",
+    { warnings: [] }, "dev-check@fixture", {},
   );
   const adapter = new CodexRuntimeAdapter({
     fsOps,
@@ -114,5 +116,50 @@ describe("Codex skill projection in a shared project", () => {
       const args = [category, "other", "/fixture/project", "/fixture/agents/reviewer.md"] as const;
       expect(f.resolveTargetPath(...args)).toBe(claudeConflictTargetPath(...args, runtime === "claude-code" ? "CLAUDE.local.md" : undefined));
     }
+  });
+});
+
+describe("OMP skill projection in a shared project", () => {
+  it("projects the OMP seat's skill even when a Claude seat's identical copy is in the shared cwd", async () => {
+    const seat = "dev-omp@fixture";
+    const ompFile = nodePath.join(piSeatPaths("/fixture/state/omp", seat).agentDir, "skills", "shared-skill", "SKILL.md");
+    const files = new Map([[sourceFile, sourceText], [claudeFile, sourceText]]);
+    const fsOps = {
+      exists: (path: string) => files.has(path),
+      readFile: (path: string) => files.get(path)!,
+      writeFile: (path: string, text: string) => { files.set(path, text); },
+      mkdirp: () => {},
+      listFiles: (path: string) => path === nodePath.dirname(sourceFile) ? ["SKILL.md"] : [],
+    };
+    const config: ProjectionInput["config"] = {
+      runtime: "omp", cwd: "/fixture/project", restorePolicy: "resume_if_possible",
+      selectedResources: {
+        skills: [{ effectiveId: "shared-skill", sourceSpec: "shared", sourcePath: "/fixture/shared", resource: { id: "shared-skill", path: "skills/shared-skill" } }],
+        guidance: [], subagents: [], plugins: [], runtimeResources: [],
+      },
+      startup: { files: [], actions: [] }, resolvedSpecName: "qa", resolvedSpecVersion: "1.0", resolvedSpecHash: "fixture",
+    };
+    const omp = new OmpRuntimeAdapter({
+      fsOps, stateRoot: "/fixture/state/omp", runnerEntryPath: "/daemon/pi-runner.js",
+      tmux: new Proxy({}, { get() { throw new Error("No tmux calls allowed"); } }) as never,
+    });
+    const plan = (runtime: string, adapter: RuntimeAdapter): ProjectionPlan => buildPlan.call(
+      { deps: { fsOps, rigRepo: { getRigClaudeManagedBlockFile: () => null } } },
+      planProjection, claudeConflictTargetPath, projectionConflictWarnings, nodePath,
+      { member: { runtime }, rigId: "fixture" }, { config: { ...config, runtime } }, { collisions: [] },
+      { lastHash: () => null }, { warnings: [], binding: { tmuxSession: seat } }, seat, adapter,
+    );
+    const binding = { tmuxSession: seat, cwd: config.cwd } as NodeBinding;
+
+    // The Claude seat sharing the cwd still sees its own identical copy as in place.
+    expect(plan("claude-code", {} as RuntimeAdapter).noOps.map(entry => entry.effectiveId)).toEqual(["shared-skill"]);
+
+    const fresh = plan("omp", omp);
+    expect(fresh.noOps).toEqual([]);
+    expect(await omp.project(fresh, binding)).toEqual({ projected: ["shared-skill"], skipped: [], failed: [] });
+    expect(files.get(ompFile)).toBe(sourceText);
+
+    // Once the OMP seat's own copy matches, it is the copy that makes it a no-op.
+    expect(plan("omp", omp).noOps.map(entry => entry.effectiveId)).toEqual(["shared-skill"]);
   });
 });

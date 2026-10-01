@@ -49,6 +49,27 @@ describe("shell launch transport", () => {
     expect(f.commands).toEqual([]);
   });
 
+  it.each([513, 1023])("falls back to direct Pi input for a %i-byte command under a long TMPDIR", async bytes => {
+    const f = fixture(undefined, "/tmp/" + "a".repeat(512));
+    const command = "é".repeat((bytes - 1) / 2) + "x";
+    expect(Buffer.byteLength(command, "utf8")).toBe(bytes);
+    expect(await f.adapter.sendShellCommand("pane", command, undefined, { stageIfLong: true, execInScript: true }))
+      .toEqual({ ok: true });
+    expect(f.fileOps.writeFile).toHaveBeenCalledOnce();
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[0]![1]).toBe(command);
+    expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
+  });
+
+  it("refuses a 1024-byte Pi command when its staged invocation exceeds the bound", async () => {
+    const f = fixture(undefined, "/tmp/" + "a".repeat(512));
+    const command = "é".repeat(512);
+    expect(Buffer.byteLength(command, "utf8")).toBe(1024);
+    expect(await f.adapter.sendShellCommand("pane", command, undefined, { stageIfLong: true, execInScript: true }))
+      .toMatchObject({ ok: false, code: "launch_path_too_long" });
+    expect(f.fileOps.writeFile).not.toHaveBeenCalled();
+    expect(f.commands).toEqual([]);
+  });
+
   it("does not remove a preexisting file when exclusive creation fails", async () => {
     const f = fixture();
     f.files.set(f.scriptPath, "retained bytes");

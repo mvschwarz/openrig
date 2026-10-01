@@ -31,6 +31,10 @@ export interface ResumeTokenCaptureDeps {
   piRunnerStateStore?: {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   } | null;
+  /** Reads the separately rooted OMP runner sidecar; never reads Pi seat state. */
+  ompRunnerStateStore?: {
+    readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
+  } | null;
 }
 
 export type ResumeTokenDeriveResult =
@@ -48,6 +52,7 @@ export type ResumeTokenDeriveResult =
  *   claude-code → the status-line sidecar's session_id (a file read)
  *   codex       → the thread id derived from live pid-keyed logs
  *   pi          → the pi-runner state sidecar's sessionFile (a file read)
+ *   omp         → the OMP runner state sidecar's sessionFile (separate root)
  * Returns a structured outcome; never throws for a missing/invalid token
  * (those are honest skips). ANY unexpected throw from a dependency is the
  * caller's to swallow (capture must never fail or block its lifecycle op).
@@ -59,7 +64,7 @@ export async function deriveResumeToken(
   const resumeType = resumeTypeForRuntime(input.runtime);
   if (!resumeType) return { outcome: "exempt" }; // terminal / unknown — exempt, not a failure
 
-  const runtime = input.runtime as string; // non-null: resumeType is set only for claude-code / codex / pi
+  const runtime = input.runtime as string; // non-null: resumeType resolves only for supported runtimes
 
   let token: string | undefined;
   if (runtime === "claude-code") {
@@ -75,9 +80,10 @@ export async function deriveResumeToken(
     if (!deps.resumeTokenCapturer) return { outcome: "noop" }; // dep absent — silent no-op
     token = await deps.resumeTokenCapturer.captureCodexThreadId(input.sessionName);
     if (!token) return { outcome: "skipped", reason: "probe_timeout" };
-  } else if (runtime === "pi") {
-    if (!deps.piRunnerStateStore) return { outcome: "noop" }; // dep absent — silent no-op
-    const state = deps.piRunnerStateStore.readSessionFile(input.sessionName);
+  } else if (runtime === "pi" || runtime === "omp") {
+    const stateStore = runtime === "pi" ? deps.piRunnerStateStore : deps.ompRunnerStateStore;
+    if (!stateStore) return { outcome: "noop" }; // dep absent — silent no-op
+    const state = stateStore.readSessionFile(input.sessionName);
     if (!state.ok) {
       return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
     }

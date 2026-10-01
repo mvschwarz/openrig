@@ -93,6 +93,12 @@ describe("FR-6 restore-plan token state", () => {
     expect(p.nodes[0]!.tokenState).toBe("stale");
   });
 
+  it("stale (age): an already-zoned ISO last-verified stamp is aged too, not skipped as unparseable", () => {
+    const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "claude-code" }]);
+    const p = buildRestorePlanPreview(rig, null, [row("n1", { resumeLastVerified: "2026-07-02T10:00:00.000Z", resumeLastProbeStatus: "resumable" })], undefined, NOW);
+    expect(p.nodes[0]!.tokenState).toBe("stale");
+  });
+
   it("codex runtime prompt surfaced for a resumable Codex seat", () => {
     const rig = rigWith([{ id: "n1", logicalId: "a", runtime: "codex" }]);
     const p = buildRestorePlanPreview(rig, null, [row("n1", { resumeType: "codex_id", resumeLastProbeStatus: "resumable", resumeLastVerified: FRESH })], undefined, NOW);

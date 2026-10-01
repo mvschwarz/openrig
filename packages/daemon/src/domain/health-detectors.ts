@@ -19,6 +19,7 @@ import type { ContextUsageStore } from "./context-usage-store.js";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import { queryUsageSeries } from "./usage-series.js";
+import { parseSqliteUtcMs } from "./sqlite-time.js";
 
 const CONTEXT_PRESSURE_PERCENT = 95;
 const CONTEXT_CRITICAL_PERCENT = 99;
@@ -213,7 +214,7 @@ export class LiveContextHealthSource implements HealthObservationSource {
               })
                 .filter((sample) => sample.nodeId === node.id
                   && sample.sampledAt !== null
-                  && Date.parse(sample.sampledAt) >= sqliteTimestampMs(tenureStartedAt)
+                  && Date.parse(sample.sampledAt) >= parseSqliteUtcMs(tenureStartedAt)
                   && Date.parse(sample.sampledAt) <= Date.parse(usage.sampledAt!))
                 .map((sample, sourceOrder): HealthEvidenceReference => ({
                   type: "context-usage",
@@ -290,10 +291,6 @@ function selectContextEpisodeEvidence(
   return [...new Set([samples[episodeStart]!, peak, latest])]
     .sort((a, b) => a.observedAt!.localeCompare(b.observedAt!, "en-US"))
     .map((item, sourceOrder) => ({ ...item, sourceOrder }));
-}
-
-function sqliteTimestampMs(value: string): number {
-  return Date.parse(value.includes("T") ? value : `${value.replace(" ", "T")}Z`);
 }
 
 export function healthScopeId(scope: HealthScope): string {

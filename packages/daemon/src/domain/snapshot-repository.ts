@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { ulid } from "ulid";
 import type { RestoreSnapshotSelection, RestoreSnapshotSummary, Snapshot, SnapshotData } from "./types.js";
+import { parseSqliteUtcMs } from "./sqlite-time.js";
 
 export type RestoreSnapshotSelectionOutcome =
   | { ok: true; snapshot: Snapshot; selection: RestoreSnapshotSelection }
@@ -115,7 +116,7 @@ export class SnapshotRepository {
     // A concurrent pruner can remove the selected row after it was read. Its
     // insertion position is then unknown, so only strictly newer timestamps count.
     const newerRows = selectedIndex < 0
-      ? candidates.filter((row) => Date.parse(sqliteUtc(row.created_at)) > Date.parse(sqliteUtc(snapshot!.createdAt)))
+      ? candidates.filter((row) => parseSqliteUtcMs(row.created_at) > parseSqliteUtcMs(snapshot!.createdAt))
       : candidates.slice(0, selectedIndex);
     const newer = newerRows.flatMap((row) => {
       const candidate = this.restoreUsableRow(row);
@@ -243,16 +244,12 @@ export class SnapshotRepository {
   }
 }
 
-function sqliteUtc(value: string): string {
-  return /Z$|[+-]\d\d:\d\d$/.test(value) ? value : value.replace(" ", "T") + "Z";
-}
-
 export function summarizeSnapshot(snapshot: Snapshot, nowMs: number = Date.now()): RestoreSnapshotSummary {
   return {
     snapshotId: snapshot.id,
     kind: snapshot.kind,
     createdAt: snapshot.createdAt,
-    ageMs: Math.max(0, nowMs - Date.parse(sqliteUtc(snapshot.createdAt))),
+    ageMs: Math.max(0, nowMs - parseSqliteUtcMs(snapshot.createdAt)),
   };
 }
 

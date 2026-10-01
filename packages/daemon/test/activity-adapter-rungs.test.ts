@@ -102,7 +102,7 @@ describe("S19 A5 — production wiring: the sweep auto-declares, consults self-r
           ? { seatNodeId, sessionName, rung: "self-report", sourceId: "claude:pid-json", seq: clock.now, observedAt: new Date(clock.now).toISOString(), activity: "working" }
           : null,
     });
-    const db = { prepare: () => ({ all: () => [{ session_name: NAME, node_id: SEAT, runtime: opts.runtime }] }) } as unknown as Database.Database;
+    const db = { prepare: () => ({ all: () => [{ session_name: NAME, node_id: SEAT, runtime: opts.runtime, attachment_type: "tmux" }] }) } as unknown as Database.Database;
     return { svc, db, clock };
   }
 

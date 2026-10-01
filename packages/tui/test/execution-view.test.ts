@@ -234,6 +234,21 @@ describe("mission execution story — readable rows over the shipped projections
     expect(executionKeys(lines).filter((key) => key.startsWith("slice:"))).toHaveLength(4);
   });
 
+  it("distinguishes retired and deferred slices from planned in fallback state", () => {
+    const fixture = executionFixture();
+    fixture.q1_lanes = [];
+    const scopes = executionScopes(4, (index) => (index === 0 ? "active" : index === 1 ? "blocked" : "done"));
+    // Slice 2 has stage "retired"
+    scopes[0]!.slices[1]!.stage = "retired";
+    // Slice 3 has status "deferred"
+    scopes[0]!.slices[2]!.status = "closed-deferred";
+
+    const overview = text(executionContentLines(fixture, scopes, [], null, 160));
+    expect(overview).toContain("○ retired");
+    expect(overview).toContain("○ deferred");
+    expect(overview).not.toContain("2 planned");
+  });
+
   it("qualifies slice completion while a release workflow is still waiting", () => {
     const fixture = executionFixture();
     fixture.q1_lanes = [];

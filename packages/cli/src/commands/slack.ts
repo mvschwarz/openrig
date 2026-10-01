@@ -201,14 +201,21 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       const scope = verification.value.scope!;
       const member = verification.value.member;
       const ready = scope.ok && (member ? member.isMember : false);
+      // Failed scope requests or an absent/empty grant header cannot prove
+      // which optional features are available. Baseline readiness is unchanged.
+      const missingFeatures = scope.error || scope.granted.length === 0 ? null
+        : surface.FEATURE_SCOPES.filter((feature) => !scope.granted.includes(feature.scope));
       if (opts.json) {
-        log(JSON.stringify({ scope, member, ready, receipt: verification.receipt }));
+        log(JSON.stringify({ scope, member, ready, missingFeatures, receipt: verification.receipt }));
       } else {
         log(`granted scopes: ${scope.granted.join(", ") || "(none)"}`);
         if (!scope.ok) log(`✗ MISSING scopes (configured != granted — reinstall the app): ${scope.missing.join(", ")}${scope.error ? ` [${scope.error}]` : ""}`);
         else log("✓ all required scopes granted");
         if (member) log(member.isMember ? `✓ channel member (${member.name ?? cfg.channel})` : `✗ NOT a member of channel ${cfg.channel} — invite the app`);
         else log("… channel not configured — set --channel to verify membership");
+        for (const feature of missingFeatures ?? []) {
+          log(`⚠ ${feature.scope} missing: ${feature.usedBy}. Reinstall the app with this scope to use the feature.`);
+        }
         log(ready ? "READY" : "NOT ready");
       }
       if (!ready) process.exitCode = 1;

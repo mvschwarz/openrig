@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { EventEmitter } from "node:events";
 import { Command } from "commander";
-import { upCommand } from "../src/commands/up.js";
+import { formatRemoteUpFailure, upCommand } from "../src/commands/up.js";
 import { DaemonClient } from "../src/client.js";
 import { LOG_FILE, STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
@@ -95,6 +95,37 @@ describe("Up CLI", () => {
     prog.addCommand(upCommand(runningDeps(port)));
     return prog;
   }
+
+  it("renders structured remote up failures and attention hints as text", () => {
+    const lines = formatRemoteUpFailure("build-host", {
+      error: "HTTP 409",
+      data: {
+        error: {
+          fact: "Seat trust approval is required.",
+          consequence: "The rig was not fully started.",
+          action: "Attach to the affected seat and approve the prompt.",
+        },
+        attentionNodes: [{ logicalId: "worker", sessionName: "worker@demo", reason: "hook trust" }],
+      },
+    });
+
+    expect(lines.join("\n")).toContain("Error on host build-host: HTTP 409");
+    expect(lines.join("\n")).toContain("Seat trust approval is required.");
+    expect(lines.join("\n")).toContain("worker (worker@demo): hook trust");
+    expect(lines.join("\n")).not.toContain("[object Object]");
+  });
+
+  it("renders message-only and partial remote error bodies without unsafe stringification", () => {
+    expect(formatRemoteUpFailure("build-host", {
+      error: "HTTP 500", data: { error: "daemon startup failed", code: "daemon_start_failed" },
+    }).join("\n")).toContain("daemon startup failed");
+    expect(formatRemoteUpFailure("build-host", {
+      error: "HTTP 502", data: { error: { fact: "Remote proxy rejected the request." } },
+    }).join("\n")).toContain("Error: Remote proxy rejected the request.");
+    const malformed = formatRemoteUpFailure("build-host", { error: "HTTP 502", data: { error: { unknown: true } } });
+    expect(malformed.join("\n")).toContain("did not return a recognized error message");
+    expect(malformed.join("\n")).not.toContain("[object Object]");
+  });
 
   it("help positions managed apps as first-class launch targets", () => {
     const logs: string[] = [];

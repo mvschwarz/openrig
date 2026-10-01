@@ -101,6 +101,7 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
     eventBus: c.get("eventBus" as never) as EventBus,
     tmuxAdapter: c.get("tmuxAdapter" as never) as TmuxAdapter,
     sessionEnv: (c.get("sessionEnv" as never) as Record<string, string | undefined> | undefined) ?? undefined,
+    runtimeSessionEnv: (c.get("runtimeSessionEnv" as never) as Record<string, Record<string, string | undefined>> | undefined) ?? undefined,
     // B1 — launch a fresh successor into a live agent via the runtime adapters.
     runtimeAdapters: (c.get("runtimeAdapters" as never) as Record<string, import("../domain/runtime-adapter.js").RuntimeAdapter> | undefined) ?? undefined,
     // OPR.0.4.6.02 S1 — the shared tmux option-defaults applier, so a FRESH
@@ -159,6 +160,13 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
       const pi = adapters?.["pi"] as { readSessionFile?: (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } } | undefined;
       return typeof pi?.readSessionFile === "function"
         ? { readSessionFile: pi.readSessionFile.bind(pi) as (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } }
+        : undefined;
+    })(),
+    ompRunnerStateStore: (() => {
+      const adapters = c.get("runtimeAdapters" as never) as Record<string, unknown> | undefined;
+      const omp = adapters?.["omp"] as { readSessionFile?: (sessionName: string) => { ok: true; sessionFile: string } | { ok: false; reason: string } } | undefined;
+      return typeof omp?.readSessionFile === "function"
+        ? { readSessionFile: omp.readSessionFile.bind(omp) }
         : undefined;
     })(),
     // GHOST-STAGE (e/Class-B) — the canonical OccupantInvalidator so commit()'s re-key call fires

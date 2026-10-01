@@ -2048,14 +2048,17 @@ export class PodRigInstantiator {
       // 4.8 restack dropped the warnings-site threading — without it every entry
       // classified safe_projection and divergent targets overwrote silently.
       // #25: a Claude seat's guidance conflict target is the rig's selected file (rig row,
-      // the same source startNode binds for the write).
+      // the same source startNode binds for the write). An adapter that writes skills
+      // outside the project tree (OMP's seat agent dir) names its own skill target.
       resolveTargetPath: (category, effectiveId, cwd, sourcePath) =>
         input.member.runtime === "codex" && category === "skill"
           ? nodePath.join(cwd, ".agents", "skills", effectiveId, "SKILL.md")
-          : claudeConflictTargetPath(
-            category, effectiveId, cwd, sourcePath,
-            input.member.runtime === "claude-code" ? this.deps.rigRepo.getRigClaudeManagedBlockFile(input.rigId) ?? undefined : undefined,
-          ),
+          : category === "skill" && adapter.skillTargetPath
+            ? adapter.skillTargetPath(launchResult.binding.tmuxSession, effectiveId)
+            : claudeConflictTargetPath(
+              category, effectiveId, cwd, sourcePath,
+              input.member.runtime === "claude-code" ? this.deps.rigRepo.getRigClaudeManagedBlockFile(input.rigId) ?? undefined : undefined,
+            ),
       lastHashLookup: (targetPath) => projectionManifest.lastHash(targetPath),
     });
     if (!planResult.ok) {

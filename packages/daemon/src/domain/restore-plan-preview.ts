@@ -13,6 +13,7 @@
 import type Database from "better-sqlite3";
 import { resolveActiveOccupantRow, resolveActiveSnapshotSession, deriveRehydrateSessionIdByNode, activeOccupantAmbiguityError, type ActiveOccupantResolution } from "./active-occupant.js";
 import type { RigWithRelations, Snapshot } from "./types.js";
+import { parseSqliteUtcMs } from "./sqlite-time.js";
 
 /** OPR.0.4.3.20 FR-6 — a present token whose last verification is older than this
  *  is surfaced as `stale` (age-based staleness — the "stale while running" signal
@@ -103,19 +104,13 @@ function tokenStateFor(
     return { tokenState: "unverified", provenance, lastVerified };
   }
   if (lastVerified) {
+    // NaN (unparseable) skips the age check: an unreadable stamp is never stale-by-age.
     const verifiedMs = parseSqliteUtcMs(lastVerified);
     if (!Number.isNaN(verifiedMs) && nowMs - verifiedMs > RESUME_FRESHNESS_THRESHOLD_MS) {
       return { tokenState: "stale", provenance, lastVerified };
     }
   }
   return { tokenState: "present", provenance, lastVerified };
-}
-
-/** Parse a SQLite `datetime('now')` value ("YYYY-MM-DD HH:MM:SS", UTC, no zone
- *  marker) to epoch ms. Returns NaN on an unparseable value (age check is then
- *  skipped — an unparseable stamp is never treated as stale-by-age). */
-function parseSqliteUtcMs(value: string): number {
-  return new Date(value.replace(" ", "T") + "Z").getTime();
 }
 
 /** OPR.0.4.3.20 FR-6 — forecast the runtime prompt a resume WOULD hit, so it is

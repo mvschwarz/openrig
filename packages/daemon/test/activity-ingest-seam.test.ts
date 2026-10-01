@@ -1,5 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { Hono } from "hono";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 import { activityRoutes, evidenceFromHookActivity } from "../src/routes/activity.js";
 import { SeatActivityService, HOOK_AUTHORITY_WINDOW_MS } from "../src/domain/seat-activity-service.js";
 import type { AgentActivity } from "../src/domain/types.js";
@@ -8,7 +10,9 @@ import type { AdapterRungInventory } from "../src/domain/activity-taxonomy.js";
 // OPR.0.5.5.19 A4 — ingest unification: hook events reach the ONE oracle through the
 // adapter seam; AgentActivityStore is reduced to the raw-event recorder. The store's
 // normalization stays the single event-name parser (no twin) — these pins consume its
-// OUTPUT shape via a fake store, and prove the route feeds SeatActivityService.
+// OUTPUT shape via a fake recorder and prove the route feeds SeatActivityService.
+// Current-session admission uses real full-schema SQLite rows; only normalization
+// output is canned here (the retirement HTTP tests exercise the real recorder).
 
 const TOKEN = "test-token";
 const SEAT = "node-ing-1";
@@ -34,7 +38,18 @@ function activity(state: AgentActivity["state"], atMs: number, reason = "turn bo
   };
 }
 
+const closeDbs: Array<() => void> = [];
+afterEach(() => { for (const close of closeDbs.splice(0)) close(); });
+
 function makeApp(clock: { now: number }) {
+  const db = createFullTestDb();
+  closeDbs.push(() => db.close());
+  db.prepare("INSERT INTO rigs (id, name) VALUES (?, ?)").run("rig-ing-1", "ingest-fixture");
+  db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES (?, ?, ?, ?)")
+    .run(SEAT, "rig-ing-1", "dev.qa", "claude-code");
+  const registry = new SessionRegistry(db);
+  const session = registry.registerSession(SEAT, SESSION);
+  registry.updateStatus(session.id, "running");
   const svc = new SeatActivityService({
     tmux: { readPaneLastActivity: async () => null },
     defaultWindowSeconds: 3,
@@ -43,6 +58,7 @@ function makeApp(clock: { now: number }) {
   svc.declareRungInventory({ seatNodeId: SEAT, sessionName: SESSION }, CLAUDE_INVENTORY);
   let cannedState: AgentActivity["state"] = "idle";
   const fakeStore = {
+    db,
     recordHookEvent: () => ({
       ok: true as const,
       activity: activity(cannedState, clock.now),

@@ -4,6 +4,7 @@ import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatStatusService } from "../src/domain/seat-status-service.js";
+import { PodRepository } from "../src/domain/pod-repository.js";
 
 describe("SeatStatusService", () => {
   let db: Database.Database;
@@ -85,6 +86,51 @@ describe("SeatStatusService", () => {
     expect(result.status.occupant_lifecycle).toBe("unknown");
     expect(result.status.continuity_outcome).toBeNull();
     expect(result.status.handover_result).toBeNull();
+  });
+
+  it("resolves canonical pod coordinates for never-launched, dotted-member and stopped seats", () => {
+    const rig = rigRepo.createRig("seat-rig");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Development");
+    rigRepo.addNode(rig.id, "dev.impl", { runtime: "terminal", podId: pod.id });
+    rigRepo.addNode(rig.id, "dev.member.dot", { runtime: "terminal", podId: pod.id });
+    const stopped = rigRepo.addNode(rig.id, "dev.stopped", { runtime: "terminal", podId: pod.id });
+    const session = sessionRegistry.registerSession(stopped.id, "former-alias@seat-rig");
+    sessionRegistry.updateStatus(session.id, "exited");
+
+    expect(service.getStatus("dev-impl@seat-rig")).toMatchObject({
+      ok: true,
+      status: { logical_id: "dev.impl", current_occupant: null, occupant_lifecycle: "unknown" },
+    });
+    expect(service.getStatus("dev-member.dot@seat-rig")).toMatchObject({
+      ok: true, status: { logical_id: "dev.member.dot" },
+    });
+    expect(service.getStatus("dev-stopped@seat-rig")).toMatchObject({
+      ok: true, status: { logical_id: "dev.stopped", session_status: "exited" },
+    });
+    expect(service.getStatus("dev.impl@seat-rig")).toMatchObject({ ok: true });
+    expect(service.getStatus("dev-missing@seat-rig")).toMatchObject({ ok: false, code: "seat_not_found" });
+
+    const duplicate = rigRepo.createRig("seat-rig");
+    rigRepo.addNode(duplicate.id, "dev.impl", { runtime: "terminal" });
+    expect(service.getStatus("dev-impl@seat-rig")).toMatchObject({ ok: false, code: "seat_ambiguous" });
+    db.prepare("UPDATE rigs SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), duplicate.id);
+    expect(service.getStatus("dev-impl@seat-rig")).toMatchObject({ ok: true });
+  });
+
+  it("the status route resolves an adopted seat by canonical, logical and raw session references", async () => {
+    const setup = createTestApp(db);
+    const rig = setup.rigRepo.createRig("seat-rig");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Development");
+    const node = setup.rigRepo.addNode(rig.id, "dev.impl", { runtime: "terminal", podId: pod.id });
+    setup.sessionRegistry.registerClaimedSession(node.id, "adopted-private-name");
+
+    for (const ref of ["dev-impl@seat-rig", "dev.impl@seat-rig", "adopted-private-name"]) {
+      const response = await setup.app.request(`/api/seat/status/${encodeURIComponent(ref)}`);
+      expect(response.status, ref).toBe(200);
+      expect(await response.json()).toMatchObject({
+        logical_id: "dev.impl", current_occupant: "adopted-private-name", session_status: "running",
+      });
+    }
   });
 
   it("returns not found for an unknown seat reference", () => {

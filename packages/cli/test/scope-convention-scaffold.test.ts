@@ -200,7 +200,11 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
 
       expect(fs.statSync(path.join(slicePath, "proof")).isDirectory(), `kind "${kind}" did not scaffold proof/`).toBe(true);
       expect(fs.existsSync(path.join(slicePath, "PROOF.md")), `kind "${kind}" did not scaffold PROOF.md`).toBe(true);
-      expect(fs.readFileSync(path.join(slicePath, "PROGRESS.md"), "utf8")).toContain("## Acceptance");
+      const progress = fs.readFileSync(path.join(slicePath, "PROGRESS.md"), "utf8");
+      expect(progress).toContain("## Current state");
+      expect(progress).toContain("## Outcomes");
+      expect(progress).toContain("rig proof show <slice>");
+      expect(progress).not.toMatch(/- \[ \] (?:Implementation complete|Tests passing|Review approved)/);
       expect(fs.readFileSync(path.join(slicePath, "PROOF.md"), "utf8")).toContain("SPEC.md");
       expect(parseYaml(fs.readFileSync(path.join(slicePath, "slice.yaml"), "utf8"))).toEqual({
         schema: "openrig.slice/v0alpha1",

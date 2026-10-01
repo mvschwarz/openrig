@@ -94,6 +94,30 @@ describe("SessionFingerprinter", () => {
     expect(result.confidence).toBe("high");
   });
 
+  it("recognizes only an explicit managed OMP runner, not a bare node pane", async () => {
+    const fp = new SessionFingerprinter({
+      cmuxAdapter: mockCmux(),
+      tmuxAdapter: mockTmux("[omp-runner] READY session=/isolated/sessions/current.jsonl"),
+      fsExists: () => false,
+    });
+    const managed = await fp.fingerprint(makePane({ activeCommand: "node" }));
+    expect(managed).toMatchObject({ runtimeHint: "omp", confidence: "medium" });
+
+    const bare = new SessionFingerprinter({ cmuxAdapter: mockCmux(), tmuxAdapter: mockTmux("unrelated output"), fsExists: () => false });
+    expect((await bare.fingerprint(makePane({ activeCommand: "node" }))).runtimeHint).toBe("unknown");
+  });
+
+  it("keeps Claude/Codex pane evidence ahead of a stale OMP READY line", async () => {
+    for (const [banner, runtimeHint] of [["Claude Code v2.1.0", "claude-code"], ["Codex CLI v0.50.0", "codex"]] as const) {
+      const fp = new SessionFingerprinter({
+        cmuxAdapter: mockCmux(),
+        tmuxAdapter: mockTmux(`[omp-runner] READY session=/old/s.jsonl\n${banner}`),
+        fsExists: () => false,
+      });
+      expect((await fp.fingerprint(makePane({ activeCommand: "node" }))).runtimeHint).toBe(runtimeHint);
+    }
+  });
+
   // T5: shell only (bash) -> terminal, high
   it("shell process (bash) -> terminal, high", async () => {
     const fp = new SessionFingerprinter({

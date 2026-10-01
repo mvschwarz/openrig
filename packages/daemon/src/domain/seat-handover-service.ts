@@ -128,6 +128,8 @@ interface SeatHandoverServiceDeps {
    *  mirroring the launch identity env. Defaults to {} (the three core identity
    *  vars are always derived internally). */
   sessionEnv?: Record<string, string | undefined>;
+  /** Extra env for one runtime only (OMP's provider keys), merged over sessionEnv. */
+  runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
   /** Injectable id source for the successor session name (tests). */
   newSuccessorId?: () => string;
   /** Runtime adapters keyed by runtime — used to launch a fresh successor into
@@ -139,6 +141,8 @@ interface SeatHandoverServiceDeps {
   resumeTokenCapturer?: ResumeTokenCaptureDeps["resumeTokenCapturer"];
   /** OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader for Pi resume-token capture. */
   piRunnerStateStore?: ResumeTokenCaptureDeps["piRunnerStateStore"];
+  /** OMP runner sidecar reader for independently isolated OMP seats. */
+  ompRunnerStateStore?: ResumeTokenCaptureDeps["ompRunnerStateStore"];
   /** Readiness timeout for the successor launch (tests shorten it). */
   readinessTimeoutMs?: number;
   /** Injectable sleep for the successor readiness backoff (tests). */
@@ -239,6 +243,7 @@ export class SeatHandoverService {
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
     this.successorLauncher = new SuccessorSessionLauncher(deps.tmuxAdapter, deps.discoveryRepo, {
       sessionEnv: deps.sessionEnv,
+      runtimeSessionEnv: deps.runtimeSessionEnv,
       newId: deps.newSuccessorId,
       runtimeAdapters: deps.runtimeAdapters,
       readinessTimeoutMs: deps.readinessTimeoutMs,
@@ -249,6 +254,7 @@ export class SeatHandoverService {
       contextUsageStore: deps.contextUsageStore ?? null,
       resumeTokenCapturer: deps.resumeTokenCapturer ?? null,
       piRunnerStateStore: deps.piRunnerStateStore ?? null,
+      ompRunnerStateStore: deps.ompRunnerStateStore ?? null,
     };
   }
 

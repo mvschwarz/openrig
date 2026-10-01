@@ -10,6 +10,7 @@
 import { connectionsProjection } from "../domain/gateway/connections-projection.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import path from "node:path";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import { loadConfig, saveConfig } from "../domain/gateway/slack/config.js";
@@ -89,7 +90,11 @@ export function gatewayRoutes(opts: {
           if (cfg.enabled === enabled) return { value, after: state(), effect: "no-op" };
           if (enabled) {
             const registry = loadHumanRegistry(home);
-            if (!registry.ok) throw new Error(`Cannot seed the existing delivery backlog: ${registry.error}`);
+            if (!registry.ok) throw new HTTPException(503, { res: c.json({
+              error: "human_registry_unavailable",
+              message: `Cannot seed the existing delivery backlog: ${registry.error}. ` +
+                "Register a human with rig gateway human add, or repair and re-project the existing human registry before enabling delivery.",
+            }, 503) });
             const seen = new SeenStore(path.join(home, "state", "slack-outbound-seen.jsonl"));
             value = await seedBacklogAsHistory({
               queue: makeQueuePorts(queueRepo!, { loadHumanRegistry: () => registry }), seen,

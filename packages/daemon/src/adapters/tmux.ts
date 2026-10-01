@@ -6,6 +6,13 @@ import { randomUUID } from "node:crypto";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
+interface TmuxShellCommandOptions {
+  /** Pi can send commands within the terminal byte bound directly. */
+  stageIfLong?: boolean;
+  /** A staged single-executable runner must replace the staging shell. */
+  execInScript?: boolean;
+}
+
 /**
  * Argv exec: run the multiplexer WITHOUT a shell (execFile-style — the
  * binary is argv[0], the rest are verbatim arguments, no quoting layer).
@@ -597,24 +604,33 @@ export class TmuxAdapter {
    * The shell removes its private script when consumed (not when pasted).
    * A shell that never consumes the invocation leaves the file for diagnosis.
    */
-  async sendShellCommand(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
+  async sendShellCommand(target: string, command: string, beforeInput?: () => void, options: TmuxShellCommandOptions = {}): Promise<TmuxResult> {
     // Keep the managed selector for nested paste/Enter checks. A resolved pane
     // ID can also occur in detached bindings after a tmux restart; resolving it
     // again would lose the unambiguous session/node and its existing lease.
     // Each nested write still validates the lease and targets its observed pane.
-    return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput));
+    return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput, options));
   }
 
-  private async sendShellCommandUnchecked(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
-    const path = this.fileOps.tmpName();
-    const invocation = `/bin/sh ${shellQuote(path)}`;
+  private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
+    const commandBytes = Buffer.byteLength(command, "utf8");
+    let path = options.stageIfLong && commandBytes <= 512 ? undefined : this.fileOps.tmpName();
+    let invocation = path ? `/bin/sh ${shellQuote(path)}` : command;
     if (Buffer.byteLength(invocation, "utf8") > 512) {
-      return { ok: false, code: "launch_path_too_long", message: "Temporary launch-script path exceeds the safe terminal input bound" };
+      // Pi commands below the canonical tty limit still fit when staging cannot.
+      if (options.stageIfLong && commandBytes < 1024) {
+        path = undefined;
+        invocation = command;
+      } else {
+        return { ok: false, code: "launch_path_too_long", message: "Temporary launch-script path exceeds the safe terminal input bound" };
+      }
     }
     let created = false;
     try {
-      await this.fileOps.writeFile(path, `/bin/rm -f -- ${shellQuote(path)}\n${command}\n`, { mode: 0o600, flag: "wx" });
-      created = true;
+      if (path) {
+        await this.fileOps.writeFile(path, `/bin/rm -f -- ${shellQuote(path)}\n${options.execInScript ? "exec " : ""}${command}\n`, { mode: 0o600, flag: "wx" });
+        created = true;
+      }
       const text = beforeInput ? await this.guardedInput(target, (pane, check) => this.sendTextUnchecked(pane, invocation, () => { check(); beforeInput(); }))
         : await this.sendText(target, invocation);
       if (!text.ok) return text;
@@ -630,7 +646,7 @@ export class TmuxAdapter {
     } catch (err) {
       return classifyWriteError(err);
     } finally {
-      if (created) {
+      if (created && path) {
         try { await this.fileOps.unlink(path); } catch { /* best-effort cleanup */ }
       }
     }

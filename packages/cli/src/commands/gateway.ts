@@ -128,7 +128,7 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
     .requiredOption("--display-name <name>", "Human-readable display name")
     .requiredOption(
       "--binding <kind:connectorRef:secretsRef:role[:handle=<id>]>",
-      "Connector binding (repeatable); role primary|secondary, EXACTLY ONE primary. Optional handle=<platform id> makes the binding inbound-resolvable (unique per kind); omit it for outbound-only.",
+      "Connector binding (repeatable); role primary|secondary, EXACTLY ONE primary. connectorRef and secretsRef are config/vault labels (e.g. for Slack: slack:openrig-personal:file:<env-path>:primary:handle=<id>; tokens come from 'rig slack setup --secrets-env-file', never inline). Optional handle=<platform id> makes the binding inbound-resolvable (unique per kind); omit it for outbound-only.",
       (v: string, acc: string[] = []) => { acc.push(v); return acc; },
     )
     .requiredOption("--delivery-class <A|B|C|D>", "Notification loudness class (the notifications register selection)")
@@ -191,7 +191,21 @@ export function gatewayCommand(deps: GatewayCommandDeps = {}): Command {
         });
         console.log(JSON.stringify({ ok: true, entityId, path: result.value.path, receipt: result.receipt }));
       } catch (error) { console.error(`refused: ${(error as Error).message}`); process.exitCode = 1; }
-    });
+    })
+    .addHelpText("after", `
+Binding specification details:
+  Format: <kind:connectorRef:secretsRef:role[:handle=<id>]>
+  - kind: Connector kind (e.g. "slack")
+  - connectorRef: Configuration label identifying the connector instance (e.g. "openrig-personal" or "main")
+  - secretsRef: Pointer or label identifying where secrets are resolved (e.g. "file:/path/to/slack.env" or "vault://slack/user").
+    NOTE: Never pass credentials or tokens inline here; credentials (like SLACK_BOT_TOKEN) are loaded from the connector's secrets env file (configured via 'rig slack setup --secrets-env-file').
+  - role: "primary" (exactly one binding must be primary) or "secondary"
+  - handle: Optional platform user identifier (e.g. "handle=U12345678") for inbound routing
+
+Example:
+  rig gateway human add alice --display-name "Alice" \\
+    --binding "slack:openrig-personal:file:/etc/openrig/slack.env:primary:handle=U12345678" \\
+    --delivery-class B`);
 
   // ── S12 (OPR.0.5.5.12): the fragment lifecycle beyond add. Every verb operates through
   // fragments + regeneration (the registry surface); none writes the generated projection.

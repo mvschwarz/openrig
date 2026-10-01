@@ -257,7 +257,10 @@ describe("rig scope slice create", () => {
     expect(fs.existsSync(progressPath)).toBe(true);
     const content = fs.readFileSync(progressPath, "utf8");
     expect(content).toContain("# Progress");
-    expect(content).toContain("Implementation complete");
+    expect(content).toContain("## Current state");
+    expect(content).toContain("## Outcomes");
+    expect(content).toContain("rig proof show <slice>");
+    expect(content).not.toContain("- [ ] Implementation complete");
   });
 
   it("OPR.0.4.1.23 AC-1/AC-3: slice create scaffolds root PROOF.md + sibling empty proof/ dir", async () => {

@@ -85,10 +85,10 @@ export function isPristineScaffoldSection(body: string | null): boolean {
   });
 }
 
-/** The generic acceptance triple scaffolded by
- *  `packages/cli/src/lib/scope-templates/slice-progress.md` — exact trimmed
- *  literals, sync-tested against the shipped template so constant/template
- *  drift fails CI instead of silently reviving the bogus pristine count. */
+/** The generic acceptance triple emitted by older slice-progress templates.
+ *  Keep recognizing these exact literals in existing PROGRESS.md files so
+ *  legacy scaffold marks never become authored acceptance evidence. New
+ *  templates emit an outcome log instead; existing files are not migrated. */
 export const GENERIC_SCAFFOLD_ACCEPTANCE: readonly string[] = [
   "Implementation complete",
   "Tests passing",

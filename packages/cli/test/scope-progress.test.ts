@@ -93,8 +93,10 @@ describe("rig scope slice progress (FR-3 add/set)", () => {
     expect(progress).not.toMatch(/## Acceptance[\s\S]*## Acceptance/); // no duplicate section
   });
 
-  it("--set rewrites an existing row's status; idempotent re-run is a no-op", async () => {
+  it("--set still rewrites a legacy row's status; idempotent re-run is a no-op", async () => {
     const slicePath = await createSlice(env, "verb-set");
+    // Existing progress files are retained rather than migrated to the new scaffold.
+    fs.writeFileSync(path.join(slicePath, "PROGRESS.md"), "# Progress\n\n## Acceptance\n\n- [ ] Implementation complete\n");
     const first = await run([
       "slice", "progress", slicePath, "--set", "Implementation complete", "--status", "done", "--json",
     ], env.missionsRoot);

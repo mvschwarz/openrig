@@ -10,6 +10,7 @@ const RUNTIME_COMMANDS: Record<string, string> = {
   "claude-code": "claude --version",
   "codex": "codex --version",
   "pi": "pi --version",
+  "omp": "omp --version",
 };
 
 interface RigSpecPreflightDeps {
@@ -141,7 +142,7 @@ import {
 
 // Slice 51-01 (OPR.0.5.1.1): `stub` is a first-class runtime (the deterministic node-script fake harness
 // through the real orchestrator) — admitted at the modern-pod preflight gate alongside the real runtimes.
-const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "terminal", "stub"]);
+const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "omp", "terminal", "stub"]);
 
 // Default daemon-shipped asset paths for the managed Claude activity hooks — the SAME files the
 // ClaudeCodeAdapter is wired with in startup.ts (validation is the shared module either way).
@@ -402,6 +403,7 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
     // launch-time surprise.
     const piErrors = await verifyPiRuntimeAvailable(rigSpec, preflightCtx.exec);
     errors.push(...piErrors);
+    errors.push(...await verifyOmpRuntimeAvailable(rigSpec, preflightCtx.exec));
   }
 
   // §6 RECONCILIATION — WARNING EMISSION ORDER (PM ruling 2026-08-05): ACTIVITY-HOOK-FIRST,
@@ -439,6 +441,17 @@ export async function verifyPiRuntimeAvailable(
     return [
       `Runtime "pi" not available ('pi --version' failed). The spec declares a pi member, so the launch would fail. Fix: install the Pi coding agent (npm install -g @earendil-works/pi-coding-agent, or the pi.dev install script) and ensure 'pi' is on PATH.`,
     ];
+  }
+}
+
+/** Probe only OMP seats. An OMP spec must never depend on the Pi binary. */
+export async function verifyOmpRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecFn): Promise<string[]> {
+  if (!rigSpec.pods.some((pod) => pod.members.some((member) => member.runtime === "omp"))) return [];
+  try {
+    await exec(RUNTIME_COMMANDS["omp"]!);
+    return [];
+  } catch {
+    return ['Runtime "omp" not available (\'omp --version\' failed). Fix: install Oh My Pi and ensure \'omp\' is on PATH.'];
   }
 }
 

@@ -118,7 +118,7 @@ export class QueueWakeRepository {
     };
   }
 
-  findBlockedQitemsByWatchdog(jobId: string): Array<{ qitemId: string; kind: "watchdog" | "timer" }> {
+  findBlockedQitemsByWatchdog(jobId: string, latestArmedOnly = false): Array<{ qitemId: string; kind: "watchdog" | "timer" }> {
     if (!this.available) return [];
     return this.db.prepare(
       `SELECT DISTINCT w.qitem_id, w.wake_kind
@@ -126,12 +126,18 @@ export class QueueWakeRepository {
          JOIN queue_items q ON q.qitem_id = w.qitem_id
         WHERE w.phase = 'armed' AND w.wake_ref = ?
           AND w.wake_kind IN ('watchdog', 'timer') AND q.state = 'blocked'
+          -- An operator-owned job can outlive the park that attached it.
+          -- Only the latest armed continuation owns this row's wake receipt.
+          AND (? = 0 OR w.transition_id = (
+            SELECT MAX(a.transition_id) FROM queue_transition_wakes a
+             WHERE a.qitem_id = w.qitem_id AND a.phase = 'armed'
+          ))
           AND (? OR NOT EXISTS (
             SELECT 1 FROM queue_transition_wakes f
              WHERE f.qitem_id = w.qitem_id AND f.phase = 'fired'
                AND f.wake_ref = w.wake_ref AND f.transition_id > w.transition_id
           ))`,
-    ).all(jobId, this.isRepeatingTimer(jobId) ? 1 : 0).map((row) => {
+    ).all(jobId, latestArmedOnly ? 1 : 0, this.isRepeatingTimer(jobId) ? 1 : 0).map((row) => {
       const r = row as { qitem_id: string; wake_kind: "watchdog" | "timer" };
       return { qitemId: r.qitem_id, kind: r.wake_kind };
     });

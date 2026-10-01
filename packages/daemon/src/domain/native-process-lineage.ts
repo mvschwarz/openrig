@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { isShellForeground } from "./shell-classifier.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 
 const execFileAsync = promisify(execFile);
@@ -24,10 +25,29 @@ function executableName(token: string): string {
   return (token.split("/").pop() ?? token).toLowerCase().replace(/\.exe$/, "");
 }
 
+// The native installer resolves `claude` to this versioned path. A bare version
+// number is never executable identity. A launch receipt takes precedence over
+// layout recognition, so a later PATH update cannot replace that launch's binary.
+function claudeExecutable(token: string, selectedExecutable?: string): boolean {
+  // An observed path must match the frozen launch path, even when its basename
+  // is claude. A bare process title carries no path and retains legacy token proof.
+  if (selectedExecutable && token.includes("/")) return token === selectedExecutable;
+  if (executableName(token) === "claude") return true; // includes native process-title spelling
+  if (selectedExecutable) return token === selectedExecutable;
+  return token.startsWith("/") && !token.split("/").some(part => part === "." || part === "..")
+    && /\/\.local\/share\/claude\/versions\/\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(token);
+}
+
+function claudeProcess(row: NativeProcessRow, selectedExecutable?: string): boolean {
+  const argv0 = tokens(row.command)[0] ?? "";
+  return claudeExecutable(argv0, selectedExecutable)
+    && executableName(row.executableName ?? "") === executableName(argv0);
+}
+
 function commandUsesExpectedToken(command: string, runtime: NativeRuntime, expectedToken: string): boolean {
   const argv = tokens(command);
   const executable = runtime === "claude-code" ? "claude" : "codex";
-  const executableIndex = argv.findIndex((token) => executableName(token) === executable);
+  const executableIndex = argv.findIndex((token) => runtime === "claude-code" ? claudeExecutable(token) : executableName(token) === executable);
   if (executableIndex < 0) return false;
   const args = argv.slice(executableIndex + 1);
   if (runtime === "claude-code") {
@@ -141,15 +161,16 @@ export type NativeProcessLister = () => NativeProcessRow[] | Promise<NativeProce
 export type NativeProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string };
 export type CodexProcessObservation = NativeProcessObservation;
 
-function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex"): NativeProcessObservation | null {
+function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, selectedExecutable?: string): NativeProcessObservation[] {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const root = byPid.get(panePid);
-  if (byPid.size !== rows.length || !root?.startedAt || !root.tpgid || root.tpgid <= 0) return null;
+  if (byPid.size !== rows.length || !root?.startedAt || !root.tpgid || root.tpgid <= 0) return [];
   const matches: { process: NativeProcessRow; chain: NativeProcessRow[] }[] = [];
   const executable = runtime === "claude-code" ? "claude" : "codex";
   for (const row of rows) {
     const osExecutable = runtime === "claude-code" ? executableName(row.executableName ?? "") : row.executableName;
-    if (osExecutable !== executable || executableName(tokens(row.command)[0] ?? "") !== executable
+    if ((runtime === "claude-code" ? !claudeProcess(row, selectedExecutable)
+      : osExecutable !== executable || executableName(tokens(row.command)[0] ?? "") !== executable)
       || row.pgid !== root.tpgid || row.tpgid !== root.tpgid) continue;
     const chain: NativeProcessRow[] = [];
     const visited = new Set<number>();
@@ -161,8 +182,15 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
       current = byPid.get(current.ppid);
     }
   }
+  return matches.map(({ process, chain }) => ({ panePid, process,
+    fingerprint: JSON.stringify(chain.map(row => [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command])) }));
+}
+
+function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex", selectedExecutable?: string): NativeProcessObservation | null {
+  const matches = nativeProcessCandidates(rows, panePid, runtime, selectedExecutable);
   if (matches.length !== 1) return null;
-  const { process, chain } = matches[0]!;
+  const observation = matches[0]!;
+  const { process } = observation;
   if (runtime === "claude-code") {
     if (!expectedToken || claudeSessionToken(tokens(process.command).slice(1)) !== expectedToken) return null;
   } else {
@@ -171,7 +199,7 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
     if ((requireResume || (expectedToken !== undefined && resumeToken !== undefined))
       && (!expectedToken || resumeToken !== expectedToken)) return null;
   }
-  return { panePid, process, fingerprint: JSON.stringify(chain.map((row) => [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command])) };
+  return observation;
 }
 
 async function observeNativePaneProcess(input: {
@@ -180,12 +208,14 @@ async function observeNativePaneProcess(input: {
   listProcesses?: NativeProcessLister;
   expectedToken?: string | null;
   requireResume?: boolean;
+  /** Canonical executable frozen by the managed launch, never re-resolved at observation time. */
+  selectedExecutable?: string;
 }, runtime: NativeRuntime): Promise<NativeProcessObservation | null> {
   try {
     const pid = await input.tmux.getPanePid(input.target);
     if (!pid) return null;
     const rows = await (input.listProcesses ?? listNativeProcesses)();
-    return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime);
+    return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable);
   } catch { return null; }
 }
 
@@ -209,4 +239,57 @@ export async function verifyClaudePaneProcess(input: Parameters<typeof observeNa
   if (!first) return null;
   const second = await observeClaudePaneProcess(input);
   return second?.fingerprint === first.fingerprint ? second : null;
+}
+
+export interface ClaudeDeliveryObservation {
+  state: "verified" | "unknown" | "idle_shell" | "conflict";
+  detail: string;
+}
+
+/** Ordinary delivery's uncertainty policy is separate from readiness/identity proof. */
+export async function observeClaudeDelivery(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<ClaudeDeliveryObservation> {
+  const unknown = { state: "unknown" as const, detail: "Claude runtime identity could not be established" };
+  const sample = async (): Promise<ClaudeDeliveryObservation & { fingerprint?: string }> => {
+    try {
+      const pid = await input.tmux.getPanePid(input.target);
+      if (!pid) return unknown;
+      const rows = await (input.listProcesses ?? listNativeProcesses)();
+      const candidates = nativeProcessCandidates(rows, pid, "claude-code", input.selectedExecutable);
+      if (candidates.length > 1) return { state: "conflict", detail: "Multiple Claude processes occupy the bound foreground" };
+      const native = candidates[0];
+      if (native) {
+        const token = claudeSessionToken(tokens(native.process.command).slice(1));
+        const fingerprint = native.fingerprint;
+        if (!token || !input.expectedToken) return { ...unknown, fingerprint };
+        return token === input.expectedToken
+          ? { state: "verified", detail: "Expected Claude conversation in the bound foreground", fingerprint }
+          : { state: "conflict", detail: "The bound foreground names a different Claude conversation", fingerprint };
+      }
+      const other = selectNativeProcess(rows, pid);
+      if (other) return { state: "conflict", detail: "A different native runtime occupies the bound foreground", fingerprint: other.fingerprint };
+      const root = rows.find(row => row.pid === pid);
+      // A wrapper's label is not an idle shell. Positive shell proof requires
+      // the pane shell itself to own the foreground, with no receiving child.
+      // A background child/helper in another group does not receive terminal input.
+      if (new Set(rows.map(row => row.pid)).size === rows.length && root?.startedAt
+        && root.pgid === pid && root.tpgid === pid
+        && isShellForeground(executableName(root.executableName ?? ""))
+        && isShellForeground(executableName(tokens(root.command)[0]?.replace(/^-/, "") ?? ""))
+        && !rows.some(row => row.pid !== pid && row.pgid === root.tpgid)) {
+        return { state: "idle_shell", detail: "The bound foreground is an idle shell with no receiving child", fingerprint: JSON.stringify(root) };
+      }
+      return unknown;
+    } catch { return unknown; }
+  };
+  const first = await sample();
+  const second = await sample();
+  if (first.state === "conflict") return first;
+  if (second.state === "conflict") return second;
+  // An unavailable sample cannot erase a positive idle-shell refusal.
+  if (first.state === "idle_shell" && second.state === "unknown") return first;
+  if (second.state === "idle_shell" && first.state === "unknown") return second;
+  if (first.fingerprint && second.fingerprint && first.fingerprint !== second.fingerprint) {
+    return { state: "conflict", detail: "The observed foreground process changed during delivery verification" };
+  }
+  return first.state === second.state && first.fingerprint && first.fingerprint === second.fingerprint ? second : unknown;
 }
