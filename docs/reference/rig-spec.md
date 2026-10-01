@@ -454,7 +454,8 @@ Each target must define exactly one of `service`, `url`, or `tcp`:
 
 ```yaml
 wait_for:
-  # HTTP probe — hits the URL, expects 2xx
+  # HTTP probe — any 2xx or 3xx response counts as ready; redirects are not followed.
+  # This proves the server answered.
   - url: http://127.0.0.1:8200/v1/sys/health
 
   # TCP probe — connects to host:port
