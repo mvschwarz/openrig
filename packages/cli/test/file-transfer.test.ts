@@ -48,6 +48,21 @@ describe("parseFilePathArg — the explicit-or-local grammar", () => {
     expect(parseFilePathArg("mac_mini2:/tmp/y")).toEqual({ ok: true, arg: { kind: "remote", hostId: "mac_mini2", path: "/tmp/y" } });
   });
 
+  it("resolves dotted registered host ids for both transfer sides", () => {
+    const host = { ...VPS, id: "edge.dev" };
+    const registryLoader = () => ({ ok: true as const, registry: { hosts: [host] } });
+    for (const [src, dst, operandIndex] of [
+      ["edge.dev:/srv/source", "/tmp/dst", -2],
+      ["/tmp/source", "edge.dev:/srv/dst", -1],
+    ] as const) {
+      const result = planFileCopy(src, dst, { registryLoader });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(buildRsyncArgv(result.plan).at(operandIndex)).toContain(`${host.target}:/srv/`);
+    }
+    expect(planFileCopy("missing.dev:/srv/x", "/tmp/dst", { registryLoader })).toMatchObject({ ok: false, code: "unknown_host" });
+    expect(parseFilePathArg("./edge.dev:/srv/x")).toEqual({ ok: true, arg: { kind: "local", path: "./edge.dev:/srv/x" } });
+  });
+
   it("N18-1: a bare colon-named file parses as an (unknown) host — fail-closed at planning, never silent-local", () => {
     expect(parseFilePathArg("notes:v2.md")).toEqual({ ok: true, arg: { kind: "remote", hostId: "notes", path: "v2.md" } });
   });

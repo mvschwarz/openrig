@@ -53,7 +53,7 @@ export type ParsedFileArg =
 
 export type FileArgParse = { ok: true; arg: ParsedFileArg } | { ok: false; error: string };
 
-const HOST_ID_SHAPE = /^[A-Za-z0-9_-]+$/;
+const HOST_ID_SHAPE = /^[A-Za-z0-9_.-]+$/;
 const SSH_USER_SHAPE = /^[A-Za-z0-9._-]+$/;
 export const REMOTE_PATH_CHARSET = /^[A-Za-z0-9._/-]+$/;
 
