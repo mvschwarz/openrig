@@ -108,6 +108,7 @@ function getStartupContext(db: Database.Database, nodeId: string): StartupContex
           required: candidate["required"] !== false,
           path: typeof candidate["path"] === "string" ? candidate["path"] : null,
           deliveryHint: typeof candidate["deliveryHint"] === "string" ? candidate["deliveryHint"] : null,
+          ownerRoot: typeof candidate["ownerRoot"] === "string" ? candidate["ownerRoot"] : null,
         }];
       }),
       projectionEntries: projectionEntries.value.flatMap((entry) => {
@@ -118,6 +119,7 @@ function getStartupContext(db: Database.Database, nodeId: string): StartupContex
           absolutePath: candidate["absolutePath"].trim(),
           effectiveId: typeof candidate["effectiveId"] === "string" ? candidate["effectiveId"] : null,
           category: typeof candidate["category"] === "string" ? candidate["category"] : null,
+          sourcePath: typeof candidate["sourcePath"] === "string" ? candidate["sourcePath"] : null,
         }];
       }),
     };
