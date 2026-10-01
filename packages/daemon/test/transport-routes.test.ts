@@ -1028,7 +1028,7 @@ describe("transport routes", () => {
       expect(String(data["warning"] ?? "")).toMatch(/no way of knowing who sent|no idea who sent/i);
     });
 
-    it("PROOF-4b: an attributed send's response carries no nag and delivers verbatim", async () => {
+    it("PROOF-4b: an attributed send delivers verbatim with a runtime advisory but no unknown-sender notice", async () => {
       seedRig();
       const { app, sentTexts } = spyTransportApp();
       const res = await app.request("/api/transport/send", {
@@ -1039,7 +1039,10 @@ describe("transport routes", () => {
       expect(res.status).toBe(200);
       expect(sentTexts[0]!.text).toBe("hello");
       const data = (await res.json()) as Record<string, unknown>;
-      expect(data["warning"]).toBeUndefined();
+      // Sender attribution does not establish the target's native identity.
+      expect(data["warning"]).toContain("runtime: Claude runtime observation or older launch binding is unavailable; delivery proceeds without verified native identity.");
+      expect(String(data["warning"])).not.toMatch(/no way of knowing who sent|no idea who sent/i);
+      expect(String(data["warning"])).not.toMatch(/sign/i);
     });
   });
 });

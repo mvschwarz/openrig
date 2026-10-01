@@ -69,6 +69,17 @@ export function nextMissionMembershipOrder(missionPath: string): number {
 /** Replace one or more already-validated manifests with rollback on write error. */
 export function applyMissionCompositionEdits(edits: MissionCompositionEdit[]): void {
   const unique = Array.from(new Map(edits.map((edit) => [edit.manifestPath, edit])).values());
+  // Check the whole batch before staging so an already-stale plan cannot
+  // overwrite another agent's authored membership or partially change a move.
+  for (const edit of unique) {
+    if (fs.readFileSync(edit.manifestPath, "utf8") !== edit.original) {
+      throw new ScopeCliError({
+        fact: `Mission composition changed since this edit was planned: ${edit.manifestPath}.`,
+        consequence: "Scope composition was not changed.",
+        action: "Read the current mission.yaml and retry the scope operation.",
+      });
+    }
+  }
   const staged: Array<{ edit: MissionCompositionEdit; temporary: string }> = [];
   const applied: MissionCompositionEdit[] = [];
   try {

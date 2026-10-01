@@ -350,7 +350,7 @@ Examples:
     .option("--operator <address>", "Operator initiating the handover")
     .option("--dry-run", "Plan the handover without changing topology")
     .option("--json", "JSON output for agents")
-    .description("Plan a safe two-phase seat handover")
+    .description("Hand a seat to a successor (two-phase). Pass --dry-run to plan without changing topology.")
     .addHelpText("after", `
 Examples:
   rig seat handover spec-writer@openrig-pm --reason context-wall --dry-run

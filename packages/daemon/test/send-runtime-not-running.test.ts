@@ -35,6 +35,7 @@ function tmuxWithPane(getPaneCommand: () => Promise<string | null>) {
     sendKeys,
     capturePaneContent: async () => "idle prompt\n❯ ",
     getPanePid: async () => null,
+    listPanes: async () => [{ id: "%1" }],
     getPaneCommand,
   } as unknown as TmuxAdapter;
   return { tmux, sendText, sendKeys };
@@ -68,12 +69,16 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     });
 
   it.each([["claude-code", "zsh"], ["codex", "-bash"]])("%s seat showing %s: refused, nothing typed", async (runtime, shell) => {
-    seat(runtime, "dev-impl@my-rig");
+    const { node } = seat(runtime, "dev-impl@my-rig");
     const { tmux, sendText, sendKeys } = tmuxWithPane(async () => shell);
-    const result = await watchdogSend(new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux }), "dev-impl@my-rig");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@my-rig", tmuxPane: "%1" });
+    tmux.getPanePid = async () => 1135;
+    const listProcesses = async () => [{ pid: 1135, ppid: 1, pgid: 1135, tpgid: 1135,
+      executableName: shell.replace(/^-/, ""), command: shell, startedAt: "Thu Oct 1 11:00:00 2026" }];
+    const result = await watchdogSend(new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, listProcesses }), "dev-impl@my-rig");
 
-    expect(result).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
-    expect(result.error).toContain(`${shell.replace(/^-/, "")} as the foreground command`);
+    expect(result).toMatchObject({ ok: false, sent: false, reason: runtime === "claude-code" ? "target_runtime_not_running" : "target_runtime_unverified" });
+    expect(result.error).toContain(runtime === "claude-code" ? "idle shell" : `${shell.replace(/^-/, "")} as the foreground command`);
     expect(result.error).toContain("No text was sent");
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
@@ -221,28 +226,30 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     ["conflicting identity arguments", () => claudeProcesses(`--resume other --session-id ${nativeToken}`)],
     ["identity flag only in name value", () => claudeProcesses(`--name --session-id ${nativeToken}`)],
   ];
-  it.each(unprovedClaude)("#197 retains refusal for %s", async (_label, mutate) => {
+  it.each(unprovedClaude)("#197 distinguishes missing evidence from a conflict: %s", async (label, mutate) => {
     const { transport, sendText, sendKeys } = wrappedClaude(vi.fn(async () => mutate(claudeProcesses())));
     const result = await transport.send("dev-check@my-rig", "existing review");
-    expect(result).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
-    expect(result.error).toContain("could not verify");
-    expect(result.error).not.toMatch(/runtime is not running|Relaunch the seat|would run as shell commands/);
-    expect(sendText).not.toHaveBeenCalled();
-    expect(sendKeys).not.toHaveBeenCalled();
+    const conflict = ["wrong Claude identity", "ambiguous native children"].includes(label);
+    expect(result.ok).toBe(!conflict);
+    if (conflict) expect(result.reason).toBe("target_runtime_conflict");
+    else expect(result.warning).toContain("without verified native identity");
+    expect(sendText).toHaveBeenCalledTimes(conflict ? 0 : 1);
+    expect(sendKeys).toHaveBeenCalledTimes(conflict ? 0 : 1);
   });
 
-  it.each(["missing identity", "changed process", "changed bound pane", "process lookup failed"])("#197 refuses %s", async kind => {
+  it.each(["missing identity", "process disappears from observation", "changed bound pane", "process lookup failed"])("#197 handles %s honestly", async kind => {
     const { transport, session, tmux, listProcesses, sendText, sendKeys } = wrappedClaude();
     if (kind === "missing identity") sessionRegistry.clearResumeToken(session.id);
-    if (kind === "changed process") listProcesses.mockResolvedValueOnce(claudeProcesses()).mockResolvedValueOnce(claudeProcesses().slice(0, -1));
+    if (kind === "process disappears from observation") listProcesses.mockResolvedValueOnce(claudeProcesses()).mockResolvedValueOnce(claudeProcesses().slice(0, -1));
     if (kind === "changed bound pane") tmux.getPanePid = async target => target === "%1" ? 999 : 1135;
     if (kind === "process lookup failed") listProcesses.mockRejectedValue(new Error("unavailable"));
     const result = await transport.send("dev-check@my-rig", "existing review");
-    expect(result).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
-    expect(result.error).toContain("could not verify");
-    expect(result.error).not.toMatch(/runtime is not running|Relaunch the seat|would run as shell commands/);
-    expect(sendText).not.toHaveBeenCalled();
-    expect(sendKeys).not.toHaveBeenCalled();
+    const conflict = kind === "changed bound pane";
+    expect(result.ok).toBe(!conflict);
+    if (conflict) expect(result.reason).toBe("target_runtime_conflict");
+    else expect(result.warning).toContain("without verified native identity");
+    expect(sendText).toHaveBeenCalledTimes(conflict ? 0 : 1);
+    expect(sendKeys).toHaveBeenCalledTimes(conflict ? 0 : 1);
   });
 
   it("#197 still refuses native approval after proving the Claude wrapper", async () => {
@@ -272,7 +279,7 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
       expect(sendKeys).toHaveBeenCalledOnce();
     } else {
       expect(stored.lastNudgeResult).toContain("failed:");
-      expect(stored.lastNudgeResult).toContain("could not verify");
+      expect(stored.lastNudgeResult).toContain("different Claude conversation");
       expect(sendText).not.toHaveBeenCalled();
       expect(sendKeys).not.toHaveBeenCalled();
     }

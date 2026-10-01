@@ -27,7 +27,12 @@ describe("rig gateway human add verb (post-relocate)", () => {
     const gw = createProgram().commands.find((c) => c.name() === "gateway");
     expect(gw).toBeDefined();
     const human = gw!.commands.find((c) => c.name() === "human");
-    expect(human!.commands.find((c) => c.name() === "add")).toBeDefined();
+    const addCmd = human!.commands.find((c) => c.name() === "add");
+    expect(addCmd).toBeDefined();
+    const bindingOpt = addCmd!.options.find((o) => o.name() === "binding");
+    expect(bindingOpt).toBeDefined();
+    expect(bindingOpt!.description).toContain("connectorRef and secretsRef are config/vault labels");
+    expect(bindingOpt!.description).toContain("tokens come from 'rig slack setup --secrets-env-file'");
   });
 
   it("add writes a fragment + projection; address DERIVED; vault-pointer secretsRef (with ':') survives", async () => {

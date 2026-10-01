@@ -126,7 +126,7 @@ Examples:
         } else if (result.ok) {
           console.log(JSON.stringify(result.data, null, 2));
         } else {
-          console.error(`Error on host ${opts.host}: ${result.error}`);
+          for (const line of formatRemoteUpFailure(opts.host, result)) console.error(line);
           process.exitCode = 1;
         }
         return;
@@ -642,6 +642,77 @@ Examples:
     });
 
   return cmd;
+}
+
+/** Render a failed remote `rig up` response without stringifying an unknown
+ *  body as `[object Object]`. JSON mode keeps the complete RemoteOpResult;
+ *  human mode shows known daemon guidance and safely falls back for older or
+ *  partial error bodies. */
+export function formatRemoteUpFailure(
+  hostId: string,
+  result: { error?: string; data?: unknown },
+): string[] {
+  const lines = [`Error on host ${hostId}${result.error ? `: ${result.error}` : ""}`];
+  const payload = result.data !== null && typeof result.data === "object" && !Array.isArray(result.data)
+    ? result.data as Record<string, unknown>
+    : undefined;
+  const error = payload?.["error"];
+  let detailAdded = false;
+
+  if (typeof error === "string" && error.trim()) {
+    lines.push(error.trim());
+    detailAdded = true;
+  } else if (error !== null && typeof error === "object" && !Array.isArray(error)) {
+    const body = error as Record<string, unknown>;
+    const fact = typeof body["fact"] === "string" ? body["fact"] : undefined;
+    const consequence = typeof body["consequence"] === "string" ? body["consequence"] : undefined;
+    const action = typeof body["action"] === "string" ? body["action"] : undefined;
+    const message = typeof body["message"] === "string" ? body["message"].trim() : undefined;
+    if (fact && consequence && action) {
+      lines.push(...formatThreePart({ fact, consequence, action }));
+      detailAdded = true;
+    } else {
+      if (fact) lines.push(`Error: ${fact}`);
+      if (consequence) lines.push(consequence);
+      if (action) lines.push(action);
+      if (message) lines.push(message);
+      detailAdded = Boolean(fact || consequence || action || message);
+    }
+  }
+
+  if (!detailAdded && typeof payload?.["message"] === "string" && payload["message"].trim()) {
+    lines.push(payload["message"].trim());
+    detailAdded = true;
+  }
+  if (!detailAdded && Array.isArray(payload?.["errors"])) {
+    const errors = payload["errors"].filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+    if (errors.length > 0) {
+      lines.push(...errors.map((entry) => `  ${entry.trim()}`));
+      detailAdded = true;
+    }
+  }
+  if (typeof payload?.["code"] === "string" && payload["code"].trim()) {
+    lines.push(`Code: ${payload["code"].trim()}`);
+  }
+  for (const node of Array.isArray(payload?.["attentionNodes"]) ? payload["attentionNodes"] : []) {
+    if (node === null || typeof node !== "object" || Array.isArray(node)) continue;
+    const entry = node as Record<string, unknown>;
+    if (typeof entry["logicalId"] !== "string" || typeof entry["reason"] !== "string") continue;
+    const session = typeof entry["sessionName"] === "string" ? ` (${entry["sessionName"]})` : "";
+    lines.push(`  ${entry["logicalId"]}${session}: ${entry["reason"]}`);
+    detailAdded = true;
+  }
+  if (Array.isArray(payload?.["warnings"])) {
+    for (const warning of payload["warnings"]) {
+      if (typeof warning === "string" && warning.trim()) lines.push(`  warning: ${warning.trim()}`);
+    }
+  }
+  if (!detailAdded && typeof result.data === "string" && result.data.trim()) {
+    lines.push(result.data.trim());
+    detailAdded = true;
+  }
+  if (!detailAdded) lines.push("Remote daemon did not return a recognized error message.");
+  return lines;
 }
 
 interface RestoreBlocker {

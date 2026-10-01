@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import path from "node:path";
 import { createProgram } from "../src/index.js";
 import http from "node:http";
 import { Command } from "commander";
@@ -271,6 +272,62 @@ describe("rig status", () => {
     const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
 
     expect(logs.join("\n")).toMatch(/not running/i);
+    expect(clientFactory).not.toHaveBeenCalled();
+  });
+
+  // Test 4b: Daemon unverified -> epistemic-matched fact, no HTTP calls or undefined port
+  it("unverified daemon -> did not respond message, no HTTP calls or undefined port", async () => {
+    const clientFactory = vi.fn();
+    const deps: StatusDeps = {
+      lifecycleDeps: mockLifecycleDeps({
+        exists: vi.fn(() => false),
+        fetch: vi.fn(async () => { throw new Error("timeout"); }), // non-refusal error -> unverified
+      }),
+      clientFactory: clientFactory as unknown as StatusDeps["clientFactory"],
+    };
+
+    const program = new Command();
+    program.addCommand(statusCommand(deps));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
+    const output = logs.join("\n");
+
+    expect(output).toMatch(/did not respond/i);
+    expect(output).not.toContain("undefined");
+    expect(clientFactory).not.toHaveBeenCalled();
+  });
+
+  it("unverified daemon with sibling hint -> renders note with sibling home", async () => {
+    const clientFactory = vi.fn();
+    const resolvedHome = path.join("/fake", "home", ".openrig");
+    const siblingHome = path.join("/fake", "home", ".openrig-vm");
+    const siblingDaemon = path.join(siblingHome, "daemon.json");
+    const parentDir = path.join("/fake", "home");
+
+    const deps: StatusDeps = {
+      lifecycleDeps: mockLifecycleDeps({
+        homeDir: resolvedHome,
+        listDir: vi.fn((p: string) => (p === parentDir ? [".openrig", ".openrig-vm"] : [])),
+        exists: vi.fn((p: string) => p === siblingDaemon),
+        readFile: vi.fn((p: string) => {
+          if (p === siblingDaemon) {
+            return JSON.stringify({ pid: 1234, port: 7433 });
+          }
+          return null;
+        }),
+        isProcessAlive: vi.fn((pid: number) => pid === 1234),
+        fetch: vi.fn(async () => { throw new Error("timeout"); }),
+      }),
+      clientFactory: clientFactory as unknown as StatusDeps["clientFactory"],
+    };
+
+    const program = new Command();
+    program.addCommand(statusCommand(deps));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "status"]));
+    const output = logs.join("\n");
+
+    expect(output).toMatch(/did not respond/i);
+    expect(output).toContain(`note: OPENRIG_HOME may be wrong — resolved ${resolvedHome}, live sibling ${siblingHome}`);
+    expect(output).not.toContain("undefined");
     expect(clientFactory).not.toHaveBeenCalled();
   });
 

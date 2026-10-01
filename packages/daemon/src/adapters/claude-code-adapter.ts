@@ -60,7 +60,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private collectorAssetPath: string | null;
   private autoDriveProviderPrompts: boolean;
   private listProcesses?: NativeProcessLister;
-  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; fingerprint?: string }>();
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; executable?: string; fingerprint?: string }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -320,7 +320,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
-    this.autoLaunches.set(binding.nodeId, { binding, token: opts.resumeToken ?? generatedSessionId! });
+    this.autoLaunches.set(binding.nodeId, { binding, token: opts.resumeToken ?? generatedSessionId!, executable: managed?.executable });
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding);
       if (!verification.ok) return verification;
@@ -378,7 +378,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       const panes = await this.tmux.listPanes(binding.tmuxSession);
       if (panes.length !== 1 || panes[0]?.id !== binding.tmuxPane) return probe;
       const observation = { target: binding.tmuxPane, tmux: this.tmux,
-        listProcesses: this.listProcesses, expectedToken: launch.token };
+        listProcesses: this.listProcesses, expectedToken: launch.token, selectedExecutable: launch.executable };
       const first = await observeClaudePaneProcess(observation);
       if (!first) return probe;
       // Pin the first exact process for this launch; retries cannot adopt a replacement.

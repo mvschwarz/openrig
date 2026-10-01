@@ -115,6 +115,26 @@ describe("NodeLauncher", () => {
     expect(notifications[0]!.type).toBe("node.launched");
   });
 
+  it("adds runtime-scoped launch env (OMP provider keys) to that runtime's seats only", async () => {
+    const rig = rigRepo.createRig("r02");
+    rigRepo.addNode(rig.id, "omp-worker", { role: "worker", runtime: "omp" });
+    rigRepo.addNode(rig.id, "claude-worker", { role: "worker", runtime: "claude-code" });
+    const envs: Record<string, Record<string, string> | undefined> = {};
+    const launcher = new NodeLauncher({
+      db, rigRepo, sessionRegistry, eventBus,
+      tmuxAdapter: mockTmuxAdapter({ createSession: async (name, _cwd, env) => { envs[name] = env; return { ok: true }; } }),
+      sessionEnv: { OPENRIG_HOME: "/home" },
+      runtimeSessionEnv: { omp: { MISTRAL_API_KEY: "omp-only" } },
+    });
+    const omp = await launcher.launchNode(rig.id, "omp-worker");
+    const claude = await launcher.launchNode(rig.id, "claude-worker");
+    expect(omp.ok && claude.ok).toBe(true);
+    if (!omp.ok || !claude.ok) return;
+    expect(envs[omp.sessionName]).toMatchObject({ OPENRIG_HOME: "/home", MISTRAL_API_KEY: "omp-only" });
+    expect(envs[claude.sessionName]).toMatchObject({ OPENRIG_HOME: "/home" });
+    expect(envs[claude.sessionName]).not.toHaveProperty("MISTRAL_API_KEY");
+  });
+
   it("launchNode commits the created session's sole live pane with its session and binding", async () => {
     const { rig, node } = seedRigWithNode();
     const listPanes = vi.fn(async () => [{ id: "%fresh" }]);

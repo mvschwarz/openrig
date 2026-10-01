@@ -21,7 +21,8 @@
 //   contract's semantic halves (temporal order, derived-values-as-commands)
 //   are not mechanically checkable and are NOT pretended at.
 
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
+import { closeSync, copyFileSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { validateMarkdownAddressability, parseMarkdownSections } from "../markdown-address.js";
 import { parseSessionName } from "../session-name.js";
@@ -58,23 +59,65 @@ export function writeSeatRecap(opts: { seatDir: string; content: string; now?: (
   }
   const now = opts.now ?? Date.now;
   const current = join(opts.seatDir, RECAP_FILENAME);
-  if (existsSync(current)) {
-    const chainDir = join(opts.seatDir, CHAIN_DIRNAME);
-    mkdirSync(chainDir, { recursive: true });
-    // COLLISION-SAFE naming (r1 F1): renameSync onto an existing path REPLACES
-    // it, so two supersessions in one millisecond silently destroyed a
-    // predecessor — the retention contract inverted. A counter suffix
-    // disambiguates: nothing is lost AND the boundary write still succeeds
-    // (better than throwing on both counts). `now` is injectable, so
-    // programmatic callers collide deterministically, not rarely.
-    const stamp = String(now()).padStart(15, "0");
-    let target = join(chainDir, `RECAP-${stamp}.md`);
-    for (let counter = 2; existsSync(target); counter++) {
-      target = join(chainDir, `RECAP-${stamp}-${counter}.md`);
+  // Write complete replacement bytes before touching current continuity.
+  const staged = join(opts.seatDir, `.RECAP-${randomUUID()}.tmp`);
+  let stagedOwned = false;
+  let archiveStage: string | undefined;
+  let archived: string | undefined;
+  let published = false;
+  try {
+    const stagedFd = openSync(staged, "wx");
+    stagedOwned = true;
+    closeSync(stagedFd);
+    writeFileSync(staged, opts.content);
+    if (existsSync(current)) {
+      const chainDir = join(opts.seatDir, CHAIN_DIRNAME);
+      mkdirSync(chainDir, { recursive: true });
+      const candidate = join(chainDir, `.RECAP-${randomUUID()}.tmp`);
+      const archiveFd = openSync(candidate, "wx");
+      archiveStage = candidate;
+      closeSync(archiveFd);
+      // The reserved staging file belongs to this attempt even if copying fails.
+      // No existing archive is touched until complete bytes can be linked.
+      copyFileSync(current, archiveStage);
+      const stamp = String(now()).padStart(15, "0");
+      for (let counter = 1; ; counter++) {
+        const suffix = counter === 1 ? "" : `-${counter}`;
+        const target = join(chainDir, `RECAP-${stamp}${suffix}.md`);
+        try {
+          // Linking publishes complete archive bytes without replacing a collision.
+          try {
+            linkSync(archiveStage, target);
+          } catch (err) {
+            if (!["EOPNOTSUPP", "ENOTSUP", "EPERM", "EXDEV"].includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
+            // Reserve the fallback exclusively: collisions still advance the suffix.
+            // Track ownership before copying so a partial copy is also cleaned up.
+            const archiveFd = openSync(target, "wx");
+            archived = target;
+            closeSync(archiveFd);
+            copyFileSync(archiveStage, target);
+          }
+          archived = target;
+          break;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
+          throw err;
+        }
+      }
     }
-    renameSync(current, target);
+    renameSync(staged, current);
+    published = true;
+  } finally {
+    if (stagedOwned) {
+      try { unlinkSync(staged); } catch { /* absent after publication, or best-effort cleanup */ }
+    }
+    if (archiveStage) {
+      try { unlinkSync(archiveStage); } catch { /* preserve the primary error */ }
+    }
+    if (!published && archived) {
+      try { unlinkSync(archived); } catch { /* failed attempts do not supersede the current recap */ }
+    }
   }
-  writeFileSync(current, opts.content);
 }
 
 /** The superseded chain, oldest first. Empty when no recap was ever superseded. */

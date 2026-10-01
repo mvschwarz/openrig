@@ -122,6 +122,7 @@ interface AgentReferenceWire {
   agentName: string;
   sourcePath: string;
   profiles: string[];
+  kind?: "consumer" | "definition";
 }
 
 export function pluginCommand(depsOverride?: StatusDeps): Command {
@@ -288,12 +289,13 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
   // -- rig plugin used-by <id> --
   cmd.command("used-by")
     .argument("<id>", "Plugin id (e.g., openrig-core)")
-    .description("List agents referencing this plugin in their profile.uses.plugins[]")
+    .description("List profile consumers and resource definitions for this plugin")
     .option("--json", "JSON output")
     .action(async (id: string, opts: { json?: boolean }) => {
       try {
         const client = await getClient();
         const res = await client.get<AgentReferenceWire[]>(`/api/plugins/${encodeURIComponent(id)}/used-by`);
+        if (res.status === 404) throw new Error(`Plugin "${id}" not found`);
         if (res.status !== 200) {
           throw new Error(`Daemon returned HTTP ${res.status}`);
         }
@@ -309,9 +311,14 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
           return;
         }
 
-        for (const r of refs) {
+        for (const r of refs.filter(ref => ref.kind !== "definition")) {
           const profilesStr = r.profiles.length > 0 ? r.profiles.join(",") : "(none)";
           console.log(`${r.agentName.padEnd(36)} [${profilesStr.padEnd(20)}] ${r.sourcePath}`);
+        }
+        const definitions = refs.filter(ref => ref.kind === "definition");
+        if (definitions.length > 0) {
+          console.log("Plugin definitions:");
+          for (const r of definitions) console.log(`${r.agentName.padEnd(36)} ${r.sourcePath}`);
         }
       } catch (err) {
         console.error((err as Error).message);

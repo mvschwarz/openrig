@@ -11,7 +11,7 @@ import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "..
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
-import { verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
+import { observeClaudeDelivery, verifyCodexPaneProcess, type ClaudeDeliveryObservation, type NativeProcessLister } from "./native-process-lineage.js";
 import type { SlowOperationInstrumentation } from "./slow-op-recorder.js";
 import { hashSentText, type CaptureObserverSink, type CaptureSlot, type ObservationInput, type ObservedBinding } from "./capture-observer.js";
 
@@ -984,6 +984,22 @@ export class SessionTransport {
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
     const runtime = sessionMeta.runtime;
+    let runtimeAdvisory: string | undefined;
+    const bindingChanged = () => JSON.stringify(this.getSessionMeta(sessionName)) !== JSON.stringify(sessionMeta);
+    const changedRecipient = (sent = false): SendResult => ({ ok: false, sessionName, sent, reason: "target_runtime_conflict",
+      error: sent ? "Recipient binding changed after paste; Enter was not sent." : "Recipient binding changed; no text was sent." });
+    const checkClaudeTarget = async (): Promise<SendResult | null> => {
+      if (runtime !== "claude-code") return null;
+      if (bindingChanged()) return changedRecipient();
+      const observation = await this.claudeDeliveryObservation(sessionName, sessionMeta.pane, sessionMeta.resumeToken);
+      if (bindingChanged()) return changedRecipient();
+      if (observation.state === "idle_shell" || observation.state === "conflict") {
+        return { ok: false, sessionName, sent: false, reason: observation.state === "idle_shell" ? "target_runtime_not_running" : "target_runtime_conflict",
+          error: `Refused: ${observation.detail}. No text was sent.` };
+      }
+      if (observation.state === "unknown") runtimeAdvisory = `runtime: ${observation.detail}; delivery proceeds without verified native identity.`;
+      return null;
+    };
     // S01/S02 P2 observation context, frozen at attempt entry before any await.
     const observed = this.captureObserver ? {
       attemptId: randomUUID(),
@@ -993,6 +1009,7 @@ export class SessionTransport {
       sentHash: null as string | null,
     } : null;
     const observe = (result: SendResult): SendResult => {
+      if (result.ok && runtimeAdvisory) result = { ...result, warning: [runtimeAdvisory, result.warning].filter(Boolean).join(" ") };
       if (observed && this.captureObserver) {
         safeRecord(this.captureObserver, {
           seam: "send_verify",
@@ -1022,9 +1039,9 @@ export class SessionTransport {
     }
 
     // #142 — a shell label may be an idle shell or a managed launch wrapper.
-    // Only positive native process proof clears the refusal, but missing proof
-    // does not establish that the runtime stopped. Terminal/unreadable behavior is unchanged.
-    const unverifiedShell = runtime && runtime !== "terminal"
+    // Non-Claude runtimes retain their existing proof requirement. Claude ordinary
+    // delivery applies its distinct uncertainty policy at the input boundary below.
+    const unverifiedShell = runtime && runtime !== "terminal" && runtime !== "claude-code"
       ? await this.unverifiedShellForeground(sessionName, runtime, sessionMeta.pane, sessionMeta.resumeToken) : null;
     if (unverifiedShell) {
       return observe({
@@ -1191,6 +1208,8 @@ export class SessionTransport {
           error: `submitOnly refused: the pane of '${sessionName}' does not show the expected staged text — pressing Enter here could drive something else entirely. Nothing was submitted.`,
         };
       }
+      const targetFailure = await checkClaudeTarget();
+      if (targetFailure) return targetFailure;
       const submitResult = await this.runStage(
         "session_transport.submit",
         () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
@@ -1199,7 +1218,7 @@ export class SessionTransport {
       if (!submitResult.ok) {
         return { ok: false, sessionName, reason: "submit_failed", outcome: "failed", error: `submitOnly: Enter did not land on '${sessionName}': ${submitResult.message}` };
       }
-      return { ok: true, sessionName, outcome: "rendered-unconfirmed", submitOnly: true };
+      return observe({ ok: true, sessionName, outcome: "rendered-unconfirmed", submitOnly: true });
     }
 
     if (waitForIdleMs !== undefined) {
@@ -1333,6 +1352,10 @@ export class SessionTransport {
       text = appendDeliveredSegment(text, this.now().getTime() - Date.parse(opts.stampISO));
     }
 
+    // Recheck the selected recipient after readiness/capture awaits, at the input boundary.
+    const targetFailure = await checkClaudeTarget();
+    if (targetFailure) return observe(targetFailure);
+
     // 3. Send text (paste)
     if (observed) observed.sentHash = hashSentText(text);
     const textResult = await this.runStage(
@@ -1353,6 +1376,8 @@ export class SessionTransport {
 
     // 4. Wait 200ms (spike-proven delay)
     await this.sleep(200);
+
+    if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
 
     // 5. Submit (C-m)
     const submitResult = await this.runStage(
@@ -1470,6 +1495,27 @@ export class SessionTransport {
     }
   }
 
+  private async claudeDeliveryObservation(sessionName: string, pane: string | null, resumeToken: string | null): Promise<ClaudeDeliveryObservation> {
+    const unknown = { state: "unknown" as const, detail: "Claude runtime observation or older launch binding is unavailable" };
+    try {
+      const panes = await this.tmuxAdapter.listPanes(sessionName);
+      if (panes.length > 1 || (pane && panes.length === 1 && panes[0]!.id !== pane)) {
+        return { state: "conflict", detail: "The session does not have the single expected bound pane" };
+      }
+      if (!pane || panes.length === 0) return unknown;
+      const [sessionPid, panePid] = await Promise.all([this.tmuxAdapter.getPanePid(sessionName), this.tmuxAdapter.getPanePid(pane)]);
+      if (sessionPid && panePid && sessionPid !== panePid) return { state: "conflict", detail: "The session and bound pane name different processes" };
+      const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken });
+      // Refusal already has positive evidence; a later failed read cannot erase it.
+      if (observation.state === "conflict" || observation.state === "idle_shell") return observation;
+      const after = await this.tmuxAdapter.listPanes(sessionName);
+      if (after.length > 1 || (after.length === 1 && after[0]!.id !== pane)) return { state: "conflict", detail: "The bound pane changed during delivery verification" };
+      const currentPid = await this.tmuxAdapter.getPanePid(pane);
+      if (panePid && currentPid && panePid !== currentPid) return { state: "conflict", detail: "The bound pane process changed during delivery verification" };
+      return after.length === 0 || !sessionPid || !panePid || !currentPid ? unknown : observation;
+    } catch { return unknown; }
+  }
+
   /** Shell label without positive native proof; not proof of an idle shell or stopped agent.
    * Null when no shell label is observed, or the expected native process is verified. */
   private async unverifiedShellForeground(sessionName: string, runtime: string, pane: string | null, resumeToken: string | null): Promise<string | null> {
@@ -1480,12 +1526,11 @@ export class SessionTransport {
       return null;
     }
     if (!paneCommand || !isShellForeground(paneCommand)) return null;
-    if ((runtime === "codex" || runtime === "claude-code") && pane) {
-      // Reuse stable, foreground, pane-descendant proof. Claude fresh/resume and
-      // Codex resume must name this session's token. Stale UI, a Node
+    if (runtime === "codex" && pane) {
+      // Reuse stable, foreground, pane-descendant Codex proof. A resumed process
+      // must name this session's token. Stale UI, a Node
       // launcher alone, missing observations or a native process elsewhere cannot clear it.
-      const verify = runtime === "codex" ? verifyCodexPaneProcess : verifyClaudePaneProcess;
-      const native = await verify({ target: sessionName, tmux: this.tmuxAdapter,
+      const native = await verifyCodexPaneProcess({ target: sessionName, tmux: this.tmuxAdapter,
         listProcesses: this.listProcesses, expectedToken: resumeToken });
       if (native && await this.tmuxAdapter.getPanePid(pane).catch(() => null) === native.panePid) return null;
     }

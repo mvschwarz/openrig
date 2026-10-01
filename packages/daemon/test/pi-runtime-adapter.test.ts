@@ -27,6 +27,7 @@ const PI_FLOOR_EFFECT = {
 
 function mockTmux(overrides?: {
   sendText?: (target: string, text: string) => Promise<TmuxResult>;
+  sendShellCommand?: (target: string, text: string) => Promise<TmuxResult>;
   sendKeys?: (target: string, keys: string[]) => Promise<TmuxResult>;
   capturePaneContent?: (target: string, lines?: number) => Promise<string | null>;
   hasSession?: (target: string) => Promise<boolean>;
@@ -34,6 +35,7 @@ function mockTmux(overrides?: {
 }) {
   return {
     sendText: overrides?.sendText ?? vi.fn(async () => ({ ok: true as const })),
+    sendShellCommand: overrides?.sendShellCommand ?? vi.fn(async () => ({ ok: true as const })),
     sendKeys: overrides?.sendKeys ?? vi.fn(async () => ({ ok: true as const })),
     capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => ""),
     hasSession: overrides?.hasSession ?? vi.fn(async () => true),
@@ -241,7 +243,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
 
   it("fresh launch: types the runner command, then captures the session file from the sidecar", async () => {
     const fs = memFs();
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       // The runner "starts" and writes its launch-stamped sidecar before the
       // adapter polls.
       fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
@@ -249,7 +251,7 @@ describe("PiRuntimeAdapter.launchHarness", () => {
       expect(text).toContain("--model 'zai/glm-5.2'");
       return { ok: true as const };
     });
-    const adapter = adapterWith(fs, mockTmux({ sendText }));
+    const adapter = adapterWith(fs, mockTmux({ sendShellCommand }));
 
     const result = await adapter.launchHarness(binding, { name: SESSION });
     expect(result).toEqual({ ok: true, resumeToken: SESSION_FILE, resumeType: "pi_session_file", appliedLaunch: PI_FLOOR_EFFECT });
@@ -261,12 +263,12 @@ describe("PiRuntimeAdapter.launchHarness", () => {
   it("explicit approve posture is honored end-to-end", async () => {
     const fs = memFs();
     let cmd = "";
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       cmd = text;
       fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
       return { ok: true as const };
     });
-    const adapter = adapterWith(fs, mockTmux({ sendText }), "approve");
+    const adapter = adapterWith(fs, mockTmux({ sendShellCommand }), "approve");
     const result = await adapter.launchHarness(binding, { name: SESSION });
     expect(result.ok).toBe(true);
     expect(cmd).toContain("--approve");
@@ -284,23 +286,23 @@ describe("PiRuntimeAdapter.launchHarness", () => {
 
   it("resume: validates the token shape, requires the file to exist, and returns the SAME token", async () => {
     const fs = memFs({ [SESSION_FILE]: "jsonl" });
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       expect(text).toContain(`--session '${SESSION_FILE}'`);
       fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
       return { ok: true as const };
     });
-    const adapter = adapterWith(fs, mockTmux({ sendText }));
+    const adapter = adapterWith(fs, mockTmux({ sendShellCommand }));
     const result = await adapter.launchHarness(binding, { name: SESSION, resumeToken: SESSION_FILE });
     expect(result).toEqual({ ok: true, resumeToken: SESSION_FILE, resumeType: "pi_session_file", appliedLaunch: PI_FLOOR_EFFECT });
-    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendShellCommand).toHaveBeenCalledOnce();
   });
 
   it("resume with a malformed token fails validation BEFORE touching the pane", async () => {
-    const sendText = vi.fn(async () => ({ ok: true as const }));
-    const adapter = adapterWith(memFs(), mockTmux({ sendText }));
+    const sendShellCommand = vi.fn(async () => ({ ok: true as const }));
+    const adapter = adapterWith(memFs(), mockTmux({ sendShellCommand }));
     const result = await adapter.launchHarness(binding, { name: SESSION, resumeToken: "relative/path.jsonl" });
     expect(result.ok).toBe(false);
-    expect(sendText).not.toHaveBeenCalled();
+    expect(sendShellCommand).not.toHaveBeenCalled();
   });
 
   it("resume with a missing session file returns retry_fresh (the awaiting-decision path)", async () => {
@@ -314,12 +316,12 @@ describe("PiRuntimeAdapter.launchHarness", () => {
     const parent = "/somewhere/parent_0196.jsonl";
     const child = `${STATE_ROOT}/${SESSION}/sessions/child_0197.jsonl`;
     const fs = memFs();
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       expect(text).toContain(`--fork '${parent}'`);
       fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(child, launchIdFrom(text));
       return { ok: true as const };
     });
-    const adapter = adapterWith(fs, mockTmux({ sendText }));
+    const adapter = adapterWith(fs, mockTmux({ sendShellCommand }));
     const result = await adapter.launchHarness(binding, {
       name: SESSION, forkSource: { kind: "native_id", value: parent },
     });
@@ -329,11 +331,11 @@ describe("PiRuntimeAdapter.launchHarness", () => {
   it("fork FAILS if the runner reports the parent file as the session (post-fork token rule)", async () => {
     const parent = `${STATE_ROOT}/${SESSION}/sessions/parent_0196.jsonl`;
     const fs = memFs();
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(parent, launchIdFrom(text));
       return { ok: true as const };
     });
-    const adapter = adapterWith(fs, mockTmux({ sendText }));
+    const adapter = adapterWith(fs, mockTmux({ sendShellCommand }));
     const result = await adapter.launchHarness(binding, {
       name: SESSION, forkSource: { kind: "native_id", value: parent },
     });
@@ -352,14 +354,14 @@ describe("PiRuntimeAdapter.launchHarness", () => {
 
   it("reports attention_required with pane evidence when the runner exits before ready", async () => {
     const fs = memFs();
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = JSON.stringify({
         ready: false, launchId: launchIdFrom(text), updatedAt: "t", exited: { code: 1, at: "t" },
       });
       return { ok: true as const };
     });
     const capturePaneContent = vi.fn(async () => "[pi-runner] ERROR pi exited: bad provider config");
-    const adapter = adapterWith(fs, mockTmux({ sendText, capturePaneContent }));
+    const adapter = adapterWith(fs, mockTmux({ sendShellCommand, capturePaneContent }));
     const result = await adapter.launchHarness(binding, { name: SESSION });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -433,39 +435,38 @@ describe("PiResumeAdapter", () => {
 
   it("resumes: types the runner --session command and confirms via the sidecar", async () => {
     const fs = memFs({ [SESSION_FILE]: "jsonl" });
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       expect(text).toContain(`--session '${SESSION_FILE}'`);
       expect(text).not.toContain("--resume");
       fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState(SESSION_FILE, launchIdFrom(text));
       return { ok: true as const };
     });
-    const a = resumeAdapter(fs, mockTmux({ sendText }));
+    const a = resumeAdapter(fs, mockTmux({ sendShellCommand }));
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
     expect(result).toEqual({ ok: true, appliedLaunch: PI_FLOOR_EFFECT });
   });
 
   it("fails honestly when the runner reports a DIFFERENT session file than requested", async () => {
     const fs = memFs({ [SESSION_FILE]: "jsonl" });
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       fs.files[piSeatPaths(STATE_ROOT, SESSION).runnerStatePath] = readyState("/other/file.jsonl", launchIdFrom(text));
       return { ok: true as const };
     });
-    const a = resumeAdapter(fs, mockTmux({ sendText }));
+    const a = resumeAdapter(fs, mockTmux({ sendShellCommand }));
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toMatch(/does not report the requested session file/);
   });
 
-  it("cleans the typed command with C-c when Enter fails (mirrors codex-resume)", async () => {
+  it("surfaces a staged launch failure without sending another submit", async () => {
     const fs = memFs({ [SESSION_FILE]: "jsonl" });
-    const sendKeys = vi.fn(async (_t: string, keys: string[]): Promise<TmuxResult> =>
-      keys[0] === "Enter"
-        ? { ok: false as const, code: "send_failed", message: "enter failed" }
-        : { ok: true as const });
-    const a = resumeAdapter(fs, mockTmux({ sendKeys }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const sendShellCommand = vi.fn(async (): Promise<TmuxResult> =>
+      ({ ok: false, code: "send_failed", message: "enter failed" }));
+    const a = resumeAdapter(fs, mockTmux({ sendShellCommand, sendKeys }));
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
-    expect(result.ok).toBe(false);
-    expect(sendKeys.mock.calls.some((c) => c[1]?.[0] === "C-c")).toBe(true);
+    expect(result).toMatchObject({ ok: false, message: "enter failed" });
+    expect(sendKeys).not.toHaveBeenCalled();
   });
 });
 
@@ -481,7 +482,7 @@ describe("launch-attempt scoping — stale artifacts never count", () => {
 
   it("fresh launch ignores a PRE-EXISTING ready sidecar and returns the NEW launch's token", async () => {
     const fs = memFs({ [statePath]: readyState(OLD_FILE, "stale-launch") });
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       // Pre-launch reset must already have replaced the stale record with a
       // pending one stamped for THIS attempt.
       const pending = JSON.parse(fs.files[statePath]!);
@@ -490,7 +491,7 @@ describe("launch-attempt scoping — stale artifacts never count", () => {
       fs.files[statePath] = readyState(NEW_FILE, launchIdFrom(text));
       return { ok: true as const };
     });
-    const adapter = adapterWith(fs, mockTmux({ sendText }));
+    const adapter = adapterWith(fs, mockTmux({ sendShellCommand }));
     const result = await adapter.launchHarness(binding, { name: SESSION });
     expect(result).toEqual({ ok: true, resumeToken: NEW_FILE, resumeType: "pi_session_file", appliedLaunch: PI_FLOOR_EFFECT });
   });
@@ -499,11 +500,11 @@ describe("launch-attempt scoping — stale artifacts never count", () => {
     const fs = memFs({
       [statePath]: JSON.stringify({ ready: false, launchId: "stale-launch", updatedAt: "t", exited: { code: 1, at: "t" } }),
     });
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       fs.files[statePath] = readyState(NEW_FILE, launchIdFrom(text));
       return { ok: true as const };
     });
-    const adapter = adapterWith(fs, mockTmux({ sendText }));
+    const adapter = adapterWith(fs, mockTmux({ sendShellCommand }));
     const result = await adapter.launchHarness(binding, { name: SESSION });
     expect(result.ok).toBe(true);
   });
@@ -512,11 +513,11 @@ describe("launch-attempt scoping — stale artifacts never count", () => {
     // The "runner" writes a ready record stamped with a DIFFERENT launch id
     // (e.g. a racing older instance) — the poll must time out, not accept it.
     const fs = memFs();
-    const sendText = vi.fn(async () => {
+    const sendShellCommand = vi.fn(async () => {
       fs.files[statePath] = readyState(OLD_FILE, "some-other-launch");
       return { ok: true as const };
     });
-    const adapter = adapterWith(fs, mockTmux({ sendText }));
+    const adapter = adapterWith(fs, mockTmux({ sendShellCommand }));
     const result = await adapter.launchHarness(binding, { name: SESSION });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/timed out/);
@@ -553,13 +554,13 @@ describe("PiResumeAdapter — stale-artifact scoping", () => {
   it("a PRE-EXISTING ready sidecar (even naming the requested file) never false-greens resume", async () => {
     // Stale record from the seat's PREVIOUS run of the SAME session file.
     const fs = memFs({ [SESSION_FILE]: "jsonl", [statePath]: readyState(SESSION_FILE, "stale-launch") });
-    const sendText = vi.fn(async () => ({ ok: true as const })); // new runner never reports
-    const a = resumeAdapter(fs, mockTmux({ sendText }));
+    const sendShellCommand = vi.fn(async () => ({ ok: true as const })); // new runner never reports
+    const a = resumeAdapter(fs, mockTmux({ sendShellCommand }));
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toMatch(/timed out/);
     // And the stale record was overwritten with a pending one before typing.
-    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendShellCommand).toHaveBeenCalledOnce();
   });
 
   it("a stale READY pane marker (same file) is never consulted", async () => {
@@ -572,22 +573,22 @@ describe("PiResumeAdapter — stale-artifact scoping", () => {
 
   it("resumes only when THIS attempt's sidecar is ready AND names the requested file", async () => {
     const fs = memFs({ [SESSION_FILE]: "jsonl" });
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       fs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
       return { ok: true as const };
     });
-    const a = resumeAdapter(fs, mockTmux({ sendText }));
+    const a = resumeAdapter(fs, mockTmux({ sendShellCommand }));
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
     expect(result).toEqual({ ok: true, appliedLaunch: PI_FLOOR_EFFECT });
   });
 
   it("this attempt's sidecar ready WITHOUT a sessionFile is not proof (no optional match)", async () => {
     const fs = memFs({ [SESSION_FILE]: "jsonl" });
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       fs.files[statePath] = JSON.stringify({ ready: true, launchId: launchIdFrom(text), updatedAt: "t" });
       return { ok: true as const };
     });
-    const a = resumeAdapter(fs, mockTmux({ sendText }));
+    const a = resumeAdapter(fs, mockTmux({ sendShellCommand }));
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.message).toMatch(/does not report the requested session file/);
@@ -613,35 +614,35 @@ describe("durable catch-up cursor survives launch-attempt resets", () => {
 
   it("adapter resume pre-write preserves lastEntryId through the pending reset", async () => {
     const fs = memFs({ [SESSION_FILE]: "jsonl", [statePath]: priorWithCursor });
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       const pending = JSON.parse(fs.files[statePath]!);
       expect(pending).toMatchObject({ ready: false, launchId: launchIdFrom(text), lastEntryId: "entry-42" });
       fs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
       return { ok: true as const };
     });
-    const adapter = adapterWith(fs, mockTmux({ sendText }));
+    const adapter = adapterWith(fs, mockTmux({ sendShellCommand }));
     const result = await adapter.launchHarness(
       { tmuxSession: SESSION, cwd: "/work" } as never,
       { name: SESSION, resumeToken: SESSION_FILE },
     );
     expect(result.ok).toBe(true);
-    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendShellCommand).toHaveBeenCalledOnce();
   });
 
   it("PiResumeAdapter pre-write preserves lastEntryId through the pending reset", async () => {
     const fs = memFs({ [SESSION_FILE]: "jsonl", [statePath]: priorWithCursor });
-    const sendText = vi.fn(async (_t: string, text: string) => {
+    const sendShellCommand = vi.fn(async (_t: string, text: string) => {
       const pending = JSON.parse(fs.files[statePath]!);
       expect(pending).toMatchObject({ ready: false, launchId: launchIdFrom(text), lastEntryId: "entry-42" });
       fs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
       return { ok: true as const };
     });
-    const a = new PiResumeAdapter(mockTmux({ sendText }), fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, {
+    const a = new PiResumeAdapter(mockTmux({ sendShellCommand }), fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, {
       pollMs: 1, maxWaitMs: 5, sleep: async () => {},
     });
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
     expect(result).toEqual({ ok: true, appliedLaunch: PI_FLOOR_EFFECT });
-    expect(sendText).toHaveBeenCalledOnce();
+    expect(sendShellCommand).toHaveBeenCalledOnce();
   });
 
   // OPR.0.4.8.2: Pi RESTORE resource-trust posture (RESOURCE TRUST, NOT a permission policy). Direct
@@ -651,12 +652,12 @@ describe("durable catch-up cursor survives launch-attempt resets", () => {
     async function resumeCmd(): Promise<string> {
       const fs = memFs({ [SESSION_FILE]: "jsonl" });
       let cmd = "";
-      const sendText = vi.fn(async (_t: string, text: string) => {
+      const sendShellCommand = vi.fn(async (_t: string, text: string) => {
         cmd = text;
         fs.files[statePath] = readyState(SESSION_FILE, launchIdFrom(text));
         return { ok: true as const };
       });
-      const a = new PiResumeAdapter(mockTmux({ sendText }), fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, {
+      const a = new PiResumeAdapter(mockTmux({ sendShellCommand }), fs, { stateRoot: STATE_ROOT, runnerEntryPath: RUNNER }, {
         pollMs: 1, maxWaitMs: 5, sleep: async () => {},
       });
       await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");

@@ -2,10 +2,12 @@
 // silently no-op, never run a second delivery path): successor replaces predecessor. The admin
 // verbs (enable/disable) route to the daemon, where the seeding rule executes before the wire
 // goes live. setup/status ride the daemon-homed config surface unchanged.
-import { afterEach, describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import { slackCommand, type SlackDeps } from "../src/commands/slack.js";
 import { buildSlackAppManifest, FEATURE_SCOPES, BASELINE_REQUIRED_SCOPES } from "@openrig/daemon/gateway-slack";
 const homes: string[] = [];
@@ -131,4 +133,64 @@ describe("S10 CLI cutover — config surfaces survive on the daemon-homed module
     await run(slackCommand(deps), ["status"]);
     expect(logs.join("\n")).toContain("IN-DAEMON");
   });
+});
+
+
+describe("Slack verify reports optional capabilities from granted scopes", () => {
+  const cases = [
+    { name: "baseline grants", grants: BASELINE_REQUIRED_SCOPES, ready: true, known: true },
+    { name: "all feature grants", grants: [...BASELINE_REQUIRED_SCOPES, ...FEATURE_SCOPES.map(f => f.scope)], ready: true, known: true },
+    { name: "absent grant header", grants: null, ready: false, known: false },
+    { name: "empty grant header", grants: [], ready: false, known: false },
+    { name: "failed authentication", grants: BASELINE_REQUIRED_SCOPES, ready: false, known: false, error: "invalid_auth" },
+  ];
+  for (const json of [false, true]) {
+    it.each(cases)(`$name (${json ? "JSON" : "human"}) retains baseline readiness and shows only known missing features`, async ({ grants, ready, known, error }) => {
+      const surface = await import("@openrig/daemon/gateway-slack");
+      const home = mkdtempSync(join(tmpdir(), "slack-scopes-"));
+      homes.push(home);
+      surface.saveConfig({ ...surface.DEFAULT_CONFIG, channel: "C-fixture" }, home);
+      vi.stubEnv("SLACK_BOT_TOKEN", "xoxb-local-fixture-only");
+      const requests: string[] = [];
+      const server = createServer((request, response) => {
+        const pathname = new URL(request.url!, "http://fixture").pathname;
+        requests.push(`${request.method} ${pathname}`);
+        response.setHeader("content-type", "application/json");
+        if (grants !== null) response.setHeader("x-oauth-scopes", grants.join(", "));
+        response.end(JSON.stringify(pathname === "/api/auth.test"
+          ? error ? { ok: false, error } : { ok: true }
+          : { ok: true, channel: { is_member: true, name: "fixture" } }));
+      });
+      server.listen(0, "127.0.0.1");
+      await once(server, "listening");
+      const port = (server.address() as { port: number }).port;
+      const logs: string[] = [];
+      process.exitCode = 0;
+      try {
+        await run(slackCommand({ home, log: message => logs.push(message), fetchImpl: (url, init) => {
+          const target = new URL(url);
+          expect(target.hostname).toBe("slack.com");
+          return fetch(`http://127.0.0.1:${port}${target.pathname}${target.search}`, init);
+        } }), json ? ["verify", "--json"] : ["verify"]);
+        expect(process.exitCode).toBe(ready ? 0 : 1);
+        expect(requests).toEqual(["POST /api/auth.test", "GET /api/conversations.info"]);
+        const missing = known ? FEATURE_SCOPES.filter(f => !grants!.includes(f.scope)) : null;
+        if (json) {
+          expect(JSON.parse(logs[0]!)).toMatchObject({ ready, missingFeatures: missing });
+        } else {
+          expect(logs.at(-1)).toBe(ready ? "READY" : "NOT ready");
+          const warnings = logs.filter(line => line.startsWith("⚠"));
+          expect(warnings).toHaveLength(missing?.length ?? 0);
+          for (const feature of missing ?? []) expect(warnings.join("\n")).toContain(`${feature.scope} missing: ${feature.usedBy}`);
+        }
+        const receipts = readFileSync(join(home, "state", "human-channel-operations.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+        expect(receipts.at(-1)).toMatchObject({ action: "verify", effect: "observed", after: { ready: error ? null : ready } });
+      } finally {
+        process.exitCode = 0;
+        vi.unstubAllEnvs();
+        server.close();
+        await once(server, "close");
+      }
+    });
+  }
 });

@@ -182,9 +182,34 @@ export async function downloadPrivateFile(
       if (contentType.includes("text/html")) {
         return { ok: false as const, error: "auth failure (Slack served an HTML page instead of the file)" };
       }
-      const buf = new Uint8Array(await res.arrayBuffer());
-      if (buf.byteLength > maxBytes) return { ok: false as const, error: `exceeds size bound (${buf.byteLength} > ${maxBytes})` };
-      return { ok: true as const, bytes: buf };
+      // Enforce the bound while receiving, including chunked responses without
+      // Content-Length. arrayBuffer() would allocate the entire oversized file
+      // before checking the limit.
+      if (!res.body) return { ok: true as const, bytes: new Uint8Array() };
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          length += value.byteLength;
+          if (length > maxBytes) {
+            await reader.cancel().catch(() => {});
+            return { ok: false as const, error: `exceeds size bound (${length} > ${maxBytes})` };
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return { ok: true as const, bytes };
     });
   } catch (e) {
     return { ok: false, error: (e as Error).message || "download failed" };

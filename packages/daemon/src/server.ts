@@ -381,6 +381,8 @@ export interface AppDeps {
    * vars are always derived internally by the composer.
    */
   sessionEnv?: Record<string, string | undefined>;
+  /** Per-runtime launch env merged over sessionEnv (OMP's provider keys). */
+  runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -498,6 +500,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("tmuxAdapter" as never, deps.tmuxAdapter);
     c.set("tmuxOptionDefaults" as never, deps.tmuxOptionDefaults);
     c.set("sessionEnv" as never, deps.sessionEnv);
+    c.set("runtimeSessionEnv" as never, deps.runtimeSessionEnv);
     c.set("cmuxAdapter" as never, deps.cmuxAdapter);
     // S10 — the in-daemon gateway subsystem handle (health surface + dispatch seam).
     c.set("gatewaySubsystem" as never, deps.gatewaySubsystem);

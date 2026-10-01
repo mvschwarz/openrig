@@ -336,6 +336,14 @@ describe("mapPiEvent", () => {
     expect(mapPiEvent({ type: "compaction_start" }).activity).toEqual({ hookEvent: "active", subtype: "compaction" });
     expect(mapPiEvent({ type: "auto_retry_start" }).activity).toEqual({ hookEvent: "active", subtype: "auto_retry" });
   });
+
+  it("leaves auto_compaction_* unmapped for Pi so an idle seat never reads as running", () => {
+    for (const type of ["auto_compaction_start", "auto_compaction_end"]) {
+      expect(mapPiEvent({ type })).toEqual({ mirrorLines: [] });
+      expect(mapPiEvent({ type }, "pi")).toEqual({ mirrorLines: [] });
+    }
+    expect(mapPiEvent({ type: "auto_compaction_start" }, "omp").activity).toEqual({ hookEvent: "active", subtype: "compaction" });
+  });
 });
 
 describe("RunnerCore assistant reply mirror", () => {

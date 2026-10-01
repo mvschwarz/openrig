@@ -12,6 +12,8 @@ describe("parseSqliteUtcMs", () => {
     // A non-UTC host is where a bare Date.parse skews the stamp by the UTC offset.
     process.env.TZ = "America/Los_Angeles";
     expect(parseSqliteUtcMs("2026-09-28 02:45:08")).toBe(Date.UTC(2026, 8, 28, 2, 45, 8));
+    // Same for the T-separated form: no zone marker means UTC, whatever the separator.
+    expect(parseSqliteUtcMs("2026-09-28T02:45:08")).toBe(Date.UTC(2026, 8, 28, 2, 45, 8));
   });
 
   it("leaves zoned ISO values unchanged and returns NaN for garbage", () => {

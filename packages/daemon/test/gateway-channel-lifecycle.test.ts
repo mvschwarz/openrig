@@ -1,19 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gatewayRoutes } from "../src/routes/gateway.js";
 import { loadConfig, saveConfig, DEFAULT_CONFIG } from "../src/domain/gateway/slack/config.js";
-import { addHumanFragment } from "../src/domain/gateway/human-registry.js";
+import { addHumanFragment, writeProjection } from "../src/domain/gateway/human-registry.js";
 
 const homes: string[] = [];
 afterEach(() => homes.splice(0).forEach((home) => rmSync(home, { recursive: true, force: true })));
 
-function fixture() {
+function fixture(opts: { registerHuman?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), "channel-lifecycle-"));
   homes.push(home);
-  addHumanFragment({ entityId: "alex", class: "human", displayName: "Alex", address: "alex@external",
+  if (opts.registerHuman !== false) addHumanFragment({ entityId: "alex", class: "human", displayName: "Alex", address: "alex@external",
     connectorBindings: [{ kind: "slack", connectorRef: "main", secretsRef: "env:private-pointer", role: "primary" }],
     prefs: { deliveryClass: "B" } }, home);
   saveConfig({ ...DEFAULT_CONFIG, secretsEnvFile: "private-pointer", channel: "C-private" }, home);
@@ -38,11 +38,53 @@ describe("human channel lifecycle at the daemon door", () => {
     const f = fixture();
     writeFileSync(join(f.home, "gateway", "humans.generated.yaml"), "invalid projection");
     const response = await f.post("enable");
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: "human_registry_unavailable" });
     expect(loadConfig(f.home).enabled).toBe(false);
     expect(f.restart).not.toHaveBeenCalled();
     expect(f.receipts().at(-1)).toMatchObject({ effect: "failed", after: null });
   });
+  it("returns actionable JSON when the first enable has no human registry, without applying delivery state", async () => {
+    const f = fixture({ registerHuman: false });
+    const before = readFileSync(join(f.home, "slack-connector.json"), "utf8");
+    const response = await f.post("enable");
+    expect(response.status).toBe(503);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toMatchObject({
+      error: "human_registry_unavailable",
+      message: expect.stringContaining("rig gateway human add"),
+    });
+    expect(readFileSync(join(f.home, "slack-connector.json"), "utf8")).toBe(before);
+    expect(f.restart).not.toHaveBeenCalled();
+    expect(f.list).not.toHaveBeenCalled();
+    expect(existsSync(join(f.home, "state", "slack-outbound-seen.jsonl"))).toBe(false);
+    expect(f.receipts().map(row => row.effect)).toEqual(["started", "failed"]);
+    expect(f.receipts().at(-1)).toMatchObject({ before: { enabled: false }, after: null });
+  });
+
+  it("allows a valid empty registry to seed the backlog", async () => {
+    const f = fixture({ registerHuman: false });
+    expect(writeProjection(f.home).ok).toBe(true);
+    const response = await f.post("enable");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, seeded: 0 });
+    expect(loadConfig(f.home).enabled).toBe(true);
+    expect(f.restart).toHaveBeenCalledTimes(1);
+    expect(f.list).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps enable no-op and disable available when the human registry is missing", async () => {
+    const f = fixture({ registerHuman: false });
+    saveConfig({ ...loadConfig(f.home), enabled: true }, f.home);
+    expect((await f.post("enable")).status).toBe(200);
+    expect(f.receipts().at(-1)).toMatchObject({ effect: "no-op" });
+    expect(f.restart).not.toHaveBeenCalled();
+    expect((await f.post("disable", { reason: "offline maintenance" })).status).toBe(200);
+    expect(loadConfig(f.home).enabled).toBe(false);
+    expect(f.restart).toHaveBeenCalledTimes(1);
+    expect(f.list).not.toHaveBeenCalled();
+  });
+
   it("serializes concurrent enables so a repeat cannot reseed newly pending work", async () => {
     const f = fixture();
     const responses = await Promise.all([f.post("enable"), f.post("enable")]);

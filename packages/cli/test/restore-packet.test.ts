@@ -432,6 +432,18 @@ describe("M2b omitted-records classifier", () => {
 });
 
 describe("M2b runtime-detect", () => {
+  it.each([
+    ["session_meta", "codex"],
+    ["user", "claude-code"],
+  ])("skips non-object JSONL before detecting %s", (type, runtime) => {
+    const content = ["null", "false", "7", '"text"', "[]", JSON.stringify({ type })].join("\n");
+    expect(detectRuntime(content)).toBe(runtime);
+  });
+
+  it("returns null when JSONL contains only non-object records", () => {
+    expect(detectRuntime('null\nfalse\n7\n"text"\n[]')).toBe(null);
+  });
+
   it("detects Codex JSONL via response_item type marker", () => {
     const content = `{"type":"session_meta","payload":{"cwd":"/x"}}
 {"type":"response_item","payload":{"type":"message","role":"user","content":"hi"}}`;

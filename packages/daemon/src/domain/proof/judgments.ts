@@ -64,6 +64,11 @@ function workspaceOf(dir: string, io: ScopeFsDeps, required = true): string {
     }
   }
 }
+/** The owning authored project, shared by readiness and lifecycle compilation.
+ * Mission storage need not be the default one-level `missions` directory. */
+export function resolveProjectRoot(dir: string): string {
+  return workspaceOf(dir, proofFs);
+}
 function policyOf(dir: string, io: ScopeFsDeps, readManifest = manifest): ScopeReadiness["policy"] {
   const root = workspaceOf(dir, io, false);
   for (let p = path.resolve(dir); ; p = path.dirname(p)) {
