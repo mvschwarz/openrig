@@ -97,7 +97,11 @@ export class DaemonClient {
 
   private async get(route: string, fetchImpl = this.fetchImpl): Promise<unknown> {
     const res = await fetchImpl(`${this.baseUrl}${route}`, { headers: this.headers, signal: AbortSignal.timeout(5_000) });
-    if (!res.ok) throw new Error(`daemon read failed: GET ${route} → ${res.status}`);
+    if (!res.ok) {
+      const parsed = await res.json().catch(() => null);
+      const detail = parsed && typeof parsed === "object" && "error" in parsed ? ` — ${(parsed as { error: unknown }).error}` : "";
+      throw new Error(`daemon read failed: GET ${route} → ${res.status}${detail}`);
+    }
     return res.json();
   }
 
