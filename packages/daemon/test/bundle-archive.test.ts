@@ -137,6 +137,42 @@ describe("Bundle archive", () => {
       .rejects.toThrow(/Unsafe archive entry|path traversal/i);
   });
 
+  it("backslash path traversal in archive entry rejected during extraction", async () => {
+    const malDir = path.join(tmpDir, "mal-win-staging");
+    fs.mkdirSync(malDir, { recursive: true });
+    fs.writeFileSync(path.join(malDir, "evil.txt"), "escape!");
+
+    const malArchive = path.join(tmpDir, "mal-win.rigbundle");
+    await tar.create(
+      { gzip: true, file: malArchive, cwd: malDir, prefix: "..\\escape" },
+      ["evil.txt"],
+    );
+
+    const archiveHash = createHash("sha256").update(fs.readFileSync(malArchive)).digest("hex");
+    fs.writeFileSync(`${malArchive}.sha256`, archiveHash);
+
+    await expect(unpack(malArchive, path.join(tmpDir, "out")))
+      .rejects.toThrow(/Unsafe archive entry|path traversal/i);
+  });
+
+  it("windows drive letter in archive entry rejected during extraction", async () => {
+    const malDir = path.join(tmpDir, "mal-drive-staging");
+    fs.mkdirSync(malDir, { recursive: true });
+    fs.writeFileSync(path.join(malDir, "evil.txt"), "escape!");
+
+    const malArchive = path.join(tmpDir, "mal-drive.rigbundle");
+    await tar.create(
+      { gzip: true, file: malArchive, cwd: malDir, prefix: "C:\\windows\\temp" },
+      ["evil.txt"],
+    );
+
+    const archiveHash = createHash("sha256").update(fs.readFileSync(malArchive)).digest("hex");
+    fs.writeFileSync(`${malArchive}.sha256`, archiveHash);
+
+    await expect(unpack(malArchive, path.join(tmpDir, "out")))
+      .rejects.toThrow(/Unsafe archive entry|absolute path/i);
+  });
+
   // T4b: Symlink entry rejection
   it("symlink in archive rejected during extraction", async () => {
     // Create an archive that includes a symlink entry

@@ -75,10 +75,11 @@ export async function unpack(archivePath: string, outputDir: string): Promise<vo
       if (entryType === "SymbolicLink" || entryType === "Link") {
         unsafeEntries.push(`${entryType}: ${entryPath}`);
       }
-      if (entryPath.startsWith("/")) {
+      const normalizedPath = entryPath.replace(/\\/g, "/");
+      if (normalizedPath.startsWith("/") || /^[a-zA-Z]:/.test(normalizedPath)) {
         unsafeEntries.push(`absolute path: ${entryPath}`);
       }
-      const segments = entryPath.split("/");
+      const segments = normalizedPath.split("/");
       if (segments.some((s: string) => s === "..")) {
         unsafeEntries.push(`path traversal: ${entryPath}`);
       }
@@ -89,9 +90,20 @@ export async function unpack(archivePath: string, outputDir: string): Promise<vo
     throw new Error(`Unsafe archive entries rejected: ${unsafeEntries.join("; ")}`);
   }
 
-  // Step 3: Extract (safe — pre-scanned)
+  // Step 3: Extract (safe — pre-scanned and defensively filtered)
   fs.mkdirSync(outputDir, { recursive: true });
-  await tar.extract({ file: archivePath, cwd: outputDir });
+  await tar.extract({
+    file: archivePath,
+    cwd: outputDir,
+    filter: (p, entry) => {
+      if ("isSymbolicLink" in entry && typeof entry.isSymbolicLink === "function" && entry.isSymbolicLink()) return false;
+      if ("type" in entry && (entry.type === "SymbolicLink" || entry.type === "Link")) return false;
+      const normalized = p.replace(/\\/g, "/");
+      if (normalized.startsWith("/") || /^[a-zA-Z]:/.test(normalized)) return false;
+      if (normalized.split("/").some((s) => s === "..")) return false;
+      return true;
+    },
+  });
 
   // Step 3: Verify content integrity
   const manifestPath = nodePath.join(outputDir, "bundle.yaml");
