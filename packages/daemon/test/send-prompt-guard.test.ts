@@ -569,26 +569,33 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
-  // No-regression: idle default still delivers; running + force still delivers.
-  it("idle target sends by default; running target now DELIVERS WITH ADVISORY (OPR.0.4.3.28 fast-follow — mid_work downgraded, busy is not a block)", async () => {
+  // Idle/busy activity does not establish native identity: this fixture has no bound pane or PID.
+  it("idle activity sends with a runtime advisory; busy activity adds its advisory with or without force", async () => {
+    const runtimeAdvisory = "runtime: Claude runtime observation or older launch binding is unavailable; delivery proceeds without verified native identity.";
     const idleSpy = vi.fn(async () => ({ ok: true as const }));
     const idle = makeTransport(mockTmux({ capturePaneContent: async () => "Done.\n❯ \n  ⏵⏵ accept edits on (shift+tab to cycle)", sendText: idleSpy }));
     const idleRes = await idle.send("dev-impl@my-rig", "hi");
     expect(idleRes.ok).toBe(true);
-    expect(idleRes.warning).toBeUndefined(); // idle → clean send, no advisory
+    expect(idleRes.warning).toContain(runtimeAdvisory);
+    expect(idleRes.warning).not.toContain("mid-task");
+    expect(idleRes.warning).not.toContain("producer-link:");
     expect(idleSpy).toHaveBeenCalled();
 
     const runSpy = vi.fn(async () => ({ ok: true as const }));
     const running = makeTransport(mockTmux({ capturePaneContent: async () => "Working on task...\n⠋ Processing\nesc to interrupt", sendText: runSpy }));
     // Default (non-force) send on a running/busy pane now PROCEEDS with a non-blocking advisory
-    // (was: ok:false mid_work). needs_input remains the ONLY hard refuse.
+    // (was: ok:false mid_work). The existing prompt refusal remains in force.
     const def = await running.send("dev-impl@my-rig", "hi");
     expect(def.ok).toBe(true);
+    expect(def.warning).toContain(runtimeAdvisory);
     expect(def.warning).toContain("mid-task");
     expect(def.warning).toContain("busy is advisory");
     // --force is now a no-op on this path (kept for back-compat) — still delivers.
     const forced = await running.send("dev-impl@my-rig", "hi", { force: true });
     expect(forced.ok).toBe(true);
+    expect(forced.warning).toContain(runtimeAdvisory);
+    expect(forced.warning).toContain("mid-task");
+    expect(forced.warning).toContain("busy is advisory");
     expect(runSpy).toHaveBeenCalled();
   });
 });
