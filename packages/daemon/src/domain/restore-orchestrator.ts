@@ -32,6 +32,8 @@ import type {
   RestoreSnapshotSelection,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
+import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
+import { isShellForeground } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
@@ -1509,12 +1511,15 @@ export class RestoreOrchestrator {
     }
     // Legacy resume adapters do not write native metadata. Fill only the
     // launched row's empty token after proof; never overwrite a hook/operator.
-    if (node.runtime === "codex" && sessionId && resumeToken) {
+    const provedClaudeWrapper = node.runtime === "claude-code"
+      && classifyPaneRuntimeMatch(identity.command, node.runtime) === "mismatch"
+      && isShellForeground(identity.command?.trim().toLowerCase() ?? "");
+    if ((node.runtime === "codex" || provedClaudeWrapper) && sessionId && resumeToken) {
       const current = this.db.prepare("SELECT node_id, session_name, status, resume_token FROM sessions WHERE id = ?").get(sessionId) as
         { node_id: string; session_name: string; status: string; resume_token: string | null } | undefined;
       const sameSession = current?.node_id === node.id && current.session_name === sessionName && current.status === "running";
       const retained = sameSession && (current.resume_token === resumeToken
-        || (!current.resume_token && this.sessionRegistry.updateResumeToken(sessionId, "codex_id", resumeToken, "scrape")));
+        || (!current.resume_token && this.sessionRegistry.updateResumeToken(sessionId, node.runtime === "codex" ? "codex_id" : "claude_id", resumeToken, "scrape")));
       if (!retained) {
         const store = new SeatIdentityStore(this.db);
         const proof = store.getForNode(node.id);

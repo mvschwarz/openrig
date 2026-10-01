@@ -138,7 +138,7 @@ export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
 }
 
 export type NativeProcessLister = () => NativeProcessRow[] | Promise<NativeProcessRow[]>;
-type NativeProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string };
+export type NativeProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string };
 export type CodexProcessObservation = NativeProcessObservation;
 
 function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex"): NativeProcessObservation | null {
@@ -200,9 +200,13 @@ export async function verifyCodexPaneProcess(input: Parameters<typeof observeCod
   return second?.fingerprint === first.fingerprint ? second : null;
 }
 
+export async function observeClaudePaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
+  return observeNativePaneProcess(input, "claude-code");
+}
+
 export async function verifyClaudePaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
-  const first = await observeNativePaneProcess(input, "claude-code");
+  const first = await observeClaudePaneProcess(input);
   if (!first) return null;
-  const second = await observeNativePaneProcess(input, "claude-code");
+  const second = await observeClaudePaneProcess(input);
   return second?.fingerprint === first.fingerprint ? second : null;
 }

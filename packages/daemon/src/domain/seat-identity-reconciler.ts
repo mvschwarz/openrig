@@ -1,4 +1,5 @@
-import { observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type CodexProcessObservation } from "./native-process-lineage.js";
+import { observeClaudePaneProcess, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation } from "./native-process-lineage.js";
+import { isShellForeground } from "./shell-classifier.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -163,10 +164,11 @@ export class SeatIdentityReconciler {
 
     // Two fresh process snapshots per sweep, not two ps calls per seat. Each
     // phase observes every bound pane; the second begins after the first ends.
-    const codexSeats = seats.filter((seat) => seat.runtime === "codex" && seat.tmux_pane && liveSessions.has(seat.session_name));
+    const nativeSeats = seats.filter((seat) => (seat.runtime === "codex" || (seat.runtime === "claude-code" && seat.resume_token))
+      && seat.tmux_pane && liveSessions.has(seat.session_name));
     const sample = async () => {
       let snapshot: ReturnType<NativeProcessLister> | undefined;
-      return Promise.all(codexSeats.map((seat) => observeCodexPaneProcess({
+      return Promise.all(nativeSeats.map((seat) => (seat.runtime === "codex" ? observeCodexPaneProcess : observeClaudePaneProcess)({
         target: seat.tmux_pane!, tmux: this.tmux, expectedToken: seat.resume_token,
         listProcesses: () => snapshot ??= this.listProcesses(),
       })));
@@ -175,11 +177,11 @@ export class SeatIdentityReconciler {
     if (generation !== this.generation) return;
     const second = await sample();
     if (generation !== this.generation) return;
-    const codexProofs = new Map(codexSeats.map((seat, index) => [seat.node_id,
+    const nativeProofs = new Map(nativeSeats.map((seat, index) => [seat.node_id,
       first[index] && first[index]?.fingerprint === second[index]?.fingerprint ? second[index]! : null]));
     for (const seat of seats) {
       try {
-        const verdict = await this.computeVerdict(seat, liveSessions, observedAt, codexProofs.get(seat.node_id) ?? null);
+        const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null);
         if (generation !== this.generation) return;
         this.store.upsert(verdict);
       } catch {
@@ -207,7 +209,7 @@ export class SeatIdentityReconciler {
     seat: RunningSeatRow,
     liveSessions: Set<string>,
     observedAt: string,
-    native: CodexProcessObservation | null,
+    native: NativeProcessObservation | null,
   ): Promise<SeatIdentityVerdict> {
     const base = {
       nodeId: seat.node_id,
@@ -252,7 +254,8 @@ export class SeatIdentityReconciler {
     }
 
     const command = await this.tmux.getPaneCommand(seat.tmux_pane);
-    if (seat.runtime === "codex") {
+    if (seat.runtime === "codex" || (seat.runtime === "claude-code" && seat.resume_token
+      && classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch" && isShellForeground(command?.trim().toLowerCase() ?? ""))) {
       return {
         ...base, verdict: native?.panePid === pid ? "verified" : "mismatch",
         evidenceSource: "pane_process", reason: native?.panePid === pid ? null : "process_identity_ambiguous",

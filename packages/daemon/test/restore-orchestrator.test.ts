@@ -76,6 +76,16 @@ function nativeLineage(runtime: "claude-code" | "codex", token: string) {
   ];
 }
 
+// Synthetic managed Claude tree: a foreground native child of the pane shell.
+function managedClaudeRows(token: string) {
+  const startedAt = "Sat Jan  1 12:00:00 2000";
+  return [
+    { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, executableName: "bash", command: "-bash", startedAt },
+    { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, executableName: "sh", command: "/bin/sh /tmp/openrig-tmux-send.txt", startedAt },
+    { pid: 1236, ppid: 1235, pgid: 1235, tpgid: 1235, executableName: "claude", command: `/opt/claude.exe --permission-mode auto --resume ${token} --name worker@r99`, startedAt },
+  ];
+}
+
 describe("RestoreOrchestrator", () => {
   let db: Database.Database;
   let rigRepo: RigRepository;
@@ -883,6 +893,67 @@ describe("RestoreOrchestrator", () => {
         .get(result.result.nodes[0]!.nodeId) as { verdict: string; registered_pane: string };
       expect(verdict).toEqual({ verdict: "verified", registered_pane: "%1" });
     }
+  });
+
+  it.each(["full", "subset", "existing-hook", "conflicting-hook"])("A3 proves managed Claude in %s recovery and the next identity sweep", async (mode) => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [], resumeType: "claude_id", resumeToken: "saved-claude" });
+    const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "sh") } as unknown as TmuxAdapter;
+    const listProcesses = vi.fn(async () => {
+      if (mode.endsWith("hook")) db.prepare("UPDATE sessions SET resume_token = ?, resume_provenance = 'hook' WHERE id = (SELECT id FROM sessions ORDER BY id DESC LIMIT 1)").run(mode === "existing-hook" ? "saved-claude" : "different-session");
+      return managedClaudeRows("saved-claude");
+    });
+    const orch = createOrchestrator({ tmux, listProcesses });
+    const result = mode !== "subset" ? await orch.restore(snap.id) : await orch.launchSingleNode(snap.rigId, "worker", { snapshotId: snap.id });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("fixture restore did not return a result");
+    const nodes = "result" in result ? result.result?.nodes : result.launched;
+    if (mode === "conflicting-hook") {
+      expect(nodes?.[0]?.status).toBe("attention_required");
+      expect(db.prepare("SELECT resume_token, resume_provenance FROM sessions ORDER BY id DESC LIMIT 1").get()).toEqual({ resume_token: "different-session", resume_provenance: "hook" });
+      return;
+    }
+    expect(nodes?.[0]?.status).toBe("resumed");
+    expect(db.prepare("SELECT resume_token, resume_provenance FROM sessions ORDER BY id DESC LIMIT 1").get()).toEqual({ resume_token: "saved-claude", resume_provenance: mode === "existing-hook" ? "hook" : "scrape" });
+    const nodeId = nodes![0]!.nodeId;
+    const name = sessionRegistry.getBindingForNode(nodeId)!.tmuxSession!;
+    const verdict = () => db.prepare("SELECT verdict, registered_pane, observed_pid FROM seat_identity_verdicts WHERE node_id = ?").get(nodeId);
+    expect(verdict()).toEqual({ verdict: "verified", registered_pane: "%1", observed_pid: 1236 });
+    tmux.listSessions = vi.fn(async () => [{ name }] as never);
+    listProcesses.mockClear();
+    await new SeatIdentityReconciler({ db, tmux, listProcesses }).reconcileAll();
+    expect(verdict()).toEqual({ verdict: "verified", registered_pane: "%1", observed_pid: 1236 });
+    expect(listProcesses).toHaveBeenCalledTimes(2);
+    // A later real loss of native evidence must remove the positive verdict.
+    listProcesses.mockResolvedValue(managedClaudeRows("different-session"));
+    await new SeatIdentityReconciler({ db, tmux, listProcesses }).reconcileAll();
+    expect(verdict()).toMatchObject({ verdict: "mismatch" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it.each(["bare", "wrong-token", "background", "unrelated", "unstable", "missing-metadata", "pane-changed", "ambiguous-pane", "process-error"])("A3 retains attention for unproved Claude: %s", async (failure) => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [], resumeType: "claude_id", resumeToken: "saved-claude" });
+    const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "sh") } as unknown as TmuxAdapter;
+    let calls = 0;
+    const listProcesses = async () => {
+      calls++;
+      if (failure === "process-error") throw new Error("fixture unavailable");
+      const rows = managedClaudeRows(failure === "wrong-token" ? "wrong" : "saved-claude");
+      if (failure === "bare") rows.pop();
+      if (failure === "background") rows[2]!.pgid = 9000;
+      if (failure === "unrelated") rows[2]!.ppid = 9000;
+      if (failure === "unstable" && calls > 1) rows[2]!.startedAt = "Sat Jan  1 12:01:00 2000";
+      if (failure === "missing-metadata") rows[2]!.startedAt = "";
+      if (failure === "pane-changed") tmux.listPanes = vi.fn(async () => [{ id: "%other", index: 0, cwd: "/", width: 80, height: 24, active: true }]);
+      return rows;
+    };
+    if (failure === "ambiguous-pane") tmux.listPanes = vi.fn(async () => ["%1", "%2"].map(id => ({ id, index: 0, cwd: "/", width: 80, height: 24, active: true })));
+    const result = await createOrchestrator({ tmux, listProcesses }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]?.status).toBe("attention_required");
+    expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
   });
 
   it.each(["full", "subset", "existing-hook", "conflicting-hook"])("proves synthetic shell-wrapped Codex through %s recovery and the next identity poll", async (mode) => {
@@ -2922,6 +2993,27 @@ describe("RestoreOrchestrator", () => {
       expect(tmux.sendText).not.toHaveBeenCalled();
       expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(oldEvent);
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(usable ? 1 : 0);
+    });
+
+    it.each([
+      ["Claude Code v2.1.220\n ❯ accept edits on", true],
+      ["Choose a conversation to resume:\n  1. project-foo", false],
+      ["Not logged in · Run /login", false],
+    ])("A3 separates wrapped Claude identity from known unusable screens: %s", async (content, usable) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("sh");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue(String(content));
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+      const oldEvent = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get();
+      const result = await createOrchestrator({ tmux, listProcesses: async () => managedClaudeRows("tok-abc-123") }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      expect(result.ok).toBe(usable);
+      if (!usable && !result.ok) expect(result.code).toBe("pane_not_usable");
+      expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(seeded.nodeId)).toEqual({ verdict: "verified" });
+      expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(oldEvent);
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(usable ? 1 : 0);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
     });
 
     it("upgrades failed -> operator_recovered when ALL four preconditions hold; emits audit event", async () => {
