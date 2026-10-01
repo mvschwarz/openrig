@@ -285,6 +285,24 @@ describe("structured human questions (#193)", () => {
       expect(threadAcks()[1]).toBe("All answered, sent back: Which database?: Postgres; Ship this week?: Yes");
     });
 
+    it("redacts secret-like question and option text in the click confirmations, as the question post does", async () => {
+      const secretQuestions = [
+        { id: "tok", question: "Rotate xoxb-LEAK-question?", options: [{ id: "a", label: "Use xoxb-LEAK-option" }, { id: "b", label: "Skip" }] },
+        { id: "ship", question: "Ship this week?", options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+      ];
+      const secret = await repo.create({ ...request, humanIntent: "decision", humanQuestions: secretQuestions });
+      const alert = async () => (await makeQueuePorts(repo, { loadHumanRegistry: () => registry }).listHumanAlerts({})).find((q) => q.qitemId === secret.qitemId);
+      wire.dispatcher.dispatch("post_message", human, await alert());
+      await vi.waitFor(async () => expect(await alert()).toBeUndefined()); // posted and its thread mapped
+      const acks = () => posts.filter((p) => p.thread_ts === "2.1").map((p) => String(p.text));
+
+      await click("tok", "a", { root: "2.1" });
+      await click("ship", "yes", { root: "2.1" });
+      await vi.waitFor(() => expect(acks()).toHaveLength(2));
+      expect(acks().join("\n")).not.toContain("xoxb-LEAK");
+      expect(acks()[1]).toContain("[redacted-secret]");
+    });
+
     it("recovers a failed hand-back without another click: the dead-letter retry lands it", async () => {
       const create = repo.create.bind(repo);
       vi.spyOn(repo, "create").mockImplementationOnce(async () => { throw new Error("database is locked"); }).mockImplementation(create);

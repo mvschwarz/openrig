@@ -16,7 +16,7 @@ import type { SeenStore, DeadLetterStore, DeadLetterEntry } from "./state-store.
 import type { InboundQueuePort } from "./queue-access.js";
 import { createHash } from "node:crypto";
 import { ADMITTED_EVENT_TYPES } from "./capabilities.js";
-import { escapeSlackText, parseQuestionAction } from "./message.js";
+import { escapeSlackText, parseQuestionAction, redactSecrets } from "./message.js";
 import { formatHumanAnswers, unansweredQuestions, type RecordHumanAnswerResult } from "../../human-questions.js";
 
 export interface SlackEvent {
@@ -328,7 +328,7 @@ export class InboundRouter {
       this.deps.log?.(`answer recorded qitem=${qitemId} question=${picked.questionId}`);
       const [just] = formatHumanAnswers(recorded.questions.filter((q) => q.id === picked.questionId), recorded.answers);
       const waiting = unansweredQuestions(recorded.questions, recorded.answers).map((q) => q.question);
-      if (live) await acknowledge(escapeSlackText(`Recorded: ${just}. Still to answer: ${waiting.join("; ")}`));
+      if (live) await acknowledge(escapeSlackText(redactSecrets(`Recorded: ${just}. Still to answer: ${waiting.join("; ")}`)));
       return { status: "accepted", reason: "answer-recorded" };
     }
     let resolution: "resolved" | "already-resolved" | "not-applicable" | undefined;
@@ -355,7 +355,7 @@ export class InboundRouter {
       return { status: "refused", reason: "resolve-not-applicable" };
     }
     this.deps.log?.(`answers complete qitem=${qitemId} -> ${route.destination}`);
-    if (resolution === "resolved") await acknowledge(escapeSlackText(`All answered, sent back: ${lines.join("; ")}`));
+    if (resolution === "resolved") await acknowledge(escapeSlackText(redactSecrets(`All answered, sent back: ${lines.join("; ")}`)));
     return { status: "accepted", reason: "answers-complete" };
   }
 
