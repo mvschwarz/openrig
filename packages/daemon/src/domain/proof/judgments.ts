@@ -321,7 +321,7 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
     for (const s of slices) s.eligible = visit(s);
   } catch (e) { issues.push(e instanceof Error ? e.message : String(e)); for (const s of slices) s.eligible = null; }
   const state = issues.length || slices.some(s => ["unknown", "legacy"].includes(s.readiness.state)) ? "unknown" : slices.length && slices.every(s => s.readiness.state === "ready") ? "ready" : "not-ready";
-  return { revision: hash([slices, issues]), state, slices, issues, historicalStatus };
+  return { revision: hash([slices, issues, historicalStatus]), state, slices, issues, historicalStatus };
 }
 
 export function readProjectReadiness(missionsRoot: string, readPolicy: ProofPolicyRead = policyOf) {

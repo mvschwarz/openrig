@@ -221,6 +221,33 @@ describe("retained authority negative controls", () => {
     const invalid = readMissionReadiness(f.mission);
     expect(invalid.issues).toContain("mission metadata: expected a mapping");
   });
+  it("invalidates proof sources when only mission status changes", async () => {
+    const f = fixture();
+    const manifest = join(f.mission, "mission.yaml");
+    const original = fs.readFileSync(manifest, "utf8");
+    const before = readMissionReadiness(f.mission);
+    const sliceRevision = readSliceReadiness(f.alpha).revision;
+    const events: Array<{ type: string; revision: string }> = [];
+    let invalidated = 0;
+    const watch = watchProofSources(f.missions, () => { invalidated++; }, {
+      emit: (event: { type: string; revision: string }) => events.push(event),
+    } as unknown as EventBus);
+    try {
+      f.write(manifest, original.replace("status: active", "status: draft"));
+      const after = readMissionReadiness(f.mission);
+      expect(after.historicalStatus).toBe("draft");
+      expect(after.revision).not.toBe(before.revision);
+      await expect.poll(() => events.length, { timeout: 5000 }).toBe(1);
+      expect(events[0]!.type).toBe("proof.sources_changed");
+      expect(invalidated).toBe(1);
+      expect(readSliceReadiness(f.alpha).revision).toBe(sliceRevision);
+      const changed = watch.observation().revision;
+      fs.writeFileSync(manifest, fs.readFileSync(manifest));
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(events).toHaveLength(1);
+      expect(watch.observation().revision).toBe(changed);
+    } finally { watch.close(); }
+  });
   it("pushes changed source truth, keeps sibling basis, and ignores unchanged source bytes", async () => {
     const f = fixture(); f.judge(); const sibling = readSliceReadiness(f.beta).revision;
     const events: Array<{ type: string; revision: string }> = []; let invalidated = 0;
