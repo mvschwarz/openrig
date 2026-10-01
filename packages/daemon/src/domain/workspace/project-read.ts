@@ -67,18 +67,29 @@ export function listProjects(c: Pick<ReadContext, "get">): { catalogPath: string
   const value = fs.existsSync(manifest) ? yamlObject(manifest) : {};
   return { catalogPath: catalog, projects: [projectEntry(value.id ?? value.metadata?.id ?? "workspace", workspace)] };
 }
-export function selectedProject(c: ReadContext): ProjectRead | null {
-  const id = c.req.query("project");
-  if (id === undefined) return null;
+function lookupProject(c: Pick<ReadContext, "get">, id: string): ProjectRead {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)) throw new ProjectReadError("invalid_project", "Invalid project ID");
   const { catalog } = projectCatalogPaths(c);
   const selected = selectCatalogProject(catalog, id);
   const p = selected ? projectEntry(selected.id, selected.root) : listProjects(c).projects.find(p => p.id === id);
   if (!p) throw new ProjectReadError("project_not_found", `Project ${id} is unavailable`);
-  if (c.req.query("projectRoot") && c.req.query("projectRoot") !== p.root) throw new ProjectReadError("project_changed", `Project ${id} root changed; choose it again`);
-  if (p.error) throw new ProjectReadError("project_unavailable", `${id}: ${p.error}`);
-  if (!fs.existsSync(p.missionsRoot)) throw new ProjectReadError("missions_unavailable", `${id}: missions root is unavailable: ${p.missionsRoot}`);
   return p;
+}
+function usableProject(p: ProjectRead): ProjectRead {
+  if (p.error) throw new ProjectReadError("project_unavailable", `${p.id}: ${p.error}`);
+  if (!fs.existsSync(p.missionsRoot)) throw new ProjectReadError("missions_unavailable", `${p.id}: missions root is unavailable: ${p.missionsRoot}`);
+  return p;
+}
+/** One catalog project by id, with the same resolution and checks as `?project=` selection. */
+export function projectById(c: Pick<ReadContext, "get">, id: string): ProjectRead {
+  return usableProject(lookupProject(c, id));
+}
+export function selectedProject(c: ReadContext): ProjectRead | null {
+  const id = c.req.query("project");
+  if (id === undefined) return null;
+  const p = lookupProject(c, id);
+  if (c.req.query("projectRoot") && c.req.query("projectRoot") !== p.root) throw new ProjectReadError("project_changed", `Project ${id} root changed; choose it again`);
+  return usableProject(p);
 }
 export function projectReadResponse(err: unknown): Response {
   return Response.json({ error: err instanceof ProjectReadError ? err.code : "project_source_unavailable", message: (err as Error).message }, { status: 409 });

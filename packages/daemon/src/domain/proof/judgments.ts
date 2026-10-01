@@ -69,8 +69,9 @@ function workspaceOf(dir: string, io: ScopeFsDeps, required = true): string {
 export function resolveProjectRoot(dir: string): string {
   return workspaceOf(dir, proofFs);
 }
-function policyOf(dir: string, io: ScopeFsDeps, readManifest = manifest): ScopeReadiness["policy"] {
-  const root = workspaceOf(dir, io, false);
+function policyOf(dir: string, io: ScopeFsDeps, readManifest = manifest, rootOverride?: string): ScopeReadiness["policy"] {
+  // A selected catalog project bounds the search at its own root: an ancestor's project.yaml is another project.
+  const root = rootOverride ?? workspaceOf(dir, io, false);
   for (let p = path.resolve(dir); ; p = path.dirname(p)) {
     for (const name of ["slice.yaml", "mission.yaml", "project.yaml"]) {
       const file = path.join(p, name), doc = readManifest(io, file);
@@ -85,7 +86,9 @@ function policyOf(dir: string, io: ScopeFsDeps, readManifest = manifest): ScopeR
     if (p === root) return null;
   }
 }
-export type ProofPolicyRead = (dir: string, io: ScopeFsDeps) => ScopeReadiness["policy"];
+export type ProofPolicyRead = (dir: string, io: ScopeFsDeps, root?: string) => ScopeReadiness["policy"];
+/** The uncached policy reader, with the optional project-root boundary. */
+const defaultPolicyRead: ProofPolicyRead = (dir, io, root) => policyOf(dir, io, manifest, root);
 
 /** One synchronous read composition owns this reader, then discards it. Only
  * policy manifest inputs (including absence) are reused, by absolute path and
@@ -94,12 +97,12 @@ export type ProofPolicyRead = (dir: string, io: ScopeFsDeps) => ScopeReadiness["
  * Errors still throw with their original source. This is not an atomic snapshot. */
 export function createProofPolicyRead(): ProofPolicyRead {
   const inputs = new WeakMap<ScopeFsDeps, Map<string, Mapping | null>>();
-  return (dir, io) => policyOf(dir, io, (provider, file) => {
+  return (dir, io, root) => policyOf(dir, io, (provider, file) => {
     let files = inputs.get(provider);
     if (!files) { files = new Map(); inputs.set(provider, files); }
     if (!files.has(file)) files.set(file, manifest(provider, file));
     return files.get(file)!;
-  });
+  }, root);
 }
 export function readProofContract(dir: string, io: ScopeFsDeps) {
   const files = { prd: "IMPLEMENTATION-PRD.md", readme: "README.md", spec: "SPEC.md" };
@@ -161,17 +164,19 @@ export function evidenceAt(root: string, dir: string, ref: string): Evidence {
   return { ref: path.relative(fs.realpathSync(root), target).split(path.sep).join("/") + (fragment ? `#${fragment}` : ""), sha256: createHash("sha256").update(addressed).digest("hex") };
 }
 
-export function readSliceReadiness(dir: string, io: ScopeFsDeps = proofFs, readPolicy: ProofPolicyRead = policyOf): ScopeReadiness {
+/** `root` (a selected catalog project's root) bounds the policy search and the scope identity; without it they derive
+ *  from the nearest project.yaml, as for the selected workspace. */
+export function readSliceReadiness(dir: string, io: ScopeFsDeps = proofFs, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string): ScopeReadiness {
   let policy: ScopeReadiness["policy"] = null, receipts: Judgment[] = [], items: ItemReadiness[] = [];
   const issues: string[] = [];
   let policyRead = false;
   try {
-    policy = readPolicy(dir, io); policyRead = true;
+    policy = readPolicy(dir, io, root); policyRead = true;
     receipts = ledger(dir, io);
-    const root = workspaceOf(dir, io, false), promises = readProofContract(dir, io);
+    const scopeRoot = root ?? workspaceOf(dir, io, false), promises = readProofContract(dir, io);
     if (new Set(promises.map(p => p.id)).size !== promises.length) throw new JudgmentError("item_ambiguous", "Repeated item identity; give distinct promises explicit <!-- proof-item: id --> markers");
     items = promises.map(p => {
-      const scope = path.relative(root, dir).split(path.sep).join("/");
+      const scope = path.relative(scopeRoot, dir).split(path.sep).join("/");
       const revision = hash([scope, p.id, p.text, policy?.revision ?? null]);
       const judgment = receipts.filter(r => r.itemId === p.id).at(-1) ?? null;
       let state: ItemReadiness["state"] = "pending", reason = "No current attributed judgment";
@@ -183,8 +188,8 @@ export function readSliceReadiness(dir: string, io: ScopeFsDeps = proofFs, readP
           const valid = judgment.evidence.length > 0 && judgment.evidence.every(e => {
             if (!e || typeof e.ref !== "string" || typeof e.sha256 !== "string") return false;
             try {
-              const address = parseAddress(e.ref), file = path.resolve(root, address.ref);
-              if (io.readBytes) contained(root, file);
+              const address = parseAddress(e.ref), file = path.resolve(scopeRoot, address.ref);
+              if (io.readBytes) contained(scopeRoot, file);
               const bytes = io.readBytes ? io.readBytes(file) : io.readFile(file);
               if (bytes === null) return false;
               const addressed = address.headerPath.length ? resolveAddress(typeof bytes === "string" ? bytes : Buffer.from(bytes).toString("utf8"), address.headerPath).text : bytes;
@@ -225,11 +230,14 @@ export interface JudgeInput {
  * @param provenance - Attestation provenance string recorded in the ledger.
  * @returns Recorded judgment receipt, current slice readiness, and replay status.
  */
-export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: string, provenance: string): { judgment: Judgment; readiness: ScopeReadiness; replayed: boolean } {
-  const dir = resolveProofScope(missionsRoot, input.scope), root = workspaceOf(dir, proofFs);
+/** `projectRoot` (the selected catalog project's root) is the boundary for evidence containment, the policy search and
+ *  the recorded scope identity. Without it the nearest project.yaml is used, which for a catalog project without its own
+ *  manifest would be an ANCESTOR, i.e. another project (CWE-22). */
+export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: string, provenance: string, projectRoot?: string): { judgment: Judgment; readiness: ScopeReadiness; replayed: boolean } {
+  const dir = resolveProofScope(missionsRoot, input.scope), root = projectRoot ? contained(projectRoot, dir) && path.resolve(projectRoot) : workspaceOf(dir, proofFs);
   if (path.basename(path.dirname(dir)) !== "slices") throw new JudgmentError("slice_required", "Item judgments belong to a slice; higher outcome judgments remain workflow decisions");
   if (!fs.statSync(dir).isDirectory()) throw new JudgmentError("scope_missing", "Select a slice directory");
-  const current = readSliceReadiness(dir);
+  const current = readSliceReadiness(dir, proofFs, defaultPolicyRead, projectRoot);
   if (!current.policy) throw new JudgmentError("policy_required", "Author proofPolicy.judges at the slice, mission or project before judging");
   if (!current.policy.judges.includes(actor)) throw new JudgmentError("actor_not_authorized", `${actor} is not a judge under ${current.policy.source}`, 403);
   if (current.issues.length) throw new JudgmentError("readiness_unavailable", current.issues.join("; "), 409);
@@ -254,7 +262,7 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   const priorOperation = receipts.find(r => r.operationId === operationId);
   if (priorOperation) {
     if (priorOperation.intent !== intent) throw new JudgmentError("operation_conflict", "Operation identity already records different contents", 409);
-    return { judgment: priorOperation, readiness: readSliceReadiness(dir), replayed: true };
+    return { judgment: priorOperation, readiness: readSliceReadiness(dir, proofFs, defaultPolicyRead, projectRoot), replayed: true };
   }
   const latest = receipts.filter(r => r.itemId === item.id).at(-1);
   if (input.expectedRevision !== item.revision || input.expectedPrevious !== (latest?.id ?? null)) throw new JudgmentError("revision_conflict", "Item or correction changed; inspect rig proof show and judge the current evidence", 409);
@@ -275,7 +283,7 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
     if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new JudgmentError("revision_conflict", "Another writer committed first; inspect current readiness", 409);
     throw e;
   } finally { fs.unlinkSync(temporary); }
-  return { judgment, readiness: readSliceReadiness(dir), replayed: false };
+  return { judgment, readiness: readSliceReadiness(dir, proofFs, defaultPolicyRead, projectRoot), replayed: false };
 }
 
 /**
@@ -285,7 +293,7 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
  * @param readPolicy - Reader function for determining applicable proof policy.
  * @returns Evaluated mission readiness, including revision, state, slices, and any issues.
  */
-export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicyRead = policyOf): MissionReadiness {
+export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string): MissionReadiness {
   const issues: string[] = [], slices: MissionReadiness["slices"] = [];
   let historicalStatus: string | null = null;
   try {
@@ -301,7 +309,7 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
       if (!Array.isArray(depends) || depends.some(x => typeof x !== "string")) throw new JudgmentError("dependencies_invalid", `${member.path}: execution.depends_on must be a list`);
       const id = (data?.metadata as { id?: unknown } | undefined)?.id ?? path.basename(dir);
       if (typeof id !== "string" || !id || slices.some(s => s.id === id)) throw new JudgmentError("dependency_identity", `${member.path}: missing or repeated slice identity`);
-      slices.push({ scope: path.basename(dir), id, readiness: readSliceReadiness(dir, proofFs, readPolicy), dependsOn: depends as string[], eligible: null });
+      slices.push({ scope: path.basename(dir), id, readiness: readSliceReadiness(dir, proofFs, readPolicy, root), dependsOn: depends as string[], eligible: null });
     }
     const memo = new Map<string, boolean | null>();
     const visit = (s: MissionReadiness["slices"][number], visiting = new Set<string>()): boolean | null => {
@@ -324,8 +332,8 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
   return { revision: hash([slices, issues]), state, slices, issues, historicalStatus };
 }
 
-export function readProjectReadiness(missionsRoot: string, readPolicy: ProofPolicyRead = policyOf) {
-  const missions = fs.readdirSync(missionsRoot).filter(n => fs.statSync(path.join(missionsRoot, n)).isDirectory()).map(name => ({ name, ...readMissionReadiness(contained(missionsRoot, path.join(missionsRoot, name)), readPolicy) }));
+export function readProjectReadiness(missionsRoot: string, readPolicy: ProofPolicyRead = defaultPolicyRead, root?: string) {
+  const missions = fs.readdirSync(missionsRoot).filter(n => fs.statSync(path.join(missionsRoot, n)).isDirectory()).map(name => ({ name, ...readMissionReadiness(contained(missionsRoot, path.join(missionsRoot, name)), readPolicy, root) }));
   const active = missions.filter(m => ["active", "release-candidate"].includes(m.historicalStatus ?? ""));
   return { revision: hash(active), state: active.length && active.every(m => m.state === "ready") ? "ready" : active.some(m => m.state === "unknown") ? "unknown" : "not-ready", missions, basis: "Active mission readiness; distinct outcome judgment and publication remain separate" };
 }

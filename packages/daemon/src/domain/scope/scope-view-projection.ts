@@ -195,7 +195,9 @@ function specShaFromLockedArtifacts(fs: ScopeFsDeps, sliceDir: string, fm: strin
   return createHash("sha256").update(bytes).digest("hex").slice(0, 8);
 }
 
-export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?: ProofPolicyRead): SliceScopeDetail | null {
+/** `root`: a selected catalog project's root. It bounds the readiness (policy search and scope identity) exactly as
+ *  `rig proof` does for that project, so the scopes view and proof agree; without it the nearest project.yaml is used. */
+export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?: ProofPolicyRead, root?: string): SliceScopeDetail | null {
   const readmePath = NODE_FILE_PRECEDENCE
     .map((n) => path.join(sliceDir, n))
     .find((p) => fs.exists(p));
@@ -222,7 +224,7 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?
   const heading = /^# (.+)$/m.exec(content);
   const progressPath = path.join(sliceDir, "PROGRESS.md");
   return {
-    readiness: readSliceReadiness(sliceDir, fs, readPolicy),
+    readiness: readSliceReadiness(sliceDir, fs, readPolicy, root),
     dirName: path.basename(sliceDir),
     id: fmValue(fm, "id"),
     displayName: heading ? heading[1]!.trim() : path.basename(sliceDir),
@@ -248,7 +250,7 @@ export function projectSliceScope(fs: ScopeFsDeps, sliceDir: string, readPolicy?
   };
 }
 
-export function projectMissionScopes(fs: ScopeFsDeps, missionsRoot: string, mission: string): MissionScopes | null {
+export function projectMissionScopes(fs: ScopeFsDeps, missionsRoot: string, mission: string, root?: string): MissionScopes | null {
   const missionDir = path.join(missionsRoot, mission);
   const slicesDir = path.join(missionDir, "slices");
   if (!fs.exists(missionDir)) return null;
@@ -257,7 +259,7 @@ export function projectMissionScopes(fs: ScopeFsDeps, missionsRoot: string, miss
     for (const entry of fs.listDir(slicesDir)) {
       const sliceDir = path.join(slicesDir, entry);
       if (!fs.isDirectory(sliceDir)) continue;
-      const detail = projectSliceScope(fs, sliceDir);
+      const detail = projectSliceScope(fs, sliceDir, undefined, root);
       if (!detail) continue;
       const { intent: _i, miniRequirements: _m, proofContract: _p, progressPath: _pp, specShaShort: _s, prdExists: _pe, ...summary } = detail;
       slices.push(summary);

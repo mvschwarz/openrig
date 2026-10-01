@@ -119,7 +119,17 @@ When the owning scope selects `proofPolicy.judges`, use `rig proof judge` to
 record an attributed accept, reject or withdraw decision on a contract item,
 and `rig proof show` to read derived readiness up through slice, mission and
 project. The nearest slice, mission or project policy selects authorized judges;
-`rig proof --help` describes setup, selectors and evidence requirements. A
+`rig proof --help` describes setup, selectors and evidence requirements. In a
+multi-project workspace catalog, name the project with `--project <id>` or a
+`<id>:` scope prefix (`alpha:m0/slices/01-t001`); unqualified scopes use the
+daemon's selected workspace. The prefix counts only when it names a catalogued
+project and no scope exists at that literal path, so a mission folder with a
+colon (`alpha:trial/slices/01-t001`) still resolves as written. The scopes views
+read a catalog project's readiness against the same project root, so they agree
+with `rig proof show`. A catalog-project read names the project
+(`project: { id, root }`) and reports its source watcher as unavailable; a
+judgment carries that root and is refused (409 `project_changed`) if the
+catalog has since moved the project. A
 correction preserves history and unrelated judgments without editing ancestor
 status checklists. An artifact can identify non-code work without a fabricated
 commit. Evidence capture (`proof add`), policy acceptance, higher outcome
