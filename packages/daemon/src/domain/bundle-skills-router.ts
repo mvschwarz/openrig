@@ -22,8 +22,8 @@ import nodePath from "node:path";
 /** Filesystem injection point — real impl wraps node:fs. Tests substitute in-memory. */
 export interface SkillsRouterFsOps {
   exists: (path: string) => boolean;
-  readFile: (path: string) => string;
-  writeFile: (path: string, content: string) => void;
+  /** Byte-for-byte copy; routed files are never decoded. */
+  copyFile: (src: string, dest: string) => void;
   mkdirp: (path: string) => void;
 }
 
@@ -125,8 +125,7 @@ export function routeSkills(input: RouteSkillsInput, fs: SkillsRouterFsOps): Rou
       continue;
     }
     fs.mkdirp(nodePath.dirname(targetAbs));
-    const content = fs.readFile(sourceAbs);
-    fs.writeFile(targetAbs, content);
+    fs.copyFile(sourceAbs, targetAbs);
     records.push({
       declaredPath: declared,
       status: "routed",
