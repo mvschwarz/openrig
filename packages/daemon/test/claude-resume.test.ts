@@ -172,6 +172,48 @@ describe("ClaudeResumeAdapter", () => {
       });
     });
 
+    it.each([
+      [null, null],
+      ["2.1.283", "Restored conversation\n❯\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"],
+      ["zsh", "Accessing workspace:\nYes, I trust this folder"],
+    ])("preserves inconclusive observations without claiming resume (%s)", async (command, content) => {
+      const adapter = new ClaudeResumeAdapter(mockTmux({
+        getPaneCommand: async () => command,
+        capturePaneContent: async () => content,
+      }), { pollMs: 0, maxWaitMs: 0 });
+      expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
+        .toMatchObject({ ok: false, code: "attention_required", message: expect.stringContaining("launch retained") });
+    });
+
+    it.each(["command", "capture"])("preserves the launch when %s observation throws", async failedRead => {
+      const adapter = new ClaudeResumeAdapter(mockTmux({
+        getPaneCommand: async () => { if (failedRead === "command") throw new Error("observation unavailable"); return "2.1.283"; },
+        capturePaneContent: async () => { throw new Error("observation unavailable"); },
+      }), { pollMs: 0, maxWaitMs: 0 });
+      expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
+        .toMatchObject({ ok: false, code: "attention_required", message: expect.stringContaining("observation unavailable") });
+    });
+
+    it.each([
+      ["No conversation found", "retry_fresh"],
+      ["How would you like to resume?\n❯ Resume from summary\n  Resume full session as-is", "attention_required"],
+    ])("retains the final observation's distinction: %s", async (content, code) => {
+      const capturePaneContent = vi.fn().mockResolvedValueOnce("").mockResolvedValue(content);
+      const adapter = new ClaudeResumeAdapter(mockTmux({
+        getPaneCommand: async () => "2.1.283", capturePaneContent,
+      }), { pollMs: 0, maxWaitMs: 0 });
+      expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
+        .toMatchObject({ ok: false, code });
+    });
+
+    it("retains positive returned-to-shell refusal", async () => {
+      const adapter = new ClaudeResumeAdapter(mockTmux({
+        getPaneCommand: async () => "zsh", capturePaneContent: async () => "$ ",
+      }), { pollMs: 0, maxWaitMs: 0 });
+      expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
+        .toMatchObject({ ok: false, code: "retry_fresh" });
+    });
+
     it("waits for Claude to become the foreground command before succeeding", async () => {
       const getPaneCommand = vi
         .fn<(_: string) => Promise<string | null>>()
