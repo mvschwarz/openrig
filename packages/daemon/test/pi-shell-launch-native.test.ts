@@ -18,15 +18,17 @@ const quote = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
 // The runner entry is deliberately offline: this exercises the real adapter,
 // tmux, canonical macOS tty and shell, without starting Pi or touching provider settings.
 describe.skipIf(!hasTmux || process.platform === "win32")("Pi launch through native tty", () => {
-  it.each(["fresh", "fork", "resume", "short-long-tmpdir"].flatMap(mode => [
+  it.each(["fresh", "fork", "resume", "short-long-tmpdir", "fresh-long-tmpdir", "fork-long-tmpdir", "resume-long-tmpdir"].flatMap(mode => [
     { mode, canonical: true }, { mode, canonical: false },
   ]))("preserves $mode runner arguments (canonical reader: $canonical)", async ({ mode, canonical }) => {
+    const launchMode = mode.split("-")[0];
+    const longTmp = mode.endsWith("long-tmpdir");
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-shell-"));
     const socket = path.join(temp, "tmux.sock");
     const session = "pi-fixture";
     const long = Array.from({ length: 8 }, () => "nested-directory-" + "x".repeat(35)).join(path.sep);
-    const stateRoot = path.join(temp, mode === "short-long-tmpdir" ? "short" : long, "state");
-    const cwd = path.join(temp, mode === "short-long-tmpdir" ? "short" : long, "project with 'quotes'");
+    const stateRoot = path.join(temp, longTmp ? "short" : long, "state");
+    const cwd = path.join(temp, longTmp ? "short" : long, "project with 'quotes'");
     fs.mkdirSync(cwd, { recursive: true });
     const runner = path.join(temp, "offline-runner.cjs");
     fs.writeFileSync(runner, `const fs = require('node:fs'); const path = require('node:path');
@@ -40,13 +42,16 @@ setInterval(() => {}, 1000);\n`);
     const parent = path.join(stateRoot, session, "sessions", "parent.jsonl");
     fs.mkdirSync(path.dirname(parent), { recursive: true });
     fs.writeFileSync(parent, "fixture\n");
-    const model = mode === "short-long-tmpdir" ? undefined : "provider/model-" + "m".repeat(7000);
+    const model = mode === "short-long-tmpdir" ? undefined : "provider/model-" + "m".repeat(longTmp ? 400 : 7000);
     const expected = buildPiRunnerCommand({ runnerEntryPath: runner, sessionName: session,
       stateRoot, cwd, model, launchId: "attempt", trust: "no-approve",
-      sessionFile: mode === "resume" ? parent : undefined,
-      forkRef: mode === "fork" ? parent : undefined });
+      sessionFile: launchMode === "resume" ? parent : undefined,
+      forkRef: launchMode === "fork" ? parent : undefined });
     if (mode === "short-long-tmpdir") expect(Buffer.byteLength(expected)).toBeLessThanOrEqual(512);
-    else expect(Buffer.byteLength(expected)).toBeGreaterThan(7000);
+    else if (longTmp) {
+      expect(Buffer.byteLength(expected)).toBeGreaterThan(512);
+      expect(Buffer.byteLength(expected)).toBeLessThan(1024);
+    } else expect(Buffer.byteLength(expected)).toBeGreaterThan(7000);
     const fsOps = { readFile: (p: string) => fs.readFileSync(p, "utf8"),
       writeFile: (p: string, c: string) => fs.writeFileSync(p, c),
       exists: fs.existsSync, mkdirp: (p: string) => { fs.mkdirSync(p, { recursive: true }); } };
@@ -59,7 +64,7 @@ setInterval(() => {}, 1000);\n`);
           : "/bin/bash --noprofile --norc -i"}`]);
       const longTmpdir = path.join(temp, ...Array.from({ length: 9 }, () => "t".repeat(60)));
       let fileOps: TmuxFileOps | undefined;
-      if (mode === "short-long-tmpdir") {
+      if (longTmp) {
         fs.mkdirSync(longTmpdir, { recursive: true });
         let names = 0;
         fileOps = {
@@ -73,7 +78,7 @@ setInterval(() => {}, 1000);\n`);
       const tmux = new TmuxAdapter(async command => (await exec(command.replace(/^tmux /,
         `tmux -S ${quote(socket)} `))).stdout, fileOps);
       await new Promise(resolve => setTimeout(resolve, 100));
-      if (mode === "resume") {
+      if (launchMode === "resume") {
         const adapter = new PiResumeAdapter(tmux, fsOps, { stateRoot, runnerEntryPath: runner },
           { maxWaitMs: 2000, pollMs: 25, newLaunchId: () => "attempt" });
         expect(await adapter.resume(session, "pi_session_file", parent, cwd, model)).toMatchObject({ ok: true });
@@ -81,14 +86,14 @@ setInterval(() => {}, 1000);\n`);
         const adapter = new PiRuntimeAdapter({ tmux, fsOps, stateRoot, runnerEntryPath: runner,
           sleep: () => new Promise(resolve => setTimeout(resolve, 25)), newLaunchId: () => "attempt" });
         expect(await adapter.launchHarness({ tmuxSession: session, cwd, model } as never,
-          { name: session, ...(mode === "fork" ? { forkSource: { kind: "native_id" as const, value: parent } } : {}) }))
+          { name: session, ...(launchMode === "fork" ? { forkSource: { kind: "native_id" as const, value: parent } } : {}) }))
           .toMatchObject({ ok: true });
       }
       const received = JSON.parse(fs.readFileSync(path.join(stateRoot, session, "received.json"), "utf8"));
       expect(received.cwd).toBe(cwd);
       expect(received.args).toContain("--no-approve");
-      expect(received.sessionFile).toBe(mode === "resume" ? parent : piSeatPaths(stateRoot, session).sessionsDir + "/child.jsonl");
-      if (mode === "fork") expect(received.args[received.args.indexOf("--fork") + 1]).toBe(parent);
+      expect(received.sessionFile).toBe(launchMode === "resume" ? parent : piSeatPaths(stateRoot, session).sessionsDir + "/child.jsonl");
+      if (launchMode === "fork") expect(received.args[received.args.indexOf("--fork") + 1]).toBe(parent);
       if (model) expect(received.args[received.args.indexOf("--model") + 1]).toBe(model);
       if (canonical) return; // Argument-delivery floor; readiness needs real interactive shell job control.
       const readiness = new PiRuntimeAdapter({ tmux, fsOps, stateRoot, runnerEntryPath: runner });

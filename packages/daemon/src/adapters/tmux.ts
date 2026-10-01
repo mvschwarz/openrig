@@ -503,10 +503,17 @@ export class TmuxAdapter {
   }
 
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
-    const path = options.stageIfLong && Buffer.byteLength(command, "utf8") <= 512 ? undefined : this.fileOps.tmpName();
-    const invocation = path ? `/bin/sh ${shellQuote(path)}` : command;
+    const commandBytes = Buffer.byteLength(command, "utf8");
+    let path = options.stageIfLong && commandBytes <= 512 ? undefined : this.fileOps.tmpName();
+    let invocation = path ? `/bin/sh ${shellQuote(path)}` : command;
     if (Buffer.byteLength(invocation, "utf8") > 512) {
-      return { ok: false, code: "launch_path_too_long", message: "Temporary launch-script path exceeds the safe terminal input bound" };
+      // Pi commands below the canonical tty limit still fit when staging cannot.
+      if (options.stageIfLong && commandBytes < 1024) {
+        path = undefined;
+        invocation = command;
+      } else {
+        return { ok: false, code: "launch_path_too_long", message: "Temporary launch-script path exceeds the safe terminal input bound" };
+      }
     }
     let created = false;
     try {
