@@ -125,6 +125,73 @@ describe("attributed proof judgments and derived readiness", () => {
     expect(read.revision).toBe(receipt.readiness.revision);
     expect(read.items[0].judgment.actor).toBe("judge@trial");
   });
+  it("reads and records project proof under the selected catalog project and its policy", async () => {
+    const f = fixture(), projectRoot = join(f.root, "other"), missionsRoot = join(projectRoot, "work", "missions");
+    const mission = join(missionsRoot, "release"), slice = join(mission, "slices", "01-beta");
+    f.write(join(f.root, "workspace.yaml"), { projects: [{ id: "other", root: "other" }] });
+    f.write(join(projectRoot, "project.yaml"), {
+      kind: "project", metadata: { id: "other" }, proofPolicy: { judges: ["judge@other"] }, missions: { root: "work/missions" },
+    });
+    f.write(join(projectRoot, "SPEC.md"), "---\nid: other\n---\n# Other project\n");
+    f.write(join(mission, "mission.yaml"), {
+      kind: "mission", metadata: { name: "release", status: "active" },
+      composition: { slices: [{ ref: "slices/01-beta/slice.yaml", order: 1, active: true }] },
+    });
+    f.write(join(slice, "slice.yaml"), { kind: "slice", metadata: { id: "01-beta", status: "draft" } });
+    f.write(join(slice, "SPEC.md"), "---\nid: 01-beta\n---\n## Proof contract\n- [ ] Project-specific outcome.\n");
+    f.write(join(slice, "proof", "evidence.md"), "Observed in the selected project.\n");
+
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("sliceIndexer" as never, { isReady: () => true, slicesRoot: f.missions, invalidate: () => {} } as never);
+      c.set("settingsStore" as never, { resolveOne: (key: string) => ({ value: key === "workspace.root" ? f.root : join(f.root, "workspace.yaml") }) } as never);
+      await next();
+    });
+    app.route("/api/proof", proofRoutes());
+
+    const selection = `?scope=release/slices/01-beta&project=other&evidence=proof/evidence.md`;
+    const preparedResponse = await app.request(`/api/proof${selection}`);
+    expect(preparedResponse.status, await preparedResponse.clone().text()).toBe(200);
+    const prepared = await preparedResponse.json();
+    expect(prepared.project).toEqual({ id: "other", root: projectRoot });
+    expect(prepared.sourceObservation).toEqual({ state: "unavailable", revision: "unverified" });
+    expect(prepared.preparedEvidence).toEqual([{
+      ref: "work/missions/release/slices/01-beta/proof/evidence.md",
+      sha256: expect.any(String),
+    }]);
+    const item = prepared.items[0];
+    const judgeUrl = `/api/proof/judge?project=other&projectRoot=${encodeURIComponent(projectRoot)}`;
+    const unauthorized = await app.request(judgeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "judge@trial" },
+      body: JSON.stringify({
+        scope: "release/slices/01-beta", item: item.id, verdict: "accept", reason: "Verified in the selected project.",
+        evidence: ["proof/evidence.md"], expectedEvidence: prepared.preparedEvidence,
+        expectedRevision: item.revision, expectedPrevious: null,
+      }),
+    });
+    expect(unauthorized.status).toBe(403);
+    expect(await unauthorized.json()).toMatchObject({ error: "actor_not_authorized" });
+    const mismatch = await app.request(`/api/proof?project=other&projectRoot=${encodeURIComponent(f.root)}`);
+    expect(mismatch.status).toBe(409);
+    expect(await mismatch.json()).toMatchObject({ error: "project_changed" });
+
+    // Windows rejects directory fsync, which recordJudgment requires after its durable link.
+    // Keep the selected-policy/root checks on Windows; the success path runs on POSIX CI.
+    if (process.platform === "win32") return;
+    const post = await app.request(judgeUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-OpenRig-Session": "judge@other" },
+      body: JSON.stringify({
+        scope: "release/slices/01-beta", item: item.id, verdict: "accept", reason: "Verified in the selected project.",
+        evidence: ["proof/evidence.md"], expectedEvidence: prepared.preparedEvidence,
+        expectedRevision: item.revision, expectedPrevious: null,
+      }),
+    });
+    expect(post.status, await post.clone().text()).toBe(201);
+    expect(fs.existsSync(join(slice, "proof", "judgments", "00000001.md"))).toBe(true);
+    expect(fs.existsSync(join(f.alpha, "proof", "judgments"))).toBe(false);
+  });
 });
 
 

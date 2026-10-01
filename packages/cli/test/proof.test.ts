@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
+import { DaemonClient } from "../src/client.js";
 import {
   proofCommand,
   validateC1Header,
@@ -428,5 +429,47 @@ describe("proof add — pristine-scaffold contract never canonical (KI-5.3-2 sec
     expect(out.contractItemsDeclared).toBe(2);
     expect(out.contractSource).toBe("prd");
     expect((out.contractItemsCovered ?? []).join(" ")).toContain("REAL ITEM ONE");
+  });
+});
+
+describe("rig proof project selection", () => {
+  let logs: string[];
+  beforeEach(() => {
+    logs = [];
+    vi.stubEnv("OPENRIG_URL", "http://127.0.0.1:1");
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logs.push(args.join(" ")); });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    process.exitCode = undefined;
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    process.exitCode = undefined;
+  });
+
+  it("selects the project for show and binds its root across judge preparation and write", async () => {
+    const get = vi.spyOn(DaemonClient.prototype, "get").mockResolvedValue({
+      status: 200,
+      data: {
+        project: { id: "other", root: "C:\\work\\other" },
+        items: [{ id: "item-1", text: "Project result", index: 1, revision: "rev-1", judgment: null }],
+        preparedEvidence: [{ ref: "missions/release/slices/01-beta/proof/evidence.md", sha256: "digest" }],
+      },
+    } as never);
+    const post = vi.spyOn(DaemonClient.prototype, "post").mockResolvedValue({ status: 201, data: { ok: true } } as never);
+
+    const show = proofCommand(); show.exitOverride();
+    await show.parseAsync(["node", "proof", "show", "release", "--project", "other"]);
+    expect(get.mock.calls[0]?.[0]).toBe("/api/proof?scope=release&project=other");
+
+    const judge = proofCommand(); judge.exitOverride();
+    await judge.parseAsync(["node", "proof", "judge", "release/slices/01-beta#1", "--project", "other", "--verdict", "accept", "--reason", "Verified outcome", "--evidence", "proof/evidence.md"]);
+    expect(get.mock.calls[1]?.[0]).toContain("scope=release%2Fslices%2F01-beta&project=other");
+    const postUrl = new URL(post.mock.calls[0]?.[0] ?? "", "http://localhost");
+    expect(postUrl.pathname).toBe("/api/proof/judge");
+    expect(postUrl.searchParams.get("project")).toBe("other");
+    expect(postUrl.searchParams.get("projectRoot")).toBe("C:\\work\\other");
+    expect(post.mock.calls[0]?.[1]).toMatchObject({ scope: "release/slices/01-beta", expectedRevision: "rev-1", expectedEvidence: [{ ref: "missions/release/slices/01-beta/proof/evidence.md", sha256: "digest" }] });
+    expect(process.exitCode).toBeUndefined();
   });
 });

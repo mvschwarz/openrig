@@ -110,6 +110,8 @@ export function proofCommand(): Command {
   );
   cmd.addHelpText("after", `
 The selected daemon owns show/judge. Scope addresses are mission/slices/slice#item.
+For a catalogued project, pass --project <id>; the selected project root is bound
+between the prepared read and the judgment write.
 The project owner selects proofPolicy: { judges: [exact-seat-address] } in the
 owning slice.yaml, mission.yaml or project.yaml (nearest wins; no default gate roles).
 The contract is the authored ## Proof contract. A sole item needs no # selector.
@@ -139,13 +141,18 @@ checkboxes do not accept an item under the selected proof policy.
   };
   cmd.command("show [scope]").description("Read current attributed proof readiness for a slice, mission or active project; no status files are changed.")
     .option("--json", "Structured readiness, item revisions and retained judgment references")
+    .option("--project <id>", "Select a catalogued project instead of the daemon's default workspace")
     .action(async (scope, opts) => {
       try {
-        const data = await response(await client().get(`/api/proof${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`));
+        const query = new URLSearchParams();
+        if (scope) query.set("scope", scope);
+        if (opts.project) query.set("project", opts.project);
+        const data = await response(await client().get(`/api/proof${query.size ? `?${query}` : ""}`));
         console.log(opts.json ? JSON.stringify(data) : JSON.stringify(data, null, 2));
       } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exitCode = 1; }
     });
   cmd.command("judge <scope-item>").description("Record one attributed item judgment and derive readiness. Use mission/slices/slice#item (index, text or ID). Policy inherits proofPolicy.judges from owning slice, mission or project.")
+    .option("--project <id>", "Select a catalogued project instead of the daemon's default workspace")
     .requiredOption("--verdict <verdict>", "accept | reject | withdraw")
     .requiredOption("--reason <text>", "The evidence-backed judgment being made")
     .option("--evidence <ref>", "Existing evidence, relative to slice or workspace missions/; repeat for multiple references", (v: string, prior: string[]) => [...prior, v], [])
@@ -160,11 +167,14 @@ checkboxes do not accept an item under the selected proof policy.
         const at = address.indexOf("#"), scope = at < 0 ? address : address.slice(0, at), selector = at < 0 ? null : address.slice(at + 1);
         const refs = [...new Set<string>([...opts.evidence, ...(opts.comparison ? [opts.comparison] : [])])];
         const query = new URLSearchParams({ scope });
+        if (opts.project) query.set("project", opts.project);
         for (const ref of refs) query.append("evidence", ref);
         const c = client(), view = await response(await c.get(`/api/proof?${query}`));
         const items = view.items as Array<{ id: string; text: string; index: number; revision: string; judgment: { id: string } | null }> | undefined;
         const item = selector ? items?.find(i => i.id === selector || i.text === selector || String(i.index) === selector) : items?.length === 1 ? items[0] : undefined;
         if (!item) throw new Error("Select one current item with scope#item; rig proof show lists IDs, text and indices");
+        const project = view.project as { id?: string; root?: string } | undefined;
+        if (opts.project && (!project || project.id !== opts.project || typeof project.root !== "string")) throw new Error("The selected proof project changed or was not returned; read it again before judging");
         const subjectAt = opts.subject?.indexOf(":") ?? -1;
         if (opts.subject && subjectAt < 1) throw new Error("--subject must be kind:ref");
         const body = { scope, item: item.id, verdict: opts.verdict, reason: opts.reason,
@@ -172,7 +182,12 @@ checkboxes do not accept an item under the selected proof policy.
           ...(opts.subject ? { subject: { kind: opts.subject.slice(0, subjectAt), ref: opts.subject.slice(subjectAt + 1), ...(opts.comparison ? { comparison: opts.comparison } : {}) } } : {}),
           expectedRevision: opts.revision ?? item.revision, expectedPrevious: item.judgment?.id ?? null,
           operationId: opts.operationId, replace: opts.replace === true };
-        const result = await response(await c.post("/api/proof/judge", body));
+        const judgeQuery = new URLSearchParams();
+        if (opts.project) {
+          judgeQuery.set("project", opts.project);
+          judgeQuery.set("projectRoot", project!.root!);
+        }
+        const result = await response(await c.post(`/api/proof/judge${judgeQuery.size ? `?${judgeQuery}` : ""}`, body));
         console.log(opts.json ? JSON.stringify(result) : JSON.stringify(result, null, 2));
       } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exitCode = 1; }
     });

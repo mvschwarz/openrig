@@ -4,12 +4,15 @@ import * as path from "node:path";
 import type { SliceIndexer } from "../domain/slices/slice-indexer.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { JudgmentError, evidenceAt, readSliceReadiness, readMissionReadiness, readProjectReadiness, recordJudgment, resolveProofScope, type JudgeInput } from "../domain/proof/judgments.js";
+import { projectReadResponse, selectedProject, type ProjectRead } from "../domain/workspace/project-read.js";
+import { ProjectReadError } from "../domain/workspace/project-catalog.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
 
 export function proofRoutes(): Hono {
   const app = new Hono();
   app.onError((e, c) => {
     if (e instanceof JudgmentError) return c.json({ error: e.code, message: e.message }, e.status as 400);
+    if (e instanceof ProjectReadError) return projectReadResponse(e);
     return c.json({ error: "proof_unavailable", message: e.message }, 503);
   });
   const indexer = (c: { get: (key: never) => unknown }): SliceIndexer => {
@@ -17,13 +20,21 @@ export function proofRoutes(): Hono {
     if (!value?.isReady()) throw new JudgmentError("workspace_unavailable", "Configure the daemon workspace before reading or recording judgments", 503);
     return value;
   };
+  const source = (c: Parameters<typeof selectedProject>[0]): { root: string; project: ProjectRead | null } => {
+    const project = selectedProject(c);
+    return { root: project?.missionsRoot ?? indexer(c).slicesRoot, project };
+  };
+  const sourceObservation = (c: Parameters<typeof selectedProject>[0], project: ProjectRead | null) =>
+    project ? { state: "unavailable" as const, revision: "unverified" } : proofSourceObservation(c);
+  const projectIdentity = (project: ProjectRead | null) => project ? { id: project.id, root: project.root } : undefined;
   app.get("/", c => {
-    const root = indexer(c).slicesRoot, scope = c.req.query("scope");
-    if (!scope) return c.json({ ...readProjectReadiness(root), sourceObservation: proofSourceObservation(c) });
+    const { root, project } = source(c), scope = c.req.query("scope");
+    const common = { sourceObservation: sourceObservation(c, project), ...(project ? { project: projectIdentity(project) } : {}) };
+    if (!scope) return c.json({ ...readProjectReadiness(root), ...common });
     const dir = resolveProofScope(root, scope);
-    if (path.basename(path.dirname(dir)) !== "slices") return c.json({ ...readMissionReadiness(dir), sourceObservation: proofSourceObservation(c) });
+    if (path.basename(path.dirname(dir)) !== "slices") return c.json({ ...readMissionReadiness(dir), ...common });
     const refs = c.req.queries("evidence") ?? [];
-    return c.json({ ...readSliceReadiness(dir), sourceObservation: proofSourceObservation(c), ...(refs.length ? { preparedEvidence: refs.map(ref => evidenceAt(path.dirname(root), dir, ref)) } : {}) });
+    return c.json({ ...readSliceReadiness(dir), ...common, ...(refs.length ? { preparedEvidence: refs.map(ref => evidenceAt(project?.root ?? path.dirname(root), dir, ref)) } : {}) });
   });
   app.post("/judge", async c => {
     const body = await c.req.json<JudgeInput & { actorSession?: string }>().catch(() => null);
@@ -33,9 +44,10 @@ export function proofRoutes(): Hono {
     if (body.subject?.comparison !== undefined && typeof body.subject.comparison !== "string") throw new JudgmentError("judgment_invalid", "Comparison must be an evidence reference");
     const identity = requireSenderIdentity(c, { verb: "proof judgment", bodyClaim: body.actorSession });
     if (!identity.ok) return identity.response;
-    const owner = indexer(c);
-    const result = recordJudgment(owner.slicesRoot, body, identity.session, resolveRecordedProvenance(c, identity));
-    owner.invalidate();
+    const { root, project } = source(c);
+    const owner = project ? null : indexer(c);
+    const result = recordJudgment(root, body, identity.session, resolveRecordedProvenance(c, identity));
+    owner?.invalidate();
     // The receipt is already durable. A lost notification must not turn a committed write into a claimed rollback.
     let notification = "unchanged";
     if (!result.replayed) {
