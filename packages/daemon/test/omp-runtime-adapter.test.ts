@@ -18,7 +18,8 @@ function fakeSeat(files: Record<string, string>) {
     mkdirp: () => {},
   };
   const tmux = {
-    sendText: vi.fn(async (_session: string, command: string) => {
+    // Pi-family launches go through the staged shell-command path.
+    sendShellCommand: vi.fn(async (_session: string, command: string) => {
       const launchId = /--launch-id '([^']+)'/.exec(command)?.[1];
       files[paths.runnerStatePath] = JSON.stringify({ ready: true, launchId, sessionFile: currentFile, updatedAt: "t" });
       return { ok: true };
@@ -35,7 +36,7 @@ describe("OMP runtime adapter exact session tokens", () => {
     const adapter = new OmpRuntimeAdapter({ fsOps: fs, tmux, stateRoot, runnerEntryPath: "/daemon/pi-runner.js", sleep: async () => {} });
     const result = await adapter.launchHarness({ tmuxSession: seat, cwd: "/work", model: "openrouter/example", launchPosture: "floor" } as never, { name: seat, resumeToken: currentFile });
     expect(result).toEqual({ ok: true, resumeToken: currentFile, resumeType: "omp_session_file", appliedLaunch: { runtime: "omp", axis: "permission", state: "observed", value: "always-ask" } });
-    expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).toContain(`--runtime omp --approval-mode always-ask --model 'openrouter/example' --session '${currentFile}'`);
+    expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]?.[1]).toContain(`--runtime omp --approval-mode always-ask --model 'openrouter/example' --session '${currentFile}'`);
   });
 
   it("fails an exact resume when the runner comes up on a different session file", async () => {
@@ -51,7 +52,7 @@ describe("OMP runtime adapter exact session tokens", () => {
     const adapter = new OmpRuntimeAdapter({ fsOps: fs, tmux, stateRoot, runnerEntryPath: "/daemon/pi-runner.js", sleep: async () => {} });
     const result = await adapter.launchHarness({ tmuxSession: seat, cwd: "/work", model: "openrouter/example", launchPosture: "full_bypass" } as never, { name: seat, forkSource: { kind: "native_id", value: parentFile } });
     expect(result).toMatchObject({ ok: true, resumeToken: currentFile, resumeType: "omp_session_file", appliedLaunch: { runtime: "omp", axis: "permission", value: "yolo" } });
-    expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).toContain(`--runtime omp --approval-mode yolo --model 'openrouter/example' --fork '${parentFile}'`);
+    expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]?.[1]).toContain(`--runtime omp --approval-mode yolo --model 'openrouter/example' --fork '${parentFile}'`);
   });
 
   it("reports a ready fresh seat without claiming an unwritten resume token", async () => {
@@ -72,6 +73,6 @@ describe("OMP runtime adapter exact session tokens", () => {
     expect(adapter.canResume("pi_session_file", currentFile)).toBe(false);
     const result = await adapter.resume(seat, "omp_session_file", currentFile, "/work", "openrouter/example", "floor");
     expect(result).toMatchObject({ ok: true, appliedLaunch: { runtime: "omp", axis: "permission", value: "always-ask" } });
-    expect(vi.mocked(tmux.sendText).mock.calls[0]?.[1]).toContain(`--runtime omp --approval-mode always-ask --model 'openrouter/example' --session '${currentFile}'`);
+    expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]?.[1]).toContain(`--runtime omp --approval-mode always-ask --model 'openrouter/example' --session '${currentFile}'`);
   });
 });
