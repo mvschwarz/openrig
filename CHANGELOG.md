@@ -10,9 +10,24 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ## [0.6.4-rc.1]
 
-Release candidate for 0.6.4, cut from main at `afde814f`. It is not published,
-and candidate testing is in progress. Only admitted blocker fixes will change it
-before 0.6.4. The changes since 0.6.3:
+Release candidate for 0.6.4, cut from main at `afde814f`. This is a pre-release
+candidate, not a stable release. Only admitted blocker fixes change it before
+0.6.4. These notes make no test claims; the final verification summary will
+state the tested environments and known limits. The changes since 0.6.3:
+
+### Release-candidate blocker fixes
+
+- Keep binary files byte-identical in rig bundles
+  ([#245](https://github.com/mvschwarz/openrig/issues/245),
+  [#257](https://github.com/mvschwarz/openrig/pull/257)).
+- Send local commands to the daemon's recorded endpoint, so a daemon started
+  with `rig daemon start --port` is the one they reach
+  ([#246](https://github.com/mvschwarz/openrig/issues/246),
+  [#266](https://github.com/mvschwarz/openrig/pull/266)).
+- Relaunch a rig's only seat after `rig seat launch --fresh --stop`, instead of
+  refusing once stopping it had ended the tmux server
+  ([#265](https://github.com/mvschwarz/openrig/issues/265),
+  [#267](https://github.com/mvschwarz/openrig/pull/267)).
 
 ### Messaging and delivery
 
@@ -34,7 +49,9 @@ before 0.6.4. The changes since 0.6.3:
 
 - Keep a blocked row's park timer through a seat handover, and retire a periodic
   park timer when its row is rerouted
-  ([#242](https://github.com/mvschwarz/openrig/pull/242)).
+  ([#242](https://github.com/mvschwarz/openrig/pull/242)). Thanks to
+  [@korallis](https://github.com/korallis), who found and documented this in
+  [korallis/agent-stack#61](https://github.com/korallis/agent-stack/pull/61).
 - Derive terminal pickup for closed queue items
   ([#176](https://github.com/mvschwarz/openrig/pull/176)).
 - Preserve discovery claims during async rescans
