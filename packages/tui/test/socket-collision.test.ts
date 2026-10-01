@@ -1,11 +1,15 @@
-import { expect, it } from "vitest";
+import { afterAll, expect, it } from "vitest";
 import net from "node:net";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawn } from "node:child_process";
 import { createViewState } from "../src/state.js";
 import { createControlSocket, type ControlSocket } from "../src/socket-server.js";
 
-function socketPath(label: string) { return `/tmp/openrig-${label}-${process.pid}.sock`; }
+const socketRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opr-sock-"));
+afterAll(() => fs.rmSync(socketRoot, { recursive: true, force: true }));
+function socketPath(label: string) { return path.join(socketRoot, `${label}.sock`); }
 async function query(path: string): Promise<unknown> {
   const client = net.createConnection(path);
   client.setEncoding("utf8");
