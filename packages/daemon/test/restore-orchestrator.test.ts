@@ -3645,4 +3645,96 @@ describe("RestoreOrchestrator", () => {
       expect(subsetEvents[0]?.result?.warnings?.some((w) => w.includes("FR-5"))).toBe(true);
     });
   });
+
+  // #261: stored built-in startup files follow the running install on restore (pre-validation + replay);
+  // custom files are delivered exactly as stored; a same-native resume still replays nothing.
+  describe("#261 built-in startup files follow the running install", () => {
+    const OLD_ASSETS = "/old-openrig/lib/node_modules/@openrig/cli/daemon/assets";
+    const RUNNING_ASSETS = path.resolve(import.meta.dirname, "../assets");
+    const builtin = (name: string, rel: string) => ({
+      path: name, absolutePath: `${OLD_ASSETS}/${rel}`, ownerRoot: OLD_ASSETS,
+      deliveryHint: "guidance_merge" as const, required: true, appliesOn: ["fresh_start" as const, "restore" as const],
+    });
+    const customSameBasename = {
+      path: "CULTURE-default.md", absolutePath: "/user-rig/CULTURE-default.md", ownerRoot: "/user-rig",
+      deliveryHint: "guidance_merge" as const, required: true, appliesOn: ["fresh_start" as const, "restore" as const],
+    };
+    const storedFiles = [
+      builtin("CULTURE-default.md", "guidance/CULTURE-default.md"),
+      builtin("openrig-start.md", "guidance/openrig-start.md"),
+      customSameBasename,
+    ];
+    const notOld = (p: string) => !p.startsWith("/old-openrig");
+
+    function seedPodAware(resume: boolean) {
+      const rig = rigRepo.createRig("test-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-261", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-261" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      if (resume) sessionRegistry.updateResumeToken(session.id, "claude_id", "resume-token-261");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+        .run(node.id, "[]", JSON.stringify(storedFiles), "[]", "claude-code");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+      const deliverStartup = vi.fn(async () => ({ delivered: 0, failed: [] }));
+      const adapter = {
+        runtime: "claude-code",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup,
+        checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness: vi.fn(async () => ({ ok: true as const, resumeToken: "t", resumeType: "claude_id" })),
+      };
+      return { snap, deliverStartup, adapter };
+    }
+
+    it("fresh replay: old install removed -> no blocker, built-ins delivered from the running install, custom file unchanged", async () => {
+      const { snap, deliverStartup, adapter } = seedPodAware(false);
+      const result = await createOrchestrator().restore(snap.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: notOld }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as Array<{ path: string; absolutePath: string; ownerRoot: string; required: boolean; appliesOn: string[]; deliveryHint: string }>);
+      const culture = delivered.filter((f) => f.path === "CULTURE-default.md");
+      expect(culture.map((f) => f.absolutePath).sort()).toEqual([`${RUNNING_ASSETS}/guidance/CULTURE-default.md`, "/user-rig/CULTURE-default.md"].sort());
+      expect(delivered.find((f) => f.path === "openrig-start.md")).toMatchObject({
+        absolutePath: `${RUNNING_ASSETS}/guidance/openrig-start.md`, ownerRoot: RUNNING_ASSETS,
+        required: true, appliesOn: ["fresh_start", "restore"], deliveryHint: "guidance_merge",
+      });
+      expect(delivered.some((f) => f.absolutePath.startsWith("/old-openrig"))).toBe(false);
+    });
+
+    it("re-anchors even while the old install still exists (current shipped guidance is selected)", async () => {
+      const { snap, deliverStartup, adapter } = seedPodAware(false);
+      const result = await createOrchestrator().restore(snap.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: () => true }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as Array<{ absolutePath: string }>);
+      expect(delivered.some((f) => f.absolutePath.startsWith("/old-openrig"))).toBe(false);
+      expect(delivered.some((f) => f.absolutePath === `${RUNNING_ASSETS}/guidance/CULTURE-default.md`)).toBe(true);
+    });
+
+    it("a genuinely missing CURRENT built-in still blocks restore honestly, naming the running path", async () => {
+      const { snap, adapter } = seedPodAware(false);
+      const runningCulture = `${RUNNING_ASSETS}/guidance/CULTURE-default.md`;
+      const result = await createOrchestrator().restore(snap.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: (p) => notOld(p) && p !== runningCulture }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.result.blockers?.[0]).toMatchObject({ code: "required_startup_file_missing", path: runningCulture });
+    });
+
+    it("same-native resume: replay stays contained (no startup files delivered), stored built-ins notwithstanding", async () => {
+      const { snap, deliverStartup, adapter } = seedPodAware(true);
+      const orch = createOrchestrator({ listProcesses: nativeLineage("claude-code", "resume-token-261") });
+      const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, fsOps: { exists: notOld } });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as unknown[]);
+      expect(delivered).toEqual([]);
+    });
+  });
 });

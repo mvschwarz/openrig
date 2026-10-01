@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import path from "node:path";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -570,5 +571,32 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(sessions[0]).toMatchObject({ status: "exited", startupStatus: "failed" });
     expect(sessionRegistry.currentOccupantTenure(seat.node.id)?.kind).toBe("fresh");
     expect(db.prepare("SELECT COUNT(*) AS c FROM events WHERE type = 'seat.fresh_launch_failed'").get()).toEqual({ c: 1 });
+  });
+
+  // #261: a fresh launch delivers stored built-in startup files from the RUNNING install;
+  // a custom rig file with the same basename is delivered exactly as stored.
+  it("#261 delivers stored built-ins from the running install and leaves custom files untouched", async () => {
+    const seat = seedSeat({ clean: true });
+    const oldAssets = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/assets";
+    const running = path.resolve(import.meta.dirname, "../assets");
+    const meta = { deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] };
+    const stored = [
+      { path: "CULTURE-default.md", absolutePath: `${oldAssets}/guidance/CULTURE-default.md`, ownerRoot: oldAssets, ...meta },
+      { path: "openrig-onboarding-01.md", absolutePath: `${oldAssets}/onboarding/01-world-and-purpose.md`, ownerRoot: oldAssets, ...meta },
+      { path: "CULTURE-default.md", absolutePath: "/project/CULTURE-default.md", ownerRoot: "/project", ...meta },
+    ];
+    db.prepare("UPDATE node_startup_context SET resolved_files_json=? WHERE node_id=?").run(JSON.stringify(stored), seat.node.id);
+    const delivered: Array<{ path: string; absolutePath: string; ownerRoot: string; required: boolean }> = [];
+    adapter.deliverStartup = async (files) => { delivered.push(...(files as typeof delivered)); return { delivered: files.length, failed: [] }; };
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "issue 261" });
+    expect(result.ok).toBe(true);
+    expect(delivered.map((f) => f.absolutePath).sort()).toEqual([
+      "/project/CULTURE-default.md",
+      `${running}/guidance/CULTURE-default.md`,
+      `${running}/onboarding/01-world-and-purpose.md`,
+    ].sort());
+    expect(delivered.every((f) => f.required)).toBe(true);
+    const persisted = JSON.parse((db.prepare("SELECT resolved_files_json AS j FROM node_startup_context WHERE node_id=?").get(seat.node.id) as { j: string }).j) as Array<{ absolutePath: string }>;
+    expect(persisted.some((f) => f.absolutePath.startsWith(oldAssets))).toBe(false);
   });
 });

@@ -17,6 +17,7 @@ import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
+import { reanchorBuiltinStartupFile } from "./builtin-startup-files.js";
 import type {
   RestoreOutcome,
   RestoreRigResult,
@@ -695,7 +696,9 @@ export class RestoreOrchestrator {
         else consumesReplay = true;
       }
 
-      for (const file of consumesReplay ? startupCtx.resolvedStartupFiles ?? [] : []) {
+      for (const storedFile of consumesReplay ? startupCtx.resolvedStartupFiles ?? [] : []) {
+        // Validate the file replay will actually deliver (#261: built-ins follow the running install).
+        const file = reanchorBuiltinStartupFile(storedFile);
         if (!file.required) {
           if (this.pathLike(file.absolutePath) && !exists(file.absolutePath)) {
             warnings.push(`Restore pre-validation: optional startup file missing for ${node.logicalId}: ${file.absolutePath}`);
@@ -1304,7 +1307,8 @@ export class RestoreOrchestrator {
           // Prefilter: check which files/entries still exist
           const existsFn = opts.fsOps?.exists ?? (() => true);
           const sourceEntries = replayContained ? [] : startupCtx.projectionEntries;
-          const sourceFiles = replayContained ? [] : startupCtx.resolvedStartupFiles;
+          // #261: recognized built-in startup files follow the running install.
+          const sourceFiles = replayContained ? [] : startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f));
           const sourceActions = replayContained ? [] : startupCtx.startupActions;
           const filteredEntries = sourceEntries.filter((e) => {
             if (!existsFn(e.absolutePath)) {
