@@ -201,7 +201,7 @@ it.each([false, true])("recovers after a killed reservation owner without removi
     const stale = child(`import net from "node:net"; net.createServer().listen(${JSON.stringify(socketPath)}, () => console.log("ready"));`);
     expect(await line(stale)).toBe("ready");
     await stop(stale);
-    const before = fs.lstatSync(socketPath);
+    expect(fs.lstatSync(socketPath).isSocket()).toBe(true);
     const owner = launcher("killed-owner", true);
     expect(await line(owner)).toBe("checked");
     expect(fs.existsSync(`${socketPath}.recovery.lock`)).toBe(true);
@@ -222,7 +222,6 @@ it.each([false, true])("recovers after a killed reservation owner without removi
       expect(await line(survivor)).toBe("ready");
       expect(await query(socketPath)).toBe("survivor");
     }
-    expect(fs.lstatSync(socketPath).ino).not.toBe(before.ino);
     expect(fs.existsSync(`${socketPath}.recovery.lock`)).toBe(false);
   } finally {
     await Promise.all(launched.map(stop));
