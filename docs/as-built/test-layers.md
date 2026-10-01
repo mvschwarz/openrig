@@ -81,7 +81,8 @@ credentials are supplied.
 A second workflow, `.github/workflows/portability-report.yml` (job `portability-report`),
 lists lines your PR adds that contain machine-specific values: credentials, home or temp
 paths, network addresses, email addresses. It never fails because of a finding. To see the
-matched text locally, run `node scripts/portability-report.mjs`. By default it compares the
+matched text locally (credentials show only their first characters), run
+`node scripts/portability-report.mjs`. By default it compares the
 merge-base with `origin/main` against `HEAD`; pass `--staged` to check staged changes instead.
 
 The UI suite is a CI matrix leg even though it is advisory locally. Check your PR's status to
@@ -120,7 +121,7 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 | Host runner | `packages/daemon/scripts/run-scenarios.mjs` |
 | In-container entry and result check | `packages/test-system/ci/run.mjs`, `packages/test-system/ci/result.mjs` |
 | PR orchestrator | `scripts/run-pr-scenarios.sh` |
-| Image | `docker/testbed/Dockerfile` and `Dockerfile.scenarios`, built by `scripts/build-testbed-image.sh` |
+| Image | `docker/testbed/Dockerfile`, built by `scripts/build-testbed-image.sh`; `docker/testbed/Dockerfile.scenarios` is layered on top by `scripts/run-pr-scenarios.sh` |
 
 ### Host mode: while you're writing a scenario
 
@@ -131,16 +132,16 @@ node --import tsx packages/daemon/scripts/run-scenarios.mjs packages/daemon/test
 ```
 
 - The runner creates a scratch `HOME`/`OPENRIG_HOME`, its own tmux server and its own
-  daemon. It refuses to start if your environment points at a daemon (`OPENRIG_URL`,
-  `RIGGED_URL`, `OPENRIG_HOST`, `RIGGED_HOST`, `OPENRIG_HOST_SELECTED`, `OPENRIG_PORT`,
-  `RIGGED_PORT`), if `TMUX` is set, or if `OPENRIG_TEST_CLOCK_NOW` is set. **Run it outside
-  tmux.** This matters when your coding agent itself runs inside a tmux pane.
+  daemon. It builds the scenario environment from `HOME`, `PATH` and `TERM` only, so your
+  shell's daemon-target variables (`OPENRIG_URL`, `OPENRIG_PORT` and similar), `TMUX` and
+  `OPENRIG_TEST_CLOCK_NOW` are dropped rather than inherited. It does not touch the daemon or
+  tmux server your own session uses.
 - It accepts YAML paths only. Any flag, including `--container`, is refused before anything runs.
 - It supplies no fault controller, so any scenario with a `seed_regression` step fails loudly
   at that step. That includes the library's `queue-baton-survives-restart`. Use the container
   path to run the seeded pair.
-- It compares the cross-surface `equals` check with an identity placeholder, so
-  `scenario-10-one-view-state` is not expected to pass here.
+- `scenario-10-one-view-state` declares its own normaliser for its cross-surface `equals`
+  check. Whether it passes in host mode has not been verified.
 
 ### Container mode: the scenario pack CI runs
 
@@ -212,7 +213,7 @@ means:
 | Area | What the stub does at `1347d825` | What that means for your test |
 |---|---|---|
 | Consuming a message | `stub-runner.ts` runs its launch script once and then idles. It has no stdin reader, socket or other input channel. The default script prints `[stub] scripted reply: acknowledged` at boot, before anything has been sent. | A pane showing a reply, or your echoed text, does not prove the message was consumed. No stub scenario can currently prove "delivered and answered". Separately, `rig send --verify` means "appeared in the pane", not acknowledgement (see `rig send --help`), and the scenario `send` step doesn't pass `--verify` at all. |
-| Launch path | `StubRuntimeAdapter` types `node <stub-runner> …` into the pane (`tmux.sendText`, then Enter). Claude Code launches through a managed launch (`ClaudeManagedLaunch.prepare`, `tmux.sendShellCommand`). The native-process check in `session-transport.ts` (`unverifiedShellForeground`) runs only for `codex` and `claude-code`. | A stub seat doesn't exercise wrapper, managed-launch or native-process-identity behaviour (the class behind #197). Wrapping the stub in a shell wouldn't change that. |
+| Launch path | `StubRuntimeAdapter` types `node <stub-runner> …` into the pane (`tmux.sendText`, then Enter). Claude Code with an explicit permission mode launches through a managed launch (`ClaudeManagedLaunch.prepare`, `tmux.sendShellCommand`); without one it uses `sendText`. The shell-foreground check in `session-transport.ts` (`unverifiedShellForeground`) runs for every runtime except `terminal`, but its native-process proof is limited to `codex` and `claude-code`. | A stub seat doesn't exercise wrapper, managed-launch or native-process-identity behaviour (the class behind #197). Wrapping the stub in a shell wouldn't change that. |
 | Permissions | `validateNativePermissionSelection` accepts only `codex` and `claude-code`. The stub models only the `floor` / `full_bypass` launch posture. | Testing Claude permission modes or per-seat permission selection needs a real runtime. |
 | Queue pickup and wake | No stub worker reacts to a nudge by claiming an item, working on it and handing it back. | The baton scenarios prove the claim *survives a restart*. They don't prove delivery, pickup or wake. |
 | Reboot / tmux reset | `daemon: {op: restart}` restarts only the scenario daemon, and the tmux server keeps running. No step resets tmux. | Recycled pane IDs and stale bindings after a real reboot (the class behind #141) are not covered by a daemon restart. |

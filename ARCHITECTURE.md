@@ -46,7 +46,7 @@ and fails the build on a specifier with no `exports` entry. To share new daemon 
 ```
   rig (CLI)            TUI            MCP server (rig mcp serve, stdio)
        \                |                /
-        +---- HTTP to the daemon (loopback, port 7433 by default) ----+
+        +---- HTTP to the daemon (port 7433 by default) --------------+
                                 |
   packages/daemon/src/server.ts      createApp(): context middleware, /healthz, app.route("/api/...")
                                 |
@@ -65,7 +65,7 @@ and fails the build on a specifier with no `exports` entry. To share new daemon 
   database (`db/connection.ts`: WAL mode, foreign keys on), runs `migrate(db, ALL_MIGRATIONS)`,
   constructs every service and adapter, and passes them to `createAppWithWebSocket(deps)` in
   `server.ts`.
-- **`server.ts`.** `createApp(deps)` installs one `app.use("*", ...)` middleware that puts each
+- **`server.ts`.** In `createApp(deps)`, the first `app.use("*", ...)` middleware puts each
   service on the request context (`c.set("<name>" as never, deps.<name>)`), serves `/healthz`, and
   mounts each router with `app.route("/api/<area>", ...)`. Unknown `/api/*` paths get a JSON 404;
   other GET requests serve the web UI's built files.
@@ -315,8 +315,8 @@ packages.
 - [docs/reference/](docs/reference/): user and operator reference; it ships with the package.
 - [docs/as-built/](docs/as-built/README.md): module-by-module descriptions of the system. **These
   are being re-verified.** Most modules were last verified against `7eaf524c` (2026-05-16, around
-  v0.3.1). The newest markers are `c8341f72` (`architecture/living-notes-review.md`) and
-  `b13a8e4c7` (`cli-reference.md`). Their counts are historical: `architecture/daemon-core.md`
+  v0.3.1); the two pages this change adds, `arteries.md` and `test-layers.md`, are verified against
+  `1347d825`. The older modules' counts are historical: `architecture/daemon-core.md`
   describes 40 migrations, and there are 89 today. Use them for orientation, then check the code.
 - [docs/as-built/test-layers.md](docs/as-built/test-layers.md): what each test layer covers and
   what it cannot catch.

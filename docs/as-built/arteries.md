@@ -35,7 +35,7 @@ area.
 | Artery | Key files | What depends on it | Past regressions and lessons |
 |---|---|---|---|
 | **Message delivery to seats** | `daemon/src/domain/session-transport.ts`, `daemon/src/domain/seat-delivery-guard.ts`, `daemon/src/adapters/tmux.ts` | Every `rig send`, queue wake, nudge, watchdog wake and handoff | #150 (the fix for #142) stopped typing into a bare shell. It then refused managed Codex seats (fixed by #171 before release) and every Claude seat launched with an explicit permission mode, which shipped in 0.6.2 as #197 (fixed by #220). The delivery guard's rule that a name must resolve to exactly one target, added in #109 (0.6.0), was involved in #141 (fixed by #151), the delivery half of #174 (fixed by #181) and #188 (fixed by #189). |
-| **Launch, relaunch, resume** | `daemon/src/adapters/claude-code-adapter.ts`, `daemon/src/domain/claude-managed-launch.ts`, `daemon/src/adapters/codex-runtime-adapter.ts`, `daemon/src/domain/codex-daemon-support.ts`, `daemon/src/domain/native-resume-probe.ts`, `daemon/src/domain/startup-orchestrator.ts` | Every seat start, restore and permission mode | Always setting `CLAUDE_CONFIG_DIR` gave explicit-mode Claude seats a blank config (#154, fixed by #225). Codex seats launch with `--no-daemon` only when `codex --help` shows support (#69, #77); when support is unknown, OpenRig refuses to launch, so a failing or slow `codex --help` blocks the seat. The fixed 30-second readiness window times out under load (#182, open). A git worktree's `.git` file broke the Codex sandbox (#121; see #126). |
+| **Launch, relaunch, resume** | `daemon/src/adapters/claude-code-adapter.ts`, `daemon/src/domain/claude-managed-launch.ts`, `daemon/src/adapters/codex-runtime-adapter.ts`, `daemon/src/domain/codex-daemon-support.ts`, `daemon/src/domain/native-resume-probe.ts`, `daemon/src/domain/startup-orchestrator.ts` | Every seat start, restore and permission mode | Always setting `CLAUDE_CONFIG_DIR` gave explicit-mode Claude seats a blank config (#154; #225 fixes its config-selection part). Codex seats launch with `--no-daemon` only when `codex --help` shows support (#69, #77); when support is unknown, OpenRig refuses to launch, so a failing or slow `codex --help` blocks the seat. The fixed 30-second readiness window times out under load (#182, open). A git worktree's `.git` file broke the Codex sandbox (#121; see #126). |
 | **Queue claim, pickup, wakes** | `daemon/src/domain/queue-repository.ts`, `daemon/src/domain/queue-pickup.ts`, `daemon/src/domain/queue-wake-ladder.ts`, `daemon/src/routes/require-sender-identity.ts`, `cli/src/client.ts` | All durable work between seats | After a slow `/healthz`, the CLI host-qualified a local sender and claims failed (#131, fixed by #135). Done-and-closed items read as stalled forever (#164, fixed by #176). |
 | **Rig identity: same names, archived and deleted rigs** | `daemon/src/domain/rig-repository.ts`, `daemon/src/domain/rig-lifecycle-service.ts`, `daemon/src/domain/rig-teardown.ts`, `daemon/src/domain/seat-handover-service.ts`, `daemon/src/domain/running-name-guard.ts` | Seat resolution, `rig remove`, restore, importing a rig from YAML | Archived rigs still matched seat references, and `rig remove` killed another rig's live seat with the same name (#174, fixed by #181). Replacing stopped same-name rig generations on YAML import followed in #196. |
 | **Projection of skills and files** | `daemon/src/domain/rigspec-instantiator.ts`, `daemon/src/domain/projection-planner.ts`, and each runtime adapter's `project()` | What every agent is given at start | Codex seats skipped skills that a Claude sibling had already projected (#159, fixed by #162). File-shaped entries failed with ENOTDIR (fixed by #185). |
@@ -70,7 +70,9 @@ cannot prove" in [test-layers.md](test-layers.md).
 
 - **Queue durability across a daemon restart: covered.** CI runs
   `queue-baton-survives-restart.yaml` healthy, then with a seeded `baton-drop` fault that must
-  fail, then healthy again (#243). Pickup, wakes and claim identity have no scenario yet.
+  fail, then healthy again (#243). It runs `rig queue claim` and checks the destination after the
+  restart, but pickup, wakes and claim-identity edge cases (such as the #131 sender case) have no
+  scenario yet.
 - **Delivery (the #197 class): not covered.** The stub runtime has no input behaviour, so it cannot
   exercise delivery to a managed wrapper; `send-verify-means-rendered.yaml` is not admitted to CI
   for that reason (`packages/test-system/ci/README.md`).
@@ -80,7 +82,9 @@ cannot prove" in [test-layers.md](test-layers.md).
   or removed rig.
 - **Projection (the #159 class): not coverable with `runtime: stub`,** which projects skills into its
   own `.openrig/stub/skills/` directory. Use adapter-level unit tests.
-- **Native process observation: unit tests only** (`packages/daemon/test/native-process-lineage.test.ts`).
+- **Native process observation: unit tests only** (for example
+  `packages/daemon/test/codex-process-observation.test.ts`, `native-ps-locale.test.ts` and
+  `send-runtime-not-running.test.ts`).
 - **Migrations: unit guards only** (`migration-fixture-parity.test.ts`,
   `startup-migrations-mirror.test.ts`). Every scenario starts from an empty database, so upgrading
   an existing database is not covered.

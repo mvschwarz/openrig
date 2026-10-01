@@ -52,7 +52,7 @@ npm run lint           # typecheck every package
 ```
 
 `npm test` builds the daemon and runs repository checks before the package suites. Read the
-specific failure. A shipped skill exists in more than one copy: edit every copy, then run
+specific failure. A shipped skill may exist in more than one copy (see ARCHITECTURE.md): edit every copy, then run
 `node scripts/regen-edge-digests.mjs` (the full `npm run mirror-skills` apply needs maintainer-only
 inputs; see "A shipped skill" in [ARCHITECTURE.md](ARCHITECTURE.md#a-shipped-skill)).
 `npm run generate-context-packs` updates generated packs. Review the generated diff; neither

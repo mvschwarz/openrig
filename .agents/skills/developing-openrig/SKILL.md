@@ -47,8 +47,8 @@ projection, process observation, migrations, restore):
 The short version is `npm run build`, `npm run lint`, `npm test`. `test-layers.md` has the full ladder, including the
 stub-agent scenarios, which run the real CLI, daemon, tmux and SQLite with scripted agents and no model cost.
 
-- Run the scenario runner from a shell that is not inside tmux. It refuses to start if `TMUX` is set, which matters
-  when your own session lives in a tmux pane.
+- The scenario runner starts its own daemon and tmux server and drops your session's `TMUX` and daemon variables, so
+  it won't touch the daemon your session runs on.
 - A stub proves OpenRig's own plumbing, not how Claude Code or Codex behave. Say which you exercised.
 
 ## How we judge changes
