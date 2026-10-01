@@ -1,13 +1,12 @@
 // release-0.4.7 intent-stage/scaffold-projection — T1 (helper unit vectors) +
-// T6 (generic-triple durability sync).
+// T6 (new outcome scaffold and legacy generic-triple compatibility).
 //
 // T1 derives its placeholder vectors FROM THE SHIPPED TEMPLATES (every
 // proof-contract checkbox text and mini-reqs numbered item across
 // scope-templates/*.md must classify placeholder) so template drift breaks
 // these tests honestly instead of silently un-classifying a placeholder.
-// T6 parses the shipped slice-progress.md and asserts the exported
-// GENERIC_SCAFFOLD_ACCEPTANCE constant is in sync (kills silent
-// template/constant drift — the plan's durability pin).
+// T6 ensures new progress scaffolds do not invent an acceptance checklist,
+// while preserving recognition of generic checkboxes emitted by older versions.
 
 import { describe, it, expect } from "vitest";
 import * as fs from "node:fs";
@@ -114,12 +113,19 @@ describe("T1 — isScaffoldPlaceholderText unit vectors", () => {
   });
 });
 
-describe("T6 — GENERIC_SCAFFOLD_ACCEPTANCE stays in sync with the shipped slice-progress.md", () => {
-  it("the exported constant equals the template's Acceptance checkbox texts, in order", () => {
+describe("T6 — progress records outcomes without a second acceptance checklist", () => {
+  it("new scaffolds point to attributed proof and have no generic acceptance boxes", () => {
     const content = fs.readFileSync(path.join(TEMPLATES_DIR, "slice-progress.md"), "utf8");
-    const body = sectionBody(content, "Acceptance");
-    expect(body, "slice-progress.md must have an ## Acceptance section").not.toBeNull();
-    expect(checkboxTexts(body!)).toEqual([...GENERIC_SCAFFOLD_ACCEPTANCE]);
+    expect(content).toContain("rig proof show <slice>");
+    expect(sectionBody(content, "Current state")).not.toBeNull();
+    expect(sectionBody(content, "Outcomes")).not.toBeNull();
+    expect(checkboxTexts(content)).toEqual([]);
+  });
+
+  it("retains the old generic triple for existing-file placeholder recognition", () => {
+    expect([...GENERIC_SCAFFOLD_ACCEPTANCE]).toEqual([
+      "Implementation complete", "Tests passing", "Review approved",
+    ]);
   });
 });
 

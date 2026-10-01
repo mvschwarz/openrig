@@ -64,9 +64,9 @@ These three are a division of labour, not a chain of gates. One agent may hold a
 - **HOW:** a slice carries `intent:` in frontmatter and opens with `## Intent`, `## Mini-requirements`, and `## Proof contract`. A mission carries its intent and mission-level specification in the same authored node file. Keep depth proportional to the work.
 
 ### PROGRESS.md
-- **WHO:** the orchestrator owns `§1` (current state); every agent logs its own outcomes.
+- **WHO:** the orchestrator owns the current state; every agent logs its own outcomes.
 - **WHEN:** on material delivery-state changes and at acceptance.
-- **HOW:** one line per outcome (checkbox), link down for detail; keep frontmatter `stage`/`verified` honest.
+- **HOW:** keep current delivery state in `## Current state`; append material outcomes with links to proof under `## Outcomes`. Retain historical entries and existing checkboxes without treating them as current acceptance authority. For a selected proof policy, use `rig proof show <slice>` for current readiness; keep frontmatter `stage`/`verified` honest.
 
 ### PROOF.md + proof/
 - **WHO:** the impl/QA pair that worked the slice.

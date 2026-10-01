@@ -100,9 +100,12 @@ Each slice directory carries:
     approval starts here.
   - **`## Proof contract`** — a checkbox list of promised deliverables (see
     §3). The UI's DELIVERED section pairs each item with its proof.
-- **`PROGRESS.md`** — the slice's acceptance checklist: the durable
-  mission/slice-level to-do checked at acceptance. In-process steps stay in
-  the working agent's own todo tool.
+- **`PROGRESS.md`** — the slice's current delivery state and retained outcome
+  log. Record material changes with links to proof; historical checkboxes are
+  testimony, not current acceptance authority. For a selected proof policy,
+  `rig proof show <slice>` derives current readiness from the proof contract
+  and attributed judgments. In-process steps stay in the working agent's
+  own todo tool.
 - **`PROOF.md`** — the retained proof summary, explicitly paired to the
   `SPEC.md` proof contract.
 - **`proof/`** — the proof-artifact directory. Curated canonical evidence
