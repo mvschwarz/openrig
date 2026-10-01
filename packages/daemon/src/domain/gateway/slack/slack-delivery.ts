@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
-import { buildOutboundMessage, attributionFromSession, reconcileToken, type SlackMediaRef } from "./message.js";
+import { buildOutboundMessage, attributionFromSession, reconcileToken, redactSecrets, type SlackMediaRef } from "./message.js";
 import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
 import type { SubsystemDeliverFn, SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
@@ -338,7 +338,8 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
         if (put.ok) {
           const done = await completeUploadExternal(
             opts.botToken,
-            { files: [{ id: up.fileId, title: q.summary ?? local.filename }], channelId: opts.channel, threadTs: intoThread },
+            // #300: the title is shown in Slack like the text, so it gets the same secret redaction.
+            { files: [{ id: up.fileId, title: redactSecrets(q.summary ?? local.filename) }], channelId: opts.channel, threadTs: intoThread },
             opts.fetchImpl,
           );
           if (done.ok) log(`uploaded ${local.filename} into thread ${intoThread ?? "(root)"} for ${q.qitemId ?? decision.decisionId}`);
