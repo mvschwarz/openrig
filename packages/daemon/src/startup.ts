@@ -340,8 +340,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     console.error("[slow-operation] setDegradedHandler registration failed", error);
   }
   // PL-004 Phase A revision (R1): topology-backed validateRig.
-  // Reject destinations without a persisted seat in the named rig.
-  // Stopped and never-launched seats remain valid. Bare ids without `@` are rejected
+  // Reject `<member>@<unknown-rig>` shapes against the rig registry.
+  // Bare ids without `@` are also rejected
   // (no canonical rig binding).
   // OPR.0.4.6.MH1 FR-8: this gate is the ARCHETYPE consumer of the shared
   // parse contract — human-seat classification BEFORE parse, then the
@@ -362,13 +362,30 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     }
     if (isHumanSeatSessionRef(sessionRef)) return true;
     if (parsed.kind !== "canonical") return false;
-    return rigRepo.findRigsByName(parsed.rig).some((rig) =>
-      getNodeInventory(db, rig.id).some((entry) =>
-        entry.canonicalSessionName === sessionRef
-        || deriveCanonicalFromEntry(entry) === sessionRef
-        || entry.logicalId === parsed.member,
-      ),
-    );
+    return rigRepo.findRigsByName(parsed.rig).length > 0;
+  };
+  // Seat absence in positively known local topology is advice, never admission
+  // authority. Keep every typed destination intact, including adopted aliases.
+  const topologyDestinationAdvisory = (sessionRef: string) => {
+    const parsed = parseSessionName(sessionRef);
+    if (isHumanSeatSessionRef(sessionRef) || parsed.kind !== "canonical") return null;
+    const rigs = rigRepo.findUnarchivedRigsByName(parsed.rig);
+    if (rigs.length === 0) return null;
+    const entries = rigs.flatMap((rig) => getNodeInventory(db, rig.id));
+    if (entries.some((entry) => entry.canonicalSessionName === sessionRef
+      || deriveCanonicalFromEntry(entry) === sessionRef || entry.logicalId === parsed.member)) return null;
+    const availableDestinations = [...new Set(entries.flatMap((entry) => [
+      entry.canonicalSessionName, deriveCanonicalFromEntry(entry),
+      !entry.logicalId.includes(".") ? `${entry.logicalId}@${parsed.rig}` : null,
+    ]).filter((destination): destination is string => !!destination && parseSessionName(destination).kind === "canonical"))].sort();
+    return {
+      code: "unmatched_destination_seat" as const,
+      destinationSession: sessionRef,
+      availableDestinations,
+      message: `Suspected seat typo: '${sessionRef}' matches no member of locally known rig '${parsed.rig}'. `
+        + `Available destinations: ${availableDestinations.join(", ") || "(none)"}. `
+        + "The row keeps the exact destination as typed; this warning does not guarantee pickup or delivery.",
+    };
   };
   // PL-004 Phase A — shared coordination services. Constructed early so
   // both the queueRepo dep slot and inboxHandler can share one instance.
@@ -376,6 +393,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // attachTransport().
   const queueRepoInstance = new QueueRepository(db, eventBus, {
     validateRig: topologyValidateRig,
+    destinationAdvisory: topologyDestinationAdvisory,
     // OPR.0.4.6.WF3 FR-6 — the frontier close-path guard's predicate,
     // INJECTED here (arch layering pin: the queue never imports the
     // workflow domain; startup wires them — the validateRig precedent).

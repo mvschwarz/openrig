@@ -275,7 +275,7 @@ describe("createDaemon startup composition", () => {
     db.close();
   });
 
-  it("queue admission rejects missing seats without writing or closing a handoff source", async () => {
+  it("queue admission advises on missing local seats while preserving destinations", async () => {
     const cmuxFactory: CmuxTransportFactory = async () => {
       throw Object.assign(new Error("no socket"), { code: "ENOENT" });
     };
@@ -307,7 +307,7 @@ describe("createDaemon startup composition", () => {
         transitions: (db.prepare("SELECT COUNT(*) count FROM queue_transitions").get() as { count: number }).count,
       });
 
-      for (const destination of ["product-ba@unknown", "prodcut-ba@membership-target", "missing@membership-source"]) {
+      for (const destination of ["product-ba@unknown", "bare-seat", "missing@external"]) {
         const before = counts();
         const response = await create(destination);
         expect(response.status).toBe(400);
@@ -316,28 +316,36 @@ describe("createDaemon startup composition", () => {
       }
       for (const destination of ["product-ba@membership-target", "product-stopped@membership-target",
         "product-member.dot@membership-target", "flat@membership-target", "adopted-alias@membership-target"]) {
-        expect((await create(destination)).status, destination).toBe(201);
+        const response = await create(destination);
+        expect(response.status, destination).toBe(201);
+        expect((await response.json()).advisories, destination).toBeUndefined();
       }
-      const beforeTransaction = counts();
-      expect(() => db.transaction(() => deps.queueRepo.createWithinTransaction({
-        sourceSession: sender, destinationSession: "prodcut-ba@membership-target",
+      const typo = "prodcut-ba@membership-target";
+      const response = await create(typo);
+      expect(response.status).toBe(201);
+      const accepted = await response.json();
+      expect(accepted.destinationSession).toBe(typo);
+      expect(accepted.advisories[0]).toMatchObject({ code: "unmatched_destination_seat", destinationSession: typo });
+      expect(accepted.advisories[0].availableDestinations).toContain("product-ba@membership-target");
+      expect(accepted.advisories[0].message).toContain("does not guarantee pickup or delivery");
+      expect(deps.queueRepo.getById(accepted.qitemId)?.destinationSession).toBe(typo);
+      const transactional = db.transaction(() => deps.queueRepo.createWithinTransaction({
+        sourceSession: sender, destinationSession: typo,
         body: "transaction membership fixture", nudge: false,
-      }))()).toThrow(/unknown rig/);
-      expect(counts()).toEqual(beforeTransaction);
+      }))();
+      expect(transactional.destinationSession).toBe(typo);
 
       for (const verb of ["handoff", "handoff-and-complete"]) {
         const original = await create(sender);
         expect(original.status).toBe(201);
         const { qitemId } = await original.json() as { qitemId: string };
         const row = () => db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(qitemId);
-        const before = { counts: counts(), source: row() };
-        const rejected = await post(`/api/queue/${qitemId}/${verb}`, { toSession: "prodcut-ba@membership-target" });
-        expect(rejected.status).toBe(400);
-        expect((await rejected.json()).error).toBe("unknown_destination_rig");
-        expect({ counts: counts(), source: row() }).toEqual(before);
-        const accepted = await post(`/api/queue/${qitemId}/${verb}`, { toSession: "product-stopped@membership-target" });
+        const accepted = await post(`/api/queue/${qitemId}/${verb}`, { toSession: typo });
         expect(accepted.status).toBe(201);
-        expect((await accepted.json()).created.destinationSession).toBe("product-stopped@membership-target");
+        const result = await accepted.json();
+        expect(result.created.destinationSession).toBe(typo);
+        expect(result.advisories[0].code).toBe("unmatched_destination_seat");
+        expect(deps.queueRepo.getById(result.created.qitemId)?.destinationSession).toBe(typo);
         expect((row() as { state: string }).state).toBe(verb === "handoff" ? "handed-off" : "done");
       }
     } finally {
