@@ -177,6 +177,24 @@ function shown(value: string): string {
   return clean.length > 200 ? `${clean.slice(0, 200)}…` : clean;
 }
 
+/**
+ * One request header as the client sent it. Node adapters expose the original request as
+ * `c.env.incoming`, whose `rawHeaders` keep duplicates and empty values; @hono/node-ws builds
+ * its Request from the collapsed `incoming.headers`, which keep only the first duplicate and
+ * drop empty values. Returns `undefined` when absent and `null` when duplicated (ambiguous).
+ * Without a Node request (tests, other adapters) it falls back to the Request headers.
+ */
+export function rawHeader(c: Context, name: "host" | "origin"): string | undefined | null {
+  const raw = (c.env as { incoming?: { rawHeaders?: unknown } } | undefined)?.incoming?.rawHeaders;
+  if (!Array.isArray(raw)) return c.req.header(name);
+  const values: string[] = [];
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    if (String(raw[i]).toLowerCase() === name) values.push(String(raw[i + 1]));
+  }
+  if (values.length === 0) return undefined;
+  return values.length === 1 ? values[0]! : null;
+}
+
 function bearerFrom(header: string | undefined): string | null {
   if (!header) return null;
   const match = /^Bearer\s+(.+)$/i.exec(header);
@@ -255,7 +273,7 @@ export function browserBoundary(options: BrowserBoundaryOptions): MiddlewareHand
       return;
     }
     logged.add(key);
-    warn(`[openrig] browser boundary refused ${code}: ${value} (${c.req.method} ${c.req.path})`);
+    warn(`[openrig] browser boundary refused ${code}: ${value} (${c.req.method} ${shown(c.req.path)})`);
   };
 
   const refuse = (c: Context, code: BoundaryCode, value: string, error: string) => {
@@ -265,11 +283,12 @@ export function browserBoundary(options: BrowserBoundaryOptions): MiddlewareHand
   };
 
   return async (c, next) => {
-    const hostHeader = c.req.header("Host");
-    const host = parseHostHeader(hostHeader);
+    const hostHeader = rawHeader(c, "host");
+    // A duplicated (ambiguous) Host is malformed; an explicitly empty one fails parsing.
+    const host = hostHeader === null ? { kind: "malformed" as const } : parseHostHeader(hostHeader);
     let hostAccepted = false;
     if (host.kind === "malformed") {
-      const value = shown(hostHeader ?? "");
+      const value = shown(hostHeader === null ? "(duplicate Host)" : hostHeader ?? "");
       return refuse(c, "untrusted_host", value,
         `This OpenRig daemon refused a request with an unusable Host header ("${value}"). Address the daemon by localhost, an IP address or this machine's own name.`);
     }
@@ -286,9 +305,11 @@ export function browserBoundary(options: BrowserBoundaryOptions): MiddlewareHand
       }
     }
 
-    const originHeader = c.req.header("Origin");
+    const rawOrigin = rawHeader(c, "origin");
+    // A duplicated Origin is malformed; an explicitly empty one is present and fails parsing.
+    const originHeader = rawOrigin === null ? "(duplicate Origin)" : rawOrigin;
     if (originHeader !== undefined) {
-      const origin = parseOrigin(originHeader);
+      const origin = rawOrigin === null ? { kind: "malformed" as const } : parseOrigin(originHeader);
       const ownUi = options.webUiEnabled && origin.kind === "ok" && origin.scheme === "http"
         && host.kind === "ok" && hostAccepted
         && origin.hostname === host.hostname && origin.port === host.port;
