@@ -275,6 +275,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     throw new Error(`CODEX_HOME must be an absolute path for managed seats: ${configuredCodexHome}`);
   }
   const codexHome = configuredCodexHome || nodePath.join(daemonHome, ".codex");
+  const configuredCursorHome = process.env.OPENRIG_CURSOR_HOME?.trim();
+  if (configuredCursorHome && !nodePath.isAbsolute(configuredCursorHome)) {
+    throw new Error(`OPENRIG_CURSOR_HOME must be an absolute path: ${configuredCursorHome}`);
+  }
+  const cursorHome = configuredCursorHome || nodePath.join(daemonHome, ".cursor");
   const dbPath = opts?.dbPath ?? ":memory:";
   const db = createDb(dbPath);
   migrate(db, ALL_MIGRATIONS);
@@ -723,14 +728,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"),
       exists: (p: string) => fs.existsSync(p),
       mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
-      deleteFile: (p: string) => fs.rmSync(p, { force: true }),
+      statMode: (p: string) => fs.statSync(p).mode,
+      chmod: (p: string, m: number) => fs.chmodSync(p, m),
       listFiles: (dir: string) => { const r: string[] = []; function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; },
     },
     stateRoot: nodePath.join(OPENRIG_HOME, "state", "cursor"),
     launchPath: process.env.PATH,
     // OPENRIG_CURSOR_HOME overrides the Cursor home (mirrors CODEX_HOME), so tests and sandboxes never touch ~/.cursor.
-    cursorHome: process.env.OPENRIG_CURSOR_HOME?.trim() || nodePath.join(daemonHome, ".cursor"),
+    cursorHome,
     activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"),
+    hooksEnabled: () => {
+      try { return new ContextPackSettingsStore().resolveOne("runtime.cursor.hooks_enabled").value as boolean; }
+      catch (err) { console.error(`[openrig] cursor activity hooks warning: ${(err as Error).message}`); return false; }
+    },
   });
   // OPR.0.5.1.1 — the stub runtime adapter (Pi-shaped node-script runner in a pane).
   // Same fsOps shape as Pi; the compiled runner entry lives in the daemon dist.
@@ -779,14 +789,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
   }
 
-  // Cursor seats report activity through OpenRig's entries in ~/.cursor/hooks.json. Kept after the
-  // Codex setup, in its own try, so a Cursor problem can never stop the Codex hooks from being set.
-  // Operator can disable via OPENRIG_RUNTIME_CURSOR_HOOKS_ENABLED or
-  // rig config set runtime.cursor.hooks_enabled false.
+  // Cursor seats report activity through OpenRig's entries in ~/.cursor/hooks.json. The first Cursor
+  // seat launch adds them; daemon start only refreshes entries already there, or removes them when
+  // disabled. Kept after the Codex setup, in its own try, so a Cursor problem can never stop the Codex
+  // hooks from being set. Operator can disable via OPENRIG_RUNTIME_CURSOR_HOOKS_ENABLED or
+  // rig config set runtime.cursor.hooks_enabled false (removal takes effect at the next daemon start).
   try {
-    const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
-    if (new SettingsStore().resolveOne("runtime.cursor.hooks_enabled").value as boolean) {
-      cursorAdapter.ensureCursorActivityHooks();
+    if (new ContextPackSettingsStore().resolveOne("runtime.cursor.hooks_enabled").value as boolean) {
+      cursorAdapter.refreshCursorActivityHooks();
     } else {
       cursorAdapter.removeCursorActivityHooks();
     }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  OPENRIG_CURSOR_HOOK_EVENTS, cursorRelayCommand, upsertCursorActivityHooks, stripCursorActivityHooks,
+  OPENRIG_CURSOR_HOOK_EVENTS, cursorRelayCommand, upsertCursorActivityHooks, stripCursorActivityHooks, hasCursorActivityHooks,
 } from "../src/adapters/cursor-activity-hooks.js";
 
 const RELAY = "/opt/openrig/daemon/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
@@ -84,8 +84,16 @@ describe("stripCursorActivityHooks", () => {
     const withBoth = upsertCursorActivityHooks(JSON.stringify({ version: 1, hooks: { stop: [{ command: "~/bin/notify.sh" }] } }), RELAY);
     expect(JSON.parse(stripCursorActivityHooks(withBoth)!)).toEqual({ version: 1, hooks: { stop: [{ command: "~/bin/notify.sh" }] } });
   });
-  it("signals deletion when nothing else remains", () => {
-    expect(stripCursorActivityHooks(upsertCursorActivityHooks("", RELAY))).toBeNull();
+  it("keeps the file, as an empty shell, when nothing else remains", () => {
+    expect(JSON.parse(stripCursorActivityHooks(upsertCursorActivityHooks("", RELAY)))).toEqual({ version: 1, hooks: {} });
+    const operatorShell = JSON.stringify({ version: 1 });
+    expect(JSON.parse(stripCursorActivityHooks(upsertCursorActivityHooks(operatorShell, RELAY)))).toEqual({ version: 1, hooks: {} });
+  });
+  it("detects whether OpenRig's entries are present", () => {
+    expect(hasCursorActivityHooks(upsertCursorActivityHooks("", RELAY))).toBe(true);
+    expect(hasCursorActivityHooks(JSON.stringify({ version: 1, hooks: { stop: [{ command: "x" }] } }))).toBe(false);
+    expect(hasCursorActivityHooks("{ not json")).toBe(false);
+    expect(hasCursorActivityHooks("")).toBe(false);
   });
   it("leaves unrelated or unparseable files alone", () => {
     const mine = JSON.stringify({ version: 1, hooks: { stop: [{ command: "x" }] } });

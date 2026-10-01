@@ -61,9 +61,18 @@ export function upsertCursorActivityHooks(content: string, relayPath: string): s
   return content.trim() !== "" && JSON.stringify(parse(content)) === JSON.stringify(parse(next)) ? content : next;
 }
 
-/** Returns the file without OpenRig's entries, the input unchanged when there is nothing to remove or
- *  it cannot be parsed, or null when nothing but an empty shell would remain (delete the file). */
-export function stripCursorActivityHooks(content: string): string | null {
+/** True when the file already carries at least one OpenRig entry (unparseable files: false). */
+export function hasCursorActivityHooks(content: string): boolean {
+  let file: HooksFile;
+  try { file = parse(content); } catch { return false; }
+  const hooks = hooksObject(file);
+  if (!hooks) return false;
+  return Object.values(hooks).some((entries) => Array.isArray(entries) && (entries as HookEntry[]).some(isOpenRigEntry));
+}
+
+/** Returns the file without OpenRig's entries, or the input unchanged when there is nothing to remove
+ *  or it cannot be parsed. The file itself is never deleted, since the operator may have created it. */
+export function stripCursorActivityHooks(content: string): string {
   let file: HooksFile;
   try { file = parse(content); } catch { return content; }
   const existingHooks = hooksObject(file);
@@ -77,10 +86,5 @@ export function stripCursorActivityHooks(content: string): string | null {
     if (kept.length > 0) hooks[event] = kept;
   }
   if (!removed) return content;
-  const rest: HooksFile = { ...file };
-  delete rest.hooks;
-  const version = rest.version;
-  delete rest.version;
-  if (Object.keys(hooks).length === 0 && Object.keys(rest).length === 0) return null;
-  return render({ ...rest, version, hooks: hooks as Record<string, HookEntry[]> });
+  return render({ ...file, hooks: hooks as Record<string, HookEntry[]> });
 }

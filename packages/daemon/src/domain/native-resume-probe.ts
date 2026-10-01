@@ -32,6 +32,8 @@ export function buildNativeResumeCommand(
   resumeToken: string | null,
   sessionName?: string | null,
   codexConfigProfile?: string | null,
+  /** Cursor: the seat's CURSOR_CONFIG_DIR, so a manual resume never writes into the operator's ~/.cursor. */
+  cursorConfigDir?: string | null,
 ): string | null {
   if (!resumeToken) return null;
   if (runtime === "claude-code") {
@@ -42,7 +44,8 @@ export function buildNativeResumeCommand(
     return buildCodexResumeCore(resumeToken, codexConfigProfile);
   }
   if (runtime === "cursor") {
-    return `cursor-agent --resume ${shellQuote(resumeToken)}`;
+    const env = cursorConfigDir ? `CURSOR_CONFIG_DIR=${shellQuote(cursorConfigDir)} ` : "";
+    return `${env}cursor-agent --resume ${shellQuote(resumeToken)}`;
   }
   return null;
 }
@@ -357,13 +360,18 @@ function looksLikeCodexTui(paneContent: string): boolean {
 // Cursor Agent's prompt line starts with "→ ". Before the first turn it shows a
 // placeholder; after a turn it shows "Add a follow-up". The header
 // ("Cursor Agent" then "v<date>") scrolls away in a long chat, so either the
-// header with a prompt line, or a placeholder prompt line alone, counts.
+// header with a prompt line, or a placeholder prompt line alone, counts. The
+// chat screen also always has the model footer ("Grok 4.7 256K Low · 8.7%")
+// below its prompt line, so that is required too: a sign-in, update or error
+// screen that happens to show an arrow line is not the chat.
 const CURSOR_PLACEHOLDER_PROMPT_RE = /^→ (?:Plan, search, build anything|Add a follow-up)\b/;
+const CURSOR_MODEL_FOOTER_RE = /\b\d+(?:\.\d+)?[KM]\b/;
 
 function looksLikeCursorTui(paneContent: string): boolean {
   const lines = paneContent.split("\n").map((line) => line.trim());
-  const hasPromptLine = lines.some((line) => line.startsWith("→ "));
-  if (!hasPromptLine) return false;
+  const lastPrompt = lines.map((line) => line.startsWith("→ ")).lastIndexOf(true);
+  if (lastPrompt < 0) return false;
+  if (!lines.slice(lastPrompt + 1).some((line) => CURSOR_MODEL_FOOTER_RE.test(line))) return false;
   const hasHeader = /(^|\n)\s*Cursor Agent\s*\n\s*v\d{4}\.\d{2}\.\d{2}/.test(paneContent);
   return hasHeader || lines.some((line) => CURSOR_PLACEHOLDER_PROMPT_RE.test(line));
 }

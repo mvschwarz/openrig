@@ -68,7 +68,7 @@ export class SeatStructuralActivityService {
    *  null or failed capture INVALIDATES the prior row (never leaves a stale positive verdict) and
    *  returns null (MUST-FIX 1). `prefetched` (#308) is the sweep's batched capture: a session it holds (null = gone or
    *  empty) is used as is; one it lacks is captured here, per seat. */
-  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null): Promise<StructuralObservation | null> {
+  async pollSeat(sessionName: string, prefetched?: Map<string, PaneCapture> | null, runtime?: string | null): Promise<StructuralObservation | null> {
     let content: string | null;
     let observedAt: Date | null = null;
     if (prefetched?.has(sessionName)) {
@@ -87,7 +87,8 @@ export class SeatStructuralActivityService {
       this.latestBySession.delete(sessionName);
       return null;
     }
-    const c = classifyPaneActivity(content);
+    // The runtime enables runtime-specific pane rules (Cursor's approval panel and prompt line).
+    const c = classifyPaneActivity(content, runtime);
     const obs: StructuralObservation = {
       state: c.state,
       reason: c.reason,
@@ -106,7 +107,7 @@ export class SeatStructuralActivityService {
     this.sweeping = true;
     try {
       const rows = db.prepare(`
-        SELECT s.session_name as session_name
+        SELECT s.session_name as session_name, n.runtime as runtime
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
@@ -114,7 +115,7 @@ export class SeatStructuralActivityService {
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
           AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
-      `).all() as Array<{ session_name: string }>;
+      `).all() as Array<{ session_name: string; runtime: string | null }>;
       const live = new Set(rows.map((r) => r.session_name));
       for (const s of Array.from(this.latestBySession.keys())) {
         if (!live.has(s)) this.latestBySession.delete(s); // release memory + never serve a stale read
@@ -125,7 +126,7 @@ export class SeatStructuralActivityService {
         ? await this.tmuxAdapter.capturePanesContent(rows.map((r) => r.session_name), this.captureLines, this.now).catch(() => null)
         : null;
       await Promise.all(rows.map(async (r) => {
-        try { await this.pollSeat(r.session_name, prefetched); } catch { /* isolate: one seat's failure never crashes the sweep */ }
+        try { await this.pollSeat(r.session_name, prefetched, r.runtime); } catch { /* isolate: one seat's failure never crashes the sweep */ }
       }));
     } finally {
       this.sweeping = false;

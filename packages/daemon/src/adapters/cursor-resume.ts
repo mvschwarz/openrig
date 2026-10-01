@@ -3,7 +3,7 @@ import type { ResumeResult } from "./claude-resume.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 import fs from "node:fs";
 import {
-  buildCursorLaunchCommand, cursorChatApprovalChanged, cursorSeatConfigDir, resetCursorSeatApprovalMode, writeCursorChatLaunch,
+  buildCursorLaunchCommand, cursorChatApprovalChanged, cursorSeatConfigDir, resetCursorSeatConfig, recordCursorChatLaunch,
   type CursorAdapterFsOps,
 } from "./cursor-runtime-adapter.js";
 import { cursorApprovalArg } from "./yolo-mode.js";
@@ -54,12 +54,12 @@ export class CursorResumeAdapter {
     const fsOps = this.options.fsOps ?? nodeFsOps;
     // Cursor keeps the approval mode per chat and has no flag to lower it, and this path cannot create chats.
     if (cursorChatApprovalChanged(fsOps, configDir, resumeToken!, approvalArg)) {
-      return { ok: false, code: "retry_fresh", message: "Cursor permission mode changed since this chat last ran; a fresh chat is required for the new mode to apply." };
+      return { ok: false, code: "retry_fresh", message: "Cursor permission mode changed since this chat last ran (or OpenRig has no record of its mode); a fresh chat is required for the new mode to apply." };
     }
-    try { resetCursorSeatApprovalMode(fsOps, configDir, permissionMode); } catch (err) {
-      return { ok: false, code: "resume_failed", message: `cursor: could not reset the seat approval mode: ${(err as Error).message}` };
+    try { resetCursorSeatConfig(fsOps, configDir, permissionMode, model); } catch (err) {
+      return { ok: false, code: "resume_failed", message: `cursor: could not reset the seat config: ${(err as Error).message}` };
     }
-    try { fsOps.mkdirp?.(configDir); writeCursorChatLaunch(fsOps, configDir, { chatId: resumeToken!, approvalArg }); } catch (err) {
+    try { fsOps.mkdirp?.(configDir); recordCursorChatLaunch(fsOps, configDir, resumeToken!, approvalArg); } catch (err) {
       return { ok: false, code: "resume_failed", message: `cursor: could not record the chat launch: ${(err as Error).message}` };
     }
     const command = buildCursorLaunchCommand({

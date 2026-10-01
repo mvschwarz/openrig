@@ -113,6 +113,8 @@ function trimPaneLines(paneContent: string): string[] {
 // the 8-line window, and only for Cursor panes (other runtimes print "→" in prose).
 const CURSOR_IDLE_PROMPT_RE = /^→ (?:Add a follow-up|Plan, search, build anything)$/;
 const CURSOR_DRAFT_PROMPT_RE = /^→ (?!(?:Add a follow-up|Plan, search, build anything)$)\S/;
+// Cursor's turn-status row: a braille spinner then a status word (e.g. "⠘⠆ Working").
+const CURSOR_TURN_STATUS_RE = /^[\u2800-\u28FF]{1,3}\s+\S/;
 const CURSOR_PERMISSION_PROMPT_PATTERNS = [
   /^Run this command\?$/,
   /\bWaiting for approval\.\.\./,
@@ -204,6 +206,9 @@ export function classifyPaneActivity(paneContent: string, runtime?: string | nul
       if (CURSOR_DRAFT_PROMPT_RE.test(cursorPromptLine) && !cursorPromptLine.includes("ctrl+c to stop")) {
         return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(cursorPromptLine) };
       }
+      // The turn-status row outranks the prompt line, as for Codex: a running turn is never idle.
+      const cursorTurnStatus = findPatternEvidence(recentLines, [CURSOR_TURN_STATUS_RE]);
+      if (cursorTurnStatus) return { state: "agent_active", reason: "mid_work_pattern", evidence: cursorTurnStatus };
       if (CURSOR_IDLE_PROMPT_RE.test(cursorPromptLine)) {
         return { state: "agent_idle", reason: "idle_prompt", evidence: truncateEvidence(cursorPromptLine) };
       }

@@ -210,6 +210,9 @@ describe("classifyPaneRuntimeMatch", () => {
   it("a bare shell where an agent was expected is a MISMATCH (dead process / orphan squat)", () => {
     expect(classifyPaneRuntimeMatch("zsh", "claude-code")).toBe("mismatch");
     expect(classifyPaneRuntimeMatch("-bash", "codex")).toBe("mismatch");
+    expect(classifyPaneRuntimeMatch("zsh", "cursor")).toBe("mismatch");
+    // cursor-agent execs node, so node is Cursor's own foreground.
+    expect(classifyPaneRuntimeMatch("node", "cursor")).toBe("match");
   });
 
   it("a shell for a terminal (infrastructure) node is expected — MATCH", () => {

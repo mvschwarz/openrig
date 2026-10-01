@@ -22,7 +22,7 @@ import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-plann
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 import { validateResumeToken } from "../domain/resume-token-validation.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
-import { upsertCursorActivityHooks, stripCursorActivityHooks } from "./cursor-activity-hooks.js";
+import { upsertCursorActivityHooks, stripCursorActivityHooks, hasCursorActivityHooks } from "./cursor-activity-hooks.js";
 
 export interface CursorAdapterFsOps {
   readFile(path: string): string;
@@ -30,7 +30,9 @@ export interface CursorAdapterFsOps {
   exists(path: string): boolean;
   mkdirp(path: string): void;
   listFiles?(dirPath: string): string[];
-  deleteFile?(path: string): void;
+  /** Mode primitives, so projected skill scripts keep their execute bit (as in the Codex adapter). */
+  statMode?(path: string): number;
+  chmod?(path: string, mode: number): void;
 }
 
 export type CursorCreateChat = (input: { configDir: string; cwd: string; launchPath?: string }) => Promise<string>;
@@ -48,6 +50,8 @@ export interface CursorRuntimeAdapterDeps {
   cursorHome?: string;
   /** Absolute path to the daemon's shipped activity-relay.cjs. */
   activityRelayPath?: string;
+  /** runtime.cursor.hooks_enabled, read at each launch. Without it, launches never write hooks.json. */
+  hooksEnabled?: () => boolean;
 }
 
 export function cursorSeatConfigDir(stateRoot: string, nodeId: string): string {
@@ -69,18 +73,19 @@ export function buildCursorLaunchCommand(input: {
  * Cursor persists `--auto-review` into the seat's `cli-config.json` as `"approvalMode": "auto-review"`,
  * and a later launch without the flag keeps it (`--force` does not persist; a fresh config starts at
  * `"allowlist"`). So unless the intended mode is auto_review, put a persisted non-allowlist mode back
- * to `"allowlist"` before the launch, keeping every other key. A missing or unparseable config is left
- * alone: Cursor creates a fresh allowlist config itself. Write errors propagate to the caller.
+ * to `"allowlist"` before the launch. `--model` persists the same way (`model` and `selectedModel`),
+ * so a seat whose spec sets no model has those keys removed, and a new chat starts on Cursor's
+ * default as in a fresh config. Every other key is kept. A missing or unparseable config is left
+ * alone: Cursor creates a fresh config itself. Write errors propagate to the caller.
  *
- * `--model` persists the same way and is deliberately not reset: a seat with no model set keeps the
- * last model it was launched with (a documented limitation).
+ * A resumed chat still keeps the model it last used; Cursor stores that per chat.
  */
-export function resetCursorSeatApprovalMode(
+export function resetCursorSeatConfig(
   fs: Pick<CursorAdapterFsOps, "readFile" | "writeFile" | "exists">,
   configDir: string,
   permissionMode?: string,
+  model?: string | null,
 ): void {
-  if (permissionMode === "auto_review") return;
   const configPath = nodePath.join(configDir, "cli-config.json");
   let config: unknown;
   try {
@@ -90,64 +95,86 @@ export function resetCursorSeatApprovalMode(
     return;
   }
   if (!config || typeof config !== "object" || Array.isArray(config)) return;
-  const record = config as Record<string, unknown>;
-  if (record.approvalMode === "allowlist") return;
-  fs.writeFile(configPath, `${JSON.stringify({ ...record, approvalMode: "allowlist" }, null, 2)}\n`);
+  const record = { ...(config as Record<string, unknown>) };
+  let changed = false;
+  if (permissionMode !== "auto_review" && record.approvalMode !== "allowlist") {
+    record.approvalMode = "allowlist";
+    changed = true;
+  }
+  if (!model?.trim()) {
+    for (const key of ["model", "selectedModel"]) {
+      if (key in record) { delete record[key]; changed = true; }
+    }
+  }
+  if (changed) fs.writeFile(configPath, `${JSON.stringify(record, null, 2)}\n`);
 }
 
 /**
  * Cursor stores the approval mode per chat, and a resumed chat keeps it: `--auto-review` or
  * `--force` can raise a chat's mode, but no flag lowers it. So OpenRig records, in its own file in
- * the seat config dir, the approval arg each chat was last launched with; a resume whose arg differs
- * must start a fresh chat instead. Cursor's own chat store is never edited.
+ * the seat config dir, the approval arg each chat it launched last ran with. A resume whose arg
+ * differs, or of a chat the record does not know (an older snapshot's chat from before the record,
+ * or one set by hand), must start a fresh chat instead. Cursor's own chat store is never edited.
  */
-export interface CursorChatLaunchRecord {
-  chatId: string;
-  approvalArg: string;
-}
-
 export const CURSOR_CHAT_LAUNCH_FILE = "openrig-chat-launch.json";
 
-/** A missing, unreadable or malformed sidecar reads as null (no record). */
-export function readCursorChatLaunch(
+/** Most chats remembered per seat; the oldest are dropped first. */
+const CURSOR_CHAT_LAUNCH_MAX = 100;
+
+/**
+ * Chat id → approval arg. A missing, unreadable or malformed file reads as empty. The one-chat
+ * shape written by earlier builds (`{ chatId, approvalArg }`) is still read.
+ */
+export function readCursorChatLaunches(
   fs: Pick<CursorAdapterFsOps, "readFile" | "exists">,
   configDir: string,
-): CursorChatLaunchRecord | null {
+): Record<string, string> {
   const path = nodePath.join(configDir, CURSOR_CHAT_LAUNCH_FILE);
   let parsed: unknown;
   try {
-    if (!fs.exists(path)) return null;
+    if (!fs.exists(path)) return {};
     parsed = JSON.parse(fs.readFile(path));
   } catch {
-    return null;
+    return {};
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const { chatId, approvalArg } = parsed as Record<string, unknown>;
-  if (typeof chatId !== "string" || typeof approvalArg !== "string") return null;
-  return { chatId, approvalArg };
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const { chats, chatId, approvalArg } = parsed as Record<string, unknown>;
+  if (chats && typeof chats === "object" && !Array.isArray(chats)) {
+    const out: Record<string, string> = {};
+    for (const [id, arg] of Object.entries(chats as Record<string, unknown>)) {
+      if (typeof arg === "string") out[id] = arg;
+    }
+    return out;
+  }
+  if (typeof chatId === "string" && typeof approvalArg === "string") return { [chatId]: approvalArg };
+  return {};
 }
 
-/** Write errors propagate to the caller. */
-export function writeCursorChatLaunch(
-  fs: Pick<CursorAdapterFsOps, "writeFile">,
+/** Records the chat's approval arg, keeping the other chats. Write errors propagate to the caller. */
+export function recordCursorChatLaunch(
+  fs: Pick<CursorAdapterFsOps, "readFile" | "writeFile" | "exists">,
   configDir: string,
-  record: CursorChatLaunchRecord,
+  chatId: string,
+  approvalArg: string,
 ): void {
+  const chats = readCursorChatLaunches(fs, configDir);
+  delete chats[chatId];
+  chats[chatId] = approvalArg;
+  const kept = Object.entries(chats).slice(-CURSOR_CHAT_LAUNCH_MAX);
   fs.writeFile(
     nodePath.join(configDir, CURSOR_CHAT_LAUNCH_FILE),
-    `${JSON.stringify({ chatId: record.chatId, approvalArg: record.approvalArg }, null, 2)}\n`,
+    `${JSON.stringify({ chats: Object.fromEntries(kept) }, null, 2)}\n`,
   );
 }
 
-/** True when the sidecar shows this chat last ran under a different approval arg. */
+/** True unless the record shows this chat last ran under this same approval arg. */
 export function cursorChatApprovalChanged(
   fs: Pick<CursorAdapterFsOps, "readFile" | "exists">,
   configDir: string,
   chatId: string,
   approvalArg: string,
 ): boolean {
-  const record = readCursorChatLaunch(fs, configDir);
-  return !!record && record.chatId === chatId && record.approvalArg !== approvalArg;
+  return readCursorChatLaunches(fs, configDir)[chatId] !== approvalArg;
 }
 
 const CHAT_ID_LINE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -236,6 +263,7 @@ export class CursorRuntimeAdapter implements RuntimeAdapter {
   private launchPath?: string;
   private cursorHome?: string;
   private activityRelayPath?: string;
+  private hooksEnabled?: () => boolean;
   private createChat: CursorCreateChat;
   private sleep: (ms: number) => Promise<void>;
 
@@ -246,8 +274,26 @@ export class CursorRuntimeAdapter implements RuntimeAdapter {
     this.launchPath = deps.launchPath;
     this.cursorHome = deps.cursorHome;
     this.activityRelayPath = deps.activityRelayPath;
+    this.hooksEnabled = deps.hooksEnabled;
     this.createChat = deps.createChat ?? defaultCreateChat;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
+  /**
+   * Daemon start: keep entries that are already there current (an upgrade moves the relay path),
+   * but never add them. They are added by the first Cursor seat launch, so a machine with only the
+   * Cursor IDE never runs OpenRig's relay.
+   */
+  refreshCursorActivityHooks(): void {
+    if (!this.cursorHome) return;
+    const hooksPath = nodePath.join(this.cursorHome, "hooks.json");
+    try {
+      if (!this.fs.exists(hooksPath) || !hasCursorActivityHooks(this.fs.readFile(hooksPath))) return;
+    } catch (err) {
+      console.error(`[openrig] cursor activity hooks skipped: ${(err as Error).message}`);
+      return;
+    }
+    this.ensureCursorActivityHooks();
   }
 
   ensureCursorActivityHooks(): void {
@@ -278,8 +324,7 @@ export class CursorRuntimeAdapter implements RuntimeAdapter {
       if (!this.fs.exists(hooksPath)) return;
       const existing = this.fs.readFile(hooksPath);
       const next = stripCursorActivityHooks(existing);
-      if (next === null) this.fs.deleteFile?.(hooksPath);
-      else if (next !== existing) this.fs.writeFile(hooksPath, next);
+      if (next !== existing) this.fs.writeFile(hooksPath, next);
     } catch (err) {
       console.error(`[openrig] cursor activity hooks cleanup skipped: ${(err as Error).message}`);
     }
@@ -321,7 +366,9 @@ export class CursorRuntimeAdapter implements RuntimeAdapter {
         } else if (hint === "skill_install") {
           const targetDir = nodePath.join(binding.cwd, ".agents", "skills", nodePath.basename(nodePath.dirname(file.absolutePath)));
           this.fs.mkdirp(targetDir);
-          this.fs.writeFile(nodePath.join(targetDir, nodePath.basename(file.path)), content);
+          const dest = nodePath.join(targetDir, nodePath.basename(file.path));
+          this.fs.writeFile(dest, content);
+          this.preserveMode(file.absolutePath, dest);
         } else if (binding.tmuxSession) {
           // Cursor's TUI does not submit text and Enter sent as one burst; type, pause, then submit.
           const typed = await this.tmux.sendText(binding.tmuxSession, content);
@@ -361,9 +408,13 @@ export class CursorRuntimeAdapter implements RuntimeAdapter {
     }
 
     let chatId = opts.resumeToken?.trim();
+    // A fresh chat is the caller's decision, not the adapter's: restore must not report it resumed.
     if (chatId && cursorChatApprovalChanged(this.fs, configDir, chatId, approvalArg)) {
-      console.log(`[openrig] cursor: permission mode changed since chat ${chatId.slice(0, 8)}…; starting a fresh chat so the new mode applies`);
-      chatId = undefined;
+      return {
+        ok: false,
+        error: "Cursor permission mode changed since this chat last ran (or OpenRig has no record of its mode); a fresh chat is required for the new mode to apply.",
+        recovery: "retry_fresh",
+      };
     }
     if (!chatId) {
       const created = await this.createSeatChat(configDir, binding.cwd);
@@ -372,16 +423,19 @@ export class CursorRuntimeAdapter implements RuntimeAdapter {
     }
 
     try {
-      resetCursorSeatApprovalMode(this.fs, configDir, binding.permissionMode);
+      resetCursorSeatConfig(this.fs, configDir, binding.permissionMode, binding.model);
     } catch (err) {
-      return { ok: false, error: `cursor: could not reset the seat approval mode: ${(err as Error).message}` };
+      return { ok: false, error: `cursor: could not reset the seat config: ${(err as Error).message}` };
     }
     // Recorded before the launch is sent: without the record a later mode change could not be detected.
     try {
-      writeCursorChatLaunch(this.fs, configDir, { chatId, approvalArg });
+      recordCursorChatLaunch(this.fs, configDir, chatId, approvalArg);
     } catch (err) {
       return { ok: false, error: `cursor: could not record the chat launch: ${(err as Error).message}` };
     }
+
+    // Logged, never thrown: a hooks problem must not stop the seat launching.
+    if (this.hooksEnabled?.()) this.ensureCursorActivityHooks();
 
     const command = buildCursorLaunchCommand({ chatId, configDir, model: binding.model, approvalArg, launchPath: this.launchPath });
     const sent = await this.tmux.sendShellCommand(binding.tmuxSession, command);
@@ -424,15 +478,26 @@ export class CursorRuntimeAdapter implements RuntimeAdapter {
     this.fs.mkdirp(targetDir);
     const files = this.fs.listFiles ? safeList(this.fs, entry.absolutePath) : [];
     if (files.length === 0) {
-      this.fs.writeFile(nodePath.join(targetDir, nodePath.basename(entry.absolutePath)), this.fs.readFile(entry.absolutePath));
+      const dest = nodePath.join(targetDir, nodePath.basename(entry.absolutePath));
+      this.fs.writeFile(dest, this.fs.readFile(entry.absolutePath));
+      this.preserveMode(entry.absolutePath, dest);
       return true;
     }
     for (const file of files) {
+      const src = nodePath.join(entry.absolutePath, file);
       const dest = nodePath.join(targetDir, file);
       this.fs.mkdirp(nodePath.dirname(dest));
-      this.fs.writeFile(dest, this.fs.readFile(nodePath.join(entry.absolutePath, file)));
+      this.fs.writeFile(dest, this.fs.readFile(src));
+      this.preserveMode(src, dest);
     }
     return true;
+  }
+
+  /** writeFile creates the dest with the default mode; reapply the source's bits (no-op without mode primitives). */
+  private preserveMode(src: string, dest: string): void {
+    if (!this.fs.statMode || !this.fs.chmod) return;
+    const srcMode = this.fs.statMode(src) & 0o777;
+    if ((this.fs.statMode(dest) & 0o777) !== srcMode) this.fs.chmod(dest, srcMode);
   }
 
   /** Mirrors the Codex adapter: the shared `rig-role` block is delivered per seat via send_text instead. */

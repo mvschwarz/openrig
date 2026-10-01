@@ -167,6 +167,11 @@ Precedence: CLI flag > environment variable > config file > default`)
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
           console.error(`note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
         }
+        // Cursor seat launches read this key live, but OpenRig's entries in ~/.cursor/hooks.json are
+        // only removed at daemon start.
+        if (key === "runtime.cursor.hooks_enabled" && store.get(key) === false && (await probeDaemonRunning())) {
+          console.error("note: new Cursor seat launches stop adding hooks now; OpenRig's entries already in ~/.cursor/hooks.json are removed at the next daemon restart (rig daemon stop && rig daemon start).");
+        }
       } catch (err) {
         console.error((err as Error).message);
         process.exitCode = 1;

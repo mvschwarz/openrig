@@ -489,6 +489,16 @@ describe("cursorContextUsageFromPane", () => {
     expect(u).toMatchObject({ availability: "unknown", reason: "no_data" });
   });
 
+  it("reads a footer with a status segment after the percent (live capture)", () => {
+    const u = read("  → Add a follow-up\n  Grok 4.7 256K High · 71.2% · 2 files edited                                  Run Everything\n  ~/Work/Dev/skill-library-rig/wt/review · ecb2397\n");
+    expect(u).toMatchObject({ availability: "known", usedPercentage: 71, contextWindowSize: 256000 });
+  });
+
+  it("returns no_data when an approval panel, not the footer, sits above model-shaped text", () => {
+    const u = read("  Loaded 500K rows · 42% Matched\n  Run this command?\n  → Run (once) (y)\n  Skip & tell the agent what to do instead (esc or n)\n");
+    expect(u).toMatchObject({ availability: "unknown", reason: "no_data" });
+  });
+
   it("returns unknown for empty or garbage screens", () => {
     expect(read("").availability).toBe("unknown");
     expect(read("\n\n   \n").reason).toBe("no_data");

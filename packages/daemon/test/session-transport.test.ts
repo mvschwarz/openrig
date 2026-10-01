@@ -1557,6 +1557,10 @@ describe("classifyPaneActivity — Cursor", () => {
     expect(classifyPaneActivity(working, "cursor").state).not.toBe("agent_idle");
     expect(classifyPaneActivity(working, "cursor").reason).not.toBe("prompt_draft");
   });
+  it("ranks the turn-status row above a bare placeholder prompt", () => {
+    const spinnerOverPlaceholder = ["  Use the shell to run: touch x", " ⠘⠆ Working", "  → Add a follow-up", ...footer].join("\n");
+    expect(classifyPaneActivity(spinnerOverPlaceholder, "cursor")).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+  });
   it("reads a draft that begins with placeholder text as attention", () => {
     const placeholderDraft = ["  finished", "  → Add a follow-up about the tests", ...footer].join("\n");
     expect(classifyPaneActivity(placeholderDraft, "cursor")).toMatchObject({ state: "attention", reason: "prompt_draft" });

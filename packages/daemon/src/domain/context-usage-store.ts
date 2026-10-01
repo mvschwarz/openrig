@@ -497,10 +497,11 @@ function unknownContextUsage(reason: ContextUnknownReason): ContextUsage {
 }
 
 const CURSOR_FOOTER_SCAN_LINES = 8;
-// `<model> <size> <effort> · <pct>%` plus an optional capitalised mode badge; nothing
-// else may follow the percent, so prose such as "256K tokens · 42% done" is not a footer.
+// `<model> <size> <effort> · <pct>%`, then optional `· <status>` segments (e.g. "· 2 files edited")
+// and a capitalised mode badge. Text after the percent must start a new "·" segment, so prose such
+// as "256K tokens · 42% done" is not a footer.
 const CURSOR_FOOTER =
-  /\b(\d+(?:\.\d+)?)([KM])\b[^·]*·\s*(\d+(?:\.\d+)?)%\s*(?:[A-Z][\w-]*(?: [\w-]+)*)?$/;
+  /\b(\d+(?:\.\d+)?)([KM])\b[^·]*·\s*(\d+(?:\.\d+)?)%(?:\s*·\s*[^·]+?)*\s*(?:[A-Z][\w-]*(?: [\w-]+)*)?$/;
 const CURSOR_BRANCH_ONLY = /^·\s*\S+$/;
 
 /**

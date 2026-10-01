@@ -9,8 +9,8 @@ import type { spawn } from "node:child_process";
 import { describe, it, expect, vi } from "vitest";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import {
-  CursorRuntimeAdapter, buildCursorLaunchCommand, runCreateChat, cursorSeatConfigDir, resetCursorSeatApprovalMode,
-  readCursorChatLaunch, writeCursorChatLaunch, type CursorAdapterFsOps,
+  CursorRuntimeAdapter, buildCursorLaunchCommand, runCreateChat, cursorSeatConfigDir, resetCursorSeatConfig,
+  readCursorChatLaunches, recordCursorChatLaunch, type CursorAdapterFsOps,
 } from "../src/adapters/cursor-runtime-adapter.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ProjectionEntry, ProjectionPlan } from "../src/domain/projection-planner.js";
@@ -46,10 +46,17 @@ function binding(over: Partial<NodeBinding> = {}): NodeBinding {
   return { nodeId: "node-1", tmuxSession: "review-cursor@skill-library", cwd: "/work/repo", ...over } as NodeBinding;
 }
 
+const SEAT_SIDECAR = nodePath.join(cursorSeatConfigDir(STATE_ROOT, "node-1"), "openrig-chat-launch.json");
+
+/** A seat whose record says CHAT_ID last ran under `approvalArg`, so resuming it is allowed. */
+function knownChatFs(approvalArg = ""): ReturnType<typeof memFs> {
+  return memFs({ [SEAT_SIDECAR]: JSON.stringify({ chats: { [CHAT_ID]: approvalArg } }) });
+}
+
 function adapter(over: { tmux?: TmuxAdapter; fs?: CursorAdapterFsOps; createChat?: () => Promise<string> } = {}) {
   return new CursorRuntimeAdapter({
     tmux: over.tmux ?? mockTmux(),
-    fsOps: over.fs ?? memFs(),
+    fsOps: over.fs ?? knownChatFs(),
     stateRoot: STATE_ROOT,
     createChat: over.createChat ?? (async () => CHAT_ID),
     sleep: async () => {},
@@ -87,7 +94,7 @@ describe("CursorRuntimeAdapter.launchHarness", () => {
 
   it("maps the auto_review native mode to --auto-review", async () => {
     const tmux = mockTmux();
-    await adapter({ tmux }).launchHarness(binding({ permissionMode: "auto_review" }), { name: "s", resumeToken: CHAT_ID });
+    await adapter({ tmux, fs: knownChatFs(" --auto-review") }).launchHarness(binding({ permissionMode: "auto_review" }), { name: "s", resumeToken: CHAT_ID });
     expect(tmux.sendShellCommand.mock.calls[0]![1]).toMatch(/ --auto-review$/);
   });
 
@@ -139,89 +146,75 @@ describe("CursorRuntimeAdapter.launchHarness", () => {
 
 describe("Cursor chat launch sidecar (per-chat approval mode)", () => {
   const SEAT_DIR = cursorSeatConfigDir(STATE_ROOT, "node-1");
-  const SIDECAR = nodePath.join(SEAT_DIR, "openrig-chat-launch.json");
+  const SIDECAR = SEAT_SIDECAR;
   const NEW_CHAT = "9a1f0c2e-1111-4222-8333-444455556666";
-  const sidecar = (chatId: string, approvalArg: string) => JSON.stringify({ chatId, approvalArg });
+  const legacy = (chatId: string, approvalArg: string) => JSON.stringify({ chatId, approvalArg });
+  const chats = (map: Record<string, string>) => JSON.stringify({ chats: map });
 
-  it("starts a fresh chat when the seat drops from auto_review to floor", async () => {
-    const fs = memFs({ [SIDECAR]: sidecar(CHAT_ID, " --auto-review") });
-    const tmux = mockTmux();
-    const createChat = vi.fn(async () => NEW_CHAT);
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    try {
+  // A fresh chat must come from the caller (startup/restore), so restore never reports it resumed.
+  for (const [label, prior] of [["auto_review", " --auto-review"], ["full_bypass", " --force"]] as const) {
+    it(`asks for a fresh start, without creating or launching, when the seat drops from ${label} to floor`, async () => {
+      const fs = memFs({ [SIDECAR]: legacy(CHAT_ID, prior) });
+      const tmux = mockTmux();
+      const createChat = vi.fn(async () => NEW_CHAT);
       const result = await adapter({ fs, tmux, createChat }).launchHarness(binding({ launchPosture: "floor" }), { name: "s", resumeToken: CHAT_ID });
-      expect(result).toEqual({ ok: true, resumeToken: NEW_CHAT, resumeType: "cursor_chat_id" });
-      expect(createChat).toHaveBeenCalledWith(expect.objectContaining({ configDir: SEAT_DIR, cwd: "/work/repo" }));
-      const cmd = tmux.sendShellCommand.mock.calls[0]![1] as string;
-      expect(cmd).toContain(`--resume '${NEW_CHAT}'`);
-      expect(cmd).not.toContain(CHAT_ID);
-      expect(cmd).not.toContain("--auto-review");
-      expect(JSON.parse(fs.files[SIDECAR]!)).toEqual({ chatId: NEW_CHAT, approvalArg: "" });
-      const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(logged).toContain(`[openrig] cursor: permission mode changed since chat ${CHAT_ID.slice(0, 8)}…; starting a fresh chat so the new mode applies`);
-      expect(logged).not.toContain(CHAT_ID);
-    } finally {
-      log.mockRestore();
+      expect(result).toMatchObject({ ok: false, recovery: "retry_fresh" });
+      if (!result.ok) expect(result.error).not.toContain(CHAT_ID);
+      expect(createChat).not.toHaveBeenCalled();
+      expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+      expect(fs.files[SIDECAR]).toBe(legacy(CHAT_ID, prior));
+    });
+  }
+
+  it("asks for a fresh start when resuming an older chat that ran higher than the seat's mode now", async () => {
+    // Chat A ran under --force; the seat was lowered and chat B started; a restore then names A.
+    const fs = memFs({ [SIDECAR]: chats({ [CHAT_ID]: " --force", [NEW_CHAT]: "" }) });
+    const tmux = mockTmux();
+    const result = await adapter({ fs, tmux }).launchHarness(binding({ launchPosture: "floor" }), { name: "s", resumeToken: CHAT_ID });
+    expect(result).toMatchObject({ ok: false, recovery: "retry_fresh" });
+    expect(tmux.sendShellCommand).not.toHaveBeenCalled();
+  });
+
+  it("asks for a fresh start when the record does not know the chat, or there is no record", async () => {
+    for (const fs of [memFs({ [SIDECAR]: legacy(NEW_CHAT, "") }), memFs({ [SIDECAR]: chats({ [NEW_CHAT]: "" }) }), memFs()]) {
+      const tmux = mockTmux();
+      const result = await adapter({ fs, tmux }).launchHarness(binding({ launchPosture: "floor" }), { name: "s", resumeToken: CHAT_ID });
+      expect(result).toMatchObject({ ok: false, recovery: "retry_fresh" });
+      expect(tmux.sendShellCommand).not.toHaveBeenCalled();
     }
   });
 
-  it("starts a fresh chat when the seat drops from full_bypass to floor", async () => {
-    const fs = memFs({ [SIDECAR]: sidecar(CHAT_ID, " --force") });
-    const createChat = vi.fn(async () => NEW_CHAT);
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    try {
-      const result = await adapter({ fs, createChat }).launchHarness(binding({ launchPosture: "floor" }), { name: "s", resumeToken: CHAT_ID });
-      expect(result).toEqual({ ok: true, resumeToken: NEW_CHAT, resumeType: "cursor_chat_id" });
-      expect(createChat).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(fs.files[SIDECAR]!)).toEqual({ chatId: NEW_CHAT, approvalArg: "" });
-    } finally {
-      log.mockRestore();
-    }
-  });
-
-  it("resumes the chat when its approval arg is unchanged", async () => {
-    const fs = memFs({ [SIDECAR]: sidecar(CHAT_ID, " --auto-review") });
+  it("resumes the chat when its approval arg is unchanged, reading the earlier one-chat record", async () => {
+    const fs = memFs({ [SIDECAR]: legacy(CHAT_ID, " --auto-review") });
     const tmux = mockTmux();
     const createChat = vi.fn(async () => NEW_CHAT);
     const result = await adapter({ fs, tmux, createChat }).launchHarness(binding({ permissionMode: "auto_review" }), { name: "s", resumeToken: CHAT_ID });
     expect(result).toEqual({ ok: true, resumeToken: CHAT_ID, resumeType: "cursor_chat_id" });
     expect(createChat).not.toHaveBeenCalled();
     expect(tmux.sendShellCommand.mock.calls[0]![1]).toContain(`--resume '${CHAT_ID}'`);
-    expect(JSON.parse(fs.files[SIDECAR]!)).toEqual({ chatId: CHAT_ID, approvalArg: " --auto-review" });
+    expect(JSON.parse(fs.files[SIDECAR]!)).toEqual({ chats: { [CHAT_ID]: " --auto-review" } });
   });
 
-  it("resumes and writes the sidecar when none exists", async () => {
-    const fs = memFs();
-    const createChat = vi.fn(async () => NEW_CHAT);
-    const result = await adapter({ fs, createChat }).launchHarness(binding({ launchPosture: "floor" }), { name: "s", resumeToken: CHAT_ID });
-    expect(result).toMatchObject({ ok: true, resumeToken: CHAT_ID });
-    expect(createChat).not.toHaveBeenCalled();
-    expect(JSON.parse(fs.files[SIDECAR]!)).toEqual({ chatId: CHAT_ID, approvalArg: "" });
-  });
-
-  it("resumes when the sidecar names a different chat", async () => {
-    const fs = memFs({ [SIDECAR]: sidecar(NEW_CHAT, " --auto-review") });
-    const createChat = vi.fn(async () => NEW_CHAT);
-    const result = await adapter({ fs, createChat }).launchHarness(binding({ launchPosture: "floor" }), { name: "s", resumeToken: CHAT_ID });
-    expect(result).toMatchObject({ ok: true, resumeToken: CHAT_ID });
-    expect(createChat).not.toHaveBeenCalled();
-    expect(JSON.parse(fs.files[SIDECAR]!)).toEqual({ chatId: CHAT_ID, approvalArg: "" });
-  });
-
-  it("records the approval arg of a fresh launch", async () => {
-    const fs = memFs();
+  it("records a fresh launch's chat alongside the chats already recorded", async () => {
+    const fs = memFs({ [SIDECAR]: chats({ [NEW_CHAT]: " --force" }) });
     await adapter({ fs }).launchHarness(binding({ permissionMode: "auto_review" }), { name: "s" });
-    expect(JSON.parse(fs.files[SIDECAR]!)).toEqual({ chatId: CHAT_ID, approvalArg: " --auto-review" });
+    expect(JSON.parse(fs.files[SIDECAR]!)).toEqual({ chats: { [NEW_CHAT]: " --force", [CHAT_ID]: " --auto-review" } });
   });
 
-  it("treats an unparseable or malformed sidecar as missing", () => {
-    for (const content of ["{ broken", "[1]", "null", JSON.stringify({ chatId: 5, approvalArg: "" }), JSON.stringify({ chatId: CHAT_ID })]) {
-      expect(readCursorChatLaunch(memFs({ [SIDECAR]: content }), SEAT_DIR)).toBeNull();
+  it("treats an unparseable or malformed record as empty, and keeps at most 100 chats", () => {
+    for (const content of ["{ broken", "[1]", "null", legacy(5 as unknown as string, ""), JSON.stringify({ chatId: CHAT_ID }), JSON.stringify({ chats: [CHAT_ID] })]) {
+      expect(readCursorChatLaunches(memFs({ [SIDECAR]: content }), SEAT_DIR)).toEqual({});
     }
-    expect(readCursorChatLaunch(memFs(), SEAT_DIR)).toBeNull();
+    expect(readCursorChatLaunches(memFs(), SEAT_DIR)).toEqual({});
     const fs = memFs();
-    writeCursorChatLaunch(fs, SEAT_DIR, { chatId: CHAT_ID, approvalArg: " --force" });
-    expect(readCursorChatLaunch(fs, SEAT_DIR)).toEqual({ chatId: CHAT_ID, approvalArg: " --force" });
+    for (let i = 0; i < 105; i++) recordCursorChatLaunch(fs, SEAT_DIR, `chat-${i}`, "");
+    recordCursorChatLaunch(fs, SEAT_DIR, "chat-10", " --force");
+    const kept = readCursorChatLaunches(fs, SEAT_DIR);
+    expect(Object.keys(kept)).toHaveLength(100);
+    expect(kept["chat-4"]).toBeUndefined();
+    expect(kept["chat-5"]).toBe("");
+    expect(kept["chat-10"]).toBe(" --force");
+    expect(Object.keys(kept).at(-1)).toBe("chat-10");
   });
 });
 
@@ -232,7 +225,7 @@ describe("Cursor seat approval mode reset", () => {
   it("rewrites a persisted auto-review back to allowlist on a floor launch, keeping every other key", async () => {
     const fs = memFs({ [CONFIG]: persisted() });
     const tmux = mockTmux();
-    const result = await adapter({ fs, tmux }).launchHarness(binding(), { name: "s", resumeToken: CHAT_ID });
+    const result = await adapter({ fs, tmux }).launchHarness(binding({ model: "grok-4.7-high" }), { name: "s" });
     expect(result).toMatchObject({ ok: true });
     expect(JSON.parse(fs.files[CONFIG]!)).toEqual({ version: 1, approvalMode: "allowlist", model: { modelId: "grok-4.7-high" }, permissions: { allow: ["Shell(ls)"] } });
     expect(tmux.sendShellCommand.mock.calls[0]![1]).not.toContain("--auto-review");
@@ -241,7 +234,7 @@ describe("Cursor seat approval mode reset", () => {
   it("leaves the config alone on an auto_review launch", async () => {
     const fs = memFs({ [CONFIG]: persisted() });
     const writeFile = vi.spyOn(fs, "writeFile");
-    await adapter({ fs }).launchHarness(binding({ permissionMode: "auto_review" }), { name: "s", resumeToken: CHAT_ID });
+    expect(await adapter({ fs }).launchHarness(binding({ permissionMode: "auto_review", model: "grok-4.7-high" }), { name: "s" })).toMatchObject({ ok: true });
     expect(fs.files[CONFIG]).toBe(persisted());
     expect(writeFile).not.toHaveBeenCalledWith(CONFIG, expect.anything());
   });
@@ -249,7 +242,7 @@ describe("Cursor seat approval mode reset", () => {
   it("does not write when the config is missing", () => {
     const fs = memFs();
     const writeFile = vi.spyOn(fs, "writeFile");
-    resetCursorSeatApprovalMode(fs, cursorSeatConfigDir(STATE_ROOT, "node-1"));
+    resetCursorSeatConfig(fs, cursorSeatConfigDir(STATE_ROOT, "node-1"));
     expect(writeFile).not.toHaveBeenCalled();
     expect(fs.files[CONFIG]).toBeUndefined();
   });
@@ -258,7 +251,7 @@ describe("Cursor seat approval mode reset", () => {
     for (const content of ["{ broken", "[1,2]", "null"]) {
       const fs = memFs({ [CONFIG]: content });
       const writeFile = vi.spyOn(fs, "writeFile");
-      resetCursorSeatApprovalMode(fs, cursorSeatConfigDir(STATE_ROOT, "node-1"));
+      resetCursorSeatConfig(fs, cursorSeatConfigDir(STATE_ROOT, "node-1"));
       expect(writeFile).not.toHaveBeenCalled();
       expect(fs.files[CONFIG]).toBe(content);
     }
@@ -268,9 +261,20 @@ describe("Cursor seat approval mode reset", () => {
     const content = JSON.stringify({ approvalMode: "allowlist", model: "x" });
     const fs = memFs({ [CONFIG]: content });
     const writeFile = vi.spyOn(fs, "writeFile");
-    resetCursorSeatApprovalMode(fs, cursorSeatConfigDir(STATE_ROOT, "node-1"), "auto_review");
-    resetCursorSeatApprovalMode(fs, cursorSeatConfigDir(STATE_ROOT, "node-1"));
+    resetCursorSeatConfig(fs, cursorSeatConfigDir(STATE_ROOT, "node-1"), "auto_review", "x");
+    resetCursorSeatConfig(fs, cursorSeatConfigDir(STATE_ROOT, "node-1"), undefined, "x");
     expect(writeFile).not.toHaveBeenCalled();
+  });
+
+  it("removes a persisted model when the seat's spec sets none, keeping every other key", async () => {
+    const content = JSON.stringify({ approvalMode: "allowlist", model: { modelId: "grok-4.7" }, selectedModel: { modelId: "grok-4.7" }, modelParameters: { "grok-4.7": [] } });
+    for (const model of [undefined, null, "  "]) {
+      const fs = memFs({ [CONFIG]: content });
+      const tmux = mockTmux();
+      expect(await adapter({ fs, tmux }).launchHarness(binding({ model }), { name: "s" })).toMatchObject({ ok: true });
+      expect(JSON.parse(fs.files[CONFIG]!)).toEqual({ approvalMode: "allowlist", modelParameters: { "grok-4.7": [] } });
+      expect(tmux.sendShellCommand.mock.calls[0]![1]).not.toContain("--model");
+    }
   });
 });
 
@@ -322,6 +326,16 @@ describe("CursorRuntimeAdapter.project and listInstalled", () => {
     expect(fs.files["/work/repo/.agents/skills/review-team/scripts/run.sh"]).toBe("echo hi");
   });
 
+  it("keeps a projected script's execute bit", async () => {
+    const fs = treeFs({ "/spec/skills/review-team/SKILL.md": "s", "/spec/skills/review-team/scripts/run.sh": "echo hi" });
+    const modes: Record<string, number> = { "/spec/skills/review-team/SKILL.md": 0o100644, "/spec/skills/review-team/scripts/run.sh": 0o100755 };
+    fs.statMode = (p) => modes[p] ?? 0o100644;
+    fs.chmod = vi.fn((p: string, m: number) => { modes[p] = m; });
+    await adapter({ fs }).project(plan([entry({ effectiveId: "review-team", absolutePath: "/spec/skills/review-team" })]), binding());
+    expect(fs.chmod).toHaveBeenCalledTimes(1);
+    expect(fs.chmod).toHaveBeenCalledWith("/work/repo/.agents/skills/review-team/scripts/run.sh", 0o755);
+  });
+
   it("skips a no_op entry without writing", async () => {
     const fs = treeFs({ "/spec/skills/done/SKILL.md": "s" });
     const result = await adapter({ fs }).project(plan([entry({ effectiveId: "done", absolutePath: "/spec/skills/done", classification: "no_op" })]), binding());
@@ -371,7 +385,7 @@ describe("CursorRuntimeAdapter.project and listInstalled", () => {
 
 describe("CursorRuntimeAdapter.checkReady", () => {
   it("is ready on Cursor's prompt", async () => {
-    const tmux = mockTmux({ capturePaneContent: vi.fn(async () => "  Cursor Agent\n  v2026.09.28-64d2043\n  → Plan, search, build anything\n") });
+    const tmux = mockTmux({ capturePaneContent: vi.fn(async () => "  Cursor Agent\n  v2026.09.28-64d2043\n  → Plan, search, build anything\n  Grok 4.7 256K Low\n  /work/repo · main\n") });
     expect(await adapter({ tmux }).checkReady(binding())).toEqual({ ready: true });
   });
   it("reports the trust gate code", async () => {
@@ -470,15 +484,40 @@ describe("CursorRuntimeAdapter activity hooks", () => {
     a.ensureCursorActivityHooks();
     expect(fs.files["/home/z/.cursor/hooks.json"]).toBe("{ broken");
   });
-  it("deletes the file on disable when only OpenRig's entries were in it", () => {
-    const fs = memFs({ [RELAY_PATH]: "// relay" });
+  it("keeps the file on disable, stripping only OpenRig's entries", () => {
+    const fs = memFs({ [RELAY_PATH]: "// relay", "/home/z/.cursor/hooks.json": JSON.stringify({ version: 1 }) });
     fs.dirs.add("/home/z/.cursor");
-    const deleted: string[] = [];
-    fs.deleteFile = (p) => { deleted.push(p); delete fs.files[p]; };
     const a = new CursorRuntimeAdapter({ tmux: mockTmux(), fsOps: fs, stateRoot: STATE_ROOT, cursorHome: "/home/z/.cursor", activityRelayPath: RELAY_PATH });
     a.ensureCursorActivityHooks();
     a.removeCursorActivityHooks();
-    expect(deleted).toEqual(["/home/z/.cursor/hooks.json"]);
+    expect(JSON.parse(fs.files["/home/z/.cursor/hooks.json"]!)).toEqual({ version: 1, hooks: {} });
+  });
+  it("adds the hooks on a seat launch when enabled, and never when disabled", async () => {
+    for (const enabled of [true, false]) {
+      const fs = knownChatFs();
+      fs.files[RELAY_PATH] = "// relay";
+      fs.dirs.add("/home/z/.cursor");
+      const a = new CursorRuntimeAdapter({
+        tmux: mockTmux(), fsOps: fs, stateRoot: STATE_ROOT, cursorHome: "/home/z/.cursor", activityRelayPath: RELAY_PATH,
+        createChat: async () => CHAT_ID, sleep: async () => {}, hooksEnabled: () => enabled,
+      });
+      expect(await a.launchHarness(binding(), { name: "s", resumeToken: CHAT_ID })).toMatchObject({ ok: true });
+      expect("/home/z/.cursor/hooks.json" in fs.files).toBe(enabled);
+    }
+  });
+  it("refreshes at daemon start only when OpenRig's entries are already there", () => {
+    const fs = memFs({ [RELAY_PATH]: "// relay", "/home/z/.cursor/hooks.json": JSON.stringify({ version: 1, hooks: { stop: [{ command: "x" }] } }) });
+    fs.dirs.add("/home/z/.cursor");
+    const a = new CursorRuntimeAdapter({ tmux: mockTmux(), fsOps: fs, stateRoot: STATE_ROOT, cursorHome: "/home/z/.cursor", activityRelayPath: RELAY_PATH });
+    const before = fs.files["/home/z/.cursor/hooks.json"];
+    a.refreshCursorActivityHooks();
+    expect(fs.files["/home/z/.cursor/hooks.json"]).toBe(before);
+    const stale = "node \"/old/daemon/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs\"";
+    fs.files["/home/z/.cursor/hooks.json"] = JSON.stringify({ version: 1, hooks: { stop: [{ command: stale }] } });
+    a.refreshCursorActivityHooks();
+    const hooks = JSON.parse(fs.files["/home/z/.cursor/hooks.json"]!).hooks as Record<string, Array<{ command: string }>>;
+    expect(hooks.stop).toEqual([{ command: `node ${JSON.stringify(RELAY_PATH)}` }]);
+    expect(hooks.preToolUse).toHaveLength(1);
   });
   it("does nothing when ~/.cursor does not exist (Cursor not installed)", () => {
     const fs = memFs({ [RELAY_PATH]: "// relay" });

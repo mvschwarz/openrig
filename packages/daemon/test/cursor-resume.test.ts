@@ -3,7 +3,7 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { CursorResumeAdapter } from "../src/adapters/cursor-resume.js";
 
 const CHAT_ID = "167733b3-080d-4eb0-a30a-7d22c40b5195";
-const READY = "  Cursor Agent\n  v2026.09.28-64d2043\n  → Plan, search, build anything\n";
+const READY = "  Cursor Agent\n  v2026.09.28-64d2043\n  → Plan, search, build anything\n  Grok 4.7 256K Low                                Auto-review\n  /work · main\n";
 
 function tmux(screens: string[]) {
   let i = 0;
@@ -25,7 +25,8 @@ function memFsOps(files: Record<string, string> = {}) {
 }
 
 const baseOpts = { stateRoot: "/h/state/cursor", sleep: async () => {}, pollMs: 1, maxWaitMs: 50 };
-const opts = () => ({ ...baseOpts, fsOps: memFsOps() });
+const KNOWN_SIDECAR = { "/h/state/cursor/node-1/openrig-chat-launch.json": JSON.stringify({ chats: { [CHAT_ID]: "" } }) };
+const opts = () => ({ ...baseOpts, fsOps: memFsOps({ ...KNOWN_SIDECAR }) });
 
 describe("CursorResumeAdapter", () => {
   it("only claims cursor_chat_id tokens", () => {
@@ -37,7 +38,8 @@ describe("CursorResumeAdapter", () => {
 
   it("relaunches the same chat in the seat's isolated config and waits for the prompt", async () => {
     const t = tmux(["", READY]);
-    const result = await new CursorResumeAdapter(t, opts()).resume("s@r", "cursor_chat_id", CHAT_ID, "/work", "node-1", "grok-4.7-high", undefined, "auto_review");
+    const fsOps = memFsOps({ "/h/state/cursor/node-1/openrig-chat-launch.json": JSON.stringify({ chats: { [CHAT_ID]: " --auto-review" } }) });
+    const result = await new CursorResumeAdapter(t, { ...baseOpts, fsOps }).resume("s@r", "cursor_chat_id", CHAT_ID, "/work", "node-1", "grok-4.7-high", undefined, "auto_review");
     expect(result).toEqual({ ok: true });
     const cmd = t.sendShellCommand.mock.calls[0]![1] as string;
     expect(cmd).toContain(`--resume '${CHAT_ID}'`);
@@ -47,10 +49,10 @@ describe("CursorResumeAdapter", () => {
 
   it("resets a persisted auto-review approval mode before relaunching without auto_review", async () => {
     const config = "/h/state/cursor/node-1/cli-config.json";
-    const files: Record<string, string> = { [config]: JSON.stringify({ approvalMode: "auto-review", model: { modelId: "m" } }) };
+    const files: Record<string, string> = { ...KNOWN_SIDECAR, [config]: JSON.stringify({ approvalMode: "auto-review", model: { modelId: "m" } }) };
     const fsOps = memFsOps(files);
     const t = tmux([READY]);
-    const result = await new CursorResumeAdapter(t, { ...baseOpts, fsOps }).resume("s@r", "cursor_chat_id", CHAT_ID, "/work", "node-1", null, "floor");
+    const result = await new CursorResumeAdapter(t, { ...baseOpts, fsOps }).resume("s@r", "cursor_chat_id", CHAT_ID, "/work", "node-1", "m", "floor");
     expect(result).toEqual({ ok: true });
     expect(JSON.parse(files[config]!)).toEqual({ approvalMode: "allowlist", model: { modelId: "m" } });
     expect(t.sendShellCommand.mock.calls[0]![1]).not.toContain("--auto-review");
@@ -83,7 +85,7 @@ describe("CursorResumeAdapter", () => {
       expect(result).toEqual({
         ok: false,
         code: "retry_fresh",
-        message: "Cursor permission mode changed since this chat last ran; a fresh chat is required for the new mode to apply.",
+        message: "Cursor permission mode changed since this chat last ran (or OpenRig has no record of its mode); a fresh chat is required for the new mode to apply.",
       });
       expect(t.sendShellCommand).not.toHaveBeenCalled();
     });
@@ -94,14 +96,16 @@ describe("CursorResumeAdapter", () => {
       const result = await new CursorResumeAdapter(t, { ...baseOpts, fsOps }).resume("s@r", "cursor_chat_id", CHAT_ID, "/work", "node-1", null, "floor", "auto_review");
       expect(result).toEqual({ ok: true });
       expect(t.sendShellCommand).toHaveBeenCalledTimes(1);
-      expect(JSON.parse(fsOps.files[SIDECAR]!)).toEqual({ chatId: CHAT_ID, approvalArg: " --auto-review" });
+      expect(JSON.parse(fsOps.files[SIDECAR]!)).toEqual({ chats: { [CHAT_ID]: " --auto-review" } });
     });
 
-    it("resumes and writes the sidecar when none exists", async () => {
-      const fsOps = memFsOps({});
-      const result = await new CursorResumeAdapter(tmux([READY]), { ...baseOpts, fsOps }).resume("s@r", "cursor_chat_id", CHAT_ID, "/work", "node-1", null, "floor");
-      expect(result).toEqual({ ok: true });
-      expect(JSON.parse(fsOps.files[SIDECAR]!)).toEqual({ chatId: CHAT_ID, approvalArg: "" });
+    it("refuses a chat the record does not know, without sending anything", async () => {
+      for (const files of [{}, { [SIDECAR]: JSON.stringify({ chats: { "9a1f0c2e-1111-4222-8333-444455556666": "" } }) }]) {
+        const t = tmux([READY]);
+        const result = await new CursorResumeAdapter(t, { ...baseOpts, fsOps: memFsOps(files) }).resume("s@r", "cursor_chat_id", CHAT_ID, "/work", "node-1", null, "floor");
+        expect(result).toMatchObject({ ok: false, code: "retry_fresh" });
+        expect(t.sendShellCommand).not.toHaveBeenCalled();
+      }
     });
   });
 });

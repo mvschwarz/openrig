@@ -885,6 +885,8 @@ describe("native resume probe", () => {
     it("builds the manual resume command", () => {
       expect(buildNativeResumeCommand("cursor", "167733b3-080d-4eb0-a30a-7d22c40b5195"))
         .toBe("cursor-agent --resume '167733b3-080d-4eb0-a30a-7d22c40b5195'");
+      expect(buildNativeResumeCommand("cursor", "167733b3-080d-4eb0-a30a-7d22c40b5195", null, null, "/h/state/cursor/node-1"))
+        .toBe("CURSOR_CONFIG_DIR='/h/state/cursor/node-1' cursor-agent --resume '167733b3-080d-4eb0-a30a-7d22c40b5195'");
     });
 
     it("reports a shell pane with residual Cursor output as returned_to_shell", () => {
@@ -895,6 +897,15 @@ describe("native resume probe", () => {
           paneContent: "  → Add a follow-up",
         })
       ).toMatchObject({ status: "failed", code: "returned_to_shell" });
+    });
+
+    it("does not take an arrow line without the model footer as the chat (sign-in, update or error screens)", () => {
+      const signIn = ["  Cursor Agent", "  v2026.09.28-64d2043", "  → Sign in with browser", "    Use an API key"].join("\n");
+      expect(assessNativeResumeProbe({ runtime: "cursor", paneCommand: "cursor-agent", paneContent: signIn }))
+        .toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+      const footerAbovePrompt = ["  Grok 4.7 256K Low · 8.7%", "  → Add a follow-up"].join("\n");
+      expect(assessNativeResumeProbe({ runtime: "cursor", paneCommand: "cursor-agent", paneContent: footerAbovePrompt }).status)
+        .not.toBe("resumed");
     });
 
     it("reports a screen with both trust-required and Cursor prompt line as trust_gate", () => {
