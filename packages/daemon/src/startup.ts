@@ -1052,6 +1052,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     },
   });
 
+  // Capture compatibility before the spec-library initializer creates the primary directory.
+  const userSpecLibraryRoot = getDefaultOpenRigPath("specs");
+  const compatibleSpecLibraryRoot = getCompatibleOpenRigPath("specs");
+
   const deps: AppDeps = {
     rigRepo,
     sessionRegistry,
@@ -1232,8 +1236,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     kernelBootTracker,
     specReviewService,
     specLibraryService: (() => {
-      const userSpecsRoot = getDefaultOpenRigPath("specs");
-      const legacySpecsRoot = getCompatibleOpenRigPath("specs");
+      const userSpecsRoot = userSpecLibraryRoot;
+      const legacySpecsRoot = compatibleSpecLibraryRoot;
       try { fs.mkdirSync(userSpecsRoot, { recursive: true }); } catch { /* best-effort */ }
       // From src/ or dist/, ../specs points to packages/daemon/specs/
       const builtinSpecsRoot = nodePath.resolve(import.meta.dirname, "../specs");
@@ -1264,10 +1268,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       openrigPluginsDir: getDefaultOpenRigPath("plugins"),
       claudeCacheDir: nodePath.join(os.homedir(), ".claude", "plugins", "cache"),
       codexCacheDir: nodePath.join(os.homedir(), ".codex", "plugins", "cache"),
-      specLibraryDir: getDefaultOpenRigPath("specs"),
+      specLibraryDir: userSpecLibraryRoot,
       additionalSpecLibraryDirs: [
         nodePath.resolve(import.meta.dirname, "../specs"),
-        getCompatibleOpenRigPath("specs"),
+        compatibleSpecLibraryRoot,
       ],
     }),
     // Slice 28 Checkpoint C-3 — skillLibraryDiscoveryService is constructed

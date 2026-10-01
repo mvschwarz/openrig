@@ -10,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -273,6 +273,49 @@ describe("plugins HTTP routes", () => {
       const res = await createApp(env.service).request("/api/plugins/no-such-plugin/used-by");
       expect(res.status).toBe(404);
       expect(await res.json()).toMatchObject({ error: "plugin_not_found", message: expect.stringContaining("no-such-plugin") });
+    });
+
+    it("retains cold legacy references while activating the primary user specs root", async () => {
+      vi.stubEnv("HOME", env.root);
+      vi.stubEnv("OPENRIG_HOME", join(env.root, "primary"));
+      const legacySpecs = join(env.root, ".rigged/specs");
+      const primarySpecs = join(env.root, "primary/specs");
+      const seedAgent = (root: string, name: string) => {
+        const dir = join(root, "agents", name);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "agent.yaml"), [
+          `name: ${name}`, 'version: "1.0"', "resources:", "  skills: []",
+          "  plugins:", "    - id: openrig-core", "      source:", "        kind: local",
+          "        path: ~/.openrig/plugins/openrig-core", "profiles:", "  default:",
+          "    uses:", "      plugins: [openrig-core]",
+        ].join("\n"));
+      };
+      seedAgent(legacySpecs, "legacy-only-agent");
+      expect(existsSync(primarySpecs)).toBe(false);
+      const { createDaemon } = await import("../src/startup.js");
+      const { app, db } = await createDaemon({ dbPath: ":memory:" });
+      try {
+        expect(existsSync(primarySpecs)).toBe(true);
+        expect(existsSync(join(env.root, ".openrig/specs"))).toBe(false);
+        const libraryRes = await app.request("/api/specs/library?kind=agent");
+        expect(libraryRes.status).toBe(200);
+        const library = await libraryRes.json() as Array<{ name: string; sourcePath: string }>;
+        expect(library).toContainEqual(expect.objectContaining({
+          name: "legacy-only-agent", sourcePath: join(legacySpecs, "agents/legacy-only-agent/agent.yaml"),
+        }));
+        seedAgent(primarySpecs, "primary-agent");
+        const res = await app.request("/api/plugins/openrig-core/used-by");
+        expect(res.status).toBe(200);
+        const refs = await res.json() as Array<{ agentName: string; sourcePath: string }>;
+        expect(refs).toContainEqual(expect.objectContaining({
+          agentName: "legacy-only-agent", sourcePath: join(legacySpecs, "agents/legacy-only-agent/agent.yaml"),
+        }));
+        expect(refs).toContainEqual(expect.objectContaining({
+          agentName: "primary-agent", sourcePath: join(primarySpecs, "agents/primary-agent/agent.yaml"),
+        }));
+      } finally {
+        db.close();
+      }
     });
 
     it("wires built-in reverse usage through the real daemon startup", async () => {
