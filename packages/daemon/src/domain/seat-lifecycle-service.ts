@@ -550,6 +550,11 @@ export class SeatLifecycleService {
         input.operator,
       );
       if (!stopped.ok) return stopped;
+      // Stopping the server's last session ends tmux's server, and every probe
+      // below would then be transport_unavailable, never absence. Restore an
+      // empty server (no session is invented; a no-op while the server is up)
+      // so they get a positive answer. The classified probes still decide.
+      await this.tmuxAdapter.startServer();
     }
 
     // Reuse clean's exhaustive, positive-absence gate for stale/history rows.
