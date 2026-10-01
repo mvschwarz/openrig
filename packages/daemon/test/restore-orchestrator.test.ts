@@ -1122,6 +1122,45 @@ describe("RestoreOrchestrator", () => {
     fs.rmSync(tmpDir, { recursive: true });
   });
 
+  it.each(["opaque", "command-error", "capture-error", "null"])("legacy %s observation preserves current binding and retained history", async mode => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "retained-history", withBinding: "worker",
+    });
+    const nodeId = snap.data.nodes[0]!.id;
+    const readState = () => ({
+      binding: sessionRegistry.getBindingForNode(nodeId),
+      sessions: db.prepare("SELECT id, status, resume_type, resume_token FROM sessions WHERE node_id=? ORDER BY id").all(nodeId),
+    });
+    const tmux = mockTmux();
+    vi.mocked(tmux.getPaneCommand).mockImplementation(async () => {
+      if (mode === "command-error") throw new Error("command observation unavailable");
+      return mode === "null" ? null : "2.1.283";
+    });
+    vi.mocked(tmux.capturePaneContent).mockImplementation(async () => {
+      if (mode === "capture-error") throw new Error("capture observation unavailable");
+      return mode === "null" ? null : "Restored conversation\n❯\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+    });
+    const claude = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0 });
+    const resume = claude.resume.bind(claude);
+    let afterLaunch: ReturnType<typeof readState> | undefined;
+    vi.spyOn(claude, "resume").mockImplementation(async (...args) => {
+      afterLaunch = readState();
+      return resume(...args);
+    });
+    const result = await createOrchestrator({ tmux, claude }).restore(snap.id);
+    expect(result).toMatchObject({ ok: true, result: { rigResult: "partially_restored", nodes: [{ status: "attention_required" }] } });
+    expect(afterLaunch?.binding).not.toBeNull();
+    expect(afterLaunch).toBeDefined();
+    expect(readState()).toEqual(afterLaunch);
+    expect(readState().sessions).toContainEqual(expect.objectContaining({ resume_type: "claude_id", resume_token: "retained-history" }));
+    expect(readState().sessions).toContainEqual(expect.objectContaining({ status: "running", resume_token: null }));
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    // Only the resume command and its submit; never orientation/checkpoint input.
+    expect(tmux.sendText).toHaveBeenCalledTimes(1);
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
   it("legacy Claude resume verification failure -> status 'failed'", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],

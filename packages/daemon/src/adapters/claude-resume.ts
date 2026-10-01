@@ -9,14 +9,12 @@ import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
 
 export type ResumeResult =
   | { ok: true; appliedLaunch?: AppliedLaunchObservation }
-  // L3: `attention_required` is a non-terminal failure — Claude is alive and
-  // recoverable, but the resume-selection prompt is blocking. Caller maps to
-  // restoreOutcome=attention_required (do NOT auto-answer per Decision 2).
+  // Non-terminal: a chooser or an inconclusive observation must preserve the
+  // launch. Attention is not proof of native identity or successful continuity.
   | { ok: false; code: "attention_required"; message: string; evidence?: string }
   | { ok: false; code: string; message: string };
 
 const CLAUDE_TYPES = new Set(["claude_name", "claude_id"]);
-const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 
 interface ClaudeResumeOptions {
   claudeManagedLaunch?: ClaudeManagedLaunch;
@@ -87,7 +85,11 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "resume_failed", message: keyResult.message };
     }
 
-    const result = await this.verifyResume(tmuxSessionName);
+    const result = await this.verifyResume(tmuxSessionName).catch((error): ResumeResult => ({
+      ok: false,
+      code: "attention_required",
+      message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
+    }));
     return result.ok ? { ...result, appliedLaunch } : result;
   }
 
@@ -145,11 +147,17 @@ export class ClaudeResumeAdapter {
       paneContent: finalContent,
     });
 
+    if (finalProbe.code === "no_conversation_found") {
+      return { ok: false, code: "retry_fresh", message: "Claude resume failed: no conversation found for the requested session" };
+    }
+    if (finalProbe.status === "attention_required") {
+      return { ok: false, code: "attention_required", message: finalProbe.detail, evidence: finalContent.split("\n").slice(-12).join("\n") };
+    }
     if (finalProbe.status === "resumed") {
       return { ok: true };
     }
 
-    if (finalCommand && SHELL_COMMANDS.has(finalCommand)) {
+    if (finalProbe.code === "returned_to_shell") {
       return {
         ok: false,
         code: "retry_fresh",
@@ -159,8 +167,9 @@ export class ClaudeResumeAdapter {
 
     return {
       ok: false,
-      code: "resume_failed",
-      message: "Claude resume failed: timed out waiting for Claude to become active",
+      code: "attention_required",
+      message: `Claude resume could not be verified; launch retained: ${finalProbe.detail}`,
+      evidence: finalContent.split("\n").slice(-12).join("\n"),
     };
   }
 }
