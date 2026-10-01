@@ -2,7 +2,7 @@
   "url": "https://context7.com/mvschwarz/openrig",
   "public_key": "pk_HcRwWEoFBsmU1mo5VIvWw",
   "projectTitle": "OpenRig",
-  "description": "OpenRig is an open-source multi-agent harness: define a team of Claude Code and Codex agents in YAML, boot it with the rig CLI, and coordinate the agents through tmux sessions, a durable queue and a local daemon.",
+  "description": "Build your own network of agents from Claude Code, Codex and Pi: long-running teams with roles, shared context and owned work.",
   "folders": [],
   "excludeFolders": [
     "docs/releases",

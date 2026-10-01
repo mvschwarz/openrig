@@ -2,7 +2,7 @@
   "name": "@openrig/cli",
   "version": "0.6.3",
   "type": "module",
-  "description": "Local control plane for multi-agent coding topologies",
+  "description": "Build your own network of agents from Claude Code, Codex and Pi: long-running teams with roles, shared context and owned work.",
   "keywords": [
     "ai",
     "agents",
