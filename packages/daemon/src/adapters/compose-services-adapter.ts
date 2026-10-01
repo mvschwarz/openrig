@@ -160,8 +160,8 @@ export class ComposeServicesAdapter {
     }
   }
 
-  /** Probe an HTTP wait target. Any 2xx or 3xx response counts as ready;
-   * redirects are not followed. This proves the server answered. */
+  /** Probe an HTTP wait target. Any 2xx or 3xx response passes this target;
+   * redirects are not followed. This proves the server answered, not application readiness. */
   async probeHttp(url: string, timeoutMs: number = 5000): Promise<boolean> {
     try {
       const cmd = `curl -sf -o /dev/null -w '%{http_code}' --max-time ${Math.ceil(timeoutMs / 1000)} ${sq(url)} 2>/dev/null`;
