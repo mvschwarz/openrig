@@ -1,5 +1,5 @@
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
-import type { HealthProjectionService } from "./health-detectors.js";
+import type { HealthProjectionService, HealthSourceCoverage } from "./health-detectors.js";
 import { healthHash, object, type HealthPolicyStore } from "./health-policy.js";
 import { HEALTH_RECORD_SCHEMA, type HealthRecord, type CeremonyProgressAssessment } from "./health-projection.js";
 
@@ -24,12 +24,12 @@ const correctionGuidance = "Inspect current selected context and its provenance,
 export class HealthDiagnosisService {
   private pending: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setInterval> | undefined;
-  private lastEvaluation: { at: string; error: string | null } | null = null;
+  private lastEvaluation: { at: string; error: string | null; coverage: HealthSourceCoverage[] | null } | null = null;
   status() { return { scheduled: this.timer !== undefined, lastEvaluation: this.lastEvaluation }; }
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.evaluate("system:health", true).then(() => { this.lastEvaluation = { at: this.now(), error: null }; }, (error: unknown) => { this.lastEvaluation = { at: this.now(), error: String(error) }; });
+      void this.evaluate("system:health", true).then(() => { this.lastEvaluation = { at: this.now(), error: null, coverage: this.deps.projection.coverage() }; }, (error: unknown) => { this.lastEvaluation = { at: this.now(), error: String(error), coverage: null }; });
     }, 60000);
     this.timer.unref();
   }

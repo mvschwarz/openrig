@@ -132,9 +132,13 @@ these boundaries. One occurrence and the existing owner cooldown apply to each
 episode; a disposition stops repeated requests.
 
 This bounded source covers explicitly linked project or mission work: at most 2,000 touched
-qitems, 200 roots, 1,000 members / 10,000 transitions per family, 200 workflow
+qitems, 1,000 members / 10,000 transitions per family, 200 workflow
 receipts, 200 declared slices, and 100 proof files per selected slice. Overflow
-refuses visibly. Context files are bounded to 64 KiB. A lineage beginning before
+refuses visibly. When more than 200 families (roots) were touched, it evaluates the
+200 with the most transitions in the window, then by lineage ID, and reports the
+result as partial coverage with the total and omitted counts. Omitted families
+were not evaluated, so having no finding for them is not a healthy verdict.
+Context files are bounded to 64 KiB. A lineage beginning before
 the retained window remains indeterminate, with the missing interval named.
 Project planning does not require a successor mission: an explicit project identity
 resolves its current context, with mission and phase absent unless evidenced.
@@ -370,7 +374,10 @@ A consumer such as a later Herder plugin reads `GET /api/health` and
 `GET /api/health/:findingId`, or the identical `rig health --json` and
 `rig health explain <finding-id> --json` records. The record schema is
 `openrig.health/v0alpha1`; list metadata is `openrig.health-list/v0alpha1`.
-Preserve ID, status, policy version, time window, freshness, evidence and
+For a source that bounds its input, list metadata also carries `coverage`
+(`source`, `total`, `evaluated`, `omitted`, `limit`, `order`, `partial`), and
+`rig health policy` reports the scheduled evaluation's coverage under
+`engine.lastEvaluation.coverage`. Preserve ID, status, policy version, time window, freshness, evidence and
 threshold together. There is no health score or implicit remediation authority.
 The default list excludes cleared records; explicit cleared queries and exact
 ID reads retain them while the source can still project them. A recurrence after

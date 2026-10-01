@@ -237,3 +237,50 @@ it("includes the typed workflow acceptance join after the queue closure without 
   expect(finding.ceremony?.stage).toBe("needs-diagnosis"); expect(finding.explanation).toContain("no ratio is computed");
   expect(finding.lastObservedAt).toBe("2026-09-05T12:00:29.500Z");
 });
+
+// Each family is one undelegated row with `n` in-window transitions, in the fixture's slice.
+function addFamilies(t: Awaited<ReturnType<typeof setup>>, counts: number[]) {
+  const item = t.db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,tags,body) VALUES(?,?,?,'a@rig','b@rig','pending',?,'family')");
+  const transition = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES(?,?,'pending','a@rig')");
+  counts.forEach((n, i) => {
+    const id = `family-${String(i).padStart(3, "0")}`;
+    item.run(id, "2026-09-05T11:59:00.000Z", "2026-09-05T11:59:00.000Z", JSON.stringify(["mission:mission", "slice:slice-1"]));
+    for (let k = 0; k < n; k++) transition.run(id, new Date(Date.parse("2026-09-05T11:59:00.000Z") + k * 1000).toISOString());
+  });
+}
+
+it("past the family limit evaluates exactly the busiest families and reports the rest as omitted, not healthy", async () => {
+  const t = await setup();
+  // root has 30 transitions; 198 families have 22; three tie at 21. The limit keeps root,
+  // the 198 and the lowest-ID tie, and omits the other two ties.
+  addFamilies(t, [...Array<number>(198).fill(22), 21, 21, 21]);
+  const read = vi.spyOn(t.queue.transitionLog, "listForQitemWindow");
+  const lineages = t.projection.records().map((r) => r.ceremony!.lineageId).sort();
+  expect(lineages).toHaveLength(200);
+  expect(lineages).toContain("root"); expect(lineages).toContain("family-198");
+  expect(lineages).not.toContain("family-199"); expect(lineages).not.toContain("family-200");
+  // Omitted families are never read, so nothing about them can be concluded.
+  expect(new Set(read.mock.calls.map((c) => c[0]))).toEqual(new Set(lineages));
+  expect(t.projection.list({ limit: 200 })).toMatchObject({ total: 200, coverage: [{ source: "passive-ceremony", unit: "handoff families",
+    limit: 200, total: 202, evaluated: 200, omitted: 2, partial: true, order: "most queue transitions in the observation window, then lineage ID" }] });
+  expect(t.projection.records().map((r) => r.ceremony!.lineageId).sort()).toEqual(lineages);
+});
+
+it("at the family limit evaluates every family as before and reports complete coverage", async () => {
+  const t = await setup();
+  addFamilies(t, [...Array<number>(197).fill(22), 3, 2]);
+  expect(t.projection.records().map((r) => r.ceremony!.lineageId)).toHaveLength(198);
+  expect(t.projection.list({ limit: 200 }).coverage).toEqual([expect.objectContaining({ total: 200, evaluated: 200, omitted: 0, partial: false })]);
+});
+
+it("the scheduled evaluation records partial coverage instead of failing past the family limit", async () => {
+  const t = await setup();
+  addFamilies(t, Array<number>(201).fill(1));
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  t.service.start();
+  await vi.advanceTimersByTimeAsync(60000);
+  await t.service.stop();
+  expect(t.service.status().lastEvaluation).toMatchObject({ error: null,
+    coverage: [{ source: "passive-ceremony", total: 202, evaluated: 200, omitted: 2, partial: true }] });
+  expect(t.service.list()).toHaveLength(1);
+});

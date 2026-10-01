@@ -1017,7 +1017,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const rigModeStore = new RigModeStore(db);
   const operatingPosture = new OperatingPostureService(db, rigModeStore, () => healthSettingsStore.resolveOne("workspace.root").value as string);
   const passiveCeremony = new PassiveCeremonySource(healthSettingsStore.resolveOne("workspace.root").value as string, queueRepoInstance, healthPolicy, undefined, healthCheckpoints, { reader: operatingPosture, instanceId: OPENRIG_HOME });
-  const healthProjection = new HealthProjectionService({ read: () => [...contextHealthSource.read(), ...healthCheckpoints.read(), ...passiveCeremony.read()] }, () => healthPolicy.read(), (record) => operatingPosture.forHealth(record));
+  const healthProjection = new HealthProjectionService({ read: () => [...contextHealthSource.read(), ...healthCheckpoints.read(), ...passiveCeremony.read()], coverage: () => passiveCeremony.coverage() }, () => healthPolicy.read(), (record) => operatingPosture.forHealth(record));
   const healthDiagnosis = new HealthDiagnosisService({ queue: queueRepoInstance, projection: healthProjection, policy: healthPolicy,
     authority: (record) => healthAuthority(healthSettingsStore.resolveOne("workspace.root").value as string, healthCheckpoints, record),
     resolveEvidence: (path, finding) => readHealthArtifact(finding.operatingPosture?.context?.paths?.project ?? healthSettingsStore.resolveOne("workspace.root").value as string, path),
