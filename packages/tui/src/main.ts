@@ -460,6 +460,15 @@ async function run(): Promise<void> {
     if (nativeAttached) return;
     for (const ev of events) {
       inputRevision += 1; startup?.interacted();
+      // The bound endpoint's copy label remains usable in startup/palette/restore
+      // contexts, whose input handlers otherwise consume the status-row click.
+      if (ev.type === "mouse" && (ev.button & 64) === 0 && lastScreen) {
+        const hit = lastScreen.hitMap.find((h) => h.y === ev.y && ev.x >= h.x1 && ev.x <= h.x2);
+        if (hit?.action.type === "print-for-copy" && hit.action.value === socket.path) {
+          perform(hit.action);
+          return;
+        }
+      }
       if (startup?.state.open && !view.get().palette) {
         if (ev.type === "char" && ev.ch === "q") { void shutdown(); return; }
         if (ev.type === "char") void startup.key(ev.ch);

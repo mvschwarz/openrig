@@ -1549,7 +1549,11 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
   if (options.controlSocketPath && screen.lines.length) {
     const row = screen.lines.length - 1;
     const socketPath = options.controlSocketPath.replace(/[\x00-\x1f\x7f]/g, " ");
-    screen.lines[row] = pad(`socket: ${socketPath} · ${screen.lines[row]!.trimEnd()}`, options.cols ?? 120);
+    const label = "socket: [copy]";
+    const cols = options.cols ?? 120;
+    screen.lines[row] = pad(`${label} ${socketPath} · ${screen.lines[row]!.trimEnd()}`, cols);
+    // The status stays compact; its copy target retains the actual bound path.
+    screen.hitMap.unshift({ y: row + 1, x1: 1, x2: Math.min(cols, label.length), action: { type: "print-for-copy", label: "Control socket", value: options.controlSocketPath } });
     if (screen.segRows) delete screen.segRows[row + 1];
   }
   const commandReady = !state.palette && !options.startup?.open && !options.restore && !options.unavailable && (!options.daemonState || options.daemonState === "up");

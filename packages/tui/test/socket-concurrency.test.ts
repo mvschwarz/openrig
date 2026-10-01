@@ -137,11 +137,15 @@ it("two standalone TUIs stay usable and expose the second control path without r
       return !!alternate;
     });
     const secondPath = path.join(root, "run", alternate!);
-    await waitFor(second, () => outputs.get(second)!.includes(`socket: ${secondPath}`));
+    await waitFor(second, () => outputs.get(second)!.includes(`socket: [copy] ${secondPath}`));
     expect(second.exitCode).toBeNull();
     expect(fs.lstatSync(socketPath).ino).toBe(original.ino);
     expect(await query(socketPath)).toBe("tui-1");
     expect(await query(secondPath)).toBe("tui-1");
+    // Send a genuine SGR mouse click on the status copy label through stdin.
+    second.stdin.write("\x1b[<0;10;32M");
+    await waitFor(second, () => outputs.get(second)!.includes(`\r\nControl socket\r\n\r\n${secondPath}\r\n`));
+    second.stdin.write("\n");
     await stop(second);
     expect(await query(socketPath)).toBe("tui-1");
   } finally {
