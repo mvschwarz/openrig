@@ -66,3 +66,22 @@ it("recovers the owned stale socket of a killed launcher", async () => {
     fs.rmSync(path, { force: true });
   }
 });
+
+
+it("reports an existing recovery reservation without changing its live socket", async () => {
+  const path = socketPath("reserved");
+  const reservation = `${path}.recovery.lock`;
+  const first = await createControlSocket({ socketPath: path, view: createViewState({ instanceId: "reserved-owner" }) });
+  const before = fs.lstatSync(path);
+  fs.writeFileSync(reservation, "existing reservation");
+  try {
+    await expect(createControlSocket({ socketPath: path, view: createViewState({ instanceId: "second" }) }))
+      .rejects.toMatchObject({ code: "EADDRINUSE", message: expect.stringContaining(reservation) });
+    expect(fs.lstatSync(path).ino).toBe(before.ino);
+    expect(fs.readFileSync(reservation, "utf8")).toBe("existing reservation");
+    expect(await query(path)).toMatchObject({ instanceId: "reserved-owner" });
+  } finally {
+    await first.close();
+    fs.rmSync(reservation, { force: true });
+  }
+});

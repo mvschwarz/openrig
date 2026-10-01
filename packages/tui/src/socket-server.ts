@@ -134,22 +134,39 @@ export async function createControlSocket(options: {
     await listen();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
-    // An existing path may belong to another running TUI. Only a refused
-    // connection to an unchanged, owned socket proves a stale launcher.
-    const before = fs.lstatSync(socketPath);
-    if (!before.isSocket() || (process.getuid && before.uid !== process.getuid())) throw error;
-    const stale = await new Promise<boolean>((resolve) => {
-      const probe = net.createConnection(socketPath);
-      probe.setTimeout(1000);
-      const finish = (value: boolean) => { probe.destroy(); resolve(value); };
-      probe.once("connect", () => finish(false));
-      probe.once("timeout", () => finish(false));
-      probe.once("error", (cause: NodeJS.ErrnoException) => finish(cause.code === "ECONNREFUSED"));
-    });
-    const after = fs.lstatSync(socketPath);
-    if (!stale || before.dev !== after.dev || before.ino !== after.ino) throw error;
-    fs.unlinkSync(socketPath);
-    await listen();
+    // All supported recoverers reserve this path before probing/unlinking.
+    // Never steal an abandoned reservation: a crash can occur after replacement bind.
+    const reservation = `${socketPath}.recovery.lock`;
+    let fd: number;
+    try {
+      fd = fs.openSync(reservation, "wx", 0o600);
+    } catch (lockError) {
+      if ((lockError as NodeJS.ErrnoException).code === "EEXIST") {
+        throw Object.assign(new Error(`Control socket recovery reservation exists: ${reservation}. Confirm no launcher is recovering this socket before removing that file.`), { code: "EADDRINUSE" });
+      }
+      throw lockError;
+    }
+    try {
+      // An existing path may belong to another running TUI. Only a refused
+      // connection to an unchanged, owned socket proves a stale launcher.
+      const before = fs.lstatSync(socketPath);
+      if (!before.isSocket() || (process.getuid && before.uid !== process.getuid())) throw error;
+      const stale = await new Promise<boolean>((resolve) => {
+        const probe = net.createConnection(socketPath);
+        probe.setTimeout(1000);
+        const finish = (value: boolean) => { probe.destroy(); resolve(value); };
+        probe.once("connect", () => finish(false));
+        probe.once("timeout", () => finish(false));
+        probe.once("error", (cause: NodeJS.ErrnoException) => finish(cause.code === "ECONNREFUSED"));
+      });
+      const after = fs.lstatSync(socketPath);
+      if (!stale || before.dev !== after.dev || before.ino !== after.ino) throw error;
+      fs.unlinkSync(socketPath);
+      await listen();
+    } finally {
+      fs.closeSync(fd);
+      fs.unlinkSync(reservation);
+    }
   }
   return {
     path: socketPath,
