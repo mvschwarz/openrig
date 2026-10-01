@@ -236,11 +236,25 @@ describe("retained authority negative controls", () => {
   });
 });
 
-async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "before" | "after" | "stale-read" | null = null) {
+async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "before" | "after" | "stale-read" | "write-error" | "fsync-error" | null = null) {
   const module = new URL("../src/domain/proof/judgments.ts", import.meta.url).href;
   const script = `
     import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
     const crash = ${JSON.stringify(crash)}, original = fs.linkSync;
+    if (crash === "write-error" || crash === "fsync-error") {
+      const write = fs.writeFileSync, sync = fs.fsyncSync; let receiptFd;
+      fs.writeFileSync = (...args) => {
+        if (typeof args[0] === "number" && String(args[1]).includes("operationId:")) {
+          receiptFd = args[0];
+          if (crash === "write-error") { write(args[0], "partial receipt"); throw Object.assign(new Error("injected receipt write"), { code: "EIO" }); }
+        }
+        return write(...args);
+      };
+      fs.fsyncSync = fd => {
+        if (fd === receiptFd && crash === "fsync-error") throw Object.assign(new Error("injected receipt fsync"), { code: "EIO" });
+        return sync(fd);
+      }; syncBuiltinESMExports();
+    }
     if (crash === "stale-read") {
       let reads = 0; const originalRead = fs.readdirSync;
       fs.readdirSync = (...args) => {
@@ -270,6 +284,29 @@ async function kill(child: ChildProcess) {
   const exited = once(child, "exit"); child.kill("SIGKILL"); await exited;
 }
 describe("real process publication and recovery", () => {
+  for (const phase of ["write-error", "fsync-error"] as const) it(`cleans owned temporary receipts after repeated ${phase} failures`, async () => {
+    const f = fixture(), input = f.input(), child = await worker(f, input, phase);
+    const home = join(f.alpha, "proof", "judgments");
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        expect((await request(child)).error).toBe("EIO");
+        expect(readSliceReadiness(f.alpha).items[0]!.state).toBe("pending");
+        expect(fs.readdirSync(home)).toEqual([]);
+      }
+    } finally { await kill(child); }
+    const retry = f.judge(input);
+    expect(retry.readiness.items[0]!.state).toBe("accepted");
+    expect(f.judge(input).judgment.id).toBe(retry.judgment.id);
+    expect(fs.readdirSync(home)).toEqual(["00000001.md"]);
+    const correction = f.input(undefined, "reject"), failingCorrection = await worker(f, correction, phase);
+    try {
+      expect((await request(failingCorrection)).error).toBe("EIO");
+      expect(readSliceReadiness(f.alpha).items[0]!.judgment!.id).toBe(retry.judgment.id);
+      expect(fs.readdirSync(home)).toEqual(["00000001.md"]);
+    } finally { await kill(failingCorrection); }
+    expect(f.judge(correction).readiness.items[0]!.state).toBe("rejected");
+    expect(fs.readdirSync(home)).toEqual(["00000001.md", "00000002.md"]);
+  });
   it("publishes one concurrent correction and replays duplicate acceptance safely", async () => {
     const f = fixture(), first = f.judge(), a = await worker(f, f.input(undefined, "reject")), b = await worker(f, f.input(undefined, "withdraw"));
     try {

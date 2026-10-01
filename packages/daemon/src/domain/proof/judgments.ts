@@ -266,8 +266,8 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   // Same-directory temp+fsync follows FileWriteService; link publishes without replacing a receipt.
   // Synchronous in the supported daemon writer. A competing process loses the exclusive publication.
   const fd = fs.openSync(temporary, "wx", 0o600);
-  try { fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   try {
+    try { fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.linkSync(temporary, target);
     const directory = fs.openSync(home, "r");
     try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
