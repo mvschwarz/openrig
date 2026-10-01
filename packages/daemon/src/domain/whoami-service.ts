@@ -82,6 +82,12 @@ export type RuntimeContext =
       resumeToken: string | null;
       estimatedTokens: number | null;
       lastSampledAt: string | null;
+    }
+  | {
+      runtime: "agy";
+      conversationId: string | null;
+      estimatedTokens: number | null;
+      lastSampledAt: string | null;
     };
 
 export class WhoamiAmbiguousError extends Error {
@@ -399,6 +405,23 @@ export class WhoamiService {
       return {
         runtime: "claude-code",
         resumeToken,
+        estimatedTokens,
+        lastSampledAt,
+      };
+    }
+    if (runtime === "agy") {
+      let conversationId: string | null = null;
+      try {
+        const row = this.db
+          .prepare("SELECT resume_token FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+          .get(nodeId) as { resume_token: string | null } | undefined;
+        conversationId = row?.resume_token ?? null;
+      } catch {
+        conversationId = null;
+      }
+      return {
+        runtime: "agy",
+        conversationId,
         estimatedTokens,
         lastSampledAt,
       };

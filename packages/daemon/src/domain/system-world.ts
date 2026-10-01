@@ -24,7 +24,7 @@ const REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
 
 export interface SystemWorldContextSelection {
   ref: string;
-  profiles?: { claude?: string; codex?: string };
+  profiles?: { claude?: string; codex?: string; agy?: string };
 }
 
 export interface SystemWorldManifest {
@@ -98,10 +98,11 @@ export function parseSystemWorldManifest(text: string, sourcePath = "System Worl
     const profiles = entry["profiles"];
     if (profiles === undefined) return { ref };
     if (!isRecord(profiles)) throw new Error(`${sourcePath} context[${index}].profiles must be an object`);
-    assertOnlyKeys(profiles, ["claude", "codex"], `${sourcePath} context[${index}].profiles`);
-    const parsed: { claude?: string; codex?: string } = {};
+    assertOnlyKeys(profiles, ["claude", "codex", "agy"], `${sourcePath} context[${index}].profiles`);
+    const parsed: { claude?: string; codex?: string; agy?: string } = {};
     if (profiles["claude"] !== undefined) parsed.claude = boundedId(profiles["claude"], `${sourcePath} context[${index}].profiles.claude`);
     if (profiles["codex"] !== undefined) parsed.codex = boundedId(profiles["codex"], `${sourcePath} context[${index}].profiles.codex`);
+    if (profiles["agy"] !== undefined) parsed.agy = boundedId(profiles["agy"], `${sourcePath} context[${index}].profiles.agy`);
     return { ref, profiles: parsed };
   });
   const skills = raw["skills"];

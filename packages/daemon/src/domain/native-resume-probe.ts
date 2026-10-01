@@ -41,7 +41,22 @@ export function buildNativeResumeCommand(
   if (runtime === "codex") {
     return buildCodexResumeCore(resumeToken, codexConfigProfile);
   }
+  if (runtime === "agy") {
+    return buildAgyResumeCore(resumeToken);
+  }
   return null;
+}
+
+export function buildAgyResumeCore(
+  resumeToken: string,
+  model?: string | null,
+  postureArg?: string,
+): string {
+  const parts = ["agy"];
+  if (postureArg) parts.push(postureArg);
+  if (model?.trim()) parts.push(`--model ${shellQuote(model.trim())}`);
+  parts.push(`--conversation ${shellQuote(resumeToken)}`);
+  return parts.join(" ");
 }
 
 export function buildCodexResumeCore(
@@ -225,6 +240,42 @@ export function assessNativeResumeProbe(
     };
   }
 
+  if (runtime === "agy") {
+    if (paneContent.includes("Conversation not found") || paneContent.includes("conversation not found") || /conversation "[^"]+" not found/i.test(paneContent)) {
+      return {
+        status: "failed",
+        code: "no_conversation_found",
+        detail: "Antigravity reported that the requested conversation no longer exists.",
+      };
+    }
+    if (looksLikeAgyTui(paneContent)) {
+      return {
+        status: "resumed",
+        code: "active_runtime",
+        detail: "Antigravity is running with an active interactive TUI in the probe pane.",
+      };
+    }
+    if (paneCommand === "agy") {
+      return {
+        status: "resumed",
+        code: "active_runtime",
+        detail: "Antigravity is the active foreground process in the probe pane.",
+      };
+    }
+    if (SHELL_COMMANDS.has(paneCommand)) {
+      return {
+        status: "failed",
+        code: "returned_to_shell",
+        detail: "The probe pane returned to a shell instead of staying inside the runtime.",
+      };
+    }
+    return {
+      status: "inconclusive",
+      code: "awaiting_runtime",
+      detail: "Antigravity did not report an explicit failure, but an interactive conversation has not been observed.",
+    };
+  }
+
   return {
     status: "inconclusive",
     code: "unsupported_runtime",
@@ -372,4 +423,12 @@ function looksLikeCodexModelSelectionPrompt(paneContent: string): boolean {
   ));
 
   return numberedModelOptions.length >= 2;
+}
+
+function looksLikeAgyTui(paneContent: string): boolean {
+  return (
+    paneContent.includes("Antigravity CLI")
+    || paneContent.includes("? for shortcuts")
+    || /(^|\n)\s*>\s*/.test(paneContent)
+  );
 }

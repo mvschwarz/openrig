@@ -43,7 +43,8 @@ export type Token =
   | "clawdEye" // clawd eyes #181818
   | "markInk" // codex `>_` ink (light)
   | "markBg" // terminal mark dark cell
-  | "codexBlue"; // OFFICIAL sampled #6867aa (picks-of-record provenance)
+  | "codexBlue" // OFFICIAL sampled #6867aa (picks-of-record provenance)
+  | "agyCyan"; // Antigravity cyan #0891b2
 
 // [truecolor rgb, 256 index, 16-color SGR]
 const PALETTE: Record<Token, [[number, number, number], number, number]> = {
@@ -67,6 +68,7 @@ const PALETTE: Record<Token, [[number, number, number], number, number]> = {
   markInk: [[250, 250, 249], 255, 97],
   markBg: [[12, 10, 9], 233, 30],
   codexBlue: [[104, 103, 170], 61, 34],
+  agyCyan: [[8, 145, 178], 38, 36],
 };
 
 export interface Style {
