@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { assertSafeInstallRef, assertTreeHasNoSymlinks, assertDestinationNamespaceContained, validateContextPackManifestForInstall } from "../lib/context-install.js";
 import { addGitContext, inspectGitContext, updateGitContext } from "../lib/context-git.js";
@@ -818,15 +818,8 @@ Examples:
             throw new Error(`Source directory must contain manifest.yaml: ${source}`);
           }
           validateContextPackManifestForInstall(manifestPath);
-          const installName = opts.name ?? (() => {
-            try {
-              const raw = readFileSync(manifestPath, "utf-8");
-              const m = raw.match(/^name:\s*['"]?([^'"\n]+)['"]?\s*$/m);
-              return m?.[1]?.trim() || basename(source);
-            } catch {
-              return basename(source);
-            }
-          })();
+          const manifest = parseYaml(readFileSync(manifestPath, "utf-8")) as { name: string };
+          const installName = opts.name ?? manifest.name;
           assertSafeInstallRef(installName);
           assertTreeHasNoSymlinks(source);
           mkdirSync(targetRoot, { recursive: true });
