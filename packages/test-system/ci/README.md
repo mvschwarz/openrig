@@ -32,7 +32,7 @@ fault is a storage-state reset, not a replay of a specific production bug.
 ## Isolation and evidence
 
 Use `bash scripts/run-pr-scenarios.sh` on a disposable GitHub Linux runner after
-`npm ci`. It refuses ordinary local invocation. Runtime is inside unprivileged,
+`npm ci`, or select a prepared remote executor as below. Runtime is inside unprivileged,
 network-disabled containers, with no host mounts, a read-only root, private
 writable `/tmp`, dropped capabilities and bounded memory/processes/time. Image
 construction uses network to retrieve the pinned base, Node and dependencies;
@@ -73,3 +73,42 @@ coverage. Container evidence for each selected case is required for admission.
 The existing CLI `run-scenarios.mjs` still accepts paths only; `--container` is
 refused. This job runs the helper *inside* the isolated image, so it does not depend
 on the host-to-container staging adapter's unsupported per-seat-script path.
+
+## Run one case before pushing
+
+Any developer or agent can use the same script with a prepared SSH Docker executor;
+there is no seat-owner or per-run approval requirement. Use a private checkout with
+the normal Node 22/24 development dependencies. Source build/pack runs on the client;
+Docker image construction and the scenario run at the selected daemon.
+
+```sh
+DOCKER_HOST=ssh://your-test-executor bash scripts/run-pr-scenarios.sh \
+  --remote --case library --mode healthy --out dist/scenario-check
+```
+
+Leave `DOCKER_CONTEXT` unset when selecting `DOCKER_HOST`, so a saved context cannot
+override the explicitly selected executor. This does not change Docker configuration.
+Use a fresh output directory for each retained run. Without `--mode` the selected
+case runs healthy / lost-baton / healthy. Without `--case` both cases run. CI keeps
+its existing six-run default. A single healthy run establishes only that leg; it is
+not the paired seeded-regression proof.
+
+The client can be macOS/arm64 while Docker is Linux/amd64: the build reads the
+**server** OS/architecture and passes the same platform to the image builds and
+containers. The Node deadline helper replaces GNU `timeout`, preserves the real
+exit status, returns 124 on deadline and escalates TERM to KILL after 15 seconds.
+All daemon work remains in the container. No local OpenRig daemon is touched.
+
+Build contexts are uploaded by Docker, not mounted from the client. Logs, actual
+exit-code files, container names/inspection, server platform, image identity and
+manifests are written in the client's `--out` directory. The image-load check still
+runs once before the selected scenario to detect a broken package/native install.
+Scenario runtime is 2 CPUs, 2GiB memory with no swap, 256 PIDs, network-none, non-root
+and a read-only root plus scratch tmpfs. A rootless executor must enforce its
+configured cgroup limits; its aggregate budget is an executor setting, not a
+claim made by successful source checks.
+
+The script removes only its named containers. If SSH becomes unavailable, it
+reports incomplete cleanup with the exact name for later reconciliation; no remote
+cleanup can be guaranteed through a broken connection. It never prunes shared
+images or other agents' containers.

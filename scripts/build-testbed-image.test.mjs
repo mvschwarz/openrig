@@ -61,11 +61,13 @@ test("Q2 fix A: packs the ASSEMBLED @openrig/cli (has the `rig` bin), NEVER the 
   assert.doesNotMatch(text, /cd\s+"?\$\{REPO_ROOT\}"?\s*&&\s*npm pack/, "must NOT pack the monorepo root");
 });
 
-test("Q2 fix B: resolves the target arch HOST-side + passes it explicitly, fail-CLOSED (never a silent amd64 default -> exit 133)", () => {
+test("resolves the target from the Docker server and passes both platform and arch", () => {
   const text = readScript();
-  assert.match(text, /uname -m/, "must resolve the host arch (uname -m) so the legacy builder gets a real TARGETARCH");
-  assert.match(text, /--build-arg\s+TARGETARCH=/, "must pass TARGETARCH explicitly (builder-agnostic)");
-  assert.match(text, /uname -m[\s\S]*?exit\s+[1-9]/, "must fail-closed (non-zero exit) on an unresolvable arch");
+  assert.match(text, /scenario-executor\.mjs.*platform/);
+  assert.match(text, /--build-arg\s+TARGETARCH=/);
+  assert.match(text, /docker build --platform/);
+  assert.match(text, /docker run --rm --platform/);
+  assert.doesNotMatch(text, /case.*uname -m/);
 });
 
 test("Q2 fix B: the Dockerfile fails CLOSED on an empty TARGETARCH (no silent amd64 default)", () => {

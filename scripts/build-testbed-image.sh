@@ -13,9 +13,15 @@ STUB_ASSETS_LIST="${TESTBED_DIR}/stub-assets.list"
 OUT_DIR="${1:-${REPO_ROOT}/dist/testbed-image}"
 
 command -v docker >/dev/null 2>&1 || {
-  echo "[testbed] docker not found — run this build HOST-side (locus ruling), not in the VM seat" >&2
+  echo "[testbed] Docker client not found; select the prepared disposable executor" >&2
   exit 3
 }
+
+# Resolve the daemon's platform BEFORE building locally. A remote amd64 daemon
+# reached from an arm64 Mac needs amd64 Node; client uname is not the target.
+mkdir -p "${OUT_DIR}"
+TARGET_PLATFORM="$(node "${REPO_ROOT}/scripts/scenario-executor.mjs" platform "${OUT_DIR}/docker-server.json")"
+TARGETARCH="${TARGET_PLATFORM#linux/}"
 
 # --- identity from the tree: the image is built AT this git sha, so gitSha == openrigSha ---
 GIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
@@ -57,18 +63,8 @@ STUB_FILES_JSON="$(node -e \
   'const fs=require("fs");const l=fs.readFileSync(process.argv[1],"utf8").split("\n").map(s=>s.replace(/#.*/,"").trim()).filter(Boolean);process.stdout.write(JSON.stringify(l))' \
   "${STUB_ASSETS_LIST}")"
 
-# --- resolve the target arch HOST-side and pass it EXPLICITLY (builder-agnostic: correct on the
-# legacy builder — which NEVER populates the automatic TARGETARCH build-arg — AND on BuildKit). Fail
-# CLOSED on an unknown arch rather than letting the Dockerfile silently default to amd64, which fetches
-# x64 Node into an arm64 image and dies with a Rosetta/ELF failure (exit 133).
-case "$(uname -m)" in
-  x86_64|amd64) TARGETARCH=amd64 ;;
-  arm64|aarch64) TARGETARCH=arm64 ;;
-  *) echo "[testbed] cannot resolve a supported TARGETARCH from 'uname -m'=$(uname -m); refusing to build (a silent amd64 default installs wrong-arch Node = exit 133)" >&2; exit 4 ;;
-esac
-
 # --- build (host-side) ---
-docker build \
+docker build --platform "${TARGET_PLATFORM}" \
   --build-arg BASE_IMAGE="${BASE_IMAGE}" \
   --build-arg NODE_VERSION="${NODE_VERSION}" \
   --build-arg OPENRIG_TARBALL=openrig.tgz \
@@ -92,7 +88,7 @@ echo "[testbed] effect proof: daemon LOAD inside the container (better-sqlite3 m
 # kernel, confirm readiness by hitting /healthz DIRECTLY (deterministic — no fixed sleep), then daemon
 # status; an EXIT trap stops the daemon so a failed assertion still tears down. A broken native install
 # fails `rig daemon start` here → set -e → non-zero → the build verb fails BEFORE the A/B pin.
-docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges "${IMAGE_TAG}" bash -lc 'set -euo pipefail; trap "rig daemon stop >/dev/null 2>&1 || true" EXIT; rig --version; rig daemon start --no-kernel; curl -fsS http://127.0.0.1:7433/healthz; rig daemon status'
+docker run --rm --platform "${TARGET_PLATFORM}" --network none --cap-drop ALL --security-opt no-new-privileges "${IMAGE_TAG}" bash -lc 'set -euo pipefail; trap "rig daemon stop >/dev/null 2>&1 || true" EXIT; rig --version; rig daemon start --no-kernel; curl -fsS http://127.0.0.1:7433/healthz; rig daemon status'
 
 # --- emit the reproducible manifest + census receipt via the tested node orchestrator ---
 INPUTS="$(mktemp)"
