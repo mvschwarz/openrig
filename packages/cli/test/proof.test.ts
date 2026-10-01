@@ -571,6 +571,22 @@ describe("rig proof add --replace swaps the entry and never writes through links
     expect(fs.readFileSync(linkedTarget)).toEqual(png("mode victim"));
   });
 
+  it("creates the staging file no wider than the artifact it replaces", async () => {
+    const priv = path.join(proofDir, "tight.md");
+    fs.writeFileSync(priv, "original\n");
+    fs.chmodSync(priv, 0o600);
+    const createdModes: number[] = [];
+    const realFchmod = fs.fchmodSync;
+    vi.spyOn(fs, "fchmodSync").mockImplementation(((fd: number, mode: fs.Mode) => {
+      createdModes.push(fs.fstatSync(fd).mode & 0o777); // the mode the exclusive open created, before narrowing
+      return realFchmod(fd, mode);
+    }) as typeof fs.fchmodSync);
+    await add("tight.md", ["--replace"]);
+    expect(process.exitCode).toBeUndefined();
+    expect(createdModes).toEqual([0o600]);
+    expect(fs.statSync(priv).mode & 0o777).toBe(0o600);
+  });
+
   it("replaces a read-only artifact on explicit --replace and keeps it read-only", async () => {
     const ro = path.join(proofDir, "frozen.md");
     fs.writeFileSync(ro, "original\n");
