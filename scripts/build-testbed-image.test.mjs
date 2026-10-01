@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -66,7 +67,7 @@ test("resolves the target from the Docker server and passes both platform and ar
   assert.match(text, /scenario-executor\.mjs.*platform/);
   assert.match(text, /--build-arg\s+TARGETARCH=/);
   assert.match(text, /docker build --platform/);
-  assert.match(text, /docker run --rm --platform/);
+  assert.match(text, /docker run --name/);
   assert.doesNotMatch(text, /case.*uname -m/);
 });
 
@@ -110,4 +111,56 @@ test("Q2 rider (effect proof): the build verb LOADS the daemon inside the contai
   assert.match(text, /docker run\b[\s\S]*\$\{IMAGE_TAG\}/, "must run the freshly-built image (effect proof)");
   assert.match(text, /rig daemon start --no-kernel/, "must LOAD the daemon (better-sqlite3 binds) via the operator-corrected start, not merely check rig exists");
   assert.match(text, /\/healthz/, "must confirm readiness deterministically via /healthz (operator correction — no fixed sleep)");
+});
+
+test("image-load success, failure and deadline all retain status and remove only the named container", () => {
+  const root = mkdtempSync(join(process.cwd(), ".testbed-load-"));
+  try {
+    for (const p of ["scripts", "docker/testbed", "packages/cli", "bin"]) mkdirSync(join(root, p), { recursive: true });
+    copyFileSync(SCRIPT, join(root, "scripts/build-testbed-image.sh"));
+    copyFileSync(join(HERE, "scenario-executor.mjs"), join(root, "scripts/scenario-executor.mjs"));
+    writeFileSync(join(root, "scripts/build-package.sh"), "#!/bin/sh\nexit 0\n");
+    writeFileSync(join(root, "scripts/testbed-build-inputs.mjs"), "export const readBaseImage = () => ({ref:'fixture@sha256:abc'});\n");
+    writeFileSync(join(root, "scripts/testbed-emit-manifest.mjs"), "import fs from 'node:fs';fs.writeFileSync(process.argv[3]+'/manifest.json','{}');\n");
+    writeFileSync(join(root, "docker/testbed/Dockerfile"), "ARG NODE_VERSION=22.22.1\n");
+    for (const p of ["docker/testbed/entrypoint.sh", "docker/testbed/base-image", "docker/testbed/stub-assets.list"]) writeFileSync(join(root, p), "");
+    writeFileSync(join(root, "bin/git"), "#!/bin/sh\nprintf 'fake-source\\n'\n", { mode: 0o755 });
+    writeFileSync(join(root, "bin/npm"), "#!/bin/sh\ntouch fixture.tgz\nprintf 'fixture.tgz\\n'\n", { mode: 0o755 });
+    writeFileSync(join(root, "bin/mktemp"), '#!/bin/sh\nexec /usr/bin/mktemp "$@" "$HOME/tmp.XXXXXXXX"\n', { mode: 0o755 });
+    // Use the real deadline helper with a short test deadline. No Docker daemon,
+    // build, package install or network is involved; the marker models a remote
+    // container surviving the client process until an explicit named removal.
+    writeFileSync(join(root, "bin/node"), `#!${process.execPath}
+import {spawnSync} from 'node:child_process';const args=process.argv.slice(2);
+if(args[1]==='timeout')args[2]='0.4';
+const p=spawnSync(${JSON.stringify(process.execPath)},args,{stdio:'inherit'});process.exit(p.status??1);
+`, { mode: 0o755 });
+    writeFileSync(join(root, "bin/docker"), `#!${process.execPath}
+import fs from 'node:fs';const args=process.argv.slice(2);const marker=process.env.FAKE_CONTAINER;
+if(args[0]==='version')console.log(JSON.stringify({Os:'linux',Arch:'amd64'}));
+else if(args[0]==='build'){}
+else if(args[0]==='run'){
+  const at=args.indexOf('--name');if(at<0)process.exit(9);
+  fs.writeFileSync(marker,args[at+1]);
+  if(process.env.LOAD_CASE==='timeout')setInterval(()=>{},1000);
+  else process.exit(process.env.LOAD_CASE==='failure'?7:0);
+}else if(args[0]==='inspect')console.log('[]');
+else if(args[0]==='rm'){
+  if(fs.readFileSync(marker,'utf8')!==args.at(-1))process.exit(8);
+  fs.unlinkSync(marker);
+}else process.exit(8);
+`, { mode: 0o755 });
+    for (const [mode, status] of [["success", 0], ["failure", 7], ["timeout", 124]]) {
+      const out = join(root, mode), marker = join(root, "container");
+      const run = spawnSync("/bin/bash", [join(root, "scripts/build-testbed-image.sh"), out], {
+        env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, TMPDIR: root, LOAD_CASE: mode, FAKE_CONTAINER: marker },
+        encoding: "utf8", timeout: 8000,
+      });
+      assert.equal(run.status, status, `${mode}: ${run.stderr}`);
+      assert.equal(Number(readFileSync(join(out, "image-load.exit-code.txt"), "utf8")), status);
+      assert.match(readFileSync(join(out, "image-load.container-name.txt"), "utf8"), /^openrig-testbed-load-/);
+      assert.equal(existsSync(marker), false, `${mode}: container must be removed even after timeout`);
+      assert.equal(existsSync(join(out, "manifest.json")), status === 0);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

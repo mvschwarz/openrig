@@ -103,6 +103,8 @@ Build contexts are uploaded by Docker, not mounted from the client. Logs, actual
 exit-code files, container names/inspection, server platform, image identity and
 manifests are written in the client's `--out` directory. The image-load check still
 runs once before the selected scenario to detect a broken package/native install.
+It has a 120-second deadline, a recorded unique container name, actual exit/log
+and inspection receipts, and bounded named cleanup even on failure or timeout.
 Scenario runtime is 2 CPUs, 2GiB memory with no swap, 256 PIDs, network-none, non-root
 and a read-only root plus scratch tmpfs. A rootless executor must enforce its
 configured cgroup limits; its aggregate budget is an executor setting, not a
