@@ -31,6 +31,7 @@ export interface Node {
   role: string | null;
   runtime: string | null;
   model: string | null;
+  effort?: string | null;
   codexConfigProfile?: string | null;
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF (builtin:<name> or spec-relative custom
    *  path), or null when none is attached (= the floor). */

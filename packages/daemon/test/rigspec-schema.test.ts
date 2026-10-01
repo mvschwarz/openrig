@@ -98,6 +98,26 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(normalized.pods[0]!.members[1]!.codexConfigProfile).toBe("sysadmin");
   });
 
+  it("allows effort for pod members and normalizes it", () => {
+    const rig = structuredClone(VALID_RIG);
+    (rig.pods[0]!.members[0] as Record<string, unknown>)["effort"] = "high";
+
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(true);
+
+    const normalized = RigSpecSchema.normalize(rig);
+    expect(normalized.pods[0]!.members[0]!.effort).toBe("high");
+  });
+
+  it("rejects non-string or empty effort on pod members", () => {
+    const rig = structuredClone(VALID_RIG);
+    (rig.pods[0]!.members[0] as Record<string, unknown>)["effort"] = "  ";
+
+    const result = RigSpecSchema.validate(rig);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain("pods[0].members[0].effort: must be a non-empty string");
+  });
+
   it("rejects codex_config_profile on non-Codex members", () => {
     const rig = structuredClone(VALID_RIG);
     (rig.pods[0]!.members[0] as Record<string, unknown>)["codex_config_profile"] = "sysadmin";

@@ -54,6 +54,26 @@ describe("RigSpec codec (pod-aware)", () => {
     expect(parsed["culture_file"]).toBe("culture.md");
   });
 
+  it("member effort round-trips through serialize/parse/normalize", () => {
+    const rigWithEffort: RigSpec = {
+      version: "0.2",
+      name: "effort-test",
+      pods: [{
+        id: "dev",
+        label: "Dev",
+        members: [{ id: "impl", agentRef: "local:agents/impl", profile: "tdd", runtime: "claude-code", cwd: ".", effort: "high" }],
+        edges: [],
+      }],
+      edges: [],
+    };
+
+    const yaml = RigSpecCodec.serialize(rigWithEffort);
+    expect(yaml).toContain("effort: high");
+    const parsed = RigSpecCodec.parse(yaml) as Record<string, unknown>;
+    const normalized = RigSpecSchema.normalize(parsed);
+    expect(normalized.pods[0]!.members[0]!.effort).toBe("high");
+  });
+
   // R1: continuity_policy nested booleans round-trip through serialize -> parse -> normalize
   it("continuity_policy nested booleans round-trip correctly", () => {
     const rigWithCp: RigSpec = {

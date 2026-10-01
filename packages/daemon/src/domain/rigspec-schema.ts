@@ -51,7 +51,7 @@ const RIG_KEYS = new Set([
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
-  "model", "role", "permission_policy", "cwd", "restore_policy",
+  "model", "effort", "role", "permission_policy", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
@@ -473,6 +473,11 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
       errors.push(`${prefix}.codex_config_profile: must contain only letters, numbers, underscores, dots, or hyphens`);
     } else if (member["runtime"] !== "codex") {
       errors.push(`${prefix}.codex_config_profile: only valid when runtime is "codex"`);
+    }
+  }
+  if (member["effort"] !== undefined) {
+    if (typeof member["effort"] !== "string" || !member["effort"].trim()) {
+      errors.push(`${prefix}.effort: must be a non-empty string`);
     }
   }
   if (!member["cwd"] || typeof member["cwd"] !== "string") {
@@ -1124,6 +1129,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     runtime: m["runtime"] as string,
     codexConfigProfile: m["codex_config_profile"] as string | undefined,
     model: m["model"] as string | undefined,
+    effort: m["effort"] as string | undefined,
     role: m["role"] as string | undefined,
     permissionPolicy: m["permission_policy"] as string | undefined,
     cwd: m["cwd"] as string,

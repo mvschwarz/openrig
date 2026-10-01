@@ -394,6 +394,66 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("attemptResume forwards effort to claude and codex resume adapters", async () => {
+    const claudeResume = vi.fn(async () => ({ ok: true as const }));
+    const codexResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({
+      claude: { canResume: vi.fn(() => true), resume: claudeResume } as unknown as ClaudeResumeAdapter,
+      codex: { canResume: vi.fn(() => true), resume: codexResume } as unknown as CodexResumeAdapter,
+    });
+
+    const rig = rigRepo.createRig("effort-forward-test");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/work" });
+
+    // Claude forwards effort
+    await (orch as any).attemptResume(
+      node.id,
+      "claude-session",
+      "claude_id",
+      "token-claude",
+      "/work",
+      null,
+      "sonnet",
+      "floor",
+      "high",
+    );
+    expect(claudeResume).toHaveBeenCalledWith(
+      "claude-session",
+      "claude_id",
+      "token-claude",
+      "/work",
+      "floor",
+      "sonnet",
+      undefined,
+      node.id,
+      "high",
+    );
+
+    // Codex forwards effort
+    (orch as any).claudeResume.canResume = vi.fn(() => false);
+    await (orch as any).attemptResume(
+      node.id,
+      "codex-session",
+      "codex_id",
+      "token-codex",
+      "/work",
+      "profile1",
+      "o3",
+      "floor",
+      "medium",
+    );
+    expect(codexResume).toHaveBeenCalledWith(
+      "codex-session",
+      "codex_id",
+      "token-codex",
+      "/work",
+      "profile1",
+      "floor",
+      "o3",
+      "medium",
+    );
+  });
+
   it("nonexistent snapshot -> { ok: false, code: 'snapshot_not_found' }", async () => {
     const orch = createOrchestrator();
     const result = await orch.restore("nonexistent");
