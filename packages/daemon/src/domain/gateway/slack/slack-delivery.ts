@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
-import { buildOutboundMessage, attributionFromSession, reconcileToken, type SlackMediaRef } from "./message.js";
+import { buildOutboundMessage, attributionFromSession, reconcileToken, redactSecrets, type SlackMediaRef } from "./message.js";
 import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
 import type { SubsystemDeliverFn, SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
@@ -53,15 +53,22 @@ export interface SubsystemSlackDeliveryOpts {
    *  undefined for everything else (quiet-threaded). The composition wires the registry lookup
    *  + the escalation predicate; delivery just renders what it is told. */
   resolveMentionUserId?: (payload: OutboundPostPayload) => string | undefined;
-  /** G — read a LOCAL image the evidenceRef points at (the founder screenshot class: a seat's
+  /** G — read a LOCAL file the evidenceRef points at (the founder screenshot class: a seat's
    *  file has no public URL, so it rides the EXTERNAL-UPLOAD flow into the thread). Injectable
-   *  for hermetic tests; default reads the filesystem, image extensions only. Return null =
-   *  not an uploadable local image. */
-  readLocalImage?: (refPath: string) => { bytes: Uint8Array; filename: string } | null;
+   *  for hermetic tests; default reads the filesystem (LOCAL_ATTACHMENT_EXT, at most
+   *  LOCAL_ATTACHMENT_MAX_BYTES). Return null = not a local attachment; { skipped } = an
+   *  attachment that can't be sent (logged, the text still delivers). */
+  readLocalImage?: (refPath: string) => LocalAttachment | null;
   log?: (msg: string) => void;
 }
 
 const LOCAL_IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+/** Local evidence files uploaded into the thread: images, video (Slack plays mp4/webm/mov inline)
+ *  and PDF. Wider than LOCAL_IMAGE_EXT, which gates https Block Kit image blocks. */
+const LOCAL_ATTACHMENT_EXT = new Set([...LOCAL_IMAGE_EXT, ".mp4", ".webm", ".mov", ".pdf"]);
+/** Well under Slack's 1 GB per-file limit, and bounded for a daemon that holds the bytes in memory. */
+export const LOCAL_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+export type LocalAttachment = { bytes: Uint8Array; filename: string } | { skipped: string };
 const TRANSPORT_FAILURE_RECEIPT_PREFIX = "::transport-failure-receipt::";
 const TRANSPORT_FAILURE_RECEIPT_REPAIRED = "::repaired";
 
@@ -91,15 +98,36 @@ function pendingTransportFailureReceipt(
   }
 }
 
-/** Default local-image reader: absolute path, image extension, readable — else null. */
-export function defaultReadLocalImage(refPath: string): { bytes: Uint8Array; filename: string } | null {
+/** Default local-attachment reader: an absolute path with an attachment extension, a regular file
+ *  of at most LOCAL_ATTACHMENT_MAX_BYTES, readable — else null (not an attachment), or { skipped }
+ *  when it is an attachment that can't be sent (too large, missing, unreadable), so the miss is
+ *  logged rather than silent. */
+export function defaultReadLocalImage(refPath: string): LocalAttachment | null {
+  if (!path.isAbsolute(refPath)) return null;
+  if (!LOCAL_ATTACHMENT_EXT.has(path.extname(refPath).toLowerCase())) return null;
+  // The path is resolved ONCE: open it, then stat and read that same descriptor, so the file checked is the file
+  // sent. O_NONBLOCK keeps the open from waiting on a FIFO (refused below as not a regular file), and the read is
+  // bounded by the size just checked.
+  let fd: number | null = null;
   try {
-    if (!path.isAbsolute(refPath)) return null;
-    if (!LOCAL_IMAGE_EXT.has(path.extname(refPath).toLowerCase())) return null;
-    const bytes = fs.readFileSync(refPath);
-    return { bytes: new Uint8Array(bytes), filename: path.basename(refPath) };
-  } catch {
-    return null;
+    fd = fs.openSync(refPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return { skipped: "not a regular file" };
+    if (st.size > LOCAL_ATTACHMENT_MAX_BYTES) {
+      return { skipped: `${st.size} bytes is over the ${LOCAL_ATTACHMENT_MAX_BYTES}-byte attachment cap` };
+    }
+    const bytes = new Uint8Array(st.size);
+    let read = 0;
+    while (read < bytes.length) {
+      const n = fs.readSync(fd, bytes, read, bytes.length - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    return { bytes: read === bytes.length ? bytes : bytes.subarray(0, read), filename: path.basename(refPath) };
+  } catch (e) {
+    return { skipped: `unreadable (${(e as NodeJS.ErrnoException).code ?? "error"})` };
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
   }
 }
 
@@ -160,6 +188,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
         qitemId: q.qitemId ?? decision.decisionId,
         summary: q.summary,
         body: q.body,
+        humanQuestions: q.humanQuestions,
         destinationSession: q.destinationSession ?? decision.entityBindingRef,
       },
       {
@@ -326,11 +355,14 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // into the conversation thread (files.upload is sunset). Upload failure is fail-VISIBLE
     // but does NOT fail the decision: the text delivered; failing here would replay the whole
     // post and duplicate the human notification (the H red). https refs already rode as Block
-    // Kit image blocks above; non-image/non-existent refs are a clean skip.
+    // Kit image blocks above; refs that are not attachments (e.g. a PROOF.md path) are a clean
+    // skip, and an attachment that can't be sent is logged.
     const local = q.evidenceRef && !/^https:\/\//.test(String(q.evidenceRef))
       ? (opts.readLocalImage ?? defaultReadLocalImage)(String(q.evidenceRef))
       : null;
-    if (local) {
+    if (local && "skipped" in local) {
+      log(`ATTACHMENT skipped for ${q.qitemId ?? decision.decisionId}: ${path.basename(String(q.evidenceRef))} ${local.skipped} (text delivered; attachment missing)`);
+    } else if (local) {
       const intoThread = threadTs ?? res.ts;
       const up = await getUploadURLExternal(opts.botToken, local.filename, local.bytes.length, opts.fetchImpl);
       if (up.ok && up.uploadUrl && up.fileId) {
@@ -338,7 +370,8 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
         if (put.ok) {
           const done = await completeUploadExternal(
             opts.botToken,
-            { files: [{ id: up.fileId, title: q.summary ?? local.filename }], channelId: opts.channel, threadTs: intoThread },
+            // #300: the title is shown in Slack like the text, so it gets the same secret redaction.
+            { files: [{ id: up.fileId, title: redactSecrets(q.summary ?? local.filename) }], channelId: opts.channel, threadTs: intoThread },
             opts.fetchImpl,
           );
           if (done.ok) log(`uploaded ${local.filename} into thread ${intoThread ?? "(root)"} for ${q.qitemId ?? decision.decisionId}`);
@@ -367,7 +400,7 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const parts = q.humanDetail
       ? [
           { ...q, humanDetail: undefined, body: `${q.body ?? ""}\n\nSupplemental detail follows in this thread.` },
-          { ...q, humanDetail: undefined, summary: `Supplemental detail: ${q.summary ?? ""}`, body: q.humanDetail, media: [], evidenceRef: null },
+          { ...q, humanDetail: undefined, humanQuestions: undefined, summary: `Supplemental detail: ${q.summary ?? ""}`, body: q.humanDetail, media: [], evidenceRef: null },
         ]
       : [q];
     const partId = (index: number) => parts.length === 1 ? decision.decisionId : `${decision.decisionId}:part:${index + 1}`;

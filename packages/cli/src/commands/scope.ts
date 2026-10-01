@@ -356,6 +356,13 @@ function buildSliceCreateCommand(): Command {
         const id = sliceIdFromMission(missionId, nn);
         const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
         for (const dependency of dependsOn) {
+          if (dependency === id) {
+            throw new ScopeCliError({
+              fact: `Slice ${id} cannot depend on itself.`,
+              consequence: "Slice not created.",
+              action: "Use a different sibling slice ID, or omit --depends-on.",
+            });
+          }
           if (!isSliceDotId(dependency) || !dependency.startsWith(`${missionId}.`)) {
             throw new ScopeCliError({
               fact: `Dependency "${dependency}" is not a sibling slice dot-ID under ${missionId}.`,
@@ -827,6 +834,13 @@ function buildMissionCreateCommand(): Command {
         const dependsOn = Array.isArray(opts.dependsOn) ? [...new Set(opts.dependsOn as string[])] : [];
         const project = id.split(".")[0];
         for (const dependency of dependsOn) {
+          if (dependency === id) {
+            throw new ScopeCliError({
+              fact: `Mission ${id} cannot depend on itself.`,
+              consequence: "Mission not created.",
+              action: "Use a different sibling mission ID, or omit --depends-on.",
+            });
+          }
           if (!isMissionDotId(dependency) || dependency.split(".")[0] !== project) {
             throw new ScopeCliError({
               fact: `Dependency "${dependency}" is not a sibling mission dot-ID in project ${project}.`,

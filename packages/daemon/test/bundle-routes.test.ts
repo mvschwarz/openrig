@@ -300,7 +300,7 @@ describe("Bundle API routes", () => {
     expect(body.digestValid).toBe(false);
   });
 
-  it.each([false, true])("saves a recovery bundle with durable unresolved-skill warnings (imported=%s)", async (imported) => {
+  it.each([false, true].flatMap(imported => ["missing", "dangling", "unreadable", "unreadable-file"].map(kind => ({ imported, kind }))))("saves a recovery bundle with durable unresolved-skill warnings (imported=$imported, kind=$kind)", async ({ imported, kind }) => {
     const agentDir = path.join(tmpDir, "agents", "impl");
     const skillAgentDir = imported ? path.join(agentDir, "shared") : agentDir;
     fs.mkdirSync(skillAgentDir, { recursive: true });
@@ -318,6 +318,13 @@ describe("Bundle API routes", () => {
         "resources:", "  skills: []", "profiles:", "  default:", "    uses:", "      skills: []",
       ].join("\n"));
     }
+    fs.mkdirSync(path.join(skillAgentDir, "skills"), { recursive: true });
+    if (kind === "dangling") fs.symlinkSync("absent-target", path.join(skillAgentDir, "skills/missing"));
+    if (kind === "unreadable" || kind === "unreadable-file") {
+      fs.mkdirSync(path.join(skillAgentDir, "skills/missing"));
+      fs.writeFileSync(path.join(skillAgentDir, "skills/missing/SKILL.md"), "# Private skill");
+      fs.chmodSync(path.join(skillAgentDir, kind === "unreadable" ? "skills/missing" : "skills/missing/SKILL.md"), 0o000);
+    }
     const specPath = path.join(tmpDir, "rig.yaml");
     fs.writeFileSync(specPath, [
       'version: "0.2"', "name: missing-skill-rig", "pods:", "  - id: dev", "    label: Dev",
@@ -332,13 +339,14 @@ describe("Bundle API routes", () => {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ specPath, bundleName: "missing-skill", bundleVersion: "0.1.0", outputPath, ...(imported ? {} : { provenance: { notes: "Operator recovery note" } }) }),
     });
+    if (kind === "unreadable" || kind === "unreadable-file") fs.chmodSync(path.join(skillAgentDir, kind === "unreadable" ? "skills/missing" : "skills/missing/SKILL.md"), 0o700);
     expect(res.status).toBe(201);
     const created = await res.json();
     const warnings = [
       'Agent "skill-owner" has unresolved declared skill "greet" at "skills/missing" (missing or inaccessible)',
       'Agent "skill-owner" has unresolved declared skill "review" at "skills/also-missing" (missing or inaccessible)',
     ];
-    expect(created.warning).toBe(warnings.join("; "));
+    expect(created.warning.split("; ").sort()).toEqual([...warnings].sort());
     const recoveryInspect = await app.request("/api/bundles/inspect", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundlePath: outputPath }),
     });
@@ -346,7 +354,7 @@ describe("Bundle API routes", () => {
     const recovery = await recoveryInspect.json();
     expect(recovery.digestValid).toBe(true);
     expect(recovery.integrityResult.passed).toBe(true);
-    const expectedNotes = `${imported ? "" : "Operator recovery note | "}${warnings.join("; ")}`;
+    const expectedNotes = `${imported ? "" : "Operator recovery note | "}${created.warning}`;
     expect(recovery.manifest.provenance.notes).toBe(expectedNotes);
 
     // The archive itself carries the caveat and surviving context for later recovery.
@@ -359,6 +367,7 @@ describe("Bundle API routes", () => {
     expect(fs.readFileSync(path.join(restoreDir, "agents/skill-owner/README.md"), "utf8")).toContain("Keep this local context");
     expect(fs.readFileSync(path.join(restoreDir, "agents/skill-owner/agent.yaml"), "utf8")).toContain("skills/also-missing");
 
+    if (kind === "dangling") fs.unlinkSync(path.join(skillAgentDir, "skills/missing"));
     // Existing skill directories remain valid, including skills owned by an imported agent.
     fs.mkdirSync(path.join(skillAgentDir, "skills/also-missing"), { recursive: true });
     fs.writeFileSync(path.join(skillAgentDir, "skills/also-missing/SKILL.md"), "# Review\nA complete review skill.");
@@ -381,6 +390,18 @@ describe("Bundle API routes", () => {
     // A genuinely invalid agent still fails before the finalized archive/digest are replaced.
     const previousArchive = fs.readFileSync(outputPath);
     const previousDigest = fs.readFileSync(`${outputPath}.sha256`);
+    // The missing-data exception is scoped to declared skills, never unrelated files.
+    fs.unlinkSync(path.join(skillAgentDir, "README.md"));
+    fs.symlinkSync("absent-readme", path.join(skillAgentDir, "README.md"));
+    const unrelated = await app.request("/api/bundles/create", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: "unrelated-error", bundleVersion: "0.1.0", outputPath }),
+    });
+    expect(unrelated.status).toBe(500);
+    expect(fs.readFileSync(outputPath)).toEqual(previousArchive);
+    expect(fs.readFileSync(`${outputPath}.sha256`)).toEqual(previousDigest);
+    fs.unlinkSync(path.join(skillAgentDir, "README.md"));
+    fs.writeFileSync(path.join(skillAgentDir, "README.md"), "# Surviving recovery context");
     fs.writeFileSync(path.join(agentDir, "agent.yaml"), "invalid: agent");
     const invalid = await app.request("/api/bundles/create", {
       method: "POST", headers: { "Content-Type": "application/json" },

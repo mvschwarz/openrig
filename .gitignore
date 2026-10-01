@@ -22,8 +22,14 @@ notes/*
 *.sqlite-wal
 *.sqlite.pre-reboot-backup
 .openrig/
-.claude
-.agents
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/developing-openrig/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/developing-openrig/
 .openrig
 .worktrees/
 

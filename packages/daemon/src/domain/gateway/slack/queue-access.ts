@@ -7,6 +7,7 @@
 
 import type { QueueRepository, QueueItem as RepoQueueItem } from "../../queue-repository.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult, type HumanFragment } from "../human-registry.js";
+import type { HumanQuestion } from "../../human-questions.js";
 import { ownerNotificationLevelAtLeast, type OwnerNotificationLevel, type QueueTransition } from "../../queue-transition-log.js";
 
 /** The narrow projection the slack path consumes (shape-compatible with the retired bridge's
@@ -20,6 +21,8 @@ export interface QueueItem {
   tier?: string | null;
   humanIntent?: "decision" | "update" | null;
   humanDetail?: string | null;
+  replyTo?: string | null;
+  humanQuestions?: HumanQuestion[] | null;
   summary?: string | null;
   body?: string | null;
   evidenceRef?: string | null;
@@ -87,6 +90,8 @@ function project(q: RepoQueueItem, transition: QueueTransition, entities: readon
     tier: (r.tier as string | null) ?? null,
     humanIntent: q.humanIntent,
     humanDetail: q.humanDetail,
+    replyTo: q.replyTo ?? null,
+    humanQuestions: q.humanQuestions ?? null,
     summary: (r.summary as string | null) ?? null,
     body: (r.body as string | null) ?? null,
     evidenceRef: (r.evidenceRef as string | null) ?? null,

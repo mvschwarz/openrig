@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createProgram } from "../src/index.js";
 import { Command } from "commander";
 import {
+  UI_DISABLED_GUIDANCE,
   UI_MAINTENANCE_NOTICE,
   uiCommand,
   type UiDeps,
@@ -54,6 +55,8 @@ function runningDeps(port: number, execFn?: UiDeps["exec"]): UiDeps {
       fetch: vi.fn(async () => ({ ok: true })),
     }),
     exec: execFn ?? vi.fn(async () => {}),
+    // The daemon serves the UI unless a test says otherwise; no test reaches a real port.
+    probeUi: vi.fn(async () => ({ status: 200, headers: new Headers({ "content-type": "text/html" }) })),
   };
 }
 
@@ -246,5 +249,35 @@ describe("rig ui open", () => {
       if (prev === undefined) delete process.env["OPENRIG_UI_URL"];
       else process.env["OPENRIG_UI_URL"] = prev;
     }
+  });
+
+  it("daemon serving the UI off -> prints the enable and restart steps, exits 1, opens nothing", async () => {
+    const execFn = vi.fn(async () => {});
+    const deps = runningDeps(8888, execFn);
+    deps.probeUi = vi.fn(async () => ({ status: 404, headers: new Headers({ "x-openrig-web-ui": "off" }) }));
+    const prior = process.exitCode;
+    process.exitCode = undefined;
+    const program = new Command();
+    program.addCommand(uiCommand(deps));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]).then(() => undefined));
+    expect(process.exitCode).toBe(1);
+    process.exitCode = prior;
+    expect(deps.probeUi).toHaveBeenCalledWith("http://127.0.0.1:8888");
+    expect(execFn).not.toHaveBeenCalled();
+    expect(logs).toContain(UI_DISABLED_GUIDANCE);
+    expect(UI_DISABLED_GUIDANCE).toContain("rig config set ui.enabled true");
+    expect(UI_DISABLED_GUIDANCE).toMatch(/rig daemon stop.*rig daemon start/);
+    expect(logs).not.toContain("http://127.0.0.1:8888");
+  });
+
+  it("an unanswered UI probe opens the URL as before", async () => {
+    const execFn = vi.fn(async () => {});
+    const deps = runningDeps(8888, execFn);
+    deps.probeUi = vi.fn(async () => { throw new Error("connection refused"); });
+    const program = new Command();
+    program.addCommand(uiCommand(deps));
+    const logs = await captureLogs(() => program.parseAsync(["node", "rig", "ui", "open"]).then(() => undefined));
+    expect(execFn).toHaveBeenCalledWith("open", ["http://127.0.0.1:8888"]);
+    expect(logs).not.toContain(UI_DISABLED_GUIDANCE);
   });
 });

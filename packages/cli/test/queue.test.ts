@@ -141,6 +141,25 @@ describe("rig queue CLI", () => {
     }
   });
 
+  it("create --human-questions-file sends the parsed questions; unreadable JSON is refused before any request", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "queue-human-questions-"));
+    const file = path.join(directory, "questions.json");
+    const questions = [{ id: "db", question: "Which database?", options: [{ id: "pg", label: "Postgres", recommended: true }, { id: "sqlite", label: "SQLite" }] }];
+    fs.writeFileSync(file, JSON.stringify(questions));
+    const broken = path.join(directory, "broken.json");
+    fs.writeFileSync(broken, "{ not json");
+    try {
+      const { deps, calls } = makeDeps();
+      await createProgram({ queueDeps: deps }).parseAsync(["node", "rig", "queue", "create", "--destination", "human-founder@external", "--body", "Pick one.", "--human-intent", "decision", "--human-questions-file", file, "--json"]);
+      expect(calls.find((c) => c.path === "/api/queue/create")?.body).toMatchObject({ humanIntent: "decision", humanQuestions: questions });
+
+      const again = makeDeps();
+      await createProgram({ queueDeps: again.deps }).parseAsync(["node", "rig", "queue", "create", "--destination", "human-founder@external", "--body", "Pick one.", "--human-intent", "decision", "--human-questions-file", broken, "--json"]);
+      expect(process.exitCode).toBe(1);
+      expect(again.calls.find((c) => c.path === "/api/queue/create")).toBeUndefined();
+    } finally { process.exitCode = undefined; fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+
   // Slice-03 Atom 6b — --body-context snapshot + provenance rule.
   it("create preserves explicit human intent and authored supplemental file bytes", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "queue-human-detail-"));
@@ -152,6 +171,37 @@ describe("rig queue CLI", () => {
       await createProgram({ queueDeps: deps }).parseAsync(["node", "rig", "queue", "create", "--destination", "human-founder@external", "--body", "No action needed.", "--human-intent", "update", "--human-detail-file", file, "--json"]);
       expect(calls.find((c) => c.path === "/api/queue/create")?.body).toMatchObject({ humanIntent: "update", humanDetail: detail, body: "No action needed." });
     } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  // #96 — --reply-to posts an update into an earlier item's Slack thread.
+  it("create --reply-to without --human-intent update fails locally with a named error and never contacts the daemon", async () => {
+    const { deps, calls } = makeDeps();
+    await createProgram({ queueDeps: deps }).parseAsync(["node", "rig", "queue", "create", "--destination", "human-founder@external", "--body", "Merged.", "--reply-to", "qitem-earlier", "--json"]);
+    expect(process.exitCode).toBe(1);
+    expect(errors.join("\n")).toMatch(/reply_to_requires_update/);
+    expect(calls.filter((c) => c.path === "/api/queue/create")).toHaveLength(0);
+    process.exitCode = 0;
+  });
+
+  it("create --reply-to with --human-intent update sends replyTo", async () => {
+    const { deps, calls } = makeDeps();
+    await createProgram({ queueDeps: deps }).parseAsync(["node", "rig", "queue", "create", "--destination", "human-founder@external", "--body", "Merged.", "--human-intent", "update", "--reply-to", "qitem-earlier", "--json"]);
+    expect(calls.find((c) => c.path === "/api/queue/create")?.body).toMatchObject({ humanIntent: "update", replyTo: "qitem-earlier" });
+  });
+
+  it("delivery verification names a --reply-to fallback to a top-level post", async () => {
+    const result = await waitForDeliveryOutcome(
+      { get: async <T>() => ({ status: 200, data: { deliveryOutcome: "posted", replyTo: "qitem-earlier", replyToFallback: "root-missing (qitem-earlier)" } as T }) },
+      "qitem-update",
+    );
+    expect(result).toMatchObject({ outcome: "posted", connectorAccepted: true, threaded: false });
+    expect(result.detail).toMatch(/top-level.*root-missing/);
+    const threaded = await waitForDeliveryOutcome(
+      { get: async <T>() => ({ status: 200, data: { deliveryOutcome: "posted", replyTo: "qitem-earlier", replyToFallback: null } as T }) },
+      "qitem-update",
+    );
+    expect(threaded).toMatchObject({ outcome: "posted", threaded: true });
+    expect(threaded.detail).toBeUndefined();
   });
 
   it("create --body-context snapshots the RESOLVED content as the body + a provenance tag", async () => {

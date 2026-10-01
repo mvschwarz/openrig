@@ -58,7 +58,7 @@ export class SnapshotRepository {
    * pre_restore, and auto-rehydrate remain below the tier (unchanged).
    *
    * The SQL query orders by `(kind IN ('auto-pre-down','auto-periodic')) DESC,
-   * created_at DESC, id DESC`. The in-memory loop validates each candidate and
+   * created_at DESC, rowid DESC`. The in-memory loop validates each candidate and
    * skips snapshots with corrupted JSON or missing topology metadata, returning
    * the first usable row. Returns null when no usable snapshot exists.
    *
@@ -71,7 +71,7 @@ export class SnapshotRepository {
   findLatestRestoreUsable(rigId: string): Snapshot | null {
     const rows = this.db
       .prepare(
-        "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic')) DESC, created_at DESC, id DESC"
+        "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic')) DESC, created_at DESC, rowid DESC"
       )
       .all(rigId) as SnapshotRow[];
 
@@ -107,16 +107,20 @@ export class SnapshotRepository {
       if (!snapshot) return { ok: false, code: "no_usable_snapshot", message: `No usable snapshot for rig ${rigId}` };
     }
 
-    // Restore tolerates a damaged snapshot without making generic list/get
-    // silently omit corrupt audit rows. Alternative discovery has the same guard.
-    const candidates = this.db.prepare("SELECT * FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC")
+    // Equal second-resolution timestamps still have an insertion order. Scan
+    // only newer rows, retaining restore's tolerant parse for damaged captures.
+    const candidates = this.db.prepare("SELECT * FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC, rowid DESC")
       .all(rigId) as SnapshotRow[];
-    const newer = candidates.flatMap((row) => {
+    const selectedIndex = candidates.findIndex((candidate) => candidate.id === snapshot!.id);
+    // A concurrent pruner can remove the selected row after it was read. Its
+    // insertion position is then unknown, so only strictly newer timestamps count.
+    const newerRows = selectedIndex < 0
+      ? candidates.filter((row) => Date.parse(sqliteUtc(row.created_at)) > Date.parse(sqliteUtc(snapshot!.createdAt)))
+      : candidates.slice(0, selectedIndex);
+    const newer = newerRows.flatMap((row) => {
       const candidate = this.restoreUsableRow(row);
       return candidate ? [candidate] : [];
     })
-      .filter((candidate) => candidate.id !== snapshot!.id)
-      .filter((candidate) => Date.parse(sqliteUtc(candidate.createdAt)) > Date.parse(sqliteUtc(snapshot!.createdAt)))
       .find((candidate) => isRestoreUsableSnapshotData(candidate.data));
     const mode = snapshotId ? "explicit" as const : "automatic" as const;
     return {
@@ -151,7 +155,7 @@ export class SnapshotRepository {
       params.push(opts.kind);
     }
 
-    sql += " ORDER BY created_at DESC";
+    sql += " ORDER BY created_at DESC, rowid DESC";
 
     if (opts?.limit) {
       sql += " LIMIT ?";

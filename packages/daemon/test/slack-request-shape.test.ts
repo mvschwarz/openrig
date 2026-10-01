@@ -5,14 +5,16 @@
 //
 // The committed discriminators pin the REQUEST SHAPE (method, URL/query, headers, body absence)
 // and the EFFECT (verifyChannelMembership returns the correct is_member from the supported
-// shape) — while the JSON-POST family (auth.test, apps.connections.open, chat.postMessage,
-// files.completeUploadExternal) stays byte-identically POST.
+// shape) — while the JSON-POST family (auth.test, apps.connections.open, chat.postMessage)
+// stays byte-identically POST. The external-upload methods are form-encoded POSTs (see the end).
 import { describe, it, expect } from "vitest";
 import {
   verifyChannelMembership,
   fetchRecentMessageTexts,
   getGrantedScopes,
   postChatMessage,
+  getUploadURLExternal,
+  completeUploadExternal,
   type FetchImpl,
 } from "../src/domain/gateway/slack/slack-api.js";
 
@@ -104,5 +106,40 @@ describe("request shape — the JSON-POST family is UNDISTURBED", () => {
     expect(r.ok).toBe(true);
     expect(calls[0]!.method).toBe("POST");
     expect(JSON.parse(calls[0]!.body ?? "{}").channel).toBe("C-MEMBER");
+  });
+});
+
+describe("external-upload methods are form-encoded POSTs (files.getUploadURLExternal rejects JSON)", () => {
+  function capture(): { fetchImpl: FetchImpl; calls: Captured[] } {
+    const calls: Captured[] = [];
+    return {
+      calls,
+      fetchImpl: async (url, init) => {
+        const headers = Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>).map(([k, v]) => [k.toLowerCase(), v]));
+        calls.push({ url, method: (init?.method ?? "GET").toUpperCase(), headers, body: init?.body === undefined ? undefined : String(init.body) });
+        const form = headers["content-type"]?.startsWith("application/x-www-form-urlencoded");
+        const ok = !url.endsWith("files.getUploadURLExternal") || form; // live: a JSON body is invalid_arguments
+        return new Response(JSON.stringify(ok ? { ok: true, upload_url: "https://files.slack.invalid/u", file_id: "F1" } : { ok: false, error: "invalid_arguments" }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      },
+    };
+  }
+
+  it("getUploadURLExternal: POST, url-encoded filename and length, bearer token", async () => {
+    const { fetchImpl, calls } = capture();
+    expect(await getUploadURLExternal("xoxb-T", "clip.mp4", 4096, fetchImpl)).toEqual({ ok: true, uploadUrl: "https://files.slack.invalid/u", fileId: "F1" });
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.url).toBe("https://slack.com/api/files.getUploadURLExternal");
+    expect(calls[0]!.headers["content-type"]).toBe("application/x-www-form-urlencoded; charset=utf-8");
+    expect(calls[0]!.headers.authorization).toBe("Bearer xoxb-T");
+    expect(calls[0]!.body).toBe("filename=clip.mp4&length=4096");
+  });
+
+  it("completeUploadExternal: url-encoded, files as a JSON string, channel and thread", async () => {
+    const { fetchImpl, calls } = capture();
+    const files = [{ id: "F1", title: "proof" }];
+    expect((await completeUploadExternal("xoxb-T", { files, channelId: "C1", threadTs: "1.2", initialComment: "see" }, fetchImpl)).ok).toBe(true);
+    expect(calls[0]!.headers["content-type"]).toBe("application/x-www-form-urlencoded; charset=utf-8");
+    expect(Object.fromEntries(new URLSearchParams(calls[0]!.body))).toEqual({ files: JSON.stringify(files), channel_id: "C1", thread_ts: "1.2", initial_comment: "see" });
   });
 });

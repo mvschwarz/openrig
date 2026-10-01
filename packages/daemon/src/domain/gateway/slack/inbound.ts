@@ -16,6 +16,8 @@ import type { SeenStore, DeadLetterStore, DeadLetterEntry } from "./state-store.
 import type { InboundQueuePort } from "./queue-access.js";
 import { createHash } from "node:crypto";
 import { ADMITTED_EVENT_TYPES } from "./capabilities.js";
+import { escapeSlackText, parseQuestionAction, redactSecrets } from "./message.js";
+import { formatHumanAnswers, unansweredQuestions, type RecordHumanAnswerResult } from "../../human-questions.js";
 
 export interface SlackEvent {
   type?: string;
@@ -31,6 +33,26 @@ export interface SlackEvent {
   channel?: string;
   files?: unknown[];
 }
+
+/** #193 — the parts of a Socket Mode `block_actions` payload (a button click) we read. */
+export interface SlackBlockActions {
+  type?: string;
+  user?: { id?: string };
+  channel?: { id?: string };
+  container?: { message_ts?: string; thread_ts?: string; channel_id?: string };
+  message?: { ts?: string; thread_ts?: string };
+  actions?: Array<{ block_id?: string; action_id?: string; value?: string; action_ts?: string }>;
+}
+
+export type RecordHumanAnswer = (input: { qitemId: string; actorSession: string; questionId: string; optionId: string }) => RecordHumanAnswerResult;
+
+/** The root message a click was made on: buttons live on the decision's root post, whose ts is
+ *  the thread map's key (a click inside a thread would carry that thread's root instead). */
+export function clickedRootTs(payload: SlackBlockActions): string | undefined {
+  return payload.container?.thread_ts ?? payload.message?.thread_ts ?? payload.container?.message_ts ?? payload.message?.ts;
+}
+
+export type InboundDisposition = "accepted" | "ignored" | "refused" | "dead-lettered" | "handler-failed";
 
 /**
  * Loop-safety + non-ingestible ignore. Ingest genuine human messages — text,
@@ -97,6 +119,13 @@ export interface InboundDeps {
   resolveRoute?: (ev: SlackEvent) => { destination: string; tags?: string[]; correlationQitemId?: string };
   /** Continue an exact human gate through the existing Mission Control resolve primitive. */
   resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string }) => Promise<"resolved" | "already-resolved" | "not-applicable">;
+  /** #193 — record a clicked answer on the decision the clicked message belongs to. */
+  recordHumanAnswer?: RecordHumanAnswer;
+  /** #193 — clicks whose continuation (reply row + resolve) failed; retried with the event
+   *  dead-letters. Absent → a failed click is only logged. */
+  actionDeadLetter?: DeadLetterStore<SlackBlockActions>;
+  /** #193 — tell the human in the decision's thread what a click did. Best-effort. */
+  acknowledgeAnswer?: (input: { channel?: string; threadTs: string; text: string }) => Promise<void>;
   /** OPR.0.5.6.2 — inbound file transfer. Absent with a file-bearing event →
    *  every file is a NAMED failure on the row ("transfer unavailable"), never
    *  a silent drop of message or file. */
@@ -256,6 +285,81 @@ export class InboundRouter {
   }
 
   /**
+   * #193 — a button click on a decision's structured questions. The clicked message is the
+   * decision's root, so the same thread map a typed reply uses names the decision and its seat
+   * (never the button's own ids, which only pick the question and option). Each click records
+   * one answer; once the set is complete the answers are final, and the continuation lands one
+   * reply row on the seat and resolves the decision, exactly like a typed reply. The reply row's
+   * id is derived from the decision, so a redelivered click or a retry finds the same row. A
+   * failed continuation is dead-lettered and retried like a typed reply that failed to land.
+   */
+  async routeAction(payload: SlackBlockActions): Promise<{ status: InboundDisposition; reason?: string }> {
+    const r = await this.attemptAction(payload, true);
+    if (r.status === "handler-failed") this.deps.actionDeadLetter?.append(payload, 1);
+    return r;
+  }
+
+  private async attemptAction(payload: SlackBlockActions, live: boolean): Promise<{ status: InboundDisposition; reason?: string }> {
+    const action = payload.actions?.[0];
+    const picked = parseQuestionAction(action?.block_id, action?.action_id);
+    if (!picked) return { status: "ignored", reason: "not-a-question-button" };
+    const who = this.deps.resolveSender(payload.user?.id ?? "");
+    if (!who.admitted) {
+      this.deps.log?.(`click REFUSED — unregistered sender ${payload.user?.id}: ${who.teaching}`);
+      return { status: "refused", reason: "unregistered" };
+    }
+    const rootTs = clickedRootTs(payload);
+    const route = rootTs ? this.deps.resolveRoute?.({ type: "message", thread_ts: rootTs, channel: payload.channel?.id }) : undefined;
+    const qitemId = route?.correlationQitemId;
+    if (!rootTs || !route || !qitemId) return { status: "ignored", reason: "unmapped-message" };
+    const recorded = this.deps.recordHumanAnswer?.({ qitemId, actorSession: who.source, ...picked });
+    if (!recorded || recorded.status !== "recorded") {
+      return { status: "ignored", reason: recorded?.reason ?? "answers-unavailable" };
+    }
+    const acknowledge = async (text: string) => {
+      try {
+        await this.deps.acknowledgeAnswer?.({ channel: payload.channel?.id, threadTs: rootTs, text });
+      } catch (e) {
+        this.deps.log?.(`answer acknowledgement failed qitem=${qitemId}: ${(e as Error).message}`);
+      }
+    };
+    const lines = formatHumanAnswers(recorded.questions, recorded.answers);
+    if (!recorded.complete) {
+      this.deps.log?.(`answer recorded qitem=${qitemId} question=${picked.questionId}`);
+      const [just] = formatHumanAnswers(recorded.questions.filter((q) => q.id === picked.questionId), recorded.answers);
+      const waiting = unansweredQuestions(recorded.questions, recorded.answers).map((q) => q.question);
+      if (live) await acknowledge(escapeSlackText(redactSecrets(`Recorded: ${just}. Still to answer: ${waiting.join("; ")}`)));
+      return { status: "accepted", reason: "answer-recorded" };
+    }
+    let resolution: "resolved" | "already-resolved" | "not-applicable" | undefined;
+    try {
+      await this.deps.queue.createQitem({
+        qitemId: `qitem-slack-answers-${createHash("sha256").update(qitemId).digest("hex").slice(0, 20)}`,
+        source: who.source,
+        destination: route.destination,
+        priority: "routine",
+        tags: [...route.tags ?? ["founder-slack", "inbound"], "human-answer"],
+        summary: `Founder via Slack: answered ${lines.length === 1 ? "1 question" : `${lines.length} questions`}`,
+        body: `${lines.join("\n")}\n\n---\nAnswers (question id → option id): ${JSON.stringify(recorded.answers)}\nIn reply to: ${qitemId} (its humanAnswers field holds the same)\nRouted by openrig slack-inbound (button click).`,
+      });
+      resolution = await this.deps.resolveHumanReply?.({ qitemId, actorSession: who.source, decision: lines.join("; ") });
+    } catch (e) {
+      this.deps.log?.(`answer continuation failed qitem=${qitemId}: ${(e as Error).message}`);
+      if (live) await acknowledge("Your answers are recorded, but handing them back failed. OpenRig will retry.");
+      return { status: "handler-failed", reason: "answer-continuation-failed" };
+    }
+    if (resolution === "not-applicable") {
+      // The reply row reached the seat, but the decision did not close: say so on the log and
+      // the receipt instead of reporting success. Retrying cannot change this outcome.
+      this.deps.log?.(`answers complete but resolve not applicable qitem=${qitemId}`);
+      return { status: "refused", reason: "resolve-not-applicable" };
+    }
+    this.deps.log?.(`answers complete qitem=${qitemId} -> ${route.destination}`);
+    if (resolution === "resolved") await acknowledge(escapeSlackText(redactSecrets(`All answered, sent back: ${lines.join("; ")}`)));
+    return { status: "accepted", reason: "answers-complete" };
+  }
+
+  /**
    * INTERRUPTION-SAFE retry (item 8): read the durable set NON-destructively,
    * attempt each, then ATOMICALLY replace the file with only the still-failing
    * entries. The original file stays intact until the atomic replace, so a crash
@@ -264,7 +368,7 @@ export class InboundRouter {
    */
   async retryDeadLetters(): Promise<{ retried: number; landed: number }> {
     const entries = this.deps.deadLetter.readAll();
-    if (entries.length === 0) return { retried: 0, landed: 0 };
+    if (entries.length === 0) return this.retryActionDeadLetters();
     this.deps.log?.(`retrying ${entries.length} dead-letter(s)`);
     const stillFailing: DeadLetterEntry<SlackEvent>[] = [];
     let landed = 0;
@@ -277,6 +381,24 @@ export class InboundRouter {
       // reason === "dup" (in-flight) → drop; a concurrent path owns it
     }
     this.deps.deadLetter.replaceAll(stillFailing); // atomic; original intact until here
+    const actions = await this.retryActionDeadLetters();
+    return { retried: entries.length + actions.retried, landed: landed + actions.landed };
+  }
+
+  /** #193 — retry dead-lettered clicks. Same interruption-safe shape as the event retry:
+   *  read, attempt each, then atomically keep only the ones still failing. */
+  private async retryActionDeadLetters(): Promise<{ retried: number; landed: number }> {
+    const store = this.deps.actionDeadLetter;
+    const entries = store?.readAll() ?? [];
+    if (!store || entries.length === 0) return { retried: 0, landed: 0 };
+    const stillFailing: DeadLetterEntry<SlackBlockActions>[] = [];
+    let landed = 0;
+    for (const e of entries) {
+      const r = await this.attemptAction(e.ev, false);
+      if (r.status === "handler-failed") stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 });
+      else if (r.status === "accepted") landed++;
+    }
+    store.replaceAll(stillFailing);
     return { retried: entries.length, landed };
   }
 }
@@ -285,7 +407,7 @@ export interface SocketEnvelope {
   envelope_id?: string;
   type?: string;
   reason?: string;
-  payload?: { event?: SlackEvent };
+  payload?: { event?: SlackEvent } & SlackBlockActions;
 }
 
 /**
@@ -300,10 +422,15 @@ export async function handleEnvelope(
   router: InboundRouter,
   log?: (m: string) => void,
   onReceived?: () => void,
-): Promise<{ status: "accepted" | "ignored" | "refused" | "dead-lettered"; reason?: string }> {
+): Promise<{ status: InboundDisposition; reason?: string }> {
   if (env.envelope_id) ack(); // fast-ack, unconditional, first
   onReceived?.(); // diagnostic receipt follows ACK but precedes every handler filter
   if (env.type === "disconnect") return { status: "ignored", reason: "disconnect" };
+  if (env.type === "interactive") {
+    // #193 — a button click. Other interactive payloads (shortcuts, modals) are not ours.
+    if (env.payload?.type !== "block_actions") return { status: "ignored", reason: "interactive-type" };
+    return router.routeAction(env.payload);
+  }
   if (env.type !== "events_api") return { status: "ignored", reason: "envelope-type" };
   const ev = env.payload?.event ?? {};
   const decision = ingestDecision(ev);

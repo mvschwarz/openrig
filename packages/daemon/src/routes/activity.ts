@@ -251,7 +251,7 @@ activityRoutes.post("/hooks", async (c) => {
     // Auto-declare on first hook evidence (and after a swap cleared the inventory):
     // the runtime's inventory sets each rung's INITIAL trust (claude standing, codex
     // hooks-at-trial per AM-2) — a successor's rungs always start unpromoted.
-    if (!oracle.hasRungInventory(emitted.nodeId)) {
+    if (!oracle.hasRungInventory(emitted.nodeId, emitted.sessionName)) {
       oracle.declareRungInventory(
         { seatNodeId: emitted.nodeId, sessionName: emitted.sessionName },
         runtimeRungInventory(runtime),

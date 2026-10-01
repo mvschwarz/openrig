@@ -74,7 +74,7 @@ interface RunningSeatRow {
 
 export interface SeatIdentityReconcilerDeps {
   db: Database.Database;
-  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand">;
+  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses">>;
   now?: () => Date;
   listProcesses?: NativeProcessLister;
 }
@@ -182,8 +182,17 @@ export class SeatIdentityReconciler {
     }
     const sample = async () => {
       let snapshot: ReturnType<NativeProcessLister> | undefined;
+      // One list-panes per sample (each sample stays a fresh, independent observation); per-pane on a miss. The
+      // observers get the adapter itself with only getPanePid served from that batch.
+      let panesNow: Promise<Map<string, { pid: number; command: string | null }> | null> | undefined;
+      const tmux = Object.assign(Object.create(this.tmux) as typeof this.tmux, {
+        getPanePid: async (target: string) => {
+          panesNow ??= this.tmux.readAllPaneProcesses ? this.tmux.readAllPaneProcesses().catch(() => null) : Promise.resolve(null);
+          return (await panesNow)?.get(target)?.pid ?? this.tmux.getPanePid(target);
+        },
+      });
       return Promise.all(nativeSeats.map((seat) => (seat.runtime === "codex" ? observeCodexPaneProcess : observeClaudePaneProcess)({
-        target: seat.tmux_pane!, tmux: this.tmux, expectedToken: seat.resume_token,
+        target: seat.tmux_pane!, tmux, expectedToken: seat.resume_token,
         listProcesses: () => snapshot ??= this.listProcesses(),
       })));
     };
@@ -193,9 +202,14 @@ export class SeatIdentityReconciler {
     if (generation !== this.generation) return;
     const nativeProofs = new Map(nativeSeats.map((seat, index) => [seat.node_id,
       first[index] && first[index]?.fingerprint === second[index]?.fingerprint ? second[index]! : null]));
+    let panes: Map<string, { pid: number; command: string | null }> | null = null;
+    if (this.tmux.readAllPaneProcesses) {
+      try { panes = await this.tmux.readAllPaneProcesses(); } catch { panes = null; }
+      if (generation !== this.generation) return;
+    }
     for (const seat of seats) {
       try {
-        const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null);
+        const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null, panes);
         if (generation !== this.generation) return;
         this.store.upsert(verdict);
       } catch {
@@ -224,6 +238,7 @@ export class SeatIdentityReconciler {
     liveSessions: Set<string>,
     observedAt: string,
     native: NativeProcessObservation | null,
+    panes: Map<string, { pid: number; command: string | null }> | null = null,
   ): Promise<SeatIdentityVerdict> {
     const base = {
       nodeId: seat.node_id,
@@ -253,7 +268,9 @@ export class SeatIdentityReconciler {
       };
     }
 
-    const pid = await this.tmux.getPanePid(seat.tmux_pane);
+    // From the sweep's one batched list-panes when the pane is in it; otherwise read per pane as before.
+    const batched = panes?.get(seat.tmux_pane) ?? null;
+    const pid = batched ? batched.pid : await this.tmux.getPanePid(seat.tmux_pane);
     if (pid === null) {
       // The registered pane no longer resolves. Distinguish "the whole tmux
       // session is gone" from "the pane within a live session is gone".
@@ -267,7 +284,7 @@ export class SeatIdentityReconciler {
       };
     }
 
-    const command = await this.tmux.getPaneCommand(seat.tmux_pane);
+    const command = batched ? batched.command : await this.tmux.getPaneCommand(seat.tmux_pane);
     if (command === null && seat.runtime === "claude-code" && seat.resume_token) {
       return this.tmuxUnavailableVerdict(seat, observedAt);
     }

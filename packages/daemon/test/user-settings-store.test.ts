@@ -112,6 +112,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "health.context_pressure.critical_percent",
       "files.allowlist", "progress.scan_roots",
       "ui.preview.refresh_interval_seconds", "ui.preview.max_pins", "ui.preview.default_lines", "ui.timezone",
+      "ui.enabled",
       // OPR.0.4.0.1 — global live-terminal cap.
       "ui.terminal.max_live_terminals",
       "recovery.auto_drive_provider_prompts",

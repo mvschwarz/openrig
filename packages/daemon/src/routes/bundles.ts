@@ -349,7 +349,21 @@ function podAssemblerFsOps(): PodAssemblerFsOps {
     readFileBuffer: (p) => fs.readFileSync(p),
     writeFile: (p, c) => fs.writeFileSync(p, c),
     exists: (p) => fs.existsSync(p),
-    listFiles: (dir) => realFsOps().listFiles!(dir),
+    listFiles: (dir, onReadError) => {
+      const files: string[] = [];
+      const walk = (directory: string, prefix: string): void => {
+        let entries: fs.Dirent[];
+        try { entries = fs.readdirSync(directory, { withFileTypes: true }); }
+        catch (error) { if (onReadError?.(directory, error)) return; throw error; }
+        for (const entry of entries) {
+          const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+          if (entry.isDirectory()) walk(nodePath.join(directory, entry.name), relative);
+          else files.push(relative);
+        }
+      };
+      walk(dir, "");
+      return files;
+    },
   };
 }
 

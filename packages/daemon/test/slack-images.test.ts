@@ -2,8 +2,12 @@
 // Hermetic, fixture-backed: the three legs (getUploadURLExternal → byte POST → complete with
 // thread_ts) are captured at the fetch boundary. The live phone render is the named external
 // door; these receipts prove the mechanical path.
-import { describe, it, expect } from "vitest";
-import { subsystemSlackDeliver, isHttpsImageRef, evidenceAttachment } from "../src/domain/gateway/slack/slack-delivery.js";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { subsystemSlackDeliver, isHttpsImageRef, evidenceAttachment, defaultReadLocalImage, LOCAL_ATTACHMENT_MAX_BYTES } from "../src/domain/gateway/slack/slack-delivery.js";
 import { SeenStore, type StateFsOps } from "../src/domain/gateway/slack/state-store.js";
 import type { OutboundDecision } from "../src/domain/gateway/protocol.js";
 import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
@@ -27,10 +31,17 @@ function slackFetch(failLeg?: "get-url" | "put" | "complete"): { fetchImpl: Fetc
     calls,
     fetchImpl: async (url, init) => {
       const headers = (init?.headers ?? {}) as Record<string, string>;
-      const isBytes = headers["content-type"] === "application/octet-stream";
-      calls.push({ url, contentType: headers["content-type"], body: isBytes ? `<${(init?.body as Uint8Array).length} bytes>` : JSON.parse(String(init?.body ?? "{}")) });
+      const contentType = headers["content-type"];
+      const isBytes = contentType === "application/octet-stream";
+      const isForm = contentType?.startsWith("application/x-www-form-urlencoded") ?? false;
+      const body = isBytes
+        ? `<${(init?.body as Uint8Array).length} bytes>`
+        : isForm ? Object.fromEntries(new URLSearchParams(String(init?.body ?? ""))) : JSON.parse(String(init?.body ?? "{}"));
+      calls.push({ url, contentType, body });
       if (url.endsWith("files.getUploadURLExternal")) {
         if (failLeg === "get-url") return new Response(JSON.stringify({ ok: false, error: "not_allowed" }), { status: 200, headers: { "content-type": "application/json" } });
+        // Live Slack reads this method's form fields only: a JSON body is "invalid_arguments".
+        if (!isForm) return new Response(JSON.stringify({ ok: false, error: "invalid_arguments" }), { status: 200, headers: { "content-type": "application/json" } });
         return new Response(JSON.stringify({ ok: true, upload_url: "https://files.slack.invalid/put/abc", file_id: "F-ID-1" }), { status: 200, headers: { "content-type": "application/json" } });
       }
       if (url === "https://files.slack.invalid/put/abc") {
@@ -73,15 +84,16 @@ describe("S10 outbound images — external-upload flow (founder screenshot class
     const urls = calls.map((c) => c.url);
     expect(urls[0]).toBe("https://slack.com/api/chat.postMessage"); // text first — the thread anchor
     expect(urls[1]).toBe("https://slack.com/api/files.getUploadURLExternal");
-    expect((calls[1]!.body as Record<string, unknown>).filename).toBe("founder-shot.png");
-    expect((calls[1]!.body as Record<string, unknown>).length).toBe(2048);
+    expect(calls[1]!.contentType).toBe("application/x-www-form-urlencoded; charset=utf-8");
+    expect(calls[1]!.body).toEqual({ filename: "founder-shot.png", length: "2048" });
     expect(urls[2]).toBe("https://files.slack.invalid/put/abc");
     expect(calls[2]!.contentType).toBe("application/octet-stream");
     expect(urls[3]).toBe("https://slack.com/api/files.completeUploadExternal");
-    const complete = calls[3]!.body as Record<string, unknown>;
+    expect(calls[3]!.contentType).toBe("application/x-www-form-urlencoded; charset=utf-8");
+    const complete = calls[3]!.body as Record<string, string>;
     expect(complete.channel_id).toBe("C-TEST");
     expect(complete.thread_ts).toBe("9000.1"); // attached into the posted root's thread
-    expect((complete.files as { id: string }[])[0]!.id).toBe("F-ID-1");
+    expect(JSON.parse(complete.files!)).toEqual([{ id: "F-ID-1", title: "screenshot" }]);
     // no dead files.upload call anywhere
     expect(urls.some((u) => u.endsWith("/files.upload"))).toBe(false);
   });
@@ -108,6 +120,82 @@ describe("S10 outbound images — external-upload flow (founder screenshot class
       expect(out.ok).toBe(true); // the text delivered; failing the decision would repost it
       expect(logs.join("\n")).toMatch(/ATTACHMENT .* FAILED .*text delivered; attachment missing/);
     }
+  });
+});
+
+describe("local attachments: images, video and PDF from disk, size-capped, misses logged", () => {
+  let dir: string;
+  beforeAll(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), "slack-attach-")); });
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = (name: string, bytes = 1) => { const p = path.join(dir, name); fs.writeFileSync(p, Buffer.alloc(bytes, 1)); return p; };
+  function deliverWithDefaultReader(fetchImpl: FetchImpl, logs: string[]) {
+    const fsx = memFs();
+    return subsystemSlackDeliver({
+      botToken: "xoxb-EXAMPLE-fake", channel: "C-TEST", sourceLabel: "vm", fetchImpl,
+      delivered: new SeenStore("/del.jsonl", fsx, clock), attempted: new SeenStore("/att.jsonl", fsx, clock),
+      outboundSeen: new SeenStore("/seen.jsonl", fsx, clock), log: (m) => logs.push(m),
+    });
+  }
+
+  it("the default reader takes images, .mp4/.webm/.mov and .pdf by absolute path; a PROOF.md or relative path is not an attachment", () => {
+    for (const ext of [".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm", ".mov", ".pdf", ".MP4"]) {
+      expect(defaultReadLocalImage(file(`a${ext}`))).toMatchObject({ filename: `a${ext}` });
+    }
+    expect(defaultReadLocalImage(file("PROOF.md"))).toBeNull();
+    expect(defaultReadLocalImage("relative/a.png")).toBeNull();
+  });
+
+  it("an attachment over the cap, missing or not a regular file comes back { skipped } with the reason", () => {
+    const big = file("big.webm", 0);
+    fs.truncateSync(big, LOCAL_ATTACHMENT_MAX_BYTES + 1);
+    expect(defaultReadLocalImage(big)).toEqual({ skipped: `${LOCAL_ATTACHMENT_MAX_BYTES + 1} bytes is over the ${LOCAL_ATTACHMENT_MAX_BYTES}-byte attachment cap` });
+    fs.truncateSync(big, LOCAL_ATTACHMENT_MAX_BYTES);
+    expect(defaultReadLocalImage(big)).toMatchObject({ filename: "big.webm" });
+    expect(defaultReadLocalImage(path.join(dir, "gone.mp4"))).toEqual({ skipped: "unreadable (ENOENT)" });
+    fs.mkdirSync(path.join(dir, "folder.mp4"));
+    expect(defaultReadLocalImage(path.join(dir, "folder.mp4"))).toEqual({ skipped: "not a regular file" });
+  });
+
+  it("the reader opens the path once and reads the descriptor it checked; a FIFO is refused without blocking", () => {
+    const real = file("once.png", 4096);
+    const openSpy = vi.spyOn(fs, "openSync"), statSpy = vi.spyOn(fs, "statSync"), readFileSpy = vi.spyOn(fs, "readFileSync");
+    try {
+      const r = defaultReadLocalImage(real);
+      expect(r).toMatchObject({ filename: "once.png" });
+      expect((r as { bytes: Uint8Array }).bytes.length).toBe(4096);
+      expect(openSpy.mock.calls.filter((c) => c[0] === real)).toHaveLength(1);
+      expect(statSpy.mock.calls.filter((c) => c[0] === real)).toHaveLength(0);
+      expect(readFileSpy.mock.calls.filter((c) => c[0] === real)).toHaveLength(0);
+    } finally {
+      openSpy.mockRestore(); statSpy.mockRestore(); readFileSpy.mockRestore();
+    }
+    const fifo = path.join(dir, "pipe.mp4");
+    execFileSync("mkfifo", [fifo]);
+    expect(defaultReadLocalImage(fifo)).toEqual({ skipped: "not a regular file" }); // returns: no writer needed
+  });
+
+  it("a local video rides the three legs into the thread", async () => {
+    const { fetchImpl, calls } = slackFetch();
+    const logs: string[] = [];
+    const out = await deliverWithDefaultReader(fetchImpl, logs)(decision(file("walkthrough.mp4", 3000)));
+    expect(out.ok).toBe(true);
+    expect(calls.map((c) => c.url)).toEqual(["https://slack.com/api/chat.postMessage", "https://slack.com/api/files.getUploadURLExternal",
+      "https://files.slack.invalid/put/abc", "https://slack.com/api/files.completeUploadExternal"]);
+    expect(calls[1]!.body).toEqual({ filename: "walkthrough.mp4", length: "3000" });
+    expect(calls[2]!.body).toBe("<3000 bytes>");
+    expect(logs.join("\n")).toMatch(/uploaded walkthrough\.mp4 into thread 9000\.1/);
+  });
+
+  it("an attachment that can't be sent still delivers the text and logs why; a PROOF.md ref stays silent", async () => {
+    const { fetchImpl, calls } = slackFetch();
+    const logs: string[] = [];
+    expect((await deliverWithDefaultReader(fetchImpl, logs)(decision(path.join(dir, "missing.mov")))).ok).toBe(true);
+    expect(calls.map((c) => c.url)).toEqual(["https://slack.com/api/chat.postMessage"]);
+    expect(logs).toContain("ATTACHMENT skipped for q-img: missing.mov unreadable (ENOENT) (text delivered; attachment missing)");
+    const quiet = slackFetch(); const quietLogs: string[] = [];
+    await deliverWithDefaultReader(quiet.fetchImpl, quietLogs)(decision(file("PROOF.md")));
+    expect(quiet.calls).toHaveLength(1);
+    expect(quietLogs.some((l) => l.includes("ATTACHMENT"))).toBe(false);
   });
 });
 

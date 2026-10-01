@@ -42,16 +42,12 @@ looked like. State scoped absences honestly: “not represented on the surface c
 than a global absence you did not establish. If another seat must act, transfer durable work rather
 than printing a summary and disappearing.
 
-Run `rig context get onboarding-width` and read its `public-what-you-can-do.md` and
-`public-reference-material.md` members for the shipped capability map and source map. This
-retrieval belongs to this second onboarding step; it is not an additional walk step.
+## When you need more
 
-The diagnostic and routing reflexes in a maintained world profile are especially relevant to
-orchestrator and planning roles. Builders should keep their assigned boundary and proof standard;
-do not import judgment-seat ceremony into an implementation lane merely because the examples are
-available. Run `rig context list`; if this rig provides a world pack, load its fresh profile with
-`rig context profile <world-pack-ref> --situation fresh`. If it does not, run
-`rig context get world-example` for a fill-in template showing how to build one. These two
-onboarding steps plus `onboarding-width` are the complete public default mental model. Use
-`forming-an-openrig-mental-model` or
-`openrig-operating-model` at their named trigger moments rather than copying their content elsewhere.
+When you need to know what OpenRig can do, run `rig context get onboarding-width`: its
+`public-what-you-can-do.md` is the capability map and `public-reference-material.md` the documentation map. For
+any one command, `rig <command> --help` on the installed binary is the most current answer.
+
+If you plan or route work, a project's world pack is worth loading in full. If you build, stay with the outcome you
+were handed and what counts as done. If you are setting up a world pack for your own project,
+`rig context get world-example` has a fill-in template.

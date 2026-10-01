@@ -21,6 +21,7 @@ import { LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { deriveCurrentWork } from "../domain/current-work.js";
+import type { HumanQuestion } from "../domain/human-questions.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -142,6 +143,10 @@ export function queueRoutes(): Hono {
         : err.code === "human_registry_unavailable" ? 400
         : err.code === "human_route_fields_required" ? 400
         : err.code === "invalid_human_notification" ? 400
+        // #96: --reply-to refusals are named client errors.
+        : err.code === "reply_to_requires_update" ? 400
+        : err.code === "reply_to_not_found" ? 400
+        : err.code === "invalid_human_questions" ? 400
         // OPR.0.5.1 slice-51-06 D2: summary/evidence_ref on a non-park transition — a client
         // input error surfaced as a structured 400 (the daemon rejects before any mutation).
         : err.code === "summary_evidence_not_persistable" ? 400
@@ -400,6 +405,8 @@ export function queueRoutes(): Hono {
       targetRepo?: string;
       humanIntent?: "decision" | "update" | null;
       humanDetail?: string | null;
+      replyTo?: string | null;
+      humanQuestions?: HumanQuestion[] | null; // shape validated by the repository (invalid_human_questions)
       summary?: string | null;
       evidenceRef?: string | null;
       nudge?: boolean;
@@ -468,6 +475,8 @@ export function queueRoutes(): Hono {
         targetRepo: body.targetRepo,
         humanIntent: body.humanIntent,
         humanDetail: body.humanDetail,
+        replyTo: body.replyTo,
+        humanQuestions: body.humanQuestions,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,

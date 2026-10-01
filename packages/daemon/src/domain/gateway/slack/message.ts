@@ -4,6 +4,8 @@
 // 40,000 truncation; top-level text is the screen-reader/notification fallback)
 // https://docs.slack.dev/reference/block-kit/blocks/section-block/ (3,000)
 // https://docs.slack.dev/reference/block-kit/blocks/ (50 blocks)
+import { MAX_OPTION_LABEL, type HumanQuestion } from "../../human-questions.js";
+
 export const SLACK_TEXT_CAP = 3900; // Our conservative complete-fallback budget, not Slack’s hard limit.
 export const SLACK_SECTION_CAP = 3000;
 /** @deprecated Complete rendering ignores excerpt requests. */
@@ -14,6 +16,8 @@ export interface QitemLike {
   summary?: string | null;
   body?: string | null;
   destinationSession?: string | null;
+  /** #193 — structured questions, rendered as one button row per question. */
+  humanQuestions?: readonly HumanQuestion[] | null;
 }
 
 /** M1 A5b — an outbound image attachment. A media-bearing OutboundDecision carries these;
@@ -90,6 +94,47 @@ export function buildImageBlocks(mediaRefs: readonly SlackMediaRef[] | undefined
     });
   }
   return blocks;
+}
+
+/** #193 — the block_id / action_id prefixes a click carries back. The inbound path parses
+ *  exactly these (one producer, one parser: see parseQuestionAction). */
+export const QUESTION_BLOCK_PREFIX = "or-q:";
+export const OPTION_ACTION_PREFIX = "or-opt:";
+const TYPED_REPLY_HINT = "Or reply in this thread with your own answer.";
+
+/** Parse a clicked button back into its question and option ids; null if it is not ours. */
+export function parseQuestionAction(blockId: unknown, actionId: unknown): { questionId: string; optionId: string } | null {
+  if (typeof blockId !== "string" || typeof actionId !== "string") return null;
+  if (!blockId.startsWith(QUESTION_BLOCK_PREFIX) || !actionId.startsWith(OPTION_ACTION_PREFIX)) return null;
+  const questionId = blockId.slice(QUESTION_BLOCK_PREFIX.length);
+  const optionId = actionId.slice(OPTION_ACTION_PREFIX.length);
+  return questionId && optionId ? { questionId, optionId } : null;
+}
+
+/** #193 — the questions as blocks (a section, then a button row, per question) plus the
+ *  complete text they must also appear as in the accessible fallback. */
+function buildQuestionBlocks(questions: readonly HumanQuestion[]): { blocks: unknown[]; text: string } {
+  const blocks: unknown[] = [];
+  const lines: string[] = [];
+  for (const q of questions) {
+    const question = bounded(`*${inert(q.question)}*`, SLACK_SECTION_CAP, "question");
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: question } });
+    blocks.push({
+      type: "actions",
+      block_id: `${QUESTION_BLOCK_PREFIX}${q.id}`,
+      elements: q.options.map((o) => ({
+        type: "button",
+        action_id: `${OPTION_ACTION_PREFIX}${o.id}`,
+        value: o.id,
+        ...(o.recommended ? { style: "primary" } : {}),
+        text: { type: "plain_text", text: bounded(inert(o.label), MAX_OPTION_LABEL, "option label") },
+      })),
+    });
+    lines.push(question, ...q.options.map((o) => `• ${inert(o.label)}${o.recommended ? " (recommended)" : ""}`));
+  }
+  blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: TYPED_REPLY_HINT }] });
+  lines.push(TYPED_REPLY_HINT);
+  return { blocks, text: lines.join("\n") };
 }
 
 // Secret-looking patterns we refuse to forward (item 7 defense-in-depth).
@@ -199,12 +244,14 @@ export function buildOutboundMessage(q: QitemLike, opts: OutboundMessageOpts): S
   const imageBlocks = buildImageBlocks(opts.mediaRefs);
   const attachmentText = imageBlocks.map((b) => `Image: ${(b as { alt_text: string }).alt_text}`).join("\n");
   const evidence = buildEvidenceLink(opts.evidenceLink);
+  const questionParts = q.humanQuestions?.length ? buildQuestionBlocks(q.humanQuestions) : null;
   if (opts.extraBlocks?.length) {
     throw new HumanMessageShapeError("Extra blocks have no complete accessible fallback. Use mediaRefs for images or author supplemental human detail.");
   }
-  const text = bounded([headline, body, attr, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n"), SLACK_TEXT_CAP, "complete fallback");
+  const text = bounded([headline, body, questionParts?.text, attr, evidence ? evidence.text : null, attachmentText, opts.reconcileMarker].filter(Boolean).join("\n"), SLACK_TEXT_CAP, "complete fallback");
   const blocks: unknown[] = [{ type: "section", text: { type: "mrkdwn", text: headline } }];
   if (body.trim()) blocks.push({ type: "section", text: { type: "mrkdwn", text: body } });
+  if (questionParts) blocks.push(...questionParts.blocks);
   blocks.push(...imageBlocks);
   if (evidence) blocks.push(evidence.block);
   blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: attr }] });

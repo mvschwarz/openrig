@@ -48,10 +48,11 @@ describe("shipped Slack app manifest — canonical sources", () => {
     }
   });
 
-  it("is a Socket Mode app with no request URL, interactivity or org-wide deploy", () => {
+  it("is a Socket Mode app with interactivity (button clicks, #193) but no request URL or org-wide deploy", () => {
     const s = bundle.manifest.settings;
     expect(s.socket_mode_enabled).toBe(true);
-    expect(s.interactivity.is_enabled).toBe(false);
+    // In Socket Mode, block_actions arrive over the socket: interactivity needs no request URL.
+    expect(s.interactivity.is_enabled).toBe(true);
     expect(s.org_deploy_enabled).toBe(false);
     expect(JSON.stringify(bundle.manifest)).not.toMatch(/request_url|redirect_url/);
   });

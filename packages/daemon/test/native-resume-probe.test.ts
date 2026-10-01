@@ -7,6 +7,31 @@ import {
 } from "../src/domain/native-resume-probe.js";
 
 describe("native resume probe", () => {
+  describe("headerless Claude auto-mode requires managed identity proof", () => {
+    const screen = "Restored conversation\n❯\u00a0\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n";
+    it("keeps every screen-only caller conservative", () => {
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent: screen }))
+        .toMatchObject({ status: "inconclusive", code: "claude_auto_identity_required" });
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent: screen, claudeAutoIdentityVerified: true }))
+        .toMatchObject({ status: "resumed", code: "active_runtime" });
+    });
+    it.each([
+      "  ⏵⏵ auto mode on (shift+tab to cycle)",
+      "❯\nThe manual says auto mode on (shift+tab to cycle)",
+      "❯\n  ⏵⏵ auto mode on",
+    ])("still needs the actual prompt/footer shape: %s", (paneContent) => {
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent, claudeAutoIdentityVerified: true }).status).not.toBe("resumed");
+    });
+    it.each([
+      ["Accessing workspace:\nYes, I trust this folder", "trust_gate"],
+      ["new MCP servers found in .mcp.json\nSelect any you wish to enable\nEnter to confirm", "mcp_gate"],
+      ["Not logged in · Run /login", "login_required"],
+      ["How would you like to resume?\n❯ Resume from summary\n  Resume full session as-is", "claude_resume_selection_prompt"],
+      ["No conversation found", "no_conversation_found"],
+    ])("does not let identity proof waive prerequisites: %s", (panel, code) => {
+      expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "sh", paneContent: `${screen}\n${panel}`, claudeAutoIdentityVerified: true }).code).toBe(code);
+    });
+  });
   describe("issue116 headerless custom status lines", () => {
     const reportedFooter = "  5h 71% left · weekly 24% left · GPT-6-Astra high · Context 81% left";
     it.each(["›", "»"])("recognizes the reported footer below a %s conversation prompt", (prompt) => {

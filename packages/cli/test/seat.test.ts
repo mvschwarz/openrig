@@ -801,12 +801,52 @@ describe("seat request deadlines (#260)", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("a mutating handover gets the 120 s launch window", async () => {
-    vi.useFakeTimers();
-    const { deps, fetchImpl } = slowClient(null, () => Response.json({}));
-    const output = await run(deps, HANDOVER, 120_000);
+  // #198: reaching the 120 s launch window leaves a mutating handover's outcome unknown; the daemon
+  // may still be working. Both aliases share runSeatHandover. One request, no retry.
+  it.each([["seat", "handover"], ["handover"]].flatMap(alias => [false, true].map(json => [alias, json] as const)))(
+    "a mutating handover (%j) reports an unknown outcome at the 120 s bound with one request (json=%s)", async (alias, json) => {
+      vi.useFakeTimers();
+      const { deps, fetchImpl } = slowClient(null, () => Response.json({}));
+      const argv = [...alias, "dev-impl@seat-rig", "--reason", "context-wall", ...(json ? ["--json"] : [])];
+      const result = captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", ...argv]).then(() => undefined))
+        .catch(error => ({ error: error as Error }));
+      await vi.advanceTimersByTimeAsync(119_999);
+      const signal = (fetchImpl.mock.calls[0]![1] as RequestInit).signal!;
+      expect(signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(signal.aborted).toBe(true);
+      const output = await result;
+      if (!("logs" in output)) throw output.error;
+      expect(output.exitCode).toBe(1);
+      const text = json ? output.logs.join("\n") : output.errors.join("\n");
+      if (json) {
+        expect(output.errors).toEqual([]);
+        expect(JSON.parse(text)).toMatchObject({
+          ok: false,
+          code: "handover_outcome_unknown",
+          status: "unknown",
+          guidance: expect.stringContaining("rig seat status dev-impl@seat-rig"),
+        });
+      } else {
+        expect(output.logs).toEqual([]);
+        expect(text).toContain("handover outcome is unknown");
+        expect(text).toContain("rig seat status dev-impl@seat-rig");
+      }
+      expect(text).toContain("may still be working");
+      expect(text).not.toMatch(/cancel|handover failed|safe to retry/i);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("a mutating handover's connection failure stays a transport error, not an unknown outcome", async () => {
+    const fetchImpl = vi.fn(async () => { throw new TypeError("fetch failed"); });
+    const deps = makeDeps({ status: 200, data: {} }, []);
+    deps.clientFactory = url => new DaemonClient(url, { fetchImpl: fetchImpl as unknown as typeof fetch });
+    const output = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", ...HANDOVER]).then(() => undefined))
+      .catch(error => ({ error: error as Error }));
     expect(output).toHaveProperty("error");
-    expect((output as { error: Error }).error.message).toContain("timed out after 120000ms");
+    expect((output as { error: Error }).error.name).toBe("DaemonConnectionError");
+    expect((output as { error: Error }).error.message).not.toContain("outcome is unknown");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 

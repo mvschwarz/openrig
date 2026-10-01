@@ -127,6 +127,7 @@ function createAppWithUiDist(db: ReturnType<typeof createFullTestDb>, uiDistDir:
     podInstantiator: fullSetup.podInstantiator,
     podBundleSourceResolver: fullSetup.podBundleSourceResolver,
     uiDistDir,
+    webUiEnabled: true,
   });
 }
 

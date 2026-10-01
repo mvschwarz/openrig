@@ -16,20 +16,21 @@ import { channelStateDigest } from "../channel-operations.js";
 import path from "node:path";
 import fs from "node:fs";
 import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from "../gateway-subsystem.js";
-import { downloadPrivateFile } from "./slack-api.js";
+import { downloadPrivateFile, postChatMessage } from "./slack-api.js";
 import { loadConfig } from "./config.js";
 import { resolveSecret } from "./secrets.js";
 import { SeenStore, DeadLetterStore, InboundReceiptStore } from "./state-store.js";
 import { makeQueuePorts } from "./queue-access.js";
 import { SlackOutboundDriver, OUTBOUND_OP, type OutboundPostPayload } from "./outbound-driver.js";
 import { subsystemSlackDeliver } from "./slack-delivery.js";
-import { InboundRouter, type SlackEvent, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
+import { InboundRouter, type SlackEvent, type SlackBlockActions, type InboundFilePort, type InboundFileResult, type StoredInboundFile, type FailedInboundFile } from "./inbound.js";
 import { makeInboundSenderResolver, type RegistrySurface } from "./inbound-admission.js";
 import { ThreadSeatMap, formatPostedStamp } from "./thread-seat-map.js";
 import { makeThreadRouteResolver } from "./thread-routing.js";
 import { startSocketInbound, type SocketInboundHandle, type WsLike } from "./socket-inbound.js";
 import { loadHumanRegistry, resolveSlackHandle } from "../human-registry.js";
-import type { QueueRepository } from "../../queue-repository.js";
+import { hasLiveHumanGate, type QueueRepository } from "../../queue-repository.js";
+import { formatReplyToChoice, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "../../reply-to-choice.js";
 import { parseSessionName } from "../../session-name.js";
 import type { FetchImpl } from "./slack-api.js";
 import { ownerNotificationLevelAtLeast } from "../../queue-transition-log.js";
@@ -253,6 +254,70 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // S10 thread routing — the map shares the daemon DB (queue rows carry the rebuild stamps).
   const threadMap = new ThreadSeatMap(opts.queueRepo.db);
 
+  // OPR.0.5.6.14 — a failed post writes the transport-failed ledger transition so the
+  // undelivered surface (and --verify) can name the gateway's error instead of guessing
+  // from nudge telemetry. One receipt per episode.
+  const recordTransportFailed = (p: OutboundPostPayload, failureClass: string, detail: string): void => {
+    if (!p.qitemId) return;
+    const key = p.notificationKey ?? p.qitemId;
+    const alreadyRecorded = opts.queueRepo.transitionLog.listForQitem(p.qitemId).some((transition) =>
+      transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ")
+        && transition.transitionNote.split(/\s+/).includes(`notification_key=${key}`));
+    if (alreadyRecorded) return;
+    opts.queueRepo.update({
+      qitemId: p.qitemId,
+      actorSession: "daemon@kernel",
+      transitionNote: [
+        "slack-owner-notification-transport-failed",
+        `notification_key=${key}`,
+        `class=${failureClass}`,
+        `error=${detail}`,
+      ].join(" "),
+    });
+  };
+
+  // #96 — where a replyTo update posts. Walks back through earlier threaded updates (which
+  // open no root of their own) to the item that owns the root.
+  const MAX_REPLY_TO_CHAIN = 32;
+  const deriveReplyToChoice = (p: OutboundPostPayload): ReplyToChoice => {
+    let item = p.replyTo ? opts.queueRepo.getById(p.replyTo) : null;
+    for (let depth = 0; item && depth < MAX_REPLY_TO_CHAIN; depth++) {
+      if (hasLiveHumanGate(item)) return { kind: "fallback", reason: "reference-has-live-gate", qitemId: item.qitemId };
+      const root = threadMap.resolveByConversation(item.qitemId);
+      if (root) {
+        if (root.state === "closed") return { kind: "fallback", reason: "root-closed", threadTs: root.threadTs };
+        if (root.channel !== cfg.channel) return { kind: "fallback", reason: "root-other-channel", threadTs: root.threadTs };
+        if (root.human !== (p.destinationSession ?? "")) return { kind: "fallback", reason: "root-other-human", threadTs: root.threadTs };
+        if (root.seat !== (p.sourceSession ?? "")) return { kind: "fallback", reason: "root-other-seat", threadTs: root.threadTs };
+        return { kind: "thread", threadTs: root.threadTs };
+      }
+      if (!item.replyTo) return { kind: "fallback", reason: "root-missing", qitemId: item.qitemId };
+      item = opts.queueRepo.getById(item.replyTo);
+    }
+    return item
+      ? { kind: "fallback", reason: "chain-too-long", qitemId: item.qitemId }
+      : { kind: "fallback", reason: "root-missing", qitemId: p.replyTo ?? "" };
+  };
+  // Decided ONCE and recorded on the row before the first post. Every later attempt reuses
+  // the record, so a reconcile scan searches where the message actually went and --verify
+  // reports what happened. If the record cannot be written, nothing posts: the delivery is
+  // retained for replay and a transport-failed receipt names why, so --verify does not just
+  // time out.
+  const chooseReplyToThread = (p: OutboundPostPayload): ReplyToChoice => {
+    const recorded = opts.queueRepo.replyToChoiceFor(p.qitemId);
+    if (recorded) return recorded;
+    const choice = deriveReplyToChoice(p);
+    try {
+      opts.queueRepo.update({ qitemId: p.qitemId, actorSession: REPLY_TO_CHOICE_ACTOR, transitionNote: formatReplyToChoice(choice) });
+    } catch (e) {
+      const detail = `reply-to thread choice could not be recorded: ${(e as Error).message}`;
+      try { recordTransportFailed(p, "reply-to-choice-unrecorded", detail); }
+      catch (receiptError) { log(`transport-failed receipt write FAILED for ${p.qitemId}: ${(receiptError as Error).message}`); }
+      throw new Error(detail);
+    }
+    return choice;
+  };
+
   // Late-bound so deliver can release the driver's in-flight guard (built after the wire).
   let releaseRef: (qitemId: string) => void = () => {};
 
@@ -270,12 +335,22 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
         // Slack replies identify only the root thread. Giving two qitems the same root
         // would make an inbound reply ambiguous and could resume the wrong human gate.
         // Re-delivery/new notification episodes for one qitem still reuse its exact root.
-        resolveThreadTs: (p) =>
-          threadMap.resolveOpenForConversation(
+        // #96: an update may name an earlier qitem's root; the guard lives in deriveReplyToChoice.
+        resolveThreadTs: (p) => {
+          if (p.replyTo) {
+            const choice = chooseReplyToThread(p);
+            if (choice.kind === "thread") return choice.threadTs;
+          }
+          const own = threadMap.resolveOpenForConversation(
             p.destinationSession ?? "",
             p.sourceSession ?? "",
             p.qitemId,
-          )?.threadTs,
+          );
+          // #96: once an update shares this root, a new decision from its owner starts a fresh
+          // root instead, so the decision never lands in a thread a reader took as FYI-only.
+          if (own && !p.replyTo && opts.queueRepo.isReplyToThread(own.threadTs)) return undefined;
+          return own?.threadTs;
+        },
         // S14: posting and interruption are separate threshold dials over one vocabulary.
         resolveMentionUserId: (p) => {
           if (p.humanIntent === "update") return undefined;
@@ -318,27 +393,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
             log(`thread stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
-        // OPR.0.5.6.14 — a failed post writes the transport-failed ledger
-        // transition so the undelivered surface can name the gateway's error
-        // instead of guessing from nudge telemetry.
-        onTransportFailed: (p, failureClass, detail) => {
-          if (!p.qitemId) return;
-          const key = p.notificationKey ?? p.qitemId;
-          const alreadyRecorded = opts.queueRepo.transitionLog.listForQitem(p.qitemId).some((transition) =>
-            transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ")
-              && transition.transitionNote.split(/\s+/).includes(`notification_key=${key}`));
-          if (alreadyRecorded) return;
-          opts.queueRepo.update({
-            qitemId: p.qitemId,
-            actorSession: "daemon@kernel",
-            transitionNote: [
-              "slack-owner-notification-transport-failed",
-              `notification_key=${key}`,
-              `class=${failureClass}`,
-              `error=${detail}`,
-            ].join(" "),
-          });
-        },
+        onTransportFailed: recordTransportFailed,
         onPosted: (p, messageTs, threadTs) => {
           // v3 digest branch: transport truth first — every member receipt is
           // stamped HERE, after the real post, digest-tokened and episode-keyed.
@@ -516,6 +571,19 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // or human-initiated → the configured orchestrator slot as an unrouted-signal row.
       resolveRoute: makeThreadRouteResolver({ map: threadMap, unroutedDestination: cfg.inboundDestination, log }),
       resolveHumanReply: opts.resolveHumanReply,
+      // #193 — a button click records its answer on the decision the clicked root belongs to;
+      // a failed hand-back is retried with the event dead-letters, and each click is confirmed
+      // in the decision's thread (a bot post, so inbound never ingests it).
+      recordHumanAnswer: (input) => opts.queueRepo.recordHumanAnswer(input),
+      actionDeadLetter: new DeadLetterStore<SlackBlockActions>(path.join(stateDir(opts.home), "slack-inbound-action-deadletter.jsonl")),
+      ...(bot ? {
+        acknowledgeAnswer: async ({ channel, threadTs, text }: { channel?: string; threadTs: string; text: string }) => {
+          const target = channel ?? cfg.channel;
+          if (!target) return;
+          const r = await postChatMessage(bot, { channel: target, thread_ts: threadTs, text }, opts.fetchImpl);
+          if (!r.ok) log(`answer acknowledgement not posted thread=${threadTs}: ${r.error}`);
+        },
+      } : {}),
       // OPR.0.5.6.2 — inbound file transfer: wired only when the bot token exists
       // (downloads need `files:read`); absent → the router's own named-failure
       // arm keeps failure honest. Media lives beside the gateway's other durable

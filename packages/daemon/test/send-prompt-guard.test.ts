@@ -360,6 +360,108 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(sendText).toHaveBeenCalled();
   });
 
+  // Codex 0.157: the empty-composer placeholder is on screen idle AND while Codex streams with its
+  // Working row hidden. It may unlock a --wait-for-idle send once the hooks have aged out, never
+  // while a display-fresh running hook says the turn is still in progress.
+  const CODEX_PLACEHOLDER_PANE = [
+    "› Ask Codex to do anything",
+    "  GPT-5.5 medium · ~/code/projects/openrig · Verify assigned outcome",
+    "  ← for agents · ? for shortcuts",
+  ].join("\n");
+
+  function seedCodexHook(fixedNow: Date, hookEvent: string, ageMs: number, name: string) {
+    agentActivityStore.recordHookEvent({
+      runtime: "codex", sessionName: name, hookEvent,
+      occurredAt: new Date(fixedNow.getTime() - ageMs).toISOString(),
+    });
+  }
+
+  it("Codex 0.157: --wait-for-idle does not treat the placeholder as idle while a running hook is display-fresh", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "UserPromptSubmit", 90_000, seat); // send-stale, display-fresh
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => CODEX_PLACEHOLDER_PANE, sendText }), { now: () => fixedNow });
+    const r = await t.send(seat, "hi", { waitForIdleMs: 50 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("wait_for_idle_timeout");
+    expect(r.activity?.state).toBe("running");
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("Codex 0.157: --wait-for-idle sends to the placeholder once the running hook has aged out", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "UserPromptSubmit", 330_000, seat); // older than the 5-min store window
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => CODEX_PLACEHOLDER_PANE, sendText }), { now: () => fixedNow });
+    const r = await t.send(seat, "hi", { waitForIdleMs: 50 });
+    expect(r.ok).toBe(true);
+    expect(r.activity?.state).toBe("idle");
+    expect(r.activity?.evidenceSource).toBe("pane_heuristic");
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("Codex 0.157: an unknown SessionStart hook does not block the placeholder idle verdict", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "SessionStart", 90_000, seat);
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => CODEX_PLACEHOLDER_PANE, sendText }), { now: () => fixedNow });
+    const r = await t.send(seat, "hi", { waitForIdleMs: 50 });
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("Codex 0.158: --wait-for-idle does not send to the placeholder while a Working row sits far above it, hook aged out", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "UserPromptSubmit", 330_000, seat);
+    const busyPane = [
+      "• Working (6m 02s • esc to interrupt)",
+      ...Array.from({ length: 10 }, (_, i) => `  incoming message line ${i + 1}`),
+      "",
+      CODEX_PLACEHOLDER_PANE,
+    ].join("\n");
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => busyPane, sendText }), { now: () => fixedNow });
+    const r = await t.send(seat, "hi", { waitForIdleMs: 50 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe("wait_for_idle_timeout");
+    expect(r.activity?.state).toBe("running");
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("Codex 0.158: completed 'Working tree is clean.' prose far above the placeholder does not block a send", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    const seat = seedCodexSeat();
+    seedCodexHook(fixedNow, "UserPromptSubmit", 330_000, seat);
+    const idlePane = [
+      "• Working tree is clean.",
+      ...Array.from({ length: 10 }, (_, i) => `  summary line ${i + 1}`),
+      "",
+      CODEX_PLACEHOLDER_PANE,
+    ].join("\n");
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => idlePane, sendText }), { now: () => fixedNow });
+    const r = await t.send(seat, "hi", { waitForIdleMs: 50 });
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
+  it("Claude Code is unchanged: a bare ❯ pane still sends past a send-stale running hook", async () => {
+    const fixedNow = new Date("2026-06-27T12:00:00.000Z");
+    agentActivityStore.recordHookEvent({
+      runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit",
+      occurredAt: new Date(fixedNow.getTime() - 90_000).toISOString(),
+    });
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => "idle\n❯ ", sendText }), { now: () => fixedNow });
+    const r = await t.send("dev-impl@my-rig", "hi", { waitForIdleMs: 50 });
+    expect(r.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
+  });
+
   // OPR.0.4.3.28 correction — INVERT fail-closed-on-unknown. `unknown` telemetry
   // (absent/failed, NOT positive picker evidence) now PROCEEDS with a non-blocking
   // advisory that still NAMES the failed producer link. Was: refused

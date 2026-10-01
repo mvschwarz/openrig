@@ -1007,6 +1007,50 @@ export class TmuxAdapter {
    *   - `null` when the target is missing OR the value is unparseable
    *     (consumers treat null as "no signal", distinct from "idle").
    */
+  /** Every session's current-window `#{window_activity}` in ONE tmux call, keyed by session name: the same value
+   *  `readPaneLastActivity(<session name>)` reads (display-message -t <session> resolves to the session's current
+   *  window). Only well-formed timestamps are included, so a missing key means "read it the per-target way". Null when
+   *  tmux can't be read at all. The session name is the LAST field, so a separator inside it stays intact. */
+  async readAllSessionWindowActivity(): Promise<Map<string, number> | null> {
+    try {
+      const format = ["#{window_active}", "#{window_activity}", "#{session_name}"].join(TMUX_FIELD_SEPARATOR);
+      const output = await this.run(["tmux", "list-windows", "-a", "-F", format], `tmux list-windows -a -F '${format}'`);
+      const out = new Map<string, number>();
+      for (const line of output.split("\n")) {
+        const first = line.indexOf(TMUX_FIELD_SEPARATOR), second = line.indexOf(TMUX_FIELD_SEPARATOR, first + 1);
+        if (first < 0 || second < 0) continue;
+        const active = line.slice(0, first), activity = line.slice(first + 1, second).trim(), session = line.slice(second + 1);
+        if (!session || active !== "1" || !/^\d+$/.test(activity)) continue;
+        const n = Number(activity);
+        if (Number.isFinite(n) && n > 0) out.set(session, n);
+      }
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Every pane's pid and current command in ONE tmux call, keyed by pane id (%N): the values `getPanePid` /
+   *  `getPaneCommand` read per pane. Panes without a valid pid are left out (read those per pane). Null when tmux can't
+   *  be read at all. The command is the LAST field, so a separator inside it stays intact. */
+  async readAllPaneProcesses(): Promise<Map<string, { pid: number; command: string | null }> | null> {
+    try {
+      const format = ["#{pane_id}", "#{pane_pid}", "#{pane_current_command}"].join(TMUX_FIELD_SEPARATOR);
+      const output = await this.run(["tmux", "list-panes", "-a", "-F", format], `tmux list-panes -a -F '${format}'`);
+      const out = new Map<string, { pid: number; command: string | null }>();
+      for (const line of output.split("\n")) {
+        const first = line.indexOf(TMUX_FIELD_SEPARATOR), second = line.indexOf(TMUX_FIELD_SEPARATOR, first + 1);
+        if (first <= 0 || second < 0) continue;
+        const id = line.slice(0, first), pid = parseInt(line.slice(first + 1, second).trim(), 10);
+        if (!Number.isFinite(pid) || pid <= 0) continue;
+        out.set(id, { pid, command: line.slice(second + 1).trim() || null });
+      }
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
   async readPaneLastActivity(paneId: string): Promise<number | null> {
     try {
       const output = await this.run(

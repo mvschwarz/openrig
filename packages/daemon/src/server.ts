@@ -116,7 +116,7 @@ import { scopesRoutes } from "./routes/scopes.js";
 import { telemetryRoutes } from "./routes/telemetry.js";
 import { proofRoutes } from "./routes/proof.js";
 import { scopeApproveRoutes } from "./routes/scope-approve.js";
-import { registerTerminalWs } from "./routes/terminal-ws.js";
+import { registerTerminalAuthOnly, registerTerminalWs } from "./routes/terminal-ws.js";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { steeringRoutes } from "./routes/steering.js";
 import { healthSummaryRoutes } from "./routes/health-summary.js";
@@ -292,6 +292,8 @@ export interface AppDeps {
   missionControlBearerToken?: string | null;
   terminalBearerToken?: string | null;
   enableNodeWebSocket?: boolean;
+  /** `ui.enabled`: serve the web UI pages and its terminal WebSocket. Off unless true; /api routes are unaffected. */
+  webUiEnabled?: boolean;
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   /**
@@ -395,6 +397,9 @@ const MIME_TYPES: Record<string, string> = {
 function resolveDefaultUiDistDir(): string {
   return nodePath.resolve(nodePath.dirname(fileURLToPath(import.meta.url)), "..", "..", "ui", "dist");
 }
+
+export const WEB_UI_OFF_MESSAGE =
+  "The OpenRig web UI is off. To turn it on, run `rig config set ui.enabled true`, then stop and start the daemon (`rig daemon stop`, `rig daemon start`).\n";
 
 function safeResolveUiPath(uiDistDir: string, requestPath: string): string | null {
   const relativePath = requestPath.replace(/^\/+/, "") || "index.html";
@@ -726,11 +731,14 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/compaction", compactionRoutes({ bearerToken: deps.terminalBearerToken ?? null }));
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let injectWebSocket: (server: any) => void = () => {};
-  if (deps.enableNodeWebSocket) {
+  // The terminal WebSocket only serves the web UI, so it exists only while the web UI is on.
+  if (deps.enableNodeWebSocket && deps.webUiEnabled === true) {
     const ws = createNodeWebSocket({ app });
     injectWebSocket = ws.injectWebSocket as never;
     _lastInjectWebSocket = injectWebSocket;
     registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null });
+  } else if (deps.enableNodeWebSocket) {
+    registerTerminalAuthOnly(app, { bearerToken: deps.terminalBearerToken ?? null });
   }
   app.route("/api/activity", activityRoutes);
   app.route("/api/ask", askRoutes);
@@ -825,6 +833,11 @@ export function createApp(deps: AppDeps): Hono {
 
     if (requestPath === "/healthz" || requestPath.startsWith("/api/")) {
       return c.notFound();
+    }
+
+    if (deps.webUiEnabled !== true) {
+      c.header("X-OpenRig-Web-UI", "off");
+      return c.text(WEB_UI_OFF_MESSAGE, 404);
     }
 
     if (!hasUiBundle) {
