@@ -172,3 +172,17 @@ describe("dev-checkout layouts re-anchor only when the stored file is missing", 
     expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, missing)).toBe(stored);
   });
 });
+
+describe("legacy persisted shapes are returned exactly as stored", () => {
+  it("startup file without ownerRoot (or path) does not throw and is unchanged", () => {
+    const noOwner = { path: "required-onboarding.md", absolutePath: "/tmp/never-read/required-onboarding.md", required: true } as unknown as { path: string; absolutePath: string; ownerRoot: string };
+    expect(reanchorBuiltinStartupFile(noOwner, RUNNING)).toBe(noOwner);
+    const noPath = { absolutePath: `${OLD}/guidance/CULTURE-default.md`, ownerRoot: OLD } as unknown as { path: string; absolutePath: string; ownerRoot: string };
+    expect(() => reanchorBuiltinStartupFile(noPath, RUNNING)).not.toThrow();
+  });
+
+  it("projection entry without sourcePath does not throw and is unchanged", () => {
+    const legacy = { absolutePath: "/tmp/never-read/CLAUDE.md", category: "memory" } as unknown as { sourcePath: string; absolutePath: string };
+    expect(reanchorShippedProjectionEntry(legacy)).toBe(legacy);
+  });
+});

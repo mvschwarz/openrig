@@ -90,7 +90,9 @@ export function reanchorBuiltinStartupFile<T extends { path: string; absolutePat
   specsRoot: string = runningShippedSpecsRoot(),
   exists: Exists = existsSync,
 ): T {
-  const relative = BUILTIN_STARTUP_FILES.get(file.path);
+  // Persisted contexts from older versions may lack ownerRoot/path; leave them exactly as stored.
+  if (typeof file.ownerRoot !== "string" || typeof file.absolutePath !== "string") return file;
+  const relative = typeof file.path === "string" ? BUILTIN_STARTUP_FILES.get(file.path) : undefined;
   if (relative) {
     const storedRoot = nodePath.resolve(file.ownerRoot);
     const parts = storedRoot.split(nodePath.sep);
@@ -119,6 +121,8 @@ export function reanchorShippedProjectionEntry<T extends { sourcePath: string; a
   specsRoot: string = runningShippedSpecsRoot(),
   exists: Exists = existsSync,
 ): T {
+  // Persisted entries from older versions may lack sourcePath; leave them exactly as stored.
+  if (typeof entry.sourcePath !== "string" || typeof entry.absolutePath !== "string") return entry;
   const mapped = mapUnderShippedSpecs(entry.sourcePath, entry.absolutePath, specsRoot, exists);
   return mapped ? { ...entry, sourcePath: mapped.root, absolutePath: mapped.file } : entry;
 }
