@@ -2,7 +2,7 @@
   "url": "https://context7.com/mvschwarz/openrig",
   "public_key": "pk_HcRwWEoFBsmU1mo5VIvWw",
   "projectTitle": "OpenRig",
-  "description": "Build your own network of agents from Claude Code, Codex and Pi: long-running teams with roles, shared context and owned work.",
+  "description": "Build your own network of agents from Claude Code, Codex and Pi: persistent teams with roles, shared context and owned work.",
   "folders": [],
   "excludeFolders": [
     "docs/releases",
