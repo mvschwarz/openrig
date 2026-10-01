@@ -3489,7 +3489,10 @@ export class QueueRepository {
   evaluateWaitReminder(input: { jobId: string }) {
     if (this.wakeRepo.findQitemsByAttachedWatchdog(input.jobId).length > 0
       && this.wakeRepo.findQitemsByGeneratedTimer(input.jobId).every(row => row.state !== "blocked")) return null;
-    const binding = this.wakeRepo.findBlockedQitemsByWatchdog(input.jobId).find(row => row.kind === "timer");
+    const currentBindings = this.wakeRepo.findBlockedQitemsByWatchdog(input.jobId);
+    const binding = currentBindings.find(row => row.kind === "timer");
+    // Reattaching a generated timer as a watchdog transfers its current wait ownership.
+    if (!binding && currentBindings.some(row => row.kind === "watchdog")) return null;
     const result = evaluateQueueWait(this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db), input.jobId, binding ? this.waitingView(binding.qitemId) : null);
     // Only an already-admitted send reads prose: healthy silence, receipts and
     // failed-delivery retries remain owned by the existing wait evaluator.

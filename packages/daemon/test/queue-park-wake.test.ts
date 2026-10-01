@@ -628,6 +628,43 @@ describe("S03 R25 — a park records its wake on the append-only transition", ()
     expect(repo.getParkWakeStatus(row.qitemId)).toMatchObject({ ref: current.ref, phase: "fired" });
   });
 
+  it("keeps a shared repeating watchdog active when its original row reattaches the same job", async () => {
+    repo.attachWatchdogJobsRepository(jobs);
+    const owner = "shared-owner@rig";
+    const original = await item(owner);
+    repo.update({ qitemId: original.qitemId, actorSession: owner, state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "original repeating wait",
+      wakeAfterSeconds: 30, wakeMaxSeconds: 120 } as never);
+    const jobId = repo.getParkWakeStatus(original.qitemId)!.ref;
+    const attached = await item(owner);
+    repo.update({ qitemId: attached.qitemId, actorSession: owner, state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "attach shared repeating watchdog",
+      wakeWatchdogId: jobId } as never);
+    repo.update({ qitemId: original.qitemId, actorSession: owner, state: "blocked",
+      blockedOn: "external:cooldown", transitionNote: "original row reattaches the same watchdog",
+      wakeWatchdogId: jobId } as never);
+    const deliveries: Array<{ targetSession: string; message: string }> = [];
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo: jobs, historyLog: new WatchdogHistoryLog(db), eventBus: bus,
+      resolveQueueWait: input => repo.evaluateWaitReminder(input),
+      resolvePreDeliveryTerminalReason: ({ jobId }) => repo.resolveWatchdogPreDeliveryTerminalReason(jobId),
+      onWakeAttempt: ({ jobId, deliveryStatus }) => repo.recordWatchdogWakeAttempt(jobId, deliveryStatus),
+      deliver: async request => { deliveries.push(request); return { status: "ok" }; },
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await engine.evaluate(jobs.getByIdOrThrow(jobId));
+      expect(result.outcome.action).toBe("send");
+      expect(jobs.getById(jobId)?.state).toBe("active");
+    }
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries.every(request => request.targetSession === owner)).toBe(true);
+    const originalReceipts = wakes(original.qitemId).filter(w => w.phase === "fired" && w.wake_ref === jobId);
+    expect(originalReceipts).toHaveLength(2);
+    expect(originalReceipts.every(w => w.wake_kind === "watchdog")).toBe(true);
+    expect(wakes(attached.qitemId).filter(w => w.phase === "fired" && w.wake_ref === jobId))
+      .toHaveLength(2);
+  });
+
   it("OPR.0.5.8.1 S1b — the S16 provider-limit path is UNCHANGED, and stays distinguishable", async () => {
     // Contract item 3 asked me to state whether this repair touches S16 and pin
     // it either way. It does not: provider-limit timers already ended after
