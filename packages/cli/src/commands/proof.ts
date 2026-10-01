@@ -521,7 +521,7 @@ export function replaceArtifactFile(target: string, content: string, stagingId: 
   const staging = path.join(path.dirname(target), `.${path.basename(target)}.${stagingId}.replace-tmp`);
   const existing = fs.lstatSync(target, { throwIfNoEntry: false });
   const keepMode = existing?.isFile() ? existing.mode & 0o777 : undefined;
-  const fd = fs.openSync(staging, "wx");
+  const fd = fs.openSync(staging, "wx", keepMode ?? 0o666); // never created wider than the artifact it replaces
   let failure: unknown;
   try {
     if (keepMode !== undefined) fs.fchmodSync(fd, keepMode);
