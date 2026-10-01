@@ -860,12 +860,12 @@ export class RestoreCheckService {
       ...probe,
       resolvedStartupFiles: probe.resolvedStartupFiles.map((file) => (
         typeof file.path === "string" && typeof file.ownerRoot === "string"
-          ? reanchorBuiltinStartupFile({ ...file, path: file.path, ownerRoot: file.ownerRoot })
+          ? reanchorBuiltinStartupFile({ ...file, path: file.path, ownerRoot: file.ownerRoot }, undefined, undefined, this.deps.exists)
           : file
       )),
       projectionEntries: probe.projectionEntries.map((entry) => (
         typeof entry.sourcePath === "string"
-          ? reanchorShippedProjectionEntry({ ...entry, sourcePath: entry.sourcePath })
+          ? reanchorShippedProjectionEntry({ ...entry, sourcePath: entry.sourcePath }, undefined, this.deps.exists)
           : entry
       )),
     };

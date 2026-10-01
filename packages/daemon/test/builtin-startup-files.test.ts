@@ -136,3 +136,39 @@ describe("reanchorBuiltinStartupFile — shipped-spec startup files", () => {
     expect(reanchorBuiltinStartupFile(lookalike, RUNNING, RUN_SPECS)).toBe(lookalike);
   });
 });
+
+describe("dev-checkout layouts re-anchor only when the stored file is missing", () => {
+  const RUN_SPECS = "/new/lib/node_modules/@openrig/cli/daemon/specs";
+  const DEV = "/src/openrig/packages/daemon";
+  const present = () => true;
+  const missing = () => false;
+
+  it("built-in from a present dev checkout stays as stored; a missing one re-anchors", () => {
+    const stored = { path: "openrig-start.md", absolutePath: `${DEV}/assets/guidance/openrig-start.md`, ownerRoot: `${DEV}/assets`, ...meta };
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, present)).toBe(stored);
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, missing).absolutePath).toBe(`${RUNNING}/guidance/openrig-start.md`);
+  });
+
+  it("shipped-spec startup file from a present dev checkout stays as stored; a missing one re-anchors", () => {
+    const stored = { path: "culture/CULTURE.md", absolutePath: `${DEV}/specs/rigs/launch/kernel/culture/CULTURE.md`, ownerRoot: `${DEV}/specs/rigs/launch/kernel`, ...meta };
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, present)).toBe(stored);
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, missing).absolutePath).toBe(`${RUN_SPECS}/rigs/launch/kernel/culture/CULTURE.md`);
+  });
+
+  it("projection resource from a present dev checkout stays as stored; a missing one re-anchors", () => {
+    const entry = { sourcePath: `${DEV}/specs/agents/shared`, absolutePath: `${DEV}/specs/agents/shared/runtime/claude-mcp.fragment.json`, effectiveId: "shared:claude-default-mcp" };
+    expect(reanchorShippedProjectionEntry(entry, RUN_SPECS, present)).toBe(entry);
+    expect(reanchorShippedProjectionEntry(entry, RUN_SPECS, missing).absolutePath).toBe(`${RUN_SPECS}/agents/shared/runtime/claude-mcp.fragment.json`);
+  });
+
+  it("packaged installs re-anchor even while the stored file is present", () => {
+    const stored = { path: "CULTURE-default.md", absolutePath: `${OLD}/guidance/CULTURE-default.md`, ownerRoot: OLD, ...meta };
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, present).absolutePath).toBe(`${RUNNING}/guidance/CULTURE-default.md`);
+  });
+
+  it("an unrecognized daemon/assets layout is not treated as an OpenRig install", () => {
+    const other = "/opt/something/daemon/assets";
+    const stored = { path: "CULTURE-default.md", absolutePath: `${other}/guidance/CULTURE-default.md`, ownerRoot: other, ...meta };
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS, missing)).toBe(stored);
+  });
+});

@@ -698,7 +698,7 @@ export class RestoreOrchestrator {
 
       for (const storedFile of consumesReplay ? startupCtx.resolvedStartupFiles ?? [] : []) {
         // Validate the file replay will actually deliver (#261: built-ins follow the running install).
-        const file = reanchorBuiltinStartupFile(storedFile);
+        const file = reanchorBuiltinStartupFile(storedFile, undefined, undefined, exists);
         if (!file.required) {
           if (this.pathLike(file.absolutePath) && !exists(file.absolutePath)) {
             warnings.push(`Restore pre-validation: optional startup file missing for ${node.logicalId}: ${file.absolutePath}`);
@@ -741,7 +741,7 @@ export class RestoreOrchestrator {
       // files and genuinely-fatal blockers (malformed snapshot, missing nodes)
       // stay critical above.
       for (const storedEntry of startupCtx.projectionEntries ?? []) {
-        const entry = reanchorShippedProjectionEntry(storedEntry);
+        const entry = reanchorShippedProjectionEntry(storedEntry, undefined, exists);
         if (this.pathLike(entry.sourcePath) && !exists(entry.sourcePath)) {
           warnings.push(`projection_drift: source root missing for ${node.logicalId}: ${entry.sourcePath} (projection will be skipped at startup; session continuity is unaffected)`);
         }
@@ -1307,9 +1307,9 @@ export class RestoreOrchestrator {
         if (adapter) {
           // Prefilter: check which files/entries still exist
           const existsFn = opts.fsOps?.exists ?? (() => true);
-          const sourceEntries = replayContained ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e));
+          const sourceEntries = replayContained ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
           // #261: recognized built-in startup files follow the running install.
-          const sourceFiles = replayContained ? [] : startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f));
+          const sourceFiles = replayContained ? [] : startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn));
           const sourceActions = replayContained ? [] : startupCtx.startupActions;
           const filteredEntries = sourceEntries.filter((e) => {
             if (!existsFn(e.absolutePath)) {
