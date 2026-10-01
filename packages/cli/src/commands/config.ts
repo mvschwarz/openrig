@@ -77,6 +77,7 @@ Keys:
   files.allowlist        name:/abs/path,name:/abs/path
   progress.scan_roots    name:/abs/path,name:/abs/path
   ui.timezone            TUI IANA timezone (default America/Los_Angeles; reopen TUI after changing)
+  ui.enabled             serve the web UI and its terminal WebSocket (default off; restart the daemon)
   ui.preview.*           refresh_interval_seconds, max_pins, default_lines
   recovery.*             auto_drive_provider_prompts, provider_auth_env_allowlist
   agents.*               advisor_session, operator_session

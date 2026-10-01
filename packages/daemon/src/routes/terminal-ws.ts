@@ -11,17 +11,9 @@ import {
 const MAX_EARLY_TERMINAL_FRAMES = 32;
 const MAX_EARLY_TERMINAL_FRAME_BYTES = 256 * 1024;
 
-export function registerTerminalWs(
-  app: Hono,
-  upgradeWebSocket: Parameters<typeof import("@hono/node-ws").createNodeWebSocket>[0] extends { app: infer _A } ? never : never,
-  opts: { bearerToken: string | null },
-): void;
-export function registerTerminalWs(
-  app: Hono,
-  upgradeWebSocket: (createHandler: (c: unknown) => unknown) => unknown,
-  opts: { bearerToken: string | null; livenessIntervalMs?: number },
-): void {
-  const terminalAuthMiddleware = async (c: { req: { header(name: string): string | undefined; query(name: string): string | undefined }; json(data: unknown, status: number): unknown }, next: () => Promise<void>) => {
+/** The WebSocket route's guard: Origin check on upgrades, then the terminal bearer token when one is set. */
+export function terminalAuthMiddleware(opts: { bearerToken: string | null }) {
+  return async (c: { req: { header(name: string): string | undefined; query(name: string): string | undefined }; json(data: unknown, status: number): unknown }, next: () => Promise<void>) => {
     const upgrade = c.req.header("Upgrade");
     if (upgrade?.toLowerCase() === "websocket") {
       const origin = c.req.header("Origin");
@@ -47,6 +39,26 @@ export function registerTerminalWs(
     if (queryToken && constantTimeEqual(queryToken.trim(), token)) { await next(); return; }
     return c.json({ error: "unauthorized", hint: "Pass terminal token via Authorization header or ?token= query" }, 401);
   };
+}
+
+/** With the web UI off the WebSocket is not registered, but this same guard still runs in front of the HTTP
+ *  terminal routes it matched before (GET /api/terminal/views, /preview, /status), so their behaviour is unchanged. */
+export function registerTerminalAuthOnly(app: Hono, opts: { bearerToken: string | null }): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (app as any).get("/api/terminal/:sessionName", terminalAuthMiddleware(opts));
+}
+
+export function registerTerminalWs(
+  app: Hono,
+  upgradeWebSocket: Parameters<typeof import("@hono/node-ws").createNodeWebSocket>[0] extends { app: infer _A } ? never : never,
+  opts: { bearerToken: string | null },
+): void;
+export function registerTerminalWs(
+  app: Hono,
+  upgradeWebSocket: (createHandler: (c: unknown) => unknown) => unknown,
+  opts: { bearerToken: string | null; livenessIntervalMs?: number },
+): void {
+  const terminalAuth = terminalAuthMiddleware(opts);
 
   // One daemon-owned broker registry shared across every WebSocket connection,
   // created lazily from the first connection's tmux adapter (a daemon
@@ -63,7 +75,7 @@ export function registerTerminalWs(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (app as any).get(
     "/api/terminal/:sessionName",
-    terminalAuthMiddleware,
+    terminalAuth,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (upgradeWebSocket as any)((c: any) => {
       const sessionName = decodeURIComponent(c.req.param("sessionName")!);
