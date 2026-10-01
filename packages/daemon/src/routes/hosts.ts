@@ -49,7 +49,9 @@ import { existsSync } from "node:fs";
 import { loadHumanRegistry, type LoadResult } from "../domain/gateway/human-registry.js";
 
 const PAIR_TTL_MS = 10 * 60 * 1000;
+const PAIR_PRUNE_GRACE_MS = 60 * 60 * 1000;
 const PAIR_HTTP_TIMEOUT_MS = 10_000;
+const MAX_PENDING_PAIRS = 20;
 
 const PAIR_SOURCE_SESSION = "host-pair@kernel";
 
@@ -166,9 +168,31 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       error: "pair_human_required", addresses: registry.entities.map((human) => human.address),
       message: "Pair approval needs one registered human. Inspect rig gateway human list --json; select --human <entityId>@external when several exist. No approval row was created.",
     }, 409);
-    const requester = (body.requester ?? "").trim() || "unknown requester";
+
+    // Prune stale issued pairs past the grace window (keep recently expired entries
+    // so waiting polling clients receive { status: "expired" } instead of 404 pair_unknown).
+    const now = Date.now();
+    for (const [id, rec] of issued.entries()) {
+      if (now - rec.createdAt > PAIR_PRUNE_GRACE_MS) {
+        issued.delete(id);
+      }
+    }
+    const activeCount = Array.from(issued.values()).filter((rec) => now - rec.createdAt <= PAIR_TTL_MS).length;
+    if (activeCount >= MAX_PENDING_PAIRS) {
+      return c.json({
+        error: "too_many_pending_pair_requests",
+        message: "Maximum pending pairing requests reached. Please wait for an existing request to be approved, denied, or expire.",
+      }, 429);
+    }
+
+    const rawRequester = (typeof body.requester === "string" ? body.requester : "").trim();
+    const requester = rawRequester.slice(0, 128).replace(/[\r\n\t\u2028\u2029]/g, " ").trim() || "unknown requester";
     const pairId = randomUUID();
     const code = String(randomInt(100000, 1000000));
+
+    // Reserve capacity synchronously before the async queue creation so concurrent
+    // requests cannot race past the MAX_PENDING_PAIRS limit.
+    issued.set(pairId, { code, qitemId: "", requester, createdAt: Date.now() });
 
     let qitemId: string;
     try {
@@ -188,12 +212,14 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         ].join("\n"),
       });
       qitemId = item.qitemId;
+      const rec = issued.get(pairId);
+      if (rec) rec.qitemId = qitemId;
     } catch (err) {
+      issued.delete(pairId);
       const message = err instanceof Error ? err.message : String(err);
       return c.json({ error: "pair_approval_item_failed", message }, 500);
     }
 
-    issued.set(pairId, { code, qitemId, requester, createdAt: Date.now() });
     return c.json({ pairId, code, approvalQitemId: qitemId });
   });
 
@@ -206,7 +232,7 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       issued.delete(pairId);
       return c.json({ status: "expired" });
     }
-    const item = getRepo(c).getById(rec.qitemId);
+    const item = rec.qitemId ? getRepo(c).getById(rec.qitemId) : null;
     const state = item?.state ?? "pending";
     if (state === "done") {
       // Single-shot handover: the first approved read consumes the pairing.
@@ -288,35 +314,66 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
       }
     }
 
+    // Prune stale client pairs past the grace window (keep recently expired entries
+    // so waiting polling clients receive { status: "expired" } instead of 404 pair_unknown).
+    const now = Date.now();
+    for (const [id, rec] of clientPairs.entries()) {
+      if (now - rec.createdAt > PAIR_PRUNE_GRACE_MS) {
+        clientPairs.delete(id);
+      }
+    }
+    const activeClients = Array.from(clientPairs.values()).filter((rec) => now - rec.createdAt <= PAIR_TTL_MS).length;
+    if (activeClients >= MAX_PENDING_PAIRS) {
+      return c.json({
+        error: "too_many_pending_pair_requests",
+        message: "Maximum pending pairing operations reached. Please wait for existing operations to complete.",
+      }, 429);
+    }
+
+    const localPairId = randomUUID();
+    // Reserve capacity synchronously before the outbound network call so concurrent
+    // requests cannot race past the MAX_PENDING_PAIRS limit.
+    clientPairs.set(localPairId, {
+      url: targetBase,
+      remotePairId: "",
+      code: "",
+      hostId,
+      createdAt: Date.now(),
+    });
+
     let remote: { pairId?: string; code?: string; error?: string; message?: string };
     let status: number;
     try {
       const res = await fetch(`${targetBase}/api/hosts/pair-request`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ requester: body.requester ?? `dashboard@${getOpenRigHome()}`, ...(body.human ? { human: body.human } : {}) }),
+        body: JSON.stringify({
+          requester: typeof body.requester === "string" && body.requester.trim()
+            ? body.requester.trim()
+            : `dashboard@${getOpenRigHome()}`,
+          ...(body.human ? { human: body.human } : {}),
+        }),
         signal: AbortSignal.timeout(PAIR_HTTP_TIMEOUT_MS),
       });
       status = res.status;
       remote = (await res.json().catch(() => ({}))) as typeof remote;
     } catch (err) {
+      clientPairs.delete(localPairId);
       return c.json({ error: "pair_target_unreachable", message: `could not reach ${targetBase}: ${(err as Error).message}` }, 502);
     }
     if (status !== 200 || !remote.pairId || !remote.code) {
+      clientPairs.delete(localPairId);
       return c.json({
         error: remote.error ?? "pair_request_failed",
         message: remote.message ?? `target responded HTTP ${status}`,
       }, 502);
     }
 
-    const localPairId = randomUUID();
-    clientPairs.set(localPairId, {
-      url: targetBase,
-      remotePairId: remote.pairId,
-      code: remote.code,
-      hostId,
-      createdAt: Date.now(),
-    });
+    const clientRec = clientPairs.get(localPairId);
+    if (clientRec) {
+      clientRec.remotePairId = remote.pairId;
+      clientRec.code = remote.code;
+    }
     return c.json({ pairId: localPairId, code: remote.code, target: targetBase });
   });
 
@@ -326,6 +383,9 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
     if (Date.now() - rec.createdAt > PAIR_TTL_MS) {
       clientPairs.delete(c.req.param("pairId"));
       return c.json({ status: "expired" });
+    }
+    if (!rec.remotePairId) {
+      return c.json({ status: "pending", code: rec.code });
     }
 
     let remote: { status?: string; token?: string };

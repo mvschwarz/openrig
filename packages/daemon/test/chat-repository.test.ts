@@ -28,6 +28,21 @@ describe("ChatRepository", () => {
     db.close();
   });
 
+  it("same-day ISO since uses UTC chronology including offsets and fractions", () => {
+    const early = chatRepo.send(rigId, "alice", "before cutoff");
+    const boundary = chatRepo.send(rigId, "alice", "at cutoff");
+    const late = chatRepo.send(rigId, "bob", "after cutoff");
+    const stamp = db.prepare("UPDATE chat_messages SET created_at = ? WHERE id = ?");
+    stamp.run("2026-09-30 10:59:59", early.id);
+    stamp.run("2026-09-30 11:00:00", boundary.id);
+    stamp.run("2026-09-30 11:00:01", late.id);
+    for (const since of ["2026-09-30T11:00:00Z", "2026-09-30 11:00:00", "2026-09-30T07:00:00-04:00"]) {
+      expect(chatRepo.history(rigId, { since }).map(m => m.body)).toEqual(["at cutoff", "after cutoff"]);
+    }
+    expect(chatRepo.history(rigId, { since: "2026-09-30T11:00:00.500Z" }).map(m => m.body)).toEqual(["after cutoff"]);
+    expect(chatRepo.history(rigId, { since: "2026-09-30T11:00:00Z", sender: "alice", after: early.id, limit: 1 }).map(m => m.body)).toEqual(["at cutoff"]);
+  });
+
   it("send persists with ULID", () => {
     const msg = chatRepo.send(rigId, "alice", "hello world");
     expect(msg.id).toBeTruthy();

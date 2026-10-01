@@ -36,6 +36,12 @@ Before delegating to a blank slate, ask: **would a wrong-but-plausible answer he
 ## It generalizes
 This is really **"route work to whoever holds the context,"** with subagents as the option for work that needs none. The audience is **every agent** — implementers and QA seats make this call as much as orchestrators do.
 
+## Hand over intent, not instructions
+Whoever does the work, give them the goal, why it matters, the context you hold and where to find more, then let
+them decide how. When you have the requester's own words, pass them on instead of compressing them into a list of
+steps. A capable agent with the goal builds better than one painting inside a narrow spec, which gets exactly what
+was written and not what was wanted. Keep exact instructions for the few things that must be exact, and say why.
+
 ## Once you've decided
 - Decided on subagents for 2+ independent tasks → `dispatching-parallel-agents` (the fan-out mechanics).
 - Subagents executing a plan's independent tasks → `subagent-driven-development`.

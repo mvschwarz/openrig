@@ -76,6 +76,12 @@ So after installing, compare the granted scopes Slack shows for the app with all
 The app subscribes to messages in public channels it is a member of (`message.channels`) and to
 mentions of the app (`app_mention`). It does not request direct-message or private-channel access.
 
+The manifest also turns on **Interactivity**, so the human can answer a decision's structured
+questions by clicking a button (`rig queue create --human-questions-file`). In Socket Mode the
+clicks arrive over the same socket, so no request URL is needed. An app created from an older
+manifest has Interactivity off: turn it on under **Interactivity & Shortcuts**, or the buttons
+will do nothing. A typed reply in the thread still answers the decision either way.
+
 ## What the connector does with the tokens
 
 The tokens stay in the env file you created. The connector reads them from that file and uses them

@@ -38,8 +38,22 @@ const MID_WORK_PATTERNS = [
 // Idle-prompt patterns: empty prompt line (no typed text after the char).
 // Lines like '❯ Working on a task.' have text after the prompt char and
 // are NOT idle — the prompt is active with input that may look mid-work.
+// Codex 0.157 renders a fixed placeholder in the empty composer (codex-rs/tui/src/chatwidget.rs
+// `PLACEHOLDER`) and its footer no longer carries the `· Context [` status bar. The placeholder
+// is visible both idle and mid-turn; mid-turn the status row (`Working … esc to interrupt`)
+// normally sits above it, but Codex hides that row while it streams assistant output. So the
+// placeholder counts as idle only through MID_WORK_PATTERNS here, and classifySendReadiness
+// never lets a placeholder-only verdict override a display-fresh running/needs_input hook.
+const CODEX_EMPTY_COMPOSER_PATTERN = /^›\s+Ask Codex to do anything\s*$/;
+
+// Codex's live turn-status row: a bullet, a header ("Working", or the reasoning summary Codex shows in its place),
+// then the elapsed time and "esc to interrupt" in parentheses, e.g. "• Working (1h 09m 39s • esc to interrupt)".
+// Completed output that merely says "Working directory: …" or "Working tree is clean." never matches.
+const CODEX_TURN_STATUS_PATTERN = /^[•◦]\s+\S.*\((?:\d+[hms]\s*)+•\s*esc to interrupt\)/;
+
 const IDLE_PROMPT_PATTERNS = [
   /^[❯›]\s*$/,  // prompt char + optional whitespace + end-of-line only
+  CODEX_EMPTY_COMPOSER_PATTERN,
 ];
 
 const PROMPT_DRAFT_PATTERNS = [
@@ -183,6 +197,21 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
       state: "agent_idle",
       reason: "idle_status_bar",
       evidence: truncateEvidence(idleStatusBarLine),
+    };
+  }
+  // Codex keeps its empty-composer placeholder on screen during a turn, and its turn-status row
+  // (`• Working (… esc to interrupt)`) can sit well above the composer when queued or incoming
+  // message blocks come in between. So under the placeholder, that row anywhere in the capture is
+  // the turn still running. Only the status-row signature counts at that range: completed prose
+  // ("Working tree is clean.") further up is history, and the 8-line generic check below still applies.
+  const placeholderMidWork = idlePromptLine && CODEX_EMPTY_COMPOSER_PATTERN.test(idlePromptLine)
+    ? findPatternEvidence(lastNonBlank, [CODEX_TURN_STATUS_PATTERN])
+    : null;
+  if (placeholderMidWork) {
+    return {
+      state: "agent_active",
+      reason: "mid_work_pattern",
+      evidence: placeholderMidWork,
     };
   }
   if (idlePromptLine && !MID_WORK_PATTERNS.some((pattern) => pattern.test(recentWindow))) {
@@ -1516,7 +1545,7 @@ export class SessionTransport {
       }
     }
 
-    return probeSessionActivity({
+    const probe = await probeSessionActivity({
       sessionName: input.sessionName,
       runtime: input.runtime,
       attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
@@ -1525,6 +1554,22 @@ export class SessionTransport {
       captureObserver: this.captureObserver,
       binding: input.binding,
     });
+    // A Codex empty-composer placeholder is also on screen while Codex streams with its status
+    // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)
+    // running/needs_input hook such as UserPromptSubmit: keep it until it ages out. An `unknown`
+    // hook (e.g. SessionStart) carries no evidence of work and does not block.
+    if (
+      probe.state === "idle" &&
+      probe.reason === "idle_prompt" &&
+      CODEX_EMPTY_COMPOSER_PATTERN.test(probe.evidence ?? "") &&
+      hookActivity &&
+      hookActivity.evidenceSource === "runtime_hook" &&
+      hookActivity.stale !== true &&
+      (hookActivity.state === "running" || hookActivity.state === "needs_input")
+    ) {
+      return hookActivity;
+    }
+    return probe;
   }
 
   // OPR.0.4.1.10 — a runtime-hook is authoritative for send-readiness only within the tight send

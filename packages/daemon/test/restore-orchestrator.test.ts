@@ -76,6 +76,16 @@ function nativeLineage(runtime: "claude-code" | "codex", token: string) {
   ];
 }
 
+// Synthetic managed Claude tree: a foreground native child of the pane shell.
+function managedClaudeRows(token: string) {
+  const startedAt = "Sat Jan  1 12:00:00 2000";
+  return [
+    { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, executableName: "bash", command: "-bash", startedAt },
+    { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, executableName: "sh", command: "/bin/sh /tmp/openrig-tmux-send.txt", startedAt },
+    { pid: 1236, ppid: 1235, pgid: 1235, tpgid: 1235, executableName: "claude", command: `/opt/claude.exe --permission-mode auto --resume ${token} --name worker@r99`, startedAt },
+  ];
+}
+
 describe("RestoreOrchestrator", () => {
   let db: Database.Database;
   let rigRepo: RigRepository;
@@ -883,6 +893,67 @@ describe("RestoreOrchestrator", () => {
         .get(result.result.nodes[0]!.nodeId) as { verdict: string; registered_pane: string };
       expect(verdict).toEqual({ verdict: "verified", registered_pane: "%1" });
     }
+  });
+
+  it.each(["full", "subset", "existing-hook", "conflicting-hook"])("A3 proves managed Claude in %s recovery and the next identity sweep", async (mode) => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [], resumeType: "claude_id", resumeToken: "saved-claude" });
+    const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "sh") } as unknown as TmuxAdapter;
+    const listProcesses = vi.fn(async () => {
+      if (mode.endsWith("hook")) db.prepare("UPDATE sessions SET resume_token = ?, resume_provenance = 'hook' WHERE id = (SELECT id FROM sessions ORDER BY id DESC LIMIT 1)").run(mode === "existing-hook" ? "saved-claude" : "different-session");
+      return managedClaudeRows("saved-claude");
+    });
+    const orch = createOrchestrator({ tmux, listProcesses });
+    const result = mode !== "subset" ? await orch.restore(snap.id) : await orch.launchSingleNode(snap.rigId, "worker", { snapshotId: snap.id });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("fixture restore did not return a result");
+    const nodes = "result" in result ? result.result?.nodes : result.launched;
+    if (mode === "conflicting-hook") {
+      expect(nodes?.[0]?.status).toBe("attention_required");
+      expect(db.prepare("SELECT resume_token, resume_provenance FROM sessions ORDER BY id DESC LIMIT 1").get()).toEqual({ resume_token: "different-session", resume_provenance: "hook" });
+      return;
+    }
+    expect(nodes?.[0]?.status).toBe("resumed");
+    expect(db.prepare("SELECT resume_token, resume_provenance FROM sessions ORDER BY id DESC LIMIT 1").get()).toEqual({ resume_token: "saved-claude", resume_provenance: mode === "existing-hook" ? "hook" : "scrape" });
+    const nodeId = nodes![0]!.nodeId;
+    const name = sessionRegistry.getBindingForNode(nodeId)!.tmuxSession!;
+    const verdict = () => db.prepare("SELECT verdict, registered_pane, observed_pid FROM seat_identity_verdicts WHERE node_id = ?").get(nodeId);
+    expect(verdict()).toEqual({ verdict: "verified", registered_pane: "%1", observed_pid: 1236 });
+    tmux.listSessions = vi.fn(async () => [{ name }] as never);
+    listProcesses.mockClear();
+    await new SeatIdentityReconciler({ db, tmux, listProcesses }).reconcileAll();
+    expect(verdict()).toEqual({ verdict: "verified", registered_pane: "%1", observed_pid: 1236 });
+    expect(listProcesses).toHaveBeenCalledTimes(2);
+    // A later real loss of native evidence must remove the positive verdict.
+    listProcesses.mockResolvedValue(managedClaudeRows("different-session"));
+    await new SeatIdentityReconciler({ db, tmux, listProcesses }).reconcileAll();
+    expect(verdict()).toMatchObject({ verdict: "mismatch" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
+  it.each(["bare", "wrong-token", "background", "unrelated", "unstable", "missing-metadata", "pane-changed", "ambiguous-pane", "process-error"])("A3 retains attention for unproved Claude: %s", async (failure) => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }], edges: [], resumeType: "claude_id", resumeToken: "saved-claude" });
+    const tmux = { ...mockTmux(), getPaneCommand: vi.fn(async () => "sh") } as unknown as TmuxAdapter;
+    let calls = 0;
+    const listProcesses = async () => {
+      calls++;
+      if (failure === "process-error") throw new Error("fixture unavailable");
+      const rows = managedClaudeRows(failure === "wrong-token" ? "wrong" : "saved-claude");
+      if (failure === "bare") rows.pop();
+      if (failure === "background") rows[2]!.pgid = 9000;
+      if (failure === "unrelated") rows[2]!.ppid = 9000;
+      if (failure === "unstable" && calls > 1) rows[2]!.startedAt = "Sat Jan  1 12:01:00 2000";
+      if (failure === "missing-metadata") rows[2]!.startedAt = "";
+      if (failure === "pane-changed") tmux.listPanes = vi.fn(async () => [{ id: "%other", index: 0, cwd: "/", width: 80, height: 24, active: true }]);
+      return rows;
+    };
+    if (failure === "ambiguous-pane") tmux.listPanes = vi.fn(async () => ["%1", "%2"].map(id => ({ id, index: 0, cwd: "/", width: 80, height: 24, active: true })));
+    const result = await createOrchestrator({ tmux, listProcesses }).restore(snap.id);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]?.status).toBe("attention_required");
+    expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(result.result.nodes[0]!.nodeId)).toEqual({ verdict: "mismatch" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
   });
 
   it.each(["full", "subset", "existing-hook", "conflicting-hook"])("proves synthetic shell-wrapped Codex through %s recovery and the next identity poll", async (mode) => {
@@ -2924,6 +2995,27 @@ describe("RestoreOrchestrator", () => {
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(usable ? 1 : 0);
     });
 
+    it.each([
+      ["Claude Code v2.1.220\n ❯ accept edits on", true],
+      ["Choose a conversation to resume:\n  1. project-foo", false],
+      ["Not logged in · Run /login", false],
+    ])("A3 separates wrapped Claude identity from known unusable screens: %s", async (content, usable) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("sh");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue(String(content));
+      const seeded = seedFailedAttempt({ restoreOutcome: "attention_required", withResumeToken: true });
+      const oldEvent = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get();
+      const result = await createOrchestrator({ tmux, listProcesses: async () => managedClaudeRows("tok-abc-123") }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+      expect(result.ok).toBe(usable);
+      if (!usable && !result.ok) expect(result.code).toBe("pane_not_usable");
+      expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(seeded.nodeId)).toEqual({ verdict: "verified" });
+      expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(oldEvent);
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(usable ? 1 : 0);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
     it("upgrades failed -> operator_recovered when ALL four preconditions hold; emits audit event", async () => {
       const tmux = mockTmuxForReconciler();
       (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
@@ -3643,6 +3735,137 @@ describe("RestoreOrchestrator", () => {
       expect(result.warnings?.some((w) => w.includes("FR-5") && w.includes("no durably-bound"))).toBe(true);
       // The externally-observable event carries it too (was warnings: []).
       expect(subsetEvents[0]?.result?.warnings?.some((w) => w.includes("FR-5"))).toBe(true);
+    });
+  });
+
+  // #261: stored built-in startup files follow the running install on restore (pre-validation + replay);
+  // custom files are delivered exactly as stored; a same-native resume still replays nothing.
+  describe("#261 built-in startup files follow the running install", () => {
+    const OLD_ASSETS = "/old-openrig/lib/node_modules/@openrig/cli/daemon/assets";
+    const RUNNING_ASSETS = path.resolve(import.meta.dirname, "../assets");
+    const builtin = (name: string, rel: string) => ({
+      path: name, absolutePath: `${OLD_ASSETS}/${rel}`, ownerRoot: OLD_ASSETS,
+      deliveryHint: "guidance_merge" as const, required: true, appliesOn: ["fresh_start" as const, "restore" as const],
+    });
+    const customSameBasename = {
+      path: "CULTURE-default.md", absolutePath: "/user-rig/CULTURE-default.md", ownerRoot: "/user-rig",
+      deliveryHint: "guidance_merge" as const, required: true, appliesOn: ["fresh_start" as const, "restore" as const],
+    };
+    const storedFiles = [
+      builtin("CULTURE-default.md", "guidance/CULTURE-default.md"),
+      builtin("openrig-start.md", "guidance/openrig-start.md"),
+      customSameBasename,
+    ];
+    const notOld = (p: string) => !p.startsWith("/old-openrig");
+
+    function seedPodAware(resume: boolean) {
+      const rig = rigRepo.createRig("test-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-261", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-261" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      if (resume) sessionRegistry.updateResumeToken(session.id, "claude_id", "resume-token-261");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+        .run(node.id, "[]", JSON.stringify(storedFiles), "[]", "claude-code");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+      const deliverStartup = vi.fn(async () => ({ delivered: 0, failed: [] }));
+      const adapter = {
+        runtime: "claude-code",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup,
+        checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness: vi.fn(async () => ({ ok: true as const, resumeToken: "t", resumeType: "claude_id" })),
+      };
+      return { snap, deliverStartup, adapter };
+    }
+
+    it("fresh replay: old install removed -> no blocker, built-ins delivered from the running install, custom file unchanged", async () => {
+      const { snap, deliverStartup, adapter } = seedPodAware(false);
+      const result = await createOrchestrator().restore(snap.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: notOld }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as Array<{ path: string; absolutePath: string; ownerRoot: string; required: boolean; appliesOn: string[]; deliveryHint: string }>);
+      const culture = delivered.filter((f) => f.path === "CULTURE-default.md");
+      expect(culture.map((f) => f.absolutePath).sort()).toEqual([`${RUNNING_ASSETS}/guidance/CULTURE-default.md`, "/user-rig/CULTURE-default.md"].sort());
+      expect(delivered.find((f) => f.path === "openrig-start.md")).toMatchObject({
+        absolutePath: `${RUNNING_ASSETS}/guidance/openrig-start.md`, ownerRoot: RUNNING_ASSETS,
+        required: true, appliesOn: ["fresh_start", "restore"], deliveryHint: "guidance_merge",
+      });
+      expect(delivered.some((f) => f.absolutePath.startsWith("/old-openrig"))).toBe(false);
+    });
+
+    it("re-anchors even while the old install still exists (current shipped guidance is selected)", async () => {
+      const { snap, deliverStartup, adapter } = seedPodAware(false);
+      const result = await createOrchestrator().restore(snap.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: () => true }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as Array<{ absolutePath: string }>);
+      expect(delivered.some((f) => f.absolutePath.startsWith("/old-openrig"))).toBe(false);
+      expect(delivered.some((f) => f.absolutePath === `${RUNNING_ASSETS}/guidance/CULTURE-default.md`)).toBe(true);
+    });
+
+    it("a genuinely missing CURRENT built-in still blocks restore honestly, naming the running path", async () => {
+      const { snap, adapter } = seedPodAware(false);
+      const runningCulture = `${RUNNING_ASSETS}/guidance/CULTURE-default.md`;
+      const result = await createOrchestrator().restore(snap.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: (p) => notOld(p) && p !== runningCulture }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.result.blockers?.[0]).toMatchObject({ code: "required_startup_file_missing", path: runningCulture });
+    });
+
+    it("extension: replay projects shipped-spec resources from the running install; plugin entry untouched; no drift warning for the old path", async () => {
+      const OLD_SPECS = "/old-openrig/lib/node_modules/@openrig/cli/daemon/specs";
+      const RUNNING_SPECS = path.resolve(import.meta.dirname, "../specs");
+      const { snap, adapter } = seedPodAware(false);
+      const entries = [
+        { category: "runtime_resource", effectiveId: "shared:claude-default-mcp", sourceSpec: "shared", sourcePath: `${OLD_SPECS}/agents/shared`, resourcePath: "r", absolutePath: `${OLD_SPECS}/agents/shared/runtime/claude-mcp.fragment.json`, resourceType: "claude_mcp_fragment" },
+        { category: "plugin", effectiveId: "shared:openrig-core", sourceSpec: "shared", sourcePath: `${OLD_SPECS}/agents/shared`, resourcePath: "p", absolutePath: "/home/u/.openrig/plugins/openrig-core" },
+      ];
+      const fixed = updateSnapshotData(snap, (data) => { for (const k of Object.keys(data.nodeStartupContext)) data.nodeStartupContext[k].projectionEntries = entries; });
+      const result = await createOrchestrator().restore(fixed.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: notOld }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(true);
+      const projected = adapter.project.mock.calls.flatMap((c) => ((c[0] as { entries: Array<{ effectiveId: string; absolutePath: string }> }).entries));
+      expect(projected.find((e) => e.effectiveId === "shared:claude-default-mcp")?.absolutePath).toBe(`${RUNNING_SPECS}/agents/shared/runtime/claude-mcp.fragment.json`);
+      expect(projected.find((e) => e.effectiveId === "shared:openrig-core")?.absolutePath).toBe("/home/u/.openrig/plugins/openrig-core");
+      if (result.ok) {
+        const drift = (result.result.warnings ?? []).filter((w) => w.includes("projection_drift"));
+        // The re-anchored resource raises no drift; the deliberately untouched plugin entry keeps its honest
+        // "source root missing" warning for the old shipped sourcePath while its own file still projects.
+        expect(drift.some((w) => w.includes("claude-mcp.fragment.json"))).toBe(false);
+        expect(drift.every((w) => w.includes("source root missing") && w.includes("/old-openrig/lib/node_modules/@openrig/cli/daemon/specs/agents/shared"))).toBe(true);
+      }
+    });
+
+    it("startup extension: replay delivers a shipped-spec rig culture from the running install; custom unchanged", async () => {
+      const OLD_SPECS = "/old-openrig/lib/node_modules/@openrig/cli/daemon/specs";
+      const RUNNING_SPECS = path.resolve(import.meta.dirname, "../specs");
+      const { snap, deliverStartup, adapter } = seedPodAware(false);
+      const shippedCulture = { path: "culture/CULTURE.md", absolutePath: `${OLD_SPECS}/rigs/launch/kernel/culture/CULTURE.md`, ownerRoot: `${OLD_SPECS}/rigs/launch/kernel`, deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] };
+      const fixed = updateSnapshotData(snap, (data) => { for (const k of Object.keys(data.nodeStartupContext)) data.nodeStartupContext[k].resolvedStartupFiles = [shippedCulture, customSameBasename]; });
+      const result = await createOrchestrator().restore(fixed.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: notOld }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => (c[0] as Array<{ absolutePath: string }>).map((f) => f.absolutePath));
+      expect(delivered.sort()).toEqual([`${RUNNING_SPECS}/rigs/launch/kernel/culture/CULTURE.md`, "/user-rig/CULTURE-default.md"].sort());
+    });
+
+    it("same-native resume: replay stays contained (no startup files delivered), stored built-ins notwithstanding", async () => {
+      const { snap, deliverStartup, adapter } = seedPodAware(true);
+      const orch = createOrchestrator({ listProcesses: nativeLineage("claude-code", "resume-token-261") });
+      const result = await orch.restore(snap.id, { adapters: { "claude-code": adapter }, fsOps: { exists: notOld } });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as unknown[]);
+      expect(delivered).toEqual([]);
     });
   });
 });

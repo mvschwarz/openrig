@@ -18,7 +18,8 @@
 //     and summarizes the tree (skills/, hooks, mcp_servers, etc.) so the UI
 //     viewer can show what the plugin ships without re-reading files.
 //   - For findUsedBy(id), parses agent.yaml files in the spec library and
-//     walks resources.plugins[].id to collect references. Operates on parsed
+//     walks resource declarations and profile uses.plugins[] to collect references.
+//     Profile consumers are distinct from definition-only resource pools. Operates on parsed
 //     YAML structure (NOT string-grep) so comments + adjacent text don't
 //     produce false positives.
 //
@@ -151,6 +152,8 @@ export interface AgentReference {
   sourcePath: string;
   /** profile names that include this plugin in their uses.plugins[]. */
   profiles: string[];
+  /** Profile consumer, or a resource declaration with no consuming profile. */
+  kind?: "consumer" | "definition";
 }
 
 export interface PluginDiscoveryServiceOpts {
@@ -381,12 +384,12 @@ export class PluginDiscoveryService {
 
       const resourcesPlugins = readResourcesPlugins(parsed);
       const declaresThisPlugin = resourcesPlugins.some((p) => p === pluginId);
-      if (!declaresThisPlugin) continue;
-
       const profiles = readProfilesUsingPlugin(parsed, pluginId);
+      if (!declaresThisPlugin && profiles.length === 0) continue;
       const agentName = readField(parsed, "name");
       if (!agentName) continue;
-      refs.push({ agentName, sourcePath: candidate.path, profiles });
+      refs.push({ agentName, sourcePath: candidate.path, profiles,
+        kind: profiles.length > 0 ? "consumer" : "definition" });
     }
     return refs;
   }
@@ -807,7 +810,7 @@ function readProfilesUsingPlugin(spec: unknown, pluginId: string): string[] {
     if (!uses || typeof uses !== "object") continue;
     const usesPlugins = (uses as Record<string, unknown>)["plugins"];
     if (!Array.isArray(usesPlugins)) continue;
-    if (usesPlugins.some((p) => p === pluginId)) {
+    if (usesPlugins.some((p) => p === pluginId || p === `shared:${pluginId}`)) {
       matched.push(profileName);
     }
   }

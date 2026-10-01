@@ -461,6 +461,24 @@ describe("rig scope slice move (HG-7)", () => {
   beforeEach(() => { env = seedSubstrate(); });
   afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
 
+  it.each([true, false])("warns about source siblings whose dependency becomes dangling (json=%s)", async (json) => {
+    const dependent = path.join(env.missionsRoot, "backlog", "slices", "02-tests", "README.md");
+    writeFile(dependent, "---\nid: OPR.99.0.1.2\ndepends_on: [OPR.99.0.1.1]\n---\n# tests\n");
+    const original = fs.readFileSync(dependent, "utf8");
+    const args = ["slice", "move", "01-debt-foo", "release-0.3.2", "--mission", "backlog"];
+    if (json) args.push("--json");
+    const result = await run(args, env.missionsRoot);
+    expect(result.exitCode).toBe(0);
+    expect(fs.readFileSync(dependent, "utf8")).toBe(original);
+    expect(result.stdout).toContain("OPR.99.0.1.2");
+    expect(result.stdout).toContain("OPR.99.0.1.1");
+    expect(result.stdout).toContain("depends_on");
+    if (json) expect(JSON.parse(result.stdout).warnings).toEqual([
+      expect.stringContaining("OPR.99.0.1.2"),
+    ]);
+    else expect(result.stdout).toContain("Warning:");
+  });
+
   it("moves between missions; auto-renumber; frontmatter.mission updates", async () => {
     seedMissionComposition(env.missionsRoot, "backlog", [
       { ref: "slices/01-debt-foo/slice.yaml", order: 10, active: true },
@@ -1524,5 +1542,44 @@ describe("OPR.0.4.1.6 FR-6 — help", () => {
     const verified = scopeCommand().commands.find((c) => c.name() === "slice")!.commands.find((c) => c.name() === "verified")!;
     const help = renderHelp(verified);
     expect(help).toMatch(/against|provenance|mandatory|source/i);
+  });
+});
+
+describe("scope create dependency identity", () => {
+  let root: string;
+  let missionsRoot: string;
+  beforeEach(() => { ({ root, missionsRoot } = seedSubstrate()); });
+  afterEach(() => { fs.rmSync(root, { recursive: true, force: true }); });
+
+  it("rejects a mission depending on itself before creating its folder", async () => {
+    const result = await run(["mission", "create", "release-1.2.3", "--no-notes", "--depends-on", "OPR.1.2.3"], missionsRoot);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("itself");
+    expect(fs.existsSync(path.join(missionsRoot, "release-1.2.3"))).toBe(false);
+  });
+
+  it("rejects a slice depending on its freshly minted ID without changing its parent", async () => {
+    const missionPath = path.join(missionsRoot, "release-0.3.2");
+    const original = fs.readFileSync(path.join(missionPath, "README.md"), "utf8");
+    const result = await run(["slice", "create", "release-0.3.2", "self", "--depends-on", "OPR.0.3.2.2"], missionsRoot);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("itself");
+    expect(fs.existsSync(path.join(missionPath, "slices", "02-self"))).toBe(false);
+    expect(fs.readFileSync(path.join(missionPath, "README.md"), "utf8")).toBe(original);
+    expect(fs.existsSync(path.join(missionPath, "mission.yaml"))).toBe(false);
+  });
+
+  it("still creates a mission with a sibling dependency", async () => {
+    const result = await run(["mission", "create", "release-1.2.3", "--no-notes", "--depends-on", "OPR.0.3.2"], missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const fm = readFrontmatter(path.join(missionsRoot, "release-1.2.3", "SPEC.md"));
+    expect(fm.depends_on).toEqual(["OPR.0.3.2"]);
+  });
+
+  it("still creates a slice with a sibling dependency", async () => {
+    const result = await run(["slice", "create", "release-0.3.2", "next", "--depends-on", "OPR.0.3.2.1"], missionsRoot);
+    expect(result.exitCode).toBe(0);
+    const fm = readFrontmatter(path.join(missionsRoot, "release-0.3.2", "slices", "02-next", "SPEC.md"));
+    expect(fm.depends_on).toEqual(["OPR.0.3.2.1"]);
   });
 });

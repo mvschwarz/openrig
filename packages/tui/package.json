@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "tsc && chmod +x dist/main.js",
+    "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest"
   },

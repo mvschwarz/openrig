@@ -40,7 +40,10 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
     let established = false;
     try {
       const res = await opts.open();
-      if (closed) return;
+      if (closed) {
+        await res?.body?.cancel();
+        return;
+      }
       if (!res?.body) {
         opts.onStatus?.("unavailable");
         return; // feature-detect said no — the leg stays off, S16 behavior intact

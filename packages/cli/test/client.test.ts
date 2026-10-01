@@ -180,7 +180,7 @@ describe("DaemonClient", () => {
       cwd: resolve(import.meta.dirname, ".."),
     });
 
-    expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+(?: \([0-9a-f]{8}(?:, dirty)?\))?$/);
+    expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?: \([0-9a-f]{8}(?:, dirty)?\))?$/);
   });
 
   // Test 7: Client non-2xx (409) -> returns { status: 409, data: errorBody }

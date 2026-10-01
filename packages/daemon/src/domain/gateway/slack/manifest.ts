@@ -75,7 +75,7 @@ export function buildSlackAppManifest(sources: ManifestSources = CANONICAL_MANIF
     oauth_config: { scopes: { bot: scopes } },
     settings: {
       event_subscriptions: { bot_events: events },
-      interactivity: { is_enabled: false },
+      interactivity: { is_enabled: true }, // #193: button clicks arrive over the socket
       org_deploy_enabled: false,
       socket_mode_enabled: true,
       token_rotation_enabled: false,

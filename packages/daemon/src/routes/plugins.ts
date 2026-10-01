@@ -132,10 +132,11 @@ export function pluginsRoutes(): Hono {
     const service = getService(c);
     if (!service) return c.json({ error: "plugin_discovery_unavailable" }, 503);
     const id = c.req.param("id");
-    if (!service.getPlugin(id)) {
+    const refs = service.findUsedBy(id);
+    if (refs.length === 0 && !service.getPlugin(id)) {
       return c.json({ error: "plugin_not_found", message: `Plugin "${id}" not found` }, 404);
     }
-    return c.json(service.findUsedBy(id));
+    return c.json(refs);
   });
 
   // Slice 28 — GET /:id/files/list?path=<rel>

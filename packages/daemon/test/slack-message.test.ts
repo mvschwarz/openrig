@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildOutboundMessage, buildImageBlocks, containsSecret, redactSecrets, SLACK_TEXT_CAP } from "../src/domain/gateway/slack/message.js";
+import { buildOutboundMessage, buildImageBlocks, containsSecret, redactSecrets, SLACK_SECTION_CAP, SLACK_TEXT_CAP } from "../src/domain/gateway/slack/message.js";
 
 describe("Slice-11 outbound message — content hygiene (item 7)", () => {
   const opts = { sourceLabel: "vm-openrig-build" };
@@ -47,6 +47,78 @@ describe("Slice-11 outbound message — content hygiene (item 7)", () => {
     expect(containsSecret("xoxb-1-2-abc")).toBe(true);
     expect(containsSecret(redactSecrets("xoxb-1-2-abc"))).toBe(false);
     expect(containsSecret("nothing sensitive here")).toBe(false);
+  });
+});
+
+describe("#47 evidence link boundaries", () => {
+  const qitem = { qitemId: "q-evidence", summary: "s", body: "b" };
+  const opts = { sourceLabel: "vm" };
+
+  it.each([
+    "https://user:password@example.invalid/shot.png",
+    "https://user@example.invalid/shot.png",
+    "https://:password@example.invalid/shot.png",
+    "https://user%3Apassword@example.invalid/shot.png",
+    "https://[invalid]/shot.png",
+    "https://example.invalid:99999/shot.png",
+    "https://hooks.slack.com/services/T00/B00/SECRETPART",
+    "https://example.invalid/proof?token=xoxb-EXAMPLE-000000-leak",
+  ])("never renders an unsafe URL in evidence or image blocks: %s", (url) => {
+    const message = buildOutboundMessage(qitem, { ...opts, evidenceLink: url });
+    expect(message.text).not.toContain("Evidence:");
+    expect(JSON.stringify(message)).not.toContain(url);
+    expect(buildImageBlocks([{ imageUrl: url, altText: "attachment" }])).toEqual([]);
+  });
+
+  it("preserves percent-encoded URLs and escapes ampersands in the final context and fallback", () => {
+    const url = "https://example.invalid/a%20b/%3Cproof%3E?next=%7Cevidence%7C&view=full";
+    const escaped = url.replaceAll("&", "&amp;");
+    const message = buildOutboundMessage(qitem, { ...opts, evidenceLink: url });
+    expect(message.text).toContain(`Evidence: ${escaped}`);
+    expect(message.blocks).toContainEqual({
+      type: "context", elements: [{ type: "mrkdwn", text: `Evidence: <${escaped}|evidence>` }],
+    });
+  });
+
+  it.each([
+    { name: "link", character: "a", escaped: "a", prefix: "Evidence: <", suffix: "|evidence>" },
+    { name: "plain text", character: "|", escaped: "|", prefix: "Evidence: ", suffix: "" },
+    { name: "escaped link", character: "&", escaped: "&amp;", prefix: "Evidence: <", suffix: "|evidence>" },
+    { name: "escaped plain text", character: "<", escaped: "&lt;", prefix: "Evidence: ", suffix: "" },
+  ])("bounds the final $name context at 3000 units without clipping", ({ character, escaped, prefix, suffix }) => {
+    const base = "https://example.invalid/";
+    const budget = SLACK_SECTION_CAP - prefix.length - base.length - suffix.length;
+    const count = Math.floor(budget / escaped.length);
+    const padding = "a".repeat(budget % escaped.length);
+    const url = base + character.repeat(count) + padding;
+    const context = prefix + base + escaped.repeat(count) + padding + suffix;
+    const message = buildOutboundMessage(qitem, { ...opts, evidenceLink: url });
+    expect(context.length).toBe(SLACK_SECTION_CAP);
+    expect(message.blocks).toContainEqual({ type: "context", elements: [{ type: "mrkdwn", text: context }] });
+    expect(() => buildOutboundMessage(qitem, { ...opts, evidenceLink: url + character })).toThrow(/evidence context.*maximum 3000/);
+  });
+
+  it("includes evidence, images, attribution, mentions and the reconcile marker in the complete fallback budget", () => {
+    const evidenceLink = "https://example.invalid/proof?view=full&revision=1";
+    const fullOpts = {
+      ...opts,
+      evidenceLink,
+      attribution: { seat: "dev@rig", session: "dev@rig@host" },
+      mentionUserId: "U-EVIDENCE",
+      reconcileMarker: "(or-mark:d-evidence)",
+      mediaRefs: [{ imageUrl: "https://example.invalid/shot.png", altText: "Screenshot & evidence" }],
+    };
+    const brief = { ...qitem, summary: "s".repeat(1000) };
+    const baseline = buildOutboundMessage(brief, fullOpts);
+    const body = "b".repeat(1 + SLACK_TEXT_CAP - baseline.text.length);
+    const message = buildOutboundMessage({ ...brief, body }, fullOpts);
+    expect(message.text.length).toBe(SLACK_TEXT_CAP);
+    expect(message.text).toContain("Evidence: " + evidenceLink.replaceAll("&", "&amp;"));
+    expect(message.text).toContain("Image: Screenshot &amp; evidence");
+    expect(message.text).toContain("from dev@rig@host");
+    expect(message.text).toContain("<@U-EVIDENCE>");
+    expect(message.text.endsWith(fullOpts.reconcileMarker)).toBe(true);
+    expect(() => buildOutboundMessage({ ...brief, body: body + "b" }, fullOpts)).toThrow(/complete fallback.*maximum 3900/);
   });
 });
 

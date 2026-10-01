@@ -120,6 +120,13 @@ and a useful report to the OpenRig team if you are still stuck. If `rig` won't r
 `daemon/docs/reference/help.md` inside the installed `@openrig/cli` package, or https://www.openrig.dev/help/agents
 (the same text).
 
+## Developing OpenRig itself
+
+If you're changing OpenRig's own source in a clone of the openrig repository, use that repository's
+`developing-openrig` skill (in the checkout's `.claude/skills/` or `.agents/skills/`). It maps the architecture, the
+areas where a small change has a large effect, and which tests to run before a pull request.
+
 ## Need more than what ships here?
 
-This index covers the **shipped** surface. A dev host carries far more (factory, architecture, PM-craft, studio skills) reached through the host's own routers/codemaps — if you're on a builder host and need something not listed above, that deeper routing is the next hop, not a wall. (Host-scale routing is the subject of the context-routing architecture doc; at product scale, this one file is the whole map.)
+This index covers the **shipped** surface. Your project, rig or machine may add its own skills and routers. Check the
+skills your working directory loads before concluding that something doesn't exist.

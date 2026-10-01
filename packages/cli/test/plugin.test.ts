@@ -153,6 +153,14 @@ describe("rig plugin CLI (slice 3.4)", () => {
         res.end(JSON.stringify(FIXTURE_USED_BY));
         return;
       }
+      if (url.pathname === "/api/plugins/with-definitions/used-by" && req.method === "GET") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([
+          { agentName: "shared", sourcePath: "/fixture/shared/agent.yaml", profiles: [], kind: "definition" },
+          { ...FIXTURE_USED_BY[0], kind: "consumer" },
+        ]));
+        return;
+      }
       if (url.pathname === "/api/plugins/unreferenced/used-by" && req.method === "GET") {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify([]));
@@ -376,6 +384,21 @@ describe("rig plugin CLI (slice 3.4)", () => {
       expect(out).toContain("advisor-lead");
       expect(out).toContain("/home/op/.openrig/specs/agents/advisor/lead/agent.yaml");
       expect(out).toContain("default");
+    });
+
+    it("prints resource definitions separately from profile consumers", async () => {
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand(runningDeps(port)));
+      const { logs, exitCode } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "used-by", "with-definitions"]);
+      });
+      expect(exitCode).toBeUndefined();
+      const out = logs.join("\n");
+      expect(out).toContain("Plugin definitions:");
+      expect(out.indexOf("advisor-lead")).toBeLessThan(out.indexOf("Plugin definitions:"));
+      expect(out.indexOf("Plugin definitions:")).toBeLessThan(out.indexOf("shared"));
+      expect(out).toContain("/fixture/shared/agent.yaml");
     });
 
     it("empty result (no agents reference the plugin) is honest — does NOT exit non-zero", async () => {

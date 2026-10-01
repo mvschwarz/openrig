@@ -39,11 +39,21 @@ A request can be vague in several directions: diagnose or change, contents or pr
 local symptom or intended outcome. Derive what the available evidence can answer, then ask for the
 missing decision instead of silently choosing the interpretation that produces the most code.
 
-The recurring failure is easy to rationalize. A doghouse seems to need a lock; the lock seems to
-need power; power suggests more infrastructure. Every step is locally defensible, yet the requested
-shelter never arrives. The cheapest corrective question is: **How big is the dog?** Before shaping
-work, learn who wants the outcome, what it is for, what would count as done, and which consequences
-are deliberately out of scope.
+The recurring failure is easy to rationalize, and it comes in two shapes. Asked for a doghouse, an
+agent wonders whether it should have a light. The light needs power, power needs a generator, and the
+generator needs fuel. Every step is locally defensible, and an hour later there is a moon base while
+the dog is still waiting outside. The question that stops it: **Does the thing actually need this?**
+
+The other shape is quieter. The agent builds exactly the doghouse that was asked for, tidy and on
+time, with a door the dog can't fit through. Nothing was over-built, but nobody asked the one fact
+that decided whether it works. The question that stops it: **How big is the dog?**
+
+Both are the same failure: losing the plot. Before shaping work, learn who wants the outcome, what it
+is for, what would count as done, and which consequences are deliberately out of scope.
+
+What prevents this is shared understanding of the goal, not tighter instructions. When you hand work
+to a capable peer, give them the intent, the context and where to find more, and let them decide how.
+A narrow script brings its own failure: you get exactly what was written, not what was wanted.
 
 Run `rig context list` to discover whether this rig provides a world pack. If it does, load that
 pack's fresh profile with `rig context profile <world-pack-ref> --situation fresh`; otherwise,

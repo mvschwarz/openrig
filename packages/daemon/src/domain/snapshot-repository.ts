@@ -58,7 +58,7 @@ export class SnapshotRepository {
    * pre_restore, and auto-rehydrate remain below the tier (unchanged).
    *
    * The SQL query orders by `(kind IN ('auto-pre-down','auto-periodic')) DESC,
-   * created_at DESC, id DESC`. The in-memory loop validates each candidate and
+   * created_at DESC, rowid DESC`. The in-memory loop validates each candidate and
    * skips snapshots with corrupted JSON or missing topology metadata, returning
    * the first usable row. Returns null when no usable snapshot exists.
    *
@@ -71,7 +71,7 @@ export class SnapshotRepository {
   findLatestRestoreUsable(rigId: string): Snapshot | null {
     const rows = this.db
       .prepare(
-        "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic')) DESC, created_at DESC, id DESC"
+        "SELECT * FROM snapshots WHERE rig_id = ? ORDER BY (kind IN ('auto-pre-down', 'auto-periodic')) DESC, created_at DESC, rowid DESC"
       )
       .all(rigId) as SnapshotRow[];
 
@@ -93,12 +93,13 @@ export class SnapshotRepository {
   selectRestoreUsable(rigId: string, snapshotId?: string, nowMs: number = Date.now()): RestoreSnapshotSelectionOutcome {
     let snapshot: Snapshot | null;
     if (snapshotId) {
-      snapshot = this.getSnapshot(snapshotId);
-      if (!snapshot) return { ok: false, code: "snapshot_not_found", message: `Snapshot ${snapshotId} not found` };
-      if (snapshot.rigId !== rigId) {
-        return { ok: false, code: "snapshot_wrong_rig", message: `Snapshot ${snapshotId} belongs to rig ${snapshot.rigId}, not ${rigId}` };
+      const row = this.db.prepare("SELECT * FROM snapshots WHERE id = ?").get(snapshotId) as SnapshotRow | undefined;
+      if (!row) return { ok: false, code: "snapshot_not_found", message: `Snapshot ${snapshotId} not found` };
+      if (row.rig_id !== rigId) {
+        return { ok: false, code: "snapshot_wrong_rig", message: `Snapshot ${snapshotId} belongs to rig ${row.rig_id}, not ${rigId}` };
       }
-      if (!isRestoreUsableSnapshotData(snapshot.data)) {
+      snapshot = this.restoreUsableRow(row);
+      if (!snapshot) {
         return { ok: false, code: "snapshot_unusable", message: `Snapshot ${snapshotId} is not structurally restore-usable` };
       }
     } else {
@@ -106,9 +107,20 @@ export class SnapshotRepository {
       if (!snapshot) return { ok: false, code: "no_usable_snapshot", message: `No usable snapshot for rig ${rigId}` };
     }
 
-    const newer = this.listSnapshots(rigId)
-      .filter((candidate) => candidate.id !== snapshot!.id)
-      .filter((candidate) => Date.parse(sqliteUtc(candidate.createdAt)) > Date.parse(sqliteUtc(snapshot!.createdAt)))
+    // Equal second-resolution timestamps still have an insertion order. Scan
+    // only newer rows, retaining restore's tolerant parse for damaged captures.
+    const candidates = this.db.prepare("SELECT * FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC, rowid DESC")
+      .all(rigId) as SnapshotRow[];
+    const selectedIndex = candidates.findIndex((candidate) => candidate.id === snapshot!.id);
+    // A concurrent pruner can remove the selected row after it was read. Its
+    // insertion position is then unknown, so only strictly newer timestamps count.
+    const newerRows = selectedIndex < 0
+      ? candidates.filter((row) => Date.parse(sqliteUtc(row.created_at)) > Date.parse(sqliteUtc(snapshot!.createdAt)))
+      : candidates.slice(0, selectedIndex);
+    const newer = newerRows.flatMap((row) => {
+      const candidate = this.restoreUsableRow(row);
+      return candidate ? [candidate] : [];
+    })
       .find((candidate) => isRestoreUsableSnapshotData(candidate.data));
     const mode = snapshotId ? "explicit" as const : "automatic" as const;
     return {
@@ -143,7 +155,7 @@ export class SnapshotRepository {
       params.push(opts.kind);
     }
 
-    sql += " ORDER BY created_at DESC";
+    sql += " ORDER BY created_at DESC, rowid DESC";
 
     if (opts?.limit) {
       sql += " LIMIT ?";
@@ -207,6 +219,16 @@ export class SnapshotRepository {
       .run(...toDelete.map((r) => r.id));
 
     return toDelete.length;
+  }
+
+  private restoreUsableRow(row: SnapshotRow): Snapshot | null {
+    let snapshot: Snapshot;
+    try { snapshot = this.rowToSnapshot(row); }
+    catch (err) {
+      if (err instanceof SyntaxError) return null;
+      throw err;
+    }
+    return isRestoreUsableSnapshotData(snapshot.data) ? snapshot : null;
   }
 
   private rowToSnapshot(row: SnapshotRow): Snapshot {
@@ -284,6 +306,7 @@ export function isRestoreUsableSnapshotData(data: unknown): data is SnapshotData
   }
   if (d.topologyRoster !== undefined) {
     const roster = d.topologyRoster;
+    if (!roster || typeof roster !== "object" || Array.isArray(roster)) return false;
     const allowedSources = new Set(["materialized_topology", "operator_explicit", "legacy_current_nodes"]);
     if (roster.version !== 1 || !allowedSources.has(roster.source) || !Array.isArray(roster.intendedNodeIds)) return false;
     if (!roster.intendedNodeIds.every((nodeId) => typeof nodeId === "string" && nodeId.length > 0)) return false;

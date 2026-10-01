@@ -1,4 +1,5 @@
-import { observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type CodexProcessObservation } from "./native-process-lineage.js";
+import { observeClaudePaneProcess, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation } from "./native-process-lineage.js";
+import { isShellForeground } from "./shell-classifier.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -73,7 +74,7 @@ interface RunningSeatRow {
 
 export interface SeatIdentityReconcilerDeps {
   db: Database.Database;
-  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand">;
+  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses">>;
   now?: () => Date;
   listProcesses?: NativeProcessLister;
 }
@@ -163,11 +164,35 @@ export class SeatIdentityReconciler {
 
     // Two fresh process snapshots per sweep, not two ps calls per seat. Each
     // phase observes every bound pane; the second begins after the first ends.
-    const codexSeats = seats.filter((seat) => seat.runtime === "codex" && seat.tmux_pane && liveSessions.has(seat.session_name));
+    const nativeSeats: RunningSeatRow[] = [];
+    for (const seat of seats) {
+      if (!seat.tmux_pane || !liveSessions.has(seat.session_name)) continue;
+      if (seat.runtime === "codex") nativeSeats.push(seat);
+      else if (seat.runtime === "claude-code" && seat.resume_token) {
+        // Only shell-label contradictions consume Claude native proof. Keep
+        // computeVerdict's fresh command/PID reads: a later shell transition
+        // without sampled proof must remain non-green for this sweep.
+        try {
+          const command = await this.tmux.getPaneCommand(seat.tmux_pane);
+          if (classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch"
+            && isShellForeground(command?.trim().toLowerCase() ?? "")) nativeSeats.push(seat);
+        } catch { /* No proof selected; the final per-seat observation still runs. */ }
+        if (generation !== this.generation) return;
+      }
+    }
     const sample = async () => {
       let snapshot: ReturnType<NativeProcessLister> | undefined;
-      return Promise.all(codexSeats.map((seat) => observeCodexPaneProcess({
-        target: seat.tmux_pane!, tmux: this.tmux, expectedToken: seat.resume_token,
+      // One list-panes per sample (each sample stays a fresh, independent observation); per-pane on a miss. The
+      // observers get the adapter itself with only getPanePid served from that batch.
+      let panesNow: Promise<Map<string, { pid: number; command: string | null }> | null> | undefined;
+      const tmux = Object.assign(Object.create(this.tmux) as typeof this.tmux, {
+        getPanePid: async (target: string) => {
+          panesNow ??= this.tmux.readAllPaneProcesses ? this.tmux.readAllPaneProcesses().catch(() => null) : Promise.resolve(null);
+          return (await panesNow)?.get(target)?.pid ?? this.tmux.getPanePid(target);
+        },
+      });
+      return Promise.all(nativeSeats.map((seat) => (seat.runtime === "codex" ? observeCodexPaneProcess : observeClaudePaneProcess)({
+        target: seat.tmux_pane!, tmux, expectedToken: seat.resume_token,
         listProcesses: () => snapshot ??= this.listProcesses(),
       })));
     };
@@ -175,11 +200,16 @@ export class SeatIdentityReconciler {
     if (generation !== this.generation) return;
     const second = await sample();
     if (generation !== this.generation) return;
-    const codexProofs = new Map(codexSeats.map((seat, index) => [seat.node_id,
+    const nativeProofs = new Map(nativeSeats.map((seat, index) => [seat.node_id,
       first[index] && first[index]?.fingerprint === second[index]?.fingerprint ? second[index]! : null]));
+    let panes: Map<string, { pid: number; command: string | null }> | null = null;
+    if (this.tmux.readAllPaneProcesses) {
+      try { panes = await this.tmux.readAllPaneProcesses(); } catch { panes = null; }
+      if (generation !== this.generation) return;
+    }
     for (const seat of seats) {
       try {
-        const verdict = await this.computeVerdict(seat, liveSessions, observedAt, codexProofs.get(seat.node_id) ?? null);
+        const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null, panes);
         if (generation !== this.generation) return;
         this.store.upsert(verdict);
       } catch {
@@ -207,7 +237,8 @@ export class SeatIdentityReconciler {
     seat: RunningSeatRow,
     liveSessions: Set<string>,
     observedAt: string,
-    native: CodexProcessObservation | null,
+    native: NativeProcessObservation | null,
+    panes: Map<string, { pid: number; command: string | null }> | null = null,
   ): Promise<SeatIdentityVerdict> {
     const base = {
       nodeId: seat.node_id,
@@ -237,7 +268,9 @@ export class SeatIdentityReconciler {
       };
     }
 
-    const pid = await this.tmux.getPanePid(seat.tmux_pane);
+    // From the sweep's one batched list-panes when the pane is in it; otherwise read per pane as before.
+    const batched = panes?.get(seat.tmux_pane) ?? null;
+    const pid = batched ? batched.pid : await this.tmux.getPanePid(seat.tmux_pane);
     if (pid === null) {
       // The registered pane no longer resolves. Distinguish "the whole tmux
       // session is gone" from "the pane within a live session is gone".
@@ -251,8 +284,12 @@ export class SeatIdentityReconciler {
       };
     }
 
-    const command = await this.tmux.getPaneCommand(seat.tmux_pane);
-    if (seat.runtime === "codex") {
+    const command = batched ? batched.command : await this.tmux.getPaneCommand(seat.tmux_pane);
+    if (command === null && seat.runtime === "claude-code" && seat.resume_token) {
+      return this.tmuxUnavailableVerdict(seat, observedAt);
+    }
+    if (seat.runtime === "codex" || (seat.runtime === "claude-code" && seat.resume_token
+      && classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch" && isShellForeground(command?.trim().toLowerCase() ?? ""))) {
       return {
         ...base, verdict: native?.panePid === pid ? "verified" : "mismatch",
         evidenceSource: "pane_process", reason: native?.panePid === pid ? null : "process_identity_ambiguous",

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ConfigStore } from "./config-store.js";
-import { readOpenRigEnv } from "./openrig-compat.js";
+import { getOpenRigHome, readOpenRigEnv } from "./openrig-compat.js";
 import { fetchWithTimeout, FetchTimeoutError } from "./fetch-with-timeout.js";
 import { readLocalOrigin } from "./local-origin.js";
 
@@ -109,6 +109,22 @@ interface DaemonClientOptions {
   timeoutMs?: number;
 }
 
+/** Routing state published by daemon start, not a health check or sibling-home discovery. */
+function localDaemonUrl(): string | undefined {
+  try {
+    // Resolve at construction time: embedders may change OPENRIG_HOME after import.
+    const state = JSON.parse(fs.readFileSync(path.join(getOpenRigHome(), "daemon.json"), "utf-8"));
+    if (!state || !Number.isSafeInteger(state.pid) || state.pid <= 0
+      || !Number.isInteger(state.port) || state.port < 1 || state.port > 65535
+      || (state.host !== undefined && (typeof state.host !== "string" || !state.host.trim()))) return undefined;
+    // A stale PID must not redirect reads or writes to another configured daemon.
+    // Keep the recorded endpoint; the request decides reachability, even after exit.
+    return `http://${state.host ?? "127.0.0.1"}:${state.port}`;
+  } catch {
+    return undefined;
+  }
+}
+
 export class DaemonClient {
   readonly baseUrl: string;
   private fetchImpl: typeof fetch = fetch;
@@ -157,9 +173,15 @@ export class DaemonClient {
       if (envUrl) {
         this.baseUrl = envUrl;
       } else {
-        // Resolve from config (env > file > defaults)
-        const config = new ConfigStore().resolve();
-        this.baseUrl = `http://${config.daemon.host}:${config.daemon.port}`;
+        // --port/--host can differ from configured startup defaults. Match the
+        // lifecycle-aware commands by preferring this home's recorded endpoint.
+        const localUrl = localDaemonUrl();
+        if (localUrl) {
+          this.baseUrl = localUrl;
+        } else {
+          const config = new ConfigStore().resolve(); // env > file > defaults
+          this.baseUrl = `http://${config.daemon.host}:${config.daemon.port}`;
+        }
       }
     }
 

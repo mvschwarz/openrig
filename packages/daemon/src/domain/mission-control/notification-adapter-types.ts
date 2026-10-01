@@ -28,5 +28,7 @@ export interface NotificationAdapter {
   readonly mechanism: string;
   /** Target descriptor (ntfy topic URL or webhook endpoint URL). */
   readonly target: string;
+  /** True when the adapter was constructed with an invalid target URL and cannot deliver notifications. */
+  readonly disabled?: boolean;
   send(payload: NotificationPayload): Promise<NotificationDeliveryResult>;
 }

@@ -274,6 +274,102 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     const second = await app.request(`/api/hosts/pair-request/${pairId}`);
     expect(second.status).toBe(404);
   });
+
+  it("flooding protection: refuses issuance when MAX_PENDING_PAIRS is reached (429)", async () => {
+    // Fill up to the limit of 20
+    for (let i = 0; i < 20; i++) {
+      const res = await app.request("/api/hosts/pair-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requester: `flood-${i}` }),
+      });
+      expect(res.status).toBe(200);
+    }
+    // 21st request should be rejected with 429
+    const rejected = await app.request("/api/hosts/pair-request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requester: "flood-overflow" }),
+    });
+    expect(rejected.status).toBe(429);
+    const body = (await rejected.json()) as { error: string };
+    expect(body.error).toBe("too_many_pending_pair_requests");
+  });
+
+  it("sanitizes requester input to prevent control-character injection in approval summaries", async () => {
+    const res = await app.request("/api/hosts/pair-request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requester: "evil\r\nAPPROVE: forged command\toperator\u2028fake\u2029line" }),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { approvalQitemId: string };
+    const item = repo.getById(json.approvalQitemId)!;
+    expect(item.summary).not.toContain("\r");
+    expect(item.summary).not.toContain("\n");
+    expect(item.summary).not.toContain("\u2028");
+    expect(item.summary).not.toContain("\u2029");
+    expect(item.summary).toContain("evil  APPROVE: forged command operator fake line");
+  });
+
+  it("handles non-string or empty requester gracefully", async () => {
+    const res = await app.request("/api/hosts/pair-request", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requester: 12345 }),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { approvalQitemId: string };
+    const item = repo.getById(json.approvalQitemId)!;
+    expect(item.summary).toContain("unknown requester");
+  });
+
+  it("preserves 'expired' status when a waiting client polls after TTL, even across subsequent requests", async () => {
+    const { pairId } = await issue();
+    const originalNow = Date.now;
+    try {
+      // Advance time past PAIR_TTL_MS (10 min), but within PAIR_PRUNE_GRACE_MS (60 min)
+      Date.now = () => originalNow() + 15 * 60 * 1000;
+
+      // Another pair request comes in
+      const res = await app.request("/api/hosts/pair-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requester: "subsequent-client" }),
+      });
+      expect(res.status).toBe(200);
+
+      // Original waiting client polls: should receive status "expired", not 404 pair_unknown
+      const poll = await app.request(`/api/hosts/pair-request/${pairId}`);
+      expect(poll.status).toBe(200);
+      const body = (await poll.json()) as { status: string };
+      expect(body.status).toBe("expired");
+
+      // Polling consumed it, so subsequent poll returns 404
+      const secondPoll = await app.request(`/api/hosts/pair-request/${pairId}`);
+      expect(secondPoll.status).toBe(404);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  it("enforces MAX_PENDING_PAIRS capacity under concurrent parallel requests", async () => {
+    // Fire 25 concurrent requests in parallel
+    const requests = Array.from({ length: 25 }, (_, i) =>
+      app.request("/api/hosts/pair-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requester: `concurrent-client-${i}` }),
+      })
+    );
+
+    const responses = await Promise.all(requests);
+    const successCount = responses.filter((r) => r.status === 200).length;
+    const rateLimitedCount = responses.filter((r) => r.status === 429).length;
+
+    expect(successCount).toBe(20);
+    expect(rateLimitedCount).toBe(5);
+  });
 });
 
 describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's write seam, B1)", () => {

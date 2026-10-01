@@ -14,6 +14,7 @@ import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { createHash, randomUUID } from "node:crypto";
 import { parseCommand } from "./grammar.js";
 import { serializeCommands } from "./commands/registry.js";
 import type { ViewState, ViewStateStore } from "./types.js";
@@ -74,13 +75,107 @@ export interface ControlSocket {
   close(): Promise<void>;
 }
 
-export async function createControlSocket(options: {
+interface ControlSocketOptions {
   socketPath: string;
   view: ViewStateStore;
   onMutation?: () => void;
   /** I5 — live command context supplier (from the C3 detector); default standard. */
   currentContext?: () => string;
-}): Promise<ControlSocket> {
+  /** Standalone terminals can use an independent endpoint on a collision. */
+  fallbackOnCollision?: boolean;
+}
+
+export async function createControlSocket(options: ControlSocketOptions): Promise<ControlSocket> {
+  try {
+    return await createReservedControlSocket(options);
+  } catch (error) {
+    if (!options.fallbackOnCollision || (error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    const directory = path.dirname(options.socketPath);
+    const suffix = `-${process.pid}-${randomUUID().slice(0, 8)}.sock`;
+    const budget = MAX_SOCKET_PATH_BYTES - Buffer.byteLength(directory + path.sep + suffix);
+    if (budget < 0) {
+      throw new Error(`socket runtime directory is too long for an independent control endpoint: ${directory} — use a shorter $OPENRIG_HOME/run or --socket path`);
+    }
+    const stem = Array.from(path.basename(options.socketPath, ".sock"));
+    while (Buffer.byteLength(stem.join("")) > budget) stem.pop();
+    const alternate = path.join(directory, stem.join("") + suffix);
+    // Use ordinary exclusive bind/recovery checks for the new path as well.
+    return createReservedControlSocket({ ...options, socketPath: alternate });
+  }
+}
+
+/** Publish the PID before the exclusive name exists, so a killed writer cannot
+ * leave an empty reservation with no identifiable owner. */
+function publishRecoveryReservation(reservation: string): () => void {
+  const temporary = path.join(path.dirname(reservation), `.tui-lock-${process.pid}-${randomUUID()}.tmp`);
+  let fd: number | undefined = fs.openSync(temporary, "wx", 0o600);
+  try {
+    fs.writeFileSync(fd, `${process.pid}\n`);
+    const owned = fs.fstatSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.linkSync(temporary, reservation);
+    return () => {
+      try {
+        const current = fs.lstatSync(reservation);
+        if (current.dev === owned.dev && current.ino === owned.ino) fs.unlinkSync(reservation);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    };
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+    fs.unlinkSync(temporary);
+  }
+}
+
+/** Only ESRCH proves a PID is dead; live, inaccessible and legacy reservations
+ * remain protected. PID reuse can conservatively keep a reservation alive. */
+function abandonedRecoveryReservation(reservation: string): fs.Stats | undefined {
+  try {
+    const stat = fs.lstatSync(reservation);
+    if (!stat.isFile() || stat.size > 32 || (process.getuid && stat.uid !== process.getuid())) return;
+    const text = fs.readFileSync(reservation, "utf8").trim();
+    if (!/^\d+$/.test(text)) return;
+    const pid = Number(text);
+    if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0x7fffffff) return;
+    try { process.kill(pid, 0); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return stat;
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "EACCES" && code !== "EPERM") throw error;
+  }
+}
+
+function recoveryReservationError(reservation: string): Error {
+  return Object.assign(new Error(`Control socket recovery reservation exists: ${reservation}. Confirm no launcher is recovering this socket before removing that file.`), { code: "EADDRINUSE" });
+}
+
+/** Serialize abandoned-lock reclamation by the old inode, then recheck it.
+ * The claim uses the same PID protocol, so a killed reclaimer can also recover.
+ * A bounded chain of interruptions fails closed rather than recursing forever. */
+function acquireRecoveryReservation(reservation: string, depth = 0): () => void {
+  try { return publishRecoveryReservation(reservation); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const abandoned = abandonedRecoveryReservation(reservation);
+  if (!abandoned || depth >= 8) throw recoveryReservationError(reservation);
+  const identity = createHash("sha256").update(`${abandoned.dev}:${abandoned.ino}`).digest("hex").slice(0, 24);
+  const claim = path.join(path.dirname(reservation), `.tui-reclaim-${identity}.lock`);
+  const releaseClaim = acquireRecoveryReservation(claim, depth + 1);
+  try {
+    const current = abandonedRecoveryReservation(reservation);
+    if (!current || current.dev !== abandoned.dev || current.ino !== abandoned.ino) throw recoveryReservationError(reservation);
+    fs.unlinkSync(reservation);
+    try { return publishRecoveryReservation(reservation); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw recoveryReservationError(reservation);
+      throw error;
+    }
+  } finally { releaseClaim(); }
+}
+
+async function createReservedControlSocket(options: ControlSocketOptions): Promise<ControlSocket> {
   const { socketPath, view, onMutation } = options;
   const currentContext = options.currentContext ?? (() => "standard");
   const bytes = Buffer.byteLength(socketPath);
@@ -90,7 +185,6 @@ export async function createControlSocket(options: {
     );
   }
   fs.mkdirSync(path.dirname(socketPath), { recursive: true });
-  if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
 
   const server = net.createServer((conn) => {
     let buf = "";
@@ -124,19 +218,43 @@ export async function createControlSocket(options: {
     });
   });
 
-  return new Promise((resolve, reject) => {
+  const listen = () => new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, () => {
-      resolve({
-        path: socketPath,
-        close: () =>
-          new Promise<void>((res) => {
-            server.close(() => {
-              if (fs.existsSync(socketPath)) fs.unlinkSync(socketPath);
-              res();
-            });
-          }),
-      });
+      server.removeListener("error", reject);
+      resolve();
     });
   });
+  try {
+    await listen();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    // All supported recoverers reserve this path before probing/unlinking.
+    const reservation = `${socketPath}.recovery.lock`;
+    const releaseReservation = acquireRecoveryReservation(reservation);
+    try {
+      // An existing path may belong to another running TUI. Only a refused
+      // connection to an unchanged, owned socket proves a stale launcher.
+      const before = fs.lstatSync(socketPath);
+      if (!before.isSocket() || (process.getuid && before.uid !== process.getuid())) throw error;
+      const stale = await new Promise<boolean>((resolve) => {
+        const probe = net.createConnection(socketPath);
+        probe.setTimeout(1000);
+        const finish = (value: boolean) => { probe.destroy(); resolve(value); };
+        probe.once("connect", () => finish(false));
+        probe.once("timeout", () => finish(false));
+        probe.once("error", (cause: NodeJS.ErrnoException) => finish(cause.code === "ECONNREFUSED"));
+      });
+      const after = fs.lstatSync(socketPath);
+      if (!stale || before.dev !== after.dev || before.ino !== after.ino) throw error;
+      fs.unlinkSync(socketPath);
+      await listen();
+    } finally {
+      releaseReservation();
+    }
+  }
+  return {
+    path: socketPath,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
 }

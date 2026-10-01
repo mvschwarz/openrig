@@ -195,6 +195,8 @@ interface DaemonOptions {
    * terminal preview/transport/websocket routes.
    */
   terminalBearerToken?: string | null;
+  /** Overrides the `ui.enabled` setting (tests). */
+  webUiEnabled?: boolean;
 }
 
 interface DaemonResult {
@@ -1533,15 +1535,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           `OPENRIG_NOTIFICATIONS_MECHANISM='${mechanism}' is not recognized; supported: ntfy | webhook | none`,
         );
       }
-      const dispatcher = new MissionControlNotificationDispatcher({
-        db,
-        eventBus,
-        adapter,
-        includeVerbCompletion,
-        missionControlBaseUrl,
-      });
-      dispatcher.start();
-      deps.missionControlNotificationDispatcher = dispatcher;
+      if (adapter.disabled) {
+        // Target URL failed validation; warning was logged and daemon starts with notifications disabled.
+      } else {
+        const dispatcher = new MissionControlNotificationDispatcher({
+          db,
+          eventBus,
+          adapter,
+          includeVerbCompletion,
+          missionControlBaseUrl,
+        });
+        dispatcher.start();
+        deps.missionControlNotificationDispatcher = dispatcher;
+      }
     }
   }
 
@@ -2361,6 +2367,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // OPR.0.5.6.1 — bind the delivery policies' late gateway ref.
   lateGatewayDispatch.fn = (op, ref, payload, opts) => gatewaySubsystem.dispatch(op, ref, payload, opts);
 
+  // `ui.enabled` (default off): the web UI pages and its terminal WebSocket. Read once at start.
+  deps.webUiEnabled = opts?.webUiEnabled ?? new ContextPackSettingsStore().resolveOne("ui.enabled").value === true;
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
   return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket };

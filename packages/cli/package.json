@@ -2,7 +2,7 @@
   "name": "@openrig/cli",
   "version": "0.6.3",
   "type": "module",
-  "description": "Local control plane for multi-agent coding topologies",
+  "description": "Build your own network of agents from Claude Code, Codex and Pi: persistent teams with roles, shared context and owned work.",
   "keywords": [
     "ai",
     "agents",
@@ -38,7 +38,7 @@
     "scripts"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/bin-wrapper.js && mkdir -p dist/schemas && cp src/schemas/*.json dist/schemas/ && mkdir -p dist/lib/scope-templates && cp src/lib/scope-templates/*.md dist/lib/scope-templates/ && cp ../../LICENSE LICENSE",
+    "build": "tsc && chmod +x dist/bin-wrapper.js && mkdir -p dist/schemas && cp src/schemas/*.json dist/schemas/ && mkdir -p dist/lib/scope-templates && cp src/lib/scope-templates/*.md dist/lib/scope-templates/ && cp ../../LICENSE LICENSE && cp ../../README.md README.md",
     "postinstall": "node scripts/check-abi.mjs",
     "prepublishOnly": "bash ../../scripts/build-package.sh",
     "test": "vitest run",

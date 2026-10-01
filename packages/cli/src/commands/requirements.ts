@@ -24,9 +24,10 @@ export function requirementsCommand(depsOverride?: StatusDeps): Command {
 
       const res = await client.post<Record<string, unknown>>("/api/bootstrap/plan", { sourceRef: spec });
 
-      if (res.status >= 500) {
-        console.error(res.data["errors"] ?? res.data["error"] ?? "Failed to check requirements");
-        process.exitCode = 2;
+      if (res.status >= 400) {
+        if (opts.json) console.log(JSON.stringify(res.data));
+        else console.error(res.data["errors"] ?? res.data["error"] ?? "Failed to check requirements");
+        process.exitCode = res.status >= 500 ? 2 : 1;
         return;
       }
 

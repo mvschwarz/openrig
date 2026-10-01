@@ -275,6 +275,37 @@ describe("plugins HTTP routes", () => {
       expect(await res.json()).toMatchObject({ error: "plugin_not_found", message: expect.stringContaining("no-such-plugin") });
     });
 
+    it("returns references to an uninstalled plugin", async () => {
+      const dir = join(env.specLibraryDir, "missing-plugin-user");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "agent.yaml"), [
+        "name: missing-plugin-user", "resources:", "  plugins:", "    - id: acme-not-installed",
+        "profiles:", "  default:", "    uses:", "      plugins: [acme-not-installed]",
+      ].join("\n"));
+      expect(env.service.getPlugin("acme-not-installed")).toBeNull();
+      const res = await createApp(env.service).request("/api/plugins/acme-not-installed/used-by");
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual([expect.objectContaining({
+        agentName: "missing-plugin-user", profiles: ["default"], kind: "consumer",
+      })]);
+    });
+
+    it("counts bare and shared profile references without local plugin declarations", async () => {
+      for (const [name, plugin] of [["bare-user", "openrig-core"], ["shared-user", "shared:openrig-core"],
+        ["other-user", "other:openrig-core"], ["similar-user", "shared:openrig-core-extra"]]) {
+        const dir = join(env.specLibraryDir, name!);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "agent.yaml"), [
+          `name: ${name}`, "profiles:", "  default:", "    uses:", `      plugins: [${plugin}]`,
+        ].join("\n"));
+      }
+      const res = await createApp(env.service).request("/api/plugins/openrig-core/used-by");
+      expect(res.status).toBe(200);
+      const refs = await res.json() as Array<{ agentName: string; profiles: string[]; kind: string }>;
+      expect(refs.map(ref => ref.agentName).sort()).toEqual(["bare-user", "shared-user"]);
+      expect(refs.every(ref => ref.kind === "consumer" && ref.profiles.join() === "default")).toBe(true);
+    });
+
     it("retains cold legacy references while activating the primary user specs root", async () => {
       vi.stubEnv("HOME", env.root);
       vi.stubEnv("OPENRIG_HOME", join(env.root, "primary"));
@@ -325,8 +356,9 @@ describe("plugins HTTP routes", () => {
       try {
         const res = await app.request("/api/plugins/openrig-core/used-by");
         expect(res.status).toBe(200);
-        const refs = await res.json() as Array<{ agentName: string }>;
-        expect(refs.some((ref) => ref.agentName === "shared")).toBe(true);
+        const refs = await res.json() as Array<{ agentName: string; profiles: string[]; kind: string }>;
+        expect(refs).toContainEqual(expect.objectContaining({ agentName: "conveyor-lead", profiles: ["default"], kind: "consumer" }));
+        expect(refs).toContainEqual(expect.objectContaining({ agentName: "shared", profiles: [], kind: "definition" }));
       } finally {
         db.close();
       }
@@ -342,10 +374,14 @@ describe("plugins HTTP routes", () => {
       });
       const res = await createApp(service).request("/api/plugins/openrig-core/used-by");
       expect(res.status).toBe(200);
-      const refs = await res.json() as Array<{ agentName: string; sourcePath: string }>;
+      const refs = await res.json() as Array<{ agentName: string; sourcePath: string; profiles: string[]; kind: string }>;
       const shared = refs.filter((ref) => ref.sourcePath === join(builtinSpecs, "agents/shared/agent.yaml"));
       expect(shared).toHaveLength(1);
       expect(shared[0]?.agentName).toBe("shared");
+      expect(shared[0]?.kind).toBe("definition");
+      expect(shared[0]?.profiles).toEqual([]);
+      expect(refs).toContainEqual(expect.objectContaining({ agentName: "conveyor-lead",
+        sourcePath: join(builtinSpecs, "agents/conveyor/lead/agent.yaml"), profiles: ["default"], kind: "consumer" }));
     });
 
     it("returns empty list when plugin not used by any agent", async () => {

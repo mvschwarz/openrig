@@ -16,7 +16,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
-import { buildOutboundMessage, attributionFromSession, reconcileToken, type SlackMediaRef } from "./message.js";
+import { buildOutboundMessage, attributionFromSession, reconcileToken, redactSecrets, type SlackMediaRef } from "./message.js";
 import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
 import type { SubsystemDeliverFn, SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
@@ -53,15 +53,22 @@ export interface SubsystemSlackDeliveryOpts {
    *  undefined for everything else (quiet-threaded). The composition wires the registry lookup
    *  + the escalation predicate; delivery just renders what it is told. */
   resolveMentionUserId?: (payload: OutboundPostPayload) => string | undefined;
-  /** G — read a LOCAL image the evidenceRef points at (the founder screenshot class: a seat's
+  /** G — read a LOCAL file the evidenceRef points at (the founder screenshot class: a seat's
    *  file has no public URL, so it rides the EXTERNAL-UPLOAD flow into the thread). Injectable
-   *  for hermetic tests; default reads the filesystem, image extensions only. Return null =
-   *  not an uploadable local image. */
-  readLocalImage?: (refPath: string) => { bytes: Uint8Array; filename: string } | null;
+   *  for hermetic tests; default reads the filesystem (LOCAL_ATTACHMENT_EXT, at most
+   *  LOCAL_ATTACHMENT_MAX_BYTES). Return null = not a local attachment; { skipped } = an
+   *  attachment that can't be sent (logged, the text still delivers). */
+  readLocalImage?: (refPath: string) => LocalAttachment | null;
   log?: (msg: string) => void;
 }
 
 const LOCAL_IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+/** Local evidence files uploaded into the thread: images, video (Slack plays mp4/webm/mov inline)
+ *  and PDF. Wider than LOCAL_IMAGE_EXT, which gates https Block Kit image blocks. */
+const LOCAL_ATTACHMENT_EXT = new Set([...LOCAL_IMAGE_EXT, ".mp4", ".webm", ".mov", ".pdf"]);
+/** Well under Slack's 1 GB per-file limit, and bounded for a daemon that holds the bytes in memory. */
+export const LOCAL_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+export type LocalAttachment = { bytes: Uint8Array; filename: string } | { skipped: string };
 const TRANSPORT_FAILURE_RECEIPT_PREFIX = "::transport-failure-receipt::";
 const TRANSPORT_FAILURE_RECEIPT_REPAIRED = "::repaired";
 
@@ -91,16 +98,74 @@ function pendingTransportFailureReceipt(
   }
 }
 
-/** Default local-image reader: absolute path, image extension, readable — else null. */
-export function defaultReadLocalImage(refPath: string): { bytes: Uint8Array; filename: string } | null {
+/** Default local-attachment reader: an absolute path with an attachment extension, a regular file
+ *  of at most LOCAL_ATTACHMENT_MAX_BYTES, readable — else null (not an attachment), or { skipped }
+ *  when it is an attachment that can't be sent (too large, missing, unreadable), so the miss is
+ *  logged rather than silent. */
+export function defaultReadLocalImage(refPath: string): LocalAttachment | null {
+  if (!path.isAbsolute(refPath)) return null;
+  if (!LOCAL_ATTACHMENT_EXT.has(path.extname(refPath).toLowerCase())) return null;
+  // The path is resolved ONCE: open it, then stat and read that same descriptor, so the file checked is the file
+  // sent. O_NONBLOCK keeps the open from waiting on a FIFO (refused below as not a regular file), and the read is
+  // bounded by the size just checked.
+  let fd: number | null = null;
   try {
-    if (!path.isAbsolute(refPath)) return null;
-    if (!LOCAL_IMAGE_EXT.has(path.extname(refPath).toLowerCase())) return null;
-    const bytes = fs.readFileSync(refPath);
-    return { bytes: new Uint8Array(bytes), filename: path.basename(refPath) };
-  } catch {
-    return null;
+    fd = fs.openSync(refPath, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return { skipped: "not a regular file" };
+    if (st.size > LOCAL_ATTACHMENT_MAX_BYTES) {
+      return { skipped: `${st.size} bytes is over the ${LOCAL_ATTACHMENT_MAX_BYTES}-byte attachment cap` };
+    }
+    const bytes = new Uint8Array(st.size);
+    let read = 0;
+    while (read < bytes.length) {
+      const n = fs.readSync(fd, bytes, read, bytes.length - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    return { bytes: read === bytes.length ? bytes : bytes.subarray(0, read), filename: path.basename(refPath) };
+  } catch (e) {
+    return { skipped: `unreadable (${(e as NodeJS.ErrnoException).code ?? "error"})` };
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
   }
+}
+
+/** #47 — only an https evidenceRef with an image-like extension may ride as a Block Kit
+ *  `image` block (extension set mirrors LOCAL_IMAGE_EXT). Slack rejects the ENTIRE
+ *  message with `invalid_blocks` when an image block's URL is not a real image (e.g. a
+ *  GitLab issue link or a PROOF.md URL — both explicitly documented evidenceRef uses),
+ *  so a non-image https ref must never become an image block. Query strings and
+ *  fragments are stripped before the extension check. */
+export function isHttpsImageRef(ref: unknown): boolean {
+  if (typeof ref !== "string") return false;
+  const url = ref.trim();
+  if (!/^https:\/\/\S+$/.test(url)) return false;
+  try {
+    return LOCAL_IMAGE_EXT.has(path.extname(new URL(url).pathname).toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/** #47 — split an evidenceRef into an image attachment vs. a plain link. An explicit
+ *  `media` array stays fully caller-controlled; otherwise an image-looking https
+ *  evidenceRef becomes a Block Kit image and a non-image https evidenceRef becomes a
+ *  plain link (rendered by buildEvidenceLink, never an image block). Local refs keep
+ *  their existing handling (image upload flow / clean skip). */
+export function evidenceAttachment(
+  media: unknown,
+  evidenceRef: unknown,
+  summary: string | null | undefined,
+): { mediaRefs: SlackMediaRef[] | undefined; evidenceLink: string | undefined } {
+  if (Array.isArray(media)) return { mediaRefs: media as SlackMediaRef[], evidenceLink: undefined };
+  if (typeof evidenceRef !== "string") return { mediaRefs: undefined, evidenceLink: undefined };
+  const ref = evidenceRef.trim();
+  if (isHttpsImageRef(ref)) {
+    return { mediaRefs: [{ imageUrl: ref, altText: summary ?? "attachment" }], evidenceLink: undefined };
+  }
+  if (/^https:\/\/\S+$/.test(ref)) return { mediaRefs: undefined, evidenceLink: ref };
+  return { mediaRefs: undefined, evidenceLink: undefined };
 }
 
 /** Build the subsystem DeliverFn. Contract mirrors the retired connector handleDecision. */
@@ -114,24 +179,23 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     }
     const q = (decision.payload ?? {}) as OutboundPostPayload & { media?: SlackMediaRef[] };
     // M1 A5b (carried over from the retired sweep): an alert's evidenceRef IS the artifact the
-    // human judges — an https image URL rides as a Block Kit image. buildImageBlocks stays the
-    // single hygiene gate (drops non-https / secret-bearing), so the predicate lives in ONE place.
-    const mediaRefs: SlackMediaRef[] | undefined = Array.isArray(q.media)
-      ? q.media
-      : q.evidenceRef
-        ? [{ imageUrl: String(q.evidenceRef), altText: q.summary ?? "attachment" }]
-        : undefined;
+    // human judges. #47 — it rides as a Block Kit image ONLY when it looks like an image;
+    // a non-image https ref rides as a plain link instead (Slack's invalid_blocks rejects
+    // the whole message when an image block's URL is not a real image).
+    const { mediaRefs, evidenceLink } = evidenceAttachment(q.media, q.evidenceRef, q.summary);
     const payload = buildOutboundMessage(
       {
         qitemId: q.qitemId ?? decision.decisionId,
         summary: q.summary,
         body: q.body,
+        humanQuestions: q.humanQuestions,
         destinationSession: q.destinationSession ?? decision.entityBindingRef,
       },
       {
         sourceLabel: opts.sourceLabel,
         bodyExcerpt: opts.bodyExcerpt,
         mediaRefs,
+        evidenceLink,
         // A1.2 — attribution rides every post; identity stays the app's own (postChatMessage
         // structurally cannot carry username/icon overrides — the customize-absence rail).
         attribution: attributionFromSession(q.sourceSession),
@@ -291,11 +355,14 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // into the conversation thread (files.upload is sunset). Upload failure is fail-VISIBLE
     // but does NOT fail the decision: the text delivered; failing here would replay the whole
     // post and duplicate the human notification (the H red). https refs already rode as Block
-    // Kit image blocks above; non-image/non-existent refs are a clean skip.
+    // Kit image blocks above; refs that are not attachments (e.g. a PROOF.md path) are a clean
+    // skip, and an attachment that can't be sent is logged.
     const local = q.evidenceRef && !/^https:\/\//.test(String(q.evidenceRef))
       ? (opts.readLocalImage ?? defaultReadLocalImage)(String(q.evidenceRef))
       : null;
-    if (local) {
+    if (local && "skipped" in local) {
+      log(`ATTACHMENT skipped for ${q.qitemId ?? decision.decisionId}: ${path.basename(String(q.evidenceRef))} ${local.skipped} (text delivered; attachment missing)`);
+    } else if (local) {
       const intoThread = threadTs ?? res.ts;
       const up = await getUploadURLExternal(opts.botToken, local.filename, local.bytes.length, opts.fetchImpl);
       if (up.ok && up.uploadUrl && up.fileId) {
@@ -303,7 +370,8 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
         if (put.ok) {
           const done = await completeUploadExternal(
             opts.botToken,
-            { files: [{ id: up.fileId, title: q.summary ?? local.filename }], channelId: opts.channel, threadTs: intoThread },
+            // #300: the title is shown in Slack like the text, so it gets the same secret redaction.
+            { files: [{ id: up.fileId, title: redactSecrets(q.summary ?? local.filename) }], channelId: opts.channel, threadTs: intoThread },
             opts.fetchImpl,
           );
           if (done.ok) log(`uploaded ${local.filename} into thread ${intoThread ?? "(root)"} for ${q.qitemId ?? decision.decisionId}`);
@@ -332,18 +400,22 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const parts = q.humanDetail
       ? [
           { ...q, humanDetail: undefined, body: `${q.body ?? ""}\n\nSupplemental detail follows in this thread.` },
-          { ...q, humanDetail: undefined, summary: `Supplemental detail: ${q.summary ?? ""}`, body: q.humanDetail, media: [], evidenceRef: null },
+          { ...q, humanDetail: undefined, humanQuestions: undefined, summary: `Supplemental detail: ${q.summary ?? ""}`, body: q.humanDetail, media: [], evidenceRef: null },
         ]
       : [q];
     const partId = (index: number) => parts.length === 1 ? decision.decisionId : `${decision.decisionId}:part:${index + 1}`;
     try {
       for (const [index, part] of parts.entries()) {
+        // #47 — preflight must mirror deliverSinglePart exactly: the same evidenceRef
+        // split (image attachment vs. plain link) so the shape check sees the true payload.
+        const partEvidence = evidenceAttachment(part.media, part.evidenceRef, part.summary);
         buildOutboundMessage(part, {
           sourceLabel: opts.sourceLabel,
           attribution: attributionFromSession(part.sourceSession),
           mentionUserId: index === 0 ? opts.resolveMentionUserId?.(q) : undefined,
           reconcileMarker: reconcileToken(partId(index)),
-          mediaRefs: Array.isArray(part.media) ? part.media : part.evidenceRef ? [{ imageUrl: part.evidenceRef, altText: part.summary ?? "attachment" }] : undefined,
+          mediaRefs: partEvidence.mediaRefs,
+          evidenceLink: partEvidence.evidenceLink,
         });
       }
     } catch (error) {

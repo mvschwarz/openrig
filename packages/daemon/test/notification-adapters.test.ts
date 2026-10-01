@@ -127,4 +127,157 @@ describe("WebhookNotificationAdapter (PL-005 Phase B)", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("502");
   });
+
+  describe("Target URL Validation", () => {
+    it("disables notifications on non-HTTP protocols with a clear warning", async () => {
+      for (const target of ["file:///etc/passwd", "ftp://example.com/test", "gopher://example.com"]) {
+        const warnings: string[] = [];
+        const warn = (msg: string) => warnings.push(msg);
+
+        const webhook = new WebhookNotificationAdapter({ endpointUrl: target, warn });
+        expect(webhook.disabled).toBe(true);
+        expect(warnings.length).toBe(1);
+        expect(warnings[0]).toContain("unsupported_protocol");
+        const resWebhook = await webhook.send({ title: "test", body: "test" });
+        expect(resWebhook.ok).toBe(false);
+        expect(resWebhook.error).toContain("unsupported_protocol");
+
+        const ntfy = new NtfyNotificationAdapter({ topicUrl: target, warn });
+        expect(ntfy.disabled).toBe(true);
+        expect(warnings.length).toBe(2);
+        expect(warnings[1]).toContain("unsupported_protocol");
+        const resNtfy = await ntfy.send({ title: "test", body: "test" });
+        expect(resNtfy.ok).toBe(false);
+        expect(resNtfy.error).toContain("unsupported_protocol");
+      }
+    });
+
+    it("supports URLs with embedded credentials by stripping them from fetch URL and sending Authorization: Basic header", async () => {
+      const calls: Array<{ url: string; init: RequestInit }> = [];
+      const fakeFetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response(null, { status: 200 });
+      }) as unknown as typeof fetch;
+
+      const webhook = new WebhookNotificationAdapter({
+        endpointUrl: "https://user:secretpassword@example.com/webhook",
+        fetchImpl: fakeFetch,
+      });
+      expect(webhook.disabled).toBeUndefined();
+      const resWebhook = await webhook.send({ title: "test", body: "test" });
+      expect(resWebhook.ok).toBe(true);
+      expect(calls[0]!.url).toBe("https://example.com/webhook");
+      expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe("Basic dXNlcjpzZWNyZXRwYXNzd29yZA==");
+
+      const ntfy = new NtfyNotificationAdapter({
+        topicUrl: "https://user:secretpassword@ntfy.sh/topic",
+        fetchImpl: fakeFetch,
+      });
+      expect(ntfy.disabled).toBeUndefined();
+      const resNtfy = await ntfy.send({ title: "test", body: "test" });
+      expect(resNtfy.ok).toBe(true);
+      expect(calls[1]!.url).toBe("https://ntfy.sh/topic");
+      expect((calls[1]!.init.headers as Record<string, string>).Authorization).toBe("Basic dXNlcjpzZWNyZXRwYXNzd29yZA==");
+    });
+
+    it("handles passwords with unescaped percent signs (like p%ss) without throwing URIError", async () => {
+      const calls: Array<{ url: string; init: RequestInit }> = [];
+      const fakeFetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response(null, { status: 200 });
+      }) as unknown as typeof fetch;
+
+      const webhook = new WebhookNotificationAdapter({
+        endpointUrl: "https://user:p%ss@example.com/webhook",
+        fetchImpl: fakeFetch,
+      });
+      expect(webhook.disabled).toBeUndefined();
+      const resWebhook = await webhook.send({ title: "test", body: "test" });
+      expect(resWebhook.ok).toBe(true);
+      expect(calls[0]!.url).toBe("https://example.com/webhook");
+      expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe(
+        `Basic ${Buffer.from("user:p%ss").toString("base64")}`,
+      );
+
+      const ntfy = new NtfyNotificationAdapter({
+        topicUrl: "https://user:p%ss@ntfy.sh/topic",
+        fetchImpl: fakeFetch,
+      });
+      expect(ntfy.disabled).toBeUndefined();
+      const resNtfy = await ntfy.send({ title: "test", body: "test" });
+      expect(resNtfy.ok).toBe(true);
+      expect(calls[1]!.url).toBe("https://ntfy.sh/topic");
+      expect((calls[1]!.init.headers as Record<string, string>).Authorization).toBe(
+        `Basic ${Buffer.from("user:p%ss").toString("base64")}`,
+      );
+    });
+
+    it("redacts credentials in warning when URL is invalid for other reasons", async () => {
+      const warnings: string[] = [];
+      const warn = (msg: string) => warnings.push(msg);
+
+      const webhook = new WebhookNotificationAdapter({
+        endpointUrl: "ftp://user:secretpassword@example.com/webhook",
+        warn,
+      });
+      expect(webhook.disabled).toBe(true);
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain("unsupported_protocol_ftp");
+      expect(warnings[0]).toContain("***:***");
+      expect(warnings[0]).not.toContain("secretpassword");
+      const resWebhook = await webhook.send({ title: "test", body: "test" });
+      expect(resWebhook.ok).toBe(false);
+      expect(resWebhook.error).toContain("***:***");
+      expect(resWebhook.error).not.toContain("secretpassword");
+
+      const ntfy = new NtfyNotificationAdapter({
+        topicUrl: "ftp://user:secretpassword@ntfy.sh/topic",
+        warn,
+      });
+      expect(ntfy.disabled).toBe(true);
+      expect(warnings.length).toBe(2);
+      expect(warnings[1]).toContain("unsupported_protocol_ftp");
+      expect(warnings[1]).toContain("***:***");
+      expect(warnings[1]).not.toContain("secretpassword");
+      const resNtfy = await ntfy.send({ title: "test", body: "test" });
+      expect(resNtfy.ok).toBe(false);
+      expect(resNtfy.error).toContain("***:***");
+      expect(resNtfy.error).not.toContain("secretpassword");
+    });
+
+    it("disables notifications on invalid or malformed URLs with a clear warning", async () => {
+      const warnings: string[] = [];
+      const warn = (msg: string) => warnings.push(msg);
+
+      const webhook = new WebhookNotificationAdapter({ endpointUrl: "not-a-valid-url", warn });
+      expect(webhook.disabled).toBe(true);
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toMatch(/invalid_url_format/);
+      const resWebhook = await webhook.send({ title: "test", body: "test" });
+      expect(resWebhook.ok).toBe(false);
+      expect(resWebhook.error).toMatch(/invalid_url_format/);
+
+      const ntfy = new NtfyNotificationAdapter({ topicUrl: "http://", warn });
+      expect(ntfy.disabled).toBe(true);
+      expect(warnings.length).toBe(2);
+      expect(warnings[1]).toMatch(/invalid_url_format|missing_hostname/);
+      const resNtfy = await ntfy.send({ title: "test", body: "test" });
+      expect(resNtfy.ok).toBe(false);
+      expect(resNtfy.error).toMatch(/invalid_url_format|missing_hostname/);
+    });
+
+    it("permits self-hosted notifiers on localhost and local network", async () => {
+      const fakeFetch = (async () => new Response(null, { status: 200 })) as unknown as typeof fetch;
+      for (const target of ["http://localhost:8080/hook", "http://127.0.0.1:7433/api", "http://192.168.1.50/ntfy", "http://10.0.0.5:8000/webhook"]) {
+        const webhook = new WebhookNotificationAdapter({ endpointUrl: target, fetchImpl: fakeFetch });
+        const res1 = await webhook.send({ title: "test", body: "test" });
+        expect(res1.ok).toBe(true);
+
+        const ntfy = new NtfyNotificationAdapter({ topicUrl: target, fetchImpl: fakeFetch });
+        const res2 = await ntfy.send({ title: "test", body: "test" });
+        expect(res2.ok).toBe(true);
+      }
+    });
+  });
 });
+
