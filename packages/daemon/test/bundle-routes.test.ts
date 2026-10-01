@@ -300,6 +300,56 @@ describe("Bundle API routes", () => {
     expect(body.digestValid).toBe(false);
   });
 
+  it.each([false, true])("refuses an absent declared skill before replacing a bundle (imported=%s)", async (imported) => {
+    const agentDir = path.join(tmpDir, "agents", "impl");
+    const skillAgentDir = imported ? path.join(agentDir, "shared") : agentDir;
+    fs.mkdirSync(skillAgentDir, { recursive: true });
+    const skillAgent = [
+      "name: skill-owner", 'version: "1.0.0"',
+      "resources:", "  skills:", "    - id: greet", "      path: skills/missing",
+      "profiles:", "  default:", "    uses:", "      skills: [greet]",
+    ].join("\n");
+    fs.writeFileSync(path.join(skillAgentDir, "agent.yaml"), skillAgent);
+    if (imported) {
+      fs.writeFileSync(path.join(agentDir, "agent.yaml"), [
+        "name: impl", 'version: "1.0.0"', "imports:", "  - ref: local:shared",
+        "resources:", "  skills: []", "profiles:", "  default:", "    uses:", "      skills: []",
+      ].join("\n"));
+    }
+    const specPath = path.join(tmpDir, "rig.yaml");
+    fs.writeFileSync(specPath, [
+      'version: "0.2"', "name: missing-skill-rig", "pods:", "  - id: dev", "    label: Dev",
+      "    members:", "      - id: impl", "        agent_ref: local:agents/impl",
+      "        profile: default", "        runtime: claude-code", "        cwd: .",
+      "    edges: []", "edges: []",
+    ].join("\n"));
+    const outputPath = path.join(tmpDir, "existing.rigbundle");
+    fs.writeFileSync(outputPath, "previous bundle");
+    fs.writeFileSync(`${outputPath}.sha256`, "previous digest");
+    const res = await app.request("/api/bundles/create", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: "missing-skill", bundleVersion: "0.1.0", outputPath }),
+    });
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toContain("skills/missing");
+    expect(fs.readFileSync(outputPath, "utf8")).toBe("previous bundle");
+    expect(fs.readFileSync(`${outputPath}.sha256`, "utf8")).toBe("previous digest");
+
+    // Existing skill directories remain valid, including skills owned by an imported agent.
+    fs.mkdirSync(path.join(skillAgentDir, "skills/missing"), { recursive: true });
+    fs.writeFileSync(path.join(skillAgentDir, "skills/missing/SKILL.md"), "# Greet\nA complete skill.");
+    const valid = await app.request("/api/bundles/create", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath, bundleName: "complete-skill", bundleVersion: "0.1.0", outputPath }),
+    });
+    expect(valid.status).toBe(201);
+    const inspected = await app.request("/api/bundles/inspect", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundlePath: outputPath }),
+    });
+    expect(inspected.status).toBe(200);
+    expect((await inspected.json()).integrityResult.passed).toBe(true);
+  });
+
   // T6-AS-T12: Pod-aware bundle create
   it("POST /api/bundles/create with pod-aware spec returns schemaVersion:2", async () => {
     // Seed a pod-aware rig spec + agent on disk

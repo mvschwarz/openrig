@@ -122,6 +122,16 @@ export class PodBundleAssembler {
           throw new Error(`Failed to resolve agent_ref "${member.agentRef}" for member ${pod.id}.${member.id}: ${result.code === "validation_failed" ? (result as { errors: string[] }).errors.join("; ") : (result as { error: string }).error}`);
         }
 
+        // Every declared skill must survive the self-contained export, including imported agents.
+        for (const agent of [result.resolved, ...result.imports]) {
+          for (const skill of agent.spec.resources.skills) {
+            const skillPath = nodePath.resolve(agent.sourcePath, skill.path);
+            if (!this.fs.exists(skillPath)) {
+              throw new Error(`Declared skill "${skill.id}" in agent "${agent.spec.name}" not found: ${skill.path} (resolved to ${skillPath})`);
+            }
+          }
+        }
+
         // Dedup: skip if already collected (but still record rewrite)
         const agentVendorPath = `agents/${result.resolved.spec.name}`;
         refRewrites.set(member.agentRef, `local:${agentVendorPath}`);
