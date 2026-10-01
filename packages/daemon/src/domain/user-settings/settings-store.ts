@@ -114,6 +114,8 @@ export const SETTINGS_VALID_KEYS = [
   "ui.preview.max_pins",
   "ui.preview.default_lines",
   "ui.timezone",
+  // The web UI and its terminal WebSocket are off unless this is true (read at daemon start).
+  "ui.enabled",
   // OPR.0.4.0.1 — global cap on simultaneously-live terminals (default 2).
   "ui.terminal.max_live_terminals",
   "recovery.auto_drive_provider_prompts",
@@ -235,6 +237,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "ui.preview.refresh_interval_seconds": { primary: "OPENRIG_UI_PREVIEW_REFRESH_INTERVAL_SECONDS" },
   "ui.preview.max_pins": { primary: "OPENRIG_UI_PREVIEW_MAX_PINS" },
   "ui.timezone": { primary: "OPENRIG_UI_TIMEZONE" },
+  "ui.enabled": { primary: "OPENRIG_UI_ENABLED" },
   "ui.preview.default_lines": { primary: "OPENRIG_UI_PREVIEW_DEFAULT_LINES" },
   "ui.terminal.max_live_terminals": { primary: "OPENRIG_UI_TERMINAL_MAX_LIVE_TERMINALS" },
   "recovery.auto_drive_provider_prompts": { primary: "OPENRIG_RECOVERY_AUTO_DRIVE_PROVIDER_PROMPTS" },
@@ -316,6 +319,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "ui.preview.refresh_interval_seconds": ["ui", "preview", "refreshIntervalSeconds"],
   "ui.preview.max_pins": ["ui", "preview", "maxPins"],
   "ui.timezone": ["ui", "timezone"],
+  "ui.enabled": ["ui", "enabled"],
   "ui.preview.default_lines": ["ui", "preview", "defaultLines"],
   "ui.terminal.max_live_terminals": ["ui", "terminal", "maxLiveTerminals"],
   "recovery.auto_drive_provider_prompts": ["recovery", "autoDriveProviderPrompts"],
@@ -572,6 +576,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "ui.preview.max_pins": return 4;
     case "ui.preview.default_lines": return 50;
     case "ui.timezone": return "America/Los_Angeles";
+    case "ui.enabled": return false;
     case "recovery.auto_drive_provider_prompts": return false;
     case "recovery.provider_auth_env_allowlist": return "";
     // V1 Phase 4 — Advisor default per universal-shell.md L83;
