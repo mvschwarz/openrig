@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { Command } from "commander";
 import YAML from "yaml";
 import { DaemonClient } from "../client.js";
@@ -458,10 +459,12 @@ checkboxes do not accept an item under the selected proof policy.
         }
         fs.mkdirSync(proofDir, { recursive: true });
         const frontmatter = YAML.stringify(header).trimEnd();
+        const content = `---\n${frontmatter}\n---\n\n${body}`;
         try {
-          fs.writeFileSync(target, `---\n${frontmatter}\n---\n\n${body}`, { encoding: "utf8", flag: opts.replace ? "w" : "wx" });
+          if (opts.replace) replaceArtifactFile(target, content);
+          else fs.writeFileSync(target, content, { encoding: "utf8", flag: "wx" });
         } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+          if (opts.replace || (err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
           throw new ScopeCliError({
             fact: `Proof artifact '${fileName}' already exists.`,
             consequence: "The existing artifact was not changed.",
@@ -505,4 +508,22 @@ checkboxes do not accept an item under the selected proof policy.
     });
 
   return cmd;
+}
+
+/** Explicit --replace swaps the artifact's directory entry; it never writes through it. A symlink or hard
+ *  link at the artifact name therefore keeps its other path's bytes. The staging file is created
+ *  exclusively under a unique name, so cleanup only ever removes a file this call created, and a failed
+ *  write or rename leaves the target as it was. The replacement is a new inode with default permissions.
+ *  There is no fsync: this is a same-directory swap, not a crash-durability guarantee. */
+export function replaceArtifactFile(target: string, content: string, stagingId: string = randomUUID()): void {
+  const staging = path.join(path.dirname(target), `.${path.basename(target)}.${stagingId}.replace-tmp`);
+  const fd = fs.openSync(staging, "wx");
+  try {
+    try { fs.writeFileSync(fd, content, "utf8"); } finally { fs.closeSync(fd); }
+    fs.renameSync(staging, target);
+  } catch (err) {
+    try { fs.rmSync(staging, { force: true }); }
+    catch (cleanupErr) { console.error(`warning: could not remove staging file ${staging}: ${(cleanupErr as Error).message}`); }
+    throw err;
+  }
 }
