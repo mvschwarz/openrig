@@ -100,8 +100,8 @@ export class PiResumeAdapter {
       launchId,
     });
 
-    // sendShellCommand owns the short tty invocation and its single submit.
-    const textResult = await this.tmux.sendShellCommand(tmuxSessionName, cmd);
+    // Short commands retain the direct path; long commands exec from a private script.
+    const textResult = await this.tmux.sendShellCommand(tmuxSessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };
     }
