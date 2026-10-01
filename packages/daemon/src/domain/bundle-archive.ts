@@ -25,6 +25,11 @@ export async function pack(stagingDir: string, outputPath: string): Promise<stri
     throw new Error("Output path must end with .rigbundle");
   }
 
+  const outDir = nodePath.dirname(outputPath);
+  if (outDir && !fs.existsSync(outDir)) {
+    fs.mkdirSync(outDir, { recursive: true });
+  }
+
   // Collect all files in deterministic order (alphabetical)
   const allFiles = walkFilesSync(stagingDir).sort();
 

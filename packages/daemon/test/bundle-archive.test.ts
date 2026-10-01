@@ -64,6 +64,17 @@ describe("Bundle archive", () => {
     return staging;
   }
 
+  it("pack creates parent directory if it does not exist", async () => {
+    const staging = createStaging();
+    const nestedOut = path.join(tmpDir, "missing", "sub", "test.rigbundle");
+
+    const hash = await pack(staging, nestedOut);
+
+    expect(fs.existsSync(nestedOut)).toBe(true);
+    expect(fs.existsSync(`${nestedOut}.sha256`)).toBe(true);
+    expect(hash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
   // T1: Pack creates valid tar.gz
   it("pack creates valid tar.gz file", async () => {
     const staging = createStaging();
