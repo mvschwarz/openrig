@@ -1058,7 +1058,8 @@ bundleRoutes.post("/create", async (c) => {
         assertShippableStagingTree(tmpStaging);
         const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
         eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
-        return c.json({ bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length, ...(driftWarning ? { warning: driftWarning } : {}) }, 201);
+        const warning = [driftWarning, ...(result.warnings ?? [])].filter(Boolean).join("; ");
+        return c.json({ bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length, ...(warning ? { warning } : {}) }, 201);
       } finally {
         fs.rmSync(tmpStaging, { recursive: true, force: true });
       }
