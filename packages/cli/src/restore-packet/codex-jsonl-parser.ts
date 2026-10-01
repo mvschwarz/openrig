@@ -107,6 +107,7 @@ export function parseCodexJsonl(content: string): StructuredTranscript {
       continue;
     }
 
+    if (record === null || typeof record !== "object" || Array.isArray(record)) continue;
     const recordType = typeof record.type === "string" ? record.type : "";
     typeCounts[recordType] = (typeCounts[recordType] ?? 0) + 1;
 
