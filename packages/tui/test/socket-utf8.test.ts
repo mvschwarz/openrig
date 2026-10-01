@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import net from "node:net";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createViewState } from "../src/state.js";
 import { createControlSocket } from "../src/socket-server.js";
 
@@ -26,17 +29,22 @@ async function sendSplit(socketPath: string, bytes: Buffer, split: number): Prom
 describe("control socket UTF-8 stream", () => {
   it("preserves every split of multibyte command arguments over an actual socket", async () => {
     const view = createViewState({ instanceId: "utf8" });
-    const control = await createControlSocket({ socketPath: `/tmp/openrig-utf8-${process.pid}.sock`, view });
-    const text = "工程🚀";
-    const command = Buffer.from(`/${text}\n`);
+    const directory = mkdtempSync(join(tmpdir(), "openrig-utf8-"));
     try {
-      for (let split = Buffer.byteLength("/") + 1; split < command.length - 1; split++) {
-        const reply = JSON.parse(await sendSplit(control.path, command, split));
-        expect(reply.filter, `split byte ${split}`).toBe(text);
-        expect(view.get().filter).toBe(text);
+      const control = await createControlSocket({ socketPath: join(directory, "control.sock"), view });
+      const text = "工程🚀";
+      const command = Buffer.from(`/${text}\n`);
+      try {
+        for (let split = Buffer.byteLength("/") + 1; split < command.length - 1; split++) {
+          const reply = JSON.parse(await sendSplit(control.path, command, split));
+          expect(reply.filter, `split byte ${split}`).toBe(text);
+          expect(view.get().filter).toBe(text);
+        }
+      } finally {
+        await control.close();
       }
     } finally {
-      await control.close();
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 });
