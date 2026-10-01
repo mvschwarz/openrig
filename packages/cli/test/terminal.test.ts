@@ -137,6 +137,18 @@ describe("rig terminal CLI", () => {
     if (json) expect(JSON.parse(logs[0]!)).toEqual({ error: "terminal_service_unavailable" });
   });
 
+  it.each([404, 409])("keeps structured %s open errors human-readable", async (status) => {
+    const { deps } = makeDeps({
+      routes: { "POST /api/terminal/open": { status, data: opened([], { code: "view_not_found", error: "unknown view 'nope'" }) } },
+    });
+    const program = createProgram({ terminalDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "nope"]);
+    expect(process.exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("provider: unknown view 'nope' (view_not_found)");
+    expect(logs.join("\n")).not.toMatch(/^\s*\{/);
+  });
+
   it("views GETs /api/terminal/views", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/terminal/views": { status: 200, data: { saved: [], rigs: ["acme-build"] } } },
