@@ -169,13 +169,24 @@ describe("terminal WebSocket DNS rebinding and origin protection", () => {
   });
 
   it("allows loopback origins in no-auth mode", async () => {
-    for (const origin of ["http://127.0.0.1", "http://localhost", "http://[::1]"]) {
+    for (const origin of ["http://127.0.0.1", "http://127.0.0.2", "http://localhost", "http://[::1]"]) {
       const result = await noAuthUpgrade(
         "/api/terminal/test-session",
         { Origin: origin },
       );
       expect(result.statusCode).not.toBe(403);
     }
+  });
+
+  it("rejects domains starting with 127. that are not valid loopback IPs", async () => {
+    const result = await noAuthUpgrade(
+      "/api/terminal/test-session",
+      {
+        Origin: "http://127.attacker.com",
+        Host: `127.attacker.com:${NO_AUTH_PORT}`,
+      },
+    );
+    expect(result.statusCode).toBe(403);
   });
 
   it("allows origins configured in OPENRIG_ALLOWED_ORIGINS", async () => {
@@ -186,6 +197,31 @@ describe("terminal WebSocket DNS rebinding and origin protection", () => {
         { Origin: "https://custom-dashboard.corp" },
       );
       expect(result.statusCode).not.toBe(403);
+    } finally {
+      delete process.env.OPENRIG_ALLOWED_ORIGINS;
+    }
+  });
+
+  it("enforces protocol and port boundaries for full URL origins in OPENRIG_ALLOWED_ORIGINS", async () => {
+    process.env.OPENRIG_ALLOWED_ORIGINS = "https://custom-dashboard.corp:8443";
+    try {
+      const match = await noAuthUpgrade(
+        "/api/terminal/test-session",
+        { Origin: "https://custom-dashboard.corp:8443" },
+      );
+      expect(match.statusCode).not.toBe(403);
+
+      const wrongPort = await noAuthUpgrade(
+        "/api/terminal/test-session",
+        { Origin: "https://custom-dashboard.corp:9000" },
+      );
+      expect(wrongPort.statusCode).toBe(403);
+
+      const wrongScheme = await noAuthUpgrade(
+        "/api/terminal/test-session",
+        { Origin: "http://custom-dashboard.corp:8443" },
+      );
+      expect(wrongScheme.statusCode).toBe(403);
     } finally {
       delete process.env.OPENRIG_ALLOWED_ORIGINS;
     }

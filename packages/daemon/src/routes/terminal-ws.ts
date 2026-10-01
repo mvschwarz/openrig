@@ -27,14 +27,16 @@ export function registerTerminalWs(
       const origin = c.req.header("Origin");
       if (origin) {
         try {
-          const originHost = new URL(origin).hostname.toLowerCase();
+          const originUrl = new URL(origin);
+          const originHost = originUrl.hostname.toLowerCase();
           const requestHost = c.req.header("Host")?.split(":")[0]?.toLowerCase() ?? "";
+          const isLoopbackIpv4 = /^127(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)){3}$/.test(originHost);
           const isLocal =
             originHost === "localhost" ||
             originHost === "127.0.0.1" ||
             originHost === "::1" ||
             originHost === "[::1]" ||
-            originHost.startsWith("127.");
+            isLoopbackIpv4;
 
           const configuredAllowed = process.env.OPENRIG_ALLOWED_ORIGINS
             ? process.env.OPENRIG_ALLOWED_ORIGINS.split(",").map((s) => s.trim().toLowerCase())
@@ -44,7 +46,8 @@ export function registerTerminalWs(
             if (!allowed) return false;
             try {
               if (allowed.startsWith("http://") || allowed.startsWith("https://")) {
-                return new URL(allowed).hostname.toLowerCase() === originHost;
+                const u = new URL(allowed);
+                return u.origin.toLowerCase() === originUrl.origin.toLowerCase();
               }
               return allowed.toLowerCase() === originHost;
             } catch {
