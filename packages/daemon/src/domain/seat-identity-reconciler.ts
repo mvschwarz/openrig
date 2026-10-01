@@ -164,8 +164,22 @@ export class SeatIdentityReconciler {
 
     // Two fresh process snapshots per sweep, not two ps calls per seat. Each
     // phase observes every bound pane; the second begins after the first ends.
-    const nativeSeats = seats.filter((seat) => (seat.runtime === "codex" || (seat.runtime === "claude-code" && seat.resume_token))
-      && seat.tmux_pane && liveSessions.has(seat.session_name));
+    const nativeSeats: RunningSeatRow[] = [];
+    for (const seat of seats) {
+      if (!seat.tmux_pane || !liveSessions.has(seat.session_name)) continue;
+      if (seat.runtime === "codex") nativeSeats.push(seat);
+      else if (seat.runtime === "claude-code" && seat.resume_token) {
+        // Only shell-label contradictions consume Claude native proof. Keep
+        // computeVerdict's fresh command/PID reads: a later shell transition
+        // without sampled proof must remain non-green for this sweep.
+        try {
+          const command = await this.tmux.getPaneCommand(seat.tmux_pane);
+          if (classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch"
+            && isShellForeground(command?.trim().toLowerCase() ?? "")) nativeSeats.push(seat);
+        } catch { /* No proof selected; the final per-seat observation still runs. */ }
+        if (generation !== this.generation) return;
+      }
+    }
     const sample = async () => {
       let snapshot: ReturnType<NativeProcessLister> | undefined;
       return Promise.all(nativeSeats.map((seat) => (seat.runtime === "codex" ? observeCodexPaneProcess : observeClaudePaneProcess)({
