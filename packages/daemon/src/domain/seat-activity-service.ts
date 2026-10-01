@@ -147,9 +147,24 @@ export class SeatActivityService {
     return this.latestByPaneId.get(paneId) ?? null;
   }
 
-  /** Drop the latest stored observation for a seat (used on seat teardown). */
+  /** Retire a session's observation and oracle evidence (used on seat teardown).
+   *  Keep the durable seat's state/seq so readers and waiters see it become unknown. */
   forgetSeat(paneId: string): void {
     this.latestByPaneId.delete(paneId);
+    this.samplerSeqBySession.delete(paneId);
+    const seatNodeId = this.sessionToSeat.get(paneId);
+    this.sessionToSeat.delete(paneId);
+    const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+    // An old session's teardown must never erase its successor's evidence.
+    if (!seat || seat.sessionName !== paneId) return;
+    seat.retired = true;
+    seat.sources.clear();
+    seat.pendingIdle = null;
+    seat.contradictionSinceMs = null;
+    seat.promotion.clear();
+    seat.trust.clear();
+    seat.inventory = null;
+    this.arbitrate(seat);
   }
 
   /**
@@ -166,23 +181,37 @@ export class SeatActivityService {
     this.sweeping = true;
     try {
       const rows = db.prepare(`
-        SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime
+        SELECT s.session_name as session_name, n.id as node_id, n.runtime as runtime,
+          COALESCE(b.attachment_type, 'tmux') as attachment_type
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
         LEFT JOIN bindings b ON b.node_id = n.id
         WHERE s.status = 'running'
           AND s.session_name IS NOT NULL
-          AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
-      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null }>;
+      `).all() as Array<{ session_name: string; node_id: string; runtime: string | null; attachment_type: string }>;
+      const tmuxRows = rows.filter((r) => r.attachment_type === "tmux");
+      const liveTmux = new Set(tmuxRows.map((r) => r.session_name));
+      for (const pane of this.latestByPaneId.keys()) {
+        if (!liveTmux.has(pane)) this.latestByPaneId.delete(pane);
+      }
+
+      // Retire bindings as well as terminal observations: hook-only seats may
+      // have oracle evidence without ever producing a sampler observation.
+      // Running non-tmux seats retain their hook evidence; only sampling is tmux-only.
+      const live = new Set(rows.map((r) => r.session_name));
+      const observed = new Set([...this.latestByPaneId.keys(), ...this.sessionToSeat.keys()]);
+      for (const pane of observed) {
+        if (!live.has(pane)) this.forgetSeat(pane);
+      }
 
       // S19: every running tmux seat gets a ladder binding; undeclared seats are
       // auto-declared from their runtime's inventory (claude authoritative standing,
       // codex hooks-at-trial, generic sampling floor) — production-complete without
       // touching the launch machinery.
-      for (const r of rows) {
+      for (const r of tmuxRows) {
         const known = this.ladder.get(r.node_id);
-        if (!known || known.inventory === null) {
+        if (!known || known.inventory === null || known.sessionName !== r.session_name) {
           this.declareRungInventory(
             { seatNodeId: r.node_id, sessionName: r.session_name },
             runtimeRungInventory(r.runtime),
@@ -190,15 +219,8 @@ export class SeatActivityService {
         }
       }
 
-      // Drop observations for seats that are no longer running (release
-      // memory + avoid stale reads from `getSeatActivity`).
-      const live = new Set(rows.map((r) => r.session_name));
-      for (const pane of Array.from(this.latestByPaneId.keys())) {
-        if (!live.has(pane)) this.latestByPaneId.delete(pane);
-      }
-
       // Best-effort: a single seat's failure does not crash the loop.
-      await Promise.all(rows.map(async (r) => {
+      await Promise.all(tmuxRows.map(async (r) => {
         try { await this.pollSeat(r.session_name); } catch { /* swallow */ }
       }));
     } finally {
@@ -246,8 +268,11 @@ export class SeatActivityService {
     binding: { seatNodeId: string; sessionName: string },
     inventory: AdapterRungInventory,
   ): void {
+    const prior = this.ladder.get(binding.seatNodeId);
+    if (prior && prior.sessionName !== binding.sessionName) this.forgetSeat(prior.sessionName);
     const seat = this.seatLadder(binding.seatNodeId, binding.sessionName);
     seat.sessionName = binding.sessionName;
+    seat.retired = false;
     this.sessionToSeat.set(binding.sessionName, binding.seatNodeId);
     seat.inventory = inventory;
     seat.trust.clear();
@@ -261,6 +286,7 @@ export class SeatActivityService {
    *  never revives an idle seat (the SubagentStop class at the service layer). */
   reportEvidence(evidence: ActivityEvidence): void {
     const seat = this.seatLadder(evidence.seatNodeId, evidence.sessionName);
+    if (seat.retired || seat.sessionName !== evidence.sessionName) return;
     this.sessionToSeat.set(evidence.sessionName, evidence.seatNodeId);
     const prior = seat.sources.get(evidence.sourceId);
     if (prior && evidence.seq <= prior.latest.seq) return; // stale/reordered — dropped
@@ -355,6 +381,7 @@ export class SeatActivityService {
     if (!seat) {
       seat = {
         sessionName,
+        retired: false,
         inventory: null,
         sources: new Map(),
         trust: new Map(),
@@ -625,6 +652,7 @@ interface NeedsInputShape {
 
 interface SeatLadderState {
   sessionName: string;
+  retired: boolean;
   inventory: AdapterRungInventory | null;
   sources: Map<string, { latest: ActivityEvidence; latestActivity: ActivityEvidence | null }>;
   trust: Map<EvidenceRungId, RungTrust>;

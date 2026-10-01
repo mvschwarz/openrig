@@ -228,7 +228,25 @@ activityRoutes.post("/hooks", async (c) => {
     | import("../domain/seat-activity-service.js").SeatActivityService
     | undefined;
   const emitted = result.event as { nodeId?: string; sessionName?: string; runtime?: string } | undefined;
-  if (oracle && emitted?.nodeId && emitted.sessionName) {
+  // Recording a historical hook is valid, but its raw activity cannot staff the
+  // current oracle. The store may resolve nodeId to a newer session even when
+  // the emitter supplied an old sessionName, so check both identities before
+  // declaring an inventory (which would reactivate a retired seat).
+  const currentSession = oracle && emitted?.nodeId
+    ? store.db.prepare("SELECT session_name, status FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+      .get(emitted.nodeId) as { session_name: string; status: string } | undefined
+    : undefined;
+  const suppliedSessionName = stringOrNull(body.sessionName);
+  if (oracle && emitted?.nodeId && emitted.sessionName
+      && currentSession?.status === "running" && currentSession.session_name === emitted.sessionName
+      && (!suppliedSessionName || suppliedSessionName === emitted.sessionName)) {
+    // A same-name relaunch can have a different registered occupant generation.
+    // Honor the store's positive mismatch verdict, while preserving legacy hooks
+    // with unresolved provenance and the archival response below.
+    if (result.activity.generation != null
+        && store.getLatestForNode({ nodeId: emitted.nodeId, sessionName: emitted.sessionName })?.reason === "generation_mismatch") {
+      return c.json({ ok: true, activity: result.activity });
+    }
     const runtime = emitted.runtime ?? stringOrNull(body.runtime);
     // Auto-declare on first hook evidence (and after a swap cleared the inventory):
     // the runtime's inventory sets each rung's INITIAL trust (claude standing, codex
