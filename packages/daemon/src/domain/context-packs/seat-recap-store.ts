@@ -86,7 +86,17 @@ export function writeSeatRecap(opts: { seatDir: string; content: string; now?: (
         const target = join(chainDir, `RECAP-${stamp}${suffix}.md`);
         try {
           // Linking publishes complete archive bytes without replacing a collision.
-          linkSync(archiveStage, target);
+          try {
+            linkSync(archiveStage, target);
+          } catch (err) {
+            if (!["EOPNOTSUPP", "ENOTSUP", "EPERM", "EXDEV"].includes((err as NodeJS.ErrnoException).code ?? "")) throw err;
+            // Reserve the fallback exclusively: collisions still advance the suffix.
+            // Track ownership before copying so a partial copy is also cleaned up.
+            const archiveFd = openSync(target, "wx");
+            archived = target;
+            closeSync(archiveFd);
+            copyFileSync(archiveStage, target);
+          }
           archived = target;
           break;
         } catch (err) {
