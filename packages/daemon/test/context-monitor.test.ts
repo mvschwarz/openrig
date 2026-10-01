@@ -481,6 +481,22 @@ describe("ContextMonitor", () => {
       expect(store.getForNode(claude.node.id, claude.sessionName).availability).toBe("known");
     });
 
+    it("persists nothing for a seat handed over during the pane read, and still polls others", async () => {
+      const cur = seedCursorNode();
+      const other = seedCursorNode("dev.cur2", "dev-cur2@test");
+      const reader = vi.fn(async (name: string) => {
+        if (name === cur.sessionName) {
+          const s = sessionRegistry.registerSession(cur.node.id, "dev-cur-new@test");
+          db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(s.id);
+        }
+        return footerScreen;
+      });
+      const m = new ContextMonitor(db, store, undefined, undefined, undefined, undefined, undefined, reader);
+      await m.pollOnce();
+      expect(db.prepare("SELECT 1 FROM context_usage WHERE node_id = ?").get(cur.node.id)).toBeUndefined();
+      expect(store.getForNode(other.node.id, other.sessionName).availability).toBe("known");
+    });
+
     it("persists unknown when the reader returns null", async () => {
       const { node, sessionName } = seedCursorNode();
       const m = new ContextMonitor(db, store, undefined, undefined, undefined, undefined, undefined, async () => null);

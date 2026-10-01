@@ -103,6 +103,12 @@ export class ContextMonitor {
           observed = isCursor
             ? await this.readCursorContextUsage(session)
             : this.readContextUsage(session);
+          // The pane read is async: if the seat was handed over meanwhile, the
+          // reading belongs to the old occupant, so persist nothing this tick.
+          if (isCursor && this.seatChangedSincePoll(session)) {
+            observed = null;
+            continue;
+          }
           this.store.persist(session.node_id, observed);
           // 51-08 A1: the over-time twin — advance-only append on the SAME tick
           // (PM decision 1: piggyback, no parallel sampler). Known samples only:
@@ -182,6 +188,8 @@ export class ContextMonitor {
 
   /** Cursor: footer from the rendered pane; a reader fault or empty capture is unknown, never a throw. */
   private async readCursorContextUsage(session: EligibleSession): Promise<ContextUsage> {
+    // Taken before the await so the store's prior-generation guard sees the true read time.
+    const sampledAt = new Date().toISOString();
     let pane: string | null = null;
     try {
       pane = (await this.cursorPaneReader?.(session.session_name)) ?? null;
@@ -189,7 +197,15 @@ export class ContextMonitor {
       pane = null;
     }
     if (pane === null) return this.store.unknownUsage("no_data");
-    return cursorContextUsageFromPane(pane, session.session_name, new Date().toISOString());
+    return cursorContextUsageFromPane(pane, session.session_name, sampledAt);
+  }
+
+  /** True when the node's latest session is no longer the one this tick polled. */
+  private seatChangedSincePoll(session: EligibleSession): boolean {
+    const latest = this.db
+      .prepare("SELECT id, session_name FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+      .get(session.node_id) as { id: string; session_name: string } | undefined;
+    return !latest || latest.id !== session.session_id || latest.session_name !== session.session_name;
   }
 
   /** Start polling at the given interval. Idempotent. */

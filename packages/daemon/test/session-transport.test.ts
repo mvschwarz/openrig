@@ -1555,6 +1555,11 @@ describe("classifyPaneActivity — Cursor", () => {
   });
   it("does not read a running turn as idle", () => {
     expect(classifyPaneActivity(working, "cursor").state).not.toBe("agent_idle");
+    expect(classifyPaneActivity(working, "cursor").reason).not.toBe("prompt_draft");
+  });
+  it("reads a draft that begins with placeholder text as attention", () => {
+    const placeholderDraft = ["  finished", "  → Add a follow-up about the tests", ...footer].join("\n");
+    expect(classifyPaneActivity(placeholderDraft, "cursor")).toMatchObject({ state: "attention", reason: "prompt_draft" });
   });
   it("reads a typed draft as attention", () => {
     expect(classifyPaneActivity(draft, "cursor")).toMatchObject({ state: "attention", reason: "prompt_draft" });

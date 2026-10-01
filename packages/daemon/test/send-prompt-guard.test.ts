@@ -762,6 +762,18 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       expect(sendText).not.toHaveBeenCalled();
     });
 
+    it("refuses a default send when the draft begins with placeholder text", async () => {
+      const name = seedCursorSeat();
+      agentActivityStore.recordHookEvent({ runtime: "cursor", sessionName: name, hookEvent: "stop" });
+      const { sendText } = spies();
+      const draft = ["  finished", "  → Add a follow-up about the tests", ...footer].join("\n");
+      const t = makeTransport(mockTmux({ capturePaneContent: async () => draft, sendText }));
+      const r = await t.send(name, "hello");
+      expect(r.ok).toBe(false);
+      expect(r.activity?.reason).toBe("prompt_draft");
+      expect(sendText).not.toHaveBeenCalled();
+    });
+
     it("leaves claude-code unchanged: a fresh running hook is authoritative and the pane is not captured", async () => {
       agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit" });
       const capture = vi.fn(async () => CURSOR_APPROVAL);

@@ -478,6 +478,17 @@ describe("cursorContextUsageFromPane", () => {
     expect(u.usedPercentage).toBe(11);
   });
 
+  it("returns no_data for a prose line as the last non-cwd line with no footer", () => {
+    const u = read("some output\nThe model said it was 256K tokens · 42% done\n  ~/x · main\n");
+    expect(u).toMatchObject({ availability: "unknown", reason: "no_data" });
+    expect(read("The model said it was 256K tokens · 42% done").availability).toBe("unknown");
+  });
+
+  it("returns no_data for an approval panel at the bottom with no footer", () => {
+    const u = read("  Grok 4.7 256K High · 11.2%     Auto-review\n  Run this command?\n  Allow once\n  Skip & tell the agent what to do instead\n");
+    expect(u).toMatchObject({ availability: "unknown", reason: "no_data" });
+  });
+
   it("returns unknown for empty or garbage screens", () => {
     expect(read("").availability).toBe("unknown");
     expect(read("\n\n   \n").reason).toBe("no_data");

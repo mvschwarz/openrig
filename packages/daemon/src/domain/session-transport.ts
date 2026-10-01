@@ -112,7 +112,7 @@ function trimPaneLines(paneContent: string): string[] {
 // placeholder. The model footer and a cwd line that can wrap sit below it, so these are checked in
 // the 8-line window, and only for Cursor panes (other runtimes print "→" in prose).
 const CURSOR_IDLE_PROMPT_RE = /^→ (?:Add a follow-up|Plan, search, build anything)$/;
-const CURSOR_DRAFT_PROMPT_RE = /^→ (?!Add a follow-up|Plan, search, build anything)\S/;
+const CURSOR_DRAFT_PROMPT_RE = /^→ (?!(?:Add a follow-up|Plan, search, build anything)$)\S/;
 const CURSOR_PERMISSION_PROMPT_PATTERNS = [
   /^Run this command\?$/,
   /\bWaiting for approval\.\.\./,

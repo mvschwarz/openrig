@@ -497,14 +497,18 @@ function unknownContextUsage(reason: ContextUnknownReason): ContextUsage {
 }
 
 const CURSOR_FOOTER_SCAN_LINES = 8;
-const CURSOR_CONTEXT_SIZE = /\b(\d+(?:\.\d+)?)([KM])\b/;
-const CURSOR_CONTEXT_PERCENT = /·\s*(\d+(?:\.\d+)?)%/;
+// `<model> <size> <effort> · <pct>%` plus an optional capitalised mode badge; nothing
+// else may follow the percent, so prose such as "256K tokens · 42% done" is not a footer.
+const CURSOR_FOOTER =
+  /\b(\d+(?:\.\d+)?)([KM])\b[^·]*·\s*(\d+(?:\.\d+)?)%\s*(?:[A-Z][\w-]*(?: [\w-]+)*)?$/;
+const CURSOR_BRANCH_ONLY = /^·\s*\S+$/;
 
 /**
  * Cursor exposes no token file; its TUI footer (model line, below the prompt
  * and above the cwd line) carries `<model> <size> <effort> · <pct>%`. Reads
- * the last footer-shaped line among the last few non-blank lines, so a
- * "· 42%" in conversation prose higher up never wins. A fresh chat shows the
+ * the first non-cwd line from the bottom (within the last few non-blank
+ * lines) and requires it to be footer-shaped, so a "· 42%" in conversation
+ * prose never wins. A fresh chat shows the
  * footer without a percentage, which is unknown, not zero.
  */
 export function cursorContextUsageFromPane(
@@ -519,20 +523,20 @@ export function cursorContextUsageFromPane(
     .slice(-CURSOR_FOOTER_SCAN_LINES);
   for (let i = tail.length - 1; i >= 0; i--) {
     const line = tail[i]!;
-    if (line.startsWith("→") || line.startsWith("$")) continue;
-    if (line.includes("/") || line.startsWith("~")) continue;
-    const size = CURSOR_CONTEXT_SIZE.exec(line);
-    if (!size) continue;
-    const percent = CURSOR_CONTEXT_PERCENT.exec(line);
-    if (!percent) return unknownContextUsage("no_data");
-    const usedPercentage = clampPercentage(Math.round(Number(percent[1])));
+    // Only cwd-like lines (the cwd can wrap) may sit below the footer.
+    if (line.includes("/") || line.startsWith("~") || CURSOR_BRANCH_ONLY.test(line)) continue;
+    // The first other line must be the footer; anything else means no footer is in view.
+    if (line.startsWith("→") || line.startsWith("$")) return unknownContextUsage("no_data");
+    const m = CURSOR_FOOTER.exec(line);
+    if (!m) return unknownContextUsage("no_data");
+    const usedPercentage = clampPercentage(Math.round(Number(m[3])));
     return {
       availability: "known",
       reason: null,
       source: "cursor_tui_footer",
       usedPercentage,
       remainingPercentage: clampPercentage(100 - usedPercentage),
-      contextWindowSize: Math.round(Number(size[1]) * (size[2] === "M" ? 1_000_000 : 1_000)),
+      contextWindowSize: Math.round(Number(m[1]) * (m[2] === "M" ? 1_000_000 : 1_000)),
       totalInputTokens: null,
       totalOutputTokens: null,
       currentUsage: null,
