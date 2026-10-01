@@ -11,23 +11,10 @@ import {
 const MAX_EARLY_TERMINAL_FRAMES = 32;
 const MAX_EARLY_TERMINAL_FRAME_BYTES = 256 * 1024;
 
-/** The WebSocket route's guard: Origin check on upgrades, then the terminal bearer token when one is set. */
+/** The WebSocket route's guard: the terminal bearer token when one is set. Origin and target name
+ *  are checked once for every /api request, upgrades included, by middleware/browser-boundary.ts. */
 export function terminalAuthMiddleware(opts: { bearerToken: string | null }) {
   return async (c: { req: { header(name: string): string | undefined; query(name: string): string | undefined }; json(data: unknown, status: number): unknown }, next: () => Promise<void>) => {
-    const upgrade = c.req.header("Upgrade");
-    if (upgrade?.toLowerCase() === "websocket") {
-      const origin = c.req.header("Origin");
-      if (origin) {
-        try {
-          const originHost = new URL(origin).hostname;
-          const requestHost = c.req.header("Host")?.split(":")[0] ?? "";
-          const allowed = originHost === requestHost || originHost === "localhost" || originHost === "127.0.0.1";
-          if (!allowed) return c.json({ error: "origin_rejected", hint: `Origin ${origin} does not match host` }, 403);
-        } catch {
-          return c.json({ error: "origin_rejected", hint: "Malformed Origin header" }, 403);
-        }
-      }
-    }
     const token = opts.bearerToken;
     if (!token) { await next(); return; }
     const header = c.req.header("Authorization") ?? c.req.header("authorization");

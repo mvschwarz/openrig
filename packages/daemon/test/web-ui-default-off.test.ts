@@ -73,9 +73,10 @@ function request(port: number, path: string, headers: Record<string, string> = {
   });
 }
 
+// Non-browser upgrade shape (no Origin), so 404 vs not-404 isolates route registration.
 const UPGRADE = {
   Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Version": "13",
-  "Sec-WebSocket-Key": Buffer.from("web-ui-off-key16").toString("base64"), Origin: "http://127.0.0.1",
+  "Sec-WebSocket-Key": Buffer.from("web-ui-off-key16").toString("base64"),
 };
 
 describe("web UI default off (ui.enabled)", () => {
@@ -132,6 +133,10 @@ describe("web UI default off (ui.enabled)", () => {
     expect(offUpgrade.status).toBe(404);
     const onUpgrade = await request(onPort, `/api/terminal/seat-1?token=${TOKEN}`, UPGRADE);
     expect(onUpgrade.status, onUpgrade.body).not.toBe(404);
+    // A browser upgrade (own-UI Origin) is refused by the /api browser boundary while the UI is off.
+    const offBrowser = await request(offPort, `/api/terminal/seat-1?token=${TOKEN}`, { ...UPGRADE, Origin: `http://127.0.0.1:${offPort}` });
+    expect(offBrowser.upgraded).toBe(false);
+    expect(offBrowser.status).toBe(403);
 
     // The guard in front of the HTTP terminal routes stays the same either way.
     for (const [path, headers] of [

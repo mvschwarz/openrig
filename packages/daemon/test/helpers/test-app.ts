@@ -260,6 +260,8 @@ export function createTestApp(
     /** Wire the ready runtime adapters into the routes' `runtimeAdapters`, as startup does, so a
      *  route launch can start harnesses. Off by default: existing tests keep no route adapters. */
     wireRuntimeAdapters?: boolean;
+    /** Extra or overriding createApp deps (browser-boundary route tests inject inert spies). */
+    appDeps?: Partial<import("../../src/server.js").AppDeps>;
     /**
      * Agent Starter v1 vertical M2 R2: optionally expose the in-test
      * StartupOrchestrator + PodRigInstantiator so callers can spy on
@@ -429,6 +431,7 @@ export function createTestApp(
     // and pass it here explicitly.
     permissionDriftObserver: opts?.permissionDriftObserver ?? { diagnose: () => null },
     runtimeAdapters: opts?.wireRuntimeAdapters ? adapters : undefined,
+    ...opts?.appDeps,
   });
   return {
     app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,

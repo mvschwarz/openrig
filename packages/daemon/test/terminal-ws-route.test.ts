@@ -5,6 +5,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import http from "node:http";
 import * as fs from "node:fs";
 import { registerTerminalWs } from "../src/routes/terminal-ws.js";
+import { browserBoundary } from "../src/middleware/browser-boundary.js";
 
 const TOKEN = "test-ws-route-token";
 const PORT = 19876;
@@ -26,6 +27,8 @@ beforeAll(async () => {
     await next();
   });
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
+  // Production order (server.ts): the /api browser boundary runs before the terminal route.
+  app.use("/api/*", browserBoundary({ webUiEnabled: true, bearerTokens: [TOKEN], warn: () => {} }));
   registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: TOKEN });
   server = serve({ fetch: app.fetch, port: PORT, hostname: "127.0.0.1" });
   injectWebSocket(server);
@@ -69,7 +72,7 @@ describe("terminal WebSocket route (production path)", () => {
   it("valid token WS upgrade does NOT return 404 (the QA blocker regression)", async () => {
     const result = await rawUpgrade(
       `/api/terminal/test-session?token=${TOKEN}`,
-      { Origin: "http://127.0.0.1" },
+      { Origin: `http://127.0.0.1:${PORT}` },
     );
     expect(result.statusCode, `expected non-404, got ${result.statusCode}: ${result.body}`).not.toBe(404);
   });
@@ -77,7 +80,7 @@ describe("terminal WebSocket route (production path)", () => {
   it("missing token returns 401", async () => {
     const result = await rawUpgrade(
       "/api/terminal/test-session",
-      { Origin: "http://127.0.0.1" },
+      { Origin: `http://127.0.0.1:${PORT}` },
     );
     expect(result.statusCode).toBe(401);
   });
@@ -93,7 +96,7 @@ describe("terminal WebSocket route (production path)", () => {
   it("wrong token returns 401", async () => {
     const result = await rawUpgrade(
       `/api/terminal/test-session?token=wrong`,
-      { Origin: "http://127.0.0.1" },
+      { Origin: `http://127.0.0.1:${PORT}` },
     );
     expect(result.statusCode).toBe(401);
   });
