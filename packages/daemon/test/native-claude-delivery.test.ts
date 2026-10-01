@@ -16,7 +16,9 @@ const modes = [
   "missing-token", "wrong-pane", "bare-shell", "unavailable", "pane-command-unavailable",
   "background", "other-semver", "unknown-both", "versioned-direct-pane", "missing-metadata",
   "ambiguous-pane", "changed-binding", "onboarding", "changed-process", "ambiguous-process",
-  "changed-after-paste",
+  "changed-after-paste", "bare-shell-helper", "bare-shell-job",
+  "wrong-token-post-read-error", "wrong-token-post-read-empty",
+  "bare-shell-post-read-error", "bare-shell-post-read-empty",
 ];
 
 it.each(modes)("selector and ordinary transport: %s", async (mode) => {
@@ -31,17 +33,25 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     const executable = ["versioned", "versioned-argv-only", "versioned-direct-pane"].includes(mode)
       ? "/fixture/.local/share/claude/versions/2.1.285"
       : mode === "other-semver" ? "/unrelated/2.1.285" : "/opt/claude";
+    const bare = mode.startsWith("bare-shell");
+    const shell = mode === "bare-shell-helper" ? "zsh" : "bash";
     const rows = [
-      { pid: 100, ppid: 1, pgid: 100, tpgid: mode === "bare-shell" ? 100 : 101,
-        executableName: "bash", command: "-bash", startedAt },
-      ...(mode === "bare-shell" ? [] : [
+      { pid: 100, ppid: 1, pgid: 100, tpgid: bare ? 100 : 101,
+        executableName: shell, command: `-${shell}`, startedAt },
+      ...(bare ? [] : [
         { pid: 101, ppid: 100, pgid: 101, tpgid: 101,
           executableName: "sh", command: "/bin/sh /fixture/launch", startedAt },
         { pid: 102, ppid: 101, pgid: mode === "background" ? 999 : 101, tpgid: 101,
           executableName: ["versioned", "versioned-comm-only", "other-semver", "versioned-direct-pane"].includes(mode) ? "2.1.285" : "claude",
-          command: `${executable} --permission-mode auto ${mode === "missing-token" ? "" : `--session-id ${mode === "wrong-token" ? "different" : token}`} --name ${name}`, startedAt },
+          command: `${executable} --permission-mode auto ${mode === "missing-token" ? "" : `--session-id ${mode.startsWith("wrong-token") ? "different" : token}`} --name ${name}`, startedAt },
       ]),
     ];
+    // The shell still owns the terminal; these children are in background groups.
+    if (mode === "bare-shell-helper" || mode === "bare-shell-job") {
+      rows.push({ pid: 103, ppid: 100, pgid: 103, tpgid: 100,
+        executableName: mode === "bare-shell-helper" ? "gitstatusd" : "sleep",
+        command: mode === "bare-shell-helper" ? "/fixture/gitstatusd" : "sleep 600", startedAt });
+    }
     if (mode === "ambiguous-process") rows.push({ ...rows[2]!, pid: 103 });
     let reads = 0;
     const listProcesses = async () => {
@@ -51,6 +61,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
         ? rows.map(row => row.pid === 102 ? { ...row, startedAt: "replacement" } : row) : rows;
     };
     const calls: string[] = [];
+    let paneReads = 0;
     const tmux = {
       hasSession: async () => true,
       probeSession: async () => ({ state: "present" }),
@@ -59,11 +70,16 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
         if (["pane-command-unavailable", "unknown-both"].includes(mode)) throw new Error("fixture command unavailable");
         return mode === "versioned-direct-pane" ? "2.1.285" : "sh";
       },
-      listPanes: async () => mode === "ambiguous-pane" ? [{ id: "%1" }, { id: "%2" }] : [{ id: "%1" }],
+      listPanes: async () => {
+        paneReads++;
+        if (paneReads > 1 && mode.endsWith("post-read-error")) throw new Error("later pane observation unavailable");
+        if (paneReads > 1 && mode.endsWith("post-read-empty")) return [];
+        return mode === "ambiguous-pane" ? [{ id: "%1" }, { id: "%2" }] : [{ id: "%1" }];
+      },
       capturePaneContent: async () => {
         if (mode === "changed-binding") sessionRegistry.updateBinding(node.id, { tmuxSession: name, tmuxPane: "%2" });
         return mode === "onboarding" ? "Do you trust the files in this folder?\n❯ 1. Yes, I trust this folder\n  2. No, exit"
-          : mode === "bare-shell" ? "admin@fixture ~ % " : autoScreen;
+          : bare ? "admin@fixture ~ % " : autoScreen;
       },
       sendText: async () => {
         calls.push("text");
@@ -80,6 +96,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
       "missing-token", "unavailable", "background", "other-semver", "missing-metadata",
       "versioned-argv-only", "versioned-comm-only",
     ].includes(mode);
+    if (bare) expect({ ok: sent.ok, calls }).toEqual({ ok: false, calls: [] });
     expect(sent.ok).toBe(expectedSend);
     expect(calls).toEqual(expectedSend ? ["text", "enter"] : mode === "changed-after-paste" ? ["text"] : []);
     // A strict process selector proves only the supplied process/token, not the DB/pane binding.
@@ -90,7 +107,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     if (expectedSend && ["unavailable", "unknown-both", "missing-token", "missing-metadata", "background", "other-semver", "versioned-argv-only", "versioned-comm-only"].includes(mode)) {
       expect(sent.warning).toContain("without verified native identity");
     }
-    reads = 0;
+    reads = 0; paneReads = 0;
     const queue = new QueueRepository(db, eventBus, { transport, loadHumanRegistry: () => ({ ok: true, entities: [] }) });
     // Exercise the actual wake consumer without an API, scheduler, or native process.
     const wake = await (queue as unknown as {

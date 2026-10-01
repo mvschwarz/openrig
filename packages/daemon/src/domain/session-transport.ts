@@ -1477,6 +1477,8 @@ export class SessionTransport {
       const [sessionPid, panePid] = await Promise.all([this.tmuxAdapter.getPanePid(sessionName), this.tmuxAdapter.getPanePid(pane)]);
       if (sessionPid && panePid && sessionPid !== panePid) return { state: "conflict", detail: "The session and bound pane name different processes" };
       const observation = await observeClaudeDelivery({ target: pane, tmux: this.tmuxAdapter, listProcesses: this.listProcesses, expectedToken: resumeToken });
+      // Refusal already has positive evidence; a later failed read cannot erase it.
+      if (observation.state === "conflict" || observation.state === "idle_shell") return observation;
       const after = await this.tmuxAdapter.listPanes(sessionName);
       if (after.length > 1 || (after.length === 1 && after[0]!.id !== pane)) return { state: "conflict", detail: "The bound pane changed during delivery verification" };
       const currentPid = await this.tmuxAdapter.getPanePid(pane);

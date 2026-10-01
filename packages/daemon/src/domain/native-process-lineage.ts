@@ -29,6 +29,9 @@ function executableName(token: string): string {
 // number is never executable identity. A launch receipt takes precedence over
 // layout recognition, so a later PATH update cannot replace that launch's binary.
 function claudeExecutable(token: string, selectedExecutable?: string): boolean {
+  // An observed path must match the frozen launch path, even when its basename
+  // is claude. A bare process title carries no path and retains legacy token proof.
+  if (selectedExecutable && token.includes("/")) return token === selectedExecutable;
   if (executableName(token) === "claude") return true; // includes native process-title spelling
   if (selectedExecutable) return token === selectedExecutable;
   return token.startsWith("/") && !token.split("/").some(part => part === "." || part === "..")
@@ -268,11 +271,12 @@ export async function observeClaudeDelivery(input: Parameters<typeof observeNati
       const root = rows.find(row => row.pid === pid);
       // A wrapper's label is not an idle shell. Positive shell proof requires
       // the pane shell itself to own the foreground, with no receiving child.
+      // A background child/helper in another group does not receive terminal input.
       if (new Set(rows.map(row => row.pid)).size === rows.length && root?.startedAt
         && root.pgid === pid && root.tpgid === pid
         && isShellForeground(executableName(root.executableName ?? ""))
         && isShellForeground(executableName(tokens(root.command)[0]?.replace(/^-/, "") ?? ""))
-        && !rows.some(row => row.pid !== pid && (row.pgid === pid || row.ppid === pid))) {
+        && !rows.some(row => row.pid !== pid && row.pgid === root.tpgid)) {
         return { state: "idle_shell", detail: "The bound foreground is an idle shell with no receiving child", fingerprint: JSON.stringify(root) };
       }
       return unknown;

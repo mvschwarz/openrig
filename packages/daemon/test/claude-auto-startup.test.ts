@@ -18,11 +18,11 @@ describe("auto-mode startup content requires the launched Claude identity", () =
   const dbs: ReturnType<typeof createFullTestDb>[] = [];
   afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
 
-  it.each(["exact", "exit-zsh", "exit-bash", "missing", "wrong-token", "ambiguous", "background", "replaced-pane", "replaced-process", "unavailable", "plain-shell", "resume-missing", "native", "native-resume", "selected-custom", "selected-changed"])("startup: %s", async (mode) => {
+  it.each(["exact", "exit-zsh", "exit-bash", "missing", "wrong-token", "ambiguous", "background", "replaced-pane", "replaced-process", "unavailable", "plain-shell", "resume-missing", "native", "native-resume", "selected-custom", "selected-changed", "selected-wrong-named", "selected-wrong-conventional", "selected-title"])("startup: %s", async (mode) => {
     const isNative = mode.startsWith("native") || mode.startsWith("selected-");
-    const good = ["exact", "native", "native-resume", "selected-custom"].includes(mode);
+    const good = ["exact", "native", "native-resume", "selected-custom", "selected-title"].includes(mode);
     const resumes = mode === "resume-missing" || mode === "native-resume";
-    const executable = mode.startsWith("selected-") ? "/fixture/custom/2.1.285" : "/fixture/.local/share/claude/versions/2.1.285";
+    const executable = mode === "selected-title" ? "claude" : ["selected-wrong-named", "selected-wrong-conventional"].includes(mode) ? "/other/claude" : mode.startsWith("selected-") ? "/fixture/custom/2.1.285" : "/fixture/.local/share/claude/versions/2.1.285";
     const db = createFullTestDb(); dbs.push(db);
     const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), eventBus = new EventBus(db);
     const rig = rigRepo.createRig("auto-startup"), node = rigRepo.addNode(rig.id, "test.c", { runtime: "claude-code" });
@@ -34,7 +34,7 @@ describe("auto-mode startup content requires the launched Claude identity", () =
       processReads++;
       if (mode === "unavailable") throw new Error("fixture observation unavailable");
       const native = { pid: 102, ppid: 101, pgid: mode === "background" ? 999 : 101, tpgid: 101,
-        executableName: isNative ? "2.1.285" : "claude", startedAt: mode === "replaced-process" && processReads > 1 ? "changed" : startedAt,
+        executableName: ["selected-title", "selected-wrong-named", "selected-wrong-conventional"].includes(mode) ? "claude" : isNative ? "2.1.285" : "claude", startedAt: mode === "replaced-process" && processReads > 1 ? "changed" : startedAt,
         command: `${isNative ? executable : "/opt/claude.exe"} --permission-mode auto ${resumes ? "--resume" : "--session-id"} ${mode === "wrong-token" ? "other-token" : token} --name ${name}` };
       return [
         { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
@@ -54,7 +54,7 @@ describe("auto-mode startup content requires the launched Claude identity", () =
       sendKeys: vi.fn(async (_target: string, keys: string[]) => { calls.push({ kind: "submit", keys }); return { ok: true as const }; }),
     } as unknown as TmuxAdapter;
     const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {}, sessionIdFactory: () => token,
-      claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`, assertCurrent: () => {}, configDir: "/fixture", ...(isNative ? { executable: mode === "selected-changed" ? "/fixture/custom/2.1.286" : executable } : {}) }) } as unknown as ClaudeManagedLaunch,
+      claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`, assertCurrent: () => {}, configDir: "/fixture", ...(isNative ? { executable: mode === "selected-changed" ? "/fixture/custom/2.1.286" : ["selected-wrong-named", "selected-title"].includes(mode) ? "/fixture/custom/2.1.285" : mode === "selected-wrong-conventional" ? "/opt/a/claude" : executable } : {}) }) } as unknown as ClaudeManagedLaunch,
       fsOps: { exists: () => false, readFile: () => payload, writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} },
     });
     const binding: NodeBinding = { id: "binding", nodeId: node.id, tmuxSession: name, tmuxPane: "%1", tmuxWindow: null,
