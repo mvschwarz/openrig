@@ -200,6 +200,11 @@ export async function verifyCodexPaneProcess(input: Parameters<typeof observeCod
   return second?.fingerprint === first.fingerprint ? second : null;
 }
 
+/** Single observation for callers that pin identity across their own launch checks. */
+export async function observeClaudePaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
+  return observeNativePaneProcess(input, "claude-code");
+}
+
 export async function verifyClaudePaneProcess(input: Parameters<typeof observeNativePaneProcess>[0]): Promise<NativeProcessObservation | null> {
   const first = await observeNativePaneProcess(input, "claude-code");
   if (!first) return null;

@@ -11,6 +11,7 @@ import type {
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { observeClaudePaneProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
@@ -58,6 +59,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private stateDir: string | null;
   private collectorAssetPath: string | null;
   private autoDriveProviderPrompts: boolean;
+  private listProcesses?: NativeProcessLister;
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; fingerprint?: string }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -73,6 +76,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     stateDir?: string;
     collectorAssetPath?: string;
     autoDriveProviderPrompts?: boolean;
+    listProcesses?: NativeProcessLister;
     claudeManagedLaunch?: ClaudeManagedLaunch;
     /** DI source of the activity-relay.cjs asset (parity with the Codex adapter). */
     activityRelayPath?: string;
@@ -90,6 +94,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.stateDir = deps.stateDir ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
+    this.listProcesses = deps.listProcesses;
     this.claudeManagedLaunch = deps.claudeManagedLaunch;
     this.activityRelayPath = deps.activityRelayPath ?? null;
     this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
@@ -221,6 +226,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource },
   ): Promise<HarnessLaunchResult> {
     binding = { ...binding };
+    this.autoLaunches.delete(binding.nodeId);
     opts = { ...opts, ...(opts.forkSource ? { forkSource: { ...opts.forkSource } } : {}) };
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session bound — cannot launch Claude Code harness" };
@@ -314,8 +320,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
+    this.autoLaunches.set(binding.nodeId, { binding, token: opts.resumeToken ?? generatedSessionId! });
     if (opts.resumeToken) {
-      const verification = await this.verifyResumeLaunch(binding.tmuxSession);
+      const verification = await this.verifyResumeLaunch(binding);
       if (!verification.ok) return verification;
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch };
     }
@@ -327,6 +334,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
+    binding = { ...binding };
     if (!binding.tmuxSession) {
       return { ready: false, reason: "No tmux session bound" };
     }
@@ -337,11 +345,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
     const paneContent = (await this.tmux.capturePaneContent(binding.tmuxSession, 40)) ?? "";
-    const probe = assessNativeResumeProbe({
-      runtime: "claude-code",
-      paneCommand,
-      paneContent,
-    });
+    const probe = await this.assessManagedProbe(binding, paneCommand, paneContent);
 
     if (probe.status === "resumed") return { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
@@ -359,17 +363,45 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   // -- Private helpers --
 
-  private async verifyResumeLaunch(tmuxSession: string): Promise<HarnessLaunchResult> {
+  private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string) {
+    const input = { runtime: "claude-code", paneCommand, paneContent };
+    const probe = assessNativeResumeProbe(input);
+    // Only the new headerless auto-mode case needs this additional observation.
+    // Screen-only callers cannot opt themselves into managed launch readiness.
+    if (probe.code !== "claude_auto_identity_required") return probe;
+    const launch = this.autoLaunches.get(binding.nodeId);
+    if (!launch || !binding.tmuxPane || !binding.tmuxSession
+      || launch.binding.id !== binding.id || launch.binding.tmuxPane !== binding.tmuxPane
+      || launch.binding.tmuxSession !== binding.tmuxSession
+      || launch.binding.launchGeneration !== binding.launchGeneration) return probe;
+    try {
+      const panes = await this.tmux.listPanes(binding.tmuxSession);
+      if (panes.length !== 1 || panes[0]?.id !== binding.tmuxPane) return probe;
+      const observation = { target: binding.tmuxPane, tmux: this.tmux,
+        listProcesses: this.listProcesses, expectedToken: launch.token };
+      const first = await observeClaudePaneProcess(observation);
+      if (!first) return probe;
+      // Pin the first exact process for this launch; retries cannot adopt a replacement.
+      launch.fingerprint ??= first.fingerprint;
+      if (first.fingerprint !== launch.fingerprint) return probe;
+      const native = await observeClaudePaneProcess(observation);
+      if (native?.fingerprint !== launch.fingerprint) return probe;
+      const currentPanes = await this.tmux.listPanes(binding.tmuxSession);
+      if (this.autoLaunches.get(binding.nodeId) !== launch || currentPanes.length !== 1
+        || currentPanes[0]?.id !== binding.tmuxPane
+        || await this.tmux.getPanePid(binding.tmuxSession) !== native.panePid) return probe;
+      return assessNativeResumeProbe({ ...input, claudeAutoIdentityVerified: true });
+    } catch { return probe; }
+  }
+
+  private async verifyResumeLaunch(binding: NodeBinding): Promise<HarnessLaunchResult> {
+    const tmuxSession = binding.tmuxSession!;
     const attempts = 16;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
       const paneContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
-      const probe = assessNativeResumeProbe({
-        runtime: "claude-code",
-        paneCommand,
-        paneContent,
-      });
+      const probe = await this.assessManagedProbe(binding, paneCommand, paneContent);
 
       if (probe.code === "no_conversation_found") {
         return {
@@ -411,17 +443,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const finalCommand = await this.tmux.getPaneCommand(tmuxSession);
     const finalContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
-    const finalProbe = assessNativeResumeProbe({
-      runtime: "claude-code",
-      paneCommand: finalCommand,
-      paneContent: finalContent,
-    });
+    const finalProbe = await this.assessManagedProbe(binding, finalCommand, finalContent);
 
     if (finalProbe.status === "resumed") {
       return { ok: true };
     }
 
-    if (finalProbe.status === "attention_required") {
+    if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required") {
       return {
         ok: false,
         error: finalProbe.detail,
