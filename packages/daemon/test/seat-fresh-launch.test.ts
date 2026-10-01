@@ -75,6 +75,7 @@ describe("SeatLifecycleService.launchFresh", () => {
       }),
       probeSession: vi.fn(async (name: string) => alive.has(name) ? { state: "present" as const } : { state: "absent" as const }),
       hasSession: vi.fn(async (name: string) => alive.has(name)),
+      startServer: vi.fn(async (): Promise<TmuxResult> => ({ ok: true })),
       listSessions: vi.fn(async () => [...alive].map((name) => ({ name, windows: 1, created: "", attached: false }))),
       listWindows: vi.fn(async () => []),
       listPanes: vi.fn(async (name: string) => {
@@ -319,6 +320,144 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed" });
     expect(alive.has(seat.sessionName)).toBe(false);
     expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(tmux.startServer).not.toHaveBeenCalled();
+  });
+
+  // Real tmux ends its server when the last session goes (exit-empty), and a
+  // probe then fails "no server running": transport_unavailable, never absence.
+  // new-session and startServer() each bring a server back.
+  function modelServerLifetime() {
+    const server = { up: true, starts: 0 };
+    const createSession = vi.mocked(tmux.createSession).getMockImplementation()!;
+    vi.mocked(tmux.createSession).mockImplementation(async (...args) => {
+      server.up = true;
+      return createSession(...args);
+    });
+    vi.mocked(tmux.killSession).mockImplementation(async (name: string) => {
+      killed.push(name);
+      alive.delete(name);
+      livePanes.delete(name);
+      if (alive.size === 0) server.up = false;
+      return { ok: true };
+    });
+    vi.mocked(tmux.probeSession).mockImplementation(async (name: string) => {
+      if (!server.up) return { state: "transport_unavailable", cause: "no server running on /tmp/tmux-1000/default" };
+      return alive.has(name) ? { state: "present" } : { state: "absent" };
+    });
+    vi.mocked(tmux.hasSession).mockImplementation(async (name: string) => server.up && alive.has(name));
+    vi.mocked(tmux.startServer).mockImplementation(async () => {
+      if (!server.up) {
+        server.up = true;
+        server.starts += 1;
+      }
+      return { ok: true };
+    });
+    return server;
+  }
+
+  describe("when stopping the managed occupant ends the tmux server", () => {
+    it.each(["sole", "pair"] as const)("continues the requested fresh launch for a %s seat", async (shape) => {
+      const seat = seedSeat();
+      const retiringGeneration = sessionRegistry.currentOccupantTenure(seat.node.id)!.generationUuid;
+      if (shape === "pair") alive.add("dev-qa@fresh-rig");
+      const server = modelServerLifetime();
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "sole-seat fresh" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      if (!result.ok) return;
+      expect(killed).toEqual([seat.sessionName]);
+      expect(server.starts).toBe(shape === "sole" ? 1 : 0);
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(alive.has(seat.sessionName)).toBe(true);
+      expect(result.generation).not.toBe(retiringGeneration);
+      expect(result.supersededSessionIds).toContain(seat.session!.id);
+      expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxPane).toBe("%fresh");
+    });
+
+    it("proves older non-terminal rows absent on the restored server before superseding them", async () => {
+      const seat = seedSeat({ clean: true });
+      const older = sessionRegistry.registerSession(seat.node.id, "r00-dev-impl@fresh-rig");
+      sessionRegistry.updateStatus(older.id, "running");
+      const current = sessionRegistry.registerSession(seat.node.id, seat.sessionName);
+      sessionRegistry.updateStatus(current.id, "running");
+      sessionRegistry.updateBinding(seat.node.id, { tmuxSession: seat.sessionName, tmuxPane: "%old" });
+      alive.add(seat.sessionName);
+      livePanes.set(seat.sessionName, "%old");
+      const server = modelServerLifetime();
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "old-row history" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready" });
+      if (!result.ok) return;
+      expect(server.starts).toBe(1);
+      expect(vi.mocked(tmux.probeSession).mock.calls.map(([name]) => name)).toContain("r00-dev-impl@fresh-rig");
+      expect(result.supersededSessionIds).toEqual(expect.arrayContaining([older.id, current.id]));
+      expect(killed).toEqual([seat.sessionName]);
+    });
+
+    it("still refuses a same-name session that appears on the restored server", async () => {
+      const seat = seedSeat();
+      const server = modelServerLifetime();
+      vi.mocked(tmux.startServer).mockImplementation(async () => {
+        server.up = true;
+        server.starts += 1;
+        alive.add(seat.sessionName);
+        livePanes.set(seat.sessionName, "%recreated");
+        return { ok: true };
+      });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "recreated occupant" });
+
+      expect(result).toMatchObject({ ok: false, code: "unmanaged_session_collision" });
+      expect(killed).toEqual([seat.sessionName]);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(livePanes.get(seat.sessionName)).toBe("%recreated");
+    });
+
+    it.each([
+      ["the server cannot be restored", () => undefined],
+      ["the probe fails with a permission error", () => { throw new Error("permission denied"); }],
+    ])("keeps the transport refusal when %s", async (_label, afterStop) => {
+      const seat = seedSeat();
+      const server = modelServerLifetime();
+      const probe = vi.mocked(tmux.probeSession).getMockImplementation()!;
+      vi.mocked(tmux.probeSession).mockImplementation(async (name: string) => {
+        if (!server.up) afterStop();
+        return probe(name);
+      });
+      vi.mocked(tmux.startServer).mockResolvedValue({ ok: false, code: "tmux_unavailable", message: "The terminal server did not become available." });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "transport stays down" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+      expect(killed).toEqual([seat.sessionName]);
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
+
+    it("neither stops nor starts a server when stop was not requested", async () => {
+      const seat = seedSeat();
+      const server = modelServerLifetime();
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "no stop" });
+
+      expect(result).toMatchObject({ ok: false, code: "session_live" });
+      expect(killed).toEqual([]);
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(server).toEqual({ up: true, starts: 0 });
+    });
+
+    it("does not start a server it did not stop: a seat with no server stays a transport refusal", async () => {
+      seedSeat({ clean: true });
+      const server = modelServerLifetime();
+      server.up = false;
+
+      const result = await service.launchFresh({ seatRef: "dev.impl", fresh: true, reason: "server already down" });
+
+      expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+      expect(tmux.startServer).not.toHaveBeenCalled();
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
   });
 
   it("stops exactly the managed pod-aware occupant, launches fresh, and preserves sibling/work state", async () => {
