@@ -904,7 +904,7 @@ describe("session_source Pi rows (OPR.0.4.6.PI1)", () => {
     } as unknown as TmuxAdapter;
 
     const adapter = new PiRuntimeAdapter({
-      tmux,
+      tmux: mockShellCommand(tmux),
       fsOps: {
         readFile: (p: string) => { if (!(p in files)) throw new Error("ENOENT"); return files[p]!; },
         writeFile: (p: string, c: string) => { files[p] = c; },
