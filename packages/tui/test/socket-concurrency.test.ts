@@ -100,3 +100,52 @@ it("two processes recovering one stale socket cannot unlink a live replacement",
     fs.rmSync(root, { recursive: true, force: true });
   }
 }, 10_000);
+
+
+it("two standalone TUIs stay usable and expose the second control path without replacing the first", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "opr-multi-"));
+  const entry = fileURLToPath(new URL("../dist/main.js", import.meta.url));
+  const launched: ChildProcessWithoutNullStreams[] = [];
+  const outputs = new Map<ChildProcessWithoutNullStreams, string>();
+  const launch = () => {
+    const child = spawn(process.execPath, [entry, "--demo"], {
+      env: { ...process.env, OPENRIG_HOME: root, OPENRIG_TUI_SOCKET: "", NO_COLOR: "1" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    launched.push(child); outputs.set(child, "");
+    for (const stream of [child.stdout, child.stderr]) stream.on("data", data => outputs.set(child, outputs.get(child)! + data));
+    return child;
+  };
+  const waitFor = async (child: ChildProcessWithoutNullStreams, predicate: () => boolean) => {
+    const deadline = Date.now() + 5000;
+    while (!predicate()) {
+      if (child.exitCode !== null || child.signalCode !== null || Date.now() > deadline) {
+        throw new Error(`Standalone TUI did not become usable: ${outputs.get(child)}`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  };
+  try {
+    const socketPath = path.join(root, "run", "tui-tui-1.sock");
+    const first = launch();
+    await waitFor(first, () => fs.existsSync(socketPath));
+    const original = fs.lstatSync(socketPath);
+    const second = launch();
+    let alternate: string | undefined;
+    await waitFor(second, () => {
+      alternate = fs.readdirSync(path.dirname(socketPath)).find(name => name.endsWith(".sock") && name !== path.basename(socketPath));
+      return !!alternate;
+    });
+    const secondPath = path.join(root, "run", alternate!);
+    await waitFor(second, () => outputs.get(second)!.includes(`socket: ${secondPath}`));
+    expect(second.exitCode).toBeNull();
+    expect(fs.lstatSync(socketPath).ino).toBe(original.ino);
+    expect(await query(socketPath)).toBe("tui-1");
+    expect(await query(secondPath)).toBe("tui-1");
+    await stop(second);
+    expect(await query(socketPath)).toBe("tui-1");
+  } finally {
+    await Promise.all(launched.map(stop));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}, 15000);

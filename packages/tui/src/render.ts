@@ -1146,6 +1146,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
 }
 
 export interface RenderOptions {
+  /** Independent endpoint chosen for a standalone TUI after a collision. */
+  controlSocketPath?: string;
   /** First visit: preserve the prior frame with its original label and no effect targets. */
   previousPage?: { state: ViewState; snapshot: FleetSnapshot };
   startup?: StartupState;
@@ -1541,9 +1543,16 @@ function crashCartShell(
 }
 
 export function renderScreen(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
-  if (state.palette) return helpScreen(state.palette, options.commandContext ?? "standard", options.cols ?? 120, options.rows ?? 32);
-  const screen = renderBody(state, snap, options, inputLine);
-  const commandReady = !options.startup?.open && !options.restore && !options.unavailable && (!options.daemonState || options.daemonState === "up");
+  const screen = state.palette
+    ? helpScreen(state.palette, options.commandContext ?? "standard", options.cols ?? 120, options.rows ?? 32)
+    : renderBody(state, snap, options, inputLine);
+  if (options.controlSocketPath && screen.lines.length) {
+    const row = screen.lines.length - 1;
+    const socketPath = options.controlSocketPath.replace(/[\x00-\x1f\x7f]/g, " ");
+    screen.lines[row] = pad(`socket: ${socketPath} · ${screen.lines[row]!.trimEnd()}`, options.cols ?? 120);
+    if (screen.segRows) delete screen.segRows[row + 1];
+  }
+  const commandReady = !state.palette && !options.startup?.open && !options.restore && !options.unavailable && (!options.daemonState || options.daemonState === "up");
   if (commandReady) {
     const reduced = reducedMotion();
     if (!commandFocusVisible(options.nowMs ?? 0, inputLine.length > 0, reduced)) {

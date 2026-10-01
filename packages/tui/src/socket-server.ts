@@ -14,6 +14,7 @@ import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 import { parseCommand } from "./grammar.js";
 import { serializeCommands } from "./commands/registry.js";
 import type { ViewState, ViewStateStore } from "./types.js";
@@ -74,13 +75,36 @@ export interface ControlSocket {
   close(): Promise<void>;
 }
 
-export async function createControlSocket(options: {
+interface ControlSocketOptions {
   socketPath: string;
   view: ViewStateStore;
   onMutation?: () => void;
   /** I5 — live command context supplier (from the C3 detector); default standard. */
   currentContext?: () => string;
-}): Promise<ControlSocket> {
+  /** Standalone terminals can use an independent endpoint on a collision. */
+  fallbackOnCollision?: boolean;
+}
+
+export async function createControlSocket(options: ControlSocketOptions): Promise<ControlSocket> {
+  try {
+    return await createReservedControlSocket(options);
+  } catch (error) {
+    if (!options.fallbackOnCollision || (error as NodeJS.ErrnoException).code !== "EADDRINUSE") throw error;
+    const directory = path.dirname(options.socketPath);
+    const suffix = `-${process.pid}-${randomUUID().slice(0, 8)}.sock`;
+    const budget = MAX_SOCKET_PATH_BYTES - Buffer.byteLength(directory + path.sep + suffix);
+    if (budget < 0) {
+      throw new Error(`socket runtime directory is too long for an independent control endpoint: ${directory} — use a shorter $OPENRIG_HOME/run or --socket path`);
+    }
+    const stem = Array.from(path.basename(options.socketPath, ".sock"));
+    while (Buffer.byteLength(stem.join("")) > budget) stem.pop();
+    const alternate = path.join(directory, stem.join("") + suffix);
+    // Use ordinary exclusive bind/recovery checks for the new path as well.
+    return createReservedControlSocket({ ...options, socketPath: alternate });
+  }
+}
+
+async function createReservedControlSocket(options: ControlSocketOptions): Promise<ControlSocket> {
   const { socketPath, view, onMutation } = options;
   const currentContext = options.currentContext ?? (() => "standard");
   const bytes = Buffer.byteLength(socketPath);

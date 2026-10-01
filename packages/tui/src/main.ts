@@ -75,6 +75,7 @@ async function run(): Promise<void> {
   const client = demo ? null : new DaemonClient({ baseUrl: argOf(args, "--url"), headers: startupHeaders });
   let startup: StartupController | null = null;
   let nativeAttached = false;
+  let controlSocketPath: string | undefined;
   let shuttingDown = false;
 
   let inputLine = "";
@@ -164,7 +165,7 @@ async function run(): Promise<void> {
     if (live) snapshot = { ...live.snapshot(),
       ...(!liveEnabled ? { readErrors: [`Live data not loaded · connection ${startup?.state.connection ?? "probing"} · L Local reading · S Startup`] } : {}),
       launchingCli: process.env["OPENRIG_TUI_CLI_IDENTITY"]?.replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 180) };
-    const opts = { cols, rows, nowMs, completion, colorMode: style.mode, commandContext: commandContext(), ...crashCartOpts, ...(startup?.state.open && !view.get().palette ? { startup: startup.state } : {}), restoreScroll: restoreScrollOffset, ...(liveEnabled && live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
+    const opts = { cols, rows, nowMs, completion, controlSocketPath, colorMode: style.mode, commandContext: commandContext(), ...crashCartOpts, ...(startup?.state.open && !view.get().palette ? { startup: startup.state } : {}), restoreScroll: restoreScrollOffset, ...(liveEnabled && live ? { load: live.load(), rowFlashes: live.flashes() } : {}) };
     if (liveEnabled && live?.load().settled) previousPage = { state: { ...view.get() }, snapshot };
     const pageOptions = { ...opts, ...(liveEnabled && !live?.load().settled ? { previousPage } : {}) };
     lastScreen = renderScreen(view.get(), snapshot, pageOptions, inputLine);
@@ -374,6 +375,7 @@ async function run(): Promise<void> {
   const socketPath = argOf(args, "--socket") ?? defaultSocketPath(instanceId);
   const socket = await createControlSocket({
     socketPath,
+    fallbackOnCollision: true,
     view,
     onMutation: () => {
       inputRevision += 1; startup?.interacted();
@@ -383,6 +385,8 @@ async function run(): Promise<void> {
     },
     currentContext: () => commandContext(),
   });
+
+  if (socket.path !== socketPath) controlSocketPath = socket.path;
 
   // Acts are drive-structure daemon WRITES (BR-8/BR-9) — executed here against
   // the two existing contracts; the view-state is only told the outcome.

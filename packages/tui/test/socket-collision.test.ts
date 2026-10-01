@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createViewState } from "../src/state.js";
-import { createControlSocket, type ControlSocket } from "../src/socket-server.js";
+import { createControlSocket, MAX_SOCKET_PATH_BYTES, type ControlSocket } from "../src/socket-server.js";
 
 const socketRoot = fs.mkdtempSync(path.join(os.tmpdir(), "opr-sock-"));
 afterAll(() => fs.rmSync(socketRoot, { recursive: true, force: true }));
@@ -84,4 +84,35 @@ it("reports an existing recovery reservation without changing its live socket", 
     await first.close();
     fs.rmSync(reservation, { force: true });
   }
+});
+
+
+it("binds an independent endpoint within the byte cap in a long runtime directory", async () => {
+  const directory = path.join(socketRoot, "long-runtime-directory");
+  fs.mkdirSync(directory);
+  const nameBytes = MAX_SOCKET_PATH_BYTES - Buffer.byteLength(directory + path.sep + ".sock");
+  expect(nameBytes).toBeGreaterThan(0);
+  const configured = path.join(directory, "x".repeat(nameBytes) + ".sock");
+  const first = await createControlSocket({ socketPath: configured, view: createViewState({ instanceId: "long-owner" }) });
+  let second: ControlSocket | undefined;
+  try {
+    second = await createControlSocket({ socketPath: configured, view: createViewState({ instanceId: "long-second" }), fallbackOnCollision: true });
+    expect(path.dirname(second.path)).toBe(directory);
+    expect(second.path).not.toBe(configured);
+    expect(Buffer.byteLength(second.path)).toBeLessThanOrEqual(MAX_SOCKET_PATH_BYTES);
+    expect(path.basename(second.path)).toContain(`-${process.pid}-`);
+    expect(await query(configured)).toMatchObject({ instanceId: "long-owner" });
+    expect(await query(second.path)).toMatchObject({ instanceId: "long-second" });
+  } finally { await second?.close(); await first.close(); }
+});
+
+it("names a runtime directory that cannot fit an independent endpoint", async () => {
+  const directory = path.join(socketRoot, "x".repeat(MAX_SOCKET_PATH_BYTES - Buffer.byteLength(socketRoot + path.sep) - 7));
+  const configured = path.join(directory, "a.sock");
+  const first = await createControlSocket({ socketPath: configured, view: createViewState({ instanceId: "tight-owner" }) });
+  try {
+    await expect(createControlSocket({ socketPath: configured, view: createViewState({ instanceId: "tight-second" }), fallbackOnCollision: true }))
+      .rejects.toThrow(`socket runtime directory is too long for an independent control endpoint: ${directory}`);
+    expect(await query(configured)).toMatchObject({ instanceId: "tight-owner" });
+  } finally { await first.close(); }
 });

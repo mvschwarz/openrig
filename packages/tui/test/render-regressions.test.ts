@@ -299,3 +299,17 @@ describe("live visual regressions", () => {
     expect(output).toContain("orchestration/");
   });
 });
+
+
+it("keeps a collision-selected socket path visible in status chrome", () => {
+  const snap = demoSnapshot();
+  const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
+  const controlSocketPath = "/tmp/openrig/tui-t-123-abcdef.sock";
+  for (const palette of [false, true]) {
+    if (palette) view.dispatch({ type: "palette-open" });
+    const screen = renderScreen(view.get(), snap, { cols: 120, rows: 32, controlSocketPath });
+    expect(screen.lines.at(-1)).toContain(`socket: ${controlSocketPath}`);
+    expect(screen.lines).toHaveLength(32);
+    expect(screen.lines.every(line => line.length <= 120)).toBe(true);
+  }
+});
