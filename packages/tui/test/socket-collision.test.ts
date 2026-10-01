@@ -60,6 +60,14 @@ it("recovers the owned stale socket of a killed launcher", async () => {
     expect(fs.lstatSync(path).isSocket()).toBe(true);
     control = await createControlSocket({ socketPath: path, view: createViewState({ instanceId: "recovered" }) });
     expect(await query(path)).toMatchObject({ instanceId: "recovered" });
+    // A dead reservation owner alone does not make a live endpoint stale.
+    const replacement = fs.lstatSync(path);
+    fs.writeFileSync(`${path}.recovery.lock`, `${child.pid}\n`);
+    await expect(createControlSocket({ socketPath: path, view: createViewState({ instanceId: "late" }) }))
+      .rejects.toMatchObject({ code: "EADDRINUSE" });
+    expect(fs.lstatSync(path).ino).toBe(replacement.ino);
+    expect(await query(path)).toMatchObject({ instanceId: "recovered" });
+    expect(fs.existsSync(`${path}.recovery.lock`)).toBe(false);
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill();
     await control?.close();
@@ -68,17 +76,17 @@ it("recovers the owned stale socket of a killed launcher", async () => {
 });
 
 
-it("reports an existing recovery reservation without changing its live socket", async () => {
+it.each(["existing reservation", `${process.pid}\n`])("reports an active or unidentifiable recovery reservation without changing its live socket (%j)", async (metadata) => {
   const path = socketPath("reserved");
   const reservation = `${path}.recovery.lock`;
   const first = await createControlSocket({ socketPath: path, view: createViewState({ instanceId: "reserved-owner" }) });
   const before = fs.lstatSync(path);
-  fs.writeFileSync(reservation, "existing reservation");
+  fs.writeFileSync(reservation, metadata);
   try {
     await expect(createControlSocket({ socketPath: path, view: createViewState({ instanceId: "second" }) }))
       .rejects.toMatchObject({ code: "EADDRINUSE", message: expect.stringContaining(reservation) });
     expect(fs.lstatSync(path).ino).toBe(before.ino);
-    expect(fs.readFileSync(reservation, "utf8")).toBe("existing reservation");
+    expect(fs.readFileSync(reservation, "utf8")).toBe(metadata);
     expect(await query(path)).toMatchObject({ instanceId: "reserved-owner" });
   } finally {
     await first.close();

@@ -149,3 +149,144 @@ it("two standalone TUIs stay usable and expose the second control path without r
     fs.rmSync(root, { recursive: true, force: true });
   }
 }, 15000);
+
+
+it.each([false, true])("recovers after a killed reservation owner without removing a concurrent replacement (delayed=$delayed)", async (delayed) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "opr-killed-"));
+  const socketPath = path.join(root, "control.sock");
+  const source = fileURLToPath(new URL("../dist/socket-server.js", import.meta.url));
+  const state = fileURLToPath(new URL("../dist/state.js", import.meta.url));
+  const launched: ChildProcessWithoutNullStreams[] = [];
+  const child = (script: string) => {
+    const result = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["pipe", "pipe", "pipe"] });
+    launched.push(result);
+    return result;
+  };
+  const launcher = (name: string, pause: boolean, delayLockRead = false) => child(`
+    import fs from "node:fs";
+    import { createControlSocket } from ${JSON.stringify(pathToFileURL(source).href)};
+    import { createViewState } from ${JSON.stringify(pathToFileURL(state).href)};
+    const socketPath = ${JSON.stringify(socketPath)};
+    const originalStat = fs.lstatSync;
+    const originalRead = fs.readFileSync;
+    fs.readFileSync = function(target, ...args) {
+      const result = originalRead.call(fs, target, ...args);
+      if (target === socketPath + ".recovery.lock" && ${delayLockRead}) {
+        process.stdout.write("observed\\n");
+        fs.readSync(0, Buffer.alloc(1), 0, 1, null);
+      }
+      return result;
+    };
+    let observations = 0;
+    fs.lstatSync = function(target, ...args) {
+      const result = originalStat.call(fs, target, ...args);
+      if (target === socketPath && ++observations === 2 && ${pause}) {
+        process.stdout.write("checked\\n");
+        fs.readSync(0, Buffer.alloc(1), 0, 1, null);
+      }
+      return result;
+    };
+    try {
+      await createControlSocket({ socketPath, view: createViewState({ instanceId: ${JSON.stringify(name)} }) });
+      process.stdout.write("ready\\n");
+    } catch (error) {
+      process.stdout.write("refused:" + error.code + "\\n");
+    }
+  `);
+  try {
+    const stale = child(`import net from "node:net"; net.createServer().listen(${JSON.stringify(socketPath)}, () => console.log("ready"));`);
+    expect(await line(stale)).toBe("ready");
+    await stop(stale);
+    const before = fs.lstatSync(socketPath);
+    const owner = launcher("killed-owner", true);
+    expect(await line(owner)).toBe("checked");
+    expect(fs.existsSync(`${socketPath}.recovery.lock`)).toBe(true);
+    expect(Number(fs.readFileSync(`${socketPath}.recovery.lock`, "utf8").trim())).toBe(owner.pid);
+    await stop(owner);
+    const survivor = launcher("survivor", false, delayed);
+    if (delayed) {
+      expect(await line(survivor)).toBe("observed");
+      const winner = launcher("winner", false);
+      expect(await line(winner)).toBe("ready");
+      const replacement = fs.lstatSync(socketPath);
+      const outcome = line(survivor);
+      survivor.stdin.write("\n");
+      expect(await outcome).toBe("refused:EADDRINUSE");
+      expect(await query(socketPath)).toBe("winner");
+      expect(fs.lstatSync(socketPath).ino).toBe(replacement.ino);
+    } else {
+      expect(await line(survivor)).toBe("ready");
+      expect(await query(socketPath)).toBe("survivor");
+    }
+    expect(fs.lstatSync(socketPath).ino).not.toBe(before.ino);
+    expect(fs.existsSync(`${socketPath}.recovery.lock`)).toBe(false);
+  } finally {
+    await Promise.all(launched.map(stop));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}, 10_000);
+
+
+it("recovers after a process is killed while reclaiming an abandoned reservation", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "opr-reclaimer-"));
+  const socketPath = path.join(root, "control.sock");
+  const source = fileURLToPath(new URL("../dist/socket-server.js", import.meta.url));
+  const state = fileURLToPath(new URL("../dist/state.js", import.meta.url));
+  const launched: ChildProcessWithoutNullStreams[] = [];
+  const child = (script: string) => {
+    const result = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["pipe", "pipe", "pipe"] });
+    launched.push(result);
+    return result;
+  };
+  const launcher = (name: string, pauseAt: "socket" | "claim" | "none") => child(`
+    import fs from "node:fs";
+    import path from "node:path";
+    import { createControlSocket } from ${JSON.stringify(pathToFileURL(source).href)};
+    import { createViewState } from ${JSON.stringify(pathToFileURL(state).href)};
+    const socketPath = ${JSON.stringify(socketPath)};
+    const pause = (message) => {
+      process.stdout.write(message + "\\n");
+      fs.readSync(0, Buffer.alloc(1), 0, 1, null);
+    };
+    const originalStat = fs.lstatSync;
+    let observations = 0;
+    fs.lstatSync = function(target, ...args) {
+      const result = originalStat.call(fs, target, ...args);
+      if (target === socketPath && ++observations === 2 && ${JSON.stringify(pauseAt)} === "socket") pause("checked");
+      return result;
+    };
+    const originalLink = fs.linkSync;
+    fs.linkSync = function(source, target) {
+      const result = originalLink.call(fs, source, target);
+      if (path.basename(target).startsWith(".tui-reclaim-") && ${JSON.stringify(pauseAt)} === "claim") pause("claimed");
+      return result;
+    };
+    try {
+      await createControlSocket({ socketPath, view: createViewState({ instanceId: ${JSON.stringify(name)} }) });
+      process.stdout.write("ready\\n");
+    } catch (error) {
+      process.stdout.write("refused:" + error.code + "\\n");
+    }
+  `);
+  try {
+    const stale = child(`import net from "node:net"; net.createServer().listen(${JSON.stringify(socketPath)}, () => console.log("ready"));`);
+    expect(await line(stale)).toBe("ready");
+    await stop(stale);
+    const owner = launcher("owner", "socket");
+    expect(await line(owner)).toBe("checked");
+    await stop(owner);
+    const reclaimer = launcher("reclaimer", "claim");
+    expect(await line(reclaimer)).toBe("claimed");
+    const claim = fs.readdirSync(root).find(name => name.startsWith(".tui-reclaim-") && name.endsWith(".lock"));
+    expect(claim).toBeDefined();
+    expect(Number(fs.readFileSync(path.join(root, claim!), "utf8").trim())).toBe(reclaimer.pid);
+    await stop(reclaimer);
+    const survivor = launcher("survivor", "none");
+    expect(await line(survivor)).toBe("ready");
+    expect(await query(socketPath)).toBe("survivor");
+    expect(fs.readdirSync(root).filter(name => name.endsWith(".lock"))).toEqual([]);
+  } finally {
+    await Promise.all(launched.map(stop));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}, 10_000);
