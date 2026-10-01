@@ -1645,7 +1645,7 @@ export class RestoreOrchestrator {
       permissionMode = override.permissionMode;
     } catch (error) { return { kind: "failed", message: `Permission selection: ${(error as Error).message}` }; }
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
-      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId, effort);
+      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId, ...(effort !== undefined ? [effort] : []));
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
@@ -1663,7 +1663,7 @@ export class RestoreOrchestrator {
     }
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
-      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model, effort);
+      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model, ...(effort !== undefined ? [effort] : []));
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };

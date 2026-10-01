@@ -477,7 +477,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
   }
   if (member["effort"] !== undefined) {
     if (typeof member["effort"] !== "string" || !member["effort"].trim()) {
-      errors.push(`${prefix}.effort: must be a non-empty string`);
+      advisories.push(`${prefix}.effort: non-string value "${member["effort"]}" ignored; effort must be a text value`);
     }
   }
   if (!member["cwd"] || typeof member["cwd"] !== "string") {
@@ -1129,7 +1129,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     runtime: m["runtime"] as string,
     codexConfigProfile: m["codex_config_profile"] as string | undefined,
     model: m["model"] as string | undefined,
-    effort: m["effort"] as string | undefined,
+    effort: typeof m["effort"] === "string" && m["effort"].trim() ? m["effort"].trim() : undefined,
     role: m["role"] as string | undefined,
     permissionPolicy: m["permission_policy"] as string | undefined,
     cwd: m["cwd"] as string,

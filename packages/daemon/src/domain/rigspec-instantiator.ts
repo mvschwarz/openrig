@@ -114,6 +114,7 @@ export class RigInstantiator {
             role: specNode.role,
             runtime: specNode.runtime,
             model: specNode.model,
+            effort: (specNode as { effort?: string }).effort,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -1208,8 +1209,8 @@ export class PodRigInstantiator {
     const config = resolveNodeConfig({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
       profileName: member.profile, specRoot: rigRoot, member, pod, rig: rigSpec, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() });
     if (!config.ok) return refuse(config.errors.join("; "));
-    if (!same(config.config.model, node.model) || !same(config.config.cwd, node.cwd) || !same(config.config.restorePolicy, node.restorePolicy)) {
-      return refuse("Resolved model, cwd or restore policy differs from the failed first start.");
+    if (!same(config.config.model, node.model) || !same(config.config.effort, node.effort) || !same(config.config.cwd, node.cwd) || !same(config.config.restorePolicy, node.restorePolicy)) {
+      return refuse("Resolved model, effort, cwd or restore policy differs from the failed first start.");
     }
     const preflight = await preflightValidatedSpec(rigSpec, { rigRoot, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(),
       ...this.systemWorldResolutionContext(), rigNameOverride: rig.rig.name, inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId), exec: this.deps.exec });
@@ -1501,7 +1502,8 @@ export class PodRigInstantiator {
             // exercised the createMemberNode paths, not bootstrap.
             role: member.role,
             runtime: member.runtime,
-            model: member.model,
+            model: member.model ?? configResult.config.model,
+            effort: member.effort ?? configResult.config.effort,
             codexConfigProfile: member.codexConfigProfile,
             // OPR.0.4.8.3 Seam B: bootstrap inline addNode is the FOURTH node-creation
             // site (see the role wire note above) — same member-ref persistence as
@@ -1771,6 +1773,7 @@ export class PodRigInstantiator {
       const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
         runtime: member.runtime,
         model: member.model,
+        effort: member.effort,
         cwd: effectiveCwd,
         restorePolicy: "checkpoint_only",
         podId,
@@ -1840,6 +1843,7 @@ export class PodRigInstantiator {
       role: input.member.role,
       runtime: input.member.runtime,
       model: input.member.model,
+      effort: input.member.effort,
       codexConfigProfile: input.member.codexConfigProfile,
       // OPR.0.4.8.3 Seam B: the member's OWN raw ref persists on the node (like role);
       // rig-level lives on the rig row; precedence applies at RESOLUTION, not storage.
@@ -2393,6 +2397,7 @@ export class PodRigInstantiator {
       resolvedSpecName: string;
       resolvedSpecVersion: string;
       resolvedSpecHash: string;
+      effort?: string;
     },
   ): void {
     try {
@@ -2410,6 +2415,9 @@ export class PodRigInstantiator {
         config.resolvedSpecHash,
         nodeId,
       );
+      if (config.effort) {
+        this.deps.rigRepo.setNodeEffort(nodeId, config.effort);
+      }
     } catch {
       /* best-effort */
     }

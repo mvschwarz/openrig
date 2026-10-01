@@ -94,9 +94,10 @@ import { nodePermissionSelectionsSchema } from "./migrations/088_node_permission
 import { classificationIdentityProvenanceSchema } from "./migrations/089_classification_identity_provenance.js";
 import { humanReplyToSchema } from "./migrations/090_human_reply_to.js";
 import { humanQuestionsSchema } from "./migrations/091_human_questions.js";
+import { nodeEffortSchema } from "./migrations/092_node_effort.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→091 (S02 086/089, S09 087, S03 088, #96 090, #193 091). */
+/** Ordered 001→092 (S02 086/089, S09 087, S03 088, #96 090, #193 091, #75 092). */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -189,4 +190,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   classificationIdentityProvenanceSchema,
   humanReplyToSchema,
   humanQuestionsSchema,
+  nodeEffortSchema,
 ];

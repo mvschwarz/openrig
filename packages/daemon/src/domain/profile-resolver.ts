@@ -142,9 +142,12 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     ?? profile.preferences?.model
     ?? spec.defaults?.model;
 
-  const effort = member.effort
+  const rawEffort = member.effort
     ?? profile.preferences?.effort
     ?? spec.defaults?.effort;
+  const effort = typeof rawEffort === "string" && rawEffort.trim()
+    ? rawEffort.trim()
+    : undefined;
 
   const cwd = ctx.cwdOverride
     ? nodePath.resolve(ctx.cwdOverride)

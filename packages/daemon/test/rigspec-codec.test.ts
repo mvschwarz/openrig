@@ -74,6 +74,47 @@ describe("RigSpec codec (pod-aware)", () => {
     expect(normalized.pods[0]!.members[0]!.effort).toBe("high");
   });
 
+  it("loads YAML with member effort through validation, normalization, and serializes back", () => {
+    const rawYaml = `
+version: "0.2"
+name: yaml-effort-rig
+pods:
+  - id: dev
+    label: Development
+    members:
+      - id: seat-a
+        agent_ref: local:agents/impl
+        profile: tdd
+        runtime: claude-code
+        effort: low
+        cwd: .
+      - id: seat-b
+        agent_ref: local:agents/qa
+        profile: reviewer
+        runtime: codex
+        effort: xhigh
+        cwd: .
+    edges: []
+edges: []
+`;
+    const parsed = RigSpecCodec.parse(rawYaml) as Record<string, unknown>;
+    const val = RigSpecSchema.validate(parsed);
+    expect(val.valid).toBe(true);
+
+    const normalized = RigSpecSchema.normalize(parsed);
+    expect(normalized.pods[0]!.members[0]!.effort).toBe("low");
+    expect(normalized.pods[0]!.members[1]!.effort).toBe("xhigh");
+
+    const reserialized = RigSpecCodec.serialize(normalized);
+    expect(reserialized).toContain("effort: low");
+    expect(reserialized).toContain("effort: xhigh");
+
+    const reparsed = RigSpecCodec.parse(reserialized) as Record<string, unknown>;
+    const renorm = RigSpecSchema.normalize(reparsed);
+    expect(renorm.pods[0]!.members[0]!.effort).toBe("low");
+    expect(renorm.pods[0]!.members[1]!.effort).toBe("xhigh");
+  });
+
   // R1: continuity_policy nested booleans round-trip through serialize -> parse -> normalize
   it("continuity_policy nested booleans round-trip correctly", () => {
     const rigWithCp: RigSpec = {

@@ -77,6 +77,18 @@ describe("SuccessorSessionLauncher", () => {
     expect(binding.model).toBe("gpt-5.4-cheap");
   });
 
+  it("#75: the successor's launch binding carries the configured effort", async () => {
+    listPanes.mockResolvedValue([{ id: "%42", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
+    const res = await launcher().createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", effort: "high" },
+      departingSessionName: "dev-impl@rig",
+    });
+    expect(res.ok).toBe(true);
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+    const binding = launchHarness.mock.calls[0]![0] as { effort?: string };
+    expect(binding.effort).toBe("high");
+  });
+
   it("CUTOVER: terminates the retiree then respawns (no -k) into the DEPARTING pane (preserved name, same pane id)", async () => {
     // A SEAT = one durable tmux session; the successor takes over the retiree's EXACT pane so native
     // scrollback survives. The retiree is terminated IN PLACE first (remain-on-exit → graceful SIGTERM),

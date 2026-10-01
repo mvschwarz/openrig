@@ -359,7 +359,9 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
     result.defaults = {
       runtime: defaults["runtime"] as string | undefined,
       model: defaults["model"] as string | undefined,
-      effort: defaults["effort"] as string | undefined,
+      effort: typeof defaults["effort"] === "string" && defaults["effort"].trim()
+        ? defaults["effort"].trim()
+        : undefined,
       lifecycle: {
         ...lifecycle,
         compactionStrategy: lifecycle.compactionStrategy ?? "default-compaction",
@@ -486,7 +488,15 @@ function normalizeProfile(raw: Record<string, unknown>): ProfileSpec {
   const uses = raw["uses"] as Record<string, unknown> | undefined;
   return {
     summary: raw["summary"] as string | undefined,
-    preferences: raw["preferences"] as { runtime?: string; model?: string; effort?: string } | undefined,
+    preferences: raw["preferences"]
+      ? {
+          runtime: (raw["preferences"] as Record<string, unknown>)["runtime"] as string | undefined,
+          model: (raw["preferences"] as Record<string, unknown>)["model"] as string | undefined,
+          effort: typeof (raw["preferences"] as Record<string, unknown>)["effort"] === "string" && ((raw["preferences"] as Record<string, unknown>)["effort"] as string).trim()
+            ? ((raw["preferences"] as Record<string, unknown>)["effort"] as string).trim()
+            : undefined,
+        }
+      : undefined,
     startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
     lifecycle: raw["lifecycle"] ? normalizeLifecycle(raw["lifecycle"] as Record<string, unknown>) : undefined,
     uses: {

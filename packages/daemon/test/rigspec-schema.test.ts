@@ -109,13 +109,17 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(normalized.pods[0]!.members[0]!.effort).toBe("high");
   });
 
-  it("rejects non-string or empty effort on pod members", () => {
+  it("handles non-text or empty effort with an advisory and drops it during normalization", () => {
     const rig = structuredClone(VALID_RIG);
-    (rig.pods[0]!.members[0] as Record<string, unknown>)["effort"] = "  ";
+    (rig.pods[0]!.members[0] as Record<string, unknown>)["effort"] = 42;
 
     const result = RigSpecSchema.validate(rig);
-    expect(result.valid).toBe(false);
-    expect(result.errors).toContain("pods[0].members[0].effort: must be a non-empty string");
+    expect(result.valid).toBe(true);
+    expect(result.advisories).toBeDefined();
+    expect(result.advisories![0]).toMatch(/pods\[0\]\.members\[0\]\.effort: non-string value "42" ignored/);
+
+    const normalized = RigSpecSchema.normalize(rig);
+    expect(normalized.pods[0]!.members[0]!.effort).toBeUndefined();
   });
 
   it("rejects codex_config_profile on non-Codex members", () => {
