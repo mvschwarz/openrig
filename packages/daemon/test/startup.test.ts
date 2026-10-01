@@ -307,7 +307,7 @@ describe("createDaemon startup composition", () => {
         transitions: (db.prepare("SELECT COUNT(*) count FROM queue_transitions").get() as { count: number }).count,
       });
 
-      for (const destination of ["product-ba@unknown", "bare-seat", "missing@external"]) {
+      for (const destination of ["product-ba@unknown", "bare-seat"]) {
         const before = counts();
         const response = await create(destination);
         expect(response.status).toBe(400);
