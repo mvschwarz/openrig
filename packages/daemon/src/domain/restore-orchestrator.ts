@@ -17,7 +17,7 @@ import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
-import { reanchorBuiltinStartupFile } from "./builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type {
   RestoreOutcome,
   RestoreRigResult,
@@ -740,7 +740,8 @@ export class RestoreOrchestrator {
       // gate from blocking the attempt entirely. Missing REQUIRED startup
       // files and genuinely-fatal blockers (malformed snapshot, missing nodes)
       // stay critical above.
-      for (const entry of startupCtx.projectionEntries ?? []) {
+      for (const storedEntry of startupCtx.projectionEntries ?? []) {
+        const entry = reanchorShippedProjectionEntry(storedEntry);
         if (this.pathLike(entry.sourcePath) && !exists(entry.sourcePath)) {
           warnings.push(`projection_drift: source root missing for ${node.logicalId}: ${entry.sourcePath} (projection will be skipped at startup; session continuity is unaffected)`);
         }
@@ -1306,7 +1307,7 @@ export class RestoreOrchestrator {
         if (adapter) {
           // Prefilter: check which files/entries still exist
           const existsFn = opts.fsOps?.exists ?? (() => true);
-          const sourceEntries = replayContained ? [] : startupCtx.projectionEntries;
+          const sourceEntries = replayContained ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e));
           // #261: recognized built-in startup files follow the running install.
           const sourceFiles = replayContained ? [] : startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f));
           const sourceActions = replayContained ? [] : startupCtx.startupActions;

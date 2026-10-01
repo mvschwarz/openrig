@@ -1,7 +1,7 @@
 // #261: recognized built-in startup files re-anchor to the running install; nothing else moves.
 import { describe, it, expect } from "vitest";
 import path from "node:path";
-import { reanchorBuiltinStartupFile, runningBuiltinAssetsRoot } from "../src/domain/builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry, runningBuiltinAssetsRoot, runningShippedSpecsRoot } from "../src/domain/builtin-startup-files.js";
 
 const RUNNING = "/new/lib/node_modules/@openrig/cli/daemon/assets";
 const OLD = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/assets";
@@ -47,5 +47,50 @@ describe("reanchorBuiltinStartupFile", () => {
 
   it("defaults to this daemon's assets root, which holds all four built-ins", () => {
     expect(runningBuiltinAssetsRoot()).toBe(path.resolve(import.meta.dirname, "../assets"));
+  });
+});
+
+describe("reanchorShippedProjectionEntry", () => {
+  const RUN_SPECS = "/new/lib/node_modules/@openrig/cli/daemon/specs";
+  const OLD_SPECS = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/specs";
+  const base = { category: "runtime_resource", effectiveId: "shared:claude-default-settings", sourceSpec: "shared",
+    resourcePath: "runtime/claude-settings.fragment.json", resourceType: "claude_settings_fragment", mergeStrategy: "managed_block", target: ".claude/settings.local.json" };
+
+  it("re-anchors a shipped resource (source and resource under an old install's daemon/specs), preserving every other field", () => {
+    const stored = { ...base, sourcePath: `${OLD_SPECS}/agents/shared`, absolutePath: `${OLD_SPECS}/agents/shared/runtime/claude-settings.fragment.json` };
+    expect(reanchorShippedProjectionEntry(stored, RUN_SPECS)).toEqual({
+      ...base, sourcePath: `${RUN_SPECS}/agents/shared`, absolutePath: `${RUN_SPECS}/agents/shared/runtime/claude-settings.fragment.json`,
+    });
+  });
+
+  it("re-anchors kernel agent guidance stored under the rig's own shipped spec directory", () => {
+    const dir = `${OLD_SPECS}/rigs/launch/kernel/agents/advisor/lead`;
+    const stored = { ...base, category: "guidance", effectiveId: "role", sourceSpec: "advisor.lead", sourcePath: dir, absolutePath: `${dir}/guidance/role.md` };
+    expect(reanchorShippedProjectionEntry(stored, RUN_SPECS).absolutePath).toBe(`${RUN_SPECS}/rigs/launch/kernel/agents/advisor/lead/guidance/role.md`);
+  });
+
+  it("re-anchors from a dev checkout (packages/daemon/specs)", () => {
+    const dev = "/src/openrig/packages/daemon/specs";
+    const stored = { ...base, sourcePath: `${dev}/agents/shared`, absolutePath: `${dev}/agents/shared/runtime/claude-mcp.fragment.json` };
+    expect(reanchorShippedProjectionEntry(stored, RUN_SPECS).absolutePath).toBe(`${RUN_SPECS}/agents/shared/runtime/claude-mcp.fragment.json`);
+  });
+
+  it("leaves a plugin projected from ~/.openrig/plugins unchanged even though its sourcePath is a shipped spec", () => {
+    const plugin = { ...base, category: "plugin", effectiveId: "shared:openrig-core", sourcePath: `${OLD_SPECS}/agents/shared`, absolutePath: "/home/u/.openrig/plugins/openrig-core" };
+    expect(reanchorShippedProjectionEntry(plugin, RUN_SPECS)).toBe(plugin);
+  });
+
+  it("leaves user spec resources unchanged", () => {
+    const user = { ...base, sourcePath: "/home/u/rigs/acme/agents/dev", absolutePath: "/home/u/rigs/acme/agents/dev/guidance/role.md" };
+    expect(reanchorShippedProjectionEntry(user, RUN_SPECS)).toBe(user);
+  });
+
+  it("does not treat a user folder merely named daemon/specs as an OpenRig install", () => {
+    const lookalike = { ...base, sourcePath: "/home/u/daemon/specs/agents/x", absolutePath: "/home/u/daemon/specs/agents/x/role.md" };
+    expect(reanchorShippedProjectionEntry(lookalike, RUN_SPECS)).toBe(lookalike);
+  });
+
+  it("defaults to this daemon's shipped specs root", () => {
+    expect(runningShippedSpecsRoot()).toBe(path.resolve(import.meta.dirname, "../specs"));
   });
 });

@@ -3728,6 +3728,31 @@ describe("RestoreOrchestrator", () => {
       expect(result.result.blockers?.[0]).toMatchObject({ code: "required_startup_file_missing", path: runningCulture });
     });
 
+    it("extension: replay projects shipped-spec resources from the running install; plugin entry untouched; no drift warning for the old path", async () => {
+      const OLD_SPECS = "/old-openrig/lib/node_modules/@openrig/cli/daemon/specs";
+      const RUNNING_SPECS = path.resolve(import.meta.dirname, "../specs");
+      const { snap, adapter } = seedPodAware(false);
+      const entries = [
+        { category: "runtime_resource", effectiveId: "shared:claude-default-mcp", sourceSpec: "shared", sourcePath: `${OLD_SPECS}/agents/shared`, resourcePath: "r", absolutePath: `${OLD_SPECS}/agents/shared/runtime/claude-mcp.fragment.json`, resourceType: "claude_mcp_fragment" },
+        { category: "plugin", effectiveId: "shared:openrig-core", sourceSpec: "shared", sourcePath: `${OLD_SPECS}/agents/shared`, resourcePath: "p", absolutePath: "/home/u/.openrig/plugins/openrig-core" },
+      ];
+      const fixed = updateSnapshotData(snap, (data) => { for (const k of Object.keys(data.nodeStartupContext)) data.nodeStartupContext[k].projectionEntries = entries; });
+      const result = await createOrchestrator().restore(fixed.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: notOld }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(true);
+      const projected = adapter.project.mock.calls.flatMap((c) => ((c[0] as { entries: Array<{ effectiveId: string; absolutePath: string }> }).entries));
+      expect(projected.find((e) => e.effectiveId === "shared:claude-default-mcp")?.absolutePath).toBe(`${RUNNING_SPECS}/agents/shared/runtime/claude-mcp.fragment.json`);
+      expect(projected.find((e) => e.effectiveId === "shared:openrig-core")?.absolutePath).toBe("/home/u/.openrig/plugins/openrig-core");
+      if (result.ok) {
+        const drift = (result.result.warnings ?? []).filter((w) => w.includes("projection_drift"));
+        // The re-anchored resource raises no drift; the deliberately untouched plugin entry keeps its honest
+        // "source root missing" warning for the old shipped sourcePath while its own file still projects.
+        expect(drift.some((w) => w.includes("claude-mcp.fragment.json"))).toBe(false);
+        expect(drift.every((w) => w.includes("source root missing") && w.includes("/old-openrig/lib/node_modules/@openrig/cli/daemon/specs/agents/shared"))).toBe(true);
+      }
+    });
+
     it("same-native resume: replay stays contained (no startup files delivered), stored built-ins notwithstanding", async () => {
       const { snap, deliverStartup, adapter } = seedPodAware(true);
       const orch = createOrchestrator({ listProcesses: nativeLineage("claude-code", "resume-token-261") });

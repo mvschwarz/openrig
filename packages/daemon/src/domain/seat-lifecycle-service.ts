@@ -13,7 +13,7 @@ import type { RuntimeAdapter, ResolvedStartupFile } from "./runtime-adapter.js";
 import type { ProjectionEntry, ProjectionPlan } from "./projection-planner.js";
 import type { StartupAction } from "./types.js";
 import { resolveStartupProof } from "./startup-resolver.js";
-import { reanchorBuiltinStartupFile } from "./builtin-startup-files.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type { OccupantInvalidator } from "./occupant-invalidator.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { observeSolePane } from "./pane-binding-observation.js";
@@ -848,7 +848,8 @@ export class SeatLifecycleService {
       // S04 owns the live ambient skill set. Replaying the older catalog
       // selection here could reinstall a skill that work-install removed.
       if (raw["category"] === "skill") continue;
-      entries.push({
+      // #261: shipped-spec resources follow the running install.
+      entries.push(reanchorShippedProjectionEntry({
         category: raw["category"],
         effectiveId: raw["effectiveId"],
         sourceSpec: raw["sourceSpec"],
@@ -860,7 +861,7 @@ export class SeatLifecycleService {
         ...(typeof raw["mergeStrategy"] === "string" ? { mergeStrategy: raw["mergeStrategy"] as ProjectionEntry["mergeStrategy"] } : {}),
         ...(typeof raw["target"] === "string" ? { target: raw["target"] } : {}),
         ...(typeof raw["pluginType"] === "string" ? { pluginType: raw["pluginType"] as ProjectionEntry["pluginType"] } : {}),
-      });
+      }));
     }
 
     const resolvedStartupFiles: ResolvedStartupFile[] = [];

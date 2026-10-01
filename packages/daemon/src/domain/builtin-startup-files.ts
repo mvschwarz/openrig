@@ -2,7 +2,9 @@
 // install that created the seat (rigspec-instantiator resolves them from
 // import.meta.dirname). After an upgrade that removes or moves that install, the
 // stored paths go stale (#261). Delivery consumers re-anchor recognized built-ins to
-// the RUNNING install's assets, so seats get this version's shipped guidance.
+// the RUNNING install's assets, so seats get this version's shipped guidance. Projection
+// entries whose source and resource ship inside an install's daemon/specs (the kernel and
+// library agents) are re-anchored the same way.
 import nodePath from "node:path";
 
 /** Logical name -> path relative to the daemon assets root, as rigspec-instantiator produces them. */
@@ -36,4 +38,45 @@ export function reanchorBuiltinStartupFile<T extends { path: string; absolutePat
   if (nodePath.basename(storedRoot) !== "assets" || nodePath.basename(nodePath.dirname(storedRoot)) !== "daemon") return file;
   if (nodePath.resolve(file.absolutePath) !== nodePath.join(storedRoot, relative)) return file;
   return { ...file, absolutePath: nodePath.join(assetsRoot, relative), ownerRoot: assetsRoot };
+}
+
+/** The running daemon's shipped specs root (packages/daemon/specs, or <cli>/daemon/specs when packaged). */
+export function runningShippedSpecsRoot(): string {
+  return nodePath.resolve(import.meta.dirname, "../../specs");
+}
+
+/** The OpenRig install's daemon/specs root containing `p`, recognized only in the packaged
+ *  (@openrig/cli/daemon/specs) or dev-checkout (packages/daemon/specs) layout. */
+function shippedSpecsRootOf(p: string): string | null {
+  const parts = nodePath.resolve(p).split(nodePath.sep);
+  for (let i = parts.length - 2; i >= 2; i--) {
+    if (parts[i] !== "daemon" || parts[i + 1] !== "specs") continue;
+    const packaged = parts[i - 1] === "cli" && parts[i - 2] === "@openrig";
+    const devCheckout = parts[i - 1] === "packages";
+    if (packaged || devCheckout) return parts.slice(0, i + 2).join(nodePath.sep);
+  }
+  return null;
+}
+
+/**
+ * Re-anchor one stored projection entry to the running install when it is a shipped-spec
+ * resource: both its sourcePath and its resource absolutePath lie under the same OpenRig
+ * install's daemon/specs root. A resource stored elsewhere (a plugin under ~/.openrig/plugins,
+ * user specs, custom paths) is returned unchanged even when its sourcePath is a shipped spec.
+ * Identifiers, category, target and merge behavior are preserved.
+ */
+export function reanchorShippedProjectionEntry<T extends { sourcePath: string; absolutePath: string }>(
+  entry: T,
+  specsRoot: string = runningShippedSpecsRoot(),
+): T {
+  const storedRoot = shippedSpecsRootOf(entry.sourcePath);
+  if (!storedRoot) return entry;
+  const source = nodePath.resolve(entry.sourcePath);
+  const resource = nodePath.resolve(entry.absolutePath);
+  if (!resource.startsWith(storedRoot + nodePath.sep)) return entry;
+  return {
+    ...entry,
+    sourcePath: nodePath.join(specsRoot, nodePath.relative(storedRoot, source)),
+    absolutePath: nodePath.join(specsRoot, nodePath.relative(storedRoot, resource)),
+  };
 }

@@ -599,4 +599,28 @@ describe("SeatLifecycleService.launchFresh", () => {
     const persisted = JSON.parse((db.prepare("SELECT resolved_files_json AS j FROM node_startup_context WHERE node_id=?").get(seat.node.id) as { j: string }).j) as Array<{ absolutePath: string }>;
     expect(persisted.some((f) => f.absolutePath.startsWith(oldAssets))).toBe(false);
   });
+
+  // #261 extension: shipped-spec projection resources follow the running install; a plugin stored
+  // outside daemon/specs and user resources are projected exactly as stored.
+  it("#261 projects shipped-spec resources from the running install and leaves plugin/user entries untouched", async () => {
+    const seat = seedSeat({ clean: true });
+    const oldSpecs = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/specs";
+    const runningSpecs = path.resolve(import.meta.dirname, "../specs");
+    const entry = (over: Record<string, string>) => ({ category: "runtime_resource", effectiveId: "x", sourceSpec: "shared", resourcePath: "r", ...over });
+    const stored = [
+      entry({ effectiveId: "shared:claude-default-settings", sourcePath: `${oldSpecs}/agents/shared`, absolutePath: `${oldSpecs}/agents/shared/runtime/claude-settings.fragment.json`, resourceType: "claude_settings_fragment" }),
+      entry({ category: "plugin", effectiveId: "shared:openrig-core", sourcePath: `${oldSpecs}/agents/shared`, absolutePath: "/home/u/.openrig/plugins/openrig-core" }),
+      entry({ category: "guidance", effectiveId: "role", sourceSpec: "dev.impl", sourcePath: "/project/agents/impl", absolutePath: "/project/agents/impl/guidance/role.md" }),
+    ];
+    db.prepare("UPDATE node_startup_context SET projection_entries_json=? WHERE node_id=?").run(JSON.stringify(stored), seat.node.id);
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "issue 261 projection" });
+    expect(result.ok).toBe(true);
+    const byId = Object.fromEntries((projectedPlan?.entries ?? []).map((e) => [e.effectiveId, e]));
+    expect(byId["shared:claude-default-settings"]).toMatchObject({
+      sourcePath: `${runningSpecs}/agents/shared`, absolutePath: `${runningSpecs}/agents/shared/runtime/claude-settings.fragment.json`,
+      resourceType: "claude_settings_fragment", category: "runtime_resource",
+    });
+    expect(byId["shared:openrig-core"]).toMatchObject({ sourcePath: `${oldSpecs}/agents/shared`, absolutePath: "/home/u/.openrig/plugins/openrig-core" });
+    expect(byId["role"]).toMatchObject({ absolutePath: "/project/agents/impl/guidance/role.md" });
+  });
 });
