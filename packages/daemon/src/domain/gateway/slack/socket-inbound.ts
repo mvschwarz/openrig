@@ -62,6 +62,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
   let stopped = false;
   let liveWs: WsLike | undefined;
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+  let finish: () => void = () => {};
   const status: SocketInboundStatus = { generation: 0, reconnects: 0, state: "disconnected" };
   const stamp = () => new Date().toISOString();
   const receipt = (entry: Parameters<InboundReceiptStore["append"]>[0]): void => {
@@ -74,6 +75,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
   };
 
   const done = new Promise<void>((resolve) => {
+    finish = resolve;
     const connect = async (): Promise<void> => {
       if (stopped) return resolve();
       connects++;
@@ -187,6 +189,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
       status.state = "stopped";
       if (pendingTimer) clearTimeout(pendingTimer);
       try { liveWs?.close(); } catch { /* best-effort */ }
+      finish(); // A canceled backoff has no future connect/close callback to settle done.
     },
     status: () => ({ ...status }),
   };
