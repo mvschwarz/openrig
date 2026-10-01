@@ -41,15 +41,31 @@ export class WebhookNotificationAdapter implements NotificationAdapter {
 
   constructor(opts: WebhookAdapterOpts) {
     const validation = validateOutboundUrl(opts.endpointUrl);
+    const extraHeaders: Record<string, string> = { ...(opts.extraHeaders ?? {}) };
+
     if (!validation.valid) {
       this.disabled = true;
       this.validationError = `Invalid webhook endpoint URL '${redactUrl(opts.endpointUrl)}': ${validation.reason}`;
       const warn = opts.warn ?? console.warn;
       warn(`[openrig] Notifications disabled: ${this.validationError}`);
+      this.target = opts.endpointUrl;
+    } else {
+      const parsed = new URL(validation.parsedUrl!.toString());
+      if (parsed.username || parsed.password) {
+        const user = decodeURIComponent(parsed.username);
+        const pass = decodeURIComponent(parsed.password);
+        const basicAuth = `Basic ${Buffer.from(`${user}:${pass}`).toString("base64")}`;
+        if (!extraHeaders["Authorization"] && !extraHeaders["authorization"]) {
+          extraHeaders["Authorization"] = basicAuth;
+        }
+        parsed.username = "";
+        parsed.password = "";
+      }
+      this.target = parsed.toString();
     }
-    this.target = opts.endpointUrl;
+
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.extraHeaders = opts.extraHeaders ?? {};
+    this.extraHeaders = extraHeaders;
   }
 
   async send(payload: NotificationPayload): Promise<NotificationDeliveryResult> {

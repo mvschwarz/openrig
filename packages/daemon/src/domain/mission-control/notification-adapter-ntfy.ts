@@ -30,6 +30,7 @@ export class NtfyNotificationAdapter implements NotificationAdapter {
   readonly disabled?: boolean;
   readonly validationError?: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly authHeader?: string;
 
   constructor(opts: NtfyAdapterOpts) {
     const validation = validateOutboundUrl(opts.topicUrl);
@@ -38,8 +39,18 @@ export class NtfyNotificationAdapter implements NotificationAdapter {
       this.validationError = `Invalid ntfy topic URL '${redactUrl(opts.topicUrl)}': ${validation.reason}`;
       const warn = opts.warn ?? console.warn;
       warn(`[openrig] Notifications disabled: ${this.validationError}`);
+      this.target = opts.topicUrl;
+    } else {
+      const parsed = new URL(validation.parsedUrl!.toString());
+      if (parsed.username || parsed.password) {
+        const user = decodeURIComponent(parsed.username);
+        const pass = decodeURIComponent(parsed.password);
+        this.authHeader = `Basic ${Buffer.from(`${user}:${pass}`).toString("base64")}`;
+        parsed.username = "";
+        parsed.password = "";
+      }
+      this.target = parsed.toString();
     }
-    this.target = opts.topicUrl;
     this.fetchImpl = opts.fetchImpl ?? fetch;
   }
 
@@ -53,6 +64,9 @@ export class NtfyNotificationAdapter implements NotificationAdapter {
     const headers: Record<string, string> = {
       Title: truncateHeader(payload.title, 250),
     };
+    if (this.authHeader) {
+      headers.Authorization = this.authHeader;
+    }
     if (payload.qitemRef) headers.Click = payload.qitemRef;
     if (payload.tags && payload.tags.length > 0) {
       headers.Tags = payload.tags.join(",");

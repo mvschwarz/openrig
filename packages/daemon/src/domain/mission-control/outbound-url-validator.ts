@@ -9,8 +9,10 @@ export interface OutboundUrlValidationResult {
  *
  * Refuses:
  * - Non-HTTP/HTTPS protocols (e.g. file:, ftp:, gopher:, data:, javascript:)
- * - Credentials embedded in the URL (e.g. http://user:pass@host)
+ * - Malformed URLs or URLs without a hostname
  *
+ * URLs with embedded credentials (e.g. https://user:pass@host) are permitted;
+ * adapters strip credentials from the URL and transmit them via Authorization headers.
  * Self-hosted notifiers on localhost or the local network are standard OpenRig
  * configurations and are explicitly permitted without restriction.
  */
@@ -27,12 +29,7 @@ export function validateOutboundUrl(rawUrl: string): OutboundUrlValidationResult
     return { valid: false, reason: `unsupported_protocol_${parsed.protocol.replace(":", "")}` };
   }
 
-  // 2. Reject credentials embedded in URL
-  if (parsed.username || parsed.password) {
-    return { valid: false, reason: "url_credentials_not_allowed" };
-  }
-
-  // 3. Ensure hostname is present
+  // 2. Ensure hostname is present
   const hostname = parsed.hostname.toLowerCase().trim();
   if (!hostname) {
     return { valid: false, reason: "missing_hostname" };

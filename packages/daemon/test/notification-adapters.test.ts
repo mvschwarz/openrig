@@ -152,37 +152,63 @@ describe("WebhookNotificationAdapter (PL-005 Phase B)", () => {
       }
     });
 
-    it("refuses URLs with embedded credentials and redacts credentials in warning", async () => {
+    it("supports URLs with embedded credentials by stripping them from fetch URL and sending Authorization: Basic header", async () => {
+      const calls: Array<{ url: string; init: RequestInit }> = [];
+      const fakeFetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response(null, { status: 200 });
+      }) as unknown as typeof fetch;
+
+      const webhook = new WebhookNotificationAdapter({
+        endpointUrl: "https://user:secretpassword@example.com/webhook",
+        fetchImpl: fakeFetch,
+      });
+      expect(webhook.disabled).toBeUndefined();
+      const resWebhook = await webhook.send({ title: "test", body: "test" });
+      expect(resWebhook.ok).toBe(true);
+      expect(calls[0]!.url).toBe("https://example.com/webhook");
+      expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe("Basic dXNlcjpzZWNyZXRwYXNzd29yZA==");
+
+      const ntfy = new NtfyNotificationAdapter({
+        topicUrl: "https://user:secretpassword@ntfy.sh/topic",
+        fetchImpl: fakeFetch,
+      });
+      expect(ntfy.disabled).toBeUndefined();
+      const resNtfy = await ntfy.send({ title: "test", body: "test" });
+      expect(resNtfy.ok).toBe(true);
+      expect(calls[1]!.url).toBe("https://ntfy.sh/topic");
+      expect((calls[1]!.init.headers as Record<string, string>).Authorization).toBe("Basic dXNlcjpzZWNyZXRwYXNzd29yZA==");
+    });
+
+    it("redacts credentials in warning when URL is invalid for other reasons", async () => {
       const warnings: string[] = [];
       const warn = (msg: string) => warnings.push(msg);
 
       const webhook = new WebhookNotificationAdapter({
-        endpointUrl: "https://user:secretpassword@example.com/webhook",
+        endpointUrl: "ftp://user:secretpassword@example.com/webhook",
         warn,
       });
       expect(webhook.disabled).toBe(true);
       expect(warnings.length).toBe(1);
-      expect(warnings[0]).toContain("url_credentials_not_allowed");
+      expect(warnings[0]).toContain("unsupported_protocol_ftp");
       expect(warnings[0]).toContain("***:***");
       expect(warnings[0]).not.toContain("secretpassword");
       const resWebhook = await webhook.send({ title: "test", body: "test" });
       expect(resWebhook.ok).toBe(false);
-      expect(resWebhook.error).toContain("url_credentials_not_allowed");
       expect(resWebhook.error).toContain("***:***");
       expect(resWebhook.error).not.toContain("secretpassword");
 
       const ntfy = new NtfyNotificationAdapter({
-        topicUrl: "https://user:secretpassword@ntfy.sh/topic",
+        topicUrl: "ftp://user:secretpassword@ntfy.sh/topic",
         warn,
       });
       expect(ntfy.disabled).toBe(true);
       expect(warnings.length).toBe(2);
-      expect(warnings[1]).toContain("url_credentials_not_allowed");
+      expect(warnings[1]).toContain("unsupported_protocol_ftp");
       expect(warnings[1]).toContain("***:***");
       expect(warnings[1]).not.toContain("secretpassword");
       const resNtfy = await ntfy.send({ title: "test", body: "test" });
       expect(resNtfy.ok).toBe(false);
-      expect(resNtfy.error).toContain("url_credentials_not_allowed");
       expect(resNtfy.error).toContain("***:***");
       expect(resNtfy.error).not.toContain("secretpassword");
     });
