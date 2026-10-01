@@ -390,7 +390,7 @@ describe("TmuxAdapter", () => {
         writeFile, unlink, tmpName: () => "/tmp/text.txt", bufferName: () => "fixture",
       });
       expect(await adapter.sendText("dev'qa@rig", text)).toEqual({ ok: true });
-      expect(writeFile).toHaveBeenCalledWith("/tmp/text.txt", text);
+      expect(writeFile).toHaveBeenCalledWith("/tmp/text.txt", text, { mode: 0o600, flag: "wx" });
       expect(exec.mock.calls.map(([cmd]) => cmd)).toEqual([
         "tmux load-buffer -b 'fixture' '/tmp/text.txt'",
         "tmux paste-buffer -t 'dev'\"'\"'qa@rig' -b 'fixture' -d -r -p",
@@ -858,7 +858,7 @@ describe("TmuxAdapter", () => {
 
       expect(result).toEqual({ ok: true });
       // The raw payload is written to disk via fs, NOT embedded in a shell command.
-      expect(writeFile).toHaveBeenCalledWith("/tmp/openrig-tmux-send-FIXED.txt", BIG);
+      expect(writeFile).toHaveBeenCalledWith("/tmp/openrig-tmux-send-FIXED.txt", BIG, { mode: 0o600, flag: "wx" });
       const cmds = exec.mock.calls.map((c) => c[0] as string);
       expect(cmds).toEqual([
         "tmux load-buffer -b 'openrig_FIXED' '/tmp/openrig-tmux-send-FIXED.txt'",
@@ -883,7 +883,7 @@ describe("TmuxAdapter", () => {
       const result: TmuxResult = await adapter.sendText("dev@rig", MID);
 
       expect(result).toEqual({ ok: true });
-      expect(writeFile).toHaveBeenCalledWith("/tmp/openrig-tmux-send-FIXED.txt", MID);
+      expect(writeFile).toHaveBeenCalledWith("/tmp/openrig-tmux-send-FIXED.txt", MID, { mode: 0o600, flag: "wx" });
       for (const cmd of exec.mock.calls.map((c) => c[0] as string)) expect(cmd).not.toContain(MID);
     });
 

@@ -552,7 +552,7 @@ export class TmuxAdapter {
     const buffer = this.fileOps.bufferName();
     let bufferLoaded = false;
     try {
-      await this.fileOps.writeFile(path, text);
+      await this.fileOps.writeFile(path, text, { mode: 0o600, flag: "wx" });
       await this.run(["tmux", "load-buffer", "-b", buffer, path],
         `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
       bufferLoaded = true;
