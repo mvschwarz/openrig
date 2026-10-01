@@ -73,6 +73,12 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
     }
   };
 
+  const retryDeadLetters = (): void => {
+    void router.retryDeadLetters().catch((error) => {
+      log(`dead-letter retry failed: ${(error as Error).message}`);
+    });
+  };
+
   const done = new Promise<void>((resolve) => {
     const connect = async (): Promise<void> => {
       if (stopped) return resolve();
@@ -102,10 +108,10 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
         status.state = "connected";
         status.connectedAt = stamp();
         receipt({ generation: connects, status: "connected" });
-        void router.retryDeadLetters(); // drain on connect (cold-init)…
+        retryDeadLetters(); // drain on connect (cold-init)…
         // …AND periodically WHILE connected (B1: recovery after a queue outage
         // must not wait for the next Slack reconnect). Cleared on close.
-        retryTimer = setInterval(() => void router.retryDeadLetters(), retryIntervalMs);
+        retryTimer = setInterval(retryDeadLetters, retryIntervalMs);
         if (typeof (retryTimer as unknown as { unref?: () => void }).unref === "function") {
           (retryTimer as unknown as { unref: () => void }).unref();
         }
