@@ -7,19 +7,27 @@ import type { RigSpec } from "../src/domain/types.js";
 
 // -- Mock filesystem --
 
-function mockFs(files: Record<string, string>): PodAssemblerFsOps {
-  const written: Record<string, string> = {};
+function mockFs(files: Record<string, string | Uint8Array>): PodAssemblerFsOps {
+  const written: Record<string, string | Uint8Array> = {};
   const dirs = new Set<string>();
+  const read = (p: string): string | Uint8Array => {
+    if (p in files) return files[p]!;
+    if (p in written) return written[p]!;
+    throw new Error(`File not found: ${p}`);
+  };
 
   return {
     readFile: (p: string) => {
-      if (p in files) return files[p]!;
-      if (p in written) return written[p]!;
-      throw new Error(`File not found: ${p}`);
+      const v = read(p);
+      return typeof v === "string" ? v : Buffer.from(v).toString("utf8");
+    },
+    readFileBuffer: (p: string) => {
+      const v = read(p);
+      return typeof v === "string" ? Buffer.from(v, "utf8") : v;
     },
     exists: (p: string) => p in files || p in written,
     mkdirp: (p: string) => { dirs.add(p); },
-    writeFile: (p: string, content: string) => { written[p] = content; },
+    writeFile: (p: string, content: string | Uint8Array) => { written[p] = content; },
     copyDir: () => {},
     listFiles: (dirPath: string) => {
       const result: string[] = [];
@@ -31,7 +39,7 @@ function mockFs(files: Record<string, string>): PodAssemblerFsOps {
       return result;
     },
     _written: written, // for test inspection
-  } as PodAssemblerFsOps & { _written: Record<string, string> };
+  } as PodAssemblerFsOps & { _written: Record<string, string | Uint8Array> };
 }
 
 // -- Helpers --
@@ -463,6 +471,33 @@ describe("PodBundleAssembler", () => {
   });
 
   // T11: integration: assemble -> verify manifest + file contents
+  it("copies agent-package and rig files as bytes, never decoding them", () => {
+    const spec = makeRigSpec({
+      cultureFile: "culture.md",
+      startup: { files: [{ path: "startup/blob.bin", deliveryHint: "auto", required: true, appliesOn: ["fresh_start", "restore"] }], actions: [] },
+    });
+    const binary = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x80, 0x00, 0xc3, 0x28, 0xff]);
+    const culture = Uint8Array.from([0x23, 0x20, 0xa0, 0xa1, 0x0a]);
+    const startup = Uint8Array.from([0xfe, 0xed, 0x00, 0xc0]);
+    const files: Record<string, string | Uint8Array> = {
+      [`${RIG_ROOT}/rig.yaml`]: rigSpecYaml(spec),
+      [`${RIG_ROOT}/culture.md`]: culture,
+      [`${RIG_ROOT}/startup/blob.bin`]: startup,
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+      [`${RIG_ROOT}/agents/impl/assets/logo.png`]: binary,
+    };
+    const fs = mockFs(files);
+    new PodBundleAssembler({ fsOps: fs }).assemble({
+      rigRoot: RIG_ROOT, rigSpecPath: `${RIG_ROOT}/rig.yaml`,
+      outputDir: "/tmp/staging", bundleName: "bytes", bundleVersion: "1.0.0",
+    });
+
+    const written = (fs as unknown as { _written: Record<string, string | Uint8Array> })._written;
+    expect(Buffer.from(written["/tmp/staging/agents/impl/assets/logo.png"]!).equals(Buffer.from(binary))).toBe(true);
+    expect(Buffer.from(written["/tmp/staging/culture.md"]!).equals(Buffer.from(culture))).toBe(true);
+    expect(Buffer.from(written["/tmp/staging/startup/blob.bin"]!).equals(Buffer.from(startup))).toBe(true);
+  });
+
   it("integration: assembled bundle has correct manifest and files", () => {
     const spec = makeRigSpec({
       cultureFile: "culture.md",
@@ -492,7 +527,7 @@ describe("PodBundleAssembler", () => {
     // Verify written files exist
     const written = (fs as unknown as { _written: Record<string, string> })._written;
     expect(written["/tmp/staging/rig.yaml"]).toBeDefined();
-    expect(written["/tmp/staging/culture.md"]).toBe("# Culture doc");
+    expect(Buffer.from(written["/tmp/staging/culture.md"]!).toString("utf8")).toBe("# Culture doc");
     expect(written["/tmp/staging/bundle.yaml"]).toBeDefined();
   });
 
