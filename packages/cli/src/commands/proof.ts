@@ -513,13 +513,30 @@ checkboxes do not accept an item under the selected proof policy.
 /** Explicit --replace swaps the artifact's directory entry; it never writes through it. A symlink or hard
  *  link at the artifact name therefore keeps its other path's bytes. The staging file is created
  *  exclusively under a unique name, so cleanup only ever removes a file this call created, and a failed
- *  write or rename leaves the target as it was. The replacement is a new inode with default permissions.
- *  There is no fsync: this is a same-directory swap, not a crash-durability guarantee. */
+ *  write, close or rename leaves the target as it was. An existing regular artifact's permission bits carry
+ *  over, so a replacement never broadens access; a symlinked or new name gets default permissions. The
+ *  first failure is the one reported. There is no fsync: this is a same-directory swap, not a
+ *  crash-durability guarantee. */
 export function replaceArtifactFile(target: string, content: string, stagingId: string = randomUUID()): void {
   const staging = path.join(path.dirname(target), `.${path.basename(target)}.${stagingId}.replace-tmp`);
+  const existing = fs.lstatSync(target, { throwIfNoEntry: false });
+  const keepMode = existing?.isFile() ? existing.mode & 0o777 : undefined;
   const fd = fs.openSync(staging, "wx");
+  let failure: unknown;
   try {
-    try { fs.writeFileSync(fd, content, "utf8"); } finally { fs.closeSync(fd); }
+    if (keepMode !== undefined) fs.fchmodSync(fd, keepMode);
+    fs.writeFileSync(fd, content, "utf8");
+  } catch (err) {
+    failure = err;
+  }
+  try {
+    fs.closeSync(fd);
+  } catch (closeErr) {
+    if (failure === undefined) failure = closeErr;
+    else console.error(`warning: closing staging file ${staging} also failed: ${(closeErr as Error).message}`);
+  }
+  try {
+    if (failure !== undefined) throw failure;
     fs.renameSync(staging, target);
   } catch (err) {
     try { fs.rmSync(staging, { force: true }); }
