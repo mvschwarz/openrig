@@ -79,11 +79,12 @@ describe("default client endpoint selection", () => {
     expect(new DaemonClient().baseUrl).toBe("http://127.0.0.1:27451");
   });
 
-  it("falls back on a dead PID without removing the state", () => {
+  it("keeps the recorded endpoint for a dead PID without rewriting state", () => {
     writeState(state());
+    const before = fs.readFileSync(path.join(home, "daemon.json"));
     vi.spyOn(process, "kill").mockImplementation(() => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
-    expect(new DaemonClient().baseUrl).toBe(fallback);
-    expect(fs.existsSync(path.join(home, "daemon.json"))).toBe(true);
+    expect(new DaemonClient().baseUrl).toBe("http://127.0.0.1:27451");
+    expect(fs.readFileSync(path.join(home, "daemon.json"))).toEqual(before);
   });
 
   it("does not mistake a permission-denied liveness check for a dead endpoint", () => {
@@ -179,5 +180,22 @@ describe("default client endpoint selection", () => {
     ]));
     expect(received.filter(r => r.method === "POST").map(r => r.body)).toEqual(["A", "B"].map(() => expect.objectContaining({ item: "fixture-item", expectedRevision: "r1", verdict: "accept" })));
     expect(received.every(r => r.sender === "author@fixture")).toBe(true);
+
+    // S1: the recorded daemon stops while the configured other daemon remains up.
+    const stopped = servers.shift()!;
+    stopped.closeAllConnections();
+    await new Promise<void>((resolve, reject) => stopped.close(e => e ? reject(e) : resolve()));
+    vi.stubEnv("OPENRIG_HOME", home);
+    vi.spyOn(process, "kill").mockImplementation(() => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
+    const staleClient = new DaemonClient();
+    const count = received.length;
+    const results = await Promise.allSettled([staleClient.get("/api/proof"), staleClient.post("/api/proof/judge", { fixture: "stale" })]);
+    process.stdout.write(`F1 stale routing receipt ${JSON.stringify({ selected: staleClient.baseUrl, stoppedPort: a, otherPort: b, results: results.map(r => r.status === "rejected" ? { status: r.status, error: String(r.reason) } : r), extraRequests: received.slice(count) })}\n`);
+    expect(staleClient.baseUrl).toBe(`http://127.0.0.1:${a}`);
+    for (const result of results) {
+      expect(result.status).toBe("rejected");
+      if (result.status === "rejected") expect(String(result.reason)).toContain(`Cannot connect to the OpenRig daemon at http://127.0.0.1:${a}`);
+    }
+    expect(received).toHaveLength(count); // no read or judgment reaches B
   });
 });

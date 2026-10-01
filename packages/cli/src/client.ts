@@ -117,13 +117,8 @@ function localDaemonUrl(): string | undefined {
     if (!state || !Number.isSafeInteger(state.pid) || state.pid <= 0
       || !Number.isInteger(state.port) || state.port < 1 || state.port > 65535
       || (state.host !== undefined && (typeof state.host !== "string" || !state.host.trim()))) return undefined;
-    try {
-      process.kill(state.pid, 0);
-    } catch (error) {
-      // EPERM is not evidence of death. Retain the recorded target; the request
-      // decides reachability. No health probe, process spawn or state cleanup here.
-      if ((error as NodeJS.ErrnoException).code !== "EPERM") return undefined;
-    }
+    // A stale PID must not redirect reads or writes to another configured daemon.
+    // Keep the recorded endpoint; the request decides reachability, even after exit.
     return `http://${state.host ?? "127.0.0.1"}:${state.port}`;
   } catch {
     return undefined;
