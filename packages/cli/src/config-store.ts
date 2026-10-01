@@ -1226,7 +1226,9 @@ export class ConfigStore {
    */
   reset(key?: string): void {
     if (key === undefined) {
-      try { unlinkSync(this.configPath); } catch { /* missing is fine */ }
+      try { unlinkSync(this.configPath); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
       return;
     }
     const removedMessage = removedContextSettingMessage(key);
