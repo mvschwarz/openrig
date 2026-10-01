@@ -294,6 +294,7 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
       try {
         const client = await getClient();
         const res = await client.get<AgentReferenceWire[]>(`/api/plugins/${encodeURIComponent(id)}/used-by`);
+        if (res.status === 404) throw new Error(`Plugin "${id}" not found`);
         if (res.status !== 200) {
           throw new Error(`Daemon returned HTTP ${res.status}`);
         }

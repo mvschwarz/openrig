@@ -333,6 +333,17 @@ describe("rig plugin CLI (slice 3.4)", () => {
   // ============================================================
 
   describe("rig plugin used-by <id>", () => {
+    it("names an unknown plugin and exits non-zero", async () => {
+      const program = new Command();
+      program.exitOverride();
+      program.addCommand(pluginCommand(runningDeps(port)));
+      const { errLogs, exitCode } = await captureLogs(async () => {
+        await program.parseAsync(["node", "rig", "plugin", "used-by", "no-such-plugin"]);
+      });
+      expect(exitCode).toBe(1);
+      expect(errLogs.join("\n")).toContain('Plugin "no-such-plugin" not found');
+    });
+
     it("--json returns the AgentReference[] from /api/plugins/:id/used-by", async () => {
       const program = new Command();
       program.exitOverride();

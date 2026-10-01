@@ -160,13 +160,10 @@ export interface PluginDiscoveryServiceOpts {
   claudeCacheDir: string;
   /** Root directory for Codex plugin cache (typically ~/.codex/plugins/cache). */
   codexCacheDir: string;
-  /**
-   * Spec library directory containing agent.yaml files (recursively scanned).
-   * Typically the daemon's resolved spec library root. May be a single root
-   * for v0; expand to multi-root in a later slice if the spec library hooks
-   * its full root list through.
-   */
+  /** User spec library directory containing agent.yaml files (recursively scanned). */
   specLibraryDir: string;
+  /** Additional spec roots visible in the library, including built-in and legacy user specs. */
+  additionalSpecLibraryDirs?: string[];
   /**
    * Slice 3.3 fix-C — optional rig cwd roots whose `.claude/plugins/*` +
    * `.codex/plugins/*` subdirectories get scanned for rig-bundled
@@ -373,9 +370,12 @@ export class PluginDiscoveryService {
 
   findUsedBy(pluginId: string): AgentReference[] {
     const refs: AgentReference[] = [];
-    if (!existsSync(this.opts.specLibraryDir)) return refs;
-
-    for (const candidate of walkAgentYamls(this.opts.specLibraryDir)) {
+    const roots = new Set([this.opts.specLibraryDir, ...(this.opts.additionalSpecLibraryDirs ?? [])]);
+    const seen = new Set<string>();
+    const candidates = [...roots].flatMap((root) => walkAgentYamls(root));
+    for (const candidate of candidates) {
+      if (seen.has(candidate.path)) continue;
+      seen.add(candidate.path);
       const parsed = safeParseYaml(candidate.content);
       if (!parsed || typeof parsed !== "object") continue;
 
