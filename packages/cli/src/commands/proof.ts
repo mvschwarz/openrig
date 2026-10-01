@@ -244,7 +244,7 @@ checkboxes do not accept an item under the selected proof policy.
             });
           }
           try {
-            body = new TextDecoder("utf-8", { fatal: true }).decode(input);
+            body = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(input);
           } catch {
             throw new ScopeCliError({
               fact: `--file ${opts.file} is not valid UTF-8 text.`,

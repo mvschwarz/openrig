@@ -168,6 +168,38 @@ describe("rig proof add (fs-level, temp workspace)", () => {
     expect(fs.readFileSync(screenshot)).toEqual(bytes);
   });
 
+  it.each(["\uFEFF", ""])("preserves UTF-8 file bytes with prefix %j", async (prefix) => {
+    const input = Buffer.from(`${prefix}Evidence: caf\u00e9 \u2713\r\n`, "utf8");
+    const source = path.join(workRoot, "evidence.txt");
+    fs.writeFileSync(source, input);
+    await run([
+      "add", "19-signal-layer", "--mission", "release-x",
+      "--artifact-type", "qa", "--verdict", "PASS",
+      "--candidate-sha", "abc1234", "--money-evidence", "file bytes preserved",
+      "--file", source, "--json",
+    ]);
+    expect(process.exitCode).toBeUndefined();
+    const artifact = fs.readFileSync(path.join(sliceDir, "proof", "evidence.md"));
+    const bodyOffset = artifact.indexOf("\n---\n\n") + Buffer.byteLength("\n---\n\n");
+    expect(bodyOffset).toBeGreaterThan(Buffer.byteLength("\n---\n\n"));
+    expect(artifact.subarray(bodyOffset)).toEqual(input);
+    expect(fs.readFileSync(source)).toEqual(input);
+  });
+
+  it("rejects invalid UTF-8 without creating an artifact", async () => {
+    const source = path.join(workRoot, "invalid.txt");
+    fs.writeFileSync(source, Buffer.from([0xef, 0xbb, 0xbf, 0xc3, 0x28]));
+    await run([
+      "add", "19-signal-layer", "--mission", "release-x",
+      "--artifact-type", "qa", "--verdict", "PASS",
+      "--candidate-sha", "abc1234", "--money-evidence", "invalid input",
+      "--file", source,
+    ]);
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toContain("not valid UTF-8 text");
+    expect(fs.existsSync(path.join(sliceDir, "proof", "invalid.md"))).toBe(false);
+  });
+
   it("uses a Markdown name for a text file and requires --replace to overwrite it", async () => {
     const source = path.join(workRoot, "notes.txt");
     fs.writeFileSync(source, "first proof");
