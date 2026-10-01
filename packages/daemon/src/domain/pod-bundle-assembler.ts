@@ -7,8 +7,10 @@ import { serializePodBundleManifest, type PodBundleManifest, type PodBundleAgent
 import type { RigSpec, StartupBlock } from "./types.js";
 
 export interface PodAssemblerFsOps extends AgentResolverFsOps {
+  /** Raw bytes, for files the bundle copies verbatim (agent packages, culture, docs, startup files). */
+  readFileBuffer(path: string): Uint8Array;
   mkdirp(path: string): void;
-  writeFile(path: string, content: string): void;
+  writeFile(path: string, content: string | Uint8Array): void;
   copyDir(src: string, dest: string): void;
   listFiles(dirPath: string, onReadError?: (path: string, error: unknown) => boolean): string[];
 }
@@ -240,7 +242,7 @@ export class PodBundleAssembler {
       throw new Error(`Path traversal detected: "${relPath}" escapes rig root`);
     }
     if (!this.fs.exists(absPath)) return; // optional files may not exist
-    const content = this.fs.readFile(absPath);
+    const content = this.fs.readFileBuffer(absPath);
     assertShippableSubstance([{ path: relPath, bytes: content }]);
     this.fs.mkdirp(nodePath.dirname(nodePath.join(outputDir, relPath)));
     this.fs.writeFile(nodePath.join(outputDir, relPath), content);
@@ -256,11 +258,11 @@ export class PodBundleAssembler {
 
   private vendorDirectory(srcDir: string, destDir: string, collected: string[], relPrefix: string, onReadError?: (path: string, error: unknown) => boolean): void {
     const files = this.fs.listFiles(srcDir, onReadError);
-    const sources: Array<{ file: string; content: string }> = [];
+    const sources: Array<{ file: string; content: Uint8Array }> = [];
     for (const file of files) {
       const sourcePath = nodePath.join(srcDir, file);
       try {
-        sources.push({ file, content: this.fs.readFile(sourcePath) });
+        sources.push({ file, content: this.fs.readFileBuffer(sourcePath) });
       } catch (error) {
         if (!onReadError?.(sourcePath, error)) throw error;
       }
