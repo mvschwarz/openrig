@@ -96,7 +96,10 @@ it.each(["existing reservation", `${process.pid}\n`])("reports an active or unid
 
 
 it("binds an independent endpoint within the byte cap in a long runtime directory", async () => {
-  const directory = path.join(socketRoot, "long-runtime-directory");
+  const suffixBytes = Buffer.byteLength(`-${process.pid}-12345678.sock`);
+  const directoryBytes = MAX_SOCKET_PATH_BYTES - Buffer.byteLength(socketRoot + path.sep) - suffixBytes - 2;
+  expect(directoryBytes).toBeGreaterThan(0);
+  const directory = path.join(socketRoot, "x".repeat(directoryBytes));
   fs.mkdirSync(directory);
   const nameBytes = MAX_SOCKET_PATH_BYTES - Buffer.byteLength(directory + path.sep + ".sock");
   expect(nameBytes).toBeGreaterThan(0);
