@@ -180,6 +180,38 @@ describe("WebhookNotificationAdapter (PL-005 Phase B)", () => {
       expect((calls[1]!.init.headers as Record<string, string>).Authorization).toBe("Basic dXNlcjpzZWNyZXRwYXNzd29yZA==");
     });
 
+    it("handles passwords with unescaped percent signs (like p%ss) without throwing URIError", async () => {
+      const calls: Array<{ url: string; init: RequestInit }> = [];
+      const fakeFetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response(null, { status: 200 });
+      }) as unknown as typeof fetch;
+
+      const webhook = new WebhookNotificationAdapter({
+        endpointUrl: "https://user:p%ss@example.com/webhook",
+        fetchImpl: fakeFetch,
+      });
+      expect(webhook.disabled).toBeUndefined();
+      const resWebhook = await webhook.send({ title: "test", body: "test" });
+      expect(resWebhook.ok).toBe(true);
+      expect(calls[0]!.url).toBe("https://example.com/webhook");
+      expect((calls[0]!.init.headers as Record<string, string>).Authorization).toBe(
+        `Basic ${Buffer.from("user:p%ss").toString("base64")}`,
+      );
+
+      const ntfy = new NtfyNotificationAdapter({
+        topicUrl: "https://user:p%ss@ntfy.sh/topic",
+        fetchImpl: fakeFetch,
+      });
+      expect(ntfy.disabled).toBeUndefined();
+      const resNtfy = await ntfy.send({ title: "test", body: "test" });
+      expect(resNtfy.ok).toBe(true);
+      expect(calls[1]!.url).toBe("https://ntfy.sh/topic");
+      expect((calls[1]!.init.headers as Record<string, string>).Authorization).toBe(
+        `Basic ${Buffer.from("user:p%ss").toString("base64")}`,
+      );
+    });
+
     it("redacts credentials in warning when URL is invalid for other reasons", async () => {
       const warnings: string[] = [];
       const warn = (msg: string) => warnings.push(msg);

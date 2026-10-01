@@ -10,7 +10,7 @@ import type {
   NotificationDeliveryResult,
   NotificationPayload,
 } from "./notification-adapter-types.js";
-import { validateOutboundUrl, redactUrl } from "./outbound-url-validator.js";
+import { validateOutboundUrl, redactUrl, safeDecodeURIComponent } from "./outbound-url-validator.js";
 
 export interface NtfyAdapterOpts {
   /**
@@ -43,8 +43,8 @@ export class NtfyNotificationAdapter implements NotificationAdapter {
     } else {
       const parsed = new URL(validation.parsedUrl!.toString());
       if (parsed.username || parsed.password) {
-        const user = decodeURIComponent(parsed.username);
-        const pass = decodeURIComponent(parsed.password);
+        const user = safeDecodeURIComponent(parsed.username);
+        const pass = safeDecodeURIComponent(parsed.password);
         this.authHeader = `Basic ${Buffer.from(`${user}:${pass}`).toString("base64")}`;
         parsed.username = "";
         parsed.password = "";

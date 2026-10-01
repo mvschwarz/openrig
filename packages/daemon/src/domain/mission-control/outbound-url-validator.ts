@@ -54,3 +54,15 @@ export function redactUrl(rawUrl: string): string {
     return rawUrl.replace(/:\/\/([^:]+):([^@]+)@/, "://***:***@");
   }
 }
+
+/**
+ * Safely decodes a URI component, falling back to the raw string if decoding throws a URIError (e.g. unescaped % characters).
+ */
+export function safeDecodeURIComponent(str: string): string {
+  try {
+    return decodeURIComponent(str);
+  } catch {
+    return str;
+  }
+}
+
