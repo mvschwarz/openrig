@@ -41,7 +41,7 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
     const src = read("adapters/codex-runtime-adapter.ts");
     // The LAUNCH resume call threads binding.launchPosture, model, then the exact precomputed
     // posture segment. The latter prevents W3 observation from re-deciding policy.
-    expect(src).toMatch(/buildCodexResumeCore\([^;]*binding\.launchPosture,\s*model,\s*postureArg(?:,\s*daemonOptOut)?\)/);
+    expect(src).toMatch(/buildCodexResumeCore\([^;]*binding\.launchPosture,\s*model,\s*postureArg(?:,\s*daemonOptOut)?(?:,\s*effort)?\)/);
   });
 
   it("claude adapter: every claude seat-launch template threads modelArg", () => {
@@ -66,9 +66,34 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
 
   it("shared buildCodexResumeCore accepts a model param and emits -m before the resume subcommand", () => {
     const src = read("domain/native-resume-probe.ts");
-    expect(src).toMatch(/model\?: string \| null,\n\s*\/\*\*[^]*?\*\/\n\s*precomputedPostureArg\?: string,\n(?:\s*\/\*\*[^]*?\*\/\n\s*daemonOptOut\?: boolean,\n)?\): string/);
+    expect(src).toMatch(/model\?: string \| null,\n\s*\/\*\*[^]*?\*\/\n\s*precomputedPostureArg\?: string,\n(?:\s*\/\*\*[^]*?\*\/\n\s*daemonOptOut\?: boolean,\n)?(?:\s*\/\*\*[^]*?\*\/\n\s*effort\?: string \| null,\n)?\): string/);
     expect(src).toMatch(/const modelArg = model \? ` -m \$\{shellQuote\(model\)\}`/);
-    expect(src).toContain("`codex${daemonArg}${profileOrPosture}${modelArg} resume ");
+    expect(src).toContain("`codex${daemonArg}${profileOrPosture}${modelArg}${effortArg} resume ");
+  });
+
+  it("#75: seat-launch command templates thread reasoning effort", () => {
+    const codexSrc = read("adapters/codex-runtime-adapter.ts");
+    const codexTemplates = [...codexSrc.matchAll(/`codex\$\{[^`]*`/g)].map((m) => m[0]);
+    const codexSeatLaunches = codexTemplates.filter((t) => / fork| -C /.test(t));
+    expect(codexSeatLaunches.length).toBeGreaterThanOrEqual(2);
+    for (const t of codexSeatLaunches) {
+      expect(t, `codex seat-launch template must thread effortArg:\n${t}`).toContain("effortArg");
+    }
+
+    const claudeSrc = read("adapters/claude-code-adapter.ts");
+    const claudeTemplates = [...claudeSrc.matchAll(/`(?:\$\{rendererPrefix\})?claude \$\{[^`]*`/g)].map((m) => m[0]);
+    const claudeSeatLaunches = claudeTemplates.filter((t) => /--resume|--session-id|--fork-session/.test(t));
+    expect(claudeSeatLaunches.length).toBeGreaterThanOrEqual(3);
+    for (const t of claudeSeatLaunches) {
+      expect(t, `claude seat-launch template must thread effortArg:\n${t}`).toContain("effortArg");
+    }
+
+    const claudeResume = read("adapters/claude-resume.ts");
+    expect(claudeResume).toMatch(/const effortArg = effort \?/);
+    expect(claudeResume).toMatch(/\$\{effortArg\}.*--resume/);
+
+    const codexResume = read("adapters/codex-resume.ts");
+    expect(codexResume).toMatch(/buildCodexResumeCore\([\s\S]*?\n\s*effort,\n/);
   });
 
   it("buildNativeResumeCommand is classified NOT-A-SEAT-LAUNCH: every caller is metadata/inventory, none is a launch module", () => {

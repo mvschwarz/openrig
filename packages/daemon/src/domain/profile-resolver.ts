@@ -31,6 +31,7 @@ export interface ResolvedResources {
 export interface ResolvedNodeConfig {
   runtime: string;
   model: string | undefined;
+  effort: string | undefined;
   cwd: string;
   restorePolicy: string;
   /** OPR.0.5.6.20 — resolved continuity mode (canonical vocabulary; most-specific-wins). */
@@ -140,6 +141,10 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   const model = member.model
     ?? profile.preferences?.model
     ?? spec.defaults?.model;
+
+  const effort = member.effort
+    ?? profile.preferences?.effort
+    ?? spec.defaults?.effort;
 
   const cwd = ctx.cwdOverride
     ? nodePath.resolve(ctx.cwdOverride)
@@ -290,6 +295,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
     config: {
       runtime,
       model,
+      effort,
       cwd,
       restorePolicy: restorePolicyResult.policy,
       compactionStrategy: compactionResult.strategy,

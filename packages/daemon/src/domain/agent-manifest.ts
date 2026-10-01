@@ -359,6 +359,7 @@ export function normalizeAgentSpec(raw: Record<string, unknown>): AgentSpec {
     result.defaults = {
       runtime: defaults["runtime"] as string | undefined,
       model: defaults["model"] as string | undefined,
+      effort: defaults["effort"] as string | undefined,
       lifecycle: {
         ...lifecycle,
         compactionStrategy: lifecycle.compactionStrategy ?? "default-compaction",
@@ -485,7 +486,7 @@ function normalizeProfile(raw: Record<string, unknown>): ProfileSpec {
   const uses = raw["uses"] as Record<string, unknown> | undefined;
   return {
     summary: raw["summary"] as string | undefined,
-    preferences: raw["preferences"] as { runtime?: string; model?: string } | undefined,
+    preferences: raw["preferences"] as { runtime?: string; model?: string; effort?: string } | undefined,
     startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
     lifecycle: raw["lifecycle"] ? normalizeLifecycle(raw["lifecycle"] as Record<string, unknown>) : undefined,
     uses: {

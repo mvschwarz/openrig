@@ -910,7 +910,7 @@ export interface AgentResources {
 
 export interface ProfileSpec {
   summary?: string;
-  preferences?: { runtime?: string; model?: string };
+  preferences?: { runtime?: string; model?: string; effort?: string };
   startup?: StartupBlock;
   lifecycle?: LifecycleDefaults;
   uses: {
@@ -940,6 +940,7 @@ export interface AgentSpec {
   defaults?: {
     runtime?: string;
     model?: string;
+    effort?: string;
     lifecycle?: LifecycleDefaults;
   };
   startup: StartupBlock;
@@ -1069,6 +1070,7 @@ export interface RigSpecPodMember {
   runtime: string;
   codexConfigProfile?: string;
   model?: string;
+  effort?: string;
   /**
    * OPR.0.4.6.FAC1: optional seat-side role declaration (writes the
    * existing `nodes.role` column via createMemberNode → addNode). The

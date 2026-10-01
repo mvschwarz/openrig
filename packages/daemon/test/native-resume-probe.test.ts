@@ -203,6 +203,12 @@ describe("native resume probe", () => {
         "codex -s workspace-write -m 'gpt-5.4-cheap' resume 'tok-123'"
       );
     });
+
+    it("#75: reasoning effort emits -c model_reasoning_effort before the resume subcommand", () => {
+      expect(buildCodexResumeCore("tok-123", null, false, undefined, undefined, "gpt-5.4-cheap", undefined, false, "high")).toBe(
+        "codex -s workspace-write -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'tok-123'"
+      );
+    });
   });
 
   it("classifies Claude no-conversation output as failed", () => {
