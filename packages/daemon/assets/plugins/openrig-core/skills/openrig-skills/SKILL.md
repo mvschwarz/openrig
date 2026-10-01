@@ -122,4 +122,5 @@ and a useful report to the OpenRig team if you are still stuck. If `rig` won't r
 
 ## Need more than what ships here?
 
-This index covers the **shipped** surface. A dev host carries far more (factory, architecture, PM-craft, studio skills) reached through the host's own routers/codemaps — if you're on a builder host and need something not listed above, that deeper routing is the next hop, not a wall. (Host-scale routing is the subject of the context-routing architecture doc; at product scale, this one file is the whole map.)
+This index covers the **shipped** surface. Your project, rig or machine may add its own skills and routers. Check the
+skills your working directory loads before concluding that something doesn't exist.
