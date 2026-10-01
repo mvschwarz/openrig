@@ -8,6 +8,88 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.6.4-rc.1]
+
+Release candidate for 0.6.4, cut from main at `afde814f`. It is not published,
+and candidate testing is in progress. Only admitted blocker fixes will change it
+before 0.6.4. The changes since 0.6.3:
+
+### Messaging and delivery
+
+- Distinguish an unverified runtime from a stopped agent when delivering
+  ([#240](https://github.com/mvschwarz/openrig/pull/240)).
+- Finish the printable-separator migration for tmux client and cursor reads
+  ([#179](https://github.com/mvschwarz/openrig/pull/179)), on top of a
+  shell-free argv execution seam for tmux
+  ([#167](https://github.com/mvschwarz/openrig/pull/167)).
+- Observe native processes independently of the inherited locale
+  ([#239](https://github.com/mvschwarz/openrig/pull/239)).
+- Release SSE subscriptions aborted during replay
+  ([#233](https://github.com/mvschwarz/openrig/pull/233)).
+- Keep CLI request deadlines active through response bodies, and report a body
+  that fails after headers as an unknown outcome
+  ([#201](https://github.com/mvschwarz/openrig/pull/201)).
+
+### Queue, seats and rigs
+
+- Keep a blocked row's park timer through a seat handover, and retire a periodic
+  park timer when its row is rerouted
+  ([#242](https://github.com/mvschwarz/openrig/pull/242)).
+- Derive terminal pickup for closed queue items
+  ([#176](https://github.com/mvschwarz/openrig/pull/176)).
+- Preserve discovery claims during async rescans
+  ([#237](https://github.com/mvschwarz/openrig/pull/237)).
+- Report an unknown seat launch outcome on timeout
+  ([#191](https://github.com/mvschwarz/openrig/pull/191)).
+- Accept runtime guards for existing nodes when attaching
+  ([#228](https://github.com/mvschwarz/openrig/pull/228)).
+- Give kernel Claude seats the shared activity hooks
+  ([#178](https://github.com/mvschwarz/openrig/pull/178)).
+- Preserve an unset native Claude config selection
+  ([#225](https://github.com/mvschwarz/openrig/pull/225)).
+- Replace a stopped same-name rig generation on YAML import by archiving it,
+  with its ID and unarchive command shown
+  ([#196](https://github.com/mvschwarz/openrig/pull/196)).
+
+### Files, transfer and context
+
+- Decode SSH and rsync output across UTF-8 chunks
+  ([#230](https://github.com/mvschwarz/openrig/pull/230)), and keep UTF-8
+  intact across herdr socket chunks
+  ([#241](https://github.com/mvschwarz/openrig/pull/241)).
+- Preserve local rsync directory content operands
+  ([#231](https://github.com/mvschwarz/openrig/pull/231)).
+- Preserve executable mode during atomic file edits
+  ([#235](https://github.com/mvschwarz/openrig/pull/235)).
+- Project file-shaped entries instead of failing them on ENOTDIR
+  ([#185](https://github.com/mvschwarz/openrig/pull/185)).
+- Clamp oversized suffix ranges to asset bounds
+  ([#234](https://github.com/mvschwarz/openrig/pull/234)).
+- Keep fenced example headings out of context addresses
+  ([#236](https://github.com/mvschwarz/openrig/pull/236)).
+- Disclose stale environment service receipts in `rig env status`
+  ([#232](https://github.com/mvschwarz/openrig/pull/232)).
+
+### Platform and setup
+
+- Provider-aware Codex readiness for non-OpenAI providers
+  ([#222](https://github.com/mvschwarz/openrig/pull/222)).
+- Leave user config content untouched when stripping Codex activity hooks
+  ([#186](https://github.com/mvschwarz/openrig/pull/186)).
+- Skip `ps` for daemon process liveness on Windows
+  ([#173](https://github.com/mvschwarz/openrig/pull/173)).
+- Make module URLs and transcript containment portable
+  ([#168](https://github.com/mvschwarz/openrig/pull/168)).
+- Keep `ps` rows whose command name contains spaces
+  ([#82](https://github.com/mvschwarz/openrig/pull/82)).
+
+### Repository
+
+- Skip release-surface tag diffs when old tags are absent
+  ([#152](https://github.com/mvschwarz/openrig/pull/152)), and ask security
+  and integration PRs for practical scenarios
+  ([#224](https://github.com/mvschwarz/openrig/pull/224)).
+
 ## [0.6.3]
 
 - Recognize running managed Claude Code seats behind OpenRig's shell wrappers
