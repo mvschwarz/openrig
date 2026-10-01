@@ -178,6 +178,13 @@ describe("fleet/system health TUI", () => {
     }
   });
 
+  it("keeps PARTIAL visible ahead of a long finding summary on a narrow line", () => {
+    const snap = healthSnapshot();
+    snap.health = { availability: "loaded", evaluatedAt: "2026-09-05T12:00:00.000Z", total: 1, truncated: true,
+      records: [record({ id: "long", seatId: "node-guard", summary: "Seat context is filling quickly and the operator should look soon. ".repeat(4) })] };
+    expect(healthSummaryLine(snap, { kind: "rig", rigId: "openrig-build", rigName: "openrig-build", local: true }, 70).text).toContain("PARTIAL");
+  });
+
   it("marks a partial source evaluation and never presents omitted families as healthy", () => {
     const coverage = [{ source: "passive-ceremony", unit: "handoff families", limit: 200, total: 634, evaluated: 200, omitted: 434, partial: true,
       order: "most queue transitions in the observation window, then lineage ID" }];

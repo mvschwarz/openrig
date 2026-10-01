@@ -172,9 +172,10 @@ export function healthSummaryLine(snap: FleetSnapshot, scope: HealthDisplayScope
     { text: `  WARN ${counts.warning}`, token: counts.warning ? "warn" : "dim", bold: counts.warning > 0 },
     ...(!compact ? [{ text: `  INFO ${counts.info}`, token: counts.info ? "info" as const : "dim" as const }] : []),
     ...(indeterminate > 0 ? [{ text: ` · Unknown ${indeterminate}`, token: "warn" as const, bold: true }] : []),
+    // PARTIAL precedes the variable-length summary so a narrow line cannot truncate it away.
+    ...(snap.health?.truncated || partialCoverage(snap).length ? [{ text: " · PARTIAL", token: "warn" as const, bold: true }] : []),
     ...(categoryText ? [{ text: compact ? ` · TYPE ${categoryText}` : ` · BY TYPE ${categoryText}`, token: "bright" as const }] : []),
     { text: ` · ${stateLabel(top)} ${top.summary}`, token: tokenFor(top) },
-    ...(snap.health?.truncated || partialCoverage(snap).length ? [{ text: " · PARTIAL", token: "warn" as const, bold: true }] : []),
   ], width, { type: "tab", tab: "health" });
 }
 

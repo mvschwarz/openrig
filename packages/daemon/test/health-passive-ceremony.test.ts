@@ -239,11 +239,11 @@ it("includes the typed workflow acceptance join after the queue closure without 
 });
 
 // Each family is one undelegated row with `n` in-window transitions, in the fixture's slice.
-function addFamilies(t: Awaited<ReturnType<typeof setup>>, counts: number[]) {
+function addFamilies(t: Awaited<ReturnType<typeof setup>>, counts: number[], prefix = "family") {
   const item = t.db.prepare("INSERT INTO queue_items(qitem_id,ts_created,ts_updated,source_session,destination_session,state,tags,body) VALUES(?,?,?,'a@rig','b@rig','pending',?,'family')");
   const transition = t.db.prepare("INSERT INTO queue_transitions(qitem_id,ts,state,actor_session) VALUES(?,?,'pending','a@rig')");
   counts.forEach((n, i) => {
-    const id = `family-${String(i).padStart(3, "0")}`;
+    const id = `${prefix}-${String(i).padStart(3, "0")}`;
     item.run(id, "2026-09-05T11:59:00.000Z", "2026-09-05T11:59:00.000Z", JSON.stringify(["mission:mission", "slice:slice-1"]));
     for (let k = 0; k < n; k++) transition.run(id, new Date(Date.parse("2026-09-05T11:59:00.000Z") + k * 1000).toISOString());
   });
@@ -283,4 +283,32 @@ it("the scheduled evaluation records partial coverage instead of failing past th
   expect(t.service.status().lastEvaluation).toMatchObject({ error: null,
     coverage: [{ source: "passive-ceremony", total: 202, evaluated: 200, omitted: 2, partial: true }] });
   expect(t.service.list()).toHaveLength(1);
+});
+
+it("the scheduled evaluation keeps its own coverage when another health read runs during delivery", async () => {
+  const t = await setup();
+  addFamilies(t, Array<number>(201).fill(1));
+  // A health-list request served while the evaluation awaits delivery replaces the source's latest coverage.
+  t.send.mockImplementation(async () => { addFamilies(t, [1, 1, 1], "late"); t.projection.list(); return { ok: true, verified: true }; });
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  t.service.start();
+  await vi.advanceTimersByTimeAsync(60000);
+  await t.service.stop();
+  expect(t.send).toHaveBeenCalledTimes(1);
+  expect(t.projection.coverage()).toMatchObject([{ total: 205, omitted: 5 }]);
+  expect(t.service.status().lastEvaluation).toMatchObject({ error: null, coverage: [{ total: 202, evaluated: 200, omitted: 2, partial: true }] });
+});
+
+it("a skipped evaluation reports no coverage, never coverage left by an earlier read", async () => {
+  const t = await setup();
+  const p = t.policy.read().policy;
+  t.policy.apply({ ...p, diagnosis: { ...p.diagnosis, enabled: false } }, "operator@rig");
+  t.projection.list();
+  expect(t.projection.coverage()).toHaveLength(1);
+  expect((await t.service.evaluate("system:health", true)).coverage).toBeNull();
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  t.service.start();
+  await vi.advanceTimersByTimeAsync(60000);
+  await t.service.stop();
+  expect(t.service.status().lastEvaluation).toMatchObject({ error: null, coverage: null });
 });
