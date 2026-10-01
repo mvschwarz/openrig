@@ -2,6 +2,7 @@ import { existsSync, accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
+import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 
 // --- Types ---
 
@@ -112,12 +113,14 @@ export interface StartupContextResolvedFile {
   required: boolean;
   path?: string | null;
   deliveryHint?: string | null;
+  ownerRoot?: string | null;
 }
 
 export interface StartupContextProjectionEntry {
   absolutePath: string;
   effectiveId?: string | null;
   category?: string | null;
+  sourcePath?: string | null;
 }
 
 export type StartupContextProbeResult =
@@ -851,7 +854,21 @@ export class RestoreCheckService {
         break;
     }
 
-    const startupContext = probe;
+    // #261: inspect (and report) the paths replay will actually use — recognized built-in startup
+    // files and shipped-spec projection resources follow the running install.
+    const startupContext = {
+      ...probe,
+      resolvedStartupFiles: probe.resolvedStartupFiles.map((file) => (
+        typeof file.path === "string" && typeof file.ownerRoot === "string"
+          ? reanchorBuiltinStartupFile({ ...file, path: file.path, ownerRoot: file.ownerRoot })
+          : file
+      )),
+      projectionEntries: probe.projectionEntries.map((entry) => (
+        typeof entry.sourcePath === "string"
+          ? reanchorShippedProjectionEntry({ ...entry, sourcePath: entry.sourcePath })
+          : entry
+      )),
+    };
     const missingRequired = startupContext.resolvedStartupFiles.filter((file) => file.required && !this.deps.exists(file.absolutePath));
     const missingOptional = startupContext.resolvedStartupFiles.filter((file) => !file.required && !this.deps.exists(file.absolutePath));
     const missingProjectionEntries = startupContext.projectionEntries.filter((entry) => !this.deps.exists(entry.absolutePath));

@@ -45,6 +45,13 @@ describe("reanchorBuiltinStartupFile", () => {
     expect(reanchorBuiltinStartupFile(other, RUNNING)).toBe(other);
   });
 
+  it.each(["constructor", "toString", "__proto__", "hasOwnProperty"])("a custom startup file named %s is returned unchanged (no inherited-key match)", (name) => {
+    const custom = { path: name, absolutePath: `/home/u/rig/${name}`, ownerRoot: "/home/u/rig", ...meta };
+    expect(reanchorBuiltinStartupFile(custom, RUNNING)).toBe(custom);
+    const underAssets = { path: name, absolutePath: `${OLD}/${name}`, ownerRoot: OLD, ...meta };
+    expect(reanchorBuiltinStartupFile(underAssets, RUNNING)).toBe(underAssets);
+  });
+
   it("defaults to this daemon's assets root, which holds all four built-ins", () => {
     expect(runningBuiltinAssetsRoot()).toBe(path.resolve(import.meta.dirname, "../assets"));
   });

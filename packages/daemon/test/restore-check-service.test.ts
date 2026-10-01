@@ -117,8 +117,8 @@ function claudeNode(overrides?: Partial<NodeInventoryEntry> & { cwd?: string | n
 function startupContextProbe(options?: {
   status?: "ok" | "missing" | "malformed" | "probe_error";
   evidence?: string;
-  resolvedStartupFiles?: Array<{ absolutePath: string; required: boolean; path?: string; deliveryHint?: string }>;
-  projectionEntries?: Array<{ absolutePath: string; effectiveId?: string; category?: string }>;
+  resolvedStartupFiles?: Array<{ absolutePath: string; required: boolean; path?: string; deliveryHint?: string; ownerRoot?: string }>;
+  projectionEntries?: Array<{ absolutePath: string; effectiveId?: string; category?: string; sourcePath?: string }>;
   runtime?: string;
 }) {
   if (options?.status && options.status !== "ok") {
@@ -1476,6 +1476,69 @@ describe("RestoreCheckService", () => {
         }),
       ],
     }));
+  });
+
+  // #261: restore-check inspects and REPORTS the paths replay will use. A stale old-install built-in or
+  // shipped-spec resource is judged at the running install; red/yellow semantics are unchanged.
+  describe("#261 stale old-install paths are judged at the running install", () => {
+    const OLD = "/old-openrig/lib/node_modules/@openrig/cli/daemon";
+    const RUN_ASSETS = path.resolve(import.meta.dirname, "../assets");
+    const RUN_SPECS = path.resolve(import.meta.dirname, "../specs");
+    const files = [{ path: "CULTURE-default.md", absolutePath: `${OLD}/assets/guidance/CULTURE-default.md`, ownerRoot: `${OLD}/assets`, required: true }];
+    const entries = [{ absolutePath: `${OLD}/specs/agents/shared/runtime/claude-settings.fragment.json`, sourcePath: `${OLD}/specs/agents/shared`, effectiveId: "shared:claude-default-settings", category: "runtime_resource" }];
+    const stoppedNode = () => claudeNode({ sessionStatus: "stopped", startupStatus: "failed", latestError: "seat crashed" });
+
+    it("old install removed, current present: green, and evidence names only the running paths", () => {
+      const service = new RestoreCheckService(mockDeps({
+        getNodeInventory: () => [stoppedNode()],
+        getStartupContext: () => startupContextProbe({ resolvedStartupFiles: files, projectionEntries: entries }) as never,
+        getLatestSnapshot: () => ({ id: "snap-261", kind: "auto-pre-down" }),
+        exists: (p) => !p.startsWith("/old-openrig"),
+      }));
+      const startup = (service.check({ noQueue: true, noHooks: true }) as any).checks.find((c: { check: string }) => c.check === "seat.dev-impl@test-rig.startup-context");
+      expect(startup.status).toBe("green");
+      expect(startup.evidence).toContain(`${RUN_ASSETS}/guidance/CULTURE-default.md`);
+      expect(startup.evidence).toContain(`${RUN_SPECS}/agents/shared/runtime/claude-settings.fragment.json`);
+      expect(startup.evidence).not.toContain("/old-openrig");
+    });
+
+    it("current built-in genuinely missing on a non-ready seat: still red, reporting the running path", () => {
+      const runningCulture = `${RUN_ASSETS}/guidance/CULTURE-default.md`;
+      const service = new RestoreCheckService(mockDeps({
+        getNodeInventory: () => [stoppedNode()],
+        getStartupContext: () => startupContextProbe({ resolvedStartupFiles: files }) as never,
+        getLatestSnapshot: () => ({ id: "snap-261", kind: "auto-pre-down" }),
+        exists: (p) => !p.startsWith("/old-openrig") && p !== runningCulture,
+      }));
+      const startup = (service.check({ noQueue: true, noHooks: true }) as any).checks.find((c: { check: string }) => c.check === "seat.dev-impl@test-rig.startup-context");
+      expect(startup.status).toBe("red");
+      expect(startup.evidence).toContain(runningCulture);
+      expect(startup.remediation).toContain(runningCulture);
+      expect(startup.evidence).not.toContain("/old-openrig");
+    });
+
+    it("current built-in missing on a running/ready seat stays yellow (red/yellow rule unchanged)", () => {
+      const runningCulture = `${RUN_ASSETS}/guidance/CULTURE-default.md`;
+      const service = new RestoreCheckService(mockDeps({
+        getStartupContext: () => startupContextProbe({ resolvedStartupFiles: files }) as never,
+        exists: (p) => !p.startsWith("/old-openrig") && p !== runningCulture,
+      }));
+      const startup = (service.check({ noQueue: true, noHooks: true }) as any).checks.find((c: { check: string }) => c.check === "seat.dev-impl@test-rig.startup-context");
+      expect(startup.status).toBe("yellow");
+    });
+
+    it("a missing custom file with a built-in basename is reported as stored, still red on a non-ready seat", () => {
+      const custom = [{ path: "CULTURE-default.md", absolutePath: "/user-rig/CULTURE-default.md", ownerRoot: "/user-rig", required: true }];
+      const service = new RestoreCheckService(mockDeps({
+        getNodeInventory: () => [stoppedNode()],
+        getStartupContext: () => startupContextProbe({ resolvedStartupFiles: custom }) as never,
+        getLatestSnapshot: () => ({ id: "snap-261", kind: "auto-pre-down" }),
+        exists: (p) => p !== "/user-rig/CULTURE-default.md",
+      }));
+      const startup = (service.check({ noQueue: true, noHooks: true }) as any).checks.find((c: { check: string }) => c.check === "seat.dev-impl@test-rig.startup-context");
+      expect(startup.status).toBe("red");
+      expect(startup.evidence).toContain("/user-rig/CULTURE-default.md");
+    });
   });
 
   it("running/ready node with missing required startup file is a yellow caveat", () => {

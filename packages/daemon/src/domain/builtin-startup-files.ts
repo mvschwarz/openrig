@@ -8,12 +8,12 @@
 import nodePath from "node:path";
 
 /** Logical name -> path relative to the daemon assets root, as rigspec-instantiator produces them. */
-const BUILTIN_STARTUP_FILES: Readonly<Record<string, string>> = {
-  "CULTURE-default.md": "guidance/CULTURE-default.md",
-  "openrig-start.md": "guidance/openrig-start.md",
-  "openrig-onboarding-01.md": "onboarding/01-world-and-purpose.md",
-  "openrig-onboarding-02.md": "onboarding/02-self-and-competent-action.md",
-};
+const BUILTIN_STARTUP_FILES: ReadonlyMap<string, string> = new Map([
+  ["CULTURE-default.md", "guidance/CULTURE-default.md"],
+  ["openrig-start.md", "guidance/openrig-start.md"],
+  ["openrig-onboarding-01.md", "onboarding/01-world-and-purpose.md"],
+  ["openrig-onboarding-02.md", "onboarding/02-self-and-competent-action.md"],
+]);
 
 /** The running daemon's assets root (packages/daemon/assets, or <cli>/daemon/assets when packaged). */
 export function runningBuiltinAssetsRoot(): string {
@@ -32,7 +32,7 @@ export function reanchorBuiltinStartupFile<T extends { path: string; absolutePat
   file: T,
   assetsRoot: string = runningBuiltinAssetsRoot(),
 ): T {
-  const relative = BUILTIN_STARTUP_FILES[file.path];
+  const relative = BUILTIN_STARTUP_FILES.get(file.path);
   if (!relative) return file;
   const storedRoot = nodePath.resolve(file.ownerRoot);
   if (nodePath.basename(storedRoot) !== "assets" || nodePath.basename(nodePath.dirname(storedRoot)) !== "daemon") return file;
