@@ -139,7 +139,7 @@ export class InboundRouter {
   constructor(private readonly deps: InboundDeps) {}
 
   private summaryOf(ev: SlackEvent, transfer?: InboundFileResult | null, correlationQitemId?: string): { summary: string; body: string } {
-    const text = String(ev.text ?? "").slice(0, 1800);
+    const text = String(ev.text ?? "");
     const meta = `slack channel=${ev.channel} user=${ev.user} ts=${ev.ts}`;
     // OPR.0.5.6.2 — attachments ride the row BODY by LOCAL path (Slack owns
     // nothing; the media file is OUR copy). Failures are per-file and named:
