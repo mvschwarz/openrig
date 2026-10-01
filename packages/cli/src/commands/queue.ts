@@ -426,7 +426,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--summary <text>", "Short human-readable subject, shown in the needs-you view. For a human destination, --body-file is the complete decision brief or update; keep technical continuation in the owning agent row and evidence.")
     .option("--human-intent <intent>", "decision (default) or update: a quiet informational delivery, never an approval request")
     .option("--human-detail-file <path>", "One explicitly authored supplemental thread reply; keep the complete action/options in --body-file")
-    .option("--reply-to <qitemId>", "Post this update into an earlier qitem's Slack thread (requires --human-intent update; refused while that qitem is a decision still waiting on the human)")
+    .option("--reply-to <qitemId>", "Post this update into an earlier qitem's Slack thread (requires --human-intent update; posts as a new top-level message instead if that thread can't be used, e.g. it is missing or still has an open human decision; --verify reports why)")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")

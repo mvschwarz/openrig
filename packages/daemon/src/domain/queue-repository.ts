@@ -63,7 +63,7 @@ export function isBlockerLive(state: string): boolean {
 
 /** #96 — a Slack reply routes to the item that owns the thread root, so a later update may
  *  share that thread only while no reply there could answer a human decision. Deliberately
- *  BROADER than what makeHumanReplyResolver resolves today (it errs toward refusing): any
+ *  BROADER than what makeHumanReplyResolver resolves today (it errs toward posting top-level): any
  *  active human-destined decision, or a row blocked on any human-class seat right now. A
  *  resolved park returns to in-progress; blocked_on alone (which the resolve verb documents
  *  keeping as provenance) is never a live gate. */
@@ -266,8 +266,9 @@ export interface QueueCreateInput {
   humanIntent?: "decision" | "update" | null;
   /** Explicit supplemental thread content, never an automatic split of the primary body. */
   humanDetail?: string | null;
-  /** #96 — post this update into the named earlier qitem's Slack thread. Updates only, and
-   *  only when the earlier item has no live human gate (see hasLiveHumanGate). */
+  /** #96 — post this update into the named earlier qitem's Slack thread. Updates only; if
+   *  that thread can't be used (e.g. a live human gate, see hasLiveHumanGate), it posts
+   *  top-level and the row records why. */
   replyTo?: string | null;
   summary?: string | null;
   /** OPR.0.4.4.19 FR-5 — optional durable-artifact pointer. Persisted when
@@ -1558,14 +1559,9 @@ export class QueueRepository {
       throw new QueueRepositoryError("reply_to_requires_update", "replyTo is accepted only with humanIntent update; a decision keeps its own thread so its reply stays unambiguous.");
     }
     if (!this.hasReplyToColumn) throw new QueueRepositoryError("invalid_human_notification", "replyTo requires the current queue schema; it was not saved.");
-    const ref = this.getById(replyTo);
-    if (!ref) throw new QueueRepositoryError("reply_to_not_found", `replyTo names no qitem on this host: ${replyTo}.`);
-    if (hasLiveHumanGate(ref)) {
-      throw new QueueRepositoryError(
-        "reply_to_open_decision",
-        `qitem ${replyTo} is still waiting on a human decision ('${ref.state}'); a reply under this update would answer that decision. Post the update without replyTo, or after the decision is made.`,
-      );
-    }
+    if (!this.getById(replyTo)) throw new QueueRepositoryError("reply_to_not_found", `replyTo names no qitem on this host: ${replyTo}.`);
+    // An item with a live human gate or no usable root is not refused here: delivery posts
+    // the update top-level and records why (deriveReplyToChoice in slack-subsystem).
   }
 
   /**

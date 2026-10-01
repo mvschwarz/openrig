@@ -145,7 +145,6 @@ export function queueRoutes(): Hono {
         // #96: --reply-to refusals are named client errors.
         : err.code === "reply_to_requires_update" ? 400
         : err.code === "reply_to_not_found" ? 400
-        : err.code === "reply_to_open_decision" ? 400
         // OPR.0.5.1 slice-51-06 D2: summary/evidence_ref on a non-park transition — a client
         // input error surfaced as a structured 400 (the daemon rejects before any mutation).
         : err.code === "summary_evidence_not_persistable" ? 400

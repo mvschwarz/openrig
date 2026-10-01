@@ -67,22 +67,25 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       await expect(repo.create({ ...request, humanIntent: "update", replyTo: "no-such-qitem" })).rejects.toMatchObject({ code: "reply_to_not_found" });
     });
 
-    it("refuses a decision still waiting on the human: a reply there would answer the decision", async () => {
+    it("accepts a reference still waiting on the human: delivery decides the thread, not create", async () => {
       const decision = await repo.create(request);
-      await expect(repo.create({ ...request, humanIntent: "update", replyTo: decision.qitemId })).rejects.toMatchObject({ code: "reply_to_open_decision" });
+      const work = await park();
+      const a = await repo.create({ ...request, humanIntent: "update", replyTo: decision.qitemId });
+      const b = await repo.create({ ...request, humanIntent: "update", replyTo: work.qitemId });
+      expect(repo.getById(a.qitemId)?.replyTo).toBe(decision.qitemId);
+      expect(repo.getById(b.qitemId)?.replyTo).toBe(work.qitemId);
     });
 
     it("treats a parked agent row as a live gate only while it is parked on the human", async () => {
       const work = await park();
-      await expect(repo.create({ ...request, humanIntent: "update", replyTo: work.qitemId })).rejects.toMatchObject({ code: "reply_to_open_decision" });
+      expect(hasLiveHumanGate(repo.getById(work.qitemId)!)).toBe(true);
       await resolvePark(work.qitemId);
       // Resolved: back to in-progress — no longer a gate.
       expect(repo.getById(work.qitemId)?.state).toBe("in-progress");
+      expect(hasLiveHumanGate(repo.getById(work.qitemId)!)).toBe(false);
       // Mission Control's resolve documents keeping blocked_on as provenance; that shape is not a gate either.
       expect(hasLiveHumanGate({ humanIntent: null, state: "in-progress", destinationSession: "worker@rig", blockedOn: "human-founder@kernel" })).toBe(false);
       expect(hasLiveHumanGate({ humanIntent: null, state: "blocked", destinationSession: "worker@rig", blockedOn: "human-founder@kernel" })).toBe(true);
-      const update = await repo.create({ ...request, humanIntent: "update", replyTo: work.qitemId });
-      expect(repo.getById(update.qitemId)?.replyTo).toBe(work.qitemId);
     });
 
     it("accepts an earlier update or an already-made decision and records the reference", async () => {
@@ -284,6 +287,25 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       await deliver(update.qitemId);
       expect(posts[1]?.thread_ts).toBeUndefined();
       expect(repo.getById(update.qitemId)?.replyToFallback).toMatch(/root-closed/);
+    });
+
+    it("posts top-level, not refused, when the referenced decision is still open, and says so on the row", async () => {
+      const decision = await repo.create(request);
+      await deliver(decision.qitemId);
+      const update = await repo.create({ ...request, humanIntent: "update", body: "FYI.", replyTo: decision.qitemId });
+      await deliver(update.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(repo.getById(update.qitemId)?.replyToFallback).toMatch(/reference-has-live-gate/);
+      expect(repo.getById(decision.qitemId)?.state).toBe("pending");
+    });
+
+    it("posts top-level when the referenced row is parked on the human", async () => {
+      const work = await park();
+      await postPendingNotice(work.qitemId);
+      const update = await repo.create({ ...request, sourceSession: "worker@rig", humanIntent: "update", body: "FYI.", replyTo: work.qitemId });
+      await deliver(update.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(repo.getById(update.qitemId)?.replyToFallback).toMatch(/reference-has-live-gate/);
     });
 
     it("re-checks at delivery: a decision reopened after the update was queued gets no shared thread", async () => {
