@@ -8,6 +8,8 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
+import { Hono } from "hono";
+import { workflowRoutes } from "../src/routes/workflow.js";
 
 describe("project lifecycle compiler", () => {
   let root: string;
@@ -50,6 +52,27 @@ execution:
     const queue = new QueueRepository(db, bus, { validateRig: () => true });
     return { db, runtime: new WorkflowRuntime({ db, eventBus: bus, queueRepo: queue }) };
   }
+
+  it("keeps a missing project manifest a structured lifecycle 404", async () => {
+    rmSync(join(root, "project.yaml"));
+    const subject = runtime();
+    const app = new Hono();
+    const projectPath = join(realpathSync(root), "project.yaml");
+    app.use("*", async (c, next) => { c.set("workflowRuntime" as never, subject.runtime as never); await next(); });
+    app.route("/api/workflow", workflowRoutes());
+    try {
+      const response = await app.request("/api/workflow/compile", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ missionPath: missionDir, operationKey: "release-op" }),
+      });
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        error: "lifecycle_manifest_missing", kind: "project",
+        message: `project manifest not found at ${projectPath}`,
+        path: projectPath,
+      });
+    } finally { subject.db.close(); }
+  });
 
   it("is deterministic and performs zero database writes", () => {
     const subject = runtime();
