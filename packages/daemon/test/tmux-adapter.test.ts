@@ -923,6 +923,20 @@ describe("TmuxAdapter", () => {
       expect(loadCmds).toHaveLength(2);
       expect(loadCmds[0]).not.toBe(loadCmds[1]);
     });
+
+    it("does not unlink the file if this call failed to create it (e.g. file already exists)", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const { ops, writeFile, unlink } = fixedFileOps();
+      const existErr = new Error("EEXIST: file already exists, open '/tmp/openrig-tmux-send-FIXED.txt'");
+      (existErr as unknown as { code: string }).code = "EEXIST";
+      writeFile.mockRejectedValueOnce(existErr);
+      const adapter = new TmuxAdapter(exec, ops);
+
+      const result = await adapter.sendText("dev@rig", BIG);
+
+      expect(result.ok).toBe(false);
+      expect(unlink).not.toHaveBeenCalled();
+    });
   });
 
   // OPR.0.4.0.38 - net-new live-seed primitives lifted from the FR-4 seed work

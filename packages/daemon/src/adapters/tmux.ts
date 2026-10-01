@@ -551,8 +551,10 @@ export class TmuxAdapter {
     const path = this.fileOps.tmpName();
     const buffer = this.fileOps.bufferName();
     let bufferLoaded = false;
+    let created = false;
     try {
       await this.fileOps.writeFile(path, text, { mode: 0o600, flag: "wx" });
+      created = true;
       await this.run(["tmux", "load-buffer", "-b", buffer, path],
         `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
       bufferLoaded = true;
@@ -571,9 +573,11 @@ export class TmuxAdapter {
       }
       return classifyWriteError(err);
     } finally {
-      try {
-        await this.fileOps.unlink(path);
-      } catch { /* best-effort cleanup */ }
+      if (created) {
+        try {
+          await this.fileOps.unlink(path);
+        } catch { /* best-effort cleanup */ }
+      }
     }
   }
 
