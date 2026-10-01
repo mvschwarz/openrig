@@ -203,10 +203,10 @@ export function queueRoutes(): Hono {
       (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ??
       loadHostRegistry;
     const fetchImpl = c.get("remoteFetchImpl" as never) as typeof fetch | undefined;
-    const fail = (detail: string, failureClass: string, remoteStatus?: number): { ok: false; response: Response } => ({
+    const fail = (detail: string, failureClass: string, remoteStatus?: number, outcome?: "indeterminate"): { ok: false; response: Response } => ({
       ok: false,
       response: c.json(
-        { error: "remote_queue_write_failed", hostId, failureClass, ...(remoteStatus !== undefined ? { remoteStatus } : {}), detail },
+        { error: "remote_queue_write_failed", hostId, failureClass, ...(remoteStatus !== undefined ? { remoteStatus } : {}), ...(outcome ? { outcome } : {}), detail },
         502,
       ),
     });
@@ -244,7 +244,7 @@ export function queueRoutes(): Hono {
           res.status,
         );
       case "network":
-        return fail(res.detail, "unreachable");
+        return fail(res.detail, "unreachable", res.status, res.outcome);
       case "http":
         // The origin refused (its own validation/auth/conflict) — its
         // structured error rides through; NO fake success.

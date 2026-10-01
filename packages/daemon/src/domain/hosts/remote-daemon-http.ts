@@ -45,6 +45,8 @@ export type RemoteJsonFailureKind = "bearer" | "timeout" | "network" | "http";
 export interface RemoteJsonFailure {
   ok: false;
   kind: RemoteJsonFailureKind;
+  /** Response interruption after request delivery cannot settle the operation outcome. */
+  outcome?: "indeterminate";
   /** For kind=timeout: whether the deadline fired before headers
    *  ("request") or while reading the body ("body"). */
   phase?: "request" | "body";
@@ -142,7 +144,7 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
   } catch (err) {
     if (controller.signal.aborted) bodyTimedOut = true;
     else if (!(err instanceof SyntaxError)) {
-      return { ok: false, kind: "network", status: res.status,
+      return { ok: false, kind: "network", status: res.status, outcome: "indeterminate",
         detail: `Response body could not be read after HTTP ${res.status}; operation outcome is unknown: ${err instanceof Error ? err.message : String(err)}` };
     }
     // Completed non-JSON body: payload stays undefined; status is the honest detail
