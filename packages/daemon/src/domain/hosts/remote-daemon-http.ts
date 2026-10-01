@@ -48,7 +48,7 @@ export interface RemoteJsonFailure {
   /** For kind=timeout: whether the deadline fired before headers
    *  ("request") or while reading the body ("body"). */
   phase?: "request" | "body";
-  /** HTTP status when headers arrived (kind=http, or kind=timeout/phase=body). */
+  /** HTTP status when headers arrived (including body timeout or network failure). */
   status?: number;
   /** Bearer message / network error message / remote error text (may be ""). */
   detail: string;
@@ -139,9 +139,13 @@ export async function remoteJsonRequest(host: HttpHostEntry, path: string, opts:
   let bodyTimedOut = false;
   try {
     payload = await Promise.race([res.json(), abortRace]);
-  } catch {
+  } catch (err) {
     if (controller.signal.aborted) bodyTimedOut = true;
-    // else: non-JSON body — payload stays undefined; status is the honest detail
+    else if (!(err instanceof SyntaxError)) {
+      return { ok: false, kind: "network", status: res.status,
+        detail: `Response body could not be read after HTTP ${res.status}; operation outcome is unknown: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    // Completed non-JSON body: payload stays undefined; status is the honest detail
   } finally {
     clearTimeout(timer);
   }
@@ -191,8 +195,10 @@ export async function remoteRawRequest(host: HttpHostEntry, path: string, opts: 
   let bodyTimedOut = false;
   try {
     bodyText = await Promise.race([res.text(), abortRace]);
-  } catch {
+  } catch (err) {
     if (controller.signal.aborted) bodyTimedOut = true;
+    else return { ok: false, kind: "network", status: res.status,
+      detail: `Response body could not be read after HTTP ${res.status}; operation outcome is unknown: ${err instanceof Error ? err.message : String(err)}` };
   } finally {
     clearTimeout(timer);
   }
