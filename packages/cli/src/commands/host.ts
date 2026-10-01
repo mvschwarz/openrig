@@ -119,7 +119,7 @@ export async function probeHostStatus(
       port = 22;
     } else {
       const u = new URL(host.url);
-      target = u.hostname;
+      target = u.hostname.replace(/^\[|\]$/g, "");
       port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
     }
     const r = await tcpProbe(target, port, timeoutMs);
