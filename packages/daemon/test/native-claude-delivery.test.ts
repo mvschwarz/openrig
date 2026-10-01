@@ -19,6 +19,7 @@ const modes = [
   "changed-after-paste", "bare-shell-helper", "bare-shell-job",
   "wrong-token-post-read-error", "wrong-token-post-read-empty",
   "bare-shell-post-read-error", "bare-shell-post-read-empty",
+  "bare-shell-second-process-unavailable", "bare-shell-first-process-unavailable",
 ];
 
 it.each(modes)("selector and ordinary transport: %s", async (mode) => {
@@ -57,6 +58,8 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     const listProcesses = async () => {
       if (["unavailable", "unknown-both"].includes(mode)) throw new Error("fixture unavailable");
       reads++;
+      if ((mode === "bare-shell-second-process-unavailable" && reads === 2)
+        || (mode === "bare-shell-first-process-unavailable" && reads === 1)) throw new Error("process sample unavailable");
       return mode === "changed-process" && reads % 2 === 0
         ? rows.map(row => row.pid === 102 ? { ...row, startedAt: "replacement" } : row) : rows;
     };
@@ -89,6 +92,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
       sendKeys: async () => { calls.push("enter"); return { ok: true }; },
     } as unknown as TmuxAdapter;
     const observation = await verifyClaudePaneProcess({ target: "%1", tmux, listProcesses, expectedToken: token });
+    reads = 0; // Each consumer starts its own observation sequence.
     const transport = new SessionTransport({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, listProcesses, sleep: async () => {} });
     const sent = await transport.send(name, "harmless fixture message");
     const expectedSend = [

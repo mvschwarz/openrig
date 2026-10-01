@@ -286,6 +286,9 @@ export async function observeClaudeDelivery(input: Parameters<typeof observeNati
   const second = await sample();
   if (first.state === "conflict") return first;
   if (second.state === "conflict") return second;
+  // An unavailable sample cannot erase a positive idle-shell refusal.
+  if (first.state === "idle_shell" && second.state === "unknown") return first;
+  if (second.state === "idle_shell" && first.state === "unknown") return second;
   if (first.fingerprint && second.fingerprint && first.fingerprint !== second.fingerprint) {
     return { state: "conflict", detail: "The observed foreground process changed during delivery verification" };
   }
