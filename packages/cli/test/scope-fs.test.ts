@@ -60,6 +60,15 @@ describe("frontmatter parser", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("requires a complete closing delimiter and accepts empty or EOF-terminated frontmatter", () => {
+    for (const suffix of ["---suffix", "---\rnot-a-delimiter"]) {
+      const content = `---\nid: DEMO.1.2\n${suffix}`;
+      expect(splitFrontmatter(content)).toEqual({ frontmatter: {}, body: content });
+    }
+    expect(splitFrontmatter("---\r\n---\r\nbody")).toEqual({ frontmatter: {}, body: "body" });
+    expect(splitFrontmatter("---\nid: DEMO.1.2\n---")).toEqual({ frontmatter: { id: "DEMO.1.2" }, body: "" });
+  });
+
   it("preserves unknown keys on update", () => {
     const dir = mktemp();
     const p = path.join(dir, "README.md");
