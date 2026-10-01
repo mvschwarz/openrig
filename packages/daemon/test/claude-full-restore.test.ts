@@ -27,8 +27,8 @@ describe("managed Claude full down/up", () => {
   const dbs: ReturnType<typeof createFullTestDb>[] = [];
   afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
 
-  it.each(["exact", "bare-shell", "wrong-token", "wrong-pane", "ambiguous"])(
-    "retains native identity and ordinary delivery only for exact lineage: %s", async (mode) => {
+  it.each(["exact", "native", "bare-shell", "wrong-token", "unobserved-pane-process", "ambiguous"])(
+    "keeps identity proof separate from ordinary delivery: %s", async (mode) => {
       const db = createFullTestDb(); dbs.push(db);
       const rigRepo = new RigRepository(db);
       const sessionRegistry = new SessionRegistry(db);
@@ -55,8 +55,8 @@ describe("managed Claude full down/up", () => {
         listSessions: vi.fn(async () => live ? [{ name }] : []),
         listWindows: vi.fn(async () => []),
         listPanes: vi.fn(async () => (mode === "ambiguous" ? ["%new", "%other"] : ["%new"]).map(id => ({ id, index: 0, cwd: "/", width: 80, height: 24, active: true }))),
-        getPanePid: vi.fn(async () => mode === "wrong-pane" ? 999 : 100),
-        getPaneCommand: vi.fn(async () => "sh"),
+        getPanePid: vi.fn(async () => mode === "unobserved-pane-process" ? 999 : 100),
+        getPaneCommand: vi.fn(async () => mode === "bare-shell" ? "bash" : "sh"),
         capturePaneContent: vi.fn(async () => autoScreen),
         sendText: vi.fn(async () => ({ ok: true })),
         sendShellCommand: vi.fn(async () => ({ ok: true })),
@@ -64,9 +64,9 @@ describe("managed Claude full down/up", () => {
       } as unknown as TmuxAdapter;
       const startedAt = "Thu Oct  1 05:53:16 2026";
       const listProcesses = async () => [
-        { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
-        { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /tmp/fixture-launch.txt", startedAt },
-        ...(mode === "bare-shell" ? [] : [{ pid: 102, ppid: 101, pgid: 101, tpgid: 101, executableName: "claude", command: `/opt/claude.exe --permission-mode auto --resume ${mode === "wrong-token" ? "different" : token} --name ${name}`, startedAt }]),
+        { pid: 100, ppid: 1, pgid: 100, tpgid: mode === "bare-shell" ? 100 : 101, executableName: "bash", command: "-bash", startedAt },
+        ...(mode === "bare-shell" ? [] : [{ pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh /tmp/fixture-launch.txt", startedAt }]),
+        ...(mode === "bare-shell" ? [] : [{ pid: 102, ppid: 101, pgid: 101, tpgid: 101, executableName: mode === "native" ? "2.1.285" : "claude", command: `${mode === "native" ? "/fixture/.local/share/claude/versions/2.1.285" : "/opt/claude.exe"} --permission-mode auto --resume ${mode === "wrong-token" ? "different" : token} --name ${name}`, startedAt }]),
       ];
       // Real teardown captures the running occupant, exits the old row and clears bindings.
       const down = await new RigTeardownOrchestrator({ db, rigRepo, sessionRegistry, eventBus, snapshotCapture, tmuxAdapter: tmux }).teardown(rig.id);
@@ -75,7 +75,7 @@ describe("managed Claude full down/up", () => {
       expect(snapshotRepo.getSnapshot(down.snapshotId!)?.kind).toBe("auto-pre-down");
       expect(sessionRegistry.getBindingForNode(node.id)).toBeNull();
       const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {},
-        claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`, assertCurrent: () => {}, configDir: "/fixture" }) } as unknown as ClaudeManagedLaunch,
+        claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`, assertCurrent: () => {}, configDir: "/fixture", executable: mode === "native" ? "/fixture/.local/share/claude/versions/2.1.285" : "/opt/claude.exe" }) } as unknown as ClaudeManagedLaunch,
         fsOps: {
         exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {},
       } });
@@ -90,9 +90,9 @@ describe("managed Claude full down/up", () => {
       // Preserve the failed-state observation in a red run, before any later scrape.
       expect({ outcome: up.result.nodes[0], latest }).toMatchObject({
         // Main includes #264's exact wrapper identity reconciliation.
-        // The joined verdict is resumed only for the proved native identity.
-        outcome: { status: mode === "exact" ? "resumed" : "attention_required" },
-        latest: mode === "exact"
+        // Both conventional and native-install executables must prove the expected identity.
+        outcome: { status: (mode === "exact" || mode === "native") ? "resumed" : "attention_required" },
+        latest: (mode === "exact" || mode === "native")
           ? { status: "running", startup_status: "ready", resume_type: "claude_id", resume_token: token, resume_provenance: "scrape" }
           : { status: "running", startup_status: "attention_required", resume_token: token, resume_provenance: null },
       });
@@ -105,10 +105,13 @@ describe("managed Claude full down/up", () => {
       vi.mocked(tmux.sendText).mockClear(); vi.mocked(tmux.sendKeys).mockClear();
       const transport = new SessionTransport({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, listProcesses, sleep: async () => {} });
       const sent = await transport.send(name, "ordinary restored message");
-      expect(sent, JSON.stringify(sent)).toMatchObject({ ok: mode === "exact" });
+      // A PID absent from the observation is uncertainty, not a positively wrong pane.
+      const delivers = mode === "exact" || mode === "native" || mode === "unobserved-pane-process";
+      expect(sent, JSON.stringify(sent)).toMatchObject({ ok: delivers });
+      if (mode === "unobserved-pane-process") expect(sent.warning).toContain("without verified native identity");
       if (mode !== "exact") expect(sent.reason).not.toBe("tmux_unavailable");
-      expect(tmux.sendText).toHaveBeenCalledTimes(mode === "exact" ? 1 : 0);
-      expect(tmux.sendKeys).toHaveBeenCalledTimes(mode === "exact" ? 1 : 0);
+      expect(tmux.sendText).toHaveBeenCalledTimes(delivers ? 1 : 0);
+      expect(tmux.sendKeys).toHaveBeenCalledTimes(delivers ? 1 : 0);
     },
   );
 });
