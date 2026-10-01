@@ -134,12 +134,18 @@ describe("A3 Claude shell sampling", () => {
     expect(f.verdict()?.verdict).toBe("verified");
   });
 
-  it("keeps final command errors unavailable after a successful wrapper proof", async () => {
+  it.each(["null", "throw"])("keeps an unavailable final command unavailable after a successful wrapper proof: %s", async mode => {
     const f = fixture();
-    vi.mocked(f.tmux.getPaneCommand).mockResolvedValueOnce("sh").mockRejectedValueOnce(new Error("final read failed"));
+    vi.mocked(f.tmux.getPaneCommand).mockResolvedValueOnce("sh");
+    if (mode === "null") vi.mocked(f.tmux.getPaneCommand).mockResolvedValueOnce(null);
+    else vi.mocked(f.tmux.getPaneCommand).mockRejectedValueOnce(new Error("final read failed"));
     await f.rec.reconcileAll();
     expect(f.verdict()?.verdict).toBe("tmux_unavailable");
     expect(f.listProcesses).toHaveBeenCalledTimes(2);
+    expect(f.tmux.getPanePid).toHaveBeenCalledTimes(3);
+    expect(f.tmux.getPaneCommand).toHaveBeenCalledTimes(2);
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("verified");
   });
 
   it.each(["sh", "-bash", " ZSH "])("retains two native phases plus final PID/command for an exact wrapper: %s", async command => {

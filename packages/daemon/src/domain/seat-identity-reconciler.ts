@@ -268,6 +268,9 @@ export class SeatIdentityReconciler {
     }
 
     const command = await this.tmux.getPaneCommand(seat.tmux_pane);
+    if (command === null && seat.runtime === "claude-code" && seat.resume_token) {
+      return this.tmuxUnavailableVerdict(seat, observedAt);
+    }
     if (seat.runtime === "codex" || (seat.runtime === "claude-code" && seat.resume_token
       && classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch" && isShellForeground(command?.trim().toLowerCase() ?? ""))) {
       return {
