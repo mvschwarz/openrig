@@ -99,6 +99,99 @@ describe("terminal WebSocket route (production path)", () => {
   });
 });
 
+describe("terminal WebSocket DNS rebinding and origin protection", () => {
+  const NO_AUTH_PORT = 19879;
+  let noAuthServer: ServerType;
+
+  beforeAll(async () => {
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("tmuxAdapter" as never, {
+        hasSession: async () => true,
+        setWindowOption: async () => ({ ok: true }),
+        startPipePane: async () => ({ ok: true }),
+        stopPipePane: async () => ({ ok: true }),
+        sendKeys: async () => ({ ok: true }),
+        sendText: async () => ({ ok: true }),
+        resizeWindow: async () => ({ ok: true }),
+      });
+      await next();
+    });
+    const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
+    registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: null });
+    noAuthServer = serve({ fetch: app.fetch, port: NO_AUTH_PORT, hostname: "127.0.0.1" });
+    injectWebSocket(noAuthServer);
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  });
+
+  afterAll(() => {
+    noAuthServer?.close();
+  });
+
+  function noAuthUpgrade(path: string, extraHeaders?: Record<string, string>): Promise<{ statusCode: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: "127.0.0.1",
+        port: NO_AUTH_PORT,
+        path,
+        method: "GET",
+        headers: {
+          Upgrade: "websocket",
+          Connection: "Upgrade",
+          "Sec-WebSocket-Key": Buffer.from("test-key-12345678").toString("base64"),
+          "Sec-WebSocket-Version": "13",
+          ...extraHeaders,
+        },
+      });
+      req.on("response", (res) => {
+        let body = "";
+        res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+        res.on("end", () => resolve({ statusCode: res.statusCode ?? 0, body }));
+      });
+      req.on("upgrade", (_res, _socket, _head) => {
+        resolve({ statusCode: 101, body: "" });
+        _socket.destroy();
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  it("blocks DNS rebinding attempt where origin and host match an untrusted external domain in no-auth mode", async () => {
+    const result = await noAuthUpgrade(
+      "/api/terminal/test-session",
+      {
+        Origin: "http://rebind.attacker.com",
+        Host: `rebind.attacker.com:${NO_AUTH_PORT}`,
+      },
+    );
+    expect(result.statusCode).toBe(403);
+  });
+
+  it("allows loopback origins in no-auth mode", async () => {
+    for (const origin of ["http://127.0.0.1", "http://localhost", "http://[::1]"]) {
+      const result = await noAuthUpgrade(
+        "/api/terminal/test-session",
+        { Origin: origin },
+      );
+      expect(result.statusCode).not.toBe(403);
+    }
+  });
+
+  it("allows origins configured in OPENRIG_ALLOWED_ORIGINS", async () => {
+    process.env.OPENRIG_ALLOWED_ORIGINS = "https://custom-dashboard.corp";
+    try {
+      const result = await noAuthUpgrade(
+        "/api/terminal/test-session",
+        { Origin: "https://custom-dashboard.corp" },
+      );
+      expect(result.statusCode).not.toBe(403);
+    } finally {
+      delete process.env.OPENRIG_ALLOWED_ORIGINS;
+    }
+  });
+});
+
 describe("terminal WebSocket input ordering", () => {
   const ORDER_PORT = 19878;
   const ORDER_TOKEN = "order-test-token";
