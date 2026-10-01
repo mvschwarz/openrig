@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { EventBus } from "../event-bus.js";
-import { readProjectReadiness } from "./judgments.js";
+import { readProjectReadiness, resolveProjectRoot } from "./judgments.js";
 
 export interface ProofSourceWatch {
   close(): void;
@@ -14,7 +14,8 @@ export function proofSourceObservation(c: { get: (key: never) => unknown }) {
 
 /** Push invalidation over the existing bus; existing client quiet refresh is the missed-event repair. */
 export function watchProofSources(missionsRoot: string, invalidate: () => void, bus: EventBus): ProofSourceWatch {
-  const workspace = path.dirname(missionsRoot);
+  let workspace = path.dirname(missionsRoot);
+  try { workspace = resolveProjectRoot(missionsRoot); } catch { /* Legacy roots retain their existing watch boundary. */ }
   // ponytail: bounded local workspaces use a full semantic read after a file burst.
   // Keep this workload measured; subtree indexing is warranted only when that bound is exceeded.
   const basis = () => createHash("sha256").update(JSON.stringify(readProjectReadiness(missionsRoot).missions.map(m => [m.name, m.revision]))).digest("hex");
