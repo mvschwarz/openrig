@@ -3753,6 +3753,20 @@ describe("RestoreOrchestrator", () => {
       }
     });
 
+    it("startup extension: replay delivers a shipped-spec rig culture from the running install; custom unchanged", async () => {
+      const OLD_SPECS = "/old-openrig/lib/node_modules/@openrig/cli/daemon/specs";
+      const RUNNING_SPECS = path.resolve(import.meta.dirname, "../specs");
+      const { snap, deliverStartup, adapter } = seedPodAware(false);
+      const shippedCulture = { path: "culture/CULTURE.md", absolutePath: `${OLD_SPECS}/rigs/launch/kernel/culture/CULTURE.md`, ownerRoot: `${OLD_SPECS}/rigs/launch/kernel`, deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] };
+      const fixed = updateSnapshotData(snap, (data) => { for (const k of Object.keys(data.nodeStartupContext)) data.nodeStartupContext[k].resolvedStartupFiles = [shippedCulture, customSameBasename]; });
+      const result = await createOrchestrator().restore(fixed.id, {
+        adapters: { "claude-code": adapter }, fsOps: { exists: notOld }, freshLogicalIds: ["dev.impl"],
+      });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => (c[0] as Array<{ absolutePath: string }>).map((f) => f.absolutePath));
+      expect(delivered.sort()).toEqual([`${RUNNING_SPECS}/rigs/launch/kernel/culture/CULTURE.md`, "/user-rig/CULTURE-default.md"].sort());
+    });
+
     it("same-native resume: replay stays contained (no startup files delivered), stored built-ins notwithstanding", async () => {
       const { snap, deliverStartup, adapter } = seedPodAware(true);
       const orch = createOrchestrator({ listProcesses: nativeLineage("claude-code", "resume-token-261") });

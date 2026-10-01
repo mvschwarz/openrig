@@ -101,3 +101,38 @@ describe("reanchorShippedProjectionEntry", () => {
     expect(runningShippedSpecsRoot()).toBe(path.resolve(import.meta.dirname, "../specs"));
   });
 });
+
+describe("reanchorBuiltinStartupFile — shipped-spec startup files", () => {
+  const RUN_SPECS = "/new/lib/node_modules/@openrig/cli/daemon/specs";
+  const OLD_SPECS = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/specs";
+  const KERNEL = "rigs/launch/kernel";
+
+  it("re-anchors the kernel rig culture (pre-launch guidance_merge), preserving metadata", () => {
+    const stored = { path: "culture/CULTURE.md", absolutePath: `${OLD_SPECS}/${KERNEL}/culture/CULTURE.md`, ownerRoot: `${OLD_SPECS}/${KERNEL}`, ...meta };
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS)).toEqual({
+      ...stored, absolutePath: `${RUN_SPECS}/${KERNEL}/culture/CULTURE.md`, ownerRoot: `${RUN_SPECS}/${KERNEL}`,
+    });
+  });
+
+  it("re-anchors agent role and startup context (post-launch send_text)", () => {
+    const agent = `${OLD_SPECS}/${KERNEL}/agents/advisor/lead`;
+    for (const rel of ["guidance/role.md", "startup/context.md"]) {
+      const stored = { path: rel, absolutePath: `${agent}/${rel}`, ownerRoot: agent, deliveryHint: "send_text" as const, required: true, appliesOn: ["fresh_start" as const, "restore" as const] };
+      expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS)).toMatchObject({
+        absolutePath: `${RUN_SPECS}/${KERNEL}/agents/advisor/lead/${rel}`, ownerRoot: `${RUN_SPECS}/${KERNEL}/agents/advisor/lead`, deliveryHint: "send_text",
+      });
+    }
+  });
+
+  it("leaves a file outside the shipped specs root unchanged even when its ownerRoot is shipped", () => {
+    const stored = { path: "notes.md", absolutePath: "/home/u/notes.md", ownerRoot: `${OLD_SPECS}/${KERNEL}`, ...meta };
+    expect(reanchorBuiltinStartupFile(stored, RUNNING, RUN_SPECS)).toBe(stored);
+  });
+
+  it("leaves user rig culture and look-alike daemon/specs folders unchanged", () => {
+    const user = { path: "culture/CULTURE.md", absolutePath: "/home/u/rigs/acme/culture/CULTURE.md", ownerRoot: "/home/u/rigs/acme", ...meta };
+    const lookalike = { path: "culture/CULTURE.md", absolutePath: "/home/u/daemon/specs/r/culture/CULTURE.md", ownerRoot: "/home/u/daemon/specs/r", ...meta };
+    expect(reanchorBuiltinStartupFile(user, RUNNING, RUN_SPECS)).toBe(user);
+    expect(reanchorBuiltinStartupFile(lookalike, RUNNING, RUN_SPECS)).toBe(lookalike);
+  });
+});

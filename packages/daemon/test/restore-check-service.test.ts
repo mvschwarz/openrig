@@ -1517,6 +1517,24 @@ describe("RestoreCheckService", () => {
       expect(startup.evidence).not.toContain("/old-openrig");
     });
 
+    it("shipped-spec rig culture: stale old path is judged at the running specs (green when present, red naming it when missing)", () => {
+      const culture = [{ path: "culture/CULTURE.md", absolutePath: `${OLD}/specs/rigs/launch/kernel/culture/CULTURE.md`, ownerRoot: `${OLD}/specs/rigs/launch/kernel`, required: true }];
+      const runningCulture = `${RUN_SPECS}/rigs/launch/kernel/culture/CULTURE.md`;
+      const check = (exists: (p: string) => boolean) => (new RestoreCheckService(mockDeps({
+        getNodeInventory: () => [stoppedNode()],
+        getStartupContext: () => startupContextProbe({ resolvedStartupFiles: culture }) as never,
+        getLatestSnapshot: () => ({ id: "snap-261", kind: "auto-pre-down" }),
+        exists,
+      })).check({ noQueue: true, noHooks: true }) as any).checks.find((c: { check: string }) => c.check === "seat.dev-impl@test-rig.startup-context");
+      const present = check((p) => !p.startsWith("/old-openrig"));
+      expect(present.status).toBe("green");
+      expect(present.evidence).toContain(runningCulture);
+      const missing = check((p) => !p.startsWith("/old-openrig") && p !== runningCulture);
+      expect(missing.status).toBe("red");
+      expect(missing.evidence).toContain(runningCulture);
+      expect(missing.evidence).not.toContain("/old-openrig");
+    });
+
     it("current built-in missing on a running/ready seat stays yellow (red/yellow rule unchanged)", () => {
       const runningCulture = `${RUN_ASSETS}/guidance/CULTURE-default.md`;
       const service = new RestoreCheckService(mockDeps({

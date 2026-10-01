@@ -1,10 +1,13 @@
-// Built-in OpenRig startup files are stored per seat as absolute paths inside the
-// install that created the seat (rigspec-instantiator resolves them from
-// import.meta.dirname). After an upgrade that removes or moves that install, the
-// stored paths go stale (#261). Delivery consumers re-anchor recognized built-ins to
-// the RUNNING install's assets, so seats get this version's shipped guidance. Projection
-// entries whose source and resource ship inside an install's daemon/specs (the kernel and
-// library agents) are re-anchored the same way.
+// Startup files and projection resources that ship with OpenRig are stored per seat as
+// absolute paths inside the install that created the seat (rigspec-instantiator resolves
+// them from import.meta.dirname, or from a rig spec that lives in the install). After an
+// upgrade that removes or moves that install, the stored paths go stale (#261). Delivery
+// consumers and restore-check re-anchor them to the RUNNING install, so seats get this
+// version's shipped content:
+// - the four built-in startup files under daemon/assets (by logical name and known path);
+// - startup files and projection resources under an install's daemon/specs (the kernel and
+//   library rigs and agents), when both their root and their file lie in that same specs root.
+// Custom, user, plugin and other external paths are never rewritten.
 import nodePath from "node:path";
 
 /** Logical name -> path relative to the daemon assets root, as rigspec-instantiator produces them. */
@@ -18,26 +21,6 @@ const BUILTIN_STARTUP_FILES: ReadonlyMap<string, string> = new Map([
 /** The running daemon's assets root (packages/daemon/assets, or <cli>/daemon/assets when packaged). */
 export function runningBuiltinAssetsRoot(): string {
   return nodePath.resolve(import.meta.dirname, "../../assets");
-}
-
-/**
- * Re-anchor one stored startup file to the running install when it is a recognized
- * OpenRig built-in: its logical name is one of the four built-ins, its stored
- * absolutePath is exactly <ownerRoot>/<known relative path>, and ownerRoot is a
- * daemon/assets directory. Anything else (rig culture, rig/agent startup files,
- * user content with a matching basename) is returned unchanged. All other fields
- * are preserved.
- */
-export function reanchorBuiltinStartupFile<T extends { path: string; absolutePath: string; ownerRoot: string }>(
-  file: T,
-  assetsRoot: string = runningBuiltinAssetsRoot(),
-): T {
-  const relative = BUILTIN_STARTUP_FILES.get(file.path);
-  if (!relative) return file;
-  const storedRoot = nodePath.resolve(file.ownerRoot);
-  if (nodePath.basename(storedRoot) !== "assets" || nodePath.basename(nodePath.dirname(storedRoot)) !== "daemon") return file;
-  if (nodePath.resolve(file.absolutePath) !== nodePath.join(storedRoot, relative)) return file;
-  return { ...file, absolutePath: nodePath.join(assetsRoot, relative), ownerRoot: assetsRoot };
 }
 
 /** The running daemon's shipped specs root (packages/daemon/specs, or <cli>/daemon/specs when packaged). */
@@ -58,6 +41,46 @@ function shippedSpecsRootOf(p: string): string | null {
   return null;
 }
 
+/** Map a (root, file) pair stored under one install's daemon/specs onto the running specs root,
+ *  preserving both relative paths. Null when the root is not in a recognized install's specs
+ *  or the file lies outside that same specs root. */
+function mapUnderShippedSpecs(root: string, file: string, specsRoot: string): { root: string; file: string } | null {
+  const storedRoot = shippedSpecsRootOf(root);
+  if (!storedRoot) return null;
+  const resolvedFile = nodePath.resolve(file);
+  if (!resolvedFile.startsWith(storedRoot + nodePath.sep)) return null;
+  return {
+    root: nodePath.join(specsRoot, nodePath.relative(storedRoot, nodePath.resolve(root))),
+    file: nodePath.join(specsRoot, nodePath.relative(storedRoot, resolvedFile)),
+  };
+}
+
+/**
+ * Re-anchor one stored startup file to the running install when it ships with OpenRig:
+ * - a built-in: its logical name is one of the four built-ins, its stored absolutePath is
+ *   exactly <ownerRoot>/<known relative path>, and ownerRoot is a daemon/assets directory; or
+ * - a shipped-spec file: its ownerRoot and absolutePath both lie under the same recognized
+ *   install's daemon/specs (for example the kernel rig culture and agent role/startup files).
+ * Anything else (custom rig/agent files, user content with a matching basename) is returned
+ * unchanged. Required, applicability, delivery and every other field are preserved.
+ */
+export function reanchorBuiltinStartupFile<T extends { path: string; absolutePath: string; ownerRoot: string }>(
+  file: T,
+  assetsRoot: string = runningBuiltinAssetsRoot(),
+  specsRoot: string = runningShippedSpecsRoot(),
+): T {
+  const relative = BUILTIN_STARTUP_FILES.get(file.path);
+  if (relative) {
+    const storedRoot = nodePath.resolve(file.ownerRoot);
+    if (nodePath.basename(storedRoot) === "assets" && nodePath.basename(nodePath.dirname(storedRoot)) === "daemon"
+      && nodePath.resolve(file.absolutePath) === nodePath.join(storedRoot, relative)) {
+      return { ...file, absolutePath: nodePath.join(assetsRoot, relative), ownerRoot: assetsRoot };
+    }
+  }
+  const mapped = mapUnderShippedSpecs(file.ownerRoot, file.absolutePath, specsRoot);
+  return mapped ? { ...file, ownerRoot: mapped.root, absolutePath: mapped.file } : file;
+}
+
 /**
  * Re-anchor one stored projection entry to the running install when it is a shipped-spec
  * resource: both its sourcePath and its resource absolutePath lie under the same OpenRig
@@ -69,14 +92,6 @@ export function reanchorShippedProjectionEntry<T extends { sourcePath: string; a
   entry: T,
   specsRoot: string = runningShippedSpecsRoot(),
 ): T {
-  const storedRoot = shippedSpecsRootOf(entry.sourcePath);
-  if (!storedRoot) return entry;
-  const source = nodePath.resolve(entry.sourcePath);
-  const resource = nodePath.resolve(entry.absolutePath);
-  if (!resource.startsWith(storedRoot + nodePath.sep)) return entry;
-  return {
-    ...entry,
-    sourcePath: nodePath.join(specsRoot, nodePath.relative(storedRoot, source)),
-    absolutePath: nodePath.join(specsRoot, nodePath.relative(storedRoot, resource)),
-  };
+  const mapped = mapUnderShippedSpecs(entry.sourcePath, entry.absolutePath, specsRoot);
+  return mapped ? { ...entry, sourcePath: mapped.root, absolutePath: mapped.file } : entry;
 }

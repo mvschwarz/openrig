@@ -623,4 +623,32 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(byId["shared:openrig-core"]).toMatchObject({ sourcePath: `${oldSpecs}/agents/shared`, absolutePath: "/home/u/.openrig/plugins/openrig-core" });
     expect(byId["role"]).toMatchObject({ absolutePath: "/project/agents/impl/guidance/role.md" });
   });
+
+  // #261 startup extension: shipped-spec startup files (kernel culture, agent role/startup context) follow the running install.
+  it("#261 delivers shipped-spec startup files (pre- and post-launch) from the running install", async () => {
+    const seat = seedSeat({ clean: true });
+    const oldSpecs = "/mise/installs/npm-openrig-cli/0.6.2/node_modules/@openrig/cli/daemon/specs";
+    const runningSpecs = path.resolve(import.meta.dirname, "../specs");
+    const kernel = "rigs/launch/kernel";
+    const agent = `${kernel}/agents/advisor/lead`;
+    const stored = [
+      { path: "culture/CULTURE.md", absolutePath: `${oldSpecs}/${kernel}/culture/CULTURE.md`, ownerRoot: `${oldSpecs}/${kernel}`, deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] },
+      { path: "guidance/role.md", absolutePath: `${oldSpecs}/${agent}/guidance/role.md`, ownerRoot: `${oldSpecs}/${agent}`, deliveryHint: "send_text", required: true, appliesOn: ["fresh_start", "restore"] },
+      { path: "culture/CULTURE.md", absolutePath: "/project/culture/CULTURE.md", ownerRoot: "/project", deliveryHint: "guidance_merge", required: true, appliesOn: ["fresh_start", "restore"] },
+    ];
+    db.prepare("UPDATE node_startup_context SET resolved_files_json=? WHERE node_id=?").run(JSON.stringify(stored), seat.node.id);
+    const delivered: string[] = [];
+    adapter.deliverStartup = async (files) => { delivered.push(...files.map((f) => f.absolutePath)); return { delivered: files.length, failed: [] }; };
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "issue 261 shipped specs" });
+    expect(result.ok).toBe(true);
+    // Pre-launch culture and the post-launch send_text role both arrive at the running install; custom is as stored.
+    expect(delivered.sort()).toEqual([
+      `${runningSpecs}/${agent}/guidance/role.md`,
+      `${runningSpecs}/${kernel}/culture/CULTURE.md`,
+      "/project/culture/CULTURE.md",
+    ].sort());
+    const persisted = JSON.parse((db.prepare("SELECT resolved_files_json AS j FROM node_startup_context WHERE node_id=?").get(seat.node.id) as { j: string }).j) as Array<{ path: string; absolutePath: string; deliveryHint: string }>;
+    expect(persisted.find((f) => f.path === "guidance/role.md")).toMatchObject({ absolutePath: `${runningSpecs}/${agent}/guidance/role.md`, deliveryHint: "send_text" });
+    expect(persisted.some((f) => f.absolutePath.startsWith(oldSpecs))).toBe(false);
+  });
 });
