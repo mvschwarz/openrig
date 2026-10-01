@@ -6,7 +6,7 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { RigRepository } from "../src/domain/rig-repository.js";
-import { ContextUsageStore, FRESHNESS_THRESHOLD_MS } from "../src/domain/context-usage-store.js";
+import { ContextUsageStore, FRESHNESS_THRESHOLD_MS, cursorContextUsageFromPane } from "../src/domain/context-usage-store.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 
@@ -431,5 +431,56 @@ describe("ContextUsageStore", () => {
       const result = plain.getForNode(node.id, "dev-impl@test-rig");
       expect(result.availability).toBe("known");
     });
+  });
+});
+
+describe("cursorContextUsageFromPane", () => {
+  const at = "2026-10-01T00:00:00.000Z";
+  const read = (pane: string) => cursorContextUsageFromPane(pane, "dev-cur@rig", at);
+
+  it("reads a mid-chat footer with a trailing Auto-review badge", () => {
+    const u = read("  Grok 4.7 256K High · 15.3%                                       Auto-review\n");
+    expect(u).toMatchObject({
+      availability: "known", source: "cursor_tui_footer", usedPercentage: 15,
+      remainingPercentage: 85, contextWindowSize: 256000, totalInputTokens: null,
+      totalOutputTokens: null, currentUsage: null, transcriptPath: null, sessionId: null,
+      sessionName: "dev-cur@rig", sampledAt: at, fresh: true,
+    });
+  });
+
+  it("reads a footer with no badge", () => {
+    const u = read("  Grok 4.7 256K Low · 8.7%");
+    expect(u.usedPercentage).toBe(9);
+    expect(u.remainingPercentage).toBe(91);
+  });
+
+  it("parses M context sizes", () => {
+    expect(read("  Some Model 1M High · 3%").contextWindowSize).toBe(1000000);
+  });
+
+  it("returns unknown for a fresh chat footer with no percentage", () => {
+    const u = read("  Grok 4.7 256K Low                                                Auto-review");
+    expect(u).toMatchObject({ availability: "unknown", reason: "no_data", source: null });
+  });
+
+  it("reads the footer from a full bottom-of-screen capture", () => {
+    const u = read("\n  → Add a follow-up\n  Grok 4.7 256K High · 11.2%                                       Auto-review\n  ~/Work/Dev/skill-library-rig/wt/review · d062715\n\n");
+    expect(u.usedPercentage).toBe(11);
+  });
+
+  it("handles a cwd line that wraps onto two lines", () => {
+    const u = read("  → Add a follow-up\n  Grok 4.7 256K High · 11.2%     Auto-review\n  ~/Work/Dev/skill-library-rig/wt/some/very/long/path/that/wraps\n  /onto/a/second/line · main\n");
+    expect(u.usedPercentage).toBe(11);
+  });
+
+  it("prefers the footer over '· 42%' in conversation prose above it", () => {
+    const u = read("The model said it was 256K tokens · 42% done\n\n  → Add a follow-up\n  Grok 4.7 256K High · 11.2%     Auto-review\n  ~/x · main\n");
+    expect(u.usedPercentage).toBe(11);
+  });
+
+  it("returns unknown for empty or garbage screens", () => {
+    expect(read("").availability).toBe("unknown");
+    expect(read("\n\n   \n").reason).toBe("no_data");
+    expect(read("$ ls\nfoo bar\n→ 256K · 50%\n~/a/b · 12K · 9%").availability).toBe("unknown");
   });
 });

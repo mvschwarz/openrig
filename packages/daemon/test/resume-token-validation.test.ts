@@ -168,3 +168,21 @@ describe("validateResumeToken — pi_session_file (path-shaped, per-type)", () =
     expect(validateResumeToken("codex", validPath).ok).toBe(false);
   });
 });
+
+describe("cursor resume tokens", () => {
+  it("maps the cursor runtime to cursor_chat_id", () => {
+    expect(resumeTypeForRuntime("cursor")).toBe("cursor_chat_id");
+  });
+
+  it("accepts a Cursor chat id (a UUID)", () => {
+    expect(validateResumeToken("cursor", "167733b3-080d-4eb0-a30a-7d22c40b5195")).toEqual({
+      ok: true, resumeType: "cursor_chat_id", token: "167733b3-080d-4eb0-a30a-7d22c40b5195",
+    });
+  });
+
+  it("rejects a token with shell metacharacters without echoing it", () => {
+    const result = validateResumeToken("cursor", "abc; rm -rf /");
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("rm -rf");
+  });
+});

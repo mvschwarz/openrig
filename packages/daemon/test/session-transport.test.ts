@@ -15,7 +15,7 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, probeSessionActivity, SessionTransport } from "../src/domain/session-transport.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
@@ -1529,5 +1529,56 @@ describe("SessionTransport", () => {
     const transport = createTransport(tmux, { now: () => new Date("2026-08-06T17:42:12Z") });
     await transport.send("dev-impl@my-rig", H_ENVELOPE, { stampISO: "2026-08-06T17:42:09Z" });
     expect(sendTextSpy.mock.calls[0]![1]).not.toContain(" · delivered ");
+  });
+});
+
+describe("classifyPaneActivity — Cursor", () => {
+  const footer = ["  Grok 4.7 256K Low · 8.7%                                  Auto-review", "  /work/a/very/long/path/that/wraps/onto", "  two-lines · main"];
+  const idle = ["  finished", "  → Add a follow-up", ...footer].join("\n");
+  const fresh = ["  Cursor Agent", "  v2026.09.28-64d2043", "  → Plan, search, build anything", ...footer].join("\n");
+  const working = ["  Use the shell to run: touch x", " ⠘⠆ Working", "  → Add a follow-up                                   ctrl+c to stop", ...footer].join("\n");
+  const draft = ["  finished", "  → please also check the tests", ...footer].join("\n");
+  const approval = [
+    "  $ touch approval-probe.txt Waiting for approval...",
+    " $  touch approval-probe.txt in .",
+    " Run this command?",
+    " Not in allowlist: touch",
+    "  → Run (once) (y)",
+    "    Add Shell(touch) to allowlist? (tab)",
+    "    Run Everything (shift+tab)",
+    "    Skip & tell the agent what to do instead (esc or n)",
+  ].join("\n");
+
+  it("reads the placeholder prompt as idle even above a wrapped footer", () => {
+    expect(classifyPaneActivity(idle, "cursor")).toMatchObject({ state: "agent_idle", reason: "idle_prompt" });
+    expect(classifyPaneActivity(fresh, "cursor")).toMatchObject({ state: "agent_idle" });
+  });
+  it("does not read a running turn as idle", () => {
+    expect(classifyPaneActivity(working, "cursor").state).not.toBe("agent_idle");
+  });
+  it("reads a typed draft as attention", () => {
+    expect(classifyPaneActivity(draft, "cursor")).toMatchObject({ state: "attention", reason: "prompt_draft" });
+  });
+  it("reads the approval panel as a permission prompt", () => {
+    expect(classifyPaneActivity(approval, "cursor")).toMatchObject({ state: "attention", reason: "permission_prompt" });
+  });
+  it("leaves other runtimes' arrow prose alone", () => {
+    const claudeProse = ["→ Created the file", "❯ "].join("\n");
+    expect(classifyPaneActivity(claudeProse, "claude-code")).toEqual(classifyPaneActivity(claudeProse));
+    expect(classifyPaneActivity(draft).reason).not.toBe("prompt_draft");
+  });
+  it("judges only the bottom-most arrow line, so earlier arrow prose does not read as a draft", () => {
+    const prose = ["  → Created the file", "  → Add a follow-up", ...footer].join("\n");
+    expect(classifyPaneActivity(prose, "cursor")).toMatchObject({ state: "agent_idle", reason: "idle_prompt" });
+  });
+  it("probeSessionActivity passes the runtime to the classifier", async () => {
+    const adapter = {
+      hasSession: async () => true,
+      capturePaneContent: async () => draft,
+    } as any;
+    const probe = (runtime: string) => probeSessionActivity({ sessionName: "s@r", runtime, attachmentType: "tmux", tmuxAdapter: adapter });
+    expect(await probe("cursor")).toMatchObject({ state: "needs_input", reason: "prompt_draft" });
+    expect((await probe("claude-code")).reason).not.toBe("prompt_draft");
+    expect((await probe("claude-code")).state).not.toBe("needs_input");
   });
 });

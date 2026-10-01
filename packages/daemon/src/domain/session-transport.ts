@@ -107,6 +107,18 @@ function trimPaneLines(paneContent: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+// Cursor Agent (runtime "cursor"): the prompt line starts with "→ ". It shows a placeholder when
+// idle; while a turn runs the same line also carries "ctrl+c to stop"; a typed draft replaces the
+// placeholder. The model footer and a cwd line that can wrap sit below it, so these are checked in
+// the 8-line window, and only for Cursor panes (other runtimes print "→" in prose).
+const CURSOR_IDLE_PROMPT_RE = /^→ (?:Add a follow-up|Plan, search, build anything)$/;
+const CURSOR_DRAFT_PROMPT_RE = /^→ (?!Add a follow-up|Plan, search, build anything)\S/;
+const CURSOR_PERMISSION_PROMPT_PATTERNS = [
+  /^Run this command\?$/,
+  /\bWaiting for approval\.\.\./,
+  /^Skip & tell the agent what to do instead\b/,
+];
+
 function truncateEvidence(text: string): string {
   const compact = text.replace(/\s+/g, " ").trim();
   return compact.length > 240 ? `${compact.slice(0, 237)}...` : compact;
@@ -143,7 +155,7 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
   return truncateEvidence(priorTrimmed);
 }
 
-export function classifyPaneActivity(paneContent: string): PaneActivityClassification {
+export function classifyPaneActivity(paneContent: string, runtime?: string | null): PaneActivityClassification {
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
     return { state: "unknown", reason: "empty_capture", evidence: null };
@@ -181,6 +193,21 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
       reason: "permission_prompt",
       evidence: permissionPromptEvidence,
     };
+  }
+
+  if (runtime === "cursor") {
+    const cursorPermission = findPatternEvidence(promptScanLines, CURSOR_PERMISSION_PROMPT_PATTERNS);
+    if (cursorPermission) return { state: "attention", reason: "permission_prompt", evidence: cursorPermission };
+    // The live prompt is the bottom-most "→ " line; earlier arrow lines are conversation prose.
+    const cursorPromptLine = [...recentLines].reverse().find((line) => line.startsWith("→ "));
+    if (cursorPromptLine) {
+      if (CURSOR_DRAFT_PROMPT_RE.test(cursorPromptLine) && !cursorPromptLine.includes("ctrl+c to stop")) {
+        return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(cursorPromptLine) };
+      }
+      if (CURSOR_IDLE_PROMPT_RE.test(cursorPromptLine)) {
+        return { state: "agent_idle", reason: "idle_prompt", evidence: truncateEvidence(cursorPromptLine) };
+      }
+    }
   }
 
   const promptDraftEvidence = findPromptDraftBeforeFooter(paneContent);
@@ -367,7 +394,7 @@ export async function probeSessionActivity(input: {
   try {
     const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
-    const classification = classifyPaneActivity(paneContent ?? "");
+    const classification = classifyPaneActivity(paneContent ?? "", runtime);
     return observeProbe(captureSlot(paneContent, capturedAt, captureSeq), {
       state: mapPaneState(classification.state),
       reason: classification.reason,
@@ -1558,6 +1585,21 @@ export class SessionTransport {
     ) {
       // Fresh hook (within the 15s send window): authoritative for any state.
       if (this.hookFreshForSend(hookActivity, now)) {
+        // Cursor has no approval hook: preToolUse fires BEFORE the approval panel renders, so a
+        // fresh "running" hook can coexist with a visible "Run this command?" panel. Let the pane
+        // veto (positive needs_input only) before trusting any non-needs_input hook.
+        if (input.runtime === "cursor" && hookActivity.state !== "needs_input") {
+          const paneVeto = await probeSessionActivity({
+            sessionName: input.sessionName,
+            runtime: input.runtime,
+            attachmentType: input.attachmentType as "tmux" | "external_cli" | null | undefined,
+            tmuxAdapter: this.tmuxAdapter,
+            now,
+            captureObserver: this.captureObserver,
+            binding: input.binding,
+          });
+          if (paneVeto.state === "needs_input") return paneVeto;
+        }
         return hookActivity;
       }
       // OPR.0.4.3.28 Part A — a stale-but-latest `idle` hook (older than the 15s

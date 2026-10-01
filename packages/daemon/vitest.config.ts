@@ -3,6 +3,8 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
+    // Keeps daemon tests from writing the operator's real ~/.cursor/hooks.json.
+    setupFiles: ["./test/hermetic-env.setup.ts"],
     // P6/D12-residue: many daemon suites spawn REAL child processes (stub-runner-*,
     // precompact-hook, bridge, restore-from-jsonl — 20+ files). Under fold-gate
     // contention (parallel files + fleet load) a single node spawn can take 5-10s,

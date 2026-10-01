@@ -373,22 +373,7 @@ export class ContextUsageStore {
 
   /** Create an unknown ContextUsage with an honest reason. */
   unknownUsage(reason: ContextUnknownReason): ContextUsage {
-    return {
-      availability: "unknown",
-      reason,
-      source: null,
-      usedPercentage: null,
-      remainingPercentage: null,
-      contextWindowSize: null,
-      totalInputTokens: null,
-      totalOutputTokens: null,
-      currentUsage: null,
-      transcriptPath: null,
-      sessionId: null,
-      sessionName: null,
-      sampledAt: null,
-      fresh: false,
-    };
+    return unknownContextUsage(reason);
   }
 
   /** Check if a sample timestamp is fresh. */
@@ -490,6 +475,75 @@ export class ContextUsageStore {
       closeSync(fd);
     }
   }
+}
+
+function unknownContextUsage(reason: ContextUnknownReason): ContextUsage {
+  return {
+    availability: "unknown",
+    reason,
+    source: null,
+    usedPercentage: null,
+    remainingPercentage: null,
+    contextWindowSize: null,
+    totalInputTokens: null,
+    totalOutputTokens: null,
+    currentUsage: null,
+    transcriptPath: null,
+    sessionId: null,
+    sessionName: null,
+    sampledAt: null,
+    fresh: false,
+  };
+}
+
+const CURSOR_FOOTER_SCAN_LINES = 8;
+const CURSOR_CONTEXT_SIZE = /\b(\d+(?:\.\d+)?)([KM])\b/;
+const CURSOR_CONTEXT_PERCENT = /·\s*(\d+(?:\.\d+)?)%/;
+
+/**
+ * Cursor exposes no token file; its TUI footer (model line, below the prompt
+ * and above the cwd line) carries `<model> <size> <effort> · <pct>%`. Reads
+ * the last footer-shaped line among the last few non-blank lines, so a
+ * "· 42%" in conversation prose higher up never wins. A fresh chat shows the
+ * footer without a percentage, which is unknown, not zero.
+ */
+export function cursorContextUsageFromPane(
+  paneContent: string,
+  sessionName: string,
+  sampledAt: string,
+): ContextUsage {
+  const tail = paneContent
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(-CURSOR_FOOTER_SCAN_LINES);
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const line = tail[i]!;
+    if (line.startsWith("→") || line.startsWith("$")) continue;
+    if (line.includes("/") || line.startsWith("~")) continue;
+    const size = CURSOR_CONTEXT_SIZE.exec(line);
+    if (!size) continue;
+    const percent = CURSOR_CONTEXT_PERCENT.exec(line);
+    if (!percent) return unknownContextUsage("no_data");
+    const usedPercentage = clampPercentage(Math.round(Number(percent[1])));
+    return {
+      availability: "known",
+      reason: null,
+      source: "cursor_tui_footer",
+      usedPercentage,
+      remainingPercentage: clampPercentage(100 - usedPercentage),
+      contextWindowSize: Math.round(Number(size[1]) * (size[2] === "M" ? 1_000_000 : 1_000)),
+      totalInputTokens: null,
+      totalOutputTokens: null,
+      currentUsage: null,
+      transcriptPath: null,
+      sessionId: null,
+      sessionName,
+      sampledAt,
+      fresh: true,
+    };
+  }
+  return unknownContextUsage("no_data");
 }
 
 function clampPercentage(value: number): number {

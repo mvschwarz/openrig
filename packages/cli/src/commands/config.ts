@@ -83,6 +83,7 @@ Keys:
   agents.*               advisor_session, operator_session
   feed.subscriptions.*   action_required, approvals, shipped, progress, audit_log
   runtime.codex.*        hooks_enabled
+  runtime.cursor.*       hooks_enabled
   workflow.*             exception_routing (orchestrator | human_only — the maturity-dial host default)
   policies.claude_compaction.*
                          enabled, threshold_percent, compact_instruction,

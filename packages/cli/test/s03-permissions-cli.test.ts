@@ -39,6 +39,8 @@ describe("S03 policy permissions compatibility", () => {
     const select = seatCommand().commands.find(c => c.name() === "set-permissions")!;
     expect(select.description()).toContain("future managed launches");
     expect(select.options.map(o => o.long)).toEqual(["--mode", "--reason", "--json"]);
+    expect(select.options.find(o => o.long === "--mode")!.description)
+      .toBe("floor, full_bypass, inherit, auto_review (Cursor seats), or a Claude mode supported by the bound managed launch context");
   });
   it("seat command posts one explicit selection and preserves refusal JSON/exit", async () => {
     const posts: unknown[] = []; const response = { ok: false, code: "permission_selection_refused", message: "native options unavailable" };

@@ -149,6 +149,27 @@ describe("RigSpecPreflight", () => {
     expect(exec).not.toHaveBeenCalledWith("pi --version");
   });
 
+  it("cursor probes 'cursor-agent --version' (exact command)", async () => {
+    const exec = vi.fn<ExecFn>().mockResolvedValue("");
+    const pf = createPreflight({ exec });
+    await pf.check(validSpec({
+      nodes: [{ id: "worker", runtime: "cursor", cwd: "/" }],
+    }));
+    const cursorCall = exec.mock.calls.find((c: unknown[]) => (c[0] as string).includes("cursor"));
+    expect(cursorCall).toBeDefined();
+    expect(cursorCall![0]).toBe("cursor-agent --version");
+  });
+
+  it("cursor-agent unavailable -> error", async () => {
+    const exec = vi.fn<ExecFn>().mockRejectedValue(new Error("not found"));
+    const pf = createPreflight({ exec });
+    const result = await pf.check(validSpec({
+      nodes: [{ id: "worker", runtime: "cursor", cwd: "/" }],
+    }));
+    expect(result.ready).toBe(false);
+    expect(result.errors.some((e) => e.includes("cursor") && e.includes("cursor-agent --version"))).toBe(true);
+  });
+
   it("runtime not available -> error", async () => {
     const exec = vi.fn<ExecFn>().mockRejectedValue(new Error("not found"));
     const pf = createPreflight({ exec });

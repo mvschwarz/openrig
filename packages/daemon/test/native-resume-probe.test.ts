@@ -826,4 +826,84 @@ describe("native resume probe", () => {
       expect(result.code).toBe("active_runtime");
     });
   });
+
+  describe("cursor", () => {
+    const FRESH = [
+      "  Cursor Agent",
+      "  v2026.09.28-64d2043",
+      "  Tip: Use /plan to plan execution and reach the right outcome faster.",
+      "  → Plan, search, build anything",
+      "  Grok 4.7 256K Low                                              Auto-review",
+      "  /work/repo",
+      "  · main",
+    ].join("\n");
+    const IDLE_AFTER_TURN = [
+      "  $ touch probe.txt 2.5s",
+      "  finished",
+      "  → Add a follow-up",
+      "  Grok 4.7 256K Low · 8.7%                                       Auto-review",
+      "  /work/repo · main",
+    ].join("\n");
+    const TRUST = [
+      "  ⚠ Workspace Trust Required",
+      "  Cursor Agent can execute code and access files in this directory.",
+      "  Do you trust the contents of this directory?",
+      "  ▶ [a] Trust this workspace",
+      "    [q] Quit",
+    ].join("\n");
+
+    it("is ready on the fresh prompt", () => {
+      expect(assessNativeResumeProbe({ runtime: "cursor", paneCommand: "cursor-agent", paneContent: FRESH }))
+        .toMatchObject({ status: "resumed", code: "active_runtime" });
+    });
+
+    it("is ready after a turn, when the header has scrolled away", () => {
+      expect(assessNativeResumeProbe({ runtime: "cursor", paneCommand: "cursor-agent", paneContent: IDLE_AFTER_TURN }))
+        .toMatchObject({ status: "resumed", code: "active_runtime" });
+    });
+
+    it("reports the workspace-trust panel as attention", () => {
+      expect(assessNativeResumeProbe({ runtime: "cursor", paneCommand: "cursor-agent", paneContent: TRUST }))
+        .toMatchObject({ status: "attention_required", code: "trust_gate" });
+    });
+
+    it("reports a shell as returned_to_shell", () => {
+      expect(assessNativeResumeProbe({ runtime: "cursor", paneCommand: "zsh", paneContent: "➜  repo " }))
+        .toMatchObject({ status: "failed", code: "returned_to_shell" });
+    });
+
+    it("waits while nothing recognisable is on screen", () => {
+      expect(assessNativeResumeProbe({ runtime: "cursor", paneCommand: "cursor-agent", paneContent: "" }))
+        .toMatchObject({ status: "inconclusive", code: "awaiting_runtime" });
+    });
+
+    it("does not take a Cursor screen as ready for another runtime", () => {
+      expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent: FRESH }).status)
+        .not.toBe("resumed");
+    });
+
+    it("builds the manual resume command", () => {
+      expect(buildNativeResumeCommand("cursor", "167733b3-080d-4eb0-a30a-7d22c40b5195"))
+        .toBe("cursor-agent --resume '167733b3-080d-4eb0-a30a-7d22c40b5195'");
+    });
+
+    it("reports a shell pane with residual Cursor output as returned_to_shell", () => {
+      expect(
+        assessNativeResumeProbe({
+          runtime: "cursor",
+          paneCommand: "zsh",
+          paneContent: "  → Add a follow-up",
+        })
+      ).toMatchObject({ status: "failed", code: "returned_to_shell" });
+    });
+
+    it("reports a screen with both trust-required and Cursor prompt line as trust_gate", () => {
+      const mixed = [
+        ...TRUST.split("\n"),
+        "  → Add a follow-up",
+      ].join("\n");
+      expect(assessNativeResumeProbe({ runtime: "cursor", paneCommand: "cursor-agent", paneContent: mixed }))
+        .toMatchObject({ status: "attention_required", code: "trust_gate" });
+    });
+  });
 });

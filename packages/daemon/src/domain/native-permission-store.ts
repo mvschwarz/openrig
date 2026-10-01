@@ -17,11 +17,13 @@ export class NativePermissionStore {
       runtime: string; mode: string; actor: string; reason: string; updated_at: string;
     } | undefined;
     if (!row) return null;
-    if ((row.runtime !== "codex" && row.runtime !== "claude-code") || !/^[A-Za-z][A-Za-z0-9_]*$/.test(row.mode)
-      || (row.runtime === "codex" && row.mode !== "floor" && row.mode !== "full_bypass")) {
+    const validRuntime = row.runtime === "codex" || row.runtime === "claude-code" || row.runtime === "cursor";
+    const codexModeOk = row.runtime !== "codex" || row.mode === "floor" || row.mode === "full_bypass";
+    const cursorModeOk = row.runtime !== "cursor" || ["floor", "full_bypass", "auto_review"].includes(row.mode);
+    if (!validRuntime || !/^[A-Za-z][A-Za-z0-9_]*$/.test(row.mode) || !codexModeOk || !cursorModeOk) {
       throw new Error("Invalid persisted native permission selection; launch refused.");
     }
-    return { runtime: row.runtime, mode: row.mode, actor: row.actor, reason: row.reason, updatedAt: row.updated_at };
+    return { runtime: row.runtime as NativePermissionSelection["runtime"], mode: row.mode, actor: row.actor, reason: row.reason, updatedAt: row.updated_at };
   }
 
   write(nodeId: string, selection: NativePermissionSelection | null, actor: string, reason: string): void {

@@ -272,7 +272,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `agent_ref` | string | yes | — | Reference to an AgentSpec. Must start with `local:` (relative) or `path:` (absolute). Exception: `builtin:terminal` for infrastructure nodes. |
 | `profile` | string | yes | — | Profile name from the referenced AgentSpec. Use `default` for the default profile. Exception: `none` for terminal nodes. |
 | `codex_config_profile` | string | no | — | Codex-only native profile passed as `-p <name>`; letters, numbers, `_`, `.`, `-`. Separate from the AgentSpec `profile`. With the normal launch mode, this replaces OpenRig's explicit workspace-write sandbox flag. A full-bypass policy instead emits danger-full-access and omits this profile argument. |
-| `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `terminal`. |
+| `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `cursor`, `terminal`. |
 | `cwd` | string | yes | — | Working directory for the agent. Resolved relative to the rig root (the directory containing the rig spec). Use `"."` for the rig root itself. Can be overridden at launch time with `rig up --cwd`. |
 | `label` | string | no | — | Human-readable member name. Shown in UI when present. |
 | `model` | string | no | — | Model override. Runtime-specific (e.g., `claude-opus-4-6` for Claude Code). |
@@ -300,6 +300,17 @@ profile: none
 ```
 
 All three must be present together. Any partial combination is a validation error.
+
+### Cursor Seats
+
+`runtime: cursor` runs the Cursor CLI (`cursor-agent`) in the seat's pane. Tested with cursor-agent 2026.09.28.
+
+- Each seat gets its own Cursor config dir (`CURSOR_CONFIG_DIR`) at `$OPENRIG_HOME/state/cursor/<nodeId>`, so the seat's model and approval settings never touch your own `~/.cursor/cli-config.json`.
+- Guidance is merged into `AGENTS.md` in the seat's `cwd`, and skills are installed under `.agents/skills/`, the same targets as Codex.
+- Seats start at Cursor's allowlist approval mode. To let Cursor's auto-review classifier approve commands instead, run `rig seat set-permissions <seat> --mode auto_review --reason "<why>"`; it takes effect on the next managed launch. Changing a Cursor seat's permission mode starts a fresh Cursor chat on its next launch, because Cursor keeps the mode per chat.
+- For activity, OpenRig adds its own entries to `~/.cursor/hooks.json`, and only when `~/.cursor` already exists. Your own entries are kept. To turn this off and remove OpenRig's entries, run `rig config set runtime.cursor.hooks_enabled false`.
+- Set `OPENRIG_CURSOR_HOME` to an absolute path to make the daemon use that directory instead of `~/.cursor` for the hooks file (like `CODEX_HOME` for Codex); the daemon's own tests use it to stay off your real home.
+- Context usage is read from Cursor's own footer line, so it updates on the context monitor's poll and is a whole-percent figure.
 
 ### agent_ref Rules
 

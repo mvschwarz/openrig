@@ -188,6 +188,37 @@ describe("createDaemon startup composition", () => {
     }
   }, 30000); // harness budget (cold createDaemon compose), not product readiness
 
+  it("writes OpenRig's Cursor activity hooks into OPENRIG_CURSOR_HOME, leaving the operator's entries and the real home alone", async () => {
+    const cursorHome = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-cursor-home-"));
+    const openrigHome = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-home-"));
+    const hooksPath = path.join(cursorHome, "hooks.json");
+    fs.writeFileSync(hooksPath, JSON.stringify({ version: 1, hooks: { stop: [{ command: "echo operator" }] } }));
+    const saved = saveEnv("OPENRIG_CURSOR_HOME", "OPENRIG_HOME", "OPENRIG_RUNTIME_CURSOR_HOOKS_ENABLED");
+    process.env.OPENRIG_CURSOR_HOME = cursorHome;
+    process.env.OPENRIG_HOME = openrigHome;
+    delete process.env.OPENRIG_RUNTIME_CURSOR_HOOKS_ENABLED;
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error(""), { code: "ENOENT" });
+    };
+    const tmuxExec: ExecFn = async () => "";
+    let db: ReturnType<typeof createDb> | undefined;
+    try {
+      db = (await createDaemon({ cmuxFactory, tmuxExec })).db;
+      const written = JSON.parse(fs.readFileSync(hooksPath, "utf-8")) as { hooks: Record<string, Array<{ command: string }>> };
+      expect(written.hooks.stop![0]).toEqual({ command: "echo operator" });
+      for (const event of ["beforeSubmitPrompt", "preToolUse", "stop"]) {
+        expect(written.hooks[event]!.some((e) => /activity-relay\.cjs/.test(e.command))).toBe(true);
+      }
+      // Nothing was created under the temp OpenRig home's .cursor either: only OPENRIG_CURSOR_HOME is used.
+      expect(fs.existsSync(path.join(openrigHome, ".cursor"))).toBe(false);
+    } finally {
+      restoreEnv(saved);
+      db?.close();
+      fs.rmSync(cursorHome, { recursive: true, force: true });
+      fs.rmSync(openrigHome, { recursive: true, force: true });
+    }
+  }, 30000);
+
   it("defaults terminal auth to local-trusted mode without minting a token file", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-terminal-auth-"));
     const priorHome = process.env.OPENRIG_HOME;
