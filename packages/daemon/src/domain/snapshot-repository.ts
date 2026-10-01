@@ -112,7 +112,12 @@ export class SnapshotRepository {
     const candidates = this.db.prepare("SELECT * FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC, rowid DESC")
       .all(rigId) as SnapshotRow[];
     const selectedIndex = candidates.findIndex((candidate) => candidate.id === snapshot!.id);
-    const newer = candidates.slice(0, selectedIndex).flatMap((row) => {
+    // A concurrent pruner can remove the selected row after it was read. Its
+    // insertion position is then unknown, so only strictly newer timestamps count.
+    const newerRows = selectedIndex < 0
+      ? candidates.filter((row) => Date.parse(sqliteUtc(row.created_at)) > Date.parse(sqliteUtc(snapshot!.createdAt)))
+      : candidates.slice(0, selectedIndex);
+    const newer = newerRows.flatMap((row) => {
       const candidate = this.restoreUsableRow(row);
       return candidate ? [candidate] : [];
     })

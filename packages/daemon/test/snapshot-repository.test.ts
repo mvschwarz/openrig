@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -139,6 +142,43 @@ describe("SnapshotRepository", () => {
     expect(automatic.ok && automatic.snapshot.id).toBe("snap-a-second");
     expect(automatic.ok && automatic.selection.newerUsableAlternative).toBeNull();
     expect(() => repo.listSnapshots("rig-1")).toThrow();
+  });
+
+  it.each([false, true])("a second SQLite writer pruning the selected row preserves strict newer fallback (newer: %s)", (hasNewer) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-phase-"));
+    const file = path.join(directory, "snapshots.db");
+    const reader = createDb(file);
+    const writer = createDb(file);
+    const selectionRepo = new SnapshotRepository(reader);
+    let restorePhase = () => {};
+    try {
+      migrate(reader, [coreSchema, snapshotsSchema]);
+      writer.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'r01')").run();
+      const insert = writer.prepare("INSERT INTO snapshots (id, rig_id, kind, data, created_at) VALUES (?, 'rig-1', ?, ?, ?)");
+      insert.run("older-last", "manual", JSON.stringify(sampleData()), "2025-01-01 00:00:00");
+      insert.run("older", "manual", JSON.stringify(sampleData()), "2026-01-01 00:00:00");
+      insert.run("selected", "auto-pre-down", JSON.stringify(sampleData()), "2026-02-01 00:00:00");
+      insert.run("same-second", "manual", JSON.stringify(sampleData()), "2026-02-01 00:00:00");
+      if (hasNewer) insert.run("strictly-newer", "manual", JSON.stringify(sampleData()), "2026-03-01 00:00:00");
+      const select = selectionRepo.findLatestRestoreUsable.bind(selectionRepo);
+      const phase = vi.spyOn(selectionRepo, "findLatestRestoreUsable").mockImplementation((rigId) => {
+        const actual = select(rigId);
+        expect(actual?.id).toBe("selected");
+        writer.prepare("DELETE FROM snapshots WHERE id = ?").run(actual!.id);
+        return actual;
+      });
+      restorePhase = () => { phase.mockRestore(); };
+      const outcome = selectionRepo.selectRestoreUsable("rig-1");
+      expect(outcome.ok && outcome.snapshot.id).toBe("selected");
+      expect(outcome.ok && outcome.selection.newerUsableAlternative?.snapshotId).toBe(hasNewer ? "strictly-newer" : undefined);
+      expect(outcome.ok && outcome.selection.newerUsableAlternative).toEqual(hasNewer ? expect.objectContaining({ snapshotId: "strictly-newer" }) : null);
+      expect(writer.prepare("SELECT id FROM snapshots WHERE id = 'selected'").get()).toBeUndefined();
+    } finally {
+      restorePhase();
+      writer.close();
+      reader.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("getLatestSnapshot with no snapshots -> null", () => {
