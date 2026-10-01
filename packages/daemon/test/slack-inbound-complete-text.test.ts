@@ -7,7 +7,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
-import { InboundRouter } from "../src/domain/gateway/slack/inbound.js";
+import { InboundRouter, type SlackEvent } from "../src/domain/gateway/slack/inbound.js";
 import { makeQueuePorts } from "../src/domain/gateway/slack/queue-access.js";
 import { SeenStore, DeadLetterStore } from "../src/domain/gateway/slack/state-store.js";
 
@@ -17,7 +17,7 @@ it("keeps complete short and long human briefs durable while bounding summaries 
   migrate(db, ALL_MIGRATIONS);
   const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
   const seen = new SeenStore(join(home, "seen.jsonl"));
-  const deadLetter = new DeadLetterStore(join(home, "dead.jsonl"));
+  const deadLetter = new DeadLetterStore<SlackEvent>(join(home, "dead.jsonl"));
   const router = new InboundRouter({
     queue: makeQueuePorts(repo), seen, deadLetter, destination: "operator-agent@kernel",
     resolveSender: () => ({ admitted: true, source: "human-fixture@external" }),
