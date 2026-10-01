@@ -548,6 +548,71 @@ describe("rig proof add --replace swaps the entry and never writes through links
     expect(stagingLeftovers()).toEqual([]);
   });
 
+  it("keeps an existing regular artifact's permission bits; a symlinked name gets default permissions", async () => {
+    const priv = path.join(proofDir, "private.md");
+    fs.writeFileSync(priv, "original\n");
+    fs.chmodSync(priv, 0o600);
+    const inode = fs.statSync(priv).ino;
+    await add("private.md", ["--replace"]);
+    expect(process.exitCode).toBeUndefined();
+    expect(fs.statSync(priv).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(priv).ino).not.toBe(inode);
+    expect(fs.readFileSync(priv, "utf8")).toContain("replacement body");
+
+    const outside = path.join(workRoot, "outside-mode");
+    fs.mkdirSync(outside);
+    const linkedTarget = path.join(outside, "secret.png");
+    fs.writeFileSync(linkedTarget, png("mode victim"));
+    fs.chmodSync(linkedTarget, 0o600);
+    fs.symlinkSync(linkedTarget, path.join(proofDir, "via-link.md"));
+    await add("via-link.md", ["--replace"]);
+    expect(fs.lstatSync(path.join(proofDir, "via-link.md")).mode & 0o777).toBe(0o666 & ~process.umask());
+    expect(fs.statSync(linkedTarget).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(linkedTarget)).toEqual(png("mode victim"));
+  });
+
+  it("replaces a read-only artifact on explicit --replace and keeps it read-only", async () => {
+    const ro = path.join(proofDir, "frozen.md");
+    fs.writeFileSync(ro, "original\n");
+    fs.chmodSync(ro, 0o444);
+    await add("frozen.md", ["--replace"]);
+    expect(process.exitCode).toBeUndefined();
+    expect(fs.statSync(ro).mode & 0o777).toBe(0o444);
+    expect(fs.readFileSync(ro, "utf8")).toContain("replacement body");
+  });
+
+  it("reports the write failure, not a later close failure, and keeps the target", async () => {
+    const target = path.join(proofDir, "wc.md");
+    fs.writeFileSync(target, "original\n");
+    const realWrite = fs.writeFileSync;
+    const realClose = fs.closeSync;
+    vi.spyOn(fs, "writeFileSync").mockImplementation(((file: unknown, ...rest: unknown[]) => {
+      if (typeof file === "number") throw Object.assign(new Error("no space left"), { code: "ENOSPC" });
+      return (realWrite as (...a: unknown[]) => void)(file, ...rest);
+    }) as typeof fs.writeFileSync);
+    vi.spyOn(fs, "closeSync").mockImplementation(((fd: number) => {
+      realClose(fd);
+      throw Object.assign(new Error("i/o error on close"), { code: "EIO" });
+    }) as typeof fs.closeSync);
+    await expect(add("wc.md", ["--replace"])).rejects.toMatchObject({ code: "ENOSPC" });
+    expect(errs.join("\n")).toContain("also failed");
+    expect(fs.readFileSync(target, "utf8")).toBe("original\n");
+    expect(stagingLeftovers()).toEqual([]);
+  });
+
+  it("a close failure alone still refuses the rename", async () => {
+    const target = path.join(proofDir, "c.md");
+    fs.writeFileSync(target, "original\n");
+    const realClose = fs.closeSync;
+    vi.spyOn(fs, "closeSync").mockImplementation(((fd: number) => {
+      realClose(fd);
+      throw Object.assign(new Error("i/o error on close"), { code: "EIO" });
+    }) as typeof fs.closeSync);
+    await expect(add("c.md", ["--replace"])).rejects.toMatchObject({ code: "EIO" });
+    expect(fs.readFileSync(target, "utf8")).toBe("original\n");
+    expect(stagingLeftovers()).toEqual([]);
+  });
+
   it("reports the original failure when cleanup also fails", async () => {
     const target = path.join(proofDir, "r.md");
     fs.writeFileSync(target, "original\n");
