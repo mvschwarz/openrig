@@ -18,7 +18,11 @@ describe("auto-mode startup content requires the launched Claude identity", () =
   const dbs: ReturnType<typeof createFullTestDb>[] = [];
   afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
 
-  it.each(["exact", "exit-zsh", "exit-bash", "missing", "wrong-token", "ambiguous", "background", "replaced-pane", "replaced-process", "unavailable", "plain-shell", "resume-missing"])("startup: %s", async (mode) => {
+  it.each(["exact", "exit-zsh", "exit-bash", "missing", "wrong-token", "ambiguous", "background", "replaced-pane", "replaced-process", "unavailable", "plain-shell", "resume-missing", "native", "native-resume", "selected-custom", "selected-changed"])("startup: %s", async (mode) => {
+    const isNative = mode.startsWith("native") || mode.startsWith("selected-");
+    const good = ["exact", "native", "native-resume", "selected-custom"].includes(mode);
+    const resumes = mode === "resume-missing" || mode === "native-resume";
+    const executable = mode.startsWith("selected-") ? "/fixture/custom/2.1.285" : "/fixture/.local/share/claude/versions/2.1.285";
     const db = createFullTestDb(); dbs.push(db);
     const rigRepo = new RigRepository(db), sessionRegistry = new SessionRegistry(db), eventBus = new EventBus(db);
     const rig = rigRepo.createRig("auto-startup"), node = rigRepo.addNode(rig.id, "test.c", { runtime: "claude-code" });
@@ -30,8 +34,8 @@ describe("auto-mode startup content requires the launched Claude identity", () =
       processReads++;
       if (mode === "unavailable") throw new Error("fixture observation unavailable");
       const native = { pid: 102, ppid: 101, pgid: mode === "background" ? 999 : 101, tpgid: 101,
-        executableName: "claude", startedAt: mode === "replaced-process" && processReads > 1 ? "changed" : startedAt,
-        command: `/opt/claude.exe --permission-mode auto --session-id ${mode === "wrong-token" ? "other-token" : token} --name ${name}` };
+        executableName: isNative ? "2.1.285" : "claude", startedAt: mode === "replaced-process" && processReads > 1 ? "changed" : startedAt,
+        command: `${isNative ? executable : "/opt/claude.exe"} --permission-mode auto ${resumes ? "--resume" : "--session-id"} ${mode === "wrong-token" ? "other-token" : token} --name ${name}` };
       return [
         { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "-bash", startedAt },
         { pid: 101, ppid: 100, pgid: 101, tpgid: 101, executableName: "sh", command: "/bin/sh fixture-launch.txt", startedAt },
@@ -50,7 +54,7 @@ describe("auto-mode startup content requires the launched Claude identity", () =
       sendKeys: vi.fn(async (_target: string, keys: string[]) => { calls.push({ kind: "submit", keys }); return { ok: true as const }; }),
     } as unknown as TmuxAdapter;
     const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {}, sessionIdFactory: () => token,
-      claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`, assertCurrent: () => {}, configDir: "/fixture" }) } as unknown as ClaudeManagedLaunch,
+      claudeManagedLaunch: { prepare: async () => ({ command: (args: readonly string[]) => `claude ${args.join(" ")}`, assertCurrent: () => {}, configDir: "/fixture", ...(isNative ? { executable: mode === "selected-changed" ? "/fixture/custom/2.1.286" : executable } : {}) }) } as unknown as ClaudeManagedLaunch,
       fsOps: { exists: () => false, readFile: () => payload, writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} },
     });
     const binding: NodeBinding = { id: "binding", nodeId: node.id, tmuxSession: name, tmuxPane: "%1", tmuxWindow: null,
@@ -60,16 +64,16 @@ describe("auto-mode startup content requires the launched Claude identity", () =
       plan: { runtime: "claude-code", cwd: "/fixture", entries: [], startup: { files: [], actions: [] }, conflicts: [], noOps: [] } as never,
       resolvedStartupFiles: [{ path: "startup.txt", absolutePath: "/fixture/startup.txt", ownerRoot: "/fixture", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }],
       startupActions: [], isRestore: false, sessionName: name, readinessTimeoutMs: 1,
-      ...(mode === "resume-missing" ? { resumeToken: token, resumeType: "claude_id", allowFreshFallback: true } : {}),
+      ...(resumes ? { resumeToken: token, resumeType: "claude_id", allowFreshFallback: true } : {}),
     });
     // Launch authorization is distinct from permission to paste/submit startup content.
-    expect(calls.filter(c => c.kind === "launch")).toEqual([{ kind: "launch", text: `claude --permission-mode auto ${mode === "resume-missing" ? "--resume" : "--session-id"} ${token} --name ${name}` }]);
+    expect(calls.filter(c => c.kind === "launch")).toEqual([{ kind: "launch", text: `claude --permission-mode auto ${resumes ? "--resume" : "--session-id"} ${token} --name ${name}` }]);
     if (mode === "resume-missing") expect(result.startupStatus).toBe("attention_required");
     expect({ ok: result.ok, content: calls.filter(c => c.kind === "content"), submit: calls.filter(c => c.kind === "submit") }).toEqual({
-      ok: mode === "exact", content: mode === "exact" ? [{ kind: "content", text: payload }] : [], submit: mode === "exact" ? [{ kind: "submit", keys: ["C-m"] }] : [],
+      ok: good, content: good ? [{ kind: "content", text: payload }] : [], submit: good ? [{ kind: "submit", keys: ["C-m"] }] : [],
     });
     // Orchestrator checks readiness before content and once more at completion.
-    if (mode === "exact") expect(listProcesses).toHaveBeenCalledTimes(4);
+    if (good && !resumes) expect(listProcesses).toHaveBeenCalledTimes(4);
     if (mode === "plain-shell") expect(listProcesses).not.toHaveBeenCalled();
   });
 });
