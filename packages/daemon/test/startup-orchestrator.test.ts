@@ -38,7 +38,9 @@ function mockAdapter(overrides?: Partial<RuntimeAdapter>): RuntimeAdapter {
     project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
     deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
     checkReady: vi.fn(async () => ({ ready: true })),
-    launchHarness: vi.fn(async () => ({ ok: true })),
+    // A successful managed Claude resume returns the identity it resumed.
+    launchHarness: vi.fn(async (_binding, opts) => ({ ok: true,
+      ...(opts.resumeToken ? { resumeToken: opts.resumeToken, resumeType: "claude_id" } : {}) })),
     ...overrides,
   };
 }
@@ -162,6 +164,30 @@ describe("StartupOrchestrator", () => {
     expect(result.ok).toBe(true);
     expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(seed.nodeId)).toEqual(before);
     expect(adapter.deliverStartup).toHaveBeenCalledWith([], expect.anything());
+  });
+
+  it.each(["missing", "late-hook"])("managed Claude resume checks final row agreement: %s", async (mode) => {
+    const seed = seedSession();
+    const token = "requested-native";
+    const adapter = mockAdapter(mode === "missing"
+      ? { launchHarness: vi.fn(async () => ({ ok: true })) } : {});
+    const t = mockTmux({ sendText: vi.fn(async () => {
+      sessionRegistry.updateResumeToken(seed.sessionId, "claude_id", "other-native", "hook");
+      return { ok: true as const };
+    }) });
+    const orch = createOrchestrator({ tmux: t });
+    const result = await orch.startNode(makeInput(seed, {
+      adapter, resumeToken: token, isRestore: true,
+      startupActions: mode === "late-hook" ? [makeAction()] : [],
+    }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(db.prepare("SELECT status, startup_status, resume_token, resume_provenance FROM sessions WHERE id = ?").get(seed.sessionId))
+      .toEqual({ status: "running", startup_status: "attention_required",
+        resume_token: mode === "late-hook" ? "other-native" : null, resume_provenance: mode === "late-hook" ? "hook" : null });
+    expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+    expect(adapter.launchHarness).toHaveBeenCalledOnce();
+    expect(t.killSession).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(seed.nodeId)).toEqual([]);
   });
 
   it.each(["launch", "readiness"])("pod-aware exact resume cannot continue fresh context after a %s gate", async (gate) => {

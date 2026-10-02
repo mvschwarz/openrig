@@ -448,6 +448,17 @@ export class StartupOrchestrator {
       }
     }
 
+    // Managed Claude resume needs agreement on the launched row, not a successful
+    // scrape write: an equal hook/operator token may reject that lower-rank write.
+    // Check after readiness/actions so a concurrent protected update is included.
+    if (!input.skipHarnessLaunch && input.adapter.runtime === "claude-code"
+      && continuityOutcome === "resumed" && input.resumeToken
+      && !this.sessionRegistry.resumeTokenMatches(input.sessionId, "claude_id", input.resumeToken.trim())) {
+      return this.fail(input, "attention_required", [
+        "Native resume was observed but its current session metadata conflicts or could not be retained; session preserved.",
+      ]);
+    }
+
     // 8. Mark ready
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId });

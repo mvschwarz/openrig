@@ -1711,7 +1711,8 @@ describe("RestoreOrchestrator", () => {
   });
 
   it.each(["exact", "wrong-token", "foreign-process", "replaced-pane", "replaced-process",
-    "chooser", "login", "trust", "mcp", "error", "missing-token", "hook-token"])(
+    "chooser", "login", "trust", "mcp", "error", "missing-token",
+    "hook-token", "hook-equal", "operator-token", "operator-equal", "hook-wrong-type", "hook-late"])(
     "pod-aware headerless Claude resume keeps native proof and new-row metadata: %s", async (mode) => {
       const { ClaudeCodeAdapter } = await import("../src/adapters/claude-code-adapter.js");
       const token = "00000000-0000-4000-8000-000000000086";
@@ -1739,6 +1740,11 @@ describe("RestoreOrchestrator", () => {
       };
       const screen = `${gates[mode] ?? "Restored conversation"}\n❯\u00a0\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`;
       let launched = false, samples = 0;
+      const protectedSource = mode.startsWith("hook-") ? "hook" : mode.startsWith("operator-") ? "operator" : null;
+      const protectedToken = mode.endsWith("-equal") || mode === "hook-wrong-type" ? token : "protected-other-token";
+      const identitySql = "SELECT resume_type, resume_token, resume_provenance, resume_last_verified, resume_last_probe_status FROM sessions WHERE id = ?";
+      let protectedIdentity: unknown;
+      let protectedBinding: unknown;
       const rows = managedClaudeRows(mode === "wrong-token" ? "different-session" : token);
       rows[2]!.command = `/fixture/.local/share/claude/versions/2.1.287 --dangerously-skip-permissions --resume ${mode === "wrong-token" ? "different-session" : token} --name dev-owner@headerless`;
       rows[2]!.executableName = mode === "foreign-process" ? "printf" : "2.1.287";
@@ -1751,9 +1757,13 @@ describe("RestoreOrchestrator", () => {
         createSession: vi.fn(async () => { launched = true; return { ok: true as const }; }),
         hasSession: vi.fn(async () => launched),
         getPaneCommand: vi.fn(async () => {
-          if (mode === "hook-token") {
+          if (protectedSource && !protectedIdentity && (mode !== "hook-late" || samples > 0)) {
             const latest = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as { id: string };
-            sessionRegistry.updateResumeToken(latest.id, "claude_id", "hook-owned-token", "hook");
+            sessionRegistry.updateResumeToken(latest.id, mode === "hook-wrong-type" ? "codex_id" : "claude_id", protectedToken, protectedSource);
+            protectedIdentity = db.prepare(identitySql).get(latest.id);
+            const binding = sessionRegistry.getBindingForNode(node.id)!;
+            protectedBinding = { id: binding.id, pane: binding.tmuxPane, session: binding.tmuxSession,
+              generation: sessionRegistry.currentOccupantTenure(node.id)?.generationUuid };
           }
           return "2.1.287";
         }),
@@ -1768,19 +1778,32 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) return;
       const outcome = result.result.nodes[0]!;
       const latest = db.prepare("SELECT id, resume_token AS resumeToken, startup_status AS startupStatus FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as { id: string; resumeToken: string | null; startupStatus: string };
-      if (mode === "exact") {
+      if (protectedSource) {
+        expect(protectedIdentity).toBeDefined();
+        expect(db.prepare(identitySql).get(latest.id)).toEqual(protectedIdentity);
+        const binding = sessionRegistry.getBindingForNode(node.id)!;
+        expect({ id: binding.id, pane: binding.tmuxPane, session: binding.tmuxSession,
+          generation: sessionRegistry.currentOccupantTenure(node.id)?.generationUuid }).toEqual(protectedBinding);
+      }
+      if (mode === "exact" || mode.endsWith("-equal")) {
         expect({ status: outcome.status, token: latest.resumeToken }).toEqual({ status: "resumed", token });
         expect(latest.id).not.toBe(old.id);
         expect(latest.startupStatus).toBe("ready");
-      } else if (mode === "hook-token") {
-        expect(latest.resumeToken).toBe("hook-owned-token"); // lower-ranked launch observation cannot overwrite a hook
+      } else if (protectedSource) {
+        expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "attention_required", startup: "attention_required" });
+        expect(latest.resumeToken).toBe(protectedToken);
+        expect(outcome.error).toContain("session metadata");
+        expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
       } else {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
         else if (mode === "chooser") expect(latest.resumeToken).toBe(token); // attempted lineage, not readiness
         else expect(latest.resumeToken).toBeNull();
       }
+      expect(tmux.killSession).not.toHaveBeenCalled();
       if (mode !== "missing-token") {
+        expect(tmux.createSession).toHaveBeenCalledTimes(1);
+        expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
         expect(tmux.sendText).toHaveBeenCalledTimes(1); // launch command only, no startup replay
         expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume ${token}`));
         expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
@@ -1805,7 +1828,7 @@ describe("RestoreOrchestrator", () => {
     sessionRegistry.updateStatus(session.id, "exited");
     db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
-    const launchSpy = vi.fn(async () => ({ ok: true as const, resumeToken: "new-token", resumeType: "claude_id" }));
+    const launchSpy = vi.fn(async () => ({ ok: true as const, resumeToken: "resume-token-123", resumeType: "claude_id" }));
     const mockAdapter = {
       runtime: "claude-code",
       listInstalled: vi.fn(async () => []),
