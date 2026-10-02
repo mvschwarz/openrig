@@ -159,6 +159,9 @@ UI default, and browser access with its docs page. The changes since 0.6.3:
 
 ### Repository
 
+- The onboarding text that new seats read now covers both ways a build goes wrong,
+  and the skills router says a project, rig or machine may add its own skills
+  ([#303](https://github.com/mvschwarz/openrig/pull/303)).
 - Skip release-surface tag diffs when old tags are absent
   ([#152](https://github.com/mvschwarz/openrig/pull/152)), and ask security
   and integration PRs for practical scenarios
