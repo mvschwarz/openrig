@@ -678,8 +678,28 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private provisionManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
     // OPR.0.4.8.2 agnostic rip-out: provisionRigPermissions (C2) removed — OpenRig no longer
     // authors any config-file permission policy. Trust/onboarding (C3/C4) are neutral plumbing, kept.
-    this.provisionWorkspaceTrust(binding.cwd ?? null);
-    this.provisionOnboardingState();
+    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    const statePath = this.claudeManagedLaunch
+      ? (binding.cwd ? this.claudeManagedLaunch.configPaths(binding.cwd).statePath : undefined)
+      : (home ? nodePath.join(home, ".claude.json") : undefined);
+    if (!statePath) return;
+    // Preserve every existing field. Unreadable/malformed/non-object state is
+    // left untouched by the caller's existing best-effort bootstrap boundary.
+    const state = this.fs.exists(statePath) ? this.readJsonObjectStrict(statePath) : {};
+    if (binding.cwd) {
+      const projects = this.readJsonObjectField(state, "projects");
+      if (Object.hasOwn(state, "projects") && projects !== state["projects"]) throw new Error("Claude bootstrap projects must be a JSON object; existing state preserved.");
+      for (const trustKey of this.workspaceTrustKeys(binding.cwd)) {
+        const projectState = this.readJsonObjectField(projects, trustKey);
+        if (Object.hasOwn(projects, trustKey) && projectState !== projects[trustKey]) throw new Error("Claude bootstrap project state must be a JSON object; existing state preserved.");
+        projectState["hasTrustDialogAccepted"] = true;
+        projects[trustKey] = projectState;
+      }
+      state["projects"] = projects;
+    }
+    state["hasCompletedOnboarding"] = true;
+    this.fs.mkdirp(nodePath.dirname(statePath));
+    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
   }
 
   // OPR.0.4.8.2 agnostic rip-out: the CONVENIENCE_BASELINE (global `Bash(rig:*)` allow) and its
@@ -687,35 +707,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   // `_openrig_provenance` marker) are DELETED. OpenRig no longer authors any config-file permission
   // policy; the harness-native permission surface is the control surface. Existing provenance-marked
   // user files are NOT retro-scrubbed — the new code simply never touches settings.json.
-
-  private provisionWorkspaceTrust(cwd: string | null): void {
-    if (!cwd) return;
-    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    if (!home) return;
-
-    const statePath = nodePath.join(home, ".claude.json");
-    const state = this.readJsonObject(statePath);
-    const projects = this.readJsonObjectField(state, "projects");
-
-    for (const trustKey of this.workspaceTrustKeys(cwd)) {
-      const projectState = this.readJsonObjectField(projects, trustKey);
-      projectState["hasTrustDialogAccepted"] = true;
-      projects[trustKey] = projectState;
-    }
-
-    state["projects"] = projects;
-    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
-  }
-
-  private provisionOnboardingState(): void {
-    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    if (!home) return;
-
-    const statePath = nodePath.join(home, ".claude.json");
-    const state = this.readJsonObject(statePath);
-    state["hasCompletedOnboarding"] = true;
-    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
-  }
 
   private workspaceTrustKeys(cwd: string): string[] {
     const keys = new Set<string>([nodePath.resolve(cwd)]);
