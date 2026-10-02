@@ -35,8 +35,10 @@ async function fixture() {
     commands.push(command); hooks.exec?.(command);
     if (command.startsWith("tmux new-session")) { panes.set("worker@fixture", "%0"); return ""; }
     if (command.startsWith("tmux has-session") || command.startsWith("tmux list-panes")) {
-      const name = [...panes.keys()].find(name => command.includes(`'${name}'`));
-      if (!name) throw Error("can't find session");
+      // Both exact session probes (=name) and window-targeted pane listings
+      // (=name:) address the same canonical session in the fixture server.
+      const name = /-t '([^']+)'/.exec(command)?.[1]?.replace(/^=/, "").replace(/:$/, "");
+      if (!name || !panes.has(name)) throw Error("can't find session");
       return command.startsWith("tmux list-panes") ? `${panes.get(name)}|0|/inert|80|24|1\n` : "";
     }
     return "";
