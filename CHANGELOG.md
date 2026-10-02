@@ -8,14 +8,32 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
-## [0.6.4-rc.1]
+## [0.6.4]
 
-Release candidate for 0.6.4, cut from main at `afde814f`. This is a pre-release
-candidate, not a stable release. Only admitted blocker fixes change it before
-0.6.4. These notes make no test claims; the final verification summary will
-state the tested environments and known limits. The changes since 0.6.3:
+0.6.4 is the code tested and published as the 0.6.4-rc.1 release candidate,
+now the normal release. Only its version and these notes changed. It was cut
+from main at `afde814f` and has changed since only by the repairs below, the web
+UI default, and browser access with its docs page. The changes since 0.6.3:
 
-### Release-candidate blocker fixes
+### Two changes you might notice
+
+- Turn the web UI and its terminal connection off by default. Turn it on with
+  `rig config set ui.enabled true`, then stop and start the daemon; while it is
+  off, opening the page and `rig ui open` show those steps
+  ([#301](https://github.com/mvschwarz/openrig/pull/301) via
+  [#303](https://github.com/mvschwarz/openrig/pull/303)).
+- Check which address and which web page a daemon request comes from. The CLI,
+  the TUI, agents, the queue, Slack, and other OpenRig hosts that reach this
+  machine by its IP address, its own hostname or its own Tailscale name are
+  unaffected. A custom DNS name, an `/etc/hosts` alias or a reverse-proxy domain
+  needs `OPENRIG_ALLOWED_HOSTS`; a local app or development server calling the
+  daemon from a browser on another port needs `OPENRIG_ALLOWED_ORIGINS`. Each
+  refusal names the setting, and both need a daemon restart. See
+  [Browser access and allowed addresses](docs/reference/browser-access.md)
+  ([#358](https://github.com/mvschwarz/openrig/pull/358),
+  [#372](https://github.com/mvschwarz/openrig/pull/372)).
+
+### Repairs made after the candidate was cut
 
 - Keep binary files byte-identical in rig bundles
   ([#245](https://github.com/mvschwarz/openrig/issues/245),
@@ -28,6 +46,45 @@ state the tested environments and known limits. The changes since 0.6.3:
   refusing once stopping it had ended the tmux server
   ([#265](https://github.com/mvschwarz/openrig/issues/265),
   [#267](https://github.com/mvschwarz/openrig/pull/267)).
+- Give Claude's capability check five seconds instead of one when a managed
+  Claude launch with an explicit permission mode reads `claude --help`. Answers
+  within the longer budget can succeed; a timeout can still refuse the launch.
+  Thanks to [@m3ac-AllbrittenJ](https://github.com/m3ac-AllbrittenJ) for
+  [#260](https://github.com/mvschwarz/openrig/issues/260)
+  ([#271](https://github.com/mvschwarz/openrig/pull/271)).
+- Launch seats after an upgrade removes the old version: fresh launches and
+  restores use the running version's built-in startup files. Thanks to
+  [@m3ac-AllbrittenJ](https://github.com/m3ac-AllbrittenJ) for
+  [#261](https://github.com/mvschwarz/openrig/issues/261)
+  ([#269](https://github.com/mvschwarz/openrig/pull/269)).
+- Accept ordinary messages again when a managed Claude seat resumes in auto mode,
+  once OpenRig confirms the same Claude process is running in its pane; a resume
+  it can't confirm asks for attention instead of starting a fresh conversation
+  ([#287](https://github.com/mvschwarz/openrig/pull/287), toward
+  [#273](https://github.com/mvschwarz/openrig/issues/273)).
+- Recognize a native Claude install behind the managed shell wrapper, including
+  versioned install paths. When the runtime can't be observed, ordinary delivery
+  goes ahead with a warning; a pane that is plainly an idle shell, or the wrong
+  recipient, is still refused
+  ([#310](https://github.com/mvschwarz/openrig/pull/310), a follow-up to
+  [#197](https://github.com/mvschwarz/openrig/issues/197), reported by
+  [@dmelo](https://github.com/dmelo)).
+- Keep an uncertain launch when restoring an older Claude seat: if the resume
+  check can't tell whether the conversation came back, the restore keeps the new
+  session and asks for attention instead of closing it
+  ([#345](https://github.com/mvschwarz/openrig/issues/345),
+  [#346](https://github.com/mvschwarz/openrig/pull/346)).
+- Replace proof files without writing through links: `rig proof add --replace`
+  now swaps in a new file, so a symlinked or hard-linked artifact no longer
+  overwrites the other path's contents
+  ([#307](https://github.com/mvschwarz/openrig/pull/307)).
+- Store a registered person's Slack message with its complete text (anything
+  past 1,800 characters was lost before), and log a storage error while the
+  gateway retries undelivered events instead of letting it escape. Thanks to
+  [@rudycelekli](https://github.com/rudycelekli) for
+  [#361](https://github.com/mvschwarz/openrig/issues/361) and
+  [#375](https://github.com/mvschwarz/openrig/issues/375) and their fixes
+  ([#404](https://github.com/mvschwarz/openrig/pull/404)).
 
 ### Messaging and delivery
 
@@ -106,6 +163,9 @@ state the tested environments and known limits. The changes since 0.6.3:
   ([#152](https://github.com/mvschwarz/openrig/pull/152)), and ask security
   and integration PRs for practical scenarios
   ([#224](https://github.com/mvschwarz/openrig/pull/224)).
+
+See [0.6.4 release notes](docs/releases/v0.6.4.md) for how it was tested, the
+tested environments and the known limits.
 
 ## [0.6.3]
 
