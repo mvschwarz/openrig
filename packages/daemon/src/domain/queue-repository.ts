@@ -5,7 +5,7 @@ import type { EventBus } from "./event-bus.js";
 import { loadHumanRegistry, resolveRegisteredHumanAddress, type LoadResult } from "./gateway/human-registry.js";
 import { resolveExternal } from "./gateway/external-admission.js";
 import type { PersistedEvent } from "./types.js";
-import { QueueTransitionLog, type OwnerNotificationLevel, type RecentQueueTransitionScope } from "./queue-transition-log.js";
+import { QueueTransitionLog, type OwnerNotificationLevel, type QueueTransition, type RecentQueueTransitionScope } from "./queue-transition-log.js";
 import { WAKE_INTENT_PREFIX, type OutboxHandler } from "./outbox-handler.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
@@ -3461,8 +3461,8 @@ export class QueueRepository {
 
   /** Null means legacy/no OWNER history; inactive means OWNER history exists
    *  but the row no longer projects a current human-notification episode. */
-  private currentDeliveryEpisode(item: QueueItem): { notificationKey: string; startedAt: string } | "inactive" | null {
-    let transition = this.transitionLog.latestOwnerNotificationForQitem(item.qitemId);
+  private currentDeliveryEpisode(item: QueueItem, knownOwner?: QueueTransition): { notificationKey: string; startedAt: string } | "inactive" | null {
+    let transition = knownOwner ?? this.transitionLog.latestOwnerNotificationForQitem(item.qitemId);
     if (!transition) return null;
     // A human-decision-resolved notice written BY the transition that closed the row (a human's direct reply closing
     // it) is never posted: the Slack outbound lists active rows only (listHumanAlerts), and that human just answered.
@@ -3508,12 +3508,23 @@ export class QueueRepository {
    *  history, inactive episodes, never-posted and transport-failed all read false. Same derivation
    *  as deliveryOutcomeFor; it reads row fields, never the waiting view. */
   humanNotificationPostedThisEpisode(qitemId: string): boolean {
-    if (!this.hasQueueTransitionsTable || !this.transitionLog.latestOwnerNotificationForQitem(qitemId)) return false;
-    const ledger = this.deliveryLedger(qitemId);
-    return ledger !== null && ledger.episode !== null && ledger.outcome === "posted";
+    if (!this.hasQueueTransitionsTable) return false;
+    // Only the ask's own notification binds a recipient: create writes it in state pending, to the destination of
+    // that moment. A park notice (its recipient is not retained), a resolution notice, or a later destination change
+    // (routeToFallback opens no new episode) cannot establish that the current destination received this ask.
+    const owner = this.transitionLog.latestOwnerNotificationForQitem(qitemId);
+    if (!owner || owner.state !== "pending") return false;
+    if (owner.ownerNotificationKind !== "human-required" && owner.ownerNotificationKind !== "human-update") return false;
+    const rerouted = this.db.prepare(
+      "SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_id > ? AND transition_note LIKE 'fallback-routed:%' LIMIT 1",
+    ).get(qitemId, owner.transitionId);
+    if (rerouted) return false;
+    // The ledger's episode exists only when the destination resolves to a registered human (aliases included).
+    const ledger = this.deliveryLedger(qitemId, owner);
+    return ledger !== null && ledger.outcome === "posted" && ledger.episode?.notificationKey === `${qitemId}:${owner.transitionId}`;
   }
 
-  private deliveryLedger(qitemId: string): { outcome: "posted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null } | null {
+  private deliveryLedger(qitemId: string, knownOwner?: QueueTransition): { outcome: "posted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null } | null {
     // Some repository-only fixtures intentionally model the pre-transition
     // schema. Delivery projection is additive there: absence means no verdict,
     // never a list failure.
@@ -3524,7 +3535,7 @@ export class QueueRepository {
     // The delivery episode uses row fields, not the waiting/backstop view.
     // Keep this read fresh without repeating the caller's recovery-tag scan.
     const item = this.rowToItem(row, false);
-    const episodeState = this.currentDeliveryEpisode(item);
+    const episodeState = this.currentDeliveryEpisode(item, knownOwner);
     if (episodeState === "inactive") return null;
     const episode = episodeState;
     const notes = this.db.prepare(

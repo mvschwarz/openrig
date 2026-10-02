@@ -784,6 +784,12 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
 describe("#514 unclaimed sweep and a pending ask posted to a registered human", () => {
   const OWNER = { entityId: "human-owner", class: "human", displayName: "Owner", address: "human-owner@external",
     connectorBindings: [{ connector: "slack", ref: "U0OWNER", primary: true }], prefs: {} } as unknown as HumanFragment;
+  const human = (entityId: string) => ({ entityId, class: "human", displayName: entityId, address: `${entityId}@external`,
+    connectorBindings: [], prefs: {} }) as unknown as HumanFragment;
+  const ALPHA = human("human-alpha");
+  const BETA = human("human-beta");
+  // A registered human whose id has no human- prefix: its canonical alias (owner@kernel) cannot carry an intent.
+  const PLAIN = human("owner");
   let db: Database.Database;
   let repo: QueueRepository;
 
@@ -792,7 +798,7 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     migrate(db, ALL_MIGRATIONS);
     repo = new QueueRepository(db, new EventBus(db), {
       validateRig: () => true,
-      loadHumanRegistry: () => ({ ok: true as const, entities: [OWNER] }),
+      loadHumanRegistry: () => ({ ok: true as const, entities: [OWNER, ALPHA, BETA, PLAIN] }),
       transport: { send: async () => ({ ok: true, verified: true }) },
     });
   });
@@ -874,7 +880,7 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
   });
 
-  it("a POSTED receipt for an earlier episode cannot suppress a newer, unposted one", async () => {
+  it("a POSTED receipt for an earlier episode cannot suppress a newer, unposted one (the predicate and view pin it; the finding may be either half's)", async () => {
     const row = await ask();
     receipt(row.qitemId, "posted");
     const firstKey = currentKey(row.qitemId);
@@ -902,5 +908,70 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
     expect(second.findings).toContainEqual(expect.objectContaining({ findingQitemId: finding!.qitemId, action: "closed" }));
     expect(repo.getById(finding!.qitemId)).toMatchObject({ state: "done", closureReason: "no-follow-on" });
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", destinationSession: "human-owner@external" });
+  });
+
+  const unclaimedFinding = async (qitemId: string) => (await findingsFor(qitemId))
+    .filter((f) => (f.tags ?? []).includes(`stuck-sweep:unclaimed-obligation:${qitemId}`));
+
+  it("a registered alias without an intent (owner@kernel) is suppressed like its @external address", async () => {
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: "owner@kernel", body: "Pick option A or B",
+      summary: "A or B?", evidenceRef: "rig queue show qitem-fixture" });
+    receipt(row.qitemId, "posted");
+    age(row.qitemId);
+    expect(repo.humanNotificationPostedThisEpisode(row.qitemId)).toBe(true);
+    await sweep();
+    expect(await findingsFor(row.qitemId)).toEqual([]);
+  });
+
+  // F1 (review-r2): the latest delivery episode describes a resolution notice, not an unanswered ask to the destination.
+  it("an agent's row claimed, parked on a human, resolved with a POSTED notice, then unclaimed keeps its unclaimed finding", async () => {
+    const row = await repo.create({ sourceSession: "asker@r", destinationSession: "worker@r", body: "work" });
+    const id = row.qitemId;
+    repo.claim({ qitemId: id, destinationSession: "worker@r" });
+    await repo.update({ qitemId: id, actorSession: "worker@r", state: "blocked", blockedOn: "human-owner@external",
+      transitionNote: "needs a human decision" } as never);
+    await repo.update({ qitemId: id, actorSession: "human-owner@external", state: "in-progress",
+      ownerNotificationKind: "human-decision-resolved", transitionNote: "decision supplied" } as never);
+    receipt(id, "posted");
+    repo.unclaim(id, "worker@r", "handing back for pickup");
+    age(id);
+    expect(repo.getById(id)).toMatchObject({ state: "pending", destinationSession: "worker@r", claimedAt: null });
+    expect(repo.humanNotificationPostedThisEpisode(id)).toBe(false);
+    expect(repo.waitingView(id)!.nextBackstop.mechanism).toBe("queue-stuck-sweep:unclaimed");
+    await sweep();
+    expect(await unclaimedFinding(id)).toHaveLength(1);
+  });
+
+  // F2 (review-r2): routeToFallback changes the recipient without opening a new notification episode.
+  it("a POSTED receipt to alpha does not suppress the obligation after routeToFallback to beta", async () => {
+    const row = await ask("human-alpha@external");
+    const id = row.qitemId;
+    receipt(id, "posted");
+    repo.routeToFallback(id, "human-beta@external", "recipient change");
+    age(id);
+    // The ledger's existing recipient association is unchanged; only the suppression is bound to the recipient.
+    expect(repo.deliveryOutcomeFor(id)?.outcome).toBe("posted");
+    expect(repo.humanNotificationPostedThisEpisode(id)).toBe(false);
+    expect(repo.waitingView(id)!.nextBackstop.mechanism).toBe("queue-stuck-sweep:unclaimed");
+    await sweep();
+    const findings = await unclaimedFinding(id);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.destinationSession).toBe("human-beta@external");
+  });
+
+  it("an ask returned to pending after a POSTED park notice keeps its finding: the park's recipient is not retained", async () => {
+    const row = await ask();
+    const id = row.qitemId;
+    receipt(id, "posted");
+    await repo.update({ qitemId: id, actorSession: "asker@r", state: "blocked", blockedOn: "human-owner@external",
+      transitionNote: "parked on the owner" } as never);
+    receipt(id, "posted");
+    await repo.update({ qitemId: id, actorSession: "asker@r", state: "pending", transitionNote: "back to pending" } as never);
+    age(id);
+    expect(repo.deliveryOutcomeFor(id)?.outcome).toBe("posted");
+    expect(repo.humanNotificationPostedThisEpisode(id)).toBe(false);
+    expect(repo.waitingView(id)!.nextBackstop.mechanism).toBe("queue-stuck-sweep:unclaimed");
+    await sweep();
+    expect(await unclaimedFinding(id)).toHaveLength(1);
   });
 });
