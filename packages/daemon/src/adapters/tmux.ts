@@ -486,8 +486,9 @@ export class TmuxAdapter {
       // Use `tmux has-session` directly for reliable existence check — avoids
       // parsing format-string output from `list-sessions` which can fail when
       // tab delimiters are malformed across tmux versions.
-      await this.run(["tmux", "has-session", "-t", name],
-        `tmux has-session -t ${shellQuote(name)}`);
+      const target = `=${name}`; // canonical session name, never a prefix lookup
+      await this.run(["tmux", "has-session", "-t", target],
+        `tmux has-session -t ${shellQuote(target)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       if (isSessionAbsenceError(err)) {
