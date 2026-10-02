@@ -34,10 +34,10 @@ export function splitFrontmatter(content: string): {
   frontmatter: Record<string, unknown>;
   body: string;
 } {
-  const opening = /^---\r?\n/.exec(content);
+  const opening = /^---[ \t]*\r?\n/.exec(content);
   if (!opening) return { frontmatter: {}, body: content };
   const rest = content.slice(opening[0].length);
-  const closing = /^---(?:\r?\n|(?![\s\S]))/m.exec(rest);
+  const closing = /^---[ \t]*(?:\r?\n|(?![\s\S]))/m.exec(rest);
   if (!closing) return { frontmatter: {}, body: content };
   return {
     frontmatter: parseYamlSafely(rest.slice(0, closing.index)),

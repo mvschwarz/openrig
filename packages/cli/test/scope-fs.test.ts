@@ -69,6 +69,20 @@ describe("frontmatter parser", () => {
     expect(splitFrontmatter("---\nid: DEMO.1.2\n---")).toEqual({ frontmatter: { id: "DEMO.1.2" }, body: "" });
   });
 
+  it("preserves delimiters with trailing spaces or tabs for LF, CRLF and EOF", () => {
+    for (const newline of ["\n", "\r\n"]) {
+      for (const trailing of [" ", "\t", " \t"]) {
+        const body = newline + "# Body" + newline;
+        for (const ending of [newline + body, ""]) {
+          const content = `---${trailing}${newline}id: DEMO.1.2${newline}---${trailing}${ending}`;
+          expect(splitFrontmatter(content)).toEqual({ frontmatter: { id: "DEMO.1.2" }, body: ending ? body : "" });
+        }
+      }
+    }
+    const malformed = "---\nid: DEMO.1.2\n--- \tsuffix";
+    expect(splitFrontmatter(malformed)).toEqual({ frontmatter: {}, body: malformed });
+  });
+
   it("preserves unknown keys on update", () => {
     const dir = mktemp();
     const p = path.join(dir, "README.md");
