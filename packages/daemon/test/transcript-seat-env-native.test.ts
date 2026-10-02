@@ -15,7 +15,7 @@ describe.skipIf(process.platform === "win32")("native transcript seat environmen
   it.each([false, true])("does not pin daemon transcript defaults inside a seat (argv=%s)", async (argv) => {
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), "transcript-env-"));
     // Unix sockets have a much shorter path bound than filesystem paths.
-    const socketDir = fs.mkdtempSync("/tmp/openrig-env-socket-");
+    const socketDir = fs.mkdtempSync(path.join(os.tmpdir(), "socket-"));
     const socket = path.join(socketDir, "owned.sock");
     const captured = path.join(temp, "seat.env");
     const config = path.join(temp, "config.json");
