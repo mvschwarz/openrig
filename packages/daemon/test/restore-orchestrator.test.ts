@@ -1710,6 +1710,83 @@ describe("RestoreOrchestrator", () => {
     expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
+  it.each(["exact", "wrong-token", "foreign-process", "replaced-pane", "replaced-process",
+    "chooser", "login", "trust", "mcp", "error", "missing-token", "hook-token"])(
+    "pod-aware headerless Claude resume keeps native proof and new-row metadata: %s", async (mode) => {
+      const { ClaudeCodeAdapter } = await import("../src/adapters/claude-code-adapter.js");
+      const token = "00000000-0000-4000-8000-000000000086";
+      const rig = rigRepo.createRig("headerless");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-headerless", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.owner", { runtime: "claude-code", podId: "pod-headerless", cwd: "/fixture" });
+      rigRepo.setRigPermissionPolicy(rig.id, "builtin:yolo");
+      rigRepo.setRigPolicyProvenance(rig.id, { origin: "builtin", resolvedTarget: null, declaringDir: null, launchPosture: "full_bypass" });
+      const old = sessionRegistry.registerSession(node.id, "dev-owner@headerless");
+      sessionRegistry.updateStatus(old.id, "running");
+      if (mode !== "missing-token") sessionRegistry.updateResumeToken(old.id, "claude_id", token);
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
+        .run(node.id, "[]", "[]", "[]", "claude-code");
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(old.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+      // Controlled observations through real restore -> startup -> Claude adapter,
+      // not a native launch or proof that Claude consumed a conversation.
+      const gates: Record<string, string> = {
+        chooser: "Choose a conversation to resume:\n  1. example",
+        login: "Not logged in · Run /login", trust: "Accessing workspace:\n/fixture\n1. Yes, I trust this folder\n2. No, exit",
+        mcp: "new MCP servers found in .mcp.json\nSelect any you wish to enable\nEnter to confirm",
+        error: "No conversation found",
+      };
+      const screen = `${gates[mode] ?? "Restored conversation"}\n❯\u00a0\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`;
+      let launched = false, samples = 0;
+      const rows = managedClaudeRows(mode === "wrong-token" ? "different-session" : token);
+      rows[2]!.command = `/fixture/.local/share/claude/versions/2.1.287 --dangerously-skip-permissions --resume ${mode === "wrong-token" ? "different-session" : token} --name dev-owner@headerless`;
+      rows[2]!.executableName = mode === "foreign-process" ? "printf" : "2.1.287";
+      const listProcesses = vi.fn(async () => {
+        samples++;
+        return rows.map(row => ({ ...row, startedAt: mode === "replaced-process" && row.pid === 1236 && samples % 2 === 0 ? "changed" : row.startedAt }));
+      });
+      const tmux = {
+        ...mockTmux(),
+        createSession: vi.fn(async () => { launched = true; return { ok: true as const }; }),
+        hasSession: vi.fn(async () => launched),
+        getPaneCommand: vi.fn(async () => {
+          if (mode === "hook-token") {
+            const latest = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as { id: string };
+            sessionRegistry.updateResumeToken(latest.id, "claude_id", "hook-owned-token", "hook");
+          }
+          return "2.1.287";
+        }),
+        capturePaneContent: vi.fn(async () => screen),
+        listPanes: vi.fn(async () => [{ id: mode === "replaced-pane" && samples > 0 ? "%2" : "%1", index: 0, cwd: "/fixture", width: 80, height: 24, active: true }]),
+      } as unknown as TmuxAdapter;
+      const adapter = new ClaudeCodeAdapter({ tmux, listProcesses, sleep: async () => {},
+        fsOps: { exists: () => false, readFile: () => "", writeFile: () => {}, mkdirp: () => {}, copyFile: () => {} },
+      });
+      const result = await createOrchestrator({ tmux, listProcesses }).restore(snap.id, { adapters: { "claude-code": adapter } });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const outcome = result.result.nodes[0]!;
+      const latest = db.prepare("SELECT id, resume_token AS resumeToken, startup_status AS startupStatus FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as { id: string; resumeToken: string | null; startupStatus: string };
+      if (mode === "exact") {
+        expect({ status: outcome.status, token: latest.resumeToken }).toEqual({ status: "resumed", token });
+        expect(latest.id).not.toBe(old.id);
+        expect(latest.startupStatus).toBe("ready");
+      } else if (mode === "hook-token") {
+        expect(latest.resumeToken).toBe("hook-owned-token"); // lower-ranked launch observation cannot overwrite a hook
+      } else {
+        expect(outcome.status).not.toBe("resumed");
+        if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
+        else if (mode === "chooser") expect(latest.resumeToken).toBe(token); // attempted lineage, not readiness
+        else expect(latest.resumeToken).toBeNull();
+      }
+      if (mode !== "missing-token") {
+        expect(tmux.sendText).toHaveBeenCalledTimes(1); // launch command only, no startup replay
+        expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume ${token}`));
+        expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
+      }
+    });
+
   // NS-T05: R1 — pod-aware restore uses launchHarness (not old helpers)
   it("pod-aware restore uses launchHarness for resume, not old helpers", async () => {
     // Create a pod-aware rig
@@ -3280,11 +3357,11 @@ describe("RestoreOrchestrator", () => {
       if (!result.ok) expect(result.code).toBe("process_lineage_mismatch");
     });
 
-    it("no-op when resume token was not used (precondition #3 fails)", async () => {
+    it.each(["claude", "2.1.287"])("no-op when resume token was not used, including legacy headerless recovery: %s", async (command) => {
       const tmux = mockTmuxForReconciler();
       (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);
-      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue("claude");
-      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue("Claude Code v2.1.89\n ❯ accept edits on");
+      (tmux.getPaneCommand as ReturnType<typeof vi.fn>).mockResolvedValue(command);
+      (tmux.capturePaneContent as ReturnType<typeof vi.fn>).mockResolvedValue(command === "claude" ? "Claude Code v2.1.89\n ❯ accept edits on" : "❯\n⏵⏵ bypass permissions on");
       const orch = createOrchestrator({ tmux, listProcesses: exactClaudeLineage() });
       const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: false });
 

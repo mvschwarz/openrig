@@ -368,9 +368,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string) {
     const input = { runtime: "claude-code", paneCommand, paneContent };
     const probe = assessNativeResumeProbe(input);
-    // Only the new headerless auto-mode case needs this additional observation.
-    // Screen-only callers cannot opt themselves into managed launch readiness.
-    if (probe.code !== "claude_auto_identity_required") return probe;
+    // Headerless managed launches (including bypass mode) use the same readiness
+    // precedence as resume. This candidate result is returned only after the
+    // exact launch identity below is proved; screen text alone is insufficient.
+    const verifiedProbe = assessNativeResumeProbe({ ...input,
+      claudeAutoIdentityVerified: true, claudeResumeIdentityVerified: true });
+    if (probe.status === "resumed" || verifiedProbe.status !== "resumed") return probe;
     const launch = this.autoLaunches.get(binding.nodeId);
     if (!launch || !binding.tmuxPane || !binding.tmuxSession
       || launch.binding.id !== binding.id || launch.binding.tmuxPane !== binding.tmuxPane
@@ -392,7 +395,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (this.autoLaunches.get(binding.nodeId) !== launch || currentPanes.length !== 1
         || currentPanes[0]?.id !== binding.tmuxPane
         || await this.tmux.getPanePid(binding.tmuxSession) !== native.panePid) return probe;
-      return assessNativeResumeProbe({ ...input, claudeAutoIdentityVerified: true });
+      return verifiedProbe;
     } catch { return probe; }
   }
 
