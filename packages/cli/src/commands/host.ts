@@ -160,15 +160,24 @@ export async function doctorLegs(host: HostEntry, deps: DoctorDeps): Promise<Che
     rows.push({ step: "remote-rig-binary", status: "pass", detail: `remote rig ${version.stdout.trim() || "(version unreadable)"}` });
 
     const daemon = await deps.run(host, ["rig", "daemon", "status"]);
-    const daemonUp = daemon.ok && /running/i.test(daemon.stdout);
+    const daemonUp = daemon.ok && /^Daemon running\b/im.test(daemon.stdout)
+      && !/\bUNHEALTHY\b/i.test(daemon.stdout);
     if (daemonUp) {
       rows.push({ step: "remote-daemon-health", status: "pass", detail: "remote daemon reports running" });
-    } else if (!daemon.ok) {
+    } else if (!daemon.ok || /\bUNVERIFIED\b/i.test(daemon.stdout)) {
       rows.push({
         step: "remote-daemon-health",
         status: "unknown",
         detail: "remote daemon status could not confirm health; SSH reachability alone cannot determine daemon health",
         fix: "on the host: verify with `rig daemon status` and an actual daemon-backed operation such as `rig ps --json`",
+      });
+      return rows;
+    } else if (/\bUNHEALTHY\b/i.test(daemon.stdout)) {
+      rows.push({
+        step: "remote-daemon-health",
+        status: "fail",
+        detail: "remote daemon reports a present process but unhealthy control plane",
+        fix: "on the host: inspect `rig daemon status` and /healthz; follow the reported recovery guidance",
       });
       return rows;
     } else {
