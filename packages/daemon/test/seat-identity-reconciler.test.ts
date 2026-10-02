@@ -470,9 +470,9 @@ describe("SeatIdentityReconciler — bounded polling", () => {
       await listGate;
       return [{ name: "s1@rig", windows: 1, created: "", attached: false }];
     });
-    // The early sampling-selection read and the final observation both see
-    // Claude during the held sweep; the next sweep sees the shell.
-    vi.mocked(tmux.getPaneCommand).mockImplementationOnce(async () => { await commandGate; return "claude"; }).mockResolvedValueOnce("claude");
+    // This tokenless legacy fixture has no sole-pane capability, so its one
+    // verdict read sees Claude during the held sweep; the next sees the shell.
+    vi.mocked(tmux.getPaneCommand).mockImplementationOnce(async () => { await commandGate; return "claude"; });
     const rec = new SeatIdentityReconciler({ db, tmux, listProcesses: async () => [] });
     const store = new SeatIdentityStore(db);
     rec.start(100);
@@ -537,7 +537,7 @@ describe("SeatIdentityReconciler — bounded polling", () => {
     seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1" });
     const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 42 }, paneCommand: { "%1": "claude" } });
     vi.mocked(tmux.listSessions).mockRejectedValueOnce(new Error("unavailable"));
-    vi.mocked(tmux.getPaneCommand).mockResolvedValueOnce("claude").mockRejectedValueOnce(new Error("final pane read failed"));
+    vi.mocked(tmux.getPaneCommand).mockRejectedValueOnce(new Error("final pane read failed"));
     const rec = new SeatIdentityReconciler({ db, tmux });
     const store = new SeatIdentityStore(db);
     try {

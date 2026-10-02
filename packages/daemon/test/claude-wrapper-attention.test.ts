@@ -60,6 +60,31 @@ function fixture(token: string | null = null) {
 }
 
 describe("Claude wrapper manual attention recovery", () => {
+  it.each([null, "review-token", "different-token"])("batched wrapper proof retains saved-token semantics (%s)", async token => {
+    const f = fixture(token);
+    const batch = vi.fn(async () => new Map([[f.pane, { pid: 100, command: "bash" }]]));
+    Object.assign(f.tmux, { readAllPaneProcesses: batch });
+    await f.poll.reconcileAll();
+    expect(batch).toHaveBeenCalledTimes(3); // selection/first sample, second sample, final verdict
+    expect(f.listProcesses).toHaveBeenCalledTimes(2);
+    expect(f.tmux.getPaneCommand).not.toHaveBeenCalled();
+    expect(f.store.getForNode(f.node.id)?.verdict).toBe(token === "different-token" ? "mismatch" : "verified");
+    expect(f.startup()).toBe("attention_required");
+  });
+
+  it.each(["pid", "command"])("uses the fresh final batch after native proof (%s changed)", async changed => {
+    const f = fixture();
+    const batch = vi.fn(async () => new Map([[f.pane, { pid: 100, command: "bash" as string | null }]]));
+    batch.mockResolvedValueOnce(new Map([[f.pane, { pid: 100, command: "bash" }]]))
+      .mockResolvedValueOnce(new Map([[f.pane, { pid: 100, command: "bash" }]]))
+      .mockResolvedValue(new Map([[f.pane, { pid: changed === "pid" ? 999 : 100, command: changed === "command" ? null : "bash" }]]));
+    Object.assign(f.tmux, { readAllPaneProcesses: batch });
+    await f.poll.reconcileAll();
+    expect(batch).toHaveBeenCalledTimes(3);
+    expect(f.store.getForNode(f.node.id)?.verdict).not.toBe("verified");
+    expect(f.startup()).toBe("attention_required");
+  });
+
   it.each([null, "review-token"])("clears with positive occupancy then stays coherent on the next sweep (saved token: %s)", async token => {
     const f = fixture(token);
     const result = await f.post();
