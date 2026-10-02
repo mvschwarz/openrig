@@ -541,7 +541,7 @@ rig scope mission progress <mission> --add "<line>"   # append a progress line; 
 rig scope slice progress <slice-path> --add "<line>"  # same flags: --add / --set, --section <heading>, --status active|done|blocked
 ```
 
-Replaces hand-editing `PROGRESS.md` with markdown. Writes the canonical structure the OpenRig PROGRESS UI page reads. `rig scope mission create` + `rig scope slice create` now scaffold `PROGRESS.md` automatically per `conventions/scope-and-versioning/README.md`.
+Replaces hand-editing `PROGRESS.md` with markdown. Writes the canonical structure the OpenRig PROGRESS UI page reads. `rig scope mission create` + `rig scope slice create` now scaffold `PROGRESS.md` automatically.
 
 ### `rig scope mission|slice stage / verified / repair` — deterministic maturity vocabulary
 
@@ -560,7 +560,7 @@ rig scope slice show <slice>                          # derives read-time effect
                                                       # — stale-`verified` `canonical` reported as effectively `provisional`
 ```
 
-Composes with the `progress` command + scaffolding to make `rig scope` the **deterministic enforcer** of `conventions/scope-and-versioning` §1 (dot-IDs) + §2 (maturity vocabulary). Agents update `stage` / `verified` / `id` through commands rather than hand-editing markdown and drifting. The `--against` MANDATORY rule on `verified` is the anti-stale keystone: bare timestamps are rejected because a bare timestamp is exactly what lets stale trackers lie while looking fresh. **STOP hand-editing the `stage` / `verified` / `id` fields in scope frontmatter; use the new verbs.** Existing missions / slices with `id:null` ghosts or missing `PROGRESS.md` are repaired idempotently via `repair`.
+Composes with the `progress` command + scaffolding to update scope IDs and maturity vocabulary through `rig scope`. Agents update `stage` / `verified` / `id` through commands rather than hand-editing markdown and drifting. The `--against` MANDATORY rule on `verified` is the anti-stale keystone: bare timestamps are rejected because a bare timestamp is exactly what lets stale trackers lie while looking fresh. **STOP hand-editing the `stage` / `verified` / `id` fields in scope frontmatter; use the new verbs.** Existing missions / slices with `id:null` ghosts or missing `PROGRESS.md` are repaired idempotently via `repair`.
 
 ### `rig skill audit` — skill cascade provenance
 
@@ -877,8 +877,6 @@ narration — a good observation beats ten noisy ones. It's a passing thought yo
 6. Monitor: `rig chatroom wait my-rig --timeout 120`
 7. Close: `rig chatroom topic my-rig "ROUND CLOSED"`
 
-See `docs/planning/roadmaps/chatroom-roundtable-protocol.md` for the full protocol.
-
 ### `rig ask`
 
 ```bash
@@ -918,7 +916,7 @@ rig auth seats … --runtime codex         # seat -> profile registry (metadata 
 
 ### `rig context` — the store + compose library (never delivers)
 
-Manage and compose context (any text/markdown) into reusable **packs**. Every piece and pack has a stable, **path-like ref** — you address context the way you address files (`packs/compaction-restore`, `as-built/queue-internals`).
+Manage and compose context (any text/markdown) into reusable **packs**. Every piece and pack has a stable, **path-like ref** — you address context the way you address files (`skills/claude-compaction-restore`, `reference/rig-spec.md`).
 
 ```bash
 rig context list                     # what's in the library
@@ -955,12 +953,12 @@ Walk a seat *through* a pack: each piece is sent into the pane, spaced by `--pac
 - **`--body-context` snapshot rule:** a qitem built from a ref stores the **resolved content** in its body **plus the ref for provenance** — the handoff carries what was actually sent, and a later library edit never silently rewrites a past handoff's history.
 - **The orchestrator habit — assign work *with* its context attached:**
   ```bash
-  rig context compose --out packs/qitem-brief --from as-built/queue.md conventions/c1-proof.md
+  rig context compose --out packs/qitem-brief --from <brief-file> <proof-file>
   rig queue create --destination dev-driver@build --body-context packs/qitem-brief --summary "…"
   ```
-  The assignee never greps for the as-built; the curated context rides the durable handoff, survives compaction, and is auditable.
+  Replace `<brief-file>` and `<proof-file>` with your existing local files. The curated context rides the durable handoff, survives compaction, and is auditable.
 
-**Skills tier vs context tier:** skills are the HOT tier (ambient, finite, always-visible front-matter); context packs are the COLD tier (unbounded, fetched on instruction — "walk yourself through `packs/tui-onboarding`"). Don't overrun the skill layer by using skills as context packs — that's what this primitive is for.
+**Skills tier vs context tier:** skills are the HOT tier (ambient, finite, always-visible front-matter); context packs are the COLD tier (unbounded, fetched on instruction — "read `rig context get onboarding-width`"). Don't overrun the skill layer by using skills as context packs — that's what this primitive is for.
 
 ## Lifecycle
 
@@ -1365,8 +1363,6 @@ Do not mass-kill:
 - `tmux attach ...`
 - `codex ...`
 - `claude ...`
-
-For deeper host/runtime triage, use the companion `openrig-operator` skill if it is available in your seat.
 
 ## JSON and Error Posture
 

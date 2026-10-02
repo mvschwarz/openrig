@@ -4,16 +4,11 @@ description: Use when a Claude Code session has just compacted, is about to comp
 metadata:
   openrig:
     sibling_skills:
-      - mental-model-ha
-      - scope-recovery
       - session-compaction-and-restore
       - agent-startup-and-context-ingestion
       - agent-starters
-      - composable-priming-packs
       - session-source-fork
       - seat-continuity-and-handover
-      - claude-compact-in-place
-      - pre-maintenance-agent-preservation
 ---
 
 # Claude Compaction Restore

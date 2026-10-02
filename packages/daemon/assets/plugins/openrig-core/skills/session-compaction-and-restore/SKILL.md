@@ -8,16 +8,11 @@ metadata:
     stage: factory-approved
     sibling_skills:
       - claude-compaction-restore
-      - mental-model-ha
-      - scope-recovery
       - agent-startup-and-context-ingestion
       - agent-starters
-      - composable-priming-packs
       - session-source-fork
       - seat-continuity-and-handover
       - retiring-and-inheriting-a-seat
-      - claude-compact-in-place
-      - pre-maintenance-agent-preservation
 ---
 
 # Session Compaction and Restore
@@ -155,7 +150,6 @@ restoration; measure the resumed seat against the proof standard above.
 ## See also
 
 - `claude-compaction-restore` skill — the Claude Code restore SOP (PreCompact hook + JSONL restore script for post-compaction recovery)
-- `mental-model-ha` skill — HA-pair compaction recovery (different scenario; sister primitive)
 - `session-source-fork` skill — `fork` mode for native-runtime-continuity-based restoration
 - `seat-continuity-and-handover` skill — occupant-creation primitives (resume/fork/rebuild/fresh) that this primitive instantiates
 - `openrig-operating-model` skill — placement and authority of durable context
