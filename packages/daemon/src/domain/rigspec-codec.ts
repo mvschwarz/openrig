@@ -192,6 +192,7 @@ function serializeStartupBlock(startup: import("./types.js").StartupBlock): Reco
   return {
     files: startup.files.map((f) => {
       const file: Record<string, unknown> = { path: f.path };
+      if (f.orientation) file["orientation"] = f.orientation;
       if (f.deliveryHint !== "auto") file["delivery_hint"] = f.deliveryHint;
       if (!f.required) file["required"] = false;
       if (f.appliesOn.length !== 2 || !f.appliesOn.includes("fresh_start") || !f.appliesOn.includes("restore")) {

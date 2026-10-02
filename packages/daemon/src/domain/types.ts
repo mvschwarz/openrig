@@ -845,6 +845,8 @@ export interface ImportSpec {
 }
 
 export interface StartupFile {
+  /** Explicit per-seat role orientation; never inferred from the filename. */
+  orientation?: "role";
   /** Startup artifacts are files; context packs are composed separately. */
   kind?: "file";
   path: string;

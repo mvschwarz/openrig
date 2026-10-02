@@ -152,6 +152,22 @@ describe("StartupOrchestrator", () => {
     expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
   });
 
+  it("records a role binding before launch succeeds and preserves it on exact resume", async () => {
+    const seed = seedSession();
+    const orch = createOrchestrator();
+    const role: ResolvedStartupFile = { path: "role.md", absolutePath: "/fixture/role.md", ownerRoot: "/fixture", orientation: "role", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] };
+    const read = () => db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { resolved_files_json: string; created_at: string };
+    const adapter = mockAdapter({ launchHarness: vi.fn(async () => {
+      expect(JSON.parse(read().resolved_files_json)).toEqual([role]);
+      return { ok: false, recovery: "attention_required", error: "Native gate" };
+    }) });
+    expect((await orch.startNode(makeInput(seed, { adapter, resolvedStartupFiles: [role] }))).ok).toBe(false);
+    const before = read();
+    expect(before.created_at).toBeTruthy();
+    await orch.startNode(makeInput(seed, { isRestore: true, resumeToken: "original", preserveStartupContext: true }));
+    expect(read()).toEqual(before);
+  });
+
   it("exact resume retains configured fresh context while sending no replay", async () => {
     const seed = seedSession(); const orch = createOrchestrator();
     const action = makeAction({ type: "send_text", value: "configured context" });

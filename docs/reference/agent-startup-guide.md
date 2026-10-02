@@ -301,6 +301,41 @@ profile → uses.skills: [openrig-user]
 ```
 This is the minimum effective startup. The agent knows who it is, how the team works, and how to use the rig.
 
+For seats sharing a working directory, keep each role in its own AgentSpec startup entry:
+
+```yaml
+startup:
+  files:
+    - path: guidance/role.md
+      orientation: role
+      delivery_hint: send_text
+      required: true
+```
+
+`rig queue whoami --json` reports only the calling seat's explicitly marked role
+bindings, independently of its current work. The `role.state` is `no-record`,
+`not-declared`, `missing`, `present`, or `unknown` when identity, storage or the
+observation is unavailable. Files retain their original `path`, `absolutePath`
+and `ownerRoot` plus the currently resolved `resolvedPath` and
+`resolvedOwnerRoot`. Built-in packaged paths follow the running installation;
+existing development-checkout paths stay where they were recorded.
+
+`recordedAt` is the startup-context record write/attempt, which happens before
+launch succeeds. Exact resume can retain an older record. `present` means the
+resolved file currently exists, not that its bytes still match the spec or that
+the agent read it. Unmarked startup files and startup actions are not exposed.
+
+Refocus includes the role path and a re-read reminder with topology or both trees,
+even if the trace fails. Work-only mode omits it; disabling refocus still disables
+the entire hook. Custom refocus prose keeps its existing precedence. The hook
+reuses its work lookup, or makes one bounded lookup when the work node is explicit;
+a failed or skipped lookup reports `unknown`.
+
+The shipped kernel seats no longer project their role into shared guidance.
+Existing user files and legacy role blocks are left intact; this is not a cleanup
+of already-installed shared blocks. General user-authored guidance projection is
+unchanged.
+
 **Separate project context from role**
 
 Don't put project documentation inside the role guidance. The role is about the agent's function; project context is about what the agent is working on. Use rig-level or pod-level startup files for project context.
@@ -356,7 +391,7 @@ If your rig REQUIRES a hook to function and the hook installation fails silently
 When creating a new agent's startup experience:
 
 - [ ] Write a `guidance/role.md` — who is this agent?
-- [ ] Reference it in the agent spec's `resources.guidance` AND `startup.files`
+- [ ] Reference it in `startup.files` with `orientation: role` and `delivery_hint: send_text`. Avoid projecting distinct seat roles into one shared `AGENTS.md` or `CLAUDE.md`.
 - [ ] Write a rig `CULTURE.md` if the rig doesn't have one
 - [ ] Choose skills from the shared pool via profile `uses`
 - [ ] Write a `startup/context.md` if the agent needs environment grounding
