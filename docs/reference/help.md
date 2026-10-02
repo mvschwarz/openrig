@@ -58,6 +58,7 @@ Read [Have your agent configure permissions](getting-started.md#have-your-agent-
 (`rig context get reference/getting-started.md#have-your-agent-configure-permissions`). Identify the
 specific prompt or sandbox restriction. Work within the user's chosen permissions; don't switch the whole environment
 to unrestricted access to clear one prompt.
+For a `403` naming `untrusted_host` or `browser_origin_refused`, see [Browser access and allowed addresses](browser-access.md).
 
 ### A seat shows attention, waiting or a failed restore
 
