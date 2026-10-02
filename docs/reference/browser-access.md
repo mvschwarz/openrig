@@ -12,7 +12,10 @@ comes from a web page, only when that page is the OpenRig UI or a page you allow
   its own Tailscale name (for example `my-machine.your-tailnet.ts.net`, or the short `my-machine`).
   The daemon learns its own Tailscale name automatically from Tailscale on this machine.
 - The web UI, when it is turned on (`rig config set ui.enabled true`, then restart the daemon) and
-  opened at the daemon's own address and port.
+  opened at the daemon's own address and port. To open it at a non-loopback name or address, such
+  as its Tailscale name, also list that page's exact origin in `OPENRIG_ALLOWED_ORIGINS` (for
+  example `http://my-machine.your-tailnet.ts.net:7433`), then restart the daemon. Without it, the
+  UI's terminal is refused there, and at a non-loopback IPv6 address its API requests are too.
 
 ### When you see a refusal
 
