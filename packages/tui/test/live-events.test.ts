@@ -211,3 +211,67 @@ describe("standard SSE notification framing", () => {
     } finally { sub.close(); }
   });
 });
+
+
+describe("bounded activity stream frames", () => {
+  const limit = 1_048_576;
+
+  function controlledStream(rejectCancel = false) {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const cancel = vi.fn(() => rejectCancel ? Promise.reject(new Error("cancel failed")) : undefined);
+    const body = new ReadableStream<Uint8Array>({ start(c) { controller = c; }, cancel });
+    return { response: new Response(body), cancel, write: (s: string) => controller.enqueue(new TextEncoder().encode(s)) };
+  }
+
+  it.each([
+    ["unterminated line", "x".repeat(limit + 1)],
+    ["terminated line", "x".repeat(limit + 1) + "\n"],
+    ["event spanning individually short lines", ("data: " + "x".repeat(1024) + "\n").repeat(1025)],
+    ["empty data fields", "data\n".repeat(limit + 1)],
+  ])("cancels an oversized %s before scheduling a reconnect", async (_name, frame) => {
+    const first = controlledStream();
+    const recovered = controlledStream();
+    const events: unknown[] = [];
+    const statuses: string[] = [];
+    const open = vi.fn(async () => open.mock.calls.length === 1 ? first.response : recovered.response);
+    const sub = subscribeActivityEvents({ open, onEvent: e => events.push(e), onStatus: s => statuses.push(s), reconnectDelayMs: 200 });
+    try {
+      first.write(frame);
+      await until(() => first.cancel.mock.calls.length === 1, 500);
+      expect(events).toEqual([]);
+      expect(statuses).toEqual(["connected", "dropped"]);
+      expect(open).toHaveBeenCalledTimes(1);
+      await until(() => open.mock.calls.length === 2, 600);
+      recovered.write('data: {"type":"seat.activity_changed","seq":7}\n\n');
+      await until(() => events.length === 1, 300);
+      expect(events).toEqual([{ type: "seat.activity_changed", seq: 7 }]);
+    } finally { sub.close(); }
+  });
+
+  it("still reconnects when cancellation of an oversized frame rejects", async () => {
+    const stream = controlledStream(true);
+    const statuses: string[] = [];
+    const open = vi.fn(async () => open.mock.calls.length === 1 ? stream.response : null);
+    const sub = subscribeActivityEvents({ open, onEvent: () => {}, onStatus: s => statuses.push(s), reconnectDelayMs: 20 });
+    try {
+      stream.write("x".repeat(limit + 1));
+      await until(() => statuses.includes("unavailable"), 500);
+      expect(stream.cancel).toHaveBeenCalledTimes(1);
+      expect(statuses).toEqual(["connected", "dropped", "reconnecting", "unavailable"]);
+    } finally { sub.close(); }
+  });
+
+  it("resets the frame budget so one chunk can contain many ordinary notifications", async () => {
+    const stream = controlledStream();
+    const events: unknown[] = [];
+    const frame = 'data: {"type":"seat.activity_changed","seq":1}\n\n';
+    const count = Math.ceil((limit + 1) / frame.length);
+    const sub = subscribeActivityEvents({ open: async () => stream.response, onEvent: e => events.push(e) });
+    try {
+      stream.write(frame.repeat(count));
+      await until(() => events.length === count, 500);
+      expect(stream.cancel).not.toHaveBeenCalled();
+      expect(events.at(-1)).toEqual({ type: "seat.activity_changed", seq: 1 });
+    } finally { sub.close(); }
+  });
+});

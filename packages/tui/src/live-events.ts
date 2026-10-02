@@ -27,6 +27,9 @@ export interface SubscribeActivityEventsOpts {
 }
 
 const RECONNECT_CAP_MS = 30_000;
+// Notifications are tiny. Bound retained decoded characters (UTF-16 code units),
+// including data-field separators, when a malformed stream omits a delimiter.
+const MAX_FRAME_CHARS = 1_048_576;
 
 export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): ActivityEventsSubscription {
   const baseDelayMs = opts.reconnectDelayMs ?? 1_000;
@@ -56,15 +59,21 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
       let buffer = "";
       let skipLF = false;
       let data: string[] = [];
+      let dataChars = 0;
       const lineReceived = (line: string): void => {
         if (line !== "") {
           // Each data field contributes one line; other SSE fields are framing.
-          if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
-          else if (line === "data") data.push("");
+          if (line.startsWith("data:") || line === "data") {
+            const value = line === "data" ? "" : line.slice(5).replace(/^ /, "");
+            dataChars += value.length + 1;
+            if (dataChars > MAX_FRAME_CHARS) throw new Error("SSE frame too long");
+            data.push(value);
+          }
           return;
         }
         const raw = data.join("\n");
         data = [];
+        dataChars = 0;
         if (!raw.trim()) return;
         try {
           const event = JSON.parse(raw) as { type: string; seatNodeId?: string; seq?: number };
@@ -88,6 +97,9 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
             skipLF = false;
           }
           const end = /[\r\n]/.exec(buffer);
+          if (dataChars + (end ? end.index : buffer.length) > MAX_FRAME_CHARS) {
+            throw new Error("SSE frame too long");
+          }
           if (!end) break;
           const line = buffer.slice(0, end.index);
           skipLF = end[0] === "\r";
@@ -96,7 +108,9 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
         }
       }
     } catch {
-      // read error on an established stream — handled as a drop below
+      // Read/parser errors on an established stream are drops. Cancel its body
+      // before reconnecting so a malformed live response cannot stay open.
+      await activeReader?.cancel().catch(() => {});
     } finally {
       activeReader = null;
     }
