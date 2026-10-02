@@ -441,8 +441,13 @@ export function rigModeCommand(depsOverride?: RigModeDeps): Command {
         if (opts.qitem) qs.set("qitem", opts.qitem);
         const path = qs.toString() ? `/api/rig-mode/effective?${qs.toString()}` : "/api/rig-mode/effective";
         const res = await client.get<EffectiveResponse>(path);
+        if (res.status >= 400) {
+          console.error(JSON.stringify(res.data, null, 2));
+          process.exitCode = 1;
+          return;
+        }
         emitOperatingPosture(res.data.operatingPosture);
-        if (res.status >= 400 || !res.data.effective) {
+        if (!res.data.effective) {
           console.log("Operating without an explicit operator-context-mode binding (unknown_posture).");
           return;
         }

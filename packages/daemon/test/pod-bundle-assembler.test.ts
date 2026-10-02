@@ -7,8 +7,9 @@ import type { RigSpec } from "../src/domain/types.js";
 
 // -- Mock filesystem --
 
-function mockFs(files: Record<string, string | Uint8Array>): PodAssemblerFsOps {
+function mockFs(files: Record<string, string | Uint8Array>, modes: Record<string, number> = {}): PodAssemblerFsOps {
   const written: Record<string, string | Uint8Array> = {};
+  const writtenModes: Record<string, number> = {};
   const dirs = new Set<string>();
   const read = (p: string): string | Uint8Array => {
     if (p in files) return files[p]!;
@@ -25,21 +26,25 @@ function mockFs(files: Record<string, string | Uint8Array>): PodAssemblerFsOps {
       const v = read(p);
       return typeof v === "string" ? Buffer.from(v, "utf8") : v;
     },
+    fileMode: (p: string) => modes[p] ?? 0o644,
     exists: (p: string) => p in files || p in written,
     mkdirp: (p: string) => { dirs.add(p); },
-    writeFile: (p: string, content: string | Uint8Array) => { written[p] = content; },
+    writeFile: (p: string, content: string | Uint8Array, mode?: number) => {
+      written[p] = content;
+      if (mode !== undefined) writtenModes[p] = mode;
+    },
     copyDir: () => {},
     listFiles: (dirPath: string) => {
       const result: string[] = [];
       for (const key of Object.keys(files)) {
-        if (key.startsWith(dirPath + "/")) {
-          result.push(key.slice(dirPath.length + 1));
-        }
+        const relative = nodePath.relative(dirPath, key);
+        if (relative && !relative.startsWith("..") && !nodePath.isAbsolute(relative)) result.push(relative);
       }
       return result;
     },
     _written: written, // for test inspection
-  } as PodAssemblerFsOps & { _written: Record<string, string | Uint8Array> };
+    _writtenModes: writtenModes,
+  } as PodAssemblerFsOps & { _written: Record<string, string | Uint8Array>; _writtenModes: Record<string, number> };
 }
 
 // -- Helpers --
@@ -141,6 +146,29 @@ describe("PodBundleAssembler", () => {
     });
 
     expect(result.manifest.agents).toHaveLength(1);
+  });
+
+  it.each([0o700, 0o750, 0o755, 0o600])("preserves mode %i while vendoring agent package files", (mode) => {
+    const rigRoot = nodePath.resolve(RIG_ROOT);
+    const scriptPath = nodePath.join(rigRoot, "agents", "impl", "bin", "hello.sh");
+    const fs = mockFs({
+      [nodePath.join(rigRoot, "rig.yaml")]: rigSpecYaml(makeRigSpec()),
+      [nodePath.join(rigRoot, "agents", "impl", "agent.yaml")]: validAgentYaml("impl"),
+      [scriptPath]: "#!/bin/sh\necho hello\n",
+    }, { [scriptPath]: mode });
+    const assembler = new PodBundleAssembler({ fsOps: fs });
+
+    assembler.assemble({
+      rigRoot,
+      rigSpecPath: nodePath.join(rigRoot, "rig.yaml"),
+      outputDir: "/tmp/bundle-staging-executable",
+      bundleName: "test-bundle",
+      bundleVersion: "1.0.0",
+    });
+
+    expect((fs as unknown as { _writtenModes: Record<string, number> })._writtenModes[
+      nodePath.join("/tmp/bundle-staging-executable", "agents", "impl", "bin", "hello.sh")
+    ]).toBe(mode);
   });
 
   it("preserves builtin terminal members without trying to vendor them", () => {

@@ -10,7 +10,9 @@ export interface PodAssemblerFsOps extends AgentResolverFsOps {
   /** Raw bytes, for files the bundle copies verbatim (agent packages, culture, docs, startup files). */
   readFileBuffer(path: string): Uint8Array;
   mkdirp(path: string): void;
-  writeFile(path: string, content: string | Uint8Array): void;
+  /** Source permission bits, used to preserve executable bundle assets. */
+  fileMode?(path: string): number;
+  writeFile(path: string, content: string | Uint8Array, mode?: number): void;
   copyDir(src: string, dest: string): void;
   listFiles(dirPath: string, onReadError?: (path: string, error: unknown) => boolean): string[];
 }
@@ -243,9 +245,10 @@ export class PodBundleAssembler {
     }
     if (!this.fs.exists(absPath)) return; // optional files may not exist
     const content = this.fs.readFileBuffer(absPath);
+    const mode = this.fs.fileMode?.(absPath);
     assertShippableSubstance([{ path: relPath, bytes: content }]);
     this.fs.mkdirp(nodePath.dirname(nodePath.join(outputDir, relPath)));
-    this.fs.writeFile(nodePath.join(outputDir, relPath), content);
+    this.fs.writeFile(nodePath.join(outputDir, relPath), content, mode);
     collected.push(relPath);
   }
 
@@ -258,11 +261,11 @@ export class PodBundleAssembler {
 
   private vendorDirectory(srcDir: string, destDir: string, collected: string[], relPrefix: string, onReadError?: (path: string, error: unknown) => boolean): void {
     const files = this.fs.listFiles(srcDir, onReadError);
-    const sources: Array<{ file: string; content: Uint8Array }> = [];
+    const sources: Array<{ file: string; content: Uint8Array; mode: number | undefined }> = [];
     for (const file of files) {
       const sourcePath = nodePath.join(srcDir, file);
       try {
-        sources.push({ file, content: this.fs.readFileBuffer(sourcePath) });
+        sources.push({ file, content: this.fs.readFileBuffer(sourcePath), mode: this.fs.fileMode?.(sourcePath) });
       } catch (error) {
         if (!onReadError?.(sourcePath, error)) throw error;
       }
@@ -272,10 +275,10 @@ export class PodBundleAssembler {
       bytes: content,
     })));
     this.fs.mkdirp(destDir);
-    for (const { file, content } of sources) {
+    for (const { file, content, mode } of sources) {
       const destPath = nodePath.join(destDir, file);
       this.fs.mkdirp(nodePath.dirname(destPath));
-      this.fs.writeFile(destPath, content);
+      this.fs.writeFile(destPath, content, mode);
       collected.push(nodePath.join(relPrefix, file).replace(/\\/g, "/"));
     }
   }

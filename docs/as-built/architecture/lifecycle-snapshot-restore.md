@@ -154,8 +154,12 @@ daemon is healthy", `:160-163`). It then runs
 4. **Per-seat checks** — `checkSeatReadiness` (`:311`), `checkStartupContext`
    (`:315`, impl `:763`; `unknownChecks` → `buildUnknown`),
    `checkTranscript` (`:325`), `checkResumePath` (`:329`), and unless opted
-   out: `checkQueueFile` (`:334`, gated by `--no-queue`, impl `:870`) and
-   `checkHooks` (`:339`, gated by `--no-hooks`, impl `:896`).
+   out: the daemon SQLite `queue_items` availability probe (`:334`, gated by
+   `--no-queue`) and `checkHooks` (`:339`, gated by `--no-hooks`). Queue
+   continuity is represented by the shared daemon store; an empty queue is
+   valid. Claude hook readiness follows the persisted `claude_activity_hooks`
+   runtime-resource selection and the adapter's activity-relay projection in
+   the seat CWD. A seat that deliberately omits that resource is not applicable.
 5. **Verdict** — `buildResult` aggregates: any red → `not_restorable`; any
    yellow → `restorable_with_caveats`; else `restorable`; probe-uninspectable
    → `unknown` (`:1074-1085`, `:1362-1379`). Plus a `RecoveryPlan`

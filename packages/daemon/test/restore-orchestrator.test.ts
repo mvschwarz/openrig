@@ -3062,6 +3062,58 @@ describe("RestoreOrchestrator", () => {
       expect(tmux.sendText).not.toHaveBeenCalled();
     });
 
+    it("reconciles a headerless Claude prompt when exact resume-token lineage is verified", async () => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("2.1.283");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue([
+        "Restored conversation",
+        "❯",
+        "⏵⏵ bypass permissions on (shift+tab to cycle)",
+      ].join("\n"));
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+
+      const result = await createOrchestrator({
+        tmux,
+        listProcesses: async () => managedClaudeRows("tok-abc-123"),
+      }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: true, to: "operator_recovered" });
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
+    it.each(["background", "ambiguous", "argv-lookalike", "missing-metadata"].flatMap((failure) =>
+      ["2.1.283", "claude"].map((paneCommand) => [failure, paneCommand])
+    ))("does not reconcile headerless %s evidence under %s", async (failure, paneCommand) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue(paneCommand);
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue("Restored conversation\n❯\n⏵⏵ bypass permissions on");
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+      const originalOutcome = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get();
+      const listProcesses = async () => {
+        const rows = managedClaudeRows("tok-abc-123");
+        if (failure === "background") {
+          rows[2]!.pgid = 9000;
+          rows.push({ ...rows[2]!, pid: 1237, pgid: 1235, command: "claude --resume another-session" });
+        }
+        if (failure === "ambiguous") rows.push({ ...rows[2]!, pid: 1237 });
+        if (failure === "argv-lookalike") rows[2]!.command = "claude --model --resume tok-abc-123";
+        if (failure === "missing-metadata") rows[2]!.startedAt = "";
+        return rows;
+      };
+
+      const result = await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result.ok).toBe(false);
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(0);
+      expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(originalOutcome);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
     it("upgrades failed -> operator_recovered when ALL four preconditions hold; emits audit event", async () => {
       const tmux = mockTmuxForReconciler();
       (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);

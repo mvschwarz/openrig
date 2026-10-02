@@ -87,6 +87,27 @@ describe("Bundle archive", () => {
     expect(fs.statSync(outputPath).size).toBeGreaterThan(0);
   });
 
+  it.skipIf(process.platform === "win32")("preserves executable file modes through pack and unpack", async () => {
+    const staging = createStaging();
+    const scriptPath = path.join(staging, "packages/pkg/bin/hello.sh");
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, "#!/bin/sh\necho hello\n", { mode: 0o755 });
+    fs.chmodSync(scriptPath, 0o755);
+    writeIntegrity(staging, computeIntegrity(staging, realIntegrityFsOps()), realIntegrityFsOps());
+
+    const archivePath = path.join(tmpDir, "executable.rigbundle");
+    await pack(staging, archivePath);
+    let archivedMode: number | undefined;
+    await tar.list({ file: archivePath, onReadEntry: (entry) => {
+      if (entry.path === "packages/pkg/bin/hello.sh") archivedMode = entry.mode;
+    } });
+    expect((archivedMode ?? 0) & 0o111).toBeGreaterThan(0);
+
+    const extractDir = path.join(tmpDir, "executable-extracted");
+    await unpack(archivePath, extractDir);
+    expect(fs.statSync(path.join(extractDir, "packages/pkg/bin/hello.sh")).mode & 0o111).toBeGreaterThan(0);
+  });
+
   // T2: Unpack extracts to correct structure
   it("unpack extracts to correct directory structure", async () => {
     const staging = createStaging();

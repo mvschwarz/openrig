@@ -5,238 +5,265 @@ status: active
 topics: [coordination, observability]
 domains: [engineering-advisor, operating-advisor]
 applies-when: |
-  Need to know how rig send/capture/broadcast works, how pipe-pane transcript
-  capture and rg/grep search behave, how durable rig chat (SQLite + SSE) is
-  modeled, what rig ask gathers, or the exact MCP-tool-name vs tmux-metadata-key
-  naming distinction.
+  Need to know how rig send/capture/broadcast works, how transcript capture
+  (periodic tmux capture-pane) and rg/grep search behave, how durable rig chat
+  (SQLite + SSE) is modeled, what rig ask gathers, or the exact MCP-tool-name
+  vs tmux-metadata-key naming distinction.
 siblings: [daemon-core.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 7eaf524c
-last-updated: 2026-05-16
+last-verified-against-source: 264fade9
+last-updated: 2026-10-02
 ---
 
 # Transport, Transcripts, Chat, Ask
 
 The communication-and-history layer: tmux is transport, not truth. Send/
-capture/broadcast wrap tmux with honest errors; transcripts are raw pipe-pane
-captures; chat is daemon-backed SQLite; `rig ask` gathers evidence but never
-calls an LLM.
+capture/broadcast wrap tmux with honest errors; transcripts are bounded
+`tmux capture-pane` snapshots written to files; chat is daemon-backed SQLite;
+the daemon's `rig ask` service gathers evidence and never calls an LLM.
 
-> Verified against source at HEAD `7eaf524c` (`git describe` →
-> `v0.3.1-6-g7eaf524c`). Package version **0.3.1** (slice-00 §1.1). Source
-> located by `architecture.md` headings (§5 Transport and communication, §6
-> Communication/Transcript/Chat flows, §11 Compat notes) per slice-08 §10.1
-> — line numbers advisory only.
+> Verified against source at main `264fade9`. Each count below sits beside the
+> command that produces it; run the command from the repository root to refresh
+> it.
 
-## 1. The naming axes (D5 — read this first)
+## 1. The naming axes (read this first)
 
-This module carries the D5 drift, which has **two independent axes** that
-must NOT be conflated or blanket-replaced (banked
-`feedback_release_prep_three_layer_depersonalization`: the rename was scoped,
-not global). Per-occurrence source verification:
+Two independent naming axes meet in this layer. They must not be conflated or
+blanket-replaced: `rigged` → `rig` is a per-occurrence question, not a global
+substitution.
 
-**Axis 1 — MCP tool names: `rig_*` (architecture.md is STALE → corrected).**
-slice-00 §1.4 confirms all 17 MCP tools are `rig_*`. The `rigged_*`
-references in `architecture.md` are stale text from a rename that predates
-v0.2.0:
+**Axis 1 — MCP tool names are `rig_*`.** `packages/cli/src/mcp-server.ts`
+registers **18** tools, all named `rig_*`
+(`grep -c 'server.tool(' packages/cli/src/mcp-server.ts`), including
+`rig_rig_nodes` (`mcp-server.ts:288`), `rig_send` (`:305`),
+`rig_capture` (`:339`), `rig_chatroom_send` (`:364`) and `rig_chatroom_watch`
+(`:400`). No `rigged_*` name other than the tmux keys below remains in product
+source: **0** hits
+(`git grep -n 'rigged_' -- ':(glob)packages/*/src/**' | grep -v -c '@rigged_'`).
 
-> Drift-fix D5 (MCP-tool-name axis) — `architecture.md` §5 `node-inventory.ts`
-> description says MCP `rigged_rig_nodes`; §6 chat flow says MCP
-> `rigged_chatroom_send` + `rigged_chatroom_watch`. Corrected to **`rig_*`**.
-> Re-confirmed at source: `mcp-server.ts:288` registers `"rig_rig_nodes"`,
-> `:305` `"rig_send"`, `:339` `"rig_capture"`, `:364` `"rig_chatroom_send"`,
-> `"rig_chatroom_watch"` (tool #17). Zero `rigged_chatroom_send` /
-> `rigged_send` / `rigged_rig_nodes` in non-test product source (grep clean
-> @HEAD). slice-00 §1.4; the rename landed in `b183c50c` pre-v0.2.0.
-
-**Axis 2 — tmux metadata keys: `@rigged_*` (architecture.md is CORRECT → do
-NOT change).** The tmux metadata keys written at claim/bind time are a
-SEPARATE thing from MCP tool names and were NOT renamed:
-
-> Drift-nuance D5 (tmux-metadata-key axis) — `architecture.md` §6 "Whoami
-> and adopted-session parity flow" lists `@rigged_node_id`,
-> `@rigged_session_name`, `@rigged_rig_id`, `@rigged_rig_name`,
-> `@rigged_logical_id`. These are **CORRECT as-is** — verified literally at
-> source: `claim-service.ts:77-81` writes exactly these five `@rigged_*`
-> keys. Do NOT blanket-sed `rigged` → `rig`; this is a per-occurrence
-> verify, not a global substitution. (The metadata-key axis is detailed in
-> `agent-spec-and-startup.md` §6.) Re-confirmed `claim-service.ts:77-81`
-> @HEAD.
+**Axis 2 — tmux metadata keys are `@rigged_*`, and are correct as-is.** The
+tmux metadata keys written at claim/bind time are a separate thing from MCP
+tool names and were not renamed. `setRiggedMetadata` in
+`packages/daemon/src/domain/claim-service.ts:176`–`180` writes exactly **5**
+keys (`grep -c '@rigged_' packages/daemon/src/domain/claim-service.ts`):
+`@rigged_node_id`, `@rigged_session_name`, `@rigged_rig_id`,
+`@rigged_rig_name`, `@rigged_logical_id`. Do not blanket-sed `rigged` → `rig`.
+The metadata-key axis is detailed in `agent-spec-and-startup.md` (identity:
+whoami, bind, adopt).
 
 ## 2. Transport and communication domain services
 
-(`architecture.md` §5 "Transport and communication")
+All under `packages/daemon/src/domain/`:
 
 - `session-transport.ts` — communication primitives: send/capture/broadcast
-  with session resolution (canonical + legacy names), mid-work detection,
-  honest error reporting, pod/rig/global targeting.
-- `transcript-store.ts` — pipe-pane transcript management: ANSI stripping on
-  read, boundary markers, readTail, grep. Filesystem-backed, NOT SQLite.
-- `history-query.ts` — transcript + chat search. Prefers `rg` when
-  available, falls back to `grep -E`, surfaces which backend was used.
-  Re-confirmed: `history-query.ts:7` `backend: "rg" | "grep" | "none"`;
-  `:103` execs `rg -i --no-filename -e <pattern>`; `:108` returns
-  `backend: "rg"`.
+  with session resolution, send-readiness classification (interactive-prompt
+  and mid-work detection), honest error reporting, and list/pod/rig/global
+  targeting.
+- `transcript-store.ts` — transcript file management: path convention, ANSI
+  stripping on read, boundary markers, `readTail`, `readFull`, `grep`.
+  Filesystem-backed, NOT SQLite. The capture that writes the files is
+  `transcript-rotation.ts` (§4).
+- `history-query.ts` — transcript + chat search. Prefers `rg`, falls back to
+  `grep -E`, surfaces which backend was used: `history-query.ts:8`
+  `backend: "rg" | "grep" | "none"`; `:252` runs
+  `rg -i --no-filename -e <pattern>` over the rig's transcript directory;
+  `:267` falls back to `grep -E -i -h -e <pattern>`.
 - `ask-service.ts` — context-engineering evidence pack: gathers rig summary
   plus transcript excerpts, chat excerpts, insufficiency state, guidance.
   Does NOT call an external LLM.
-- `chat-repository.ts` — durable rig-scoped chat: CRUD for `chat_messages`
-  table, SSE-compatible event emission.
+- `chat-repository.ts` — durable rig-scoped chat over the `chat_messages`
+  table (`send`, `sendTopic`, `history`, `latest`, `searchChat`, `clear`). The
+  repository emits no events: `routes/chat.ts` emits `chat.message` on the
+  event bus after each send or topic, and `/watch` streams those as SSE.
 
-Routes: `routes/{transport,transcripts,ask,chat,whoami}.ts` — all confirmed
-present @HEAD.
+Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
+— all present.
 
 ## 3. Communication flow
 
-(`architecture.md` §6 "Communication flow")
-
 `rig send <session> "message"` → CLI → `POST /api/transport/send` →
-`SessionTransport`:
+`SessionTransport.send()`:
 
-1. Resolve session name (canonical or legacy; by session/rig/pod/global).
-2. Check mid-work state (unless `--force`) — re-confirmed
-   `session-transport.ts:136-141` (`findPatternEvidence(recentLines,
-   MID_WORK_PATTERNS)`); legacy mid-work check at `:666`.
-3. Two-step tmux send: a unique file/buffer pasted with `paste-buffer -d -r -p` at every payload size → ~200ms delay → separate `C-m`. Bracketed paste preserves multiline input in supporting TUIs; the payload never enters a shell argument. A successful paste proves transport execution, not runtime consumption.
-   (`session-transport.ts:717` submits `C-m`).
-4. Optional `--verify`: capture post-send pane, check message visibility
-   (`session-transport.ts:305` `verify?`; `:694` `if (opts?.verify)`).
+1. Resolve the session name (`resolveBySessionName`,
+   `session-transport.ts:729`): not found → 404; the same name in more than
+   one rig → 409. Pod, rig, global and `--to` list targets go through
+   `POST /api/transport/broadcast`, which resolves them with
+   `resolveSessions`.
+2. Classify send readiness. Only a positive interactive-prompt reading
+   (`needs_input`) refuses, with `target_needs_input`
+   (`session-transport.ts:1272`), unless the caller passes
+   `--dangerously-interact --reason`. A mid-work reading (`running`, from a
+   fresh runtime hook or the pane's mid-work patterns,
+   `findPatternEvidence(recentLines, MID_WORK_PATTERNS)`, `:225`) or an
+   `unknown` one proceeds with an advisory `warning` (`:1321`). `--force` has
+   no effect on this path.
+3. Two-step tmux send: a unique file/buffer pasted with `paste-buffer -d -r -p`
+   at every payload size (`packages/daemon/src/adapters/tmux.ts:587`) →
+   ~200ms delay (`session-transport.ts:1378`) → separate `C-m` (`:1385`).
+   Bracketed paste preserves multiline input in supporting TUIs; the payload
+   never enters a shell argument. A successful paste proves transport
+   execution, not runtime consumption.
+4. Optional `--verify`: capture the last 30 pane lines before and after the
+   send and count the message's first 40 characters in each. A higher count
+   after the send reports `outcome: "delivered"`; otherwise the outcome is
+   `rendered-unconfirmed` — text and Enter landed but the capture could not
+   re-confirm the render, which is not a failure (`session-transport.ts:472`
+   `verify?`; `:1403` `if (opts?.verify)`; `:1415`
+   `verified = postCount > preCount`).
 5. Honest result with reason on failure.
 
-Architecture Rule 18 (carried, `architecture.md` §7): tmux is transport, not
-truth — `send/capture/broadcast` wrap tmux reliably with honest errors.
+Architecture rule 18 (`architecture-rules-and-event-system.md`): tmux is
+transport, not truth — `send/capture/broadcast` wrap tmux reliably with honest
+errors.
 
-### 3b. Cross-host coordination verbs (v0.4.6 — OPR.0.4.6.MH4)
+### 3b. Cross-host coordination verbs
 
 `rig send/capture/transcript/broadcast --host <id>` (and the `agent@rig@host`
-target sugar on the session-target verbs) cross the host boundary with **zero
-daemon-side changes** — the remote daemon's existing local routes do all the
-work; the only net-new is the CLI transport branch.
+target sugar on the session-target verbs) cross the host boundary through the
+remote daemon's ordinary local routes; the cross-host logic is in the CLI.
 
-- **The seam principle (arch-ruled): SIDEDNESS + CALLER pick the seam.**
-  ONE-SIDED remote ops from a BEARER-CAPABLE caller (the CLI resolves the
-  registry bearer locally) go **CLI-DIRECT** via the shipped
-  `runRemoteHttpOp` — one hop, no local-daemon involvement (the
-  `ps --all-hosts` precedent). TWO-SIDED ops (MH-3's queue handoff closes the
-  local source and creates the remote successor — the local daemon owns half
-  the transaction) or BEARER-INCAPABLE callers (the browser: MC-action,
-  MH-2's read-through) use the **daemon-side forward-then-strip**. MH-4's
-  four verbs are pure one-sided remote ops from the CLI.
-- **Transport is dictated by the host entry (ssh XOR http), never a
-  per-call choice:** ssh hosts keep the shipped shell-out byte-verbatim for
-  send/capture; http hosts (the `pair` front door's kind) take the
-  CLI-direct branch to `POST /api/transport/send|capture|broadcast` /
-  `GET /api/transcripts/*` with the SAME bodies/paths the local CLI builds
-  (one route, two callers = wrap parity by construction). transcript and
-  broadcast are http-only (no ssh path exists for them); a wrong-transport
-  verb dies with the structured requirement error — never a fallback.
-- **Terminal-bearer posture (named limitation, v0 — `/api/transport/*`
-  ONLY):** the remote's transport routes (send/capture/broadcast) gate on
-  ITS TERMINAL bearer class (`OPENRIG_TERMINAL_BEARER_TOKEN`, default null →
-  pass-through; the tailnet is the auth boundary by design), while the CLI
-  presents the REGISTRY bearer from `hosts.yaml` when one is configured;
-  for a URL-only anonymous host the `Authorization` header is omitted.
-  A remote enforcing a
-  DIFFERENT terminal bearer surfaces as the structured `permission-gate`
-  step (never a hang, never silent). Remedy: set the remote terminal bearer
-  equal to the paired registry bearer, or rely on the tailnet boundary.
-  **The transcript read is DELIBERATELY outside this class (arch n2):**
-  `/api/transcripts/*` mounts UNGATED (`server.ts` — the shipped open-route
-  posture; daemon-local trust boundary with route-level credential
-  redaction as the protective primitive), so a wrong terminal bearer that
-  permission-gates `send --host` does NOT gate `transcript --host` — the
-  read keeps succeeding, and the proof matrix must not treat the auth-fail
-  class as uniform across the four verbs. A coherent transcript-read auth
-  policy across tail/grep/full is a named future slice per
-  `routes/transcripts.ts`'s own comment (orch approved-option-a).
-  Bearer-class unification is likewise a NAMED follow-up, not v0 (no
-  un-asked auth machinery).
-- **BR-1 holds:** the 3-part form is CLI-edge sugar only (suffix must match
-  a REGISTERED host id, else passthrough + a loud host hint); every session
-  string that reaches any daemon stays `member@rig`; the host travels
-  out-of-band. Durable cross-host coordination stays MH-3's queue — MH-4
-  adds no queue surface.
+- **Sidedness and caller pick the seam.** One-sided remote operations from a
+  caller that can resolve the registry bearer locally (the CLI) go
+  **CLI-direct** through `runRemoteHttpOp`
+  (`packages/cli/src/remote-host-ops.ts:25`) — one hop, no local-daemon
+  involvement, as `rig ps --all-hosts` does. Two-sided operations (a
+  cross-host queue handoff closes the local source and creates the remote
+  successor, so the local daemon owns half the transaction) and callers
+  without the bearer (the browser: Mission Control actions and the `?host=`
+  read-through) go through the local daemon, which forwards to the remote.
+  These four verbs are one-sided remote operations from the CLI.
+- **The host entry dictates the transport (ssh or http), never a per-call
+  choice.** ssh hosts shell out over ssh for send/capture
+  (`packages/cli/src/cross-host-executor.ts`); http hosts (the kind
+  `rig host pair` registers) go CLI-direct to
+  `POST /api/transport/send|capture|broadcast` / `GET /api/transcripts/*` with
+  the same bodies and paths the local CLI uses. transcript and broadcast are
+  http-only (no ssh path exists for them); on an ssh host they fail with a
+  structured error naming the transport requirement
+  (`remote-host-ops.ts:47`), never a fallback.
+- **Terminal-bearer posture (`/api/transport/*` only).** The remote's
+  transport routes (send/capture/broadcast) gate on its terminal bearer
+  (`routes/transport.ts:26`; `OPENRIG_TERMINAL_BEARER_TOKEN`,
+  `packages/daemon/src/index.ts:283`). With no token configured the
+  middleware passes every request through
+  (`packages/daemon/src/middleware/auth-bearer-token.ts:99`) — the tailnet is
+  the auth boundary by design — except that a daemon bound to an explicit
+  address that is neither local nor tailnet falls back to
+  `OPENRIG_AUTH_BEARER_TOKEN`
+  (`index.ts:289`). The CLI presents the registry bearer from `hosts.yaml`
+  when one is configured; for a URL-only anonymous host the `Authorization`
+  header is omitted. A remote enforcing a different terminal bearer answers
+  401, which surfaces as the structured `permission-gate` step
+  (`packages/cli/src/host-registry.ts:53`) — never a hang, never silent.
+  Remedy: set the remote terminal bearer equal to the paired registry bearer,
+  or rely on the tailnet boundary. **The transcript read is deliberately
+  outside this class:** `/api/transcripts/*` mounts with no bearer middleware
+  (`packages/daemon/src/server.ts:749`, beside the gated `/api/transport` at
+  `:750`), and credential-shaped text is redacted on the `/full` route only
+  (`routes/transcripts.ts:292`). So a wrong terminal bearer that
+  permission-gates `send --host` does NOT gate `transcript --host` — the read
+  keeps succeeding, and the auth-failure class is not uniform across the four
+  verbs. The route's own comment (`routes/transcripts.ts:250`) leaves a
+  coherent transcript-read auth policy across tail/grep/full for later.
+- **The 3-part form is CLI-edge sugar only.** `resolveCrossHostTarget`
+  (`packages/cli/src/cross-host-target.ts:58`) strips the suffix only when it
+  resolves to a registered host, or equals this host's own id, which routes
+  home (`:95`); otherwise the string passes through unchanged with a loud
+  host hint. Every session string that reaches any daemon stays
+  `member@rig`; the host travels out-of-band. Durable cross-host
+  coordination stays the queue's cross-host routing
+  (`coordination-primitive.md`); these four verbs add no queue surface.
 
 ## 4. Transcript flow
 
-(`architecture.md` §6 "Transcript flow")
-
-1. `NodeLauncher` starts `pipe-pane` immediately after tmux session creation
-   (before harness boot).
-2. Raw terminal output streams to
-   `~/.openrig/transcripts/{rig-name}/{session-name}.log`.
+1. `NodeLauncher` starts transcript rotation right after tmux session
+   creation, before the harness boots
+   (`packages/daemon/src/domain/node-launcher.ts:181`).
+2. Each rotation tick runs `tmux capture-pane -p -S -<lines>`
+   (`adapters/tmux.ts:994`) and atomically overwrites (temp file + rename,
+   `transcript-rotation.ts:143`)
+   `~/.openrig/transcripts/{rig-name}/{session-name}.log`. Defaults: 1000
+   trailing lines every 2 s (`transcript-rotation.ts:27`–`28`), tunable with
+   `OPENRIG_TRANSCRIPTS_LINES` and `OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS`.
+   This bounded capture replaced the earlier `tmux pipe-pane` stream
+   (`transcript-rotation.ts:3`), so the file holds a trailing window, not the
+   whole session.
 3. `TranscriptStore` owns path convention, ANSI stripping on read, boundary
-   markers, `readTail`, `grep`.
+   markers, `readTail`, `readFull`, `grep`.
 4. `rig transcript <session> --tail N / --grep "pattern"` provides
    agent-facing access.
-5. On restore: a boundary marker is written before re-launch; pipe-pane
-   reconnects to the same file (append). (Restore-side detail in
-   `lifecycle-snapshot-restore.md` §3.)
+5. On restore: a `--- SESSION BOUNDARY: … ---` marker is written before
+   re-launch (`restore-orchestrator.ts:1099`); each rotation tick keeps every
+   boundary line as a header above the fresh capture
+   (`transcript-rotation.ts:119`). (Restore-side detail in
+   `lifecycle-snapshot-restore.md`.)
 6. `rig ask` gathers rig summary plus transcript excerpts, chat excerpts,
    insufficiency state, and guidance.
 
-Architecture Rule 19 (carried): transcripts are raw capture via pipe-pane,
-ANSI strip on read; `rg` preferred, `grep -E` fallback. Rule 22: `rig ask`
-is context engineering — gathers evidence, does NOT call an external LLM;
-the agent IS the LLM.
+Architecture rule 19, as the code implements it: transcripts are a bounded
+`capture-pane` snapshot (not pipe-pane), ANSI-stripped on read; `rg`
+preferred, `grep -E` fallback. Rule 22: the daemon's `rig ask` is context
+engineering — it gathers evidence and does NOT call an external LLM; the
+agent IS the LLM. The one exception is the explicit CLI flag `rig ask --wake`
+(`packages/cli/src/commands/ask.ts:88`), which runs a headless resume of a
+Claude or Codex session (`claude -p --resume` / `codex exec resume`,
+`packages/cli/src/ask-wake.ts:58`–`60`) to answer one question.
 
 ## 5. Chat flow
 
-(`architecture.md` §6 "Chat flow")
-
 1. `rig chatroom send <rig> "message"` → `POST
-   /api/rigs/:rigId/chat/send` → `ChatRepository.addMessage()`.
+   /api/rigs/:rigId/chat/send` → `ChatRepository.send()`
+   (`routes/chat.ts:35`); the route then emits `chat.message` (`:37`).
 2. SSE: `GET /api/rigs/:rigId/chat/watch` delivers real-time messages.
-3. History: `GET /api/rigs/:rigId/chat/history` returns full channel
-   history; `POST /api/rigs/:rigId/chat/topic` persists topic markers.
-4. UI: chat-room tab in the rig drawer.
-5. MCP: **`rig_chatroom_send` + `rig_chatroom_watch`** (D5 axis-1 correction
-   — `architecture.md` §6 said `rigged_*`; source `mcp-server.ts:364` +
-   tool #17).
+3. History: `GET /api/rigs/:rigId/chat/history` returns channel history in id
+   order, 100 messages unless `limit` says otherwise
+   (`chat-repository.ts:68`), filterable by `topic`, `after`, `since` and
+   `sender`; `POST /api/rigs/:rigId/chat/topic` persists topic markers.
+4. UI: a `RigChatPanel` component exists
+   (`packages/ui/src/components/RigChatPanel.tsx`), but no UI view mounts it:
+   **1** file under `packages/ui/src` names it, its own
+   (`git grep -l 'RigChatPanel' -- packages/ui/src | wc -l`).
+5. MCP: **`rig_chatroom_send` + `rig_chatroom_watch`** (`mcp-server.ts:364`,
+   `:400`).
 6. Source of truth: daemon-backed SQLite (`chat_messages` table), NOT tmux
    scrollback.
 
-**ChatMessage** type (`architecture.md` §4): durable rig-scoped message —
+**ChatMessage** type (`chat-repository.ts:6`): durable rig-scoped message —
 `id`, `rigId`, `sender`, `kind`, `body`, `topic`, `createdAt`.
 
-## 6. Compatibility notes (carried verbatim, `architecture.md` §11)
+## 6. Compatibility notes
 
-The intentional limits in this layer:
+The intentional limits in this layer (numbered as in
+`architecture-rules-and-event-system.md`):
 
-- Note 4 — `rig ask` gathers context only; does not call an external LLM.
-  The agent reasons about the gathered evidence.
+- Note 4 — the daemon's `rig ask` gathers context only; it does not call an
+  external LLM. The agent reasons about the gathered evidence. Only the
+  explicit `--wake` flag executes a runtime (§4).
 - Note 5 — transcript search prefers `rg` but falls back to `grep -E`;
   search quality/performance varies by backend.
 - Note 6 — chat is rig-scoped only: no cross-rig channels or DMs.
-- Note 7 — `--verify` on `rig send` checks pane content for message
-  visibility but can produce false positives from pre-existing matching
-  content. Known limitation.
+- Note 7 — `--verify` on `rig send` checks the pane for the message by
+  comparing snippet counts before and after the send (§3 step 4); when the
+  capture cannot re-confirm the render it reports `rendered-unconfirmed`,
+  not a failure.
 
-(The full §11 compatibility-notes list lives in
+(The full compatibility-notes list lives in
 `architecture-rules-and-event-system.md`.)
-
-## OPEN / carried items
-
-- **D5 (the careful one — resolved per-occurrence, NOT blanket-replaced):**
-  Axis 1 (MCP tool names) corrected `rigged_*` → `rig_*` (3 sites: §5
-  node-inventory, §6 chat flow ×2). Axis 2 (tmux `@rigged_*` metadata keys)
-  verified literally correct at `claim-service.ts:77-81` and left unchanged.
-  No slice-00 numeric drift applies to this module's split content.
 
 ## See also
 
-- `daemon-core.md` — transport/transcript/chat/ask are among the 49 route
-  mounts; MCP tool count (17, `rig_*`) is anchored there.
-- `agent-spec-and-startup.md` §6 — the tmux `@rigged_*` metadata-key axis
-  detail (whoami/adopt).
-- `lifecycle-snapshot-restore.md` §3 — restore-side transcript boundary
+- `daemon-core.md` — the route-mount surface these routes sit in, and the MCP
+  tool count.
+- `agent-spec-and-startup.md` — the tmux `@rigged_*` metadata-key axis detail
+  (whoami/adopt).
+- `lifecycle-snapshot-restore.md` — restore-side transcript boundary
   markers.
-- `coordination-primitive.md` §3b — MH-3's cross-host QUEUE routing (the
-  two-sided daemon-forward twin of §3b's one-sided CLI-direct verbs).
-- `cli-reference.md` § Cross-host execution — the per-verb transport
-  capability table, parse rules, and http failure taxonomy (MH-3 + MH-4).
-- Source roots: `packages/daemon/src/domain/{session-transport,
-  transcript-store,history-query,ask-service,chat-repository}.ts`,
+- `coordination-primitive.md` — cross-host queue routing (the two-sided
+  daemon-forward twin of §3b's one-sided CLI-direct verbs).
+- `../cli-reference.md` § Cross-host execution (`--host <id>`) — the per-verb
+  transport table, the `agent@rig@host` parse rules, and the structured
+  failure modes.
+- Source roots: `packages/daemon/src/domain/{session-transport,transcript-store,transcript-rotation,history-query,ask-service,chat-repository}.ts`,
   `packages/daemon/src/routes/{transport,transcripts,ask,chat}.ts`,
   `packages/cli/src/mcp-server.ts`,
-  `packages/cli/src/{remote-host-ops,cross-host-target,cross-host-executor}.ts` (v0.4.6 MH-4).
+  `packages/cli/src/{remote-host-ops,cross-host-target,cross-host-executor,ask-wake}.ts`.

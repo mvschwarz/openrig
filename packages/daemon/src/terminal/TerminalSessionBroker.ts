@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { TmuxResult, TmuxCursorPosition } from "../adapters/tmux.js";
 
 // OPR.0.4.0.38 - real-terminal session broker.
@@ -175,6 +176,7 @@ export class TerminalSessionBroker {
   private tailInterval: ReturnType<typeof setInterval> | null = null;
   private livenessInterval: ReturnType<typeof setInterval> | null = null;
   private lastSize = 0;
+  private outputDecoder = new StringDecoder("utf8");
   private inputQueue: Promise<void> = Promise.resolve();
   // Singleflight the pipe-open as a shared promise so EVERY concurrent attach
   // awaits the SAME open result before it seeds/adds (a bare boolean would let a
@@ -456,7 +458,10 @@ export class TerminalSessionBroker {
           fs.readSync(fd, buf, 0, buf.length, this.lastSize);
           fs.closeSync(fd);
           this.lastSize += buf.length;
-          this.fanout(buf.toString("utf-8"));
+          // A pipe write or the read bound can split a multibyte character.
+          // Retain its pending bytes until the next poll before broadcasting.
+          const output = this.outputDecoder.write(buf);
+          if (output) this.fanout(output);
         }
       } catch {
         // transient stat/read failures are tolerated; liveness owns death
@@ -567,6 +572,7 @@ export class TerminalSessionBroker {
       this.outputPath = null;
     }
     this.lastSize = 0;
+    this.outputDecoder = new StringDecoder("utf8");
     // Clear the history ring so a torn-down broker leaks no retained output.
     this.history = [];
     this.historyBytes = 0;

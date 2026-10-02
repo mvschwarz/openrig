@@ -12,6 +12,8 @@ export interface NativeResumeProbeInput {
   paneContent: string | null;
   /** Only the managed adapter supplies this after exact, stable native-process proof. */
   claudeAutoIdentityVerified?: boolean;
+  /** Only an exact --resume process-lineage proof may use the visible composer as readiness. */
+  claudeResumeIdentityVerified?: boolean;
 }
 
 export interface NativeResumeProbeResult {
@@ -126,7 +128,14 @@ export function assessNativeResumeProbe(
         detail: "Claude is running with an active interactive TUI in the probe pane.",
       };
     }
-    if (paneCommand === "claude") {
+    if (input.claudeResumeIdentityVerified && hasClaudeComposerPrompt(paneContent)) {
+      return {
+        status: "resumed",
+        code: "verified_native_identity",
+        detail: "Claude is at its interactive prompt and the exact managed resume process was verified.",
+      };
+    }
+    if (paneCommand === "claude" && input.claudeResumeIdentityVerified !== false) {
       return {
         status: "resumed",
         code: "active_runtime",
@@ -239,13 +248,17 @@ export function isProbeShellReady(input: ProbeShellReadyInput): boolean {
 }
 
 function looksLikeClaudeTui(paneContent: string): boolean {
-  const hasPrompt = /(^|\n)\s*❯/.test(paneContent);
+  const hasPrompt = hasClaudeComposerPrompt(paneContent);
   if (!hasPrompt) return false;
 
   return (
     paneContent.includes("Claude Code v")
     || paneContent.includes("accept edits on")
   );
+}
+
+function hasClaudeComposerPrompt(paneContent: string): boolean {
+  return /(^|\n)\s*❯/.test(paneContent);
 }
 
 function looksLikeClaudeTrustPrompt(paneContent: string): boolean {
