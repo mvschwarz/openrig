@@ -547,12 +547,21 @@ export class TmuxAdapter {
   finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
 
   private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
+    // These are the daemon's resolved capture settings, not seat overrides.
+    // An empty per-session value prevents the tmux server's inherited values
+    // from pinning an old policy over config.json inside a newly launched seat.
+    // Explicit seat settings remain authoritative.
+    const seatEnv = {
+      OPENRIG_TRANSCRIPTS_LINES: "",
+      OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "",
+      ...env,
+    };
     const argv = ["tmux", "new-session", "-d", "-s", name];
     if (cwd != null) argv.push("-c", cwd);
-    if (env) for (const [k, v] of Object.entries(env)) argv.push("-e", `${k}=${v}`);
+    for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
     const legacyParts = ["tmux", "new-session", "-d", "-s", shellQuote(name)];
     if (cwd != null) legacyParts.push("-c", shellQuote(cwd));
-    if (env) for (const [k, v] of Object.entries(env)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
+    for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
     try {
       await this.run(argv, legacyParts.join(" "));
       return { ok: true };
