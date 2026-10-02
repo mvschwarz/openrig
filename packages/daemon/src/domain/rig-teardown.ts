@@ -118,13 +118,12 @@ export class RigTeardownOrchestrator {
     // 5. Kill each live session
     let killFailures = 0;
     for (const session of liveSessions) {
-      // V1 pre-release CLI/daemon Item 1: stop the rotation timer
-      // before killing the tmux session so capture-pane stops poking
-      // a dead target. Idempotent: silent no-op if no timer registered.
-      stopTranscriptRotation(session.sessionName);
       const killResult = await this.deps.tmuxAdapter.killSession(session.sessionName);
 
       if (killResult.ok || (killResult as { code?: string }).code === "session_not_found") {
+        // Stop capture only when termination is confirmed. A failed kill leaves
+        // the session running, so its existing transcript rotation must survive.
+        stopTranscriptRotation(session.sessionName);
         // Success or already gone — update DB atomically
         this.atomicNodeCleanup(session);
         this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd);
