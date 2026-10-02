@@ -14,6 +14,7 @@
 import nodeFs from "node:fs";
 import nodePath from "node:path";
 import { pathToFileURL } from "node:url";
+import { formatDaemonHostForUrl } from "./daemon-url.js";
 import {
   stubSeatSidecarPath,
   stubSeatScriptPath,
@@ -254,7 +255,8 @@ export function resolveStubActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: 
   let baseUrl = env.OPENRIG_URL?.trim() || null;
   let token = env.OPENRIG_ACTIVITY_HOOK_TOKEN?.trim() || null;
   if (!baseUrl && env.OPENRIG_PORT) {
-    baseUrl = `http://${env.OPENRIG_HOST?.trim() || "127.0.0.1"}:${env.OPENRIG_PORT.trim()}`;
+    const rawHost = env.OPENRIG_HOST?.trim() || "127.0.0.1";
+    baseUrl = `http://${formatDaemonHostForUrl(rawHost)}:${env.OPENRIG_PORT.trim()}`;
   }
   if (!baseUrl || !token) {
     try {

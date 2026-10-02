@@ -4,8 +4,7 @@
 //   - my-queue            → queue_items where destination_session = operator
 //                            AND tier='human-gate'
 //   - human-gate          → queue_items where tier='human-gate'
-//   - fleet               → shell out to `rig ps --nodes -A --json` (graceful
-//                            degradation per 4-sub-clause spec)
+//   - fleet               → daemon rig registry + queue, with optional CLI observations
 //   - active-work         → queue_items where state in (pending, in-progress,
 //                            blocked) sorted by priority
 //   - recent-ships        → queue_items where state in (done, handed-off)
@@ -86,6 +85,7 @@ export interface MissionControlReadResult {
   meta: {
     rowCount: number;
     rigsRunningStaleCli?: number;
+    rigsWithUnknownCliCapabilities?: number;
     degradedFields?: string[];
     sourceFallback?: string;
   };
@@ -202,6 +202,7 @@ export class MissionControlReadLayer {
       meta: {
         rowCount: rows.length,
         rigsRunningStaleCli: fleet.staleCliCount,
+        rigsWithUnknownCliCapabilities: fleet.unknownCliCount,
         degradedFields: fleet.degradedFields.length > 0 ? fleet.degradedFields : undefined,
         sourceFallback: fleet.sourceFallback ?? undefined,
       },
@@ -261,7 +262,10 @@ export class MissionControlReadLayer {
         meta: { rowCount: 0, sourceFallback: "stream-store-not-wired" },
       };
     }
-    const items: StreamItem[] = this.streamStore.list({ limit: RECENT_OBSERVATIONS_LIMIT });
+    const items: StreamItem[] = this.streamStore.list({
+      limit: RECENT_OBSERVATIONS_LIMIT,
+      direction: "latest",
+    });
     const rows = items.map((s) => streamItemToCompactRow(s));
     return {
       viewName: "recent-observations",

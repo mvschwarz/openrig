@@ -49,10 +49,12 @@ describe("classifyDaemonState — 3-state honest-degraded rail", () => {
     };
     await classifyDaemonState(deps({ openrigUrl: "http://foreign:8080", probeHealthz: probe }));
     await classifyDaemonState(deps({ readDaemonJson: () => ({ pid: 9, port: 9999, host: "10.0.0.5" }), probeHealthz: probe }));
+    await classifyDaemonState(deps({ readDaemonJson: () => ({ pid: 9, port: 9999, host: "::1" }), probeHealthz: probe }));
     await classifyDaemonState(deps({ readDaemonJson: () => undefined, probeHealthz: probe }));
     expect(seen).toEqual([
       "http://foreign:8080/healthz",
       "http://10.0.0.5:9999/healthz",
+      "http://[::1]:9999/healthz",
       "http://127.0.0.1:7433/healthz",
     ]);
   });

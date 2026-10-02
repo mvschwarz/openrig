@@ -1139,6 +1139,71 @@ describe("StartupOrchestrator", () => {
   });
 
   // NS-T05: readiness retry loop
+  describe("readiness deadline", () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it.each([20_000, 30_000])("accepts readiness at %i ms within the 30-second budget", async (readyAfterMs) => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({
+        checkReady: vi.fn(async () => ({ ready: Date.now() - started >= readyAfterMs })),
+      });
+      let settled = false;
+      const pending = createOrchestrator().startNode(makeInput(seed, { adapter }))
+        .then((result) => { settled = true; return result; });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await pending).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(sessionRegistry.getSessionsForRig(seed.rigId).find((s) => s.id === seed.sessionId)?.startupStatus).toBe("ready");
+    });
+
+    it.each([500, 30_000])("does not time out before the %i ms budget expires", async (timeoutMs) => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({
+        checkReady: vi.fn(async () => ({ ready: false, reason: `not ready at ${Date.now() - started}ms` })),
+      });
+      let settled = false;
+      const pending = createOrchestrator().startNode(makeInput(seed, { adapter, readinessTimeoutMs: timeoutMs }))
+        .then((result) => { settled = true; return result; });
+
+      await vi.advanceTimersByTimeAsync(timeoutMs - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await pending).toMatchObject({
+        ok: false,
+        startupStatus: "failed",
+        errors: [expect.stringContaining(`not ready at ${timeoutMs}ms`)],
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("preserves an attention blocker observed at the deadline", async () => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({
+        checkReady: vi.fn(async () => Date.now() - started >= 30_000
+          ? { ready: false, code: "trust_gate", reason: "workspace trust required" }
+          : { ready: false, reason: "starting" }),
+      });
+      const pending = createOrchestrator().startNode(makeInput(seed, { adapter }));
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(await pending).toMatchObject({
+        ok: false,
+        startupStatus: "attention_required",
+        errors: ["Startup requires attention: workspace trust required"],
+      });
+    });
+  });
+
   it("readiness retries until ready", async () => {
     const seed = seedSession();
     let callCount = 0;

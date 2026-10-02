@@ -171,7 +171,7 @@ export class ContextMonitor {
     // The enforcer is Claude's /compact path; never relay other runtimes
     // (Cursor in particular reads a whole-percent footer, not a Claude sample).
     if (session.runtime === "cursor") return;
-    if (!usage || usage.availability !== "known") return;
+    if (!usage || usage.availability !== "known" || !usage.fresh) return;
     try {
       await this.compactionEnforcer.maybeAutoCompact({
         sessionName: session.session_name,

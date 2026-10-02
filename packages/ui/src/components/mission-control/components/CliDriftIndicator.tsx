@@ -1,21 +1,22 @@
 // PL-005 Phase A: cross-CLI-version drift indicator.
 //
-// Per PRD § Runtime/Source Drift Acceptance sub-clause 4: surfaces a
-// fleet-level "rigs running stale CLI" indicator + per-row "field
-// unavailable on this rig's daemon version" placeholders.
+// Keep confirmed outdated versions, unknown capabilities and unavailable
+// fields separate: a missing field alone does not establish an old CLI.
 
 export interface CliDriftIndicatorProps {
   staleCliCount: number;
+  unknownCliCount?: number;
   degradedFields: string[];
   sourceFallback?: string | null;
 }
 
 export function CliDriftIndicator({
   staleCliCount,
+  unknownCliCount = 0,
   degradedFields,
   sourceFallback,
 }: CliDriftIndicatorProps) {
-  if (staleCliCount === 0 && degradedFields.length === 0 && !sourceFallback) {
+  if (staleCliCount === 0 && unknownCliCount === 0 && degradedFields.length === 0 && !sourceFallback) {
     return null;
   }
   return (
@@ -27,6 +28,11 @@ export function CliDriftIndicator({
         <div data-testid="mc-cli-drift-stale-count">
           <span className="font-mono uppercase text-[9px] tracking-[0.12em]">stale-cli</span>{" "}
           {staleCliCount} {staleCliCount === 1 ? "rig" : "rigs"} running stale CLI
+        </div>
+      ) : null}
+      {unknownCliCount > 0 ? (
+        <div data-testid="mc-cli-drift-unknown-count">
+          {unknownCliCount} {unknownCliCount === 1 ? "rig" : "rigs"} with unknown CLI capabilities
         </div>
       ) : null}
       {degradedFields.length > 0 ? (
@@ -54,9 +60,9 @@ export function MissingFieldPlaceholder({ fieldName }: MissingFieldPlaceholderPr
     <span
       data-testid="mc-missing-field-placeholder"
       className="font-mono text-[10px] text-amber-700"
-      title={`field unavailable on this rig's daemon version`}
+      title="field unavailable on this rig"
     >
-      {fieldName}: field unavailable on this rig's daemon version
+      {fieldName}: field unavailable on this rig
     </span>
   );
 }

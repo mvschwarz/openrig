@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const serveMock = vi.fn();
 const createDaemonMock = vi.fn();
+const serverMock = { prependListener: vi.fn() };
+let signalListenersBefore: { SIGINT: Function[]; SIGTERM: Function[] };
 
 vi.mock("@hono/node-server", () => ({
   serve: serveMock,
@@ -13,7 +15,13 @@ vi.mock("../src/startup.js", () => ({
 
 describe("daemon startServer", () => {
   beforeEach(() => {
+    signalListenersBefore = {
+      SIGINT: process.listeners("SIGINT"),
+      SIGTERM: process.listeners("SIGTERM"),
+    };
     serveMock.mockReset();
+    serverMock.prependListener.mockReset();
+    serveMock.mockReturnValue(serverMock);
     createDaemonMock.mockReset();
     createDaemonMock.mockResolvedValue({
       app: { fetch: vi.fn() },
@@ -29,6 +37,14 @@ describe("daemon startServer", () => {
   });
 
   afterEach(() => {
+    // startServer installs shutdown handlers; keep this mock-only fixture isolated.
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      for (const listener of process.listeners(signal)) {
+        if (!signalListenersBefore[signal].includes(listener)) {
+          process.removeListener(signal, listener as () => void);
+        }
+      }
+    }
     delete process.env.OPENRIG_HOST;
     delete process.env.RIGGED_HOST;
     delete process.env.OPENRIG_BIND_HOST;
@@ -39,11 +55,15 @@ describe("daemon startServer", () => {
   it("binds the daemon to loopback", async () => {
     const { startServer } = await import("../src/index.js");
 
-    await startServer(7441);
+    const server = await startServer(7441);
 
     expect(serveMock).toHaveBeenCalledWith(
       expect.objectContaining({ port: 7441, hostname: "127.0.0.1" }),
       expect.any(Function)
+    );
+    expect(server).toBe(serverMock);
+    expect(serverMock.prependListener).toHaveBeenCalledWith(
+      "request", expect.any(Function),
     );
   });
 

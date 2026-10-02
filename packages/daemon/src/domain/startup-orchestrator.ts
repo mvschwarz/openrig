@@ -486,15 +486,12 @@ export class StartupOrchestrator {
         return result;
       }
 
-      const elapsed = Date.now() - startTime;
-      if (elapsed + delay > timeoutMs) {
-        // One final check before timing out
-        const finalResult = await adapter.checkReady(binding);
-        if (finalResult.ready) return finalResult;
+      const remaining = timeoutMs - (Date.now() - startTime);
+      if (remaining <= 0) {
         return { ready: false, reason: result.reason ?? "readiness timeout" };
       }
 
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      await new Promise((resolve) => setTimeout(resolve, Math.min(delay, remaining)));
       delay = Math.min(delay * 2, maxDelay);
     }
   }

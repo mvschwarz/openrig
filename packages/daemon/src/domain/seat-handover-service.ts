@@ -139,6 +139,8 @@ interface SeatHandoverServiceDeps {
   runtimeAdapters?: Record<string, RuntimeAdapter>;
   /** Claude sidecar reader for discovered-mode resume-token capture (B2). */
   contextUsageStore?: ResumeTokenCaptureDeps["contextUsageStore"];
+  /** #421 — start time of the pane's current Claude process; a sidecar sampled earlier is skipped. */
+  claudeProcessStartedAt?: ResumeTokenCaptureDeps["claudeProcessStartedAt"];
   /** Codex thread-id capturer for discovered-mode resume-token capture (B2). */
   resumeTokenCapturer?: ResumeTokenCaptureDeps["resumeTokenCapturer"];
   /** OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader for Pi resume-token capture. */
@@ -254,6 +256,7 @@ export class SeatHandoverService {
     });
     this.captureDeps = {
       contextUsageStore: deps.contextUsageStore ?? null,
+      claudeProcessStartedAt: deps.claudeProcessStartedAt ?? null,
       resumeTokenCapturer: deps.resumeTokenCapturer ?? null,
       piRunnerStateStore: deps.piRunnerStateStore ?? null,
       ompRunnerStateStore: deps.ompRunnerStateStore ?? null,
@@ -775,7 +778,7 @@ export class SeatHandoverService {
   private emitCaptureSkip(
     input: { rigId: string; nodeId: string; sessionId: string; sessionName: string },
     runtime: string,
-    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token",
+    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token" | "stale_sidecar",
   ): void {
     try {
       this.eventBus.emit({

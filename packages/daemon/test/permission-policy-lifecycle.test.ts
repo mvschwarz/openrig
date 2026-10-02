@@ -502,6 +502,8 @@ describe("GF2 — the COMPLETE production-altitude launch/restore matrix", () =>
       const checkpointStore2 = new CheckpointStore(db2);
       const snapshotCapture2 = new SnapshotCapture({ db: db2, rigRepo: rigRepo2, sessionRegistry: sessionRegistry2, eventBus: eventBus2, snapshotRepo: snapshotRepo2, checkpointStore: checkpointStore2 });
       const tmux = mockTmux();
+      // The old seat is gone; the newly created seat must be live for real readiness.
+      vi.mocked(tmux.hasSession).mockImplementation(async () => vi.mocked(tmux.createSession).mock.calls.length > 0);
       const realClaude = new ClaudeCodeAdapter({ sleep: async () => {}, tmux, fsOps: (function () {
         const store: Record<string, string> = {};
         return { readFile: (p: string) => { if (p in store) return store[p]!; throw new Error("nf"); }, writeFile: (p: string, c: string) => { store[p] = c; }, exists: (p: string) => p in store, mkdirp: () => {}, copyFile: () => {}, listFiles: () => [] } as ClaudeAdapterFsOps;
@@ -515,6 +517,7 @@ describe("GF2 — the COMPLETE production-altitude launch/restore matrix", () =>
         codexResume: { canResume: vi.fn(() => false), resume: vi.fn() } as unknown as CodexResumeAdapter,
       });
       await orch.restore(snap.id, { adapters: { "claude-code": realClaude } } as never);
+      expect(sessionRegistry2.getSessionsForRig(rigId).find((s) => s.nodeId === implNode.id && s.status === "running")?.startupStatus).toBe("ready");
       const cmds = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[1]));
       const launchCmd = cmds.find((c) => c.includes("claude"));
       expect(launchCmd, `expected a claude harness launch among: ${cmds.join(" | ")}`).toBeDefined();

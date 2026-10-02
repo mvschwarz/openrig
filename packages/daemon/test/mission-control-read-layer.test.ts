@@ -201,11 +201,33 @@ describe("MissionControlReadLayer (PL-005 Phase A; 7 views)", () => {
     expect(result.rows[0]?.rigOrMissionName).toBe("discovery@rig");
   });
 
-  it("fleet view returns rows + drift indicator metadata", async () => {
+  it("recent-observations returns the newest bounded page when item count exceeds limit (#489)", async () => {
+    // RECENT_OBSERVATIONS_LIMIT is 50. Emit 60 items.
+    for (let i = 1; i <= 60; i++) {
+      streamStore.emit({
+        streamItemId: `stream-${String(i).padStart(3, "0")}`,
+        sourceSession: `discovery-${i}@rig`,
+        body: `observation ${i}`,
+        tsEmitted: new Date(Date.now() + i * 1000).toISOString(),
+      });
+    }
+    const result = await readLayer.readView("recent-observations");
+    expect(result.rows).toHaveLength(50);
+    // The items returned should be the latest 50 (items 11 to 60)
+    // Preserving chronological order (direction: "latest" reverses the DESC query)
+    expect(result.rows[0]?.rawSourceRef).toBe("stream-011");
+    expect(result.rows[0]?.rigOrMissionName).toBe("discovery-11@rig");
+    expect(result.rows[49]?.rawSourceRef).toBe("stream-060");
+    expect(result.rows[49]?.rigOrMissionName).toBe("discovery-60@rig");
+  });
+
+  it("fleet view reports unobserved CLI capabilities without claiming stale versions", async () => {
     const result = await readLayer.readView("fleet");
     expect(result.viewName).toBe("fleet");
     expect(typeof result.meta.rowCount).toBe("number");
-    // staleCliCount is present (may be 0 with default no-op probe).
-    expect(typeof result.meta.rigsRunningStaleCli).toBe("number");
+    expect(result.rows[0]?.confidenceFreshness).toBe("unknown");
+    expect(result.meta.rigsRunningStaleCli).toBe(0);
+    expect(result.meta.rigsWithUnknownCliCapabilities).toBe(1);
+    expect(result.meta.degradedFields).toBeUndefined();
   });
 });

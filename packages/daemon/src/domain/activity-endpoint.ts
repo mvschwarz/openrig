@@ -20,6 +20,8 @@ import fs from "node:fs";
 import nodePath from "node:path";
 import { randomBytes } from "node:crypto";
 
+import { formatDaemonHostForUrl } from "./daemon-url.js";
+
 const TOKEN_FILE = "activity-hook-token";
 const ENDPOINT_FILE = "activity-endpoint.json";
 const DEFAULT_DAEMON_PORT = "7433";
@@ -36,7 +38,8 @@ export function deriveActivityUrl(host: string | undefined, port: string | undef
   const p = port && port.trim().length > 0 ? port.trim() : DEFAULT_DAEMON_PORT;
   const h = host?.trim();
   const wildcard = !h || h === "0.0.0.0" || h === "::" || h === "[::]" || h === "*";
-  return `http://${wildcard ? "127.0.0.1" : h}:${p}`;
+  const resolvedHost = wildcard ? "127.0.0.1" : formatDaemonHostForUrl(h);
+  return `http://${resolvedHost}:${p}`;
 }
 
 /** Read the durable activity-hook token from state, or generate + persist one.

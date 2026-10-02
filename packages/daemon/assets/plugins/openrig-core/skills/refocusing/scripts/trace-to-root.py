@@ -18,6 +18,10 @@ NO_CURRENT_BATON_BASIS = (
     "no typed in-progress work (only in-progress rows are considered; a typed row that is "
     "pending or blocked is not current work)"
 )
+# The daemon's session-name character set and human-class refs (domain/session-name.ts:
+# validateSessionName, isHumanSeatSessionRef).
+SESSION_CHARS = re.compile(r"[A-Za-z0-9\-_.@]+")
+HUMAN_CLASS_SESSION = re.compile(r"human(?:-[A-Za-z0-9._-]+)?@(?:kernel|host)|[A-Za-z0-9._:-]+@external")
 
 
 def rig_output(*args):
@@ -205,10 +209,31 @@ def render_work(start, root, depth, fallback=None):
     return "\n".join(output)
 
 
+def canonical_seat(session):
+    """(member, rig) for a canonical session name, else None so the caller asks `rig whoami`.
+
+    Mirrors the daemon's parse contract (domain/session-name.ts, parseSessionName): the member is
+    everything before the FIRST "@" and the rig is everything after it, which may itself contain
+    "@". Human-class refs are not seats, and a name outside the session character set
+    (validateSessionName) is uncertain, so both keep the lookup."""
+    if not session or not SESSION_CHARS.fullmatch(session) or HUMAN_CLASS_SESSION.fullmatch(session):
+        return None
+    member, at, rig = session.partition("@")
+    return (member, rig) if at and member and rig else None
+
+
 def derive_topology_start(root):
     explicit = os.environ.get("OPENRIG_REFOCUS_TOPOLOGY_NODE")
     if explicit:
         return Path(explicit)
+    # A stale session name (one left over from a seat swap) can name a seat that has no folder;
+    # only an existing seat directory is trusted, otherwise `rig whoami` decides.
+    seat = canonical_seat(os.environ.get("OPENRIG_SESSION_NAME"))
+    if seat:
+        member, rig = seat
+        candidate = root / "rigs" / rig / "seats" / member
+        if candidate.is_dir():
+            return candidate
     raw = rig_output("whoami", "--json")
     if not raw:
         return None

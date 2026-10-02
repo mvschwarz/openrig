@@ -23,7 +23,6 @@ import { MissionControlReadLayer } from "../src/domain/mission-control/mission-c
 import {
   MissionControlFleetCliCapability,
   makeLocalCliCapabilityProbe,
-  LOCAL_CLI_VERSION_LABEL,
 } from "../src/domain/mission-control/mission-control-fleet-cli-capability.js";
 import { missionControlRoutes } from "../src/routes/mission-control.js";
 
@@ -237,46 +236,78 @@ describe("mission-control routes (PL-005 Phase A)", () => {
     expect(typeof body.staleCliCount).toBe("number");
   });
 
-  // R1 fix per PL-005 Phase A guard review (2026-05-04). End-to-end
-  // proof through the production-wired ROUTE PATH (not just an injected
-  // unit seam): when the fleet capability is constructed with the
-  // production probe (the same factory startup.ts wires in), the
-  // /api/mission-control/cli-capabilities route payload exposes
-  // recoveryGuidance drift to UI consumers.
-  it("R1 PRODUCTION-WIRED ROUTE: /cli-capabilities reports recoveryGuidance drift in JSON payload + per-row cliDriftDetected", async () => {
-    // Build a fresh app with the production probe wired (the no-op
-    // default from earlier tests is replaced by the canonical factory).
-    const productionFleetCli = new MissionControlFleetCliCapability({
+  it.each([
+    {
+      name: "unobserved production CLI",
+      probe: makeLocalCliCapabilityProbe(),
+      version: "unknown", status: "unknown", outdated: false,
+      stale: 0, unknown: 1, fields: [],
+    },
+    {
+      name: "observed compatible CLI",
+      probe: makeLocalCliCapabilityProbe({ versionLabel: "0.6.3", knownNodeFields: new Set(["agentActivity"]) }),
+      version: "0.6.3", status: "available", outdated: false,
+      stale: 0, unknown: 0, fields: [],
+    },
+    {
+      name: "observed unavailable field",
+      probe: makeLocalCliCapabilityProbe({ versionLabel: "0.6.3", knownNodeFields: new Set() }),
+      version: "0.6.3", status: "unavailable", outdated: false,
+      stale: 0, unknown: 0, fields: ["agentActivity"],
+    },
+    {
+      name: "independently confirmed outdated CLI",
+      probe: makeLocalCliCapabilityProbe({ versionLabel: "0.1.12", knownNodeFields: new Set(), versionOutdated: true }),
+      version: "0.1.12", status: "unavailable", outdated: true,
+      stale: 1, unknown: 0, fields: ["agentActivity"],
+    },
+    {
+      name: "failed observation",
+      probe: async () => { throw new Error("CLI unavailable"); },
+      version: "unknown", status: "unknown", outdated: false,
+      stale: 0, unknown: 1, fields: [],
+    },
+  ])("CLI capabilities and fleet view agree for $name", async (testCase) => {
+    const fleetCli = new MissionControlFleetCliCapability({
       db,
       eventBus: bus,
       rigRepo: new RigRepository(db),
-      probeRig: makeLocalCliCapabilityProbe(),
+      probeRig: testCase.probe,
     });
-    const productionApp = new Hono();
-    productionApp.use("*", async (c, next) => {
-      c.set("eventBus" as never, bus);
-      c.set("missionControlReadLayer" as never, c.get("missionControlReadLayer" as never));
-      c.set("missionControlWriteContract" as never, c.get("missionControlWriteContract" as never));
-      c.set("missionControlFleetCliCapability" as never, productionFleetCli);
-      await next();
+    const readLayer = new MissionControlReadLayer({
+      db, queueRepo, viewProjector: new ViewProjector(db, bus),
+      fleetCliCapability: fleetCli,
     });
-    productionApp.route("/api/mission-control", missionControlRoutes());
+    const capabilityApp = buildApp({
+      eventBus: bus, readLayer, fleetCli,
+      writeContract: new MissionControlWriteContract({
+        db, eventBus: bus, queueRepo, actionLog: new MissionControlActionLog(db),
+      }),
+    });
 
-    const res = await productionApp.request("/api/mission-control/cli-capabilities");
+    const res = await capabilityApp.request("/api/mission-control/cli-capabilities");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      rows: Array<{ rigName: string; cliDriftDetected: boolean; cliVersionLabel: string }>;
-      staleCliCount: number;
-      degradedFields: string[];
-      sourceFallback: string | null;
-    };
-    expect(body.staleCliCount).toBeGreaterThan(0);
-    expect(body.degradedFields).toContain("recoveryGuidance");
-    expect(body.degradedFields).not.toContain("agentActivity");
-    for (const row of body.rows) {
-      expect(row.cliDriftDetected).toBe(true);
-      expect(row.cliVersionLabel).toBe(LOCAL_CLI_VERSION_LABEL);
-    }
+    expect(await res.json()).toMatchObject({
+      rows: [{
+        rigName: "rig", cliVersionLabel: testCase.version,
+        cliCapabilityStatus: testCase.status,
+        cliVersionOutdated: testCase.outdated,
+        cliDriftDetected: testCase.fields.length > 0,
+      }],
+      staleCliCount: testCase.stale, unknownCliCount: testCase.unknown,
+      degradedFields: testCase.fields, sourceFallback: "daemon-internal-projection",
+    });
+
+    const viewRes = await capabilityApp.request("/api/mission-control/views/fleet");
+    expect(viewRes.status).toBe(200);
+    const view = await viewRes.json() as { rows: Array<{ confidenceFreshness: string }>; meta: Record<string, unknown> };
+    expect(view.rows[0]?.confidenceFreshness).toBe(testCase.version);
+    expect(view.meta).toEqual({
+      rowCount: 1, rigsRunningStaleCli: testCase.stale,
+      rigsWithUnknownCliCapabilities: testCase.unknown,
+      sourceFallback: "daemon-internal-projection",
+      ...(testCase.fields.length > 0 ? { degradedFields: testCase.fields } : {}),
+    });
   });
 
   // SSE route-order discipline (per PL-004 Phase A R1 lesson; literal

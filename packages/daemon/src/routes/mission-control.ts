@@ -26,7 +26,10 @@ import {
   type MissionControlWriteContract,
 } from "../domain/mission-control/mission-control-write-contract.js";
 import type { MissionControlFleetCliCapability } from "../domain/mission-control/mission-control-fleet-cli-capability.js";
-import type { MissionControlAuditBrowse } from "../domain/mission-control/audit-browse.js";
+import {
+  MissionControlAuditQueryError,
+  type MissionControlAuditBrowse,
+} from "../domain/mission-control/audit-browse.js";
 import type { MissionControlNotificationDispatcher } from "../domain/mission-control/notification-dispatcher.js";
 import { resolveActorWithDeferral, resolveRecordedProvenance } from "./require-sender-identity.js";
 
@@ -456,6 +459,13 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
       const result = audit.query({ qitemId, actionVerb, actorSession, since, until, limit, beforeId, scopeTier, scopeId, scopePath, approvalScope });
       return c.json(result);
     } catch (err) {
+      if (err instanceof MissionControlAuditQueryError) {
+        const status = err.code === "verb_unknown" ? 400 : 500;
+        return c.json(
+          { error: err.code, message: err.message, ...(err.details ?? {}) },
+          status as 200,
+        );
+      }
       return c.json(
         {
           error: "audit_query_failed",

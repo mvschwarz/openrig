@@ -416,6 +416,10 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       const actionableAt = pendingSince(deps.db, row.qitemId) ?? row.tsCreated;
       if (actionableAt > cutoff) continue;
       if (hasLiveLadder(deps.db, row.qitemId)) continue;
+      // #514 — an ask already posted to its registered human in the current delivery episode waits on
+      // that human; it is not stuck, and a finding would post the human again. Unposted, failed,
+      // legacy and non-human rows keep this net.
+      if (deps.queueRepo.humanNotificationPostedThisEpisode(row.qitemId)) continue;
       candidates.push({
         kind: "unclaimed-obligation",
         row,

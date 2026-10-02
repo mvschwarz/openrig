@@ -233,7 +233,7 @@ describe("Slice-11 INBOUND routing — never-drop, on the in-process queue port 
     const r = await h.router.route(ev);
     expect(r.landed).toBe(true);
     expect(r.qitemId).toBe("qitem-in-1");
-    expect(h.seen.load().has("100.1")).toBe(true);
+    expect(h.seen.load().has("C1:100.1")).toBe(true);
   });
 
   it("item 8: dedup by ts — same event twice creates ONE qitem", async () => {
@@ -254,7 +254,7 @@ describe("Slice-11 INBOUND routing — never-drop, on the in-process queue port 
     const h = mk(() => (fail ? new Error("daemon busy") : "qitem-in-9"));
     const r = await h.router.route(ev);
     expect(r.landed).toBe(false);
-    expect(h.seen.load().has("100.1")).toBe(false);
+    expect(h.seen.load().has("C1:100.1")).toBe(false);
     const peek = h.dead.readAll();
     expect(peek).toHaveLength(1);
     expect(peek[0]!.attempts).toBe(1);
@@ -262,7 +262,7 @@ describe("Slice-11 INBOUND routing — never-drop, on the in-process queue port 
     fail = false;
     const rr = await h.router.retryDeadLetters();
     expect(rr.landed).toBe(1);
-    expect(h.seen.load().has("100.1")).toBe(true);
+    expect(h.seen.load().has("C1:100.1")).toBe(true);
     expect(h.dead.readAll()).toHaveLength(0);
   });
 

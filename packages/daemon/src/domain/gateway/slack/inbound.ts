@@ -91,7 +91,7 @@ export function ingestDecision(ev: SlackEvent): { ingest: true } | { ingest: fal
 export interface StoredInboundFile { name: string; localPath: string; mimetype?: string; bytes: number }
 export interface FailedInboundFile { name: string; error: string }
 export interface InboundFileResult { stored: StoredInboundFile[]; failed: FailedInboundFile[] }
-export interface InboundFilePort { transfer(files: unknown[], eventTs: string): Promise<InboundFileResult> }
+export interface InboundFilePort { transfer(files: unknown[], eventTs: string, eventChannel?: string): Promise<InboundFileResult> }
 
 export function shouldIngest(ev: SlackEvent): boolean {
   return ingestDecision(ev).ingest;
@@ -135,7 +135,7 @@ export interface InboundDeps {
 }
 
 export class InboundRouter {
-  private readonly inflight = new Set<string>(); // same-ts double-dispatch guard (item 8)
+  private readonly inflight = new Set<string>(); // same-channel message identity double-dispatch guard
   private retryPass: Promise<{ retried: number; landed: number }> | undefined;
   constructor(private readonly deps: InboundDeps) {}
 
@@ -167,9 +167,13 @@ export class InboundRouter {
     };
   }
 
+  /** Slack message ts is unique within a channel, so every inbound id uses both fields. */
+  private inboundEventId(ev: SlackEvent): string {
+    return `${ev.channel ?? "-"}:${ev.ts ?? "-"}`;
+  }
+
   private inboundQitemId(ev: SlackEvent): string {
-    const key = `${ev.channel ?? "-"}:${ev.ts ?? "-"}`;
-    return `qitem-slack-inbound-${createHash("sha256").update(key).digest("hex").slice(0, 20)}`;
+    return `qitem-slack-inbound-${createHash("sha256").update(this.inboundEventId(ev)).digest("hex").slice(0, 20)}`;
   }
 
   /**
@@ -186,7 +190,8 @@ export class InboundRouter {
     replyResolution?: "resolved" | "already-resolved" | "not-applicable";
   }> {
     const ts = ev.ts ?? "";
-    if (!ts || this.inflight.has(ts) || this.deps.seen.load().has(ts)) return { landed: false, reason: "dup" };
+    const eventId = this.inboundEventId(ev);
+    if (!ts || this.inflight.has(eventId) || this.deps.seen.load().has(eventId)) return { landed: false, reason: "dup" };
     // A6 v3 registration gate: admit-iff-registered. An unregistered sender is REFUSED here —
     // never landed as a fabricated human-<slackid>@kernel seat. This is a POLICY refusal, not a
     // transient failure, so it is NOT dead-lettered (retrying can't help until the human registers).
@@ -195,7 +200,7 @@ export class InboundRouter {
       this.deps.log?.(`inbound REFUSED — unregistered sender ${ev.user} (ts=${ts}): ${who.teaching}`);
       return { landed: false, reason: "unregistered" };
     }
-    this.inflight.add(ts);
+    this.inflight.add(eventId);
     try {
       // OPR.0.5.6.2 — transfer the human's files BEFORE composing the row so the
       // row carries local paths (or named failures). A missing port is itself a
@@ -218,7 +223,7 @@ export class InboundRouter {
           // becomes a NAMED failure. Failure honesty is a property of this seam,
           // not a promise the port is trusted to keep.
           try {
-            transfer = await this.deps.files.transfer(fileMetas, ts);
+            transfer = await this.deps.files.transfer(fileMetas, ts, ev.channel);
           } catch (e) {
             this.deps.log?.(`inbound file port CRASHED ts=${ts}: ${(e as Error).message}`);
             transfer = namedAll(`file transfer crashed: ${(e as Error).message || "unknown error"}`);
@@ -256,11 +261,11 @@ export class InboundRouter {
           return { landed: false, qitemId, reason: "resolve_failed", correlationQitemId: route.correlationQitemId };
         }
       }
-      this.deps.seen.mark(ts, "landed"); // durable qitem exists → safe to mark
+      this.deps.seen.mark(eventId, "landed"); // durable qitem exists → safe to mark
       this.deps.log?.(`qitem ${qitemId} -> ${route.destination} (ts=${ts})`);
       return { landed: true, qitemId, correlationQitemId: route.correlationQitemId, replyResolution };
     } finally {
-      this.inflight.delete(ts);
+      this.inflight.delete(eventId);
     }
   }
 
@@ -388,7 +393,7 @@ export class InboundRouter {
     let landed = 0;
     const seen = this.deps.seen.load();
     for (const e of entries) {
-      if (e.ev.ts && seen.has(e.ev.ts)) continue; // already landed → recovered, drop from set
+      if (e.ev.ts && seen.has(this.inboundEventId(e.ev))) continue; // already landed → recovered, drop from set
       const r = await this.attemptLand(e.ev);
       if (r.landed) landed++;
       else if (r.reason === "create_failed" || r.reason === "resolve_failed") stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 });

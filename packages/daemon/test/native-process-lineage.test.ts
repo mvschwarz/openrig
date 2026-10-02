@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { findExactNativeResumeProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
+import { findExactNativeResumeProcess, observeClaudePaneStartedAt, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 const token = "00000000-0000-7000-8000-000000000001";
 const startedAt = "Sat Jan  1 12:00:00 2000";
@@ -69,5 +69,26 @@ describe("joined native Codex identity", () => {
   it("retains the existing Claude exact-token contract", () => {
     expect(findExactNativeResumeProcess([{ pid: 10, ppid: 1, command: `claude --resume ${token}` }], 10, "claude-code", token)?.pid).toBe(10);
     expect(findExactNativeResumeProcess([{ pid: 10, ppid: 1, command: "claude --resume wrong" }], 10, "claude-code", token)).toBeNull();
+  });
+});
+
+describe("observeClaudePaneStartedAt", () => {
+  const claudeStart = "Fri Oct  2 11:00:00 2026";
+  const claudeRows = (extra: NativeProcessRow[] = []): NativeProcessRow[] => [
+    { pid: 20, ppid: 1, pgid: 20, tpgid: 21, executableName: "zsh", command: "-zsh", startedAt },
+    { pid: 21, ppid: 20, pgid: 21, tpgid: 21, executableName: "claude", command: "claude --name seat@rig", startedAt: claudeStart },
+    ...extra,
+  ];
+  const observe = (list: NativeProcessRow[], panePid: number | null = 20) =>
+    observeClaudePaneStartedAt({ target: "seat@rig", tmux: { getPanePid: async () => panePid }, listProcesses: () => list });
+
+  it("returns the start time of the one Claude process in the pane's foreground, without a token", async () => {
+    expect(await observe(claudeRows())).toBe(claudeStart);
+  });
+
+  it("is unknown when the pane, the process or a single candidate cannot be established", async () => {
+    expect(await observe(claudeRows(), null)).toBeNull();
+    expect(await observe(claudeRows().slice(0, 1))).toBeNull();
+    expect(await observe(claudeRows([{ pid: 22, ppid: 20, pgid: 21, tpgid: 21, executableName: "claude", command: "claude", startedAt: claudeStart }]))).toBeNull();
   });
 });

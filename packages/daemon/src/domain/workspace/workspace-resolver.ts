@@ -99,5 +99,5 @@ function isInside(child: string, parent: string): boolean {
   const normParent = path.resolve(parent);
   if (normChild === normParent) return true;
   const rel = path.relative(normParent, normChild);
-  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
 }

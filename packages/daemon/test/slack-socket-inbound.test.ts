@@ -101,7 +101,7 @@ describe("Slice-11 INBOUND transport — real runInboundLoop / open / message / 
     // open → on-connect dead-letter drain (D1 lands) + periodic interval starts
     fake.ws.onopen!();
     await flush();
-    expect(seen.load().has("D1")).toBe(true); // recovered on connect
+    expect(seen.load().has("C0:D1")).toBe(true); // recovered on connect
     expect(dead.readAll()).toHaveLength(0);
 
     // a human message: fast-ACK + land
@@ -109,7 +109,7 @@ describe("Slice-11 INBOUND transport — real runInboundLoop / open / message / 
     await flush();
     expect(fake.sent.some((s) => s.includes('"envelope_id":"e-M1"'))).toBe(true); // fast-ack sent
     expect(order.indexOf("ack")).toBeLessThan(order.indexOf("received")); // receipt is pre-filter, but ACK stays first
-    expect(seen.load().has("M1")).toBe(true); // landed via real ack path
+    expect(seen.load().has("C0:M1")).toBe(true); // landed via real ack path
 
     // The lost-reply diagnostic rail: every parsed inbound event is receipted BEFORE
     // filtering, then receives one credential-free final disposition. Message text,
@@ -125,14 +125,14 @@ describe("Slice-11 INBOUND transport — real runInboundLoop / open / message / 
     fake.ws.onmessage!({ data: envelope({ type: "message", bot_id: "B1", text: "loop", ts: "B1TS" }, "e-bot") });
     await flush();
     expect(fake.sent.some((s) => s.includes('"envelope_id":"e-bot"'))).toBe(true);
-    expect(seen.load().has("B1TS")).toBe(false);
+    expect(seen.load().has("-:B1TS")).toBe(false);
     expect(receipts.readAll().some((r) => r.status === "ignored" && r.eventTs === "B1TS" && r.reason === "bot_id")).toBe(true);
 
     // B1: a NEW dead-letter appears WHILE connected → the PERIODIC timer drains it
     // (no Slack reconnect). This is the exact gap QA flagged.
     dead.append({ type: "message", user: "U2", text: "outage recovered", ts: "D2", channel: "C0" }, 1);
     await new Promise((r) => setTimeout(r, 70)); // ~3 intervals of 20ms
-    expect(seen.load().has("D2")).toBe(true); // retried while the socket stayed open
+    expect(seen.load().has("C0:D2")).toBe(true); // retried while the socket stayed open
     expect(dead.readAll()).toHaveLength(0);
 
     // close → loop resolves (inboundMaxConnects reached)

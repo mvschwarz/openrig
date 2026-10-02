@@ -1,7 +1,8 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { formatDaemonHostForUrl } from "./client.js";
+import { connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
+import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
 import { DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
@@ -59,7 +60,12 @@ export interface DaemonStatus {
   reason?: "unresponsive" | "event-loop-starved";
   /** OPR.0.4.3.21 — event-loop evidence when healthz answered with a monitor. */
   eventLoop?: DaemonEventLoopEvidence;
+  /** #275 — the OS code behind a failed health probe (e.g. EPERM when a sandbox blocked it). */
+  probeErrorCode?: string;
 }
+
+/** "unknown": the process may exist but this shell can neither signal nor inspect it. */
+export type ProcessLiveness = "alive" | "dead" | "unknown";
 
 export interface GetDaemonStatusOptions {
   /** Observers may disable cleanup; only a matching clean shutdown permits removal. */
@@ -84,6 +90,8 @@ export interface DaemonNotRunningError {
   fact: string;
   consequence: string;
   action: string;
+  /** The OS code behind the failed probe, when known. */
+  causeCode?: string;
 }
 
 export function daemonNotRunningError(): DaemonNotRunningError {
@@ -107,11 +115,22 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
   if (status.state === "stopped" || status.state === "stale") {
     return daemonNotRunningError();
   }
+  const causeCode = status.probeErrorCode ? { causeCode: status.probeErrorCode } : {};
+  if (isBlockedConnectionCode(status.probeErrorCode)) {
+    const blocked = blockedConnectionGuidance(status.probeErrorCode);
+    return {
+      fact: `Daemon could not be checked: the health probe was blocked (${status.probeErrorCode}).`,
+      consequence: `This command needs a responsive daemon. ${blocked.consequence}`,
+      action: blocked.action,
+      ...causeCode,
+    };
+  }
   // unverified, or running-but-unhealthy: we do NOT know it is down.
   return {
     fact: "Daemon did not respond — it may be busy or stopped (state not confirmed).",
     consequence: "This command needs a responsive daemon; the outcome of proceeding would be indeterminate.",
     action: "Re-check with 'rig daemon status'. If it is confirmed stopped, run 'rig up' or 'rig daemon start'.",
+    ...causeCode,
   };
 }
 
@@ -194,6 +213,9 @@ export interface LifecycleDeps {
   openForAppend: (path: string) => number;
   closeFile?: (fd: number) => void;
   isProcessAlive: (pid: number) => boolean;
+  /** #275 — three-state liveness for status reads (production: realDeps). Optional so existing
+   *  mocks keep the boolean rule; absent = derived from isProcessAlive. */
+  processLiveness?: (pid: number) => ProcessLiveness;
   // OPR.0.4.2.1 — optional injectable delay for the status-probe bounded settle/retry.
   // Defaults to a real setTimeout in production; tests pass a no-op to stay fast. Optional so
   // existing deps / mocks / callers are untouched.
@@ -955,8 +977,8 @@ export async function getDaemonStatus(
       const url = new URL(openrigUrl);
       return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
     } catch (err) {
-      // 1ae863d2: refusal = positive down; anything else (timeout/wedged) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified" };
+      // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...probeErrorCodeOf(err) };
     }
   }
 
@@ -978,12 +1000,15 @@ export async function getDaemonStatus(
       // 1ae863d2: the resolved home has NO daemon state — before asserting anything,
       // look for a live sibling home / HOME-MOVED marker (the wrong-home class).
       const siblingHint = findSiblingHome(deps);
-      if (siblingHint) return { state: "unverified", siblingHint };
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified" };
+      if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err) };
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...probeErrorCodeOf(err) };
     }
   }
 
-  if (!deps.isProcessAlive(state.pid)) {
+  const liveness: ProcessLiveness = deps.processLiveness
+    ? deps.processLiveness(state.pid)
+    : deps.isProcessAlive(state.pid) ? "alive" : "dead";
+  if (liveness === "dead") {
     // A status read must not erase the identity needed to judge a failed stop.
     const stateFile = resolveLifecycleFile(deps, "daemon.json");
     const { receipt } = readShutdownReceipt(deps, stateFile);
@@ -993,26 +1018,47 @@ export async function getDaemonStatus(
     return { state: "stale" };
   }
 
-  // Process alive — check healthz
   const host = state.host ?? DEFAULT_HOST;
+  if (liveness === "unknown") {
+    // #275: this shell can neither signal nor inspect the recorded PID (a sandbox, or another
+    // user's process). Never call that stale; let the daemon answer, and touch no state file.
+    try {
+      const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
+      const ev = await readHealthEvidence(res);
+      return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
+    } catch (err) {
+      // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", pid: state.pid, ...probeErrorCodeOf(err) };
+    }
+  }
+
+  // Process alive — check healthz
   let healthy = false;
   let reason: DaemonStatus["reason"];
   let eventLoop: DaemonEventLoopEvidence | undefined;
+  let probeFailure: Pick<DaemonStatus, "probeErrorCode"> = {};
   try {
     const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
     const ev = await readHealthEvidence(res);
     healthy = ev.healthy;
     reason = ev.reason;
     eventLoop = ev.eventLoop;
-  } catch {
+  } catch (err) {
     // OPR.0.4.3.21 — pid alive but healthz timed out: the honest wedged-loop
     // signal. Report process-present/unhealthy (NOT "stopped") with the
     // "unresponsive" reason so the operator knows it's the control plane.
     reason = "unresponsive";
+    probeFailure = probeErrorCodeOf(err);
   }
 
   // pid alive = running (state file preserved either way)
-  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop };
+  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop, ...probeFailure };
+}
+
+/** #275 — keep the OS code of a failed health probe (absent for a timeout). */
+function probeErrorCodeOf(err: unknown): Pick<DaemonStatus, "probeErrorCode"> {
+  const code = connectionErrorCode(err);
+  return code ? { probeErrorCode: code } : {};
 }
 
 export function readLogs(deps: LifecycleDeps): string | null {

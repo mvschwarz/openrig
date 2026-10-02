@@ -1,5 +1,5 @@
 import { existsSync, accessSync, constants } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { shellQuote as quoteShellArgument } from "../adapters/shell-quote.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
@@ -683,7 +683,7 @@ export class RestoreCheckService {
       const openRigHome = getCompatibleOpenRigPath("");
       const resolved = join(openRigHome, relativePath);
       const relativeToHome = relative(openRigHome, resolved);
-      if (relativeToHome.startsWith("..") || isAbsolute(relativeToHome)) {
+      if (relativeToHome === ".." || relativeToHome.startsWith(`..${sep}`) || isAbsolute(relativeToHome)) {
         return { error: "path traversal outside OPENRIG_HOME rejected" };
       }
       return { path: resolved };

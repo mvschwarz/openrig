@@ -18,6 +18,7 @@ import { workflowSpecsDiagnosticSchema } from "../src/db/migrations/040_workflow
 import { WorkflowSpecCache } from "../src/domain/workflow-spec-cache.js";
 import { scanWorkflowSpecFolder } from "../src/domain/spec-library-workflow-scanner.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 const VALID_YAML = `workflow:
   id: folder-test
@@ -167,13 +168,23 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result.valid).toBe(edit === "valid-edit" ? 1 : 0);
     expect(result.errors).toBe(edit === "invalid-edit" ? 1 : 0);
     expect(result.skipped).toBe(0);
-    const row = db.prepare("SELECT purpose, status, error_message FROM workflow_specs WHERE source_path = ?").get(file) as {purpose: string; status: string; error_message: string|null};
+    // The row this scan wrote. An invalid edit keeps the cached valid version beside it (#503).
+    const row = db.prepare("SELECT purpose, status, error_message FROM workflow_specs WHERE source_path = ? ORDER BY cached_at DESC, rowid DESC LIMIT 1").get(file) as {purpose: string; status: string; error_message: string|null};
     expect(row.status).toBe(edit === "valid-edit" ? "valid" : "error");
     if (edit === "valid-edit") expect(row.purpose).toBe("Updated objective");
     else expect(row.error_message).toBeTruthy();
     // Unchanged bytes still remain a skip on a second scan.
     const unchanged = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
     expect(unchanged.skipped).toBe(1);
+  });
+
+  it("keeps scanning the folder when recording one file's parse error fails", () => {
+    writeFileSync(join(folder, "a-bad.yaml"), INVALID_YAML);
+    writeFileSync(join(folder, "b-good.yaml"), VALID_YAML);
+    cache.writeDiagnostic = () => { throw new Error("diagnostic write failed"); };
+    let result: ReturnType<typeof scanWorkflowSpecFolder> | undefined;
+    expect(() => { result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null }); }).not.toThrow();
+    expect(result).toMatchObject({ scanned: 2, valid: 1, errors: 1 });
   });
 
   it("removes cache row when file disappears (OQ-4)", () => {
@@ -304,5 +315,147 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result.valid).toBe(1);
     expect(result.errors).toBe(1);
     expect(result.removed).toBe(1);
+  });
+});
+
+// A spec file whose cached versions include one still pinned by running work, then a parse
+// error, then a repair (#503). Each write gets a later mtime and each scan caches one second after
+// it, so the scanner's mtime check sees changed and unchanged files as it would on disk.
+describe("scanWorkflowSpecFolder: parse error and repair with several cached versions", () => {
+  let db: Database.Database;
+  let cache: WorkflowSpecCache;
+  let folder: string;
+  let file: string;
+  let tick: number;
+  const base = Math.floor(Date.now() / 1000) - 1000;
+
+  const versioned = (version: string) => VALID_YAML.replace("version: '1'", `version: '${version}'`);
+  const BROKEN = "workflow:\n  id: folder-test\n  version: [unterminated\n";
+  const scanAfterWriting = (content?: string) => {
+    if (content !== undefined) {
+      writeFileSync(file, content);
+      tick += 10;
+      utimesSync(file, base + tick, base + tick);
+    }
+    return scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+  };
+  const rowsForFile = () => db
+    .prepare(`SELECT spec_id, version, status FROM workflow_specs WHERE source_path = ? ORDER BY rowid`)
+    .all(file) as Array<{ spec_id: string; version: string; status: string }>;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, workflowSpecsSchema, workflowSpecsDiagnosticSchema]);
+    cache = new WorkflowSpecCache(db, () => new Date((base + tick + 1) * 1000));
+    folder = mkdtempSync(join(tmpdir(), "wf-folder-versions-"));
+    file = join(folder, "wf.yaml");
+    tick = 0;
+  });
+  afterEach(() => {
+    db.close();
+    rmSync(folder, { recursive: true, force: true });
+  });
+
+  it("leaves no error row behind once the file parses again", () => {
+    scanAfterWriting(versioned("1"));
+    scanAfterWriting(versioned("2"));
+    expect(scanAfterWriting(BROKEN).errors).toBe(1);
+    expect(rowsForFile().some((row) => row.status === "error")).toBe(true);
+
+    expect(scanAfterWriting(versioned("2")).valid).toBe(1);
+    expect(rowsForFile().filter((row) => row.status === "error")).toEqual([]);
+  });
+
+  it("keeps every cached version, with its row and content, through the error and the repair", () => {
+    scanAfterWriting(versioned("1"));
+    scanAfterWriting(versioned("2"));
+    // Row id and step count per cached version; null when that version can no longer be read.
+    const versions = () => ["1", "2"].map((version) => {
+      const row = cache.getByNameVersion("folder-test", version);
+      return row ? { specId: row.specId, steps: row.spec.steps.length } : null;
+    });
+    const cached = versions();
+    expect(cached.every(Boolean)).toBe(true);
+
+    scanAfterWriting(BROKEN);
+    expect(versions()).toEqual(cached);
+
+    scanAfterWriting(versioned("2"));
+    expect(versions()).toEqual(cached);
+  });
+
+  it("recovers a single cached version in place", () => {
+    scanAfterWriting(versioned("1"));
+    const [original] = rowsForFile();
+    scanAfterWriting(BROKEN);
+    scanAfterWriting(versioned("1"));
+    expect(rowsForFile()).toEqual([{ spec_id: original!.spec_id, version: "1", status: "valid" }]);
+  });
+
+  it("skips a file restored to its cached bytes on the scan after the repair", () => {
+    scanAfterWriting(versioned("1"));
+    scanAfterWriting(BROKEN);
+    expect(scanAfterWriting(versioned("1")).valid).toBe(1);
+    expect(scanAfterWriting()).toMatchObject({ skipped: 1, valid: 0 });
+  });
+
+  it("still skips an unchanged broken file on the next scan", () => {
+    scanAfterWriting(versioned("1"));
+    scanAfterWriting(versioned("2"));
+    scanAfterWriting(BROKEN);
+    expect(scanAfterWriting()).toMatchObject({ skipped: 1, errors: 0 });
+  });
+});
+
+// Installs upgraded from a release whose diagnostic writer blanked a cached version's columns
+// but kept its spec_json. That row is the only surviving copy of the older version (#503).
+describe("scanWorkflowSpecFolder: an older version damaged by the previous diagnostic writer", () => {
+  let db: Database.Database;
+  let cache: WorkflowSpecCache;
+  let folder: string;
+  let file: string;
+  let tick: number;
+  const base = Math.floor(Date.now() / 1000) - 1000;
+  const v1 = VALID_YAML.replace("A folder-scan fixture", "version one");
+  const v2 = VALID_YAML.replace("version: '1'", "version: '2'").replace("A folder-scan fixture", "version two");
+  const scanAfterWriting = (content: string) => {
+    writeFileSync(file, content);
+    tick += 10;
+    utimesSync(file, base + tick, base + tick);
+    return scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+  };
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    tick = 0;
+    cache = new WorkflowSpecCache(db, () => new Date((base + tick + 1) * 1000));
+    folder = mkdtempSync(join(tmpdir(), "wf-folder-legacy-"));
+    file = join(folder, "wf.yaml");
+  });
+  afterEach(() => {
+    db.close();
+    rmSync(folder, { recursive: true, force: true });
+  });
+
+  it("keeps the damaged row, its spec ID and its full stored spec through a repair", () => {
+    scanAfterWriting(v1);
+    scanAfterWriting(v2);
+    const original = cache.getByNameVersion("folder-test", "1")!;
+    const storedSpec = () => (db.prepare("SELECT spec_json FROM workflow_specs WHERE spec_id = ?").get(original.specId) as { spec_json: string } | undefined)?.spec_json;
+    const storedBefore = storedSpec();
+    expect(storedBefore).toBeTruthy();
+    // The previous writer's in-place rewrite of the oldest row for the path (spec_json untouched).
+    db.prepare(
+      `UPDATE workflow_specs SET status = 'error', error_message = 'old parse error', name = 'wf.yaml', version = '',
+         purpose = NULL, target_rig = NULL, roles_json = '{}', steps_json = '[]', coordination_terminal_turn_rule = 'hot_potato'
+       WHERE spec_id = ?`,
+    ).run(original.specId);
+
+    expect(scanAfterWriting(v2).valid).toBe(1);
+
+    expect(storedSpec()).toBe(storedBefore);
+    expect(cache.getByIdOrThrow(original.specId).spec.objective).toBe("version one");
+    expect(cache.getByNameVersion("folder-test", "2")?.spec.objective).toBe("version two");
   });
 });

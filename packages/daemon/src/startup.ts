@@ -81,6 +81,7 @@ import { setSelfHostId, setSelfHostIdSource } from "./domain/hosts/fanout-contra
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
+import { observeClaudePaneStartedAt } from "./domain/native-process-lineage.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures } from "./domain/transcript-capture.js";
 import { SessionTransport } from "./domain/session-transport.js";
@@ -1113,13 +1114,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   // OPR.0.4.3.20 FR-4 — inject contextUsageStore so refresh() can null-fill a
   // Claude token from the sidecar during periodic/manual snapshot refresh.
-  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore });
+  // #421 — the pane's current Claude process start time; a sidecar sampled earlier is not this
+  // process's, so capture and null-fill skip it.
+  const claudeProcessStartedAt = (sessionName: string) => observeClaudePaneStartedAt({ target: sessionName, tmux: tmuxAdapter });
+  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore, claudeProcessStartedAt });
   const claimService = new ClaimService({
     db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter, transcriptStore,
     claudeContextProvisioner: claudeAdapter,
     // OPR.0.4.3.20 FR-3 — adoption-boundary resume-token capture deps
     // (Claude sidecar reader + Codex thread-id capturer, both reuse).
     contextUsageStore,
+    claudeProcessStartedAt,
     resumeTokenCapturer: resumeMetadataRefresher,
     // OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader (the adapter exposes it).
     piRunnerStateStore: piAdapter,
@@ -1580,14 +1585,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       db,
       eventBus,
       rigRepo,
-      // R1 fix per guard PL-005 Phase A review: wire the production
-      // capability probe so /api/mission-control/cli-capabilities
-      // honestly reports drift when MISSION_CONTROL_DESIRED_FIELDS
-      // are missing from the local CLI's allow-list. Without this
-      // probe injection, the production path defaulted to a no-op
-      // that always reported staleCliCount=0 even when the audit-
-      // row-5 case (recoveryGuidance not in CLI allow-list) was
-      // present.
+      // This projection observes the daemon registry and queue, not a CLI.
+      // Leave CLI version/capabilities unknown until actually observed.
       probeRig: makeLocalCliCapabilityProbe(),
     });
     // V0.3.1 slice 05 kernel-rig-as-default — cascade the resolved

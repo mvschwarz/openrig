@@ -364,6 +364,29 @@ describe("ResumeMetadataRefresher", () => {
     expect(sessionRegistry.updateResumeToken).toHaveBeenCalledWith("sess-c", "claude_id", "claude-uuid-xyz", "scrape");
   });
 
+  // #421: a sidecar sampled before the pane's current Claude process started is from an
+  // earlier process; it must not fill the token.
+  it.each([
+    ["does not fill from a sample taken before the process started", -3_600_000, false],
+    ["fills from a sample taken after the process started", 60_000, true],
+  ])("FR-4: %s", async (_label, offsetMs, fills) => {
+    const processStart = "Fri Oct  2 11:00:00 2026";
+    const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
+    const claudeProcessStartedAt = vi.fn(async () => processStart);
+    const refresher = new ResumeMetadataRefresher({
+      sessionRegistry,
+      tmuxAdapter: mockTmux(),
+      contextUsageStore: { readSidecar: () => ({ ok: true as const, data: { session_id: "claude-uuid-xyz", sampled_at: new Date(Date.parse(processStart) + offsetMs).toISOString() } }) },
+      claudeProcessStartedAt,
+    } as never);
+    await refresher.refresh([
+      { sessionId: "sess-c", sessionName: "seat@rig", runtime: "claude-code", resumeType: null, resumeToken: null },
+    ]);
+    if (fills) expect(sessionRegistry.updateResumeToken).toHaveBeenCalledWith("sess-c", "claude_id", "claude-uuid-xyz", "scrape");
+    else expect(sessionRegistry.updateResumeToken).not.toHaveBeenCalled();
+    expect(claudeProcessStartedAt).toHaveBeenCalledWith("seat@rig");
+  });
+
   it("FR-4: a missing/parse-error sidecar leaves the Claude token null (no write, no throw)", async () => {
     const sessionRegistry = { updateResumeToken: vi.fn(), clearResumeToken: vi.fn() } as unknown as SessionRegistry;
     const refresher = new ResumeMetadataRefresher({
@@ -546,6 +569,31 @@ describe("ResumeMetadataRefresher", () => {
       expect(sessionRegistry.markResumeProbeResult).toHaveBeenCalledWith("sess-c", "resumable");
       expect(probeClaudeResume).not.toHaveBeenCalled(); // NO heavyweight claude --resume on the periodic path
       expect(sessionRegistry.updateResumeToken).not.toHaveBeenCalled();
+    });
+
+    // #421: an equal token in a sample taken before the pane's current Claude process started is
+    // an earlier process's evidence; it must not refresh the stored token's freshness.
+    it.each([
+      ["does not re-stamp from a sample taken before the process started", -3_600_000, false],
+      ["re-stamps from a sample taken after the process started", 60_000, true],
+    ])("Claude present + equal sidecar derive: %s", async (_label, offsetMs, restamps) => {
+      const processStart = "Fri Oct  2 11:00:00 2026";
+      const sessionRegistry = { updateResumeToken: vi.fn(), markResumeProbeResult: vi.fn() } as unknown as SessionRegistry;
+      const claudeProcessStartedAt = vi.fn(async () => processStart);
+      const refresher = new ResumeMetadataRefresher({
+        sessionRegistry,
+        tmuxAdapter: mockTmux(),
+        contextUsageStore: { readSidecar: () => ({ ok: true as const, data: { session_id: "claude-tok-A", sampled_at: new Date(Date.parse(processStart) + offsetMs).toISOString() } }) },
+        claudeProcessStartedAt,
+        probeClaudeResume: vi.fn(async () => "resumable" as const),
+        sleep: async () => {},
+      });
+      await refresher.refresh([
+        { sessionId: "sess-c", sessionName: "dev-design@demo-rig", runtime: "claude-code", resumeType: null, resumeToken: "claude-tok-A", cwd: "/repo" },
+      ], { fillNullOnly: true });
+      if (restamps) expect(sessionRegistry.markResumeProbeResult).toHaveBeenCalledWith("sess-c", "resumable");
+      else expect(sessionRegistry.markResumeProbeResult).not.toHaveBeenCalled();
+      expect(claudeProcessStartedAt).toHaveBeenCalledWith("dev-design@demo-rig");
     });
 
     it("Claude present + DIFFERENT sidecar derive → no re-stamp, no probe, no clobber", async () => {

@@ -16,6 +16,7 @@ import {
   isProbeShellReady,
 } from "./native-resume-probe.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
+import { isClaudeSidecarFromEarlierProcess, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,8 +43,10 @@ interface ResumeMetadataRefresherDeps {
   // Optional + structurally typed (older wirings/tests omit it → Claude null-fill
   // is a silent no-op, Codex behavior unchanged).
   contextUsageStore?: {
-    readSidecar(sessionName: string): { ok: true; data: { session_id?: string } } | { ok: false; reason: string };
+    readSidecar(sessionName: string): { ok: true; data: { session_id?: string; sampled_at?: string } } | { ok: false; reason: string };
   };
+  /** #421 — start time of the pane's current Claude process; a sidecar sampled earlier is not used. */
+  claudeProcessStartedAt?: ResumeTokenCaptureDeps["claudeProcessStartedAt"];
 }
 
 export class ResumeMetadataRefresher {
@@ -56,6 +59,7 @@ export class ResumeMetadataRefresher {
   private sleep: (ms: number) => Promise<void>;
   private homeDir: string;
   private contextUsageStore: ResumeMetadataRefresherDeps["contextUsageStore"] | null;
+  private claudeProcessStartedAt: ResumeMetadataRefresherDeps["claudeProcessStartedAt"] | null;
 
   constructor(deps: ResumeMetadataRefresherDeps) {
     this.sessionRegistry = deps.sessionRegistry;
@@ -78,6 +82,7 @@ export class ResumeMetadataRefresher {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.homeDir = deps.homeDir ?? os.homedir();
     this.contextUsageStore = deps.contextUsageStore ?? null;
+    this.claudeProcessStartedAt = deps.claudeProcessStartedAt ?? null;
   }
 
   /**
@@ -155,7 +160,8 @@ export class ResumeMetadataRefresher {
           const sidecar = this.contextUsageStore?.readSidecar(session.sessionName);
           if (sidecar?.ok) {
             const token = sidecar.data.session_id;
-            if (typeof token === "string" && token.trim().length > 0) {
+            if (typeof token === "string" && token.trim().length > 0
+              && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, this.claudeProcessStartedAt))) {
               this.sessionRegistry.updateResumeToken(session.sessionId, "claude_id", token.trim(), "scrape");
             }
           }
@@ -173,11 +179,13 @@ export class ResumeMetadataRefresher {
           // (NO probe; never spawns `claude --resume`). Re-derive via the pure-read
           // status-line sidecar and refresh freshness ONLY on an EXACT match to the
           // stored token. Different / absent / parse-error / unreadable → no-op: no
-          // re-stamp and no token clobber (left honest for FR-6 + FR-7).
+          // re-stamp and no token clobber (left honest for FR-6 + FR-7). An equal token in a sample
+          // taken before the pane's current Claude process started is not evidence for it (#421).
           const sidecar = this.contextUsageStore?.readSidecar(session.sessionName);
           if (sidecar?.ok) {
             const derived = sidecar.data.session_id;
-            if (typeof derived === "string" && derived.trim().length > 0 && derived.trim() === session.resumeToken) {
+            if (typeof derived === "string" && derived.trim().length > 0 && derived.trim() === session.resumeToken
+              && !(await isClaudeSidecarFromEarlierProcess(sidecar.data.sampled_at, session.sessionName, this.claudeProcessStartedAt))) {
               this.sessionRegistry.markResumeProbeResult(session.sessionId, "resumable");
             }
           }

@@ -73,7 +73,7 @@ try {
   assert.equal(faults, 2, "both errors logged without terminating the child");
   assert.equal(dead.readAll().length, 0, "next scheduled pass recovers after the real fault clears");
   assert.equal(repo.list({ limit: 100 }).length, 1, "seen delivery is not duplicated by retry");
-  assert.ok(seen.load().has(event.ts));
+  assert.ok(seen.load().has(`${event.channel}:${event.ts}`));
   assert.equal(handle.status().state, "connected");
   assert.equal(requests, 1, "recovery does not require reconnecting");
   console.log(JSON.stringify({ phase, faults, remaining: 0, rows: 1, state: "connected", requests }));

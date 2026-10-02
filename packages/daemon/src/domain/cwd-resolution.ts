@@ -22,7 +22,7 @@ export function getOpenRigInstallRoot(): string {
 
 export function isPathInsideRoot(candidatePath: string, rootPath: string): boolean {
   const relative = nodePath.relative(nodePath.resolve(rootPath), nodePath.resolve(candidatePath));
-  return relative === "" || (!relative.startsWith("..") && !nodePath.isAbsolute(relative));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative));
 }
 
 export function getOpenRigInstallCwdError(

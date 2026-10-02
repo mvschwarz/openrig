@@ -216,6 +216,17 @@ describe("FR-5 check #3 — file allowlist sane", () => {
     expect(result.status).toBe("ok");
   });
 
+  it("recognizes an allowlist ancestor when the workspace directory starts with two dots", () => {
+    const sub = path.join(dir, "..cache");
+    fs.mkdirSync(sub);
+    const result = checkFileAllowlist({
+      workspaceRoot: sub,
+      allowlistValue: `parent:${dir}`,
+      allowlistSource: "env",
+    });
+    expect(result.status).toBe("ok");
+  });
+
   // Pre-decoded entries path: pre-parsed entries should bypass the
   // canonical decoder and be honored verbatim. Discriminator: pass an
   // entry shape that the decoder couldn't have produced.

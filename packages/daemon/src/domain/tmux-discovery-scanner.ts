@@ -36,10 +36,15 @@ export class TmuxDiscoveryScanner {
     const sessions = await this.tmux.listSessions();
 
     for (const session of sessions) {
-      const windows = await this.tmux.listWindows(session.name);
+      // tmux reads a leading "=" in a target as "match this session name
+      // exactly", so a session literally named "=lit" must be addressed as
+      // "==lit". Prefixing every lookup keeps the name exact and literal:
+      // "lit" -> "=lit", "=lit" -> "==lit".
+      const exactSession = `=${session.name}`;
+      const windows = await this.tmux.listWindows(exactSession);
 
       for (const window of windows) {
-        const target = `${session.name}:${window.index}`;
+        const target = `${exactSession}:${window.index}`;
         const tmuxPanes = await this.tmux.listPanes(target);
 
         for (const pane of tmuxPanes) {

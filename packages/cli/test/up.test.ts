@@ -463,13 +463,13 @@ describe("Up CLI", () => {
   // and trip getOpenRigInstallCwdError at preflight. The bare-name form
   // is already rescued at the resolveLibrarySpec branch (covered by the
   // earlier library-name test); this pins the path-form gap.
-  it("up path-form spec inside install root defaults cwdOverride to caller cwd and prints notice", async () => {
+  it.each(["rigs", "..cache"])("up path-form spec inside install root (%s) defaults cwdOverride to caller cwd and prints notice", async (directory) => {
     const fs = await import("node:fs");
     const path = await import("node:path");
     const os = await import("node:os");
 
     const installRoot = fs.mkdtempSync(path.join(os.tmpdir(), "up-bug3-install-"));
-    const specPath = path.join(installRoot, "rigs", "demo", "rig.yaml");
+    const specPath = path.join(installRoot, directory, "demo", "rig.yaml");
     fs.mkdirSync(path.dirname(specPath), { recursive: true });
     fs.writeFileSync(specPath, "version: '0.2'\nname: demo\npods: []\nedges: []\n");
 

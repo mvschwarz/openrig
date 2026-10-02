@@ -71,6 +71,12 @@ describe("resolveNodeWorkspace (PL-007)", () => {
     expect(r?.kind).toBe("project");
   });
 
+  it("matches lab when cwd has a descendant segment starting with two dots", () => {
+    const r = resolveNodeWorkspace({ spec, cwd: "/Users/op/hub/lab/..cache/x" });
+    expect(r?.activeRepo).toBe("lab");
+    expect(r?.kind).toBe("lab");
+  });
+
   it("returns kind=knowledge when cwd is under knowledge_root", () => {
     const r = resolveNodeWorkspace({ spec, cwd: "/Users/op/knowledge/canon" });
     expect(r?.kind).toBe("knowledge");

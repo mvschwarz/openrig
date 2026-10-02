@@ -26,6 +26,7 @@ import { StringDecoder } from "node:string_decoder";
 import { execFileSync, spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import { formatDaemonHostForUrl } from "./daemon-url.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER,
@@ -648,7 +649,8 @@ function resolveActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: string; tok
   let baseUrl = env.OPENRIG_URL?.trim() || null;
   let token = env.OPENRIG_ACTIVITY_HOOK_TOKEN?.trim() || null;
   if (!baseUrl && env.OPENRIG_PORT) {
-    baseUrl = `http://${env.OPENRIG_HOST?.trim() || "127.0.0.1"}:${env.OPENRIG_PORT.trim()}`;
+    const rawHost = env.OPENRIG_HOST?.trim() || "127.0.0.1";
+    baseUrl = `http://${formatDaemonHostForUrl(rawHost)}:${env.OPENRIG_PORT.trim()}`;
   }
   if (!baseUrl || !token) {
     try {

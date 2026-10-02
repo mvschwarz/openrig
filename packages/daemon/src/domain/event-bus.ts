@@ -32,6 +32,7 @@ export class EventBus {
   private subscribers = new Set<Subscriber>();
   private activeEnvelope: ActiveEnvelope | null = null;
   private drainingNotifyRows = false;
+  private notifyingSubscribers = false;
   private notifyEnvelopeRuns = 0;
   private notifyDrainStatus: NotifyDrainStatus;
   readonly db: Database.Database;
@@ -163,13 +164,21 @@ export class EventBus {
    * Does NOT insert into DB. Subscriber errors are isolated.
    */
   notifySubscribers(event: PersistedEvent): void {
+    // A subscriber may persist another event. Finish this event's fanout
+    // before draining those rows, so all observers see each seq once in order.
+    if (this.notifyingSubscribers) return;
     const nestedRowsStartAfter = this.maxSeq();
-    for (const subscriber of this.subscribers) {
-      try {
-        subscriber(event);
-      } catch (err) {
-        console.error("EventBus subscriber error:", err);
+    this.notifyingSubscribers = true;
+    try {
+      for (const subscriber of this.subscribers) {
+        try {
+          subscriber(event);
+        } catch (err) {
+          console.error("EventBus subscriber error:", err);
+        }
       }
+    } finally {
+      this.notifyingSubscribers = false;
     }
     this.notifyDrainStatus.watermark = Math.max(this.notifyDrainStatus.watermark, event.seq);
     if (!this.drainingNotifyRows) {
@@ -201,7 +210,7 @@ export class EventBus {
   }
 
   private drainNotifyRowsToQuiescence(startAfter: number): void {
-    if (this.drainingNotifyRows) return;
+    if (this.drainingNotifyRows || this.notifyingSubscribers) return;
     this.drainingNotifyRows = true;
     let cursor = startAfter;
     try {

@@ -396,14 +396,12 @@ export class SuccessorSessionLauncher {
       if (result.ready) return result;
       if (isAttentionRequiredReadinessCode(result.code)) return result;
 
-      const elapsed = Date.now() - startTime;
-      if (elapsed + delay > this.readinessTimeoutMs) {
-        const finalResult = await adapter.checkReady(binding);
-        if (finalResult.ready) return finalResult;
+      const remaining = this.readinessTimeoutMs - (Date.now() - startTime);
+      if (remaining <= 0) {
         return { ready: false, reason: result.reason ?? "readiness timeout" };
       }
 
-      await this.sleep(delay);
+      await this.sleep(Math.min(delay, remaining));
       delay = Math.min(delay * 2, maxDelay);
     }
   }

@@ -111,9 +111,14 @@ export class ClaudeManagedLaunch {
       ...(generation ? { OPENRIG_OCCUPANT_GENERATION: generation } : {}) };
     const assignments = Object.entries({ ...context.env, ...identity }).map(([key, value]) => shellQuote(`${key}=${value}`));
     const forwarded = inherited.filter(key => !(key in identity)).map(key => `"${key}=\${${key}-}"`);
+    // Expand in the target pane shell, whose terminal can differ from the daemon.
+    // Empty and absent values remain absent after env -i.
+    const terminal = ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+      "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"]
+      .map(key => `\${${key}:+"${key}=$${key}"}`);
     return Object.freeze({ assertCurrent, configDir: context.configDir, executable: context.executable, command: (args: readonly string[]) => {
       assertCurrent();
-      return `cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
+      return `cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, ...terminal, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
     } });
   }
 }

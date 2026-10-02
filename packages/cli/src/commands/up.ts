@@ -30,7 +30,7 @@ async function defaultPromptYesNo(question: string): Promise<boolean> {
 // inside the daemon install root without importing the daemon package.
 function isPathInsideRoot(candidate: string, root: string): boolean {
   const relative = nodePath.relative(nodePath.resolve(root), nodePath.resolve(candidate));
-  return relative === "" || (!relative.startsWith("..") && !nodePath.isAbsolute(relative));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative));
 }
 
 // OPR.0.4.4.11 (arch return R11-2) — pre-dispatch detection of a topology

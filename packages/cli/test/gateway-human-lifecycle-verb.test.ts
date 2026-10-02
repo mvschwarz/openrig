@@ -294,6 +294,55 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     if (loaded.ok) expect(loaded.entities[0]!.displayName).toBe("Mike Replaced");
   });
 
+  it.each([
+    { status: 503, body: { error: "queue_unavailable" } },
+    { status: 500, body: [] },
+    { status: 200, body: { error: "invalid_queue_projection" } },
+    { status: 200, body: null },
+    { status: 204, body: undefined },
+  ].flatMap((entry) => [false, true].map((force) => ({ ...entry, force }))))("keeps human removal indeterminate for HTTP $status (force=$force)", async ({ status, body, force }) => {
+    const server = createServer((_req, res) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(body === undefined ? undefined : JSON.stringify(body));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const previousUrl = process.env.OPENRIG_URL;
+    process.env.OPENRIG_URL = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const fragment = join(humansDir(home), "mike.yaml");
+    const before = readFileSync(fragment, "utf8");
+    try {
+      const command = gatewayCommand();
+      command.exitOverride();
+      await command.parseAsync(["node", "gateway", "human", "remove", "mike", ...(force ? ["--force"] : [])]);
+      expect(process.exitCode).toBe(1);
+      expect(readFileSync(fragment, "utf8")).toBe(before);
+      const rows = await daemonQueueRows("mike@external");
+      expect(rows.ok).toBe(false);
+      if (!rows.ok) expect(rows.error).toContain(`HTTP ${status}`);
+      expect(errSpy.mock.calls.map((call) => String(call[0])).join("\n")).toContain("queue could not be checked");
+    } finally {
+      if (previousUrl === undefined) delete process.env.OPENRIG_URL; else process.env.OPENRIG_URL = previousUrl;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("allows human removal after HTTP 200 proves the queue is empty", async () => {
+    const { server, url } = await stubQueueDaemon(0);
+    const previousUrl = process.env.OPENRIG_URL;
+    process.env.OPENRIG_URL = url;
+    try {
+      expect(await daemonQueueRows("mike@external")).toEqual({ ok: true, rows: [] });
+      const command = gatewayCommand();
+      command.exitOverride();
+      await command.parseAsync(["node", "gateway", "human", "remove", "mike"]);
+      expect(process.exitCode).toBeUndefined();
+      expect(existsSync(join(humansDir(home), "mike.yaml"))).toBe(false);
+    } finally {
+      if (previousUrl === undefined) delete process.env.OPENRIG_URL; else process.env.OPENRIG_URL = previousUrl;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   // ── fix-r1 F2: the remove guard's row read enumerates to EXHAUSTION ──
 
   it("F2: daemonQueueRows at cap+1 (501 active rows) returns ALL 501 or refuses — silent truncation ABSENT", async () => {
