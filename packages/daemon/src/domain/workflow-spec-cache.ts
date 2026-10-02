@@ -547,12 +547,14 @@ export function parseWorkflowSpec(rawYaml: string, sourcePath: string): Workflow
 
 export class WorkflowSpecCache {
   private readonly hasSpecJsonColumn: boolean;
+  private readonly hasDiagnosticColumns: boolean;
 
   constructor(
     private readonly db: Database.Database,
     private readonly now: () => Date = () => new Date(),
   ) {
     this.hasSpecJsonColumn = detectSpecColumn(db, "spec_json");
+    this.hasDiagnosticColumns = detectSpecColumn(db, "status") && detectSpecColumn(db, "error_message");
   }
 
   /**
@@ -571,12 +573,18 @@ export class WorkflowSpecCache {
     const raw = readFileSync(sourcePath, "utf-8");
     const sourceHash = createHash("sha256").update(raw).digest("hex");
     const spec = parseWorkflowSpec(raw, sourcePath);
-    const existing = this.db
+    const named = this.db
       .prepare(
         `SELECT * FROM workflow_specs WHERE name = ? AND version = ?`,
       )
       .get(spec.id, spec.version) as SpecRow | undefined;
-    if (existing && existing.source_hash === sourceHash) {
+    // Diagnostic names are filename fallbacks, not parsed workflow identities.
+    // Recover the owning source row in place once that file parses again.
+    const diagnostic = !named && this.hasDiagnosticColumns
+      ? this.db.prepare("SELECT * FROM workflow_specs WHERE source_path = ? AND status = 'error'").get(sourcePath) as SpecRow | undefined
+      : undefined;
+    const existing = named ?? diagnostic;
+    if (existing && existing.status !== "error" && existing.source_hash === sourceHash) {
       // readThrough is file-authoritative: return the freshly parsed
       // file spec so validation sees non-column metadata such as
       // workflow.entry and workflow.invariants.
@@ -600,7 +608,10 @@ export class WorkflowSpecCache {
     if (existing) {
       // Update in place (same name+version, content changed).
       const specJsonSet = this.hasSpecJsonColumn ? ", spec_json = ?" : "";
+      const diagnosticSet = this.hasDiagnosticColumns ? ", status = 'valid', error_message = NULL" : "";
       const updateParams: unknown[] = [
+        spec.id,
+        spec.version,
         purpose,
         targetRig,
         rolesJson,
@@ -615,14 +626,18 @@ export class WorkflowSpecCache {
       this.db
         .prepare(
           `UPDATE workflow_specs SET
+             name = ?, version = ?,
              purpose = ?, target_rig = ?, roles_json = ?, steps_json = ?,
              coordination_terminal_turn_rule = ?, source_path = ?,
-             source_hash = ?, cached_at = ?${specJsonSet}
+             source_hash = ?, cached_at = ?${specJsonSet}${diagnosticSet}
            WHERE spec_id = ?`,
         )
         .run(...(updateParams as never[]));
       return rowToWorkflowSpec({
         ...existing,
+        name: spec.id,
+        version: spec.version,
+        ...(this.hasDiagnosticColumns ? { status: "valid", error_message: null } : {}),
         purpose,
         target_rig: targetRig,
         roles_json: rolesJson,
