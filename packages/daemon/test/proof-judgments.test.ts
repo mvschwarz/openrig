@@ -38,6 +38,30 @@ function fixture() {
 }
 
 describe("attributed proof judgments and derived readiness", () => {
+  it("prepares the same evidence identity that judgments use in nested mission roots", async () => {
+    const f = fixture(), nested = join(f.root, "work", "initiatives");
+    fs.mkdirSync(join(f.root, "work"));
+    fs.renameSync(f.missions, nested);
+    const alpha = join(nested, "trial", "slices", "01-alpha");
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("sliceIndexer" as never, { isReady: () => true, slicesRoot: nested, invalidate() {} } as never); await next(); });
+    app.route("/api/proof", proofRoutes());
+    const read = await app.request("/api/proof?scope=trial/slices/01-alpha&evidence=proof/evidence.md");
+    expect(read.status).toBe(200);
+    const prepared = await read.json(), item = prepared.items[0];
+    expect(prepared.preparedEvidence[0].ref).toBe("work/initiatives/trial/slices/01-alpha/proof/evidence.md");
+    const input = { scope: "trial/slices/01-alpha", item: item.id, verdict: "accept", reason: "Prepared observed outcome", evidence: ["proof/evidence.md"], expectedEvidence: prepared.preparedEvidence, expectedRevision: item.revision, expectedPrevious: null };
+    const post = () => app.request("/api/proof/judge", { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "judge@trial" }, body: JSON.stringify(input) });
+    const evidence = join(alpha, "proof", "evidence.md"), original = fs.readFileSync(evidence);
+    fs.writeFileSync(evidence, "Changed after preparation");
+    const stale = await post(); expect(stale.status).toBe(409); expect((await stale.json()).error).toBe("evidence_conflict");
+    expect(fs.existsSync(join(alpha, "proof", "judgments"))).toBe(false);
+    fs.writeFileSync(evidence, original);
+    const accepted = await post(); expect(accepted.status, await accepted.clone().text()).toBe(201);
+    expect(readSliceReadiness(alpha).state).toBe("ready");
+    expect((await post()).status).toBe(200);
+  });
+
   it("lifts one verdict, corrects it, preserves siblings/history, and writes no ancestor status", () => {
     const f = fixture();
     const files = [join(f.root, "project.yaml"), join(f.mission, "mission.yaml"), join(f.alpha, "SPEC.md"), join(f.beta, "SPEC.md")];
