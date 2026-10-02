@@ -12,8 +12,10 @@
  * With no args it runs the committed evidence scenarios under
  * test/fixtures/scenarios/. Prerequisite: the built rig bin (npm run build -w
  * packages/cli and -w packages/daemon). The up step stands up real tmux seats on a
- * server the hermetic scaffold OWNS (it sets TMUX_TMPDIR itself and refuses to run
- * from inside a tmux attachment), so a run cannot reach the operator/fleet server.
+ * server the hermetic scaffold OWNS (it sets TMUX_TMPDIR itself), so a run cannot
+ * reach the operator/fleet server. This runner passes the scaffold only HOME, PATH
+ * and TERM, so an ambient TMUX (and any daemon variable) is dropped rather than
+ * refused, and running from inside tmux is safe.
  *
  * The equals mode uses the runner-internal normalizer seam (lock amendment A-N1)
  * with an IDENTITY placeholder here; the DECLARATIVE mapping is the scenario-facing
