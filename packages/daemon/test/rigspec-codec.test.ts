@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { RigSpecCodec, LegacyRigSpecCodec } from "../src/domain/rigspec-codec.js";
-import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
-import type { RigSpec } from "../src/domain/types.js";
+import { RigSpecSchema, LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
+import type { RigSpec, LegacyRigSpec } from "../src/domain/types.js";
 
 const VALID_RIG: RigSpec = {
   version: "0.2",
@@ -254,5 +254,35 @@ edges: []
   it("specs with no starter_ref roundtrip cleanly (no spurious field emitted)", () => {
     const yaml = RigSpecCodec.serialize(VALID_RIG);
     expect(yaml).not.toContain("starter_ref:");
+  });
+});
+
+describe("LegacyRigSpecCodec", () => {
+  it("legacy node effort round-trips through serialize/parse/normalize", () => {
+    const legacyRig: LegacyRigSpec = {
+      schemaVersion: 1,
+      name: "legacy-effort-rig",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "worker",
+          runtime: "claude-code",
+          model: "claude-3-7-sonnet-20250219",
+          effort: "high",
+          cwd: "/workspace",
+        },
+      ],
+      edges: [],
+    };
+
+    const yaml = LegacyRigSpecCodec.serialize(legacyRig);
+    expect(yaml).toContain("effort: high");
+
+    const parsed = LegacyRigSpecCodec.parse(yaml);
+    const validation = LegacyRigSpecSchema.validate(parsed);
+    expect(validation.valid).toBe(true);
+
+    const normalized = LegacyRigSpecSchema.normalize(parsed);
+    expect(normalized.nodes[0]!.effort).toBe("high");
   });
 });

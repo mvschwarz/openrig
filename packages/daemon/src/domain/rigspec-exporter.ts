@@ -79,7 +79,7 @@ export class RigSpecExporter {
 
       if (node.role) specNode.role = node.role;
       if (node.model) specNode.model = node.model;
-      if (node.effort) (specNode as { effort?: string }).effort = node.effort;
+      if (node.effort) specNode.effort = node.effort;
       if (node.cwd) specNode.cwd = node.cwd;
       if (node.surfaceHint) specNode.surfaceHint = node.surfaceHint;
       if (node.workspace) specNode.workspace = node.workspace;

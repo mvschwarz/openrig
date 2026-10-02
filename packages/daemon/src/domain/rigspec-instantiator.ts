@@ -114,7 +114,7 @@ export class RigInstantiator {
             role: specNode.role,
             runtime: specNode.runtime,
             model: specNode.model,
-            effort: (specNode as { effort?: string }).effort,
+            effort: specNode.effort,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -1186,7 +1186,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "cwd", "role", "codex_config_profile", "permission_policy", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "cwd", "role", "codex_config_profile", "permission_policy", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -2415,8 +2415,12 @@ export class PodRigInstantiator {
         config.resolvedSpecHash,
         nodeId,
       );
+      // Always write the resolved effort — present value sets it, absent value
+      // clears a previously-stored effort so spec changes take effect on next launch.
       if (config.effort) {
         this.deps.rigRepo.setNodeEffort(nodeId, config.effort);
+      } else {
+        this.deps.rigRepo.clearNodeEffort(nodeId);
       }
     } catch {
       /* best-effort */

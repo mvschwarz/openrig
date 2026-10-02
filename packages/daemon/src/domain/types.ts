@@ -965,6 +965,7 @@ export interface LegacyRigSpecNode {
   runtime: string;
   role?: string;
   model?: string;
+  effort?: string;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;

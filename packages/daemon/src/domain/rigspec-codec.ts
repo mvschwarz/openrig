@@ -232,6 +232,7 @@ export class LegacyRigSpecCodec {
         const n: Record<string, unknown> = { id: node.id, runtime: node.runtime };
         if (node.role != null) n["role"] = node.role;
         if (node.model != null) n["model"] = node.model;
+        if (node.effort != null) n["effort"] = node.effort;
         if (node.cwd != null) n["cwd"] = node.cwd;
         if (node.surfaceHint != null) n["surface_hint"] = node.surfaceHint;
         if (node.workspace != null) n["workspace"] = node.workspace;

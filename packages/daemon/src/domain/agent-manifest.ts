@@ -175,7 +175,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
     }
   }
 
-  // Defaults lifecycle
+  // Defaults lifecycle + effort advisory
   if (obj["defaults"] && typeof obj["defaults"] === "object") {
     const defaults = obj["defaults"] as Record<string, unknown>;
     if (defaults["lifecycle"]) {
@@ -184,6 +184,9 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
         errors.push(...lifecycleResult.errors);
         advisories.push(...lifecycleResult.advisories);
       }
+    }
+    if (defaults["effort"] !== undefined && (typeof defaults["effort"] !== "string" || !(defaults["effort"] as string).trim())) {
+      advisories.push(`defaults.effort: non-string value "${defaults["effort"]}" ignored; effort must be a text value`);
     }
   }
 
@@ -195,7 +198,7 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
     errors.push("profiles: must be a map (object), not an array or scalar");
   }
 
-  // Profile startup + lifecycle
+  // Profile startup + lifecycle + effort advisory
   if (obj["profiles"] && typeof obj["profiles"] === "object" && !Array.isArray(obj["profiles"])) {
     for (const [profileName, profileRaw] of Object.entries(obj["profiles"] as Record<string, unknown>)) {
       if (profileRaw && typeof profileRaw === "object") {
@@ -206,6 +209,13 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
             const lifecycleResult = validateLifecycle(p["lifecycle"], `profiles.${profileName}.lifecycle`);
             errors.push(...lifecycleResult.errors);
             advisories.push(...lifecycleResult.advisories);
+          }
+        }
+        const prefs = p["preferences"];
+        if (prefs && typeof prefs === "object") {
+          const prefsObj = prefs as Record<string, unknown>;
+          if (prefsObj["effort"] !== undefined && (typeof prefsObj["effort"] !== "string" || !(prefsObj["effort"] as string).trim())) {
+            advisories.push(`profiles.${profileName}.preferences.effort: non-string value "${prefsObj["effort"]}" ignored; effort must be a text value`);
           }
         }
       }

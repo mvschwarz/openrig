@@ -1245,6 +1245,12 @@ export class LegacyRigSpecSchema {
           errors.push(`node ${node["id"]}: unknown runtime '${node["runtime"]}'`);
         }
 
+        if (node["effort"] !== undefined) {
+          if (typeof node["effort"] !== "string" || !node["effort"].trim()) {
+            advisories.push(`nodes.${nodeWhere}.effort: non-string value "${node["effort"]}" ignored; effort must be a text value`);
+          }
+        }
+
         if (node["restore_policy"] != null && !LEGACY_KNOWN_RESTORE_POLICIES.has(node["restore_policy"] as string)) {
           errors.push(`node ${node["id"]}: unknown restorePolicy '${node["restore_policy"]}'`);
         }
@@ -1294,6 +1300,7 @@ export class LegacyRigSpecSchema {
       runtime: n["runtime"] as string,
       role: (n["role"] as string) ?? undefined,
       model: (n["model"] as string) ?? undefined,
+      effort: typeof n["effort"] === "string" && n["effort"].trim() ? n["effort"].trim() : undefined,
       cwd: (n["cwd"] as string) ?? undefined,
       surfaceHint: (n["surface_hint"] as string) ?? undefined,
       workspace: (n["workspace"] as string) ?? undefined,

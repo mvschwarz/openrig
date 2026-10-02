@@ -460,6 +460,14 @@ export class RigRepository {
     return result.changes > 0;
   }
 
+  clearNodeEffort(nodeId: string): boolean {
+    if (!this.hasNodeColumn("effort")) return false;
+    const result = this.db
+      .prepare("UPDATE nodes SET effort = NULL WHERE id = ?")
+      .run(nodeId);
+    return result.changes > 0;
+  }
+
   addEdge(rigId: string, sourceId: string, targetId: string, kind: string): Edge {
     const id = ulid();
     this.db
