@@ -18,6 +18,7 @@ import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
+import { verifyClaudePaneProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type {
   RestoreOutcome,
@@ -1844,7 +1845,21 @@ export class RestoreOrchestrator {
     }
     const paneCommand = await this.tmuxAdapter.getPaneCommand(identity.pane);
     const paneContent = (await this.tmuxAdapter.capturePaneContent(identity.pane, 40)) ?? "";
-    const probe = assessNativeResumeProbe({ runtime, paneCommand, paneContent });
+    const claudeResumeIdentityVerified = runtime === "claude-code" && !!await verifyClaudePaneProcess({
+      target: identity.pane,
+      tmux: this.tmuxAdapter,
+      expectedToken: expectedResumeToken,
+      requireResume: true,
+      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
+    });
+    const probe = assessNativeResumeProbe({
+      runtime,
+      paneCommand,
+      paneContent,
+      // Headerless readiness requires the same stable foreground/argv proof
+      // as the resume adapter; a token-bearing descendant alone is insufficient.
+      ...(runtime === "claude-code" ? { claudeResumeIdentityVerified } : {}),
+    });
     const fgProcess = runtime === "claude-code" ? "claude" as const : runtime === "codex" ? "codex" as const : null;
     if (!fgProcess) {
       return { ok: false, code: "fg_process_not_runtime", detail: `Node runtime is ${runtime ?? "unknown"}, not claude/codex.` };

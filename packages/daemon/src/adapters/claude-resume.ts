@@ -3,6 +3,7 @@ import type { TmuxAdapter } from "./tmux.js";
 import { shellQuote } from "./shell-quote.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { verifyClaudePaneProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { observeClaudePermission, type AppliedLaunchObservation } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
@@ -18,6 +19,7 @@ const CLAUDE_TYPES = new Set(["claude_name", "claude_id"]);
 
 interface ClaudeResumeOptions {
   claudeManagedLaunch?: ClaudeManagedLaunch;
+  listProcesses?: NativeProcessLister;
   pollMs?: number;
   maxWaitMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -85,7 +87,7 @@ export class ClaudeResumeAdapter {
       return { ok: false, code: "resume_failed", message: keyResult.message };
     }
 
-    const result = await this.verifyResume(tmuxSessionName).catch((error): ResumeResult => ({
+    const result = await this.verifyResume(tmuxSessionName, resumeToken!).catch((error): ResumeResult => ({
       ok: false,
       code: "attention_required",
       message: `Claude resume observation unavailable; launch retained: ${error instanceof Error ? error.message : String(error)}`,
@@ -93,7 +95,7 @@ export class ClaudeResumeAdapter {
     return result.ok ? { ...result, appliedLaunch } : result;
   }
 
-  private async verifyResume(tmuxSessionName: string): Promise<ResumeResult> {
+  private async verifyResume(tmuxSessionName: string, resumeToken: string): Promise<ResumeResult> {
     const pollMs = this.options.pollMs ?? 200;
     const maxWaitMs = this.options.maxWaitMs ?? 5_000;
     const sleepFn = this.options.sleep ?? sleep;
@@ -155,6 +157,29 @@ export class ClaudeResumeAdapter {
     }
     if (finalProbe.status === "resumed") {
       return { ok: true };
+    }
+
+    // The exact --resume identity is stronger evidence than a pane command or
+    // a version/footer heuristic. Use it only with Claude's interactive prompt
+    // visible, and after the untrusted screen classifiers have had their say.
+    const mayBeWrappedComposer = finalProbe.status === "inconclusive"
+      || (finalProbe.status === "failed" && finalProbe.code === "returned_to_shell");
+    if (/(^|\n)\s*❯/.test(finalContent) && mayBeWrappedComposer) {
+      const identity = await verifyClaudePaneProcess({
+        target: tmuxSessionName,
+        tmux: this.tmux,
+        ...(this.options.listProcesses ? { listProcesses: this.options.listProcesses } : {}),
+        expectedToken: resumeToken,
+      });
+      if (identity) {
+        const verifiedProbe = assessNativeResumeProbe({
+          runtime: "claude-code",
+          paneCommand: finalCommand,
+          paneContent: finalContent,
+          claudeResumeIdentityVerified: true,
+        });
+        if (verifiedProbe.status === "resumed") return { ok: true };
+      }
     }
 
     if (finalProbe.code === "returned_to_shell") {

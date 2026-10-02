@@ -243,7 +243,8 @@ Examples:
         if (kernelResult.kernelState === "skipped") {
           if (!opts.json) console.log("Kernel auto-boot skipped (--no-kernel or test mode).");
         } else {
-          console.error(`Kernel failed to start: state=${kernelResult.kernelState ?? "unknown"}, detail=${kernelResult.detail ?? "none"}`);
+          const terminalFailure = ["auth_blocked", "spec_missing", "bootstrap_failed", "degraded"].includes(kernelResult.kernelState ?? "");
+          console.error(`${terminalFailure ? "Kernel failed to start" : "Kernel did not report ready before the deadline"}: state=${kernelResult.kernelState ?? "unknown"}, detail=${kernelResult.detail ?? "none"}`);
           console.error("Cannot proceed to rig restore without a working kernel.");
           console.error("Fix: resolve the kernel issue, then rerun: rig start");
           process.exitCode = 1;

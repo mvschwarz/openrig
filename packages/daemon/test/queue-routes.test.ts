@@ -72,6 +72,28 @@ describe("queue routes", () => {
 
   afterEach(() => db.close());
 
+  it.each(["create", "handoff", "handoff-and-complete"])("keeps committed %s successful when the destination advisory throws", async (verb) => {
+    queueRepo = new QueueRepository(db, bus, {
+      destinationAdvisory: () => { throw Object.assign(new Error("membership unavailable"), { code: "SQLITE_BUSY" }); },
+    });
+    queueRepo.attachOutbox(outbox);
+    app = buildApp({ eventBus: bus, queueRepo, inboxHandler: inbox, outboxHandler: outbox });
+    const source = verb === "create" ? null : await queueRepo.create({
+      sourceSession: "a@r", destinationSession: "a@r", body: "source", nudge: false,
+    });
+    const response = await app.request(source ? `/api/queue/${source.qitemId}/${verb}` : "/api/queue/create", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "a@r" },
+      body: JSON.stringify(source ? { toSession: "typo@r", nudge: false } : { destinationSession: "typo@r", body: "committed", nudge: false }),
+    });
+    expect(response.status).toBe(201);
+    const result = await response.json();
+    expect(result.advisories).toBeUndefined();
+    const created = result.created ?? result;
+    expect(queueRepo.getById(created.qitemId)?.destinationSession).toBe("typo@r");
+    expect(queueRepo.list()).toHaveLength(source ? 2 : 1);
+    if (source) expect(queueRepo.getById(source.qitemId)?.state).toBe(verb === "handoff" ? "handed-off" : "done");
+  });
+
   function createWakeContractTable(database: Database.Database): void {
     database.exec(`
       CREATE TABLE queue_transition_wakes (

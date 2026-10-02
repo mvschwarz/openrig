@@ -11,10 +11,6 @@ import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { SnapshotRepository } from "../src/domain/snapshot-repository.js";
 import {
   RestoreCheckService,
-  // OPR.0.3.2.14 — imported from source; previously copy-pasted here.
-  CLAUDE_HOOKS_ROOT,
-  CLAUDE_SESSION_START_COMPACT_COMMAND as REQUIRED_SESSION_START_COMPACT_COMMAND,
-  CLAUDE_USER_PROMPT_SUBMIT_COMMAND as REQUIRED_USER_PROMPT_SUBMIT_COMMAND,
 } from "../src/domain/restore-check-service.js";
 
 const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
@@ -55,24 +51,6 @@ function v2HostInfraDeclaration(overrides?: {
         evidencePaths: overrides?.supportingInfraEvidencePaths ?? ["${OPENRIG_HOME}/supervisor-wake/README.md"],
       },
     ],
-  });
-}
-
-function claudeHookSettings(): string {
-  return JSON.stringify({
-    hooks: {
-      SessionStart: [
-        {
-          matcher: "compact",
-          hooks: [{ type: "command", command: REQUIRED_SESSION_START_COMPACT_COMMAND }],
-        },
-      ],
-      UserPromptSubmit: [
-        {
-          hooks: [{ type: "command", command: REQUIRED_USER_PROMPT_SUBMIT_COMMAND }],
-        },
-      ],
-    },
   });
 }
 
@@ -137,7 +115,7 @@ describe("Restore check routes", () => {
     fs.rmSync(openRigHome, { recursive: true, force: true });
   });
 
-  it.each(["configured", "legacy"])("resolves spec and queue paths under the %s shared-docs root", async (layout) => {
+  it.each(["configured", "legacy"])("resolves the spec root and probes the SQLite queue store for %s shared-docs", async (layout) => {
     const home = path.join(openRigHome, "isolated-home");
     const sharedDocs = layout === "configured"
       ? path.join(openRigHome, "custom shared-docs")
@@ -149,17 +127,18 @@ describe("Restore check routes", () => {
       const rig = rigRepo.createRig("test-rig");
       rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
       const rigRoot = path.join(sharedDocs, "rigs", "test-rig");
-      const queuePath = path.join(rigRoot, "state", "dev", "impl.queue.md");
-      fs.mkdirSync(path.dirname(queuePath), { recursive: true });
+      fs.mkdirSync(rigRoot, { recursive: true });
       fs.writeFileSync(path.join(rigRoot, "rig.yaml"), "name: test-rig\n");
-      fs.writeFileSync(queuePath, "");
 
       const res = await app.request("/api/restore-check?noHooks=true");
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.checks).toEqual(expect.arrayContaining([
         expect.objectContaining({ check: "rig.test-rig.spec-present", status: "green", evidence: `Spec present at ${path.join(rigRoot, "rig.yaml")}` }),
-        expect.objectContaining({ check: "seat.dev.impl.queue-file", status: "green", evidence: `Queue file exists at ${queuePath}` }),
+        expect.objectContaining({
+          check: "seat.dev.impl.queue-store", status: "green",
+          evidence: "Daemon SQLite queue_items store is queryable; an empty queue is valid",
+        }),
       ]));
     } finally {
       vi.unstubAllEnvs();
@@ -228,7 +207,7 @@ describe("Restore check routes", () => {
     const res = await app.request("/api/restore-check?noQueue=true");
     const body = await res.json();
 
-    const queueChecks = body.checks.filter((c: { check: string }) => c.check.includes("queue-file"));
+    const queueChecks = body.checks.filter((c: { check: string }) => c.check.includes("queue-store"));
     expect(queueChecks).toHaveLength(0);
   });
 
@@ -243,14 +222,31 @@ describe("Restore check routes", () => {
     expect(hookChecks).toHaveLength(0);
   });
 
-  it("GET /api/restore-check uses node cwd to inspect project-local Claude hook settings", async () => {
+  it("GET /api/restore-check recognizes the selected Claude activity-hook delivery", async () => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-route-hook-cwd-"));
     const settingsDir = path.join(projectDir, ".claude");
     const settingsPath = path.join(settingsDir, "settings.local.json");
+    const relayPath = path.join(projectDir, ".openrig", "hooks", "scripts", "activity-relay.cjs");
     fs.mkdirSync(settingsDir, { recursive: true });
-    fs.writeFileSync(settingsPath, claudeHookSettings());
+    fs.mkdirSync(path.dirname(relayPath), { recursive: true });
+    fs.writeFileSync(relayPath, "// test relay\n");
+    const manifestPath = path.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
+    const relayEvents = Object.entries(manifest.hooks)
+      .filter(([, groups]) => groups.some((group) => group.hooks.some((hook) => hook.command.includes("activity-relay.cjs"))))
+      .map(([event]) => event);
+    fs.writeFileSync(settingsPath, JSON.stringify({ hooks: Object.fromEntries(relayEvents.map((event) => [
+      event, [{ hooks: [{ type: "command", command: `node '${relayPath}'` }] }],
+    ])) }));
     const rig = rigRepo.createRig("hooked-rig");
-    rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: projectDir });
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: projectDir });
+    insertStartupContextRow(db, node.id, {
+      projectionEntriesJson: JSON.stringify([{
+        category: "runtime_resource", effectiveId: "shared:claude_activity_hooks",
+        sourceSpec: "shared", sourcePath: "/source/activity-hooks", resourcePath: "hooks",
+        absolutePath: "/source/activity-hooks", resourceType: "claude_activity_hooks",
+      }]),
+    });
 
     try {
       const res = await app.request("/api/restore-check?rig=hooked-rig");
@@ -263,7 +259,7 @@ describe("Restore check routes", () => {
         remediation: "",
       }));
       expect(hook.evidence).toContain(settingsPath);
-      expect(hook.evidence).toContain("configuration present, not hook-execution verified");
+      expect(hook.evidence).toContain("hook execution is not verified");
     } finally {
       fs.rmSync(projectDir, { recursive: true, force: true });
     }
@@ -360,6 +356,25 @@ describe("Restore check routes", () => {
     expect(body.checks.some((c: { check: string }) => c.check === "probe.error")).toBe(false);
   });
 
+  it.each([
+    [null],
+    [{ category: "runtime_resource", resourceType: "claude_activity_hooks" }],
+  ])("GET /api/restore-check preserves malformed selection members as hook caveats: %j", async (member) => {
+    const rig = rigRepo.createRig("malformed-selection-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@malformed-selection-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    insertStartupContextRow(db, node.id, { projectionEntriesJson: JSON.stringify([member]) });
+    const res = await app.request("/api/restore-check?rig=malformed-selection-rig&noQueue=true");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const hook = body.checks.find((c: { check: string }) => c.check === "seat.dev-impl@malformed-selection-rig.hooks");
+    expect(hook.status).toBe("yellow");
+    expect(hook.evidence).not.toContain("not selected");
+    expect(body.checks.find((c: { check: string }) => c.check.endsWith(".startup-context")).evidence).toContain("projection_entries_json");
+  });
+
   it("GET /api/restore-check does not false-green malformed startup_actions_json", async () => {
     const rig = rigRepo.createRig("malformed-startup-actions-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
@@ -400,8 +415,8 @@ describe("Restore check routes", () => {
   });
 
   it("GET /api/restore-check returns non-null repairPacket with blocking field for broken fixture", async () => {
-    // Create a rig with a node — hooks are yellow by default (Slice 2 unimplemented),
-    // producing restorable_with_caveats and a non-null repairPacket
+    // Create a rig with a node and no persisted startup context, producing a
+    // non-null repairPacket without treating an uninspected hook selection as ready.
     const rig = rigRepo.createRig("broken-rig");
     rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
 
@@ -425,7 +440,7 @@ describe("Restore check routes", () => {
     expect(body.hostInfra).toEqual(expect.objectContaining({
       status: "not_declared",
     }));
-    // Hooks yellow → restorable_with_caveats → repairPacket populated
+    // Missing startup context remains a non-blocking caveat.
     expect(body.repairPacket).toBeInstanceOf(Array);
     expect(body.repairPacket.length).toBeGreaterThan(0);
 
@@ -438,7 +453,7 @@ describe("Restore check routes", () => {
       expect(typeof step.blocking).toBe("boolean");
     }
 
-    // Yellow hooks are non-blocking caveats
+    // Hook selection is unavailable, so its repair remains non-blocking.
     const hookStep = body.repairPacket.find((s: { rationale: string }) => s.rationale.includes("Hook"));
     if (hookStep) {
       expect(hookStep.blocking).toBe(false);

@@ -70,7 +70,14 @@ function parseText(text: string, final: boolean): { events: InputEvent[]; remain
         if (!final && /^\x1b\[[0-?]*[ -/]*$/.test(tail)) break;
       }
       if (!final && tail === "\x1bO") break;
-      if (/^\x1bO[@-~]/.test(tail)) { i += 3; continue; }
+      if (/^\x1bO[@-~]/.test(tail)) {
+        // Application-cursor mode sends SS3 arrows instead of CSI arrows.
+        const code = text[i + 2];
+        const key = code === "A" ? "up" : code === "B" ? "down" : code === "C" ? "right" : code === "D" ? "left" : null;
+        if (key) events.push({ type: "key", key, action: { type: "select", delta: key === "down" ? 1 : key === "up" ? -1 : 0 } });
+        i += 3;
+        continue;
+      }
       events.push({ type: "key", key: "escape" });
       i += 1;
       continue;

@@ -27,6 +27,7 @@ import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitio
 import { queueTransitionWakesSchema } from "../src/db/migrations/073_queue_transition_wakes.js";
 import { viewsCustomSchema } from "../src/db/migrations/030_views_custom.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { buildExecutionView } from "../src/domain/execution-view.js";
 import { ViewProjector, ViewProjectorError } from "../src/domain/view-projector.js";
 import { Hono } from "hono";
 import { viewsRoutes } from "../src/routes/views.js";
@@ -552,6 +553,42 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     const s33 = q4.find((s) => s.slice_id === "OPR.9.9.33")!;
     expect((s33.reviewed as Record<string, unknown>).value).toBe("INDETERMINATE");
     expect(String((s33.reviewed as Record<string, unknown>).basis)).toContain("candidate");
+  });
+
+  it("joins local proof review drops when the shared review registry is unavailable", () => {
+    fs.rmSync(rigsRoot, { recursive: true });
+    const proof = path.join(missionsRoot, MISSION, "slices", "31-alpha", "proof");
+    fs.mkdirSync(proof);
+    const drop = path.join(proof, "rev1-r1.md");
+    fs.writeFileSync(drop, `---\nslice: OPR.9.9.31\nartifact_type: rev1-r1\nverdict: CLEAR\ncandidate_sha: ${candidateSha}\n---\nLocal review.\n`);
+    const local = (show().q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!.reviewed as Record<string, unknown>;
+    expect(local.value).toBe(true);
+    expect((local.legs as Record<string, unknown>[]).map(leg => leg.path)).toEqual([drop]);
+    fs.writeFileSync(path.join(proof, "other-slice.md"), `---\nslice: OPR.9.9.32\nartifact_type: rev1-r2\nverdict: BLOCKING\ncandidate_sha: ${candidateSha}\n---\nOther slice.\n`);
+    fs.writeFileSync(path.join(proof, "qa.md"), `---\nslice: OPR.9.9.31\nartifact_type: qa\nverdict: BLOCKING\ncandidate_sha: ${candidateSha}\n---\nQA is not a review leg.\n`);
+    const controls = (show().q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!.reviewed as Record<string, unknown>;
+    expect(controls.value).toBe(true);
+    expect(controls.legs).toHaveLength(1);
+    fs.writeFileSync(drop, fs.readFileSync(drop, "utf8").replace("verdict: CLEAR", "verdict: BLOCKING"));
+    expect(((show().q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!.reviewed as Record<string, unknown>).value).toBe(false);
+    fs.writeFileSync(drop, fs.readFileSync(drop, "utf8").replace(candidateSha, "0000000000000000000000000000000000000000"));
+    expect(((show().q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!.reviewed as Record<string, unknown>).value).toBe("INDETERMINATE");
+  });
+
+  it("uses project-local review drops without joining unbound global artifacts", () => {
+    for (const row of db.prepare("SELECT qitem_id, tags FROM queue_items").all() as {qitem_id: string; tags: string}[]) {
+      const tags = JSON.parse(row.tags) as string[];
+      db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify([...tags, "project:demo"]), row.qitem_id);
+    }
+    const proof = path.join(missionsRoot, MISSION, "slices", "31-alpha", "proof");
+    fs.mkdirSync(proof);
+    const drop = path.join(proof, "local-review.md");
+    fs.writeFileSync(drop, `---\nslice: OPR.9.9.31\nartifact_type: adjudication\nverdict: CLEAR\ncandidate_sha: ${candidateSha}\n---\nProject local.\n`);
+    fs.writeFileSync(path.join(rigsRoot, "exec-fixture", "state", "review-fixture", "S31-verdict.md"), `---\nslice: OPR.9.9.31\nartifact_type: rev1-r2\nverdict: BLOCKING\ncandidate_sha: ${candidateSha}\n---\nUnbound global record.\n`);
+    const doc = buildExecutionView({ db, slicesRoot: () => missionsRoot, rigsRoot: () => rigsRoot }, { mission: MISSION, project: "demo" });
+    const local = (doc.q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!.reviewed as Record<string, unknown>;
+    expect(local.value).toBe(true);
+    expect((local.legs as Record<string, unknown>[]).map(leg => leg.path)).toEqual([drop]);
   });
 
   it("Q2 honesty: own-completion INDETERMINATE never yields next_up=true, and terminal-row blockedOn does not govern dispatchability", () => {

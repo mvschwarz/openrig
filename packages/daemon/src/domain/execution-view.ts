@@ -576,52 +576,46 @@ interface ReviewArtifactFact {
   artifactType: string | null;
 }
 
-/** Scan rigs/<rig>/state/review… dirs for review artifacts naming this slice.
- *  Root resolution follows the shipped shared-docs precedent. */
-function scanReviewArtifacts(rigsRoot: string, sliceDirOrId: string[]): ReviewArtifactFact[] | Indeterminate {
-  let rigs: string[];
-  try {
-    rigs = fs.readdirSync(rigsRoot);
-  } catch {
-    return INDETERMINATE;
-  }
+/** Read review drops co-located with this slice, plus the legacy global registry
+ * when no catalogued project was selected. Both sources keep the same slice and
+ * built-commit join; unbound global artifacts cannot establish project review. */
+function scanReviewArtifacts(rigsRoot: string, sliceDirOrId: string[], proofDir: string, includeGlobal: boolean): ReviewArtifactFact[] | Indeterminate {
   const out: ReviewArtifactFact[] = [];
-  for (const rig of rigs) {
-    const stateDir = path.join(rigsRoot, rig, "state");
-    let stateEntries: string[];
+  let readable = false;
+  const scanDirectory = (dir: string, local: boolean) => {
+    let files: string[];
     try {
-      stateEntries = fs.readdirSync(stateDir);
-    } catch {
-      continue;
+      files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
+      readable = true;
+    } catch { return; }
+    for (const f of files) {
+      let raw: string;
+      try { raw = fs.readFileSync(path.join(dir, f), "utf8"); }
+      catch { continue; }
+      const fm = parseFrontmatter(raw);
+      const sliceVal = typeof fm["slice"] === "string" ? fm["slice"] : null;
+      if (!sliceVal || !sliceDirOrId.includes(sliceVal)) continue;
+      const artifactType = typeof fm["artifact_type"] === "string" ? fm["artifact_type"] : null;
+      // A local QA/guard drop does not become a review leg merely by living in proof/.
+      if (local && !["rev1-r1", "rev1-r2", "adjudication"].includes(artifactType ?? "")) continue;
+      out.push({ path: path.join(dir, f),
+        verdict: typeof fm["verdict"] === "string" ? fm["verdict"] : INDETERMINATE,
+        candidateSha: typeof fm["candidate_sha"] === "string" ? fm["candidate_sha"] : null,
+        artifactType });
     }
-    for (const entry of stateEntries.filter((e) => e.startsWith("review"))) {
-      const dir = path.join(stateDir, entry);
-      let files: string[];
-      try {
-        files = fs.readdirSync(dir).filter((f) => f.endsWith(".md"));
-      } catch {
-        continue;
-      }
-      for (const f of files) {
-        let raw: string;
-        try {
-          raw = fs.readFileSync(path.join(dir, f), "utf8");
-        } catch {
-          continue;
-        }
-        const fm = parseFrontmatter(raw);
-        const sliceVal = typeof fm["slice"] === "string" ? (fm["slice"] as string) : null;
-        if (!sliceVal || !sliceDirOrId.includes(sliceVal)) continue;
-        out.push({
-          path: path.join(dir, f),
-          verdict: typeof fm["verdict"] === "string" ? (fm["verdict"] as string) : INDETERMINATE,
-          candidateSha: typeof fm["candidate_sha"] === "string" ? (fm["candidate_sha"] as string) : null,
-          artifactType: typeof fm["artifact_type"] === "string" ? (fm["artifact_type"] as string) : null,
-        });
-      }
+  };
+  scanDirectory(proofDir, true);
+  if (includeGlobal) {
+    let rigs: string[] = [];
+    try { rigs = fs.readdirSync(rigsRoot); readable = true; } catch { /* Local proof remains usable. */ }
+    for (const rig of rigs) {
+      const stateDir = path.join(rigsRoot, rig, "state");
+      let entries: string[];
+      try { entries = fs.readdirSync(stateDir); } catch { continue; }
+      for (const entry of entries.filter((e) => e.startsWith("review"))) scanDirectory(path.join(stateDir, entry), false);
     }
   }
-  return out;
+  return readable ? out : INDETERMINATE;
 }
 
 type Rung =
@@ -882,10 +876,10 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
     // tags, full shas, annotated fields) join by RESOLVED commit; malformed,
     // ambiguous, or non-resolving inputs are excluded with the reason carried —
     // they neither clear nor poison.
-    const artifacts = opts?.project ? INDETERMINATE : scanReviewArtifacts(rigsRoot, [facts.dir, ...(typeof facts.id === "string" ? [facts.id] : [])]);
+    const artifacts = scanReviewArtifacts(rigsRoot, [facts.dir, ...(typeof facts.id === "string" ? [facts.id] : [])], path.join(path.dirname(facts.specPath), "proof"), !opts?.project);
     let reviewed: Record<string, unknown>;
     if (artifacts === INDETERMINATE) {
-      reviewed = { value: INDETERMINATE, basis: opts?.project ? "Global review artifacts have no project identity binding" : `review-artifact root unreadable (${rigsRoot})`, legs: [] };
+      reviewed = { value: INDETERMINATE, basis: opts?.project ? `slice-local review-artifact root unreadable (${path.dirname(facts.specPath)}/proof)` : `review-artifact roots unreadable (slice proof/ and ${rigsRoot})`, legs: [] };
     } else if (!candidateSha || !builtToken) {
       reviewed = { value: INDETERMINATE, basis: "no built candidate token to scope review legs to", legs: [] };
     } else if (!builtResolved) {

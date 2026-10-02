@@ -86,6 +86,41 @@ describe("pod bundle byte preservation (create -> archive -> install)", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it.skipIf(process.platform === "win32")("keeps executable and restrictive modes through create and install", async () => {
+    const src = path.join(tmpDir, "mode-source");
+    fs.mkdirSync(path.join(src, "agents/impl/bin"), { recursive: true });
+    fs.writeFileSync(path.join(src, "agents/impl/agent.yaml"), AGENT_YAML);
+    fs.writeFileSync(path.join(src, "rig.yaml"), RIG_YAML);
+    fs.mkdirSync(path.join(src, "startup"));
+    fs.writeFileSync(path.join(src, "startup/blob.bin"), PAYLOADS["startup/blob.bin"]!);
+    fs.mkdirSync(path.join(src, "agents/impl/skills/greet"), { recursive: true });
+    fs.writeFileSync(path.join(src, "agents/impl/skills/greet/SKILL.md"), "# Greet");
+    const modes = [0o700, 0o750, 0o755, 0o600];
+    for (const mode of modes) {
+      const file = path.join(src, "agents/impl/bin", `${mode.toString(8)}.sh`);
+      fs.writeFileSync(file, "#!/bin/sh\nexit 0\n");
+      fs.chmodSync(file, mode);
+    }
+
+    const outputPath = path.join(tmpDir, "modes.rigbundle");
+    const created = await app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath: path.join(src, "rig.yaml"), rigRoot: src, bundleName: "modes", bundleVersion: "0.1.0", outputPath }),
+    });
+    expect(created.status, await created.clone().text()).toBe(201);
+    const extracted = path.join(tmpDir, "mode-extracted");
+    await unpack(outputPath, extracted);
+    const target = path.join(tmpDir, "mode-installed");
+    fs.mkdirSync(target);
+    expect(materializePodBundle(extracted, target)).toEqual({ ok: true });
+    for (const mode of modes) {
+      const relative = path.join("agents/impl/bin", `${mode.toString(8)}.sh`);
+      expect(fs.statSync(path.join(extracted, relative)).mode & 0o777, `${relative} archived`).toBe(mode);
+      expect(fs.statSync(path.join(target, relative)).mode & 0o777, `${relative} installed`).toBe(mode);
+    }
+  });
+
   it("keeps binary, non-UTF-8, NUL, empty and multibyte files byte-identical, with truthful integrity", async () => {
     const src = path.join(tmpDir, "src");
     for (const [rel, bytes] of Object.entries(PAYLOADS)) {

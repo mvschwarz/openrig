@@ -261,7 +261,16 @@ describe("retained authority negative controls", () => {
       const after = readMissionReadiness(f.mission);
       expect(after.historicalStatus).toBe("draft");
       expect(after.revision).not.toBe(before.revision);
-      await expect.poll(() => events.length, { timeout: 5000 }).toBe(1);
+      // On macOS, fs.watch arms its recursive FSEvents stream asynchronously, so a write made in the
+      // same tick can precede the stream and is never reported (the product's quiet refresh repairs
+      // that; this test asserts the push path). Rewrite the unchanged draft bytes until the watcher
+      // reports: the semantic basis changes once, so this still yields exactly one event.
+      const deadline = Date.now() + 5000;
+      while (events.length === 0 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        if (events.length === 0) fs.writeFileSync(manifest, fs.readFileSync(manifest));
+      }
+      expect(events).toHaveLength(1);
       expect(events[0]!.type).toBe("proof.sources_changed");
       expect(invalidated).toBe(1);
       expect(readSliceReadiness(f.alpha).revision).toBe(sliceRevision);

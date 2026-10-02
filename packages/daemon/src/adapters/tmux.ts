@@ -372,8 +372,18 @@ export class TmuxAdapter {
           const result = classifyWriteError(error);
           // Only termination consumes positive absence. Unknown probe failures
           // still refuse, and guard-on never reaches this observation.
-          if (allowAbsent && !result.ok && result.code === "session_not_found"
-            && !/permission denied|operation not permitted|EACCES|EPERM/i.test(result.message)) return result;
+          if (allowAbsent && !result.ok
+            && !/permission denied|operation not permitted|EACCES|EPERM/i.test(result.message)) {
+            if (result.code === "session_not_found") return result;
+            // list-panes reports a missing session as "can't find window" on
+            // native tmux. Do not broaden write-error classification: only
+            // termination may confirm the bound session's positive absence.
+            if (/can't find window/i.test(result.message)) {
+              const probe = await this.probeSession(bound.session);
+              guard.checkInput(identity);
+              if (probe.state === "absent") return { ok: false, code: "session_not_found", message: result.message };
+            }
+          }
           throw error;
         }
         const pane = fresh ? created.pane : bound.pane;
@@ -710,6 +720,15 @@ export class TmuxAdapter {
   }
 
   private async killSessionUnchecked(name: string): Promise<TmuxResult> {
+    // Detach first so `detach-on-destroy off` cannot switch views onto another session.
+    try {
+      await this.run(["tmux", "detach-client", "-s", name],
+        `tmux detach-client -s ${shellQuote(name)}`);
+    } catch (err) {
+      // tmux 3.7 says "no current client" when nothing is attached (and for a missing session, which the kill classifies).
+      const message = err instanceof Error ? err.message : String(err);
+      if (!message.toLowerCase().includes("no current client")) return classifyWriteError(err);
+    }
     try {
       await this.run(["tmux", "kill-session", "-t", name],
         `tmux kill-session -t ${shellQuote(name)}`);
