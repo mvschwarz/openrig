@@ -197,6 +197,12 @@ describe("native resume probe", () => {
     );
   });
 
+  it("builds an agy resume command with the conversation token", () => {
+    expect(buildNativeResumeCommand("agy", "conv-999")).toBe(
+      "agy --conversation 'conv-999'"
+    );
+  });
+
   it("returns null when runtime or token are missing", () => {
     expect(buildNativeResumeCommand("terminal", "x")).toBeNull();
     expect(buildNativeResumeCommand("claude-code", null)).toBeNull();
@@ -411,6 +417,34 @@ describe("native resume probe", () => {
       status: "failed",
       code: "no_saved_session",
       detail: "Codex reported that the requested saved session does not exist.",
+    });
+  });
+
+  it("classifies agy active TUI with agy prompt as resumed", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "agy",
+        paneCommand: "agy",
+        paneContent: "Antigravity CLI v1.2.14\nagy> Ready",
+      })
+    ).toEqual({
+      status: "resumed",
+      code: "active_runtime",
+      detail: "Antigravity is running with an active interactive TUI in the probe pane.",
+    });
+  });
+
+  it("classifies agy missing conversation output as failed", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "agy",
+        paneCommand: "bash",
+        paneContent: "Error: Conversation not found: conv-missing",
+      })
+    ).toEqual({
+      status: "failed",
+      code: "no_conversation_found",
+      detail: "Antigravity reported that the requested conversation no longer exists.",
     });
   });
 

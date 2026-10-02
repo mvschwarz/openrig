@@ -12,6 +12,7 @@ const RUNTIME_COMMANDS: Record<string, string> = {
   "codex": "codex --version",
   "pi": "pi --version",
   "omp": "omp --version",
+  "agy": "agy --version",
 };
 
 interface RigSpecPreflightDeps {
@@ -143,7 +144,7 @@ import {
 
 // Slice 51-01 (OPR.0.5.1.1): `stub` is a first-class runtime (the deterministic node-script fake harness
 // through the real orchestrator) — admitted at the modern-pod preflight gate alongside the real runtimes.
-const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "omp", "terminal", "stub"]);
+const SUPPORTED_RUNTIMES = new Set(["claude-code", "codex", "pi", "omp", "agy", "terminal", "stub"]);
 
 // Default daemon-shipped asset paths for the managed Claude activity hooks — the SAME files the
 // ClaudeCodeAdapter is wired with in startup.ts (validation is the shared module either way).
@@ -405,6 +406,8 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
     const piErrors = await verifyPiRuntimeAvailable(rigSpec, preflightCtx.exec);
     errors.push(...piErrors);
     errors.push(...await verifyOmpRuntimeAvailable(rigSpec, preflightCtx.exec));
+    const agyErrors = await verifyAgyRuntimeAvailable(rigSpec, preflightCtx.exec);
+    errors.push(...agyErrors);
   }
 
   // §6 RECONCILIATION — WARNING EMISSION ORDER (PM ruling 2026-08-05): ACTIVITY-HOOK-FIRST,
@@ -453,6 +456,29 @@ export async function verifyOmpRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecF
     return [];
   } catch (err) {
     return [`Runtime "omp" not available ('omp --version' failed: ${runtimeProbeFailure(err)}). If OMP is not installed, install Oh My Pi and ensure 'omp' is on PATH.`];
+  }
+}
+
+/**
+ * Async post-preflight probe: when the spec declares any `runtime: "agy"` member,
+ * verify the `agy` binary answers `agy --version`.
+ * Returns a single what/why/fix error naming the install surface on failure.
+ */
+export async function verifyAgyRuntimeAvailable(
+  rigSpec: PodRigSpec,
+  exec: ExecFn,
+): Promise<string[]> {
+  const hasAgyMember = (rigSpec.pods ?? []).some((pod: RigSpecPod) =>
+    (pod.members ?? []).some((member: RigSpecPodMember) => member.runtime === "agy"),
+  );
+  if (!hasAgyMember) return [];
+  try {
+    await exec(RUNTIME_COMMANDS["agy"]!);
+    return [];
+  } catch {
+    return [
+      `Runtime "agy" not available ('agy --version' failed). The spec declares an agy member, so the launch would fail. Fix: install Antigravity CLI and ensure 'agy' is on PATH.`,
+    ];
   }
 }
 

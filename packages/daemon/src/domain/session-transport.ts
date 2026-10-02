@@ -1396,6 +1396,25 @@ export class SessionTransport {
       });
     }
 
+    // 5b. Confirm the Enter was consumed. The fixed gap between paste and Enter can lose the Enter
+    // while the Claude TUI is still ingesting the paste or redrawing (a turn ending): tmux accepts
+    // the key, yet the text stays typed in the input box, never submitted. Reuse the guarded
+    // submit-only path once. It presses Enter only when the pane's current input holds this exact
+    // text and refuses without sending a key otherwise, so a consumed send costs one capture.
+    if (runtime === "claude-code" && !opts?.dangerouslyInteract) {
+      await this.sleep(500);
+      try {
+        await this.send(sessionName, "", {
+          submitOnly: true,
+          expectedStagedText: text,
+          expectedStagedLineCount: text.split("\n").length,
+          actorSession: opts?.actorSession,
+        });
+      } catch {
+        // Best effort: the original send already succeeded; never fail it over the confirmation.
+      }
+    }
+
     // 6. Verify if requested. At this point text + Enter BOTH succeeded, so the
     // message LANDED; the capture only re-confirms the render. Not re-confirming
     // (a TUI redraw race, or the capture throwing) is therefore the honest

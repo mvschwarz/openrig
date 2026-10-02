@@ -19,6 +19,7 @@ const choices = [
   ["first-project", ["codex", "codex"], ["gpt-6-astra", "gpt-6-astra"]],
   ["first-project-claude", ["claude-code", "claude-code"], [undefined, undefined]],
   ["first-project-mixed", ["claude-code", "codex"], [undefined, "gpt-6-astra"]],
+  ["first-project-agy", ["agy", "agy"], [undefined, undefined]],
 ] as const;
 
 describe("first-project provider choices", () => {
@@ -85,6 +86,7 @@ describe("first-project provider choices", () => {
         const runtimeResources = projection.plan.entries.filter((entry) => entry.category === "runtime_resource");
         expect(runtimeResources.map((entry) => entry.resourceType).sort()).toEqual(
           member.runtime === "codex" ? ["codex_config_fragment"]
+            : member.runtime === "agy" ? []
             : ["claude_activity_hooks", "claude_mcp_fragment", "claude_settings_fragment"],
         );
         for (const entry of runtimeResources) expect(existsSync(entry.absolutePath)).toBe(true);

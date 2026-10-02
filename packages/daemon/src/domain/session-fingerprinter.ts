@@ -27,6 +27,7 @@ const CODEX_PROCESS_PATTERNS = ["codex"];
 // state; a bare `omp` executable could use the default, unisolated user home.
 // No Layer-1 OMP signal: tmux reports the runner as `node`, never its argv.
 const OMP_READY_PATTERN = /^\s*\[omp-runner\] READY(?:\s|$)/;
+const AGY_PROCESS_PATTERNS = ["agy", "antigravity"];
 
 const CLAUDE_PANE_PATTERNS = [
   { label: "Claude Code", test: (line: string) => /^\s*Claude Code\b/i.test(line) },
@@ -38,6 +39,12 @@ const CODEX_PANE_PATTERNS = [
   { label: "Codex CLI", test: (line: string) => /^\s*Codex CLI\b/i.test(line) },
   { label: "codex>", test: (line: string) => /^\s*codex>\s*/i.test(line) },
   { label: "╭─ Codex", test: (line: string) => /^\s*╭─ Codex\b/i.test(line) },
+];
+
+const AGY_PANE_PATTERNS = [
+  { label: "Antigravity CLI", test: (line: string) => /^\s*Antigravity CLI\b/i.test(line) },
+  { label: "agy>", test: (line: string) => /^\s*agy>\s*/i.test(line) },
+  { label: "╭─ Antigravity", test: (line: string) => /^\s*╭─ Antigravity\b/i.test(line) },
 ];
 
 /**
@@ -82,6 +89,7 @@ export class SessionFingerprinter {
         const hint = cmuxMatch.runtime.includes("claude") ? "claude-code" as RuntimeHint
           : cmuxMatch.runtime.includes("codex") ? "codex" as RuntimeHint
           : cmuxMatch.runtime.toLowerCase() === "omp" || cmuxMatch.runtime.toLowerCase() === "oh-my-pi" ? "omp" as RuntimeHint
+          : (cmuxMatch.runtime.includes("agy") || cmuxMatch.runtime.includes("antigravity")) ? "agy" as RuntimeHint
           : "unknown" as RuntimeHint;
         return { runtimeHint: hint, confidence: "highest", evidence };
       }
@@ -104,6 +112,14 @@ export class SessionFingerprinter {
           evidence.layerUsed = 1;
           evidence.processSignal = { command: pane.activeCommand, matched: pattern };
           return { runtimeHint: "codex", confidence: "high", evidence };
+        }
+      }
+
+      for (const pattern of AGY_PROCESS_PATTERNS) {
+        if (cmd.includes(pattern)) {
+          evidence.layerUsed = 1;
+          evidence.processSignal = { command: pane.activeCommand, matched: pattern };
+          return { runtimeHint: "agy", confidence: "high", evidence };
         }
       }
 
@@ -132,6 +148,14 @@ export class SessionFingerprinter {
             evidence.layerUsed = 2;
             evidence.paneContentSignal = { pattern: pattern.label, matchedLine: line.trim() };
             return { runtimeHint: "codex", confidence: "medium", evidence };
+          }
+        }
+
+        for (const pattern of AGY_PANE_PATTERNS) {
+          if (pattern.test(line)) {
+            evidence.layerUsed = 2;
+            evidence.paneContentSignal = { pattern: pattern.label, matchedLine: line.trim() };
+            return { runtimeHint: "agy", confidence: "medium", evidence };
           }
         }
       }
