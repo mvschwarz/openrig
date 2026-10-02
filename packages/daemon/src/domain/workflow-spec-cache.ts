@@ -589,15 +589,32 @@ export class WorkflowSpecCache {
       .get(spec.id, spec.version) as SpecRow | undefined;
     // Diagnostic names are filename fallbacks, not parsed workflow identities.
     // Recover the owning source row in place once that file parses again.
+    // An error row that still holds a stored spec was a cached version blanked by an earlier
+    // diagnostic writer: it is the only copy of that version, so it is never reused or removed
+    // here (#503). Only rows with no stored spec are diagnostic-only.
+    const diagnosticOnly = `status = 'error'${this.hasSpecJsonColumn ? " AND spec_json IS NULL" : ""}`;
     const diagnostic = !named && this.hasDiagnosticColumns
-      ? this.db.prepare("SELECT * FROM workflow_specs WHERE source_path = ? AND status = 'error'").get(sourcePath) as SpecRow | undefined
+      ? this.db.prepare(`SELECT * FROM workflow_specs WHERE source_path = ? AND ${diagnosticOnly}`).get(sourcePath) as SpecRow | undefined
       : undefined;
     const existing = named ?? diagnostic;
     // A file moved away from a path that no longer exists keeps its cached row: record the new
     // path, so the scanner's removal pass does not delete the current version (#511). A retained
     // row whose file is back is made valid again.
     const moved = existing !== undefined && existing.source_path !== sourcePath && !existsSync(existing.source_path);
+    // A successful parse supersedes this file's diagnostic-only rows (#503). A versioned row may
+    // still back running work and is never touched here.
+    const cleared = this.hasDiagnosticColumns
+      ? this.db
+        .prepare(`DELETE FROM workflow_specs WHERE source_path = ? AND ${diagnosticOnly} AND version = '' AND spec_id != ?`)
+        .run(sourcePath, existing?.spec_id ?? "").changes
+      : 0;
     if (existing && existing.status !== "error" && existing.status !== RETAINED_STATUS && !moved && existing.source_hash === sourceHash) {
+      // A repair back to the cached bytes records this scan, so the next scan skips the file.
+      if (cleared > 0) {
+        const repairedAt = this.now().toISOString();
+        this.db.prepare(`UPDATE workflow_specs SET cached_at = ? WHERE spec_id = ?`).run(repairedAt, existing.spec_id);
+        existing.cached_at = repairedAt;
+      }
       // readThrough is file-authoritative: return the freshly parsed
       // file spec so validation sees non-column metadata such as
       // workflow.entry and workflow.invariants.
@@ -823,13 +840,12 @@ export class WorkflowSpecCache {
    * falls back to the source file basename so the Library has a
    * stable label even when the YAML couldn't be parsed.
    *
-   * Single-row-per-source_path semantics: writeDiagnostic on a path
-   * that already has a row (valid or diagnostic) UPDATES the row's
-   * status to 'error', error_message, source_hash, cached_at, and
-   * resets the parsed payload fields to empty (the prior YAML is no
-   * longer trusted). Round-trip between 'valid' and 'error' is
-   * supported via the same path: a passing readThrough flips the
-   * row back to 'valid' with parsed payload restored.
+   * One diagnostic row per source_path: writeDiagnostic updates the
+   * path's existing diagnostic row (status 'error') or inserts one. It
+   * never rewrites a cached valid version, because a running workflow
+   * may still read that version by name and version (#503). A passing
+   * readThrough removes the path's diagnostic rows, or turns the only
+   * row of a never-valid file into the valid row.
    */
   writeDiagnostic(opts: {
     sourcePath: string;
@@ -839,7 +855,7 @@ export class WorkflowSpecCache {
     const cachedAt = this.now().toISOString();
     const fallbackName = opts.sourcePath.split("/").pop() ?? opts.sourcePath;
     const existing = this.db
-      .prepare(`SELECT spec_id FROM workflow_specs WHERE source_path = ?`)
+      .prepare(`SELECT spec_id FROM workflow_specs WHERE source_path = ? AND status = 'error'`)
       .get(opts.sourcePath) as { spec_id: string } | undefined;
     if (existing) {
       this.db

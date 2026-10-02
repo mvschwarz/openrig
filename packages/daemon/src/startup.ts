@@ -81,6 +81,7 @@ import { setSelfHostId, setSelfHostIdSource } from "./domain/hosts/fanout-contra
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
+import { observeClaudePaneStartedAt } from "./domain/native-process-lineage.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures } from "./domain/transcript-capture.js";
 import { SessionTransport } from "./domain/session-transport.js";
@@ -1068,13 +1069,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   // OPR.0.4.3.20 FR-4 — inject contextUsageStore so refresh() can null-fill a
   // Claude token from the sidecar during periodic/manual snapshot refresh.
-  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore });
+  // #421 — the pane's current Claude process start time; a sidecar sampled earlier is not this
+  // process's, so capture and null-fill skip it.
+  const claudeProcessStartedAt = (sessionName: string) => observeClaudePaneStartedAt({ target: sessionName, tmux: tmuxAdapter });
+  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore, claudeProcessStartedAt });
   const claimService = new ClaimService({
     db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter, transcriptStore,
     claudeContextProvisioner: claudeAdapter,
     // OPR.0.4.3.20 FR-3 — adoption-boundary resume-token capture deps
     // (Claude sidecar reader + Codex thread-id capturer, both reuse).
     contextUsageStore,
+    claudeProcessStartedAt,
     resumeTokenCapturer: resumeMetadataRefresher,
     // OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader (the adapter exposes it).
     piRunnerStateStore: piAdapter,

@@ -462,8 +462,10 @@ export function scanWorkflowSpecFolder(
     // precision; without this floor a freshly-written file whose mtime
     // is `T - 999ms` would always look "newer" than its cached_at at
     // exactly `T` and never skip.
+    // A path can hold several cached versions plus a diagnostic row (#503); the most
+    // recently written row is the one that reflects the file's last scan.
     const cachedAt = opts.db
-      .prepare(`SELECT cached_at, source_hash FROM workflow_specs WHERE source_path = ? AND status != '${RETAINED_STATUS}'`)
+      .prepare(`SELECT cached_at, source_hash FROM workflow_specs WHERE source_path = ? AND status != '${RETAINED_STATUS}' ORDER BY cached_at DESC, rowid DESC LIMIT 1`)
       .get(filePath) as { cached_at: string; source_hash: string } | undefined;
     if (cachedAt) {
       const cachedAtMs = Date.parse(cachedAt.cached_at);

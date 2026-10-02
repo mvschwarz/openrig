@@ -180,10 +180,13 @@ describe("WorkflowSpecCache diagnostic methods (slice 11)", () => {
       cache.readThrough(sourcePath);
     }
     cache.writeDiagnostic({ sourcePath, sourceHash: "broken-hash", errorMessage: "Fixture parse failure" });
-    const before = db.prepare("SELECT spec_id FROM workflow_specs WHERE source_path = ?").get(sourcePath) as {spec_id: string};
+    // The row that survives the repair: a never-valid file's diagnostic row becomes the valid row;
+    // a previously-valid file keeps its valid row, which the diagnostic leaves untouched (#503).
+    const before = db.prepare("SELECT spec_id FROM workflow_specs WHERE source_path = ? ORDER BY rowid LIMIT 1").get(sourcePath) as {spec_id: string};
     writeFileSync(sourcePath, "invalid: [");
     expect(() => cache.readThrough(sourcePath)).toThrow();
-    expect((db.prepare("SELECT status FROM workflow_specs WHERE spec_id = ?").get(before.spec_id) as {status: string}).status).toBe("error");
+    const statuses = (db.prepare("SELECT status FROM workflow_specs WHERE source_path = ? ORDER BY rowid").all(sourcePath) as {status: string}[]).map((row) => row.status);
+    expect(statuses).toEqual(initial === "new" ? ["error"] : ["valid", "error"]);
     writeFileSync(sourcePath, VALID_DIAG_SAMPLE);
     cache.readThrough(sourcePath);
     const rows = db.prepare("SELECT spec_id, name, version, status, error_message, roles_json, steps_json FROM workflow_specs WHERE source_path = ?").all(sourcePath) as {spec_id: string; name: string; version: string; status: string; error_message: string|null; roles_json: string; steps_json: string}[];

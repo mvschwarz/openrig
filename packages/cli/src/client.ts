@@ -57,13 +57,24 @@ function resolveTerminalToken(): string | null {
   }
 }
 
+/** The OS code behind a failed connection (`EPERM`, `ECONNREFUSED`, …) when Node exposes one.
+ *  `fetch` reports every connection failure as "fetch failed" and keeps the code on `cause`. */
+export function connectionErrorCode(err: unknown): string | undefined {
+  const e = err as { code?: unknown; cause?: { code?: unknown } } | null | undefined;
+  const code = e?.cause?.code ?? e?.code;
+  return typeof code === "string" && code ? code : undefined;
+}
+
 export class DaemonConnectionError extends Error {
   /** A write caller cannot infer nondelivery from losing the response. */
   writeOutcome?: "unknown";
+  /** #275: the OS cause, so a connection this machine blocked is not rendered as a stopped daemon. */
+  causeCode?: string;
 
-  constructor(message: string) {
+  constructor(message: string, causeCode?: string) {
     super(message);
     this.name = "DaemonConnectionError";
+    if (causeCode) this.causeCode = causeCode;
   }
 }
 
@@ -293,7 +304,11 @@ export class DaemonClient {
       // Headers prove that the daemon received the request, but not that a write
       // finished. A dropped body must preserve unknown-outcome guidance.
       if (responseStatus !== undefined) throw new DaemonResponseError(responseStatus, "");
-      throw new DaemonConnectionError(`Cannot connect to the OpenRig daemon at ${this.baseUrl}: ${msg}`);
+      const causeCode = connectionErrorCode(err);
+      throw new DaemonConnectionError(
+        `Cannot connect to the OpenRig daemon at ${this.baseUrl}: ${msg}${causeCode && !msg.includes(causeCode) ? ` (${causeCode})` : ""}`,
+        causeCode,
+      );
     }
   }
 
