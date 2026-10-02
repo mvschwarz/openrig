@@ -1,4 +1,5 @@
 import type { DaemonClient } from "../client.js";
+import { fetchWithTimeout } from "../fetch-with-timeout.js";
 
 /**
  * OPR.0.4.6.WF3 FR-1 — the shared follow engine behind `rig workflow
@@ -85,6 +86,8 @@ export interface FollowOptions {
   io?: FollowIo;
   /** SSE reconnect attempts before degrading to the poll fallback. */
   maxReconnects?: number;
+  /** Deadline for opening SSE response headers; streamed bodies remain unbounded. */
+  streamConnectTimeoutMs?: number;
   /** Poll fallback interval (ms). */
   pollIntervalMs?: number;
 }
@@ -178,6 +181,7 @@ export async function followInstance(
   const io = opts.io ?? realFollowIo();
   const maxReconnects = opts.maxReconnects ?? 3;
   const pollIntervalMs = opts.pollIntervalMs ?? 3000;
+  const streamConnectTimeoutMs = opts.streamConnectTimeoutMs ?? 5000;
 
   // Walk-caught (VM iteration 2): without aborting the SSE connection
   // on return, the open socket keeps the node event loop alive and the
@@ -192,10 +196,10 @@ export async function followInstance(
     const sseUrl = `${client.baseUrl}/api/workflow/sse`;
     let streamRes: Response | null = null;
     try {
-      streamRes = await io.fetchImpl(sseUrl, {
+      streamRes = await fetchWithTimeout(io.fetchImpl, sseUrl, {
         headers: { Accept: "text/event-stream" },
         signal: aborter.signal,
-      });
+      }, { timeoutMs: streamConnectTimeoutMs, timeoutMessage: "Workflow stream connection timed out." });
       if (!streamRes.ok || !streamRes.body) streamRes = null;
     } catch {
       streamRes = null;
@@ -229,10 +233,10 @@ export async function followInstance(
         reconnectsLeft -= 1;
         io.err(`stream dropped — reconnecting (${maxReconnects - reconnectsLeft}/${maxReconnects})`);
         try {
-          const retry = await io.fetchImpl(sseUrl, {
+          const retry = await fetchWithTimeout(io.fetchImpl, sseUrl, {
             headers: { Accept: "text/event-stream" },
             signal: aborter.signal,
-          });
+          }, { timeoutMs: streamConnectTimeoutMs, timeoutMessage: "Workflow stream connection timed out." });
           if (retry.ok && retry.body) {
             streamRes = retry;
             continue;

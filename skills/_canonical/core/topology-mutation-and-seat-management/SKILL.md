@@ -1,6 +1,6 @@
 ---
 name: topology-mutation-and-seat-management
-description: Use when changing a rig while it is alive — `rig expand` / `rig shrink` / `rig launch` / `rig remove` / `rig discover` / `rig bind` / `rig adopt` / `rig attach`. Covers the 4 failure modes (newly created seat lacks queue/startup/role; edges and permissions not updated; adopt/bind succeeds at tmux but not OpenRig identity; shrink/remove leaves stale topology references) and the rule that mutation must work while the rig is active, not just in clean fixtures.
+description: Use when changing a rig while it is alive — `rig grow` / `rig expand` / `rig shrink` / `rig launch` / `rig remove` / `rig discover` / `rig bind` / `rig adopt` / `rig attach`. Covers the 4 failure modes (newly created seat lacks queue/startup/role; edges and permissions not updated; adopt/bind succeeds at tmux but not OpenRig identity; shrink/remove leaves stale topology references) and the rule that mutation must work while the rig is active, not just in clean fixtures.
 metadata:
   cli_surfaces_referenced:
     - adopt
@@ -8,6 +8,7 @@ metadata:
     - bind
     - discover
     - expand
+    - grow
     - launch
     - ps
     - release
@@ -43,12 +44,31 @@ static launch scripts.
 
 ## Use this when
 
-- Adding capacity to a running rig (`rig expand <rig> <pod-fragment-path>`)
+- Adding seats to a running rig (`rig grow <rig-id> <member...>` for the simple case, a fragment with `rig expand` or `rig add` otherwise; see below)
 - Removing capacity (`rig shrink` / `rig remove`)
 - Launching/relaunching a node in a running rig (`rig launch`)
 - Binding a discovered session into an existing logical node (`rig bind`)
 - Adopting a topology + binding live sessions (`rig adopt`)
 - Attaching a shell or agent into a rig node (`rig attach --self`)
+
+## Adding seats: `rig grow` first, a fragment when you need more
+
+`rig grow <rig-id> <member...>` adds one or more seats to a running rig without
+writing YAML. Each seat gets the default agent spec and its `default` profile.
+Check `rig grow --help` on your installed version; at the time of writing:
+
+- `--pod <pod>`: the target pod; inferred when the rig has one pod
+- `--new-pod <pod>`: create a new pod for the seats (not together with `--pod`)
+- `--runtime <runtime>`: one runtime for every named seat (default `claude-code`)
+- `--cwd <path>`: one working directory for every named seat (default: the current directory)
+- `--json`: output for agents
+
+Write a fragment instead when a seat needs something `rig grow` does not set: an
+explicit model, a permission policy, a different agent spec or role profile, a
+per-seat runtime or working directory, or startup files. Use
+`rig expand <rig-id> <pod-fragment-path>` to add a pod, or
+`rig add <rig-id> <pod-namespace> <member-fragment-path>` to add one member to an
+existing pod.
 
 ## Don't use this when
 
@@ -89,6 +109,7 @@ adding or removing a seat from replacing its occupant; use
 
 Per `cli-reference.md` v0.2.0:
 
+- `rig grow <rig-id> <member...> [--pod <pod> | --new-pod <pod>] [--runtime <runtime>] [--cwd <path>]` (added after v0.2.0; check `rig grow --help`)
 - `rig expand <rig-id> <pod-fragment-path>` (with optional `session_source`)
 - `rig shrink <rigId> <podRef>`
 - `rig launch <rigId> <nodeRef>`
@@ -114,7 +135,7 @@ unfinished proof obligation is implied by loading this skill.
 
 ## See also
 
-- `openrig-user` skill — CLI surface for `rig expand / shrink / launch / remove / bind / adopt / attach`
+- `openrig-user` skill — CLI surface for `rig grow / expand / shrink / launch / remove / bind / adopt / attach`
 - `seat-scaling-and-specialization` skill — when to add specialized capacity vs generic
 - `seat-continuity-and-handover` skill — replacing an occupant on a stable seat (different shape than topology mutation)
 - `cross-host-rig-commands` skill — cross-host topology mutation (deferred)

@@ -99,8 +99,9 @@ describe("apiOriginProtection middleware", () => {
         headers: { Origin: "https://evil-cross-site.com" },
       });
       expect(res.status).toBe(403);
-      const body = (await res.json()) as { error: string };
-      expect(body.error).toBe("origin_rejected");
+      // On the real app the /api browser boundary runs first, so its code and remedy are returned.
+      const body = (await res.json()) as { error: string; code: string };
+      expect(body.code).toBe("browser_origin_refused");
     } finally {
       db.close();
     }

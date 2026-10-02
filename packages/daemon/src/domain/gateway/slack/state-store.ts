@@ -153,6 +153,24 @@ export class DeadLetterStore<T = unknown> {
     this.fsops.writeFileSync(tmp, body);
     this.fsops.rename(tmp, this.file); // atomic: original intact until this instant
   }
+
+  /** Finish a retry snapshot without removing entries appended while it awaited I/O.
+   * Match occurrences, not just event ids: a later identical append is still owed. */
+  replaceBatch(processed: DeadLetterEntry<T>[], remaining: DeadLetterEntry<T>[]): void {
+    const counts = new Map<string, number>();
+    for (const entry of processed) {
+      const key = JSON.stringify(entry);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const appended = this.readAll().filter((entry) => {
+      const key = JSON.stringify(entry);
+      const count = counts.get(key) ?? 0;
+      if (count === 0) return true;
+      counts.set(key, count - 1);
+      return false;
+    });
+    this.replaceAll([...remaining, ...appended]);
+  }
 }
 
 export type InboundReceiptStatus =

@@ -1250,6 +1250,7 @@ This lets ordinary agents ask the manager for OpenRig help instead of every agen
 ### Add/remove running topology parts
 
 ```bash
+rig grow <rig-id> <member...> [--pod <pod> | --new-pod <pod>] [--runtime <runtime>] [--cwd <path>] [--json]
 rig expand <rig-id> <pod-fragment-path> [--rig-root <path>] [--json]
 rig launch <rigId> <nodeRef> [--json]
 rig launch <rigId> --seats <a,b,c> [--hold-reason <text>] [--json]
@@ -1257,6 +1258,12 @@ rig remove <rigId> <nodeRef> [--json]
 rig shrink <rigId> <podRef> [--json]
 rig unclaim <sessionRef> [--json]
 ```
+
+`rig grow` is the simplest way to add seats: no YAML, the default agent spec, and one
+runtime and working directory for the named seats (`--new-pod` creates a pod for them).
+Check `rig grow --help` on your installed version. Use a fragment with `rig expand` (a pod)
+or `rig add` (one member) when a seat needs an explicit model, a permission policy, a
+different agent spec or role profile, per-seat runtime or cwd, or startup files.
 
 Node-granular managed partial restore (v0.3.4+):
 - `rig launch <rigId> <nodeRef>` relaunches a single seat by logical id or node id through orchestration.
@@ -1267,14 +1274,12 @@ Node-granular managed partial restore (v0.3.4+):
 ### Add a member to an existing pod — v0.3.3+
 
 ```bash
-rig add <rig> <member-fragment-path> [--json]
-rig add-member <rig> <member-fragment-path> [--json]
+rig add <rig-id> <pod-namespace> <member-fragment-path> [--json]
 ```
 
-`rig add` (alias `rig add-member`) is the top-level verb for the `add_member`
-converge op. It adds a single member to an existing pod from a YAML/JSON member
-fragment file. The fragment must declare the target pod; the daemon resolves
-the pod by that declared identity, validates the member, runs preflight, and
+`rig add` is the top-level verb for the `add_member` converge op. It adds a
+single member to an existing pod from a YAML/JSON member fragment file. The
+daemon resolves the named pod, validates the member, runs preflight, and
 launches the member in place.
 
 HTTP outcomes:

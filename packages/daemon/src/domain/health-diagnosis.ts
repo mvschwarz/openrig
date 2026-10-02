@@ -1,5 +1,5 @@
 import type { QueueItem, QueueRepository } from "./queue-repository.js";
-import type { HealthProjectionService } from "./health-detectors.js";
+import type { HealthProjectionService, HealthSourceCoverage } from "./health-detectors.js";
 import { healthHash, object, type HealthPolicyStore } from "./health-policy.js";
 import { HEALTH_RECORD_SCHEMA, type HealthRecord, type CeremonyProgressAssessment } from "./health-projection.js";
 
@@ -24,12 +24,12 @@ const correctionGuidance = "Inspect current selected context and its provenance,
 export class HealthDiagnosisService {
   private pending: Promise<unknown> = Promise.resolve();
   private timer: ReturnType<typeof setInterval> | undefined;
-  private lastEvaluation: { at: string; error: string | null } | null = null;
+  private lastEvaluation: { at: string; error: string | null; coverage: HealthSourceCoverage[] | null } | null = null;
   status() { return { scheduled: this.timer !== undefined, lastEvaluation: this.lastEvaluation }; }
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.evaluate("system:health", true).then(() => { this.lastEvaluation = { at: this.now(), error: null }; }, (error: unknown) => { this.lastEvaluation = { at: this.now(), error: String(error) }; });
+      void this.evaluate("system:health", true).then((result) => { this.lastEvaluation = { at: this.now(), error: null, coverage: result.coverage }; }, (error: unknown) => { this.lastEvaluation = { at: this.now(), error: String(error), coverage: null }; });
     }, 60000);
     this.timer.unref();
   }
@@ -93,7 +93,7 @@ export class HealthDiagnosisService {
       return { ...o, finding, authority: this.deps.authority(finding), authorityReadAt: this.now() };
     });
   }
-  evaluate(actor: string, apply: boolean): Promise<{ policyVersion: string; enabled: boolean; actions: DiagnosisAction[] }> {
+  evaluate(actor: string, apply: boolean): Promise<{ policyVersion: string; enabled: boolean; actions: DiagnosisAction[]; coverage: HealthSourceCoverage[] | null }> {
     const work = this.pending.then(() => this.evaluateOnce(actor, apply));
     this.pending = work.catch(() => undefined);
     return work;
@@ -102,11 +102,14 @@ export class HealthDiagnosisService {
     const effective = this.deps.policy.read();
     const policy = effective.policy.diagnosis;
     const actions: DiagnosisAction[] = [];
-    if (!policy.enabled || !policy.owner) return { policyVersion: effective.version, enabled: false, actions };
+    // Nothing was read, so this evaluation has no coverage of its own to report.
+    if (!policy.enabled || !policy.owner) return { policyVersion: effective.version, enabled: false, actions, coverage: null };
     const now = Date.parse(this.now());
     const occurrences = this.list(false);
     let latestOwnerPresentation = Math.max(0, ...occurrences.filter((x) => x.row.destinationSession === policy.owner).flatMap((x) => [Date.parse(x.packet.presentedAt), ...x.receipts.filter((r) => r.action === "presented").map((r) => Date.parse(r.at))]));
     const records = this.deps.projection.records().sort((a, b) => Number(b.detector === "process.ceremony-amplification") - Number(a.detector === "process.ceremony-amplification") || a.id.localeCompare(b.id));
+    // Snapshot this read's coverage now: another health read during a delivery await below replaces the source's latest.
+    const coverage = this.deps.projection.coverage();
     for (const finding of records) {
       const qitemId = this.id(finding.id);
       const old = occurrences.find((o) => o.row.qitemId === qitemId);
@@ -162,7 +165,7 @@ export class HealthDiagnosisService {
           tags: ["health-diagnosis", finding.id, `policy:${effective.version}`, ...(finding.ceremony ? [`health-lineage:${finding.ceremony.lineageId}`] : [])], summary: `System Health: inspect ${finding.detector}`, evidenceRef: finding.id });
       }
     }
-    return { policyVersion: effective.version, enabled: true, actions };
+    return { policyVersion: effective.version, enabled: true, actions, coverage };
   }
   private requireOwner(qitemId: string, actor: string) {
     const diagnosis = this.show(qitemId);
