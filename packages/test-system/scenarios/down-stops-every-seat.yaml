@@ -1,0 +1,40 @@
+# Family: lifecycle `down` (first-run journey: up, ps, down, up by name).
+# Defect class: `rig down` reports success but leaves a seat recorded as running, so a
+#   later `up` collides with it or `ps` keeps showing a live seat that should be stopped.
+# What this proves: STUB PLUMBING plus the daemon's recorded lifecycle. After `down`,
+#   the shipped `rig ps --json` reports the rig `stopped` with zero running seats out of
+#   two, and the rig stays listed (it is not deleted). `runningCount` counts sessions the
+#   daemon records as running, less seats with a `session_missing` verdict.
+# What this does NOT prove: that the tmux panes are gone (the runner has no negative or
+#   absence form, and `rig capture` of a downed seat errors rather than returning a
+#   value), that the auto-pre-down snapshot restores, or any Claude Code / Codex behaviour.
+# Planted negative: a teardown loop that stops only the first live session leaves one
+#   seat running. The post-down `expect ps` fails with `runningCount: 1`,
+#   `status: partial` and `lifecycleState: degraded` in the diff; setup and the
+#   pre-down assertion still pass.
+# Deps: R-10 runner (`up`, `down`, `ps` surface). No emit, no env preconditions.
+scenario: down-stops-every-seat
+topology: ./dev-pair-stub.yaml
+steps:
+  - up: {}
+  # both seats are up and recorded as running
+  - expect:
+      surface: ps
+      within: 30s
+      match:
+        - name: dev-pair-stub
+          status: running
+          nodeCount: 2
+          runningCount: 2
+  - down: {}
+  # every seat is recorded as stopped; the rig is still listed, not archived
+  - expect:
+      surface: ps
+      within: 30s
+      match:
+        - name: dev-pair-stub
+          status: stopped
+          lifecycleState: stopped
+          nodeCount: 2
+          runningCount: 0
+          isArchived: false
