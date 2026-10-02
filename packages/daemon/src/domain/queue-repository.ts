@@ -2667,7 +2667,9 @@ export class QueueRepository {
       }
       const oldWake = this.wakeRepo.getStatus(input.qitemId);
       const job = armQueueWait(this.db, jobsRepo, {
-        previousJobId: oldWake?.kind === "timer" ? oldWake.ref : undefined,
+        // Reusing a shared job would rewrite the attachment's schedule and packet.
+        previousJobId: oldWake?.kind === "timer" && this.wakeRepo.findLiveQitemsByAttachedWatchdog(oldWake.ref).length === 0
+          ? oldWake.ref : undefined,
         qitemId: input.qitemId, blocker: effectiveBlockedOn,
         evidence: input.wakeProgressEvidence,
         initialSeconds: input.wakeAfterSeconds, maxSeconds: input.wakeMaxSeconds,
@@ -2871,6 +2873,9 @@ export class QueueRepository {
   private retireParkGeneratedTimer(qitemId: string, reason: string): void {
     const armed = this.wakeRepo.getStatus(qitemId);
     if (armed?.kind !== "timer" || !armed.live) return;
+    // An explicit --wake-watchdog attachment gives another continuation custody
+    // of this same job. The timer row's exit cannot cancel that attachment.
+    if (this.wakeRepo.findLiveQitemsByAttachedWatchdog(armed.ref).length > 0) return;
     (this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db)).markTerminal(armed.ref, reason);
   }
 
@@ -2962,22 +2967,12 @@ export class QueueRepository {
     return this.wakeRepo.currentParkTimerIds();
   }
 
-  /** Refuse a legacy park-generated timer only when every row bound to it is
-   *  terminal. Current exits retire these timers transactionally; this is the
-   *  delivery-seam backstop for residue persisted by an older daemon. A timer
-   *  still bound to any actionable row, and every operator-attached watchdog,
-   *  remains deliverable. */
+  /** Generated jobs end when neither their original park nor an unfired
+   *  attachment still owns them. Standalone operator jobs keep their lifecycle. */
   resolveWatchdogPreDeliveryTerminalReason(jobId: string): string | null {
     const targets = this.wakeRepo.findQitemsByGeneratedTimer(jobId);
-    if (targets.length === 0 || targets.some(({ state }) => !isTerminalState(state))) return null;
-    // Ownership, not just staleness. This backstop may retire a job only when
-    // the job is SOLELY a park-generated timer. `--wake-watchdog` can attach an
-    // operator row to the very job another row's `--wake-after` produced, and
-    // that is a supported path — so a shared job carries a second, watchdog-kind
-    // binding this reason has no authority over. The timer's rows being terminal
-    // says nothing about the attachment; claiming the job anyway terminals it
-    // before transport and the attachment can never wake.
-    if (this.wakeRepo.findQitemsByAttachedWatchdog(jobId).length > 0) return null;
+    if (targets.length === 0 || this.wakeRepo.findCurrentQitemsByGeneratedTimer(jobId).length > 0) return null;
+    if (this.wakeRepo.findLiveQitemsByAttachedWatchdog(jobId).length > 0) return null;
     return "park_timer_target_terminal";
   }
 
@@ -3001,7 +2996,7 @@ export class QueueRepository {
   recordWatchdogWakeAttempt(jobId: string, deliveryStatus: string): void {
     const bindings = this.wakeRepo.findBlockedQitemsByWatchdog(jobId);
     if (bindings.length === 0) return;
-    // Receipt ownership follows the latest park; timer lifecycle follows all bindings.
+    // Both receipt ownership and timer lifecycle follow the current park.
     const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
     const recordFired = ({ qitemId, kind }: (typeof targets)[number]): PersistedEvent => {
       const transition = this.transitionLog.append({
@@ -3031,7 +3026,7 @@ export class QueueRepository {
         summary: this.getById(qitemId)?.summary ?? null,
       });
     };
-    const usageLimitBlockers = bindings.filter(({ qitemId }) =>
+    const usageLimitBlockers = targets.filter(({ qitemId }) =>
       this.getById(qitemId)?.tags?.includes(USAGE_LIMIT_BLOCKER_TAG),
     );
     // OPR.0.5.8.1 S1b — a park-generated timer is ONE-SHOT. `periodic-reminder`
@@ -3042,7 +3037,7 @@ export class QueueRepository {
     // behaviour is UNCHANGED by this repair and pinned as unchanged. This widens
     // the same act to ordinary park timers, without their blocker resolution —
     // resolving the blocker is a provider-limit outcome, not a timer one.
-    const parkGeneratedTimer = bindings.some(({ kind }) => kind === "timer");
+    const parkGeneratedTimer = this.wakeRepo.findCurrentQitemsByGeneratedTimer(jobId).length > 0;
     const events = this.db.transaction(() => {
       const firedEvents = targets.map(recordFired);
       if (deliveryStatus === "retained") return firedEvents;
@@ -3711,9 +3706,8 @@ export class QueueRepository {
   attachWorkflowGuidance(reader: (packetId: string) => string[]): void { this.workflowGuidance = reader; }
 
   evaluateWaitReminder(input: { jobId: string }) {
-    if (this.wakeRepo.findQitemsByAttachedWatchdog(input.jobId).length > 0
-      && this.wakeRepo.findQitemsByGeneratedTimer(input.jobId).every(row => row.state !== "blocked")) return null;
-    const binding = this.wakeRepo.findBlockedQitemsByWatchdog(input.jobId).find(row => row.kind === "timer");
+    const binding = this.wakeRepo.findCurrentQitemsByGeneratedTimer(input.jobId)[0];
+    if (!binding && this.wakeRepo.findLiveQitemsByAttachedWatchdog(input.jobId).length > 0) return null;
     const result = evaluateQueueWait(this.watchdogJobsRepo ?? new WatchdogJobsRepository(this.db), input.jobId, binding ? this.waitingView(binding.qitemId) : null);
     // Only an already-admitted send reads prose: healthy silence, receipts and
     // failed-delivery retries remain owned by the existing wait evaluator.

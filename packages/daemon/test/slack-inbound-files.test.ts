@@ -10,6 +10,7 @@
 // unchanged. RED at base: the row-landing pins fail at the admission layer.
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
+import path from "node:path";
 import { InboundRouter, ingestDecision, handleEnvelope, type SlackEvent } from "../src/domain/gateway/slack/inbound.js";
 import { SeenStore, DeadLetterStore } from "../src/domain/gateway/slack/state-store.js";
 import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
@@ -131,6 +132,24 @@ describe("inbound files: admission (the T1076 seam replaced)", () => {
 });
 
 describe("inbound files: the row carries our local copy, never Slack's URL", () => {
+  it("preserves distinct attachment bytes for equal timestamps and filenames in different channels", async () => {
+    const second = { ...F_IMG, id: "F-SECOND", url_private: "https://files.slack.com/files-pri/T1-F-SECOND/sketch.png" };
+    const h = harness({ routes: { [F_IMG.url_private]: PNG_BYTES, [second.url_private]: PDF_BYTES } });
+    await deliver(h, fileEvent({ channel: "C1", files: [F_IMG] }));
+    await deliver(h, fileEvent({ channel: "C2", files: [second] }));
+    expect(h.rows).toHaveLength(2);
+    const paths = [...h.media.keys()];
+    expect(paths).toHaveLength(2);
+    expect(paths[0]).not.toBe(paths[1]);
+    expect(h.rows[0]!.body).toContain(paths[0]!);
+    expect(h.rows[1]!.body).toContain(paths[1]!);
+    expect(sha(h.media.get(paths[0]!)!)).toBe(sha(PNG_BYTES));
+    expect(sha(h.media.get(paths[1]!)!)).toBe(sha(PDF_BYTES));
+    await deliver(h, fileEvent({ channel: "C1", files: [F_IMG] }));
+    expect(h.rows).toHaveLength(2);
+    expect(h.media.size).toBe(2);
+  });
+
   it("single image into a MAPPED thread: row lands with a local path whose bytes hash-match the original", async () => {
     const h = harness({
       routes: { [F_IMG.url_private]: PNG_BYTES },
@@ -141,7 +160,7 @@ describe("inbound files: the row carries our local copy, never Slack's URL", () 
     const body = h.rows[0]!.body;
     const stored = [...h.media.keys()];
     expect(stored, "exactly one media file stored").toHaveLength(1);
-    expect(stored[0]!.startsWith(MEDIA_DIR + "/"), "stored INSIDE the media dir").toBe(true);
+    expect(path.dirname(stored[0]!), "stored INSIDE the media dir").toBe(path.normalize(MEDIA_DIR));
     expect(body, "the row references the local path").toContain(stored[0]!);
     expect(sha(h.media.get(stored[0]!)!), "bytes hash-match the original").toBe(sha(PNG_BYTES));
     expect(h.seenAuth.some((a) => a === "Bearer xoxb-test-token"), "download authenticated with the bot token").toBe(true);

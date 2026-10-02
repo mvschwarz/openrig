@@ -13,7 +13,7 @@ import type { FleetSnapshot } from "../src/types.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
-function sseServer(): Promise<{ server: Server; url: string; push: (data: unknown) => void; connections: () => number }> {
+function sseServer(): Promise<{ server: Server; url: string; push: (data: unknown) => void; pushRaw: (frame: string) => void; connections: () => number }> {
   return new Promise((resolve) => {
     const sockets = new Set<import("node:http").ServerResponse>();
     const server = createServer((req, res) => {
@@ -28,6 +28,7 @@ function sseServer(): Promise<{ server: Server; url: string; push: (data: unknow
         server,
         url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
         push: (data) => { for (const s of sockets) s.write(`data: ${JSON.stringify(data)}\n\n`); },
+        pushRaw: (frame) => { for (const s of sockets) s.write(frame); },
         connections: () => sockets.size,
       });
     });
@@ -153,4 +154,142 @@ describe("S19 AM-R18 — the subscription path", () => {
     expect(mod).not.toMatch(/working|idle-at-prompt|terminalActive/); // notification-only: no vocabulary
     expect(mod).not.toMatch(/setInterval/); // no idle timers on the data path
   });
+});
+
+describe("standard SSE notification framing", () => {
+  function controlledStream() {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({ start(c) { controller = c; } });
+    return { response: new Response(body), write: (s: string) => controller.enqueue(new TextEncoder().encode(s)) };
+  }
+
+  it("delivers multiline CRLF notifications through actual localhost HTTP", async () => {
+    const { server, url, pushRaw, connections } = await sseServer();
+    const events: unknown[] = [];
+    const sub = subscribeActivityEvents({ open: () => fetch(`${url}/api/activity/events`), onEvent: e => events.push(e) });
+    try {
+      await until(() => connections() === 1);
+      pushRaw('data: {"type":"seat.activity_changed",\r\ndata: "seatNodeId":"工程师","seq":6}\r\n\r\n');
+      await until(() => events.length === 1, 300);
+      expect(events).toEqual([{ type: "seat.activity_changed", seatNodeId: "工程师", seq: 6 }]);
+    } finally { sub.close(); server.closeAllConnections(); server.close(); }
+  });
+
+  it("delivers CRLF frames even when CR and LF arrive in different chunks", async () => {
+    const stream = controlledStream();
+    const events: unknown[] = [];
+    const sub = subscribeActivityEvents({ open: async () => stream.response, onEvent: e => events.push(e) });
+    try {
+      stream.write('data: {"type":"seat.activity_changed","seq":1}\r');
+      stream.write('\n\r');
+      stream.write('\ndata: {"type":"seat.activity_changed","seq":2}\r\n\r\n');
+      await until(() => events.length === 2, 300);
+      expect(events).toEqual([{ type: "seat.activity_changed", seq: 1 }, { type: "seat.activity_changed", seq: 2 }]);
+    } finally { sub.close(); }
+  });
+
+  it("joins data lines into one notification before parsing JSON", async () => {
+    const stream = controlledStream();
+    const events: unknown[] = [];
+    const sub = subscribeActivityEvents({ open: async () => stream.response, onEvent: e => events.push(e) });
+    try {
+      stream.write('event: activity\n: keepalive\ndata: {"type":"seat.activity_changed",\ndata: "seq":3}\n\n');
+      await until(() => events.length === 1, 300);
+      expect(events).toEqual([{ type: "seat.activity_changed", seq: 3 }]);
+    } finally { sub.close(); }
+  });
+
+  it("accepts bare CR delimiters and preserves subsequent LF notifications", async () => {
+    const stream = controlledStream();
+    const events: unknown[] = [];
+    const sub = subscribeActivityEvents({ open: async () => stream.response, onEvent: e => events.push(e) });
+    try {
+      stream.write('data: {"type":"seat.activity_changed","seq":4}\r\r');
+      stream.write('data: {"type":"seat.activity_changed","seq":5}\n\n');
+      await until(() => events.length === 2, 300);
+      expect(events).toEqual([{ type: "seat.activity_changed", seq: 4 }, { type: "seat.activity_changed", seq: 5 }]);
+    } finally { sub.close(); }
+  });
+});
+
+
+describe("bounded activity stream frames", () => {
+  const limit = 1_048_576;
+
+  function controlledStream(rejectCancel = false) {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const cancel = vi.fn(() => rejectCancel ? Promise.reject(new Error("cancel failed")) : undefined);
+    const body = new ReadableStream<Uint8Array>({ start(c) { controller = c; }, cancel });
+    return { response: new Response(body), cancel, write: (s: string) => controller.enqueue(new TextEncoder().encode(s)) };
+  }
+
+  it.each([
+    ["unterminated line", "x".repeat(limit + 1)],
+    ["terminated line", "x".repeat(limit + 1) + "\n"],
+    ["event spanning individually short lines", ("data: " + "x".repeat(1024) + "\n").repeat(1025)],
+    ["empty data fields", "data\n".repeat(limit + 1)],
+  ])("cancels an oversized %s before scheduling a reconnect", async (_name, frame) => {
+    const first = controlledStream();
+    const recovered = controlledStream();
+    const events: unknown[] = [];
+    const statuses: string[] = [];
+    const open = vi.fn(async () => open.mock.calls.length === 1 ? first.response : recovered.response);
+    const sub = subscribeActivityEvents({ open, onEvent: e => events.push(e), onStatus: s => statuses.push(s), reconnectDelayMs: 200 });
+    try {
+      first.write(frame);
+      await until(() => first.cancel.mock.calls.length === 1, 500);
+      expect(events).toEqual([]);
+      expect(statuses).toEqual(["connected", "dropped"]);
+      expect(open).toHaveBeenCalledTimes(1);
+      await until(() => open.mock.calls.length === 2, 600);
+      recovered.write('data: {"type":"seat.activity_changed","seq":7}\n\n');
+      await until(() => events.length === 1, 300);
+      expect(events).toEqual([{ type: "seat.activity_changed", seq: 7 }]);
+    } finally { sub.close(); }
+  });
+
+  it("still reconnects when cancellation of an oversized frame rejects", async () => {
+    const stream = controlledStream(true);
+    const statuses: string[] = [];
+    const open = vi.fn(async () => open.mock.calls.length === 1 ? stream.response : null);
+    const sub = subscribeActivityEvents({ open, onEvent: () => {}, onStatus: s => statuses.push(s), reconnectDelayMs: 20 });
+    try {
+      stream.write("x".repeat(limit + 1));
+      await until(() => statuses.includes("unavailable"), 500);
+      expect(stream.cancel).toHaveBeenCalledTimes(1);
+      expect(statuses).toEqual(["connected", "dropped", "reconnecting", "unavailable"]);
+    } finally { sub.close(); }
+  });
+
+  it("resets the frame budget so one chunk can contain many ordinary notifications", async () => {
+    const stream = controlledStream();
+    const events: unknown[] = [];
+    const frame = 'data: {"type":"seat.activity_changed","seq":1}\n\n';
+    const count = Math.ceil((limit + 1) / frame.length);
+    const sub = subscribeActivityEvents({ open: async () => stream.response, onEvent: e => events.push(e) });
+    try {
+      stream.write(frame.repeat(count));
+      await until(() => events.length === count, 500);
+      expect(stream.cancel).not.toHaveBeenCalled();
+      expect(events.at(-1)).toEqual({ type: "seat.activity_changed", seq: 1 });
+    } finally { sub.close(); }
+  });
+
+  it("reconnects without waiting for underlying oversized-frame cancellation", async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    const cancel = vi.fn(() => pending);
+    const response = new Response(new ReadableStream<Uint8Array>({ start(c) { controller = c; }, cancel }));
+    const statuses: string[] = [];
+    const open = vi.fn(async () => open.mock.calls.length === 1 ? response : null);
+    const sub = subscribeActivityEvents({ open, onEvent: () => {}, onStatus: s => statuses.push(s), reconnectDelayMs: 20 });
+    try {
+      controller.enqueue(new TextEncoder().encode("x".repeat(limit + 1)));
+      await until(() => statuses.includes("unavailable"), 200);
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(statuses).toEqual(["connected", "dropped", "reconnecting", "unavailable"]);
+    } finally { finish(); sub.close(); }
+  });
+
 });

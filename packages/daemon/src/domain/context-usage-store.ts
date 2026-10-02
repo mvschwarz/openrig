@@ -395,7 +395,7 @@ export class ContextUsageStore {
   private isFresh(sampledAt: string): boolean {
     try {
       const age = Date.now() - new Date(sampledAt).getTime();
-      return age < FRESHNESS_THRESHOLD_MS;
+      return age >= 0 && age < FRESHNESS_THRESHOLD_MS;
     } catch {
       return false;
     }

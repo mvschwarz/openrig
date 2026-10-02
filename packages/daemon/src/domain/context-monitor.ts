@@ -152,7 +152,7 @@ export class ContextMonitor {
     usage: ContextUsage | null,
   ): Promise<void> {
     if (!this.compactionEnforcer) return;
-    if (!usage || usage.availability !== "known") return;
+    if (!usage || usage.availability !== "known" || !usage.fresh) return;
     try {
       await this.compactionEnforcer.maybeAutoCompact({
         sessionName: session.session_name,

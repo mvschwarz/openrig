@@ -112,13 +112,13 @@ describe("L2 return path — bare map seats route straight to the queue-accepted
     const first = await router.route(event);
     expect(first).toMatchObject({ landed: false, disposition: "dead-lettered", reason: "resolve_failed" });
     expect(dead.readAll()).toHaveLength(1);
-    expect(seen.load().has("201.2")).toBe(false);
+    expect(seen.load().has("C1:201.2")).toBe(false);
 
     expect(await router.retryDeadLetters()).toEqual({ retried: 1, landed: 1 });
     expect(created.size).toBe(1);
     expect(creates).toBe(2); // retry reaches the idempotent create seam; no duplicate row exists
     expect(resolves).toBe(2);
     expect(dead.readAll()).toHaveLength(0);
-    expect(seen.load().has("201.2")).toBe(true);
+    expect(seen.load().has("C1:201.2")).toBe(true);
   });
 });

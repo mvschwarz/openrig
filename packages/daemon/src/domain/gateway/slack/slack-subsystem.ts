@@ -14,6 +14,7 @@
 
 import { channelStateDigest } from "../channel-operations.js";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { buildInProcessWire, type GatewayWire, type SubsystemDeliverFn } from "../gateway-subsystem.js";
 import { downloadPrivateFile, postChatMessage } from "./slack-api.js";
@@ -124,7 +125,8 @@ export function makeHumanReplyResolver(
  * yields `{ name, error }`, never an exception that could cost the message.
  *
  * Safe-path discipline: filenames sanitize to a bounded [A-Za-z0-9._-] basename
- * prefixed with the event ts + index (unique per event), and the resolved path
+ * prefixed with the event ts, a channel/message/file identity digest, and index,
+ * so messages sharing a timestamp across channels cannot overwrite each other. The resolved path
  * is verified to stay inside `mediaDir` before any write.
  */
 /** R1 F1 — the anchored Slack-host verdict: https + URL-parsed hostname that is
@@ -151,7 +153,7 @@ export function makeInboundFilePort(opts: {
   const mkdirp = opts.mkdirp ?? ((dir: string) => { fs.mkdirSync(dir, { recursive: true }); });
   const writeFile = opts.writeFile ?? ((p: string, bytes: Uint8Array) => { fs.writeFileSync(p, bytes); });
   return {
-    async transfer(files: unknown[], eventTs: string): Promise<InboundFileResult> {
+    async transfer(files: unknown[], eventTs: string, eventChannel?: string): Promise<InboundFileResult> {
       const stored: StoredInboundFile[] = [];
       const failed: FailedInboundFile[] = [];
       mkdirp(opts.mediaDir);
@@ -173,7 +175,8 @@ export function makeInboundFilePort(opts: {
           continue;
         }
         const safeBase = path.basename(name).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80) || `file-${i + 1}`;
-        const localPath = path.join(opts.mediaDir, `${eventTs.replace(/[^0-9.]/g, "")}-${i + 1}-${safeBase}`);
+        const identity = createHash("sha256").update(JSON.stringify([eventChannel ?? "-", eventTs, meta.id ?? null])).digest("hex").slice(0, 20);
+        const localPath = path.join(opts.mediaDir, `${eventTs.replace(/[^0-9.]/g, "")}-${identity}-${i + 1}-${safeBase}`);
         if (!path.resolve(localPath).startsWith(path.resolve(opts.mediaDir) + path.sep)) {
           failed.push({ name, error: "unsafe path refused" });
           continue;

@@ -27,6 +27,9 @@ export interface SubscribeActivityEventsOpts {
 }
 
 const RECONNECT_CAP_MS = 30_000;
+// Notifications are tiny. Bound retained decoded characters (UTF-16 code units),
+// including data-field separators, when a malformed stream omits a delimiter.
+const MAX_FRAME_CHARS = 1_048_576;
 
 export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): ActivityEventsSubscription {
   const baseDelayMs = opts.reconnectDelayMs ?? 1_000;
@@ -54,32 +57,60 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
       activeReader = reader;
       const decoder = new TextDecoder();
       let buffer = "";
+      let skipLF = false;
+      let data: string[] = [];
+      let dataChars = 0;
+      const lineReceived = (line: string): void => {
+        if (line !== "") {
+          // Each data field contributes one line; other SSE fields are framing.
+          if (line.startsWith("data:") || line === "data") {
+            const value = line === "data" ? "" : line.slice(5).replace(/^ /, "");
+            dataChars += value.length + 1;
+            if (dataChars > MAX_FRAME_CHARS) throw new Error("SSE frame too long");
+            data.push(value);
+          }
+          return;
+        }
+        const raw = data.join("\n");
+        data = [];
+        dataChars = 0;
+        if (!raw.trim()) return;
+        try {
+          const event = JSON.parse(raw) as { type: string; seatNodeId?: string; seq?: number };
+          // Headers and keepalives can precede another immediate disconnect.
+          // Reset only when the stream resumes delivering notifications.
+          delayMs = baseDelayMs;
+          opts.onEvent(event);
+        } catch {
+          // a non-JSON keepalive is framing, not an event
+        }
+      };
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        let sep: number;
-        while ((sep = buffer.indexOf("\n\n")) >= 0) {
-          const frame = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
-          for (const line of frame.split("\n")) {
-            if (!line.startsWith("data:")) continue; // comments/event-name lines are framing
-            const raw = line.slice(5).trim();
-            if (!raw) continue;
-            try {
-              const event = JSON.parse(raw) as { type: string; seatNodeId?: string; seq?: number };
-              // Headers and keepalives can precede another immediate disconnect.
-              // Reset only when the stream resumes delivering notifications.
-              delayMs = baseDelayMs;
-              opts.onEvent(event);
-            } catch {
-              // a non-JSON keepalive line is framing, not an event
-            }
+        while (buffer.length) {
+          // A CR terminates a line immediately. Its optional LF may be in the
+          // following network chunk and must not create an extra blank line.
+          if (skipLF) {
+            if (buffer.startsWith("\n")) buffer = buffer.slice(1);
+            skipLF = false;
           }
+          const end = /[\r\n]/.exec(buffer);
+          if (dataChars + (end ? end.index : buffer.length) > MAX_FRAME_CHARS) {
+            throw new Error("SSE frame too long");
+          }
+          if (!end) break;
+          const line = buffer.slice(0, end.index);
+          skipLF = end[0] === "\r";
+          buffer = buffer.slice(end.index + 1);
+          lineReceived(line);
         }
       }
     } catch {
-      // read error on an established stream — handled as a drop below
+      // Read/parser errors on an established stream are drops. Start cancelling
+      // its body before reconnecting, without waiting for underlying cleanup.
+      void activeReader?.cancel().catch(() => {});
     } finally {
       activeReader = null;
     }

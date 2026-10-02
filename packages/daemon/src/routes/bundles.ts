@@ -345,6 +345,7 @@ function integrityFsOps(): IntegrityFsOps {
 function podAssemblerFsOps(): PodAssemblerFsOps {
   return {
     ...assemblerFsOps(),
+    realpath: (p) => fs.realpathSync(p),
     readFile: (p) => fs.readFileSync(p, "utf-8"),
     readFileBuffer: (p) => fs.readFileSync(p),
     fileMode: (p) => fs.statSync(p).mode & 0o777,
