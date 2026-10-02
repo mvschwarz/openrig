@@ -97,6 +97,22 @@ describe("spec-library route folder scan (slice 11)", () => {
     return app;
   }
 
+  it("keeps accepted name/version pairs distinct and reviewable when a version contains a colon", async () => {
+    writeFileSync(join(folder, "first.yaml"), VALID_YAML("demo").replace("version: '1'", "version: 'release:1'"));
+    writeFileSync(join(folder, "second.yaml"), VALID_YAML("demo:release"));
+    const app = createApp();
+    const response = await app.request("/api/specs/library");
+    expect(response.status).toBe(200);
+    const entries = await response.json() as Array<{ id: string; name: string; version: string }>;
+    expect(entries).toHaveLength(2);
+    expect(new Set(entries.map(entry => entry.id)).size).toBe(2);
+    for (const entry of entries) {
+      const review = await app.request(`/api/specs/library/${encodeURIComponent(entry.id)}/review`);
+      expect(review.status).toBe(200);
+      expect(await review.json()).toMatchObject({ name: entry.name, version: entry.version });
+    }
+  });
+
   it("GET / triggers folder scan and surfaces valid YAML as a workflow entry", async () => {
     writeFileSync(join(folder, "good.yaml"), VALID_YAML("good-spec"));
     const app = createApp();
