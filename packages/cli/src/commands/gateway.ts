@@ -97,7 +97,13 @@ export async function daemonQueueRows(address: string): ReturnType<HumanRowsLook
       const res = await client.get<Array<{ qitemId?: string; state?: string; summary?: string | null }>>(
         `/api/queue/list?destinationSession=${encodeURIComponent(address)}&state=pending,in-progress,blocked&limit=${limit}&compact=1`,
       );
-      const data = Array.isArray(res.data) ? res.data : [];
+      if (res.status !== 200) {
+        throw new Error(`HTTP ${res.status}: queue enumeration refused`);
+      }
+      if (!Array.isArray(res.data)) {
+        throw new Error("HTTP 200: malformed queue enumeration response");
+      }
+      const data = res.data;
       if (data.length < limit) {
         return {
           ok: true,
