@@ -25,7 +25,8 @@ and becomes standing infrastructure instead of a hand-built probe.
   loud in a stub topology — no scenario here names it.
 - Assertions ride the shipped-observable surface set ONLY: `ps` · `queue` · `stream` ·
   `scope` · `pane` · `transcript` · `tui_socket` · `policy_provenance`. `proof` is
-  reserved: it has no read verb, and the validator rejects it. No internal DB pokes.
+  reserved: the scenario runner has no read binding for it (`rig proof show` exists, but
+  no scenario surface reads it), and the validator rejects it. No internal DB pokes.
 
 ## Layout
 - `scenarios/` — the eleven scenarios (§6 ten + the A1 eleventh), one YAML file each,
