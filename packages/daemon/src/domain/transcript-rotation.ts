@@ -29,6 +29,7 @@ export const DEFAULT_TRANSCRIPT_POLL_INTERVAL_MS = 2000;
 // Below the default ingest-health stale window (10s). Activity hints are
 // advisory: reconciliation still reads the complete bounded trailing buffer.
 export const MAX_IDLE_CAPTURE_INTERVAL_MS = 8000;
+export const ACTIVITY_HINT_DEADLINE_MS = 1000;
 
 /** A shared live resolver retains a usable policy during partial config writes.
  * Environment overrides keep their existing precedence over file settings. */
@@ -72,7 +73,16 @@ async function activityHint(adapter: TmuxAdapter, session: string, cadence: numb
   let snapshot = activitySnapshots.get(adapter);
   if (!snapshot || (!snapshot.pending && Date.now() - snapshot.at >= Math.min(cadence, 1000))) {
     const next = { at: Date.now(), pending: true, result: Promise.resolve<Map<string, number> | null>(null) };
-    next.result = adapter.readAllSessionWindowActivity().catch(() => null).finally(() => { next.pending = false; });
+    // Hints are advisory. A stalled tmux metadata call must not block otherwise
+    // functioning pane captures. Keep pending tied to the actual child, rather
+    // than the deadline, so timeout fallback never starts an accumulating probe.
+    const request = Promise.resolve().then(() => adapter.readAllSessionWindowActivity())
+      .catch(() => null).finally(() => { next.pending = false; });
+    next.result = new Promise((resolve) => {
+      const deadline = setTimeout(() => resolve(null), ACTIVITY_HINT_DEADLINE_MS);
+      deadline.unref?.();
+      void request.then((result) => { clearTimeout(deadline); resolve(result); });
+    });
     snapshot = next;
     activitySnapshots.set(adapter, snapshot);
   }
@@ -92,6 +102,7 @@ export function getTranscriptCaptureStats() {
     lines: entries.length ? entries.reduce((max, s) => Math.max(max, s.lines), 0) : null,
     maxIdleIntervalMs: entries.reduce((max, s) => Math.max(max, s.intervalMs), MAX_IDLE_CAPTURE_INTERVAL_MS),
     settingsReloadError,
+    activityHintDeadlineMs: ACTIVITY_HINT_DEADLINE_MS,
   };
 }
 

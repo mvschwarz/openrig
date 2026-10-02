@@ -74,16 +74,20 @@ describe("adaptive capture", () => {
     expect(getTranscriptCaptureStats().idleSeats).toBe(0);
   });
 
-  it("does not start overlapping activity probes while a shared hint read is pending", async () => {
+  it("falls back to full captures without overlapping probes while a shared hint read is stalled", async () => {
     const { adapter } = fixture();
     let release!: (value: Map<string, number>) => void;
     adapter.readAllSessionWindowActivity.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
     start(adapter); start(adapter, "other");
     await vi.advanceTimersByTimeAsync(10_000);
     expect(adapter.readAllSessionWindowActivity).toHaveBeenCalledTimes(1);
+    // Both seats keep capturing at configured cadence after the 1s hint deadline.
+    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(10);
+    expect(getTranscriptCaptureStats().idleSeats).toBe(0);
     release(new Map([["seat", 1], ["other", 1]]));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(adapter.readAllSessionWindowActivity).toHaveBeenCalledTimes(2);
+    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(12);
   });
 
   it("applies live intervals and line counts while keeping pending captures exclusive", async () => {
