@@ -78,12 +78,16 @@ involved before proposing changes.
 Compare the harness version and what you actually observe before attributing a failure to one of these. Check the
 issue's current status; a similar symptom alone is not a diagnosis.
 
-- Claude seats reported as needing attention after a restore: [#86](https://github.com/mvschwarz/openrig/issues/86).
-- Claude usage limits are not detected: [#98](https://github.com/mvschwarz/openrig/issues/98),
-  [#99](https://github.com/mvschwarz/openrig/issues/99).
-- Codex prompt variants not recognised as ready: [#79](https://github.com/mvschwarz/openrig/issues/79).
+- Claude seats reported as needing attention after a restore: [#86](https://github.com/mvschwarz/openrig/issues/86),
+  [#273](https://github.com/mvschwarz/openrig/issues/273).
+- Claude usage limits may not be detected: [#99](https://github.com/mvschwarz/openrig/issues/99).
+- Codex prompt variants not recognised as idle: [#79](https://github.com/mvschwarz/openrig/issues/79).
 - Codex asks about hook trust at first launch: [#17](https://github.com/mvschwarz/openrig/issues/17), not reproduced
   by the team.
+- Codex seats on the default `workspace-write` sandbox can't reach the local daemon, so their queue work fails:
+  [#275](https://github.com/mvschwarz/openrig/issues/275).
+- Stopping the daemon can report a timeout while closing connections:
+  [#166](https://github.com/mvschwarz/openrig/issues/166).
 
 For everything else, search [open issues](https://github.com/mvschwarz/openrig/issues).
 

@@ -24,17 +24,19 @@ and becomes standing infrastructure instead of a hand-built probe.
   mid_turn_death, restore}. `usage_limit` is real-runtime-only and MUST fail validation
   loud in a stub topology — no scenario here names it.
 - Assertions ride the shipped-observable surface set ONLY: `ps` · `queue` · `stream` ·
-  `scope` · `proof` · `pane` · `transcript` · `tui_socket` · `policy_provenance`. No
-  internal DB pokes.
+  `scope` · `pane` · `transcript` · `tui_socket` · `policy_provenance`. `proof` is
+  reserved: it has no read verb, and the validator rejects it. No internal DB pokes.
 
 ## Layout
-- `scenarios/*.yaml` — the eleven scenarios (§6 ten + the A1 eleventh), one file each,
-  the scenario name naming its defect class.
-- `fixtures/*.yaml` — topology rig specs, seats `runtime: stub`.
-- `scripts/` — scenario-resolved stub scripts (per the 51-01 scripted-response
-  contract); 51-01's built-in default script applies when a scenario names none.
-- `ROUTING.md` — every capability this set needs that the LOCKED 51-02/51-01 build must
-  land BEFORE these run. Per 51-03 mini-req 2 these are ROUTED, never shimmed here.
+- `scenarios/` — the eleven scenarios (§6 ten + the A1 eleventh), one YAML file each,
+  the scenario name naming its defect class. Beside them: the topology rig specs they
+  bring up (`*-stub.yaml`, seats `runtime: stub`) and the `agents/` and `culture.md`
+  those specs reference.
+- `scripts/` — holds no scripts yet. A scenario names per-seat stub scripts with
+  `env.stub_scripts` (paths relative to the scenario file); the built-in default script
+  applies when a scenario names none.
+- `ROUTING.md` — the runner, stub and format capabilities this set depends on, and which
+  of them have landed. Per 51-03 mini-req 2 these are ROUTED, never shimmed here.
 
 ## The seed contract (per-scenario, binding — kills the unfalsifiable-RED risk)
 Every scenario carries a `seed_regression: {class: …}` step and, in its header, a
@@ -49,10 +51,14 @@ seeded run and explicitly record that fault as disabled in the healthy run. The
 paired harness verifies the injection receipt and the specific failed observation.
 The remaining historical markers after their assertions are not executable proofs.
 
-## Run status honesty (authored before the runner exists)
-YAML authoring is cleared ahead of the 51-02 runner (dispatch authority). These files
-are the runner's acceptance targets; they are authored to the locked format and DO NOT
-run until 51-02 lands the runner + env-helper and 51-01 lands the emit repertoire (items
-5–8). Scenario #11 is RED-FIRST: its GREEN gates on the 51-06 transactional
-execution-closure fix; until then its expected-RED runs are recorded as expected-RED,
-never massaged. See `ROUTING.md` for the exact per-item dependencies.
+## Run status honesty
+The runner (`packages/daemon/scripts/run-scenarios.mjs`, over
+`packages/daemon/test/helpers/scenario-*.ts`) and its hermetic env-helper exist. The stub
+runs the four emit behaviors only from a per-seat launch script (`env.stub_scripts`); the
+step verbs `emit`, `restore`, `mutate` and `policy` parse, but the runner throws
+`UnboundActionError` when it reaches one. Only `queue-baton-survives-restart` runs in CI
+(see [ci/README.md](ci/README.md)); the other ten are not yet runnable as meaningful
+checks. Scenario #11 is RED-FIRST: its GREEN gates on the 51-06 transactional
+execution-closure fix and on its own setup and assertion-shape gaps (R-17, R-20); until
+then its expected-RED runs are recorded as expected-RED, never massaged. See `ROUTING.md`
+for the exact per-item dependencies.
