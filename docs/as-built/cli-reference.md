@@ -636,6 +636,8 @@ Root: `rig`; declared option: `-V, --version`.
 | `rig config reset [key]` | — | — |
 | `rig config init-workspace` | — | `--root <path>`<br>`--force`<br>`--dry-run`<br>`--json` |
 
+- `init-workspace` — `rig config init-workspace` creates missing `missions/`, `exhaust/`, `SPEC.md`, `project.yaml`, `workspace.yaml`, and `.gitignore` entries at the configured workspace root (or `--root <path>`). Initialization is additive and preserves existing files; a complete six-entry scaffold is a no-op. `--force` is deprecated compatibility and still preserves existing files. `--dry-run` reports planned additions without writing; incompatible path types are reported before any writes.
+
 ### file
 
 | Invocation | Aliases | Declared options |
