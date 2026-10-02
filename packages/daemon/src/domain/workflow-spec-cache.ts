@@ -892,6 +892,23 @@ export class WorkflowSpecCache {
     }
   }
 
+  /**
+   * #511 — the workflow name and version a cached row stands for. A row that a previous
+   * diagnostic writer blanked (status error, no version) still carries them in its stored spec.
+   */
+  storedIdentity(specId: string): { name: string; version: string } | null {
+    const row = this.db.prepare(`SELECT * FROM workflow_specs WHERE spec_id = ?`).get(specId) as SpecRow | undefined;
+    if (!row) return null;
+    if (row.version) return { name: row.name, version: row.version };
+    if (!row.spec_json) return null;
+    try {
+      const stored = JSON.parse(row.spec_json) as { id?: unknown; version?: unknown };
+      return typeof stored.id === "string" && typeof stored.version === "string" ? { name: stored.id, version: stored.version } : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** #511 — keep a pinned version whose file is gone: readable by name and version, hidden from discovery. */
   retain(specId: string): void {
     this.db.prepare(`UPDATE workflow_specs SET status = '${RETAINED_STATUS}' WHERE spec_id = ?`).run(specId);

@@ -536,7 +536,8 @@ export function scanWorkflowSpecFolder(
     if (!row.spec_id) continue;
     // #511: a version that unfinished work is pinned to stays readable until that work ends;
     // a later scan removes it. Every other row of the vanished file goes, one event per version.
-    if (row.name && row.version && opts.cache.isPinnedByUnfinishedWork(row.name, row.version)) {
+    const identity = opts.cache.storedIdentity(row.spec_id);
+    if (identity && opts.cache.isPinnedByUnfinishedWork(identity.name, identity.version)) {
       opts.cache.retain(row.spec_id);
       continue;
     }

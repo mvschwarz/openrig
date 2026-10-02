@@ -122,6 +122,32 @@ describe("workflow spec file removal keeps versions pinned by unfinished work (#
     expect(await projects(inst)).toBe("ok");
   });
 
+  // An install upgraded from a release whose diagnostic writer blanked a cached version's name,
+  // version and steps but kept its stored spec: that row is the only copy of the pinned version.
+  it("delete keeps a pinned version the previous diagnostic writer blanked, with its spec ID and stored spec", async () => {
+    const { inst, v1 } = await activeOnV1();
+    const storedSpec = () => (db.prepare("SELECT spec_json FROM workflow_specs WHERE spec_id = ?").get(v1!.specId) as { spec_json: string } | undefined)?.spec_json;
+    const storedBefore = storedSpec();
+    expect(storedBefore).toBeTruthy();
+    db.prepare(
+      `UPDATE workflow_specs SET status = 'error', error_message = 'old parse error', name = 'flow.yaml', version = '',
+         purpose = NULL, target_rig = NULL, roles_json = '{}', steps_json = '[]', coordination_terminal_turn_rule = 'hot_potato'
+       WHERE spec_id = ?`,
+    ).run(v1!.specId);
+
+    unlinkSync(file);
+    scan();
+    expect(storedSpec()).toBe(storedBefore);
+    expect(cache.getByIdOrThrow(v1!.specId).spec.version).toBe("1");
+    expect(library()).toEqual([]);
+    expect(removedEvents()).toEqual(["2"]);
+
+    // Once that work has finished, the next scan removes it like any other vanished version.
+    db.prepare(`UPDATE workflow_instances SET status = 'completed' WHERE instance_id = ?`).run(inst.instance.instanceId);
+    scan();
+    expect(storedSpec()).toBeUndefined();
+  });
+
   it("still removes an old version that no unfinished instance uses", () => {
     write(file, spec("1"));
     scan();
@@ -137,6 +163,7 @@ describe("workflow spec file removal keeps versions pinned by unfinished work (#
   it.each([
     ["completed", "releases", false],
     ["aborted", "releases", false],
+    ["waiting", "keeps", true],
     ["failed", "keeps", true],
   ])("an instance with status %s %s its version once the file is gone", async (status, _verb, keeps) => {
     const { inst, v1 } = await activeOnV1();
