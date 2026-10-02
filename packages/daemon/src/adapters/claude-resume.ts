@@ -51,6 +51,7 @@ export class ClaudeResumeAdapter {
     model?: string | null,
     selectedPermissionMode?: string,
     nodeId?: string,
+    effort?: string | null,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };
@@ -60,6 +61,7 @@ export class ClaudeResumeAdapter {
     // unconditional acceptEdits floor when OFF; the full bypass when YOLO is ON) — every seat.
     // 0.5.2-07: --model matches the fresh-launch adapter (claude-code-adapter), emitted after posture.
     const modelArg = model ? ` --model ${shellQuote(model)}` : "";
+    const effortArg = effort ? ` --effort ${shellQuote(effort)}` : "";
     let managed: Awaited<ReturnType<ClaudeManagedLaunch["prepare"]>> | undefined;
     if (selectedPermissionMode !== undefined) {
       try {
@@ -69,8 +71,8 @@ export class ClaudeResumeAdapter {
     }
     const permissionMode = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
     const appliedLaunch = observeClaudePermission(permissionMode);
-    const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...(model ? ["--model", model] : []), "--resume", resumeToken!])
-      : `${claudeClassicRendererEnvPrefix(process.env)}claude ${permissionMode}${modelArg} --resume ${shellQuote(resumeToken!)}`;
+    const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), "--resume", resumeToken!])
+      : `${claudeClassicRendererEnvPrefix(process.env)}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(tmuxSessionName, cmd, managed.assertCurrent)
       : await this.tmux.sendText(tmuxSessionName, cmd);

@@ -32,7 +32,9 @@ class FakeTmux {
   exec = async (command: string): Promise<string> => {
     this.commands.push(command);
     this.onCommand?.(command);
-    const target = /-t '([^']+)'/.exec(command)?.[1];
+    // Native list-panes uses an exact session/window target (=name:), while
+    // has-session uses =name; immutable tmux ids retain their literal spelling.
+    const target = /-t '([^']+)'/.exec(command)?.[1]?.replace(/^=/, "").replace(/:.*$/, "");
     const byTarget = () => [...this.sessions.entries()].find(([name, s]) => name === target || s.pane === target || s.id === target);
     if (command.startsWith("tmux new-session")) {
       const name = /-s '([^']+)'/.exec(command)![1]!;
@@ -180,7 +182,7 @@ describe("#188 snapshot refresh probe cleanup", () => {
     const tmux = new FakeTmux(40);
     const seat = claudeSeat("%7");
     tmux.onCommand = (command) => {
-      const name = /list-panes -t '(rigged-refresh-[^']+)'/.exec(command)?.[1];
+      const name = /list-panes -t '=(rigged-refresh-[^':]+):'/.exec(command)?.[1];
       if (!name || tmux.sessions.get(name) === undefined) return;
       const rig = rigRepo.createRig("adopter");
       const node = rigRepo.addNode(rig.id, "dev.adopted", { role: "worker", runtime: "claude-code" });
@@ -198,7 +200,7 @@ describe("#188 snapshot refresh probe cleanup", () => {
     const seat = claudeSeat("%7");
     let replacement: { id: string; pane: string } | undefined;
     tmux.onCommand = (command) => {
-      const name = /list-panes -t '(rigged-refresh-[^']+)'/.exec(command)?.[1];
+      const name = /list-panes -t '=(rigged-refresh-[^':]+):'/.exec(command)?.[1];
       if (!name || replacement) return;
       tmux.replace(name);
       replacement = { ...tmux.sessions.get(name)! };
@@ -215,7 +217,7 @@ describe("#188 snapshot refresh probe cleanup", () => {
     tmux.listPanesFails = true;
     const seat = claudeSeat("%7");
     tmux.onCommand = (command) => {
-      if (!/list-panes -t 'rigged-refresh-/.test(command) || tmux.sessions.has("unrelated")) return;
+      if (!/list-panes -t '=rigged-refresh-/.test(command) || tmux.sessions.has("unrelated")) return;
       tmux.resetServer();
       tmux.create("unrelated"); // the new server hands out the helper's id again
     };

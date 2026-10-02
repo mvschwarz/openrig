@@ -28,6 +28,7 @@ import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand } from "./adapters/tmux-exec.js";
+import { execPreflightCommand } from "./adapters/preflight-exec.js";
 import { createCmuxCliTransport } from "./adapters/cmux-transport.js";
 import { SnapshotRepository } from "./domain/snapshot-repository.js";
 import { CheckpointStore } from "./domain/checkpoint-store.js";
@@ -681,7 +682,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const podRepo = new PodRepository(db);
   const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo });
   const rigSpecPreflight = new RigSpecPreflight({
-    rigRepo, tmuxAdapter, exec: opts?.tmuxExec ?? execCommand, cmuxExec: opts?.cmuxExec ?? execCommand,
+    rigRepo, tmuxAdapter, exec: opts?.tmuxExec ?? execPreflightCommand, cmuxExec: opts?.cmuxExec ?? execCommand,
   });
   const rigInstantiator = new RigInstantiator({
     db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight: rigSpecPreflight, tmuxAdapter,
@@ -987,7 +988,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     tmuxAdapter,
     agentImageLibrary,
     continuityPolicyMaterializer,
-    exec,
+    exec: opts?.tmuxExec ?? execPreflightCommand,
     // OPR.0.5.3.6 — shipped topology chain-file defaults install under the
     // typed topology.root at materialization (copy-if-absent).
     topologyRootResolver: () => String(new ContextPackSettingsStore().resolveOne("topology.root").value),

@@ -119,9 +119,9 @@ describe("SeatHandoverService", () => {
     });
   }
 
-  function seedSeat(opts?: { runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string }) {
+  function seedSeat(opts?: { runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string; effort?: string }) {
     const rig = rigRepo.createRig("seat-rig");
-    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile });
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile, effort: opts?.effort });
     let sessionId: string | null = null;
     if (opts?.withSession !== false) {
       const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
@@ -1239,5 +1239,19 @@ describe("SeatHandoverService", () => {
       currentOccupant: "route-successor",
       currentStatus: { handoverResult: "complete" },
     });
+  });
+
+  it("#75: an effort-pinned seat's handover launches the successor with that effort — the REAL lookupNode→createSuccessor→launchHarness path", async () => {
+    seedSeat({ runtime: "codex", effort: "high" });
+    const result = await service.handover({
+      seatRef: "dev-impl@seat-rig",
+      reason: "context-wall",
+      source: "fresh",
+      operator: "orch-lead@seat-rig",
+    });
+    expect(result.ok).toBe(true);
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+    const successorBinding = launchHarness.mock.calls[0]![0] as { effort?: string };
+    expect(successorBinding.effort).toBe("high");
   });
 });

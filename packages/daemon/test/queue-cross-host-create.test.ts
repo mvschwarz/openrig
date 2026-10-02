@@ -261,6 +261,33 @@ describe("MH-3 C1 — cross-host queue create (route)", () => {
     expect((await res.json()) as { failureClass: string }).toMatchObject({ failureClass: "unreachable" });
     expect(rowCount(db)).toBe(0);
   });
+
+  it("forwards a changed-body warning from the real receiver without duplicating or overwriting its row", async () => {
+    const receiverDb = createDb();
+    migrate(receiverDb, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueTargetRepoSchema]);
+    try {
+      const receiver = makeApp({ db: receiverDb, bus: new EventBus(receiverDb) });
+      const app = makeApp({
+        db, bus,
+        fetchImpl: (async (url, init) => receiver.request(new URL(String(url)).pathname, init)) as typeof fetch,
+      });
+      const input = { ...BASE, qitemId: "qitem-forward-retry", hostId: "vps-b", nudge: false };
+      const first = await post(app, input);
+      const firstBody = await first.json();
+      const same = await post(app, input);
+      expect(same.status).toBe(201);
+      expect(await same.json()).toEqual(firstBody);
+      const changed = await post(app, { ...input, body: BASE.body + " changed" });
+      expect(changed.status).toBe(201);
+      expect(await changed.json()).toMatchObject({
+        body: BASE.body,
+        createWarning: { code: "qitem_body_not_saved", message: expect.stringContaining("not saved") },
+      });
+      expect(rowCount(db)).toBe(0);
+      expect(rowCount(receiverDb)).toBe(1);
+      expect(receiverDb.prepare("SELECT body FROM queue_items").get()).toEqual({ body: BASE.body });
+    } finally { receiverDb.close(); }
+  });
 });
 
 describe("MH-3 C1 — origin-side PK identity handling (repo)", () => {

@@ -4,6 +4,7 @@ import path from "node:path";
 import net from "node:net";
 import { execSync } from "node:child_process";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
+import { formatDaemonHostForUrl } from "../client.js";
 import { ConfigStore } from "../config-store.js";
 import { buildWritableHomeCheck } from "../system-preflight.js";
 import {
@@ -212,7 +213,7 @@ export function runDoctorChecks(deps: DoctorDeps): { checks: DoctorCheck[]; port
   // configured host/port must not be reported missing). Defaults stay 127.0.0.1:7433.
   const daemonHost = config.daemon.host ?? "127.0.0.1";
   const daemonPort = config.daemon.port ?? DEFAULT_PORT;
-  const daemonBase = `http://${daemonHost}:${daemonPort}`;
+  const daemonBase = `http://${formatDaemonHostForUrl(daemonHost)}:${daemonPort}`;
   const fetchFn = deps.fetch ?? globalThis.fetch;
   const portCheck = deps.checkPort(daemonPort, daemonHost).then(async (available): Promise<DoctorCheck> => {
     if (available) {
@@ -406,7 +407,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         fetchLiveLogicalIds: async (rigName: string): Promise<string[] | null> => {
           try {
             const cfg = new ConfigStore().resolve();
-            const base = `http://${cfg.daemon.host ?? "127.0.0.1"}:${cfg.daemon.port ?? DEFAULT_PORT}`;
+            const base = `http://${formatDaemonHostForUrl(cfg.daemon.host ?? "127.0.0.1")}:${cfg.daemon.port ?? DEFAULT_PORT}`;
             const rigsRes = await fetch(`${base}/api/rigs`);
             if (!rigsRes.ok) return null;
             const rigs = (await rigsRes.json()) as Array<{ id?: string; name?: string }>;

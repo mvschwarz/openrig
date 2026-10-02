@@ -9,9 +9,10 @@ const member = { id: "pi", agent_ref: "local:agent", profile: "default", runtime
 const closers: Array<() => void> = [];
 afterEach(() => { for (const close of closers.splice(0)) close(); });
 
-async function failedAdd() {
+async function failedAdd(memberOverrides?: Record<string, unknown>) {
   const db = createFullTestDb();
   closers.push(() => db.close());
+  const effectiveMember = { ...member, ...memberOverrides };
   const files: Record<string, string> = {
     [root]: "",
     [`${root}/agent/agent.yaml`]: `name: implementer\nversion: "1.0.0"\nresources:\n  skills:\n${skillIds.map(id => `    - id: ${id}\n      path: skills/${id}`).join("\n")}\nprofiles:\n  default:\n    uses:\n      skills: [${skillIds.join(", ")}]\nstartup:\n  files:\n    - path: role.md\n      required: true\n      delivery_hint: send_text\n`,
@@ -35,7 +36,7 @@ async function failedAdd() {
   const rig = setup.rigRepo.createRig("first-start");
   const seeded = await setup.rigExpansionService.expand({ rigId: rig.id, pod: { id: "dev", label: "Dev", members: [{ id: "sibling", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: root }], edges: [] } });
   expect(seeded.ok).toBe(true);
-  const added = await setup.podInstantiator.addMemberToPod(rig.id, "dev", member, root);
+  const added = await setup.podInstantiator.addMemberToPod(rig.id, "dev", effectiveMember, root);
   expect(added).toMatchObject({ ok: true, result: { node: { status: "failed", logicalId: "dev.pi" } } });
   const node = setup.rigRepo.getRig(rig.id)!.nodes.find(n => n.logicalId === "dev.pi")!;
   expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id = ?").get(node.id)).toBeUndefined();
@@ -50,11 +51,11 @@ async function failedAdd() {
   const clean = await lifecycle.cleanSeat({ seatRef: "dev-pi@first-start", reason: "Projection failed before native launch; shell has exited" });
   expect(clean.ok).toBe(true);
   projectionBlocked = false;
-  const request = (retryMember: Record<string, unknown> = member) => setup.app.request(`/api/rigs/${rig.id}/nodes/dev.pi/launch`, {
+  const request = (retryMember: Record<string, unknown> = effectiveMember) => setup.app.request(`/api/rigs/${rig.id}/nodes/dev.pi/launch`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ retryStartupFrom: { member: retryMember, rigRoot: root } }),
   });
-  return { ...setup, db, rig, node, adapter, tmux, files, firstSession, failure, request };
+  return { ...setup, db, rig, node, adapter, tmux, files, firstSession, failure, request, effectiveMember };
 }
 
 describe("explicit first-start retry after projection failure", () => {
@@ -91,6 +92,22 @@ describe("explicit first-start retry after projection failure", () => {
     expect(f.adapter.launchHarness).toHaveBeenCalledTimes(1);
   });
 
+  it("reprojects and delivers required startup on the same node when member declares effort", async () => {
+    const f = await failedAdd({ effort: "high" });
+    const before = f.rigRepo.getRig(f.rig.id)!;
+    const nodeBefore = before.nodes.find(n => n.id === f.node.id)!;
+    expect(nodeBefore.effort).toBe("high");
+
+    const res = await f.request();
+    const body = await res.json();
+    expect({ status: res.status, body }, JSON.stringify(body)).toMatchObject({ status: 201, body: { ok: true, nodeId: f.node.id, status: "launched" } });
+    const after = f.rigRepo.getRig(f.rig.id)!;
+    const nodeAfter = after.nodes.find(n => n.id === f.node.id)!;
+    expect(nodeAfter.effort).toBe("high");
+    expect(f.adapter.launchHarness).toHaveBeenCalledTimes(1);
+    expect(f.adapter.deliverStartup).toHaveBeenCalled();
+  });
+
   it.each(["present", "unknown"])("refuses %s liveness without effects", async state => {
     const f = await failedAdd();
     vi.mocked(f.tmux.probeSession).mockResolvedValue(state === "present" ? { state: "present" } : { state: "transport_unavailable", cause: "transport failure" });
@@ -114,14 +131,18 @@ describe("explicit first-start retry after projection failure", () => {
     expect(f.adapter.project).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["resume", "native", "late-failure", "changed-spec", "changed-member", "overrides"])("refuses %s without projection or launch", async control => {
+  it.each(["resume", "native", "late-failure", "changed-spec", "changed-member", "changed-effort", "overrides"])("refuses %s without projection or launch", async control => {
     const f = await failedAdd();
     if (control === "resume") f.sessionRegistry.updateResumeToken(f.firstSession.id, "pi", "native-id");
     if (control === "native") f.db.prepare("UPDATE occupant_tenures SET native_session_id_at_boot = 'native-id' WHERE node_id = ?").run(f.node.id);
     if (control === "late-failure") f.db.prepare("UPDATE events SET payload = ? WHERE node_id = ? AND type = 'node.startup_failed'").run(JSON.stringify({ type: "node.startup_failed", nodeId: f.node.id, sessionId: f.firstSession.id, error: "Harness launch failed" }), f.node.id);
     if (control === "changed-spec") f.files[`${root}/agent/agent.yaml`] += "\n# changed\n";
     const changes = f.db.prepare("SELECT total_changes() AS n").get();
-    const res = await f.request(control === "changed-member" ? { ...member, model: "different/model" } : control === "overrides" ? { ...member, startup: { files: [] } } : member);
+    const res = await f.request(
+      control === "changed-member" ? { ...member, model: "different/model" } :
+      control === "changed-effort" ? { ...member, effort: "high" } :
+      control === "overrides" ? { ...member, startup: { files: [] } } : member
+    );
     expect(res.status).toBe(409);
     expect(f.db.prepare("SELECT total_changes() AS n").get()).toEqual(changes);
     expect(f.adapter.launchHarness).not.toHaveBeenCalled();

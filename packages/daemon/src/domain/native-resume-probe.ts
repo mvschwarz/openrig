@@ -69,6 +69,8 @@ export function buildCodexResumeCore(
   precomputedPostureArg?: string,
   /** #69: launch callers pass true when the installed Codex supports `--no-daemon`. Absent → byte-identical. */
   daemonOptOut?: boolean,
+  /** #75: optional reasoning effort for the seat. Emitted as -c 'model_reasoning_effort="<level>"'. */
+  effort?: string | null,
 ): string {
   // OPR.0.4.8.2: the RESUME path uses the SAME posture decision (codexPostureArg) as fresh/fork.
   // YOLO forces -s danger-full-access (overriding even a named profile); otherwise a named profile
@@ -78,10 +80,11 @@ export function buildCodexResumeCore(
   // 0.5.2-07: -m is a top-level codex flag (matches the fresh-launch adapter), emitted before the
   // resume subcommand.
   const modelArg = model ? ` -m ${shellQuote(model)}` : "";
+  const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
   const middle = extraArgs ? `${extraArgs} ` : "";
   const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
   const daemonArg = daemonOptOut ? " --no-daemon" : "";
-  return `codex${daemonArg}${profileOrPosture}${modelArg} resume ${middle}${tokenArg}`;
+  return `codex${daemonArg}${profileOrPosture}${modelArg}${effortArg} resume ${middle}${tokenArg}`;
 }
 
 export function assessNativeResumeProbe(

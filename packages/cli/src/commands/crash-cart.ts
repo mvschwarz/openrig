@@ -3,6 +3,7 @@ import { copyFileSync, lstatSync, mkdtempSync, readFileSync, rmSync } from "node
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigStore } from "../config-store.js";
+import { formatDaemonHostForUrl } from "../client.js";
 
 // `rig crash-cart --json` — the daemon-DOWN recovery verdict emit (plan c015d9ed §C3, coupling ruling
 // option A). Prints ONE JSON = the 3-state detector verdict + (on DOWN) the discovery — READ-ONLY, a
@@ -87,7 +88,7 @@ async function realEmit(): Promise<CrashCartEmit> {
         : "no daemon.json";
       const url = openrigUrl
         ? `${openrigUrl.replace(/\/$/, "")}/healthz`
-        : `http://${state?.host ?? "127.0.0.1"}:${state?.port ?? 7433}/healthz`;
+        : `http://${formatDaemonHostForUrl(state?.host ?? "127.0.0.1")}:${state?.port ?? 7433}/healthz`;
       const probeResult = await probeClassified(url);
       return { pidState, probeResult, failedSignal: `healthz ${probeResult} at ${url}` };
     },

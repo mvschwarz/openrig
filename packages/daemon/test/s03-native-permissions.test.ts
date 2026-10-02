@@ -60,7 +60,7 @@ const binding = (nodeId = "node"): NodeBinding => ({ id: "binding", nodeId, atta
 describe("S03 future native permission selections (offline; no native effect claim)", () => {
   it("migration 088 preserves prior launch observations and histories and applies only once", () => {
     const db = new Database(":memory:"); opened.push(db); db.pragma("foreign_keys = ON");
-    migrate(db, ALL_MIGRATIONS.filter(m => !m.name.startsWith("088_") && !m.name.startsWith("092_")));
+    migrate(db, ALL_MIGRATIONS.filter(m => !m.name.startsWith("088_") && !m.name.startsWith("093_")));
     const repo = new RigRepository(db); const rig = repo.createRig("upgrade");
     const node = repo.addNode(rig.id, "owner", { runtime: "codex", cwd: "/inert" });
     const registry = new SessionRegistry(db); registry.registerSession(node.id, "owner@upgrade");

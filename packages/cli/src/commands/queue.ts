@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomBytes } from "node:crypto";
 import { Command } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
@@ -426,7 +427,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--tier <tier>", "Tier (e.g. fast, routine, deep, critical) — drives SLA")
     .option("--tags <tags>", "Comma-separated tags (composes with --mission and --slice)")
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
-    .option("--id <qitemId>", "Idempotent qitem_id (skip if not provided)")
+    .option("--id <qitemId>", "Retry identity: reuse for the same create after an unknown outcome; otherwise generated and printed before sending")
     .option("--target-repo <name>", "PL-007: typed repo scope (must match a repo in the source rig's RigSpec.workspace.repos[])")
     .option("--summary <text>", "Short human-readable subject, shown in the needs-you view. For a human destination, --body-file is the complete decision brief or update; keep technical continuation in the owning agent row and evidence.")
     .option("--human-intent <intent>", "decision (default) or update: a quiet informational delivery, never an approval request")
@@ -569,9 +570,23 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             return;
           }
         }
+        // Allocate before the write: a timeout/abort cannot tell us whether the
+        // daemon committed. The existing primary-key absorb makes a retry with
+        // THIS id safe; a negative read is not permission to mint another one.
+        // Keep timestamp-based fallback consumers, with 64 random bits so an
+        // accidental collision is not mistaken for an intentional retry.
+        const qitemId = opts.id ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
+        const show = `rig queue show ${shellQuote(qitemId)} --full --json`;
+        const reconcile = hostResolved.hostId && hostResolved.hostId !== "local"
+          ? `For destination host ${shellQuote(hostResolved.hostId)}, replace <destination-daemon-url> with its registered daemon URL and run: OPENRIG_URL='<destination-daemon-url>' ${show}.`
+          : `At the same endpoint and OPENRIG_HOME, run: ${show}.`;
+        const recovery = `${reconcile} If retrying, repeat the same create with --id ${shellQuote(qitemId)} and unchanged source, destination, body and options. A missing row does not rule out a pending commit; retrying without this ID creates new work.`;
+        // stderr survives an interrupted wait without adding a second JSON
+        // document to stdout. This is a request identity, NOT a commit receipt.
+        console.error(`Queue create request ID: ${qitemId} (not proof of persistence). ${recovery}`);
         const res = await client.post<Record<string, unknown>>("/api/queue/create", {
           ...(managedSource === undefined ? { sourceSession: source } : {}),
-          qitemId: opts.id,
+          qitemId,
           destinationSession: hostResolved.destination,
           body: resolvedBody,
           humanIntent: opts.humanIntent,
@@ -589,7 +604,27 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (omitted for
           // plain local writes — the local path stays byte-identical).
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
+        }).catch((error: unknown) => {
+          // A pre-header disconnect can follow a committed create. Preserve the
+          // typed error, but do not let the shared renderer assert nondelivery.
+          if (error instanceof DaemonConnectionError) error.writeOutcome = "unknown";
+          if (error instanceof DaemonConnectionError || error instanceof DaemonResponseError) {
+            // Keep the shared typed error/exit path, including --json, while
+            // supplying the identity missing from an unreadable/late response.
+            error.message += ` ${recovery}`;
+          }
+          throw error;
         });
+        if (res.status >= 400 && res.data?.outcome === "indeterminate") {
+          // Forwarded writes may return a structured unknown outcome rather
+          // than throw. Preserve that failure and expose the same recovery ID.
+          printResult(opts.json ?? false, { ...res.data, qitemId, recovery }, res.status);
+          return;
+        }
+        const createWarning = res.data?.createWarning as { code?: unknown; message?: unknown } | undefined;
+        if (res.status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
+          console.error(`Warning: ${createWarning.message}`);
+        }
         if (opts.verify && res.status < 400) {
           const created = res.data;
           const qitemId = typeof created.qitemId === "string" ? created.qitemId : null;

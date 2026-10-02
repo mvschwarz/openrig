@@ -3,7 +3,7 @@ import type { Migration } from "../migrate.js";
 // SQLite cannot alter a CHECK constraint, so the table is rebuilt with cursor added.
 // Rows and their columns are copied unchanged.
 export const nodePermissionSelectionsCursorSchema: Migration = {
-  name: "092_node_permission_selections_cursor.sql",
+  name: "093_node_permission_selections_cursor.sql",
   sql: `
     CREATE TABLE node_permission_selections_next (
       node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,

@@ -650,3 +650,87 @@ profiles:
     expect(result.errors.join(" ")).toMatch(/lifecycle\.mechanic.*canonical.*seat@rig/i);
   });
 });
+
+// ─── Effort advisory — defaults + profile preferences (mirrors member-level) ─
+describe("effort advisory — non-string value in defaults and profile preferences", () => {
+  it("defaults.effort: non-string value produces advisory and spec remains valid", () => {
+    const raw = parseAgentSpec(`
+version: "0.2"
+name: effort-advisory-fixture
+defaults:
+  runtime: claude-code
+  effort: 42
+profiles:
+  default: {}
+`);
+    const result = validateAgentSpec(raw);
+    expect(result.valid).toBe(true);
+    expect(result.advisories).toBeDefined();
+    expect(result.advisories!.join(" ")).toMatch(/defaults\.effort.*non-string.*42.*ignored/);
+  });
+
+  it("defaults.effort: empty string produces advisory", () => {
+    const raw = parseAgentSpec(`
+version: "0.2"
+name: effort-advisory-fixture
+defaults:
+  runtime: claude-code
+  effort: ""
+profiles:
+  default: {}
+`);
+    const result = validateAgentSpec(raw);
+    expect(result.valid).toBe(true);
+    expect(result.advisories).toBeDefined();
+    expect(result.advisories!.join(" ")).toMatch(/defaults\.effort.*non-string.*ignored/);
+  });
+
+  it("defaults.effort: valid string value produces no advisory", () => {
+    const raw = parseAgentSpec(`
+version: "0.2"
+name: effort-advisory-fixture
+defaults:
+  runtime: claude-code
+  effort: high
+profiles:
+  default: {}
+`);
+    const result = validateAgentSpec(raw);
+    expect(result.valid).toBe(true);
+    expect((result.advisories ?? []).some((a) => a.includes("defaults.effort"))).toBe(false);
+  });
+
+  it("profiles.<name>.preferences.effort: non-string value produces advisory and spec remains valid", () => {
+    const raw = parseAgentSpec(`
+version: "0.2"
+name: effort-advisory-fixture
+defaults:
+  runtime: claude-code
+profiles:
+  heavy:
+    preferences:
+      effort: true
+`);
+    const result = validateAgentSpec(raw);
+    expect(result.valid).toBe(true);
+    expect(result.advisories).toBeDefined();
+    expect(result.advisories!.join(" ")).toMatch(/profiles\.heavy\.preferences\.effort.*non-string.*ignored/);
+  });
+
+  it("profiles.<name>.preferences.effort: valid string value produces no advisory", () => {
+    const raw = parseAgentSpec(`
+version: "0.2"
+name: effort-advisory-fixture
+defaults:
+  runtime: claude-code
+profiles:
+  heavy:
+    preferences:
+      effort: high
+`);
+    const result = validateAgentSpec(raw);
+    expect(result.valid).toBe(true);
+    expect((result.advisories ?? []).some((a) => a.includes("preferences.effort"))).toBe(false);
+  });
+});
+

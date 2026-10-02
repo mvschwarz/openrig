@@ -58,6 +58,9 @@ function resolveTerminalToken(): string | null {
 }
 
 export class DaemonConnectionError extends Error {
+  /** A write caller cannot infer nondelivery from losing the response. */
+  writeOutcome?: "unknown";
+
   constructor(message: string) {
     super(message);
     this.name = "DaemonConnectionError";
@@ -98,6 +101,17 @@ export interface DaemonResponse<T = unknown> {
   data: T;
 }
 
+/**
+ * Issue #425: wrap bare IPv6 literals in brackets for URL hosts. `::1` must
+ * render as `[::1]` — `http://::1:7433` never parses in fetch. Hostnames,
+ * IPv4, and already-bracketed literals pass through unchanged.
+ */
+export function formatDaemonHostForUrl(host: string): string {
+  const trimmed = host.trim();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) return trimmed;
+  return trimmed.includes(":") ? `[${trimmed}]` : trimmed;
+}
+
 interface DaemonRequestOptions {
   timeoutMs?: number;
   /** Per-call header overrides (e.g., `Authorization: Bearer ...`). */
@@ -119,7 +133,7 @@ function localDaemonUrl(): string | undefined {
       || (state.host !== undefined && (typeof state.host !== "string" || !state.host.trim()))) return undefined;
     // A stale PID must not redirect reads or writes to another configured daemon.
     // Keep the recorded endpoint; the request decides reachability, even after exit.
-    return `http://${state.host ?? "127.0.0.1"}:${state.port}`;
+    return `http://${formatDaemonHostForUrl(state.host ?? "127.0.0.1")}:${state.port}`;
   } catch {
     return undefined;
   }
@@ -180,7 +194,7 @@ export class DaemonClient {
           this.baseUrl = localUrl;
         } else {
           const config = new ConfigStore().resolve(); // env > file > defaults
-          this.baseUrl = `http://${config.daemon.host}:${config.daemon.port}`;
+          this.baseUrl = `http://${formatDaemonHostForUrl(config.daemon.host)}:${config.daemon.port}`;
         }
       }
     }

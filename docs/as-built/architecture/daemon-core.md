@@ -9,143 +9,106 @@ applies-when: |
   graph, the SQLite schema/migration set, or the route-mount surface.
 siblings: [coordination-primitive.md, agent-spec-and-startup.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md]
-last-verified-against-source: 7eaf524c
-last-updated: 2026-05-16
+last-verified-against-source: 48f6cce7
+last-updated: 2026-10-02
 ---
 
 # Daemon Core — Wiring, DB, Migrations, Startup
 
 OpenRig is a local control plane for multi-agent coding topologies. The daemon
 (`@openrig/daemon`) is the framework-free SQLite-backed core that the CLI
-(`@openrig/cli`), UI (`@openrig/ui`), and MCP server all sit on top of.
+(`@openrig/cli`), the terminal UI (`@openrig/tui`), the web UI (`@openrig/ui`)
+and the MCP server all sit on top of.
 
-> Verified against source at HEAD `7eaf524c` (`git describe` →
-> `v0.3.1-6-g7eaf524c`). Current package version is **0.3.1** across all three
-> packages (`package.json` root `"version": "0.3.1"`; slice-00 §1.1). HEAD
-> carries 6 commits of unreleased release-0.3.2 work; no `v0.3.2` tag exists.
+> Verified against source at main `48f6cce7`. Each count below sits beside the
+> command that produces it; run the command from the repository root to refresh
+> it.
 
 ## 1. System overview
 
-The system has six architectural layers (`architecture.md` §1 L23–30):
+For what OpenRig is and how its packages fit together, read `ARCHITECTURE.md` at
+the repository root. This module covers the daemon's own wiring.
 
-1. **AgentSpec / pod-aware core** — spec parsing, resolution, precedence,
-   startup orchestration, snapshot/restore, bundles.
-2. **Operator and topology layer** — harness auto-launch, node inventory,
-   session naming, infrastructure nodes, explorer UI, existing-rig power-on,
-   auto-snapshot, post-command handoff.
-3. **Communication and history layer** — transcript capture (pipe-pane),
-   communication primitives (send/capture/broadcast), config/preflight,
-   `rig ask` context packs, durable rig chat.
-4. **Authoring and identity layer** — spec review + spec library, `whoami`,
-   adopted-session tmux-metadata parity, bind/materialize/adopt workflows.
-5. **Rig environment layer** — rig-scoped services records, Compose-backed
-   service orchestration, readiness gates, env snapshot/restore integration.
-6. **Agent-managed software layer** — managed-app classification, app-focused
-   browse/review/runtime UI, and the canonical `secrets-manager` example.
+### Source footprint at `48f6cce7`
 
-Legacy flat-node/package flows remain for backward compatibility.
+The footprint counts use non-test TypeScript files under each package's `src/`
+(tests live in separate `packages/*/test/` directories):
+`find <dir> -type f \( -name '*.ts' -o -name '*.tsx' \) ! -name '*.test.*' | wc -l`.
 
-### Verified source footprint at HEAD `7eaf524c`
-
-> Drift-fix D1/D6 — `architecture.md` L6,11 said `OpenRig v0.2.0` /
-> "Current v0.2.0 release verification" and L7 said `376` source files. Both
-> are a frozen pre-v0.2.0-era header (slice-00 §1.9 — last edited `72982bb2`,
-> 2026-03-30). Corrected to the values below.
-
-| Metric | Value @ HEAD | Source (independently re-confirmed) |
+| Metric | Count | Directory or command |
 |---|---|---|
-| Package version | **0.3.1** (HEAD +6 unreleased 0.3.2 commits) | slice-00 §1.1; `package.json:version` |
-| Total source footprint | **601** files | slice-00 §1.6; `find packages/*/src` non-test = 279+87+235 |
-| Daemon footprint | **279** total / **173** domain / **49** route mounts (46 route files) / **11** adapters / **40** migrations | slice-00 §1.5/§1.6; `find packages/daemon/src` non-test |
-| CLI footprint | **87** files | slice-00 §1.6; `find packages/cli/src` non-test |
-| UI footprint | **235** files | slice-00 §1.6; `find packages/ui/src` `.ts`+`.tsx` non-test |
+| All packages | **1151** | `packages/*/src` |
+| Daemon | **623** (**408** under `domain/`, **24** under `adapters/`) | `packages/daemon/src`, `…/src/domain`, `…/src/adapters` |
+| CLI | **161** | `packages/cli/src` |
+| Web UI | **304** | `packages/ui/src` |
+| TUI | **63** | `packages/tui/src` |
+| Database migrations | **91** (`001_core_schema.ts` … `091_human_questions.ts`) | `git ls-files packages/daemon/src/db/migrations \| wc -l` |
+| Files in `routes/` | **67**, of which **65** create a Hono router | `git ls-files packages/daemon/src/routes \| wc -l`; `git grep -l 'new Hono' -- packages/daemon/src/routes \| wc -l` |
+| `app.route(...)` mounts in `server.ts` | **69** | `grep -c 'app.route(' packages/daemon/src/server.ts` |
+| Top-level `rig` commands | **85** | `grep -c 'program.addCommand(' packages/cli/src/index.ts` |
+| MCP tools | **18**, all named `rig_*` | `grep -c 'server.tool(' packages/cli/src/mcp-server.ts` |
+| Runtime adapter classes | **5**: Claude Code, Codex, Pi, Stub, Terminal | `git grep -l 'implements RuntimeAdapter' packages/daemon/src \| wc -l` |
 
-> Footprint counts use the `find packages/*/src -type f \( -name '*.ts' -o
-> -name '*.tsx' \) ! -name '*.test.*'` predicate (tests live in separate
-> `packages/*/test/` dirs). Counts are reproducible with that predicate; a
-> different counting convention shifts absolute numbers (slice-00 OPEN-5).
+`OmpRuntimeAdapter` (Oh My Pi) extends `PiRuntimeAdapter`, so the daemon wires
+six runtime keys — `claude-code`, `codex`, `pi`, `omp`, `stub`, `terminal`
+(`startup.ts:941`).
 
 ### The stack
 
-> Drift-fix D2 — `architecture.md` L37,125 said `CLI (53 command groups)`.
-> Corrected to **58** at HEAD (slice-00 §1.2: 53 at v0.2.0 tag, 56 at v0.3.0,
-> 57 at v0.3.1, **58 at HEAD** — the 58th is `scopeCommand()` added post-0.3.1
-> by `0b77cba4`, re-confirmed `index.ts:20,187`).
->
-> Drift-fix D4 — `architecture.md` L40 said `31 route groups` and L76 said
-> "`createApp()` now mounts 22 route groups". Corrected to **49 `app.route()`
-> mounts + 4 dedicated handlers** (slice-00 §1.5; re-confirmed `server.ts`
-> 49×`app.route(` L450–513, plus `app.get("/healthz")` :446,
-> `handleExportYaml` :461, `handleExportJson` :462, `app.get("*")` :519).
-> Carry slice-00 **OPEN-2**: "route-group count is definitional" — there is
-> no single canonical "route group" definition in source; reported as mount
-> count + dedicated handlers.
->
-> Drift-fix D3 — `architecture.md` L54 said `SQLite state (36 migrations)`.
-> Corrected to **40** (slice-00 §1.3; re-confirmed below).
-
 ```text
-CLI (58 command groups) / UI (explorer + workspace + drawer) / MCP (17 tools)
+CLI (85 top-level commands) / TUI / web UI / MCP (18 tools)
       |
       v
-Hono daemon routes (49 app.route() mounts + 4 dedicated health/export/static handlers)
+Hono daemon routes (69 app.route() mounts + direct handlers for /healthz,
+                    spec export, unknown /api paths and the static UI)
       |
-      +-- dual-format route adapters (legacy v1 + rebooted v0.2)
+      +-- rigspec routes (pod-aware and legacy spec formats)
       +-- env routes (status / logs / down)
-      +-- transport routes (send/capture/broadcast)
-      +-- transcript routes (tail/grep)
-      +-- ask routes (context evidence packs)
+      +-- transport routes (send / capture / broadcast)
+      +-- transcript routes (tail / grep)
+      +-- ask routes (context evidence)
       +-- chat routes (durable rig messaging + SSE)
-      +-- spec review/library routes (managed-app enrichment + compose preview)
-      +-- whoami identity + context-usage route
-      +-- coordination routes (stream / queue / workflow / mission-control)
+      +-- spec review / spec library routes
+      +-- whoami identity route
+      +-- coordination routes (stream / queue / workflow / mission control)
       |
       v
-Framework-free domain services (173 daemon domain files)
+Framework-free domain services (408 files under packages/daemon/src/domain)
       |
-      +-- SQLite state (40 migrations)
+      +-- SQLite state (91 migrations)
       +-- tmux / cmux / resume adapters
-      +-- runtime adapters (Claude Code / Codex / Terminal)
-      +-- RigEnv substrate (compose adapter, readiness, orchestrator)
+      +-- runtime adapters (Claude Code / Codex / Pi / Oh My Pi / Stub / Terminal)
+      +-- rig environment services (compose adapter, service readiness, orchestrator)
       +-- transport / transcript / chat / ask layers
-      +-- whoami identity service
+      +-- whoami identity service (including context usage)
 ```
 
 The core product loop: `down (auto-snapshot) → up <rig-name> (auto-restore) →
 handoff → inspect/attach → work → repeat`.
 
-> MCP tool count is **17** (`rig_*`) — slice-00 §1.4 confirms the count is
-> correct and the names are `rig_*` (NOT `rigged_*`; the `rigged_*` text in
-> `architecture.md` §2 is stale — the rename predates v0.2.0). Per-occurrence
-> verification of any `rigged_*` reference lands in `transport-and-transcripts.md`
-> (D5); the tmux `@rigged_*` metadata keys are a separate axis, not blanket-replaced.
-
 ## 2. Database schema
 
-> Drift-fix D3 — `architecture.md` L243 said "27 migrations (22 existing plus
-> 5 added by PL-004 Phase A)" and L1002 repeated "27 migrations"; the §1 stack
-> diagram L54 said "36 migrations". All corrected to **40** migrations
-> (`001`–`040`). Triangulated (slice-00 §1.3, re-confirmed at HEAD): (1)
-> filesystem `packages/daemon/src/db/migrations/[0-9][0-9][0-9]_*.ts` → 40
-> files, `001_core_schema.ts` … `040_workflow_specs_diagnostic.ts`; (2)
-> `startup.ts:206` `migrate(db, [...])` passes a 40-element schema array
-> (`coreSchema` … `workflowSpecsDiagnosticSchema`); (3) `migrate.ts:13`
-> applies them sorted by name, tracked in `schema_migrations`.
+The migrations live in `packages/daemon/src/db/migrations/` (91 files,
+`001_core_schema.ts` … `091_human_questions.ts`). `ALL_MIGRATIONS`
+(`packages/daemon/src/db/all-migrations.ts:100`) lists all 91, and `createDaemon`
+applies them with `migrate(db, ALL_MIGRATIONS)` (`startup.ts:281`). `migrate.ts`
+sorts them by name (`:29`) and records each applied name in `schema_migrations`
+(`:15`).
 
-### Core state tables (`001_core_schema.ts`)
+### Core state tables
 
 `rigs` (topology container, `001_core_schema.ts:7`), `nodes` (logical node
-identity, `:17`), `edges` (logical topology relationships, `:30`), plus
-`bindings` (physical tmux/cmux surface attachment), `sessions` (live execution
-state), `events` (append-only event log), `snapshots` (serialized rig state),
-`checkpoints` (per-node recovery state). `architecture.md` §3 L247–289.
+identity, `:17`) and `edges` (logical topology relationships, `:30`); then
+`bindings` (physical tmux/cmux surface attachment) and `sessions` (live
+execution state) in `002_bindings_sessions.ts`, `events` (append-only event log)
+in `003_events.ts`, `snapshots` (serialized rig state) in `004_snapshots.ts`, and
+`checkpoints` (per-node recovery state) in `005_checkpoints.ts`.
 
-### Reboot-era schema
+### Pod-aware schema
 
-- `014_agentspec_reboot.ts` — reboot schema shape; adds `pods`,
-  `continuity_state`, and reboot columns on `nodes`/`sessions`/`checkpoints`
-  (`pod_id`, `agent_ref`, `resolved_spec_*`, `startup_status`,
-  `continuity_source`). `architecture.md` §3 L253–289.
+- `014_agentspec_reboot.ts` — the pod-aware schema; adds the `pods` and
+  `continuity_state` tables and pod-aware columns on `nodes`, `sessions` and
+  `checkpoints`.
 - `015_startup_context.ts` — persisted startup replay context for restore.
 - `016_chat_messages.ts` — durable rig-scoped chat (SQLite-backed; transcripts
   remain filesystem-backed via pipe-pane).
@@ -155,106 +118,105 @@ state), `events` (append-only event log), `snapshots` (serialized rig state),
 - `020_rig_services.ts` — rig-scoped environment record for service-backed rigs.
 - `021_seat_handover_observability.ts`, `022_node_codex_config_profile.ts`.
 
-### Coordination / PL-004 / PL-005 / workspace migrations
+### Coordination, workflow, mission control and workspace migrations
 
-- `023_stream_items.ts` … `027_outbox_entries.ts` — PL-004 Phase A
-  coordination tables (detail in `coordination-primitive.md`).
+- `023_stream_items.ts` … `027_outbox_entries.ts` — the coordination tables
+  (stream, queue, queue transitions, inbox, outbox; detail in
+  `coordination-primitive.md`).
 - `028_project_classifications.ts`, `029_classifier_leases.ts`,
-  `030_views_custom.ts` — PL-004 Phase B classifier + view tables. (Note:
-  `architecture.md` L361 said "028 through 030"; the middle migration is
-  literally `029_classifier_leases.ts` — re-confirmed at HEAD.)
-- `031_watchdog_jobs.ts`, `032_watchdog_history.ts` — PL-004 Phase C watchdog.
+  `030_views_custom.ts` — classifier and view tables.
+- `031_watchdog_jobs.ts`, `032_watchdog_history.ts` — watchdog tables.
 - `033_workflow_specs.ts`, `034_workflow_instances.ts`,
-  `035_workflow_step_trails.ts` — PL-004 Phase D Workflow Runtime tables
-  (detail in `workflow-runtime.md`). `036_watchdog_policy_enum_extension.ts`
-  is a documenting no-op.
-- `037_mission_control_actions.ts` — PL-005 Phase A audit table
-  (`037_mission_control_actions.ts:54` `CREATE TABLE … mission_control_actions`;
-  detail in `mission-control.md`).
-- `038_workspace_primitive.ts`, `039_queue_target_repo.ts` — PL-007 typed
-  workspace primitive (`bab24bf7`).
-- `040_workflow_specs_diagnostic.ts` — slice-11 (`f68f453a`); an
-  `ALTER TABLE ADD COLUMN` adding parser/validator diagnostic columns to
-  `workflow_specs` (no new table). **Net-new since `architecture.md` was last
-  edited** — slice-00 §1.3 provenance; carried into `workflow-runtime.md`.
+  `035_workflow_step_trails.ts` — workflow runtime tables (detail in
+  `workflow-runtime.md`). `036_watchdog_policy_enum_extension.ts` runs no SQL; it
+  documents an enum extension.
+- `037_mission_control_actions.ts` — the mission control audit table
+  (`037_mission_control_actions.ts:58`; detail in `mission-control.md`).
+- `038_workspace_primitive.ts`, `039_queue_target_repo.ts` — the typed workspace
+  primitive.
+- `040_workflow_specs_diagnostic.ts` — `ALTER TABLE workflow_specs ADD COLUMN`
+  for parser/validator diagnostics (no new table).
 
-Legacy package/bootstrap/discovery tables (`packages`, `package_installs`,
-`install_journal`, `bootstrap_runs`, `bootstrap_actions`,
-`runtime_verifications`, `discovered_sessions`) remain active.
+Migrations `041`–`091` continue in the same directory; list them with
+`git ls-files packages/daemon/src/db/migrations`.
+
+The package, bootstrap and discovery tables remain: `packages`
+(`008_packages.ts`), `package_installs` and `install_journal`
+(`009_install_journal.ts`), `bootstrap_runs`, `bootstrap_actions` and
+`runtime_verifications` (`011_bootstrap.ts`), and `discovered_sessions`
+(`012_discovery.ts`).
 
 ## 3. Route-mount surface
 
-`createApp(deps)` (`packages/daemon/src/server.ts:295`) mounts **49**
-`app.route()` route-group mounts (`server.ts` L450–513) plus 4 dedicated
-non-route handlers: `GET /healthz` (`:446`), `GET /api/rigs/:rigId/spec`
-(`handleExportYaml`, `:461`), `GET /api/rigs/:rigId/spec.json`
-(`handleExportJson`, `:462`), and the static/deep-link `app.get("*")`
-catch-all (`:519`).
+`createApp(deps)` (`packages/daemon/src/server.ts:441`) mounts **69**
+`app.route()` route groups (`server.ts:724`–`839`) plus direct handlers:
+`GET /healthz` (`:665`), `GET /api/rigs/:rigId/spec` (`handleExportYaml`,
+`:736`), `GET /api/rigs/:rigId/spec.json` (`handleExportJson`, `:737`), a JSON
+`404 not_found` for any other `/api/*` path (`:844`), and the static/deep-link
+`app.get("*")` catch-all (`:853`).
 
-> OPEN-2 (carried verbatim, slice-00): the route-group "count" is definitional
-> — "49" is the count of `app.route()` mounts in `server.ts`. The older
-> "31 route groups" / "createApp now mounts 22 route groups" framing
-> (`architecture.md` L40,76) used a different, smaller accounting. Independent
-> corroboration: `packages/daemon/src/routes/` has 46 non-test route `.ts`
-> files (some groups composed from shared modules; the 49 mounts are the
-> authoritative count of mounted groups — slice-00 §1.5).
+The 69 is the count of `app.route(` lines in `server.ts`; `packages/daemon/src/routes/`
+has 67 files, 65 of which create a Hono router.
 
-Mount families include reboot-era rig/session/spec routes plus the coordination
-routes (`/api/stream` `server.ts:489`, `/api/queue` `:490`,
-`/api/workflow` `:495`, `missionControlRoutes(...)` `:498`),
-`/api/health-summary` (`:511`), `/api/rigs/:rigId/env` (`:512`), and
-`/api/restore-check` (`:513`).
+Mount families include the rig, session and spec routes plus the coordination
+routes (`/api/stream` `server.ts:784`, `/api/queue` `:785`, `/api/workflow`
+`:790`, `missionControlRoutes(...)` `:793`), `/api/health-summary` (`:829`),
+`/api/rigs/:rigId/env` (`:835`) and `/api/restore-check` (`:836`).
+
+`createAppWithWebSocket(deps)` (`server.ts:893`) sets `enableNodeWebSocket` and
+calls `createApp`; the terminal WebSocket is registered only when the web UI is
+also enabled (`server.ts:757`).
 
 ## 4. Startup sequence (`createDaemon`)
 
-`createDaemon(opts?)` is `packages/daemon/src/startup.ts:203` (async,
-returns `DaemonResult`). It returns `{ app, db, deps, contextMonitor }`
-(`startup.ts:1204`). The sequence (`architecture.md` §9 L1000–1028,
-corrected against source):
+`createDaemon(opts?)` is `packages/daemon/src/startup.ts:272` (async, returns
+`DaemonResult`). It returns `{ app, db, deps, contextMonitor, eventLoopMonitor,
+injectWebSocket }` (`startup.ts:2448`). In source order, it:
 
-1. Open SQLite and run **all 40 migrations** (`startup.ts:206`
-   `migrate(db, [coreSchema … workflowSpecsDiagnosticSchema])` — a 40-element
-   array; `architecture.md` L1002 said "27 migrations (22 existing plus the 5
-   PL-004 Phase A coordination tables)" — corrected to 40, drift-fix D3).
-2. Construct core repositories and legacy services.
-3. Construct package/bootstrap/discovery services.
-4. Construct rebooted startup/runtime services: `StartupOrchestrator`,
-   `ClaudeCodeAdapter`, `CodexRuntimeAdapter`, `TerminalAdapter`,
-   `PodRigInstantiator`, `PodBundleSourceResolver`.
-5. Construct rig environment services: `ComposeServicesAdapter`,
-   `ServiceOrchestrator`.
-6. Construct operator/transport/history services: `TranscriptStore`,
-   `SessionTransport`, `ChatRepository`, `AskService` (with `HistoryQuery`),
-   `ResumeMetadataRefresher`, `ContextUsageStore`, `ContextMonitor`,
-   `NodeInventory`.
-7. Construct authoring/identity/managed-app services: `SpecReviewService`,
-   `SpecLibraryService`, `WhoamiService`.
-8. Construct `BootstrapOrchestrator` with both legacy and rebooted seams.
-9. Construct PL-004 Phase A coordination services from a shared
-   `QueueRepository` instance (so `InboxHandler.absorb()` and `/api/queue`
-   write to the same repo): `StreamStore`, `QueueRepository`, `InboxHandler`,
-   `OutboxHandler`.
-10. Build `AppDeps`, enforce shared-DB invariants, and call
-    `createApp(deps)` (`startup.ts:1202`) to mount the full route tree.
+1. Opens SQLite and applies all 91 migrations (`migrate(db, ALL_MIGRATIONS)`,
+   `startup.ts:281`).
+2. Constructs the coordination stores early: `StreamStore` (`:313`),
+   `QueueRepository` (`:411`) and `OutboxHandler` (`:426`).
+3. Constructs `TranscriptStore` (`:538`) and the rig environment services
+   `ComposeServicesAdapter` and `ServiceOrchestrator` (`:617`–`618`).
+4. Constructs `StartupOrchestrator` (`:749`) and the runtime adapters:
+   `ClaudeCodeAdapter` (`:751`), `CodexRuntimeAdapter` (`:752`),
+   `PiRuntimeAdapter` (`:755`), `OmpRuntimeAdapter` (`:756`) and
+   `StubRuntimeAdapter` (`:761`); the terminal adapter is created inline in the
+   runtime adapter map (`:941`).
+5. Constructs `PodRigInstantiator` (`:937`), `PodBundleSourceResolver` (`:966`)
+   and `BootstrapOrchestrator` (`:968`).
+6. Constructs `ContextUsageStore` (`:1042`), `ResumeMetadataRefresher`
+   (`:1070`), `SpecReviewService` (`:1094`) and `WhoamiService` (`:1097`).
+7. Constructs `SessionTransport` (`:1202`), `ChatRepository` (`:1236`),
+   `InboxHandler` (`:1240`), `AskService` (`:1289`) and `SpecLibraryService`
+   (`:1327`). `InboxHandler` receives the same queue repository instance
+   (`queueRepoInstance`) that serves `/api/queue`, so absorbed inbox items and the
+   queue route write to one store.
+8. Constructs `ContextMonitor` (`:2351`).
+9. Builds `AppDeps` and calls `createAppWithWebSocket(deps)` (`startup.ts:2446`)
+   to mount the full route tree.
 
-The daemon entrypoint `packages/daemon/src/index.ts:36` calls
-`createDaemon({ dbPath, bearerToken })`.
+Node inventory is a set of functions (`getNodeInventory` and friends in
+`domain/node-inventory.ts`), imported where needed rather than constructed at
+startup.
 
-## 5. Test and verification state
+The daemon entrypoint `packages/daemon/src/index.ts:298` calls
+`createDaemon({ dbPath, bearerToken, terminalBearerToken, … })`.
 
-> Drift-fix D7 / OPEN-3 (carried verbatim, slice-00): `architecture.md` L12,13
-> and §10 L1036–1046 assert daemon `2561/2561` / CLI `794/794` / total
-> `2422/2422` test pass counts and per-package file counts (`127`/`37`/`37`).
-> **These are runtime claims and are NOT re-run here** — a read-only static
-> trace counted `*.test.ts` files only: daemon **255**, cli **234**
-> (slice-00 §1.7; ui test-file count not separately gathered). Pass tallies
-> are marked `unverified-runtime-claim`; do not assert them as current. To
-> assert pass counts, run `pnpm/npm test` and re-verify.
+## 5. Test files
+
+A static count of tracked test files at `48f6cce7` (no pass counts are claimed
+here; CI runs the suites in `.github/workflows/tests.yml`): daemon **797**,
+CLI **214**, web UI **197**, TUI **92**
+(`git ls-files 'packages/<package>/**/*.test.ts' 'packages/<package>/**/*.test.tsx' | wc -l`).
 
 ## See also
 
-- `coordination-primitive.md` — PL-004 Phase A stream/queue/inbox/outbox.
+- `ARCHITECTURE.md` (repository root) — what OpenRig is and where to add things.
+- `coordination-primitive.md` — the stream/queue/inbox/outbox coordination layer.
 - `agent-spec-and-startup.md` — spec parsing/resolution/startup contract.
 - `lifecycle-snapshot-restore.md` — snapshot/restore/continuity.
 - Source roots: `packages/daemon/src/{startup.ts,server.ts,index.ts}`,
+  `packages/daemon/src/db/{all-migrations.ts,migrate.ts}`,
   `packages/daemon/src/db/migrations/`, `packages/cli/src/index.ts`.

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { RigSpecCodec, LegacyRigSpecCodec } from "../src/domain/rigspec-codec.js";
-import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
-import type { RigSpec } from "../src/domain/types.js";
+import { RigSpecSchema, LegacyRigSpecSchema } from "../src/domain/rigspec-schema.js";
+import type { RigSpec, LegacyRigSpec } from "../src/domain/types.js";
 
 const VALID_RIG: RigSpec = {
   version: "0.2",
@@ -52,6 +52,67 @@ describe("RigSpec codec (pod-aware)", () => {
     expect(yaml).toContain("culture_file: culture.md");
     const parsed = RigSpecCodec.parse(yaml) as Record<string, unknown>;
     expect(parsed["culture_file"]).toBe("culture.md");
+  });
+
+  it("member effort round-trips through serialize/parse/normalize", () => {
+    const rigWithEffort: RigSpec = {
+      version: "0.2",
+      name: "effort-test",
+      pods: [{
+        id: "dev",
+        label: "Dev",
+        members: [{ id: "impl", agentRef: "local:agents/impl", profile: "tdd", runtime: "claude-code", cwd: ".", effort: "high" }],
+        edges: [],
+      }],
+      edges: [],
+    };
+
+    const yaml = RigSpecCodec.serialize(rigWithEffort);
+    expect(yaml).toContain("effort: high");
+    const parsed = RigSpecCodec.parse(yaml) as Record<string, unknown>;
+    const normalized = RigSpecSchema.normalize(parsed);
+    expect(normalized.pods[0]!.members[0]!.effort).toBe("high");
+  });
+
+  it("loads YAML with member effort through validation, normalization, and serializes back", () => {
+    const rawYaml = `
+version: "0.2"
+name: yaml-effort-rig
+pods:
+  - id: dev
+    label: Development
+    members:
+      - id: seat-a
+        agent_ref: local:agents/impl
+        profile: tdd
+        runtime: claude-code
+        effort: low
+        cwd: .
+      - id: seat-b
+        agent_ref: local:agents/qa
+        profile: reviewer
+        runtime: codex
+        effort: xhigh
+        cwd: .
+    edges: []
+edges: []
+`;
+    const parsed = RigSpecCodec.parse(rawYaml) as Record<string, unknown>;
+    const val = RigSpecSchema.validate(parsed);
+    expect(val.valid).toBe(true);
+
+    const normalized = RigSpecSchema.normalize(parsed);
+    expect(normalized.pods[0]!.members[0]!.effort).toBe("low");
+    expect(normalized.pods[0]!.members[1]!.effort).toBe("xhigh");
+
+    const reserialized = RigSpecCodec.serialize(normalized);
+    expect(reserialized).toContain("effort: low");
+    expect(reserialized).toContain("effort: xhigh");
+
+    const reparsed = RigSpecCodec.parse(reserialized) as Record<string, unknown>;
+    const renorm = RigSpecSchema.normalize(reparsed);
+    expect(renorm.pods[0]!.members[0]!.effort).toBe("low");
+    expect(renorm.pods[0]!.members[1]!.effort).toBe("xhigh");
   });
 
   // R1: continuity_policy nested booleans round-trip through serialize -> parse -> normalize
@@ -193,5 +254,35 @@ describe("RigSpec codec (pod-aware)", () => {
   it("specs with no starter_ref roundtrip cleanly (no spurious field emitted)", () => {
     const yaml = RigSpecCodec.serialize(VALID_RIG);
     expect(yaml).not.toContain("starter_ref:");
+  });
+});
+
+describe("LegacyRigSpecCodec", () => {
+  it("legacy node effort round-trips through serialize/parse/normalize", () => {
+    const legacyRig: LegacyRigSpec = {
+      schemaVersion: 1,
+      name: "legacy-effort-rig",
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "worker",
+          runtime: "claude-code",
+          model: "claude-3-7-sonnet-20250219",
+          effort: "high",
+          cwd: "/workspace",
+        },
+      ],
+      edges: [],
+    };
+
+    const yaml = LegacyRigSpecCodec.serialize(legacyRig);
+    expect(yaml).toContain("effort: high");
+
+    const parsed = LegacyRigSpecCodec.parse(yaml);
+    const validation = LegacyRigSpecSchema.validate(parsed);
+    expect(validation.valid).toBe(true);
+
+    const normalized = LegacyRigSpecSchema.normalize(parsed);
+    expect(normalized.nodes[0]!.effort).toBe("high");
   });
 });

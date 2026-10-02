@@ -23,7 +23,7 @@ describe("forwarded queue response outcomes reach the CLI", () => {
     }
   });
 
-  it.each(["interrupted", "success", "refused"] as const)("renders %s without retrying", async (mode) => {
+  it.each(["interrupted", "success", "refused"] as const)("renders %s without retrying, with a preallocated ID", async (mode) => {
     const requests: Array<{ method?: string; path?: string; body: Record<string, unknown> }> = [];
     server = createServer(async (req, res) => {
       let body = "";
@@ -37,7 +37,7 @@ describe("forwarded queue response outcomes reach the CLI", () => {
         setTimeout(() => res.destroy(), 50);
       } else {
         res.writeHead(mode === "success" ? 201 : 409, { "content-type": "application/json" });
-        res.end(JSON.stringify(mode === "success" ? { qitemId: "qitem-proof" } : { error: "qitem_id_reuse" }));
+        res.end(JSON.stringify(mode === "success" ? { qitemId: requests[0]!.body.qitemId } : { error: "qitem_id_reuse" }));
       }
     });
     server.listen(0, "127.0.0.1");
@@ -70,25 +70,34 @@ describe("forwarded queue response outcomes reach the CLI", () => {
     program.addCommand(queueCommand(deps));
     await program.parseAsync([
       "node", "rig", "queue", "create", "--destination", "worker@rig", "--body", "proof",
-      "--summary", "proof", "--host", "edge", "--id", "qitem-proof", "--no-nudge", "--json",
+      "--summary", "proof", "--host", "edge", "--no-nudge", "--json",
     ]);
     const response = JSON.parse(String(output.mock.calls[0]?.[0]));
     const stderr = errors.mock.calls.map((call) => call.join(" ")).join("\n");
     expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({ method: "POST", path: "/api/queue/create", body: { qitemId: "qitem-proof", nudge: false } });
+    const id = requests[0]!.body.qitemId;
+    expect(typeof id).toBe("string");
+    expect(requests[0]).toMatchObject({ method: "POST", path: "/api/queue/create", body: { nudge: false } });
+    expect(stderr).toContain(`Queue create request ID: ${id}`);
+    expect(stderr).toContain("not proof of persistence");
+    expect(stderr).toContain("destination host 'edge'");
+    expect(stderr).toContain(`OPENRIG_URL='<destination-daemon-url>' rig queue show '${id}' --full --json`);
+    expect(stderr).not.toContain("--full --json on destination host");
     if (mode === "interrupted") {
       expect(response).toMatchObject({ error: "remote_queue_write_failed", hostId: "edge", remoteStatus: 201, outcome: "indeterminate" });
+      expect(response.qitemId).toBe(id);
+      expect(response.recovery).toContain(`--id '${id}'`);
       expect(stderr).toContain("INDETERMINATE");
       expect(stderr).toContain("reconcile by ID before any retry");
       expect(process.exitCode).toBe(2);
     } else if (mode === "success") {
-      expect(response).toEqual({ qitemId: "qitem-proof" });
-      expect(stderr).toBe("");
+      expect(response).toEqual({ qitemId: id });
+      expect(stderr).not.toContain("INDETERMINATE");
       expect(process.exitCode).toBeUndefined();
     } else {
       expect(response).toMatchObject({ failureClass: "remote-error", remoteStatus: 409, detail: "qitem_id_reuse" });
       expect(response.outcome).toBeUndefined();
-      expect(stderr).toBe("");
+      expect(stderr).not.toContain("INDETERMINATE");
       expect(process.exitCode).toBe(2);
     }
   });

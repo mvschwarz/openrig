@@ -92,6 +92,18 @@ describe("ClaudeResumeAdapter", () => {
       );
     });
 
+    it("#75: a SPEC-pinned effort emits --effort on the legacy resume command", async () => {
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({ sendText });
+      const adapter = new ClaudeResumeAdapter(tmux);
+
+      await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo", undefined, "gpt-5.4-cheap", undefined, undefined, "high");
+
+      expect(sendText.mock.calls[0]![1]).toBe(
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --permission-mode acceptEdits --model 'gpt-5.4-cheap' --effort 'high' --resume 'my-session'"
+      );
+    });
+
     it("returns { ok: true } on success", async () => {
       const adapter = new ClaudeResumeAdapter(mockTmux());
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");

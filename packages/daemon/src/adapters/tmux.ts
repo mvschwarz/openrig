@@ -471,9 +471,16 @@ export class TmuxAdapter {
   }
 
   async listPanes(target: string): Promise<TmuxPane[]> {
+    // Callers name a session (optionally with a window), or an immutable tmux
+    // id. Exact session matching prevents observing a prefix neighbor's pane.
+    // A bare leading '=' belongs to the literal session name. Only qualified
+    // targets already carry tmux's encoded exact-match syntax.
+    const namedTarget = target.includes(":") && target.startsWith("=") ? target : `=${target}`;
+    const exactTarget = /^[%$@]\d+$/.test(target) ? target
+      : namedTarget.includes(":") ? namedTarget : `${namedTarget}:`;
     try {
-      const output = await this.run(["tmux", "list-panes", "-t", target, "-F", PANE_FORMAT],
-        `tmux list-panes -t ${shellQuote(target)} -F "${PANE_FORMAT}"`);
+      const output = await this.run(["tmux", "list-panes", "-t", exactTarget, "-F", PANE_FORMAT],
+        `tmux list-panes -t ${shellQuote(exactTarget)} -F "${PANE_FORMAT}"`);
       return parseLines(output, parsePaneLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
@@ -496,8 +503,9 @@ export class TmuxAdapter {
       // Use `tmux has-session` directly for reliable existence check — avoids
       // parsing format-string output from `list-sessions` which can fail when
       // tab delimiters are malformed across tmux versions.
-      await this.run(["tmux", "has-session", "-t", name],
-        `tmux has-session -t ${shellQuote(name)}`);
+      const target = `=${name}`; // canonical session name, never a prefix lookup
+      await this.run(["tmux", "has-session", "-t", target],
+        `tmux has-session -t ${shellQuote(target)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       if (isSessionAbsenceError(err)) {

@@ -93,23 +93,30 @@ function readConfiguredContent(home) {
 
 // A live seat carries no OPENRIG_REFOCUS_WORK_NODE, so the trace used to report an
 // unresolved work node while the daemon could already name the seat's typed baton. Ask it.
-// The explicit variable always wins and short-circuits the call; any failure here returns
-// null and leaves the pre-existing gap line intact, because refusing to answer is correct
-// and guessing a work node would silently re-point the whole trace.
+// The explicit variable always wins and short-circuits the call. When the daemon names no
+// current work, its basis travels to the trace script, which alone decides how to render it;
+// a failed or unreadable answer is passed as UNKNOWN. Never guess a work node here: a guess
+// would silently re-point the whole trace.
 function deriveWorkStart() {
-  if (process.env.OPENRIG_REFOCUS_WORK_NODE) return process.env.OPENRIG_REFOCUS_WORK_NODE;
+  if (process.env.OPENRIG_REFOCUS_WORK_NODE) return { start: process.env.OPENRIG_REFOCUS_WORK_NODE };
   const result = spawnSync("rig", ["queue", "whoami", "--json"], {
     encoding: "utf8",
     env: process.env,
     timeout: 2_000,
     maxBuffer: 16 * 1024 * 1024,
   });
-  if (result.error || result.status !== 0 || !result.stdout || !result.stdout.trim()) return null;
+  if (result.error) return { unknown: `queue whoami failed: ${result.error.message}` };
+  if (result.status !== 0 || !result.stdout || !result.stdout.trim()) {
+    return { unknown: `queue whoami exited ${result.status ?? "without a status"} with no answer` };
+  }
   try {
-    const workNodePath = JSON.parse(result.stdout)?.currentWork?.workNodePath;
-    return typeof workNodePath === "string" && workNodePath ? workNodePath : null;
+    const answer = JSON.parse(result.stdout);
+    const workNodePath = answer?.currentWork?.workNodePath;
+    if (typeof workNodePath === "string" && workNodePath) return { start: workNodePath };
+    const basis = answer?.currentWorkBasis;
+    return typeof basis === "string" && basis ? { basis } : { unknown: "queue whoami named no current work and no basis" };
   } catch {
-    return null;
+    return { unknown: "queue whoami answer was not JSON" };
   }
 }
 
@@ -123,10 +130,10 @@ function renderTrace() {
   if (process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE) {
     args.push("--topology-start", process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE);
   }
-  const workStart = deriveWorkStart();
-  if (workStart) {
-    args.push("--work-start", workStart);
-  }
+  const work = deriveWorkStart();
+  if (work.start) args.push("--work-start", work.start);
+  else if (work.basis) args.push("--work-basis", work.basis);
+  else if (work.unknown) args.push("--work-unknown", work.unknown);
   const result = spawnSync(process.env.PYTHON || "python3", args, {
     encoding: "utf8",
     env: process.env,

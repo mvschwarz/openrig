@@ -43,7 +43,7 @@ Five host-scoped tables back the primitive, one per migration `023`–`027` in
   `067_i3_identity_provenance.ts`). Items immutable after emit (only
   `archived_at` may be set, `stream-store.ts:217`).
 - **`queue_items`** (`024_queue_items.ts`) — L3 owned-work queue.
-  Unless the caller passes its own id (for example `rig queue create --id`), the daemon mints each `qitem_id` (the TEXT primary key) with `newQitemId()` (`packages/daemon/src/domain/queue-repository.ts:433`) in the form `qitem-<UTC YYYYMMDDHHMMSS>-<8 hex>`, where the 8 hex digits are random.
+  Unless `--id` is supplied, the CLI generates the create request's `qitem_id` (TEXT PK) before sending as `qitem-<UTC YYYYMMDDHHMMSS>-<16 hex>` (64 random bits) and prints it to stderr as a request identity, not proof of persistence; reuse that ID with `--id` and the unchanged payload after an unknown outcome, while daemon callers without an ID still use `newQitemId()` and its `qitem-<UTC YYYYMMDDHHMMSS>-<8 hex>` form.
   State enum (**8** values, `QUEUE_STATES` at `queue-repository.ts:32`;
   `sed -n '/^export const QUEUE_STATES/,/] as const/p' packages/daemon/src/domain/queue-repository.ts | grep -c '^  "'`):
   `pending | in-progress | done | blocked | failed | denied | canceled |

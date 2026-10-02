@@ -329,13 +329,27 @@ export function getWorkflowReview(opts: ScanWorkflowSpecsOpts & { name: string; 
 }
 
 export function workflowLibraryId(name: string, version: string): string {
+  // Legacy IDs round-trip every name, but only versions without a colon.
+  // An opaque tuple keeps colon-bearing versions distinct without changing
+  // any already-unambiguous ID. Legacy valid IDs always contain another colon.
+  if (version.includes(":")) return `workflow:@${Buffer.from(JSON.stringify([name, version])).toString("base64url")}`;
   return `workflow:${name}:${version}`;
 }
 
 export function parseWorkflowLibraryId(id: string): { name: string; version: string } | null {
   if (!id.startsWith("workflow:")) return null;
   const rest = id.slice("workflow:".length);
-  // version may be numeric or an arbitrary string; split on the LAST `:`.
+  if (rest.startsWith("@") && !rest.includes(":")) {
+    try {
+      const encoded = rest.slice(1);
+      const bytes = Buffer.from(encoded, "base64url");
+      if (!encoded || bytes.toString("base64url") !== encoded) return null;
+      const pair: unknown = JSON.parse(bytes.toString("utf8"));
+      if (!Array.isArray(pair) || pair.length !== 2 || pair.some(value => typeof value !== "string")) return null;
+      return { name: pair[0], version: pair[1] };
+    } catch { return null; }
+  }
+  // Preserve legacy names (including literal percent sequences and colons).
   const lastColon = rest.lastIndexOf(":");
   if (lastColon === -1) return null;
   return { name: rest.slice(0, lastColon), version: rest.slice(lastColon + 1) };

@@ -117,8 +117,12 @@ export function renderDaemonTransportError(
   } else if (e instanceof DaemonConnectionError) {
     parts = {
       fact: e.message,
-      consequence: "The command was not delivered.",
-      action: "Confirm the daemon is reachable with 'rig daemon status'; if it is down, start it with 'rig up' or 'rig daemon start'.",
+      consequence: e.writeOutcome === "unknown"
+        ? "The command's outcome is UNKNOWN — no usable response confirmed whether the write was applied."
+        : "The command was not delivered.",
+      action: e.writeOutcome === "unknown"
+        ? "Check 'rig daemon status' on the affected host; if it is down, start it with 'rig daemon start'. Reconcile using the recovery ID before any retry. A lost connection does not prove the write failed."
+        : "Confirm the daemon is reachable with 'rig daemon status'; if it is down, start it with 'rig up' or 'rig daemon start'.",
     };
   }
   if (!parts) return false;

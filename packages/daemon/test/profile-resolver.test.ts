@@ -219,6 +219,61 @@ describe("Profile resolver + precedence engine", () => {
     if (result.ok) expect(result.config.model).toBe("opus");
   });
 
+  it("rig member effort overrides profile preference", () => {
+    const ctx = makeCtx({
+      baseSpec: makeResolved(makeSpec({
+        defaults: { effort: "low" },
+        profiles: { default: { preferences: { effort: "medium" }, uses: { skills: ["skill-a"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } },
+      })),
+      member: makeMember({ effort: "high" }),
+    });
+
+    const result = resolveNodeConfig(ctx);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.effort).toBe("high");
+  });
+
+  it("profile preference effort overrides spec defaults", () => {
+    const ctx = makeCtx({
+      baseSpec: makeResolved(makeSpec({
+        defaults: { effort: "low" },
+        profiles: { default: { preferences: { effort: "medium" }, uses: { skills: ["skill-a"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } },
+      })),
+      member: makeMember(),
+    });
+
+    const result = resolveNodeConfig(ctx);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.effort).toBe("medium");
+  });
+
+  it("spec defaults effort is used when member and profile omit effort", () => {
+    const ctx = makeCtx({
+      baseSpec: makeResolved(makeSpec({
+        defaults: { effort: "low" },
+        profiles: { default: { uses: { skills: ["skill-a"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } },
+      })),
+      member: makeMember(),
+    });
+
+    const result = resolveNodeConfig(ctx);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.effort).toBe("low");
+  });
+
+  it("effort is undefined when omitted everywhere", () => {
+    const ctx = makeCtx({
+      baseSpec: makeResolved(makeSpec({
+        profiles: { default: { uses: { skills: ["skill-a"], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } },
+      })),
+      member: makeMember(),
+    });
+
+    const result = resolveNodeConfig(ctx);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.config.effort).toBeUndefined();
+  });
+
   // T6: rig member cwd is authoritative
   it("rig member cwd is authoritative", () => {
     const ctx = makeCtx({

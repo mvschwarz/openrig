@@ -2,6 +2,7 @@ import { Command } from "commander";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { acquireDaemonStartLock } from "../daemon-start-lock.js";
+import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
 import {
@@ -215,7 +216,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           const timeoutMs = opts.waitForKernelMs && /^\d+$/.test(opts.waitForKernelMs)
             ? parseInt(opts.waitForKernelMs, 10)
             : 60_000;
-          const baseUrl = `http://${state.host}:${state.port}`;
+          const baseUrl = `http://${formatDaemonHostForUrl(state.host ?? "127.0.0.1")}:${state.port}`;
           const result = await waitForKernelReady(baseUrl, timeoutMs);
           if (result.ok) {
             console.log(`Kernel ${result.kernelState}; variant=${result.variant ?? "(none)"}`);

@@ -1388,7 +1388,10 @@ export class QueueRepository {
     }
   }
 
-  async create(input: QueueCreateInput): Promise<QueueItem> {
+  async create(input: QueueCreateInput): Promise<QueueItem & {
+    /** Response-only: the retry's changed body was not written. Never stored on the row. */
+    createWarning?: { code: "qitem_body_not_saved"; message: string };
+  }> {
     // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 4 / ruling cb19867f Q2):
     // a LOCAL write stores the bare transport identity — no self-host suffix inside one
     // instance. Host identity is added only at the cross-host forwarding boundary
@@ -1419,6 +1422,18 @@ export class QueueRepository {
             existing.destinationSession === input.destinationSession &&
             existing.sourceSession === input.sourceSession
           ) {
+            // Keep retry compatibility, but never imply that an absorbed,
+            // different body was saved. Decide at the actual PK conflict,
+            // rather than comparing a fresh create's post-nudge readback.
+            if (existing.body !== input.body) {
+              return {
+                ...existing,
+                createWarning: {
+                  code: "qitem_body_not_saved",
+                  message: `qitem ${input.qitemId} already exists with a different body. The supplied body was not saved; the existing row is returned unchanged. No new work or delivery was created.`,
+                },
+              };
+            }
             return existing;
           }
           throw new QueueRepositoryError(

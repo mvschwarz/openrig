@@ -190,7 +190,7 @@ describe("PluginVendorService release-version authority", () => {
       "09601be0c704da9bf49eb2c8b174f9caa2983fd11fc5df9333b49ab28d4d3bfc",
     );
     expect(sha256(fs.readFileSync(bundledHook))).toBe(
-      "3537a378c3424193fe27e5b95198c0a15f57ec48ce511e1de129a5a63211ff5c",
+      "c7c4298b512393e9526a157f7afcfa3b8a2800fa6da3871bc5de4378c24cee8b",
     );
 
     const svc = new PluginVendorService({
