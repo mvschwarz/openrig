@@ -496,6 +496,33 @@ describe("RestoreCheckService", () => {
     }
   });
 
+  it("accepts real OPENRIG_HOME evidence inside a literal dot-prefixed directory", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "restore-dot-prefix-"));
+    const evidence = path.join(root, "..cache", "launchd.plist");
+    const declaration = path.join(root, "host-infra.json");
+    const previous = process.env["OPENRIG_HOME"];
+    process.env["OPENRIG_HOME"] = root;
+    fs.mkdirSync(path.dirname(evidence));
+    fs.writeFileSync(evidence, "synthetic local launch evidence");
+    fs.writeFileSync(declaration, v2HostInfraDeclaration({
+      daemonEvidencePaths: ["${OPENRIG_HOME}/..cache/launchd.plist"], supportingInfra: [],
+    }));
+    try {
+      const service = new RestoreCheckService(mockDeps({
+        listRigs: () => [], exists: fs.existsSync,
+        readFile: (candidate) => fs.readFileSync(candidate, "utf8"),
+      }));
+      const result = service.check({ noQueue: true, noHooks: true });
+      const check = result.checks.find((entry) => entry.check === "host.bootstrap-autostart.declaration");
+      expect(check?.status).toBe("green");
+      expect(check?.evidence).toContain(evidence);
+    } finally {
+      if (previous === undefined) delete process.env["OPENRIG_HOME"];
+      else process.env["OPENRIG_HOME"] = previous;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("schemaVersion 2 missing daemon evidence path is yellow with exact path", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-check-host-infra-v2-missing-daemon-"));
     const declarationPath = path.join(tmpDir, "host-infra.json");
