@@ -70,6 +70,12 @@ export function queueRoutes(): Hono {
   function getRepo(c: { get: (key: string) => unknown }): QueueRepository {
     return c.get("queueRepo" as never) as QueueRepository;
   }
+  function destinationAdvisory(c: { get: (key: string) => unknown }, sessionRef: string) {
+    // This observation runs after the write commits. An unavailable lookup
+    // must neither fail that write nor misreport membership as unmatched.
+    try { return getRepo(c).destinationAdvisory(sessionRef); }
+    catch { return null; }
+  }
   function getInbox(c: { get: (key: string) => unknown }): InboxHandler {
     return c.get("inboxHandler" as never) as InboxHandler;
   }
@@ -482,7 +488,8 @@ export function queueRoutes(): Hono {
         nudge: (body as { nudge?: boolean }).nudge,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      return c.json(item, 201);
+      const advisory = destinationAdvisory(c, item.destinationSession);
+      return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -658,7 +665,8 @@ export function queueRoutes(): Hono {
         nudge: (body as { nudge?: boolean }).nudge,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      return c.json(result, 201);
+      const advisory = destinationAdvisory(c, result.created.destinationSession);
+      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -730,7 +738,8 @@ export function queueRoutes(): Hono {
         nudge: body.nudge,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      return c.json(result, 201);
+      const advisory = destinationAdvisory(c, result.created.destinationSession);
+      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }

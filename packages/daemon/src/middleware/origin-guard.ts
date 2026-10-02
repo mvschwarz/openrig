@@ -5,6 +5,31 @@ export interface OriginGuardOptions {
 }
 
 /**
+ * Hostname of the `Host` header, normalized the way `URL.hostname` normalizes
+ * an Origin so the two can be compared directly.
+ *
+ * A bare `split(":")[0]` truncates a bracketed IPv6 authority: `[fd7a::1]:7433`
+ * becomes `[fd7a`, and the same-host comparison can never match (#405). Parsing
+ * instead keeps the brackets and lower-cases and compresses the address, exactly
+ * as `new URL(origin).hostname` does for the Origin side.
+ *
+ * Returns "" for a missing header, and for any value that is not a bare
+ * host[:port]: userinfo (`attacker@victim`) or a path would otherwise make the
+ * parse read a hostname the server was not addressed by. "" never matches an
+ * Origin, so an unparseable Host falls through to the other checks.
+ */
+export function hostHeaderHostname(rawHost: string | undefined): string {
+  const host = rawHost?.trim();
+  if (!host) return "";
+  if (/[@/\\?#]/.test(host)) return "";
+  try {
+    return new URL(`http://${host}`).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Origin Guard Middleware for REST API routes (/api/*).
  * Protects local daemon endpoints from Cross-Site Request Forgery (CSRF) and
  * unauthorized cross-origin requests from malicious web pages loaded in the operator's browser.
@@ -40,9 +65,7 @@ export function apiOriginProtection(options?: OriginGuardOptions): MiddlewareHan
     }
 
     const originHost = originUrl.hostname.toLowerCase();
-    const rawHostHeader = c.req.header("Host");
-    // Strip port if present
-    const requestHost = rawHostHeader ? rawHostHeader.split(":")[0]?.toLowerCase() : "";
+    const requestHost = hostHeaderHostname(c.req.header("Host"));
 
     const configuredAllowed = [
       ...(options?.allowedOrigins ?? []),

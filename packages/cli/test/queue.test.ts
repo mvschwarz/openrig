@@ -141,6 +141,43 @@ describe("rig queue CLI", () => {
     }
   });
 
+  it("create accepts an explicit source outside a managed seat as a body claim", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    await program.parseAsync(["node", "rig", "queue", "create", "--source", "external@rig",
+      "--destination", "bob@rig", "--body", "external work", "--summary", "External work", "--json"]);
+    expect(process.exitCode).toBeUndefined();
+    const body = calls.find(c => c.path === "/api/queue/create")?.body as Record<string, unknown>;
+    expect(body.sourceSession).toBe("external@rig");
+    expect(body.destinationSession).toBe("bob@rig");
+  });
+
+  it("create still requires a source when neither the managed env nor explicit claim is supplied", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "");
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    await program.parseAsync(["node", "rig", "queue", "create", "--destination", "bob@rig",
+      "--body", "external work", "--summary", "External work", "--json"]);
+    expect(process.exitCode).toBe(1);
+    expect(calls).toEqual([]);
+    expect(errors.join("\n")).toContain("--source is required");
+  });
+
+  it("create preserves the legacy managed source env without forwarding an explicit body claim", async () => {
+    vi.stubEnv("OPENRIG_SESSION_NAME", "");
+    vi.stubEnv("RIGGED_SESSION_NAME", "legacy@rig");
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    await program.parseAsync(["node", "rig", "queue", "create", "--source", "ignored@rig",
+      "--destination", "bob@rig", "--body", "legacy work", "--summary", "Legacy work", "--json"]);
+    expect(process.exitCode).toBeUndefined();
+    const body = calls.find(c => c.path === "/api/queue/create")?.body as Record<string, unknown>;
+    expect(body.sourceSession).toBeUndefined();
+  });
+
   it("create --human-questions-file sends the parsed questions; unreadable JSON is refused before any request", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "queue-human-questions-"));
     const file = path.join(directory, "questions.json");

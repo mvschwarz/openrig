@@ -37,6 +37,7 @@ export class LocalReadingController {
     try { result = await this.read(request); }
     catch (error) { result = { error: error instanceof Error ? error.message : String(error) }; }
     if (generation !== this.generation) return;
+    if (result.entries) this.state.selected = Math.max(0, Math.min(this.state.selected, result.entries.length - 1));
     Object.assign(this.state, { busy: false, result }); this.changed();
   }
   close() { this.generation++; }

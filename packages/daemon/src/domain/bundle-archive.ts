@@ -39,7 +39,7 @@ export async function pack(stagingDir: string, outputPath: string): Promise<stri
       gzip: { level: 9 },
       file: outputPath,
       cwd: stagingDir,
-      portable: true, // Normalizes uid/gid/mode
+      portable: true, // Omits machine-specific owner metadata
       mtime: new Date("2026-01-01T00:00:00Z"), // Fixed mtime for determinism
     },
     allFiles,
