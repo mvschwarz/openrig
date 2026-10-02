@@ -770,6 +770,16 @@ function percentageConstraint(key: string) {
 }
 
 const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  "transcripts.lines": (raw, value) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
+      throw new Error("Invalid transcripts.lines: must be an integer in [1, 1000000]");
+    }
+  },
+  "transcripts.poll_interval_seconds": (raw, value) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 3600) {
+      throw new Error("Invalid transcripts.poll_interval_seconds: must be an integer in [1, 3600]");
+    }
+  },
   "ui.timezone": (_raw, value) => {
     try {
       if (typeof value !== "string" || !value || /^[+-]/.test(value)) throw new Error();

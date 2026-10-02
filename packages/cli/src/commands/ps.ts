@@ -218,6 +218,7 @@ const ALLOWED_NODE_FIELDS = new Set([
 
 interface PsCliOptions {
   json?: boolean;
+  resources?: boolean;
   nodes?: boolean;
   full?: boolean;
   verbose?: boolean;
@@ -823,6 +824,7 @@ Exit codes:
 
   cmd
     .option("--json", "JSON output for agents")
+    .option("--resources", "Show this host’s load and transcript capture cost (also supports --host)")
     .option("--nodes", "Show per-node detail (current rig; -A for all rigs)")
     .option("--full", "Show all node-list fields per node (uncompacted rows; node-list recoveryGuidance/currentUsage live on the node detail, not the list)")
     .option("--verbose", "Alias for --full")
@@ -856,6 +858,11 @@ Exit codes:
       // every remote path).
       const sessionName = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
       const callerRig = sessionName ? extractRigName(sessionName) : undefined;
+      if (opts.resources && (opts.nodes || opts.allRigs || opts.rig || opts.session || opts.allHosts || opts.hosts || opts.limit || opts.fields || opts.filter || opts.summary || opts.active || opts.includeArchived || opts.full || opts.verbose)) {
+        console.error("rig ps --resources supports --json and one --host; rig/node filters and fan-out do not apply to host measurements.");
+        process.exitCode = 1;
+        return;
+      }
       const ladderError = validatePsLadder(opts, callerRig);
       if (ladderError) {
         console.error(ladderError);
@@ -913,6 +920,10 @@ Exit codes:
 
       const client = deps.clientFactory(getDaemonUrl(status));
 
+      if (opts.resources) {
+        await handleResources(client, opts.json);
+        return;
+      }
       if (opts.nodes) {
         await handleNodes(client, opts, parsedFilter, limit, fields, useEnvelope, undefined, scopedToSessionRig);
         return;
@@ -1378,6 +1389,7 @@ async function runCrossHostPs(
 
   // SSH path — reconstruct argv
   const argv: string[] = ["rig", "ps"];
+  if (opts.resources) argv.push("--resources");
   if (opts.nodes) argv.push("--nodes");
   if (opts.full) argv.push("--full");
   // OPR.0.4.0.34: forward the breadth flag so `--host h -A` keeps all-rigs
@@ -1450,6 +1462,10 @@ async function runHttpPs(
   const headers = buildRemoteHeaders(bearerResult.token);
 
   try {
+    if (opts.resources) {
+      await handleResources(client, opts.json, headers);
+      return;
+    }
     if (opts.nodes) {
       await handleNodes(client, opts, parsedFilter, limit, fields, useEnvelope, headers);
       return;
@@ -1670,4 +1686,36 @@ async function runFanOutPs(
   }
 
   if (hasFailure) process.exitCode = 3;
+}
+
+
+interface HostResources {
+  sampledAt: string; cpuCount: number; runningSeats: number;
+  loadAverage: number[] | null; loadPerCpu: number[] | null;
+  capture: {
+    rotatingSeats: number; idleSeats: number; captures: number; failures: number;
+    capturedBytes: number; captureDurationMs: number;
+    activeIntervalMs: number | null; lines: number | null; maxIdleIntervalMs: number;
+    settingsReloadError?: string | null;
+  };
+}
+
+async function handleResources(client: DaemonClient, json?: boolean, headers?: Record<string, string>): Promise<void> {
+  const response = await client.get<HostResources>("/api/ps/resources", headers ? { headers } : undefined);
+  if (response.status >= 400) {
+    console.error(`Host resource measurements unavailable (HTTP ${response.status}); this host may need a newer daemon.`);
+    process.exitCode = 2;
+    return;
+  }
+  const data = response.data;
+  if (json) { console.log(JSON.stringify(data)); return; }
+  console.log(`Host: ${data.cpuCount} available CPUs · ${data.runningSeats} running seats`);
+  console.log(data.loadAverage && data.loadPerCpu
+    ? `Load (1/5/15m): ${data.loadAverage.map((n) => n.toFixed(2)).join(" / ")} · per CPU: ${data.loadPerCpu.map((n) => n.toFixed(2)).join(" / ")} (not CPU utilization)`
+    : "Load average: unavailable on this platform");
+  const capture = data.capture;
+  console.log(`Transcript capture: ${capture.rotatingSeats} rotating · ${capture.idleSeats} backed off · ${capture.captures} attempts · ${capture.failures} failures`);
+  console.log(`Capture cost for currently rotating seats: ${capture.capturedBytes} bytes · ${capture.captureDurationMs.toFixed(1)} ms elapsed across captures (not daemon CPU time)`);
+  console.log(`Effective capture: ${capture.activeIntervalMs ?? "unavailable"} ms active · ${capture.maxIdleIntervalMs} ms idle ceiling · ${capture.lines ?? "unavailable"} trailing lines`);
+  if (capture.settingsReloadError) console.log(capture.settingsReloadError);
 }
