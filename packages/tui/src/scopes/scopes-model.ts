@@ -259,6 +259,7 @@ function proofStack(detail: SliceScopeSnap, width: number): ContentLine[] {
       { text: status, token: status === "ACCEPTED" ? "ok" : "warn", bold: true },
     ], width));
     lines.push(...wrapped(item.text, width, "    "));
+    lines.push(semantic([{ text: "    EVIDENCE", token: "dim", bold: true }], width));
     for (const line of proofEvidence(detail, item)) lines.push(...wrapped(line.text, width, "    ", line.token));
   }
   return lines;
