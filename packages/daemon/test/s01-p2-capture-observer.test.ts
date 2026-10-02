@@ -110,7 +110,7 @@ describe("S01/S02 P2 capture observer", () => {
         post: { state: "captured", content: "before\nhello world\n❯ " },
         regexResult: { ok: true, outcome: "delivered", verified: true },
       });
-      expect(obs!.seq).toBe(2); // seq 1 is this send's readiness probe
+      expect(obs!.seq).toBe(4); // readiness, pre-paste and pre-Enter probes precede the send result
       expect(typeof obs!.attemptId).toBe("string");
       expect(Object.isFrozen(obs)).toBe(true);
       expect(Object.isFrozen(obs!.binding)).toBe(true);
@@ -138,7 +138,7 @@ describe("S01/S02 P2 capture observer", () => {
       expect(obs!.pre).toEqual({ state: "not_requested" });
       expect(obs!.post).toEqual({ state: "not_requested" });
       expect(obs!.regexResult).toEqual({ ok: true });
-      expect(t.calls.capture).toBe(1); // only the pre-existing readiness-probe capture; P2 adds none
+      expect(t.calls.capture).toBe(3); // readiness plus both input boundaries; observing adds none
     });
 
     it("a failed paste leaves the post capture not_reached", async () => {
@@ -173,10 +173,9 @@ describe("S01/S02 P2 capture observer", () => {
       } });
       const o = new CaptureObserver();
       await transport(t.adapter, o).send("dev-impl@obs-rig", "x", { waitForIdleMs });
-      const [probe, send] = await drainAll(o);
+      const observations = await drainAll(o);
       const expected = { sessionName: "dev-impl@obs-rig", nodeId: node.id, occupant, pane: "%7" };
-      expect(probe!.binding).toEqual(expected);
-      expect(send!.binding).toEqual(expected);
+      for (const observation of observations) expect(observation.binding).toEqual(expected);
     });
 
     it("capture sequence and time survive sends completing in reverse order", async () => {
@@ -278,26 +277,26 @@ describe("S01/S02 P2 capture observer", () => {
         expect(other.result).toEqual(baseline.result);
         expect(other.calls).toEqual(baseline.calls);
       }
-      expect(full.stats()).toMatchObject({ recorded: 1, dropped: 2, queued: 1 }); // probe + send both dropped
+      expect(full.stats()).toMatchObject({ recorded: 1, dropped: 4, queued: 1 }); // probe + send both dropped
     });
 
     it("a slow or failing consumer never blocks recording and nothing is replayed", async () => {
       seed();
       const o = new CaptureObserver();
       const tr = transport(terminal().adapter, o);
-      await tr.send("dev-impl@obs-rig", "one"); // seq 1 probe, 2 send
+      await tr.send("dev-impl@obs-rig", "one"); // seq 1–3 probes, 4 send
       let release!: () => void;
       const slow = o.drain(() => new Promise<void>((r) => { release = r; }));
       expect(await o.drain(() => {})).toBe(0); // concurrent drain refused, not awaited
-      await tr.send("dev-impl@obs-rig", "two"); // seq 3, 4: recording continues while the consumer is stuck
-      expect(o.stats().queued).toBe(2);
+      await tr.send("dev-impl@obs-rig", "two"); // seq 5–8: recording continues while the consumer is stuck
+      expect(o.stats().queued).toBe(4);
       release();
-      expect(await slow).toBe(2);
+      expect(await slow).toBe(4);
       expect(await o.drain(() => { throw new Error("consumer down"); })).toBe(0);
-      expect(o.stats()).toMatchObject({ drained: 2, consumerFailures: 1, consumerFailedObservations: 2, queued: 0 });
+      expect(o.stats()).toMatchObject({ drained: 4, consumerFailures: 1, consumerFailedObservations: 4, queued: 0 });
       await tr.send("dev-impl@obs-rig", "three");
       const later = await drainAll(o);
-      expect(later.map((x) => x.seq)).toEqual([5, 6]); // the failed batch (3, 4) is not replayed
+      expect(later.map((x) => x.seq)).toEqual([9, 10, 11, 12]); // the failed batch (5–8) is not replayed
     });
 
     it("sequence numbers are ordered across observations", async () => {
@@ -306,10 +305,10 @@ describe("S01/S02 P2 capture observer", () => {
       const tr = transport(terminal().adapter, o);
       for (const text of ["a", "b", "c"]) await tr.send("dev-impl@obs-rig", text);
       const all = await drainAll(o);
-      expect(all.map((x) => x.seq)).toEqual([1, 2, 3, 4, 5, 6]);
-      expect(all.map((x) => x.seam)).toEqual(["probe_activity", "send_verify", "probe_activity", "send_verify", "probe_activity", "send_verify"]);
+      expect(all.map((x) => x.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+      expect(all.map((x) => x.seam)).toEqual(Array(3).fill(["probe_activity", "probe_activity", "probe_activity", "send_verify"]).flat());
       // The readiness probe is its own attempt; it never borrows the send's identity.
-      expect(new Set(all.map((x) => x.attemptId)).size).toBe(6);
+      expect(new Set(all.map((x) => x.attemptId)).size).toBe(12);
     });
   });
 

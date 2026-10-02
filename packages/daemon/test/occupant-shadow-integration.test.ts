@@ -25,6 +25,8 @@ function terminal(capture?:ShadowCapture) {
   return {db,tmux,transport,mutate:()=>{pane="%99";occupant="new";},setHook:(fn:()=>void)=>{hook=fn;},counts:()=>({probes,captures,pastes,enters})};
 }
 describe("disabled-by-default production observer ports",()=>{
+  // Each verified send observes readiness, pre-paste, pre-Enter, and its result.
+  // The three probe captures plus verification's before/after captures total five.
   it("stop disables capture immediately, flushes the retained active and queued rows once, and preserves ordinary send",async()=>{
     const rows:Observation[]=[];let release!:()=>void, entered!:()=>void, closes=0;
     const started=new Promise<void>(r=>{entered=r;});
@@ -32,12 +34,12 @@ describe("disabled-by-default production observer ports",()=>{
     const f=terminal(shadow);await f.transport.send("seat@rig","hello world",{verify:true});
     const draining=shadow.drain();await started;
     await f.transport.send("seat@rig","hello world",{verify:true});
-    expect(shadow.status().observer.recorded).toBe(4);
+    expect(shadow.status().observer.recorded).toBe(8);
     const stop=shadow.stop();expect(shadow.status().enabled).toBe(false);
     expect((await f.transport.send("seat@rig","hello world",{verify:true})).outcome).toBe("delivered");
-    expect(shadow.status().observer.recorded).toBe(4);release();await draining;
-    const status=await stop;expect(status.observer.queued).toBe(0);expect(rows).toHaveLength(4);expect(closes).toBe(1);
-    expect(status.sink).toMatchObject({completedRecords:4,dropped:0,stopped:true});
+    expect(shadow.status().observer.recorded).toBe(8);release();await draining;
+    const status=await stop;expect(status.observer.queued).toBe(0);expect(rows).toHaveLength(8);expect(closes).toBe(1);
+    expect(status.sink).toMatchObject({completedRecords:8,dropped:0,stopped:true});
     expect(await shadow.stop()).toEqual(status);expect(closes).toBe(1);
   });
   it("public stop requires an actor, drains retained observations, and cannot enable an absent collector",async()=>{
@@ -46,7 +48,7 @@ describe("disabled-by-default production observer ports",()=>{
     const app=new Hono();app.use("*",async(c,next)=>{c.set("shadowCapture" as never,shadow);await next();});app.route("/",projectsRoutes());
     expect((await app.request("/shadow/stop",{method:"POST"})).status).toBe(400);expect(shadow.status().enabled).toBe(true);
     const response=await app.request("/shadow/stop",{method:"POST",headers:{"x-openrig-session":"fixture@rig"}});
-    expect(await response.json()).toMatchObject({enabled:false,sink:{completedRecords:2,stopped:true}});expect(rows).toHaveLength(2);
+    expect(await response.json()).toMatchObject({enabled:false,sink:{completedRecords:4,stopped:true}});expect(rows).toHaveLength(4);
     const absent=new Hono().route("/",projectsRoutes());
     expect(await(await absent.request("/shadow/stop",{method:"POST",headers:{"x-openrig-session":"fixture@rig"}})).json()).toEqual({enabled:false,error:null});
   });
@@ -56,7 +58,7 @@ describe("disabled-by-default production observer ports",()=>{
     expect(configureShadowCapture(JSON.stringify({...config,destination:"relative"})).capture).toBeUndefined();
     const valid=configureShadowCapture(JSON.stringify(config));expect(valid.capture?.status().sink.reservedRecords).toBe(0);
     const f=terminal();expect((await f.transport.send("seat@rig","hello world",{verify:true})).outcome).toBe("delivered");
-    expect(f.counts()).toMatchObject({captures:3,pastes:1});
+    expect(f.counts()).toMatchObject({captures:5,pastes:1,enters:1});
     expect(inventoryCaptureOptions(f.db,undefined)).toEqual({});
   });
   it("transport entry snapshots node/occupant/pane before awaits and uses only existing captures",async()=>{
@@ -65,8 +67,11 @@ describe("disabled-by-default production observer ports",()=>{
     const f=terminal(shadow);f.setHook(f.mutate);
     expect((await f.transport.send("seat@rig","hello world",{verify:true})).outcome).toBe("delivered");
     expect(rows).toHaveLength(0);await shadow.drain();
-    expect(f.counts()).toMatchObject({captures:3,pastes:1});
-    expect(rows).toHaveLength(2);
+    expect(f.counts()).toMatchObject({captures:5,pastes:1,enters:1});
+    const plain=terminal();plain.setHook(plain.mutate);
+    expect((await plain.transport.send("seat@rig","hello world",{verify:true})).outcome).toBe("delivered");
+    expect(f.counts()).toEqual(plain.counts()); // observing adds no capture or input
+    expect(rows.map(row=>row.seam)).toEqual(["probe_activity","probe_activity","probe_activity","send_verify"]);
     for(const row of rows)expect(row.binding).toEqual({sessionName:"seat@rig",nodeId:"node",occupant:"old",pane:"%7"});
     expect(rows.find(x=>x.seam==="send_verify")!.regexResult).toMatchObject({outcome:"delivered"});
   });
@@ -90,7 +95,7 @@ describe("disabled-by-default production observer ports",()=>{
     const drain=shadow.drain();
     if(kind==="slow")await started;
     const result=await f.transport.send("seat@rig","hello world",{verify:true});
-    expect(result.outcome).toBe("delivered");expect(f.counts()).toMatchObject({pastes:2,captures:6});
+    expect(result.outcome).toBe("delivered");expect(f.counts()).toMatchObject({pastes:2,enters:2,captures:10});
     if(kind==="slow"){
       expect(shadow.status().observer.drainingBytes).toBeGreaterThan(0);
       // One pending drain only; overflow on the next send cannot spawn another sink call.
@@ -103,7 +108,7 @@ describe("disabled-by-default production observer ports",()=>{
     await drain;
     if(kind==="error")expect(shadow.status()).toMatchObject({sink:{errors:1,stopped:true},observer:{consumerFailures:1}});
     if(kind==="full")expect(shadow.status().sink).toMatchObject({reservedRecords:1,dropped:1});
-    if(kind==="bytes")expect(shadow.status().observer).toMatchObject({recorded:0,dropped:4});
+    if(kind==="bytes")expect(shadow.status().observer).toMatchObject({recorded:0,dropped:8});
   });
   it("HTTP drain is separate, cannot enable capture, requires an actor, and reports sink errors",async()=>{
     const shadow=new ShadowCapture(config,async()=>{throw Error("private destination unavailable");});
@@ -122,7 +127,7 @@ describe("disabled-by-default production observer ports",()=>{
     await terminal(capture).transport.send("seat@rig","hello world",{verify:true});await capture.drain();
     expect(fs.statSync(destination).mode & 0o777).toBe(0o600);
     const bytes=fs.readFileSync(destination,"utf8");expect(bytes.trim().split("\n")).toHaveLength(1);
-    expect(capture.status().sink).toMatchObject({reservedRecords:1,completedRecords:1,dropped:1,stopped:true});
+    expect(capture.status().sink).toMatchObject({reservedRecords:1,completedRecords:1,dropped:3,stopped:true});
     const existing=new ShadowCapture({...config,destination});
     await terminal(existing).transport.send("seat@rig","hello world",{verify:true});await existing.drain();
     expect(existing.status().sink.errors).toBe(1);expect(fs.readFileSync(destination,"utf8")).toBe(bytes);
