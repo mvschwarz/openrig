@@ -461,6 +461,28 @@ describe("SessionTransport", () => {
       expect(keys).toEqual(["C-m", "C-m"]);
     });
 
+    it("presses Enter on a later check when a large paste only finishes rendering after the first one", async () => {
+      seedCanonicalRig();
+      const keys: string[] = [];
+      const sleeps: number[] = [];
+      let typed = false;
+      let captures = 0;
+      const staged = `Brewed for 1m\n\n❯ ${MSG.replace(/\n/g, "\n  ")}\n─────────────────────────\n  ⏵⏵ bypass permissions on`;
+      const tmux = mockTmux({
+        sendText: async () => { typed = true; return { ok: true }; },
+        sendKeys: async (_t, k) => { keys.push(k.join(",")); return { ok: true }; },
+        // first check after the send: composer still rendering (empty); the second sees the staged text
+        capturePaneContent: async () => (typed && ++captures >= 2 ? staged : "❯ \n"),
+      });
+      const transport = createTransport(tmux, { sleep: async (ms) => { sleeps.push(ms); } });
+
+      const result = await transport.send("dev-impl@my-rig", MSG);
+
+      expect(result.ok).toBe(true);
+      expect(keys).toEqual(["C-m", "C-m"]);
+      expect(sleeps).toContain(1500);
+    });
+
     it("sends no extra key when the Enter was consumed (input box empty, text only in history)", async () => {
       seedCanonicalRig();
       const keys: string[] = [];

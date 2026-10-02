@@ -1402,16 +1402,24 @@ export class SessionTransport {
     // submit-only path once. It presses Enter only when the pane's current input holds this exact
     // text and refuses without sending a key otherwise, so a consumed send costs one capture.
     if (runtime === "claude-code" && !opts?.dangerouslyInteract) {
-      await this.sleep(500);
-      try {
-        await this.send(sessionName, "", {
-          submitOnly: true,
-          expectedStagedText: text,
-          expectedStagedLineCount: text.split("\n").length,
-          actorSession: opts?.actorSession,
-        });
-      } catch {
-        // Best effort: the original send already succeeded; never fail it over the confirmation.
+      // A large multi-line paste can take the TUI longer than one beat to render, so the staged
+      // text may not be visible yet at the first check: look once more later. A check that
+      // finds nothing staged presses nothing, so a later check cannot double-submit.
+      const checkDelaysMs = text.includes("\n") ? [500, 1500] : [500];
+      for (const delayMs of checkDelaysMs) {
+        await this.sleep(delayMs);
+        try {
+          const confirm = await this.send(sessionName, "", {
+            submitOnly: true,
+            expectedStagedText: text,
+            expectedStagedLineCount: text.split("\n").length,
+            actorSession: opts?.actorSession,
+          });
+          if (confirm.ok || confirm.reason !== "staged_mismatch") break;
+        } catch {
+          // Best effort: the original send already succeeded; never fail it over the confirmation.
+          break;
+        }
       }
     }
 
