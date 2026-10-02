@@ -1540,14 +1540,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       db,
       eventBus,
       rigRepo,
-      // R1 fix per guard PL-005 Phase A review: wire the production
-      // capability probe so /api/mission-control/cli-capabilities
-      // honestly reports drift when MISSION_CONTROL_DESIRED_FIELDS
-      // are missing from the local CLI's allow-list. Without this
-      // probe injection, the production path defaulted to a no-op
-      // that always reported staleCliCount=0 even when the audit-
-      // row-5 case (recoveryGuidance not in CLI allow-list) was
-      // present.
+      // This projection observes the daemon registry and queue, not a CLI.
+      // Leave CLI version/capabilities unknown until actually observed.
       probeRig: makeLocalCliCapabilityProbe(),
     });
     // V0.3.1 slice 05 kernel-rig-as-default — cascade the resolved

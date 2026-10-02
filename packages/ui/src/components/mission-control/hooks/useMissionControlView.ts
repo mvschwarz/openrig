@@ -35,6 +35,7 @@ export interface MissionControlViewResult {
   meta: {
     rowCount: number;
     rigsRunningStaleCli?: number;
+    rigsWithUnknownCliCapabilities?: number;
     degradedFields?: string[];
     sourceFallback?: string;
   };
