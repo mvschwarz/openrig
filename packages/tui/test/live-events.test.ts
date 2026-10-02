@@ -274,4 +274,22 @@ describe("bounded activity stream frames", () => {
       expect(events.at(-1)).toEqual({ type: "seat.activity_changed", seq: 1 });
     } finally { sub.close(); }
   });
+
+  it("reconnects without waiting for underlying oversized-frame cancellation", async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    const cancel = vi.fn(() => pending);
+    const response = new Response(new ReadableStream<Uint8Array>({ start(c) { controller = c; }, cancel }));
+    const statuses: string[] = [];
+    const open = vi.fn(async () => open.mock.calls.length === 1 ? response : null);
+    const sub = subscribeActivityEvents({ open, onEvent: () => {}, onStatus: s => statuses.push(s), reconnectDelayMs: 20 });
+    try {
+      controller.enqueue(new TextEncoder().encode("x".repeat(limit + 1)));
+      await until(() => statuses.includes("unavailable"), 200);
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(statuses).toEqual(["connected", "dropped", "reconnecting", "unavailable"]);
+    } finally { finish(); sub.close(); }
+  });
+
 });

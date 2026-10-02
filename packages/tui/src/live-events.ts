@@ -108,9 +108,9 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
         }
       }
     } catch {
-      // Read/parser errors on an established stream are drops. Cancel its body
-      // before reconnecting so a malformed live response cannot stay open.
-      await activeReader?.cancel().catch(() => {});
+      // Read/parser errors on an established stream are drops. Start cancelling
+      // its body before reconnecting, without waiting for underlying cleanup.
+      void activeReader?.cancel().catch(() => {});
     } finally {
       activeReader = null;
     }
