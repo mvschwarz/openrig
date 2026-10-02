@@ -1,3 +1,4 @@
+import { resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
@@ -320,6 +321,20 @@ describe("createDaemon startup composition", () => {
         expect(response.status, destination).toBe(201);
         expect((await response.json()).advisories, destination).toBeUndefined();
       }
+      const dotted = "product.ba@membership-target";
+      expect(resolveGuardTarget(db, dotted)).toBeNull();
+      expect(resolveGuardTarget(db, "product-ba@membership-target")).not.toBeNull();
+      const dottedResponse = await create(dotted);
+      expect(dottedResponse.status).toBe(201);
+      const dottedResult = await dottedResponse.json();
+      expect(dottedResult.destinationSession).toBe(dotted);
+      expect(dottedResult.advisories[0].availableDestinations).toContain("product-ba@membership-target");
+      expect(deps.queueRepo.getById(dottedResult.qitemId)?.destinationSession).toBe(dotted);
+      const dottedAlias = deps.rigRepo.addNode(target.id, "pod.adopted-dot", { runtime: null });
+      deps.sessionRegistry.registerSession(dottedAlias.id, "adopted.dot@membership-target");
+      const aliasResponse = await create("adopted.dot@membership-target");
+      expect(aliasResponse.status).toBe(201);
+      expect((await aliasResponse.json()).advisories).toBeUndefined();
       const typo = "prodcut-ba@membership-target";
       const response = await create(typo);
       expect(response.status).toBe(201);

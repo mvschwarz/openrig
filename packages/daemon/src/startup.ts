@@ -373,7 +373,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     if (rigs.length === 0) return null;
     const entries = rigs.flatMap((rig) => getNodeInventory(db, rig.id));
     if (entries.some((entry) => entry.canonicalSessionName === sessionRef
-      || deriveCanonicalFromEntry(entry) === sessionRef || entry.logicalId === parsed.member)) return null;
+      || deriveCanonicalFromEntry(entry) === sessionRef
+      || (!entry.logicalId.includes(".") && entry.logicalId === parsed.member))) return null;
     const availableDestinations = [...new Set(entries.flatMap((entry) => [
       entry.canonicalSessionName, deriveCanonicalFromEntry(entry),
       !entry.logicalId.includes(".") ? `${entry.logicalId}@${parsed.rig}` : null,
