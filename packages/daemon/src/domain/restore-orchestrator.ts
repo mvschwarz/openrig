@@ -1422,7 +1422,8 @@ export class RestoreOrchestrator {
                 ? ((startupResult.continuityOutcome === "resumed" || nativeContinuityProved) ? "resumed" : baseStatus)
                 : baseStatus;
               if (finalStatus === "resumed") {
-                return this.finishJoinedResume(node, sessionName, resumeToken, launchResult?.session.id);
+                return this.finishJoinedResume(node, sessionName, resumeToken, launchResult?.session.id,
+                  isPodAware && node.runtime === "claude-code");
               }
               return { nodeId: node.id, logicalId: node.logicalId, status: finalStatus };
             }
@@ -1500,6 +1501,7 @@ export class RestoreOrchestrator {
     sessionName: string,
     resumeToken: string | null,
     sessionId?: string,
+    managedClaudeResume = false,
   ): Promise<RestoreNodeResult> {
     const identity = await rebindAndVerifyPaneIdentity({
       db: this.db,
@@ -1512,7 +1514,19 @@ export class RestoreOrchestrator {
       requireExactResumeLineage: true,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
     });
+    const markManagedResumeAttention = () => {
+      if (!managedClaudeResume || !sessionId) return;
+      // The join awaits native observations. Only the exact launched row, still
+      // current and running, owns this readiness write after those awaits.
+      const current = this.db.prepare(
+        "SELECT id, session_name, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+      ).get(node.id) as { id: string; session_name: string; status: string } | undefined;
+      if (current?.id === sessionId && current.session_name === sessionName && current.status === "running") {
+        this.sessionRegistry.updateStartupStatus(sessionId, "attention_required");
+      }
+    };
     if (!identity.ok) {
+      markManagedResumeAttention();
       return {
         nodeId: node.id,
         logicalId: node.logicalId,
@@ -1525,13 +1539,18 @@ export class RestoreOrchestrator {
     const provedClaudeWrapper = node.runtime === "claude-code"
       && classifyPaneRuntimeMatch(identity.command, node.runtime) === "mismatch"
       && isShellForeground(identity.command?.trim().toLowerCase() ?? "");
-    if ((node.runtime === "codex" || provedClaudeWrapper) && sessionId && resumeToken) {
+    if ((node.runtime === "codex" || provedClaudeWrapper || managedClaudeResume) && sessionId && resumeToken) {
       const current = this.db.prepare("SELECT node_id, session_name, status, resume_token FROM sessions WHERE id = ?").get(sessionId) as
         { node_id: string; session_name: string; status: string; resume_token: string | null } | undefined;
       const sameSession = current?.node_id === node.id && current.session_name === sessionName && current.status === "running";
-      const retained = sameSession && (current.resume_token === resumeToken
-        || (!current.resume_token && this.sessionRegistry.updateResumeToken(sessionId, node.runtime === "codex" ? "codex_id" : "claude_id", resumeToken, "scrape")));
+      // Startup already retained the managed token. Recheck after the awaited
+      // join; a hook/operator may have changed it meanwhile. Never backfill here.
+      const retained = sameSession && (managedClaudeResume
+        ? this.sessionRegistry.resumeTokenMatches(sessionId, "claude_id", resumeToken)
+        : current.resume_token === resumeToken
+          || (!current.resume_token && this.sessionRegistry.updateResumeToken(sessionId, node.runtime === "codex" ? "codex_id" : "claude_id", resumeToken, "scrape")));
       if (!retained) {
+        markManagedResumeAttention();
         const store = new SeatIdentityStore(this.db);
         const proof = store.getForNode(node.id);
         if (proof) store.upsert({ ...proof, verdict: "mismatch", reason: "process_identity_mismatch" });
