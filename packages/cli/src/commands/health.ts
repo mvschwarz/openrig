@@ -252,6 +252,10 @@ function scopeLabel(scope: HealthScope): string {
 function renderList(projection: HealthListProjection): void {
   const evaluated = projection.evaluatedAt ?? "unavailable";
   console.log(`Fleet health — evaluated=${evaluated} findings=${projection.total} limit=${projection.limit}`);
+  for (const c of projection.coverage ?? []) {
+    if (!c.partial) continue;
+    console.log(`PARTIAL: ${c.source} evaluated ${c.evaluated} of ${c.total} ${c.unit} (limit ${c.limit}; ${c.omitted} omitted; order: ${c.order}). Omitted ${c.unit} were not evaluated and are not healthy.`);
+  }
   if (projection.records.length === 0) {
     console.log("No health findings match this bounded query. This is not a healthy assertion.");
     console.log("Next inspection: widen only as needed with `rig health --instance --json`.");

@@ -121,6 +121,7 @@ describe("rig health — daemon-backed read-only projection", () => {
   let whoamiStatus = 200;
   let healthStatus = 200;
   let empty = false;
+  let partial = false;
 
   beforeAll(async () => {
     server = http.createServer((request, response) => {
@@ -139,7 +140,9 @@ describe("rig health — daemon-backed read-only projection", () => {
       } else if (healthStatus === 404) {
         response.end(JSON.stringify({ error: "not_found", path: "/api/health" }));
       } else {
-        response.end(JSON.stringify(empty ? { ...LIST, total: 0, records: [] } : LIST));
+        response.end(JSON.stringify(empty ? { ...LIST, total: 0, records: [] } : partial ? { ...LIST, total: 0, records: [], coverage: [{
+          source: "passive-ceremony", evaluatedAt: LIST.evaluatedAt, unit: "handoff families", limit: 200, total: 634,
+          evaluated: 200, omitted: 434, partial: true, order: "most queue transitions in the observation window, then lineage ID" }] } : LIST));
       }
     });
     await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -198,6 +201,17 @@ describe("rig health — daemon-backed read-only projection", () => {
     expect(output).toContain("No health findings match this bounded query");
     expect(output).toContain("not a healthy assertion");
     expect(output).toContain("rig health --instance");
+  });
+
+  it("says a partial evaluation is partial and that omitted families are not healthy", async () => {
+    partial = true;
+    const { logs, exitCode } = await run(["--instance"], runningDeps(port));
+    partial = false;
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("PARTIAL: passive-ceremony evaluated 200 of 634 handoff families (limit 200; 434 omitted;");
+    expect(output).toContain("Omitted handoff families were not evaluated and are not healthy.");
+    expect(output).toContain("not a healthy assertion");
   });
 
   it("explains the exact daemon record, bounded evidence, freshness, literal rule, and next inspection", async () => {

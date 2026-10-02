@@ -25,6 +25,7 @@
 // null when nothing is declared.
 
 import { Hono } from "hono";
+import { parseDocument, isScalar } from "yaml";
 import { readMissionReadiness, readSliceReadiness } from "../domain/proof/judgments.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -87,7 +88,7 @@ export function missionsRoutes(): Hono {
   });
 
   // Slice 18 §3.5 — Mark mission complete (Getting Started complete-and-hide).
-  // Writes `status: complete` to the mission README.md frontmatter; the UI
+  // Writes the authored mission status (manifest, or legacy node frontmatter); the UI
   // storytelling preview gates on this so completed missions disappear from
   // the band. The daemon is the audit-trail surface; the UI maintains
   // an optimistic local mirror via localStorage so the hide is instant.
@@ -126,11 +127,19 @@ export function missionsRoutes(): Hono {
   return app;
 }
 
-/** Slice 18 §3.5 — write `status: complete` to a mission README's
- *  frontmatter, creating the frontmatter block when absent and
- *  replacing an existing status field when present. Idempotent.
- *  Preserves unrelated frontmatter fields. */
+/** Complete the status owner used by mission/proof reads. Legacy missions keep
+ *  their node-file frontmatter; authored manifests keep their other fields and comments. */
 function writeMissionStatusComplete(missionPath: string): void {
+  const manifestPath = path.join(missionPath, "mission.yaml");
+  if (fs.existsSync(manifestPath)) {
+    const document = parseDocument(fs.readFileSync(manifestPath, "utf8"));
+    if (document.errors.length) throw document.errors[0];
+    const status = document.getIn(["metadata", "status"], true);
+    if (isScalar(status)) status.value = "complete";
+    else document.setIn(["metadata", "status"], "complete");
+    fs.writeFileSync(manifestPath, document.toString());
+    return;
+  }
   // Mutate the node file the mission actually has; only a mission with neither gets a new one, and
   // a new one is authored under the current name.
   const resolved = resolveNodeFile(missionPath);

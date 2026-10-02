@@ -924,6 +924,8 @@ Exit codes:
       const res = await client.get<PsEntry[]>("/api/ps?includeArchived=true");
 
       if (res.status >= 400) {
+        const reason = (res.data as unknown as { error?: unknown } | null)?.error;
+        if (typeof reason === "string" && reason) console.error(reason);
         console.error(`Failed to fetch rig list from daemon (HTTP ${res.status}). Check daemon status with: rig status`);
         process.exitCode = 2;
         return;
@@ -1077,6 +1079,8 @@ async function handleNodes(
 ): Promise<void> {
   const rigRes = await client.get<PsEntry[]>(psApiPath(opts), requestHeaders ? { headers: requestHeaders } : undefined);
   if (rigRes.status >= 400) {
+    const reason = (rigRes.data as unknown as { error?: unknown } | null)?.error;
+    if (typeof reason === "string" && reason) console.error(reason);
     console.error(`Failed to fetch rig list from daemon (HTTP ${rigRes.status}). Check daemon status with: rig status`);
     process.exitCode = 2;
     return;

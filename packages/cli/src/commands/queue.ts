@@ -149,6 +149,11 @@ async function withClient<T>(
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
+  if (status >= 400 && body && typeof body === "object"
+    && (body as { error?: unknown }).error === "remote_queue_write_failed"
+    && (body as { outcome?: unknown }).outcome === "indeterminate") {
+    console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
+  }
   if (json) {
     console.log(JSON.stringify(body));
   } else {

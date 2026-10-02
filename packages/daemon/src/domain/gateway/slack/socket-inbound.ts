@@ -62,6 +62,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
   let stopped = false;
   let liveWs: WsLike | undefined;
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+  let finish: () => void = () => {};
   const status: SocketInboundStatus = { generation: 0, reconnects: 0, state: "disconnected" };
   const stamp = () => new Date().toISOString();
   const receipt = (entry: Parameters<InboundReceiptStore["append"]>[0]): void => {
@@ -73,7 +74,14 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
     }
   };
 
+  const retryDeadLetters = (): void => {
+    void router.retryDeadLetters().catch((error) => {
+      log(`dead-letter retry failed: ${(error as Error).message}`);
+    });
+  };
+
   const done = new Promise<void>((resolve) => {
+    finish = resolve;
     const connect = async (): Promise<void> => {
       if (stopped) return resolve();
       connects++;
@@ -102,10 +110,10 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
         status.state = "connected";
         status.connectedAt = stamp();
         receipt({ generation: connects, status: "connected" });
-        void router.retryDeadLetters(); // drain on connect (cold-init)…
+        retryDeadLetters(); // drain on connect (cold-init)…
         // …AND periodically WHILE connected (B1: recovery after a queue outage
         // must not wait for the next Slack reconnect). Cleared on close.
-        retryTimer = setInterval(() => void router.retryDeadLetters(), retryIntervalMs);
+        retryTimer = setInterval(retryDeadLetters, retryIntervalMs);
         if (typeof (retryTimer as unknown as { unref?: () => void }).unref === "function") {
           (retryTimer as unknown as { unref: () => void }).unref();
         }
@@ -187,6 +195,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
       status.state = "stopped";
       if (pendingTimer) clearTimeout(pendingTimer);
       try { liveWs?.close(); } catch { /* best-effort */ }
+      finish(); // A canceled backoff has no future connect/close callback to settle done.
     },
     status: () => ({ ...status }),
   };

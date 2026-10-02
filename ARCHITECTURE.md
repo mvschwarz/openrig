@@ -260,11 +260,12 @@ and no model cost.
 4. Write a header comment naming the defect class and the seed: what a seeded regression plants,
    and which `expect` must catch it. A scenario counts only as a pair: it passes on healthy code
    and fails on the seeded run (`packages/test-system/README.md`).
-5. **Run it on your machine** after `npm run build`, from a shell that is not inside tmux:
+5. **Run it on your machine** after `npm run build`:
    `node --import tsx packages/daemon/scripts/run-scenarios.mjs <file.yaml>`. It uses a private
-   daemon and a private tmux server, and refuses to start if `TMUX` is set. It supplies no fault
-   controller, so a `seed_regression` step fails there; the seeded pair runs in the container
-   path.
+   daemon and a private tmux server, and builds its environment from `HOME`, `PATH` and `TERM`
+   only, so your session's `TMUX` and daemon variables are dropped and it is safe to run from
+   inside tmux, including an agent's pane. It supplies no fault controller, so a
+   `seed_regression` step fails there; the seeded pair runs in the container path.
 6. **CI.** The `installed-scenario` job runs `scripts/run-pr-scenarios.sh` in disposable,
    network-less containers built from the packed package. It runs two cases, both built around
    queue durability (`library` is `queue-baton-survives-restart.yaml`). Adding a case today means

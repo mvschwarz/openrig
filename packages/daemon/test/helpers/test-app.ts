@@ -113,7 +113,7 @@ import { PodBundleSourceResolver } from "../../src/domain/bundle-source-resolver
 import { NodeCmuxService } from "../../src/domain/node-cmux-service.js";
 import { AgentActivityStore } from "../../src/domain/agent-activity-store.js";
 import { SeatAttentionReconciler } from "../../src/domain/seat-attention-reconciler.js";
-import { createApp } from "../../src/server.js";
+import { createApp, createAppWithWebSocket } from "../../src/server.js";
 import fs from "node:fs";
 
 /** Seam B R6: the canonical full-fixture migration list, exported so file-backed
@@ -262,6 +262,10 @@ export function createTestApp(
     /** Wire the ready runtime adapters into the routes' `runtimeAdapters`, as startup does, so a
      *  route launch can start harnesses. Off by default: existing tests keep no route adapters. */
     wireRuntimeAdapters?: boolean;
+    /** Extra or overriding createApp deps (browser-boundary route tests inject inert spies). */
+    appDeps?: Partial<import("../../src/server.js").AppDeps>;
+    /** Build through createAppWithWebSocket (production upgrade path) and return injectWebSocket. */
+    withWebSocket?: boolean;
     /**
      * Agent Starter v1 vertical M2 R2: optionally expose the in-test
      * StartupOrchestrator + PodRigInstantiator so callers can spy on
@@ -400,7 +404,7 @@ export function createTestApp(
   };
   const upRouter = new UpCommandRouter({ fsOps: upRouterFs });
 
-  const app = createApp({
+  const testAppDeps = {
     rigRepo, sessionRegistry, eventBus, nodeLauncher, startupOrchestrator, tmuxAdapter: tmux, cmuxAdapter: cmux,
     snapshotCapture, snapshotRepo, restoreOrchestrator,
     rigSpecExporter, rigSpecPreflight, rigInstantiator,
@@ -434,9 +438,15 @@ export function createTestApp(
     // instantiator stubs only when explicitly wired, since they would make
     // restore routes report resumes.
     runtimeAdapters: opts?.wireRuntimeAdapters ? adapters : opts?.adapters as Record<string, RuntimeAdapter> | undefined,
-  });
+    ...opts?.appDeps,
+  };
+  // withWebSocket: the production createAppWithWebSocket path, returning its injectWebSocket.
+  const built = opts?.withWebSocket
+    ? createAppWithWebSocket(testAppDeps as never)
+    : { app: createApp(testAppDeps as never), injectWebSocket: undefined };
+  const app = built.app;
   return {
-    app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,
+    app, injectWebSocket: built.injectWebSocket, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,
     snapshotCapture, checkpointStore, restoreOrchestrator,
     rigSpecExporter, rigSpecPreflight, rigInstantiator,
     packageRepo, installRepo, installEngine, installVerifier,

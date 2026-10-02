@@ -68,6 +68,9 @@ interface AskResult {
   guidance?: string;
 }
 
+/** Largest delay a Node timer honours (2^31-1 ms); execFile's timeout uses one. */
+const MAX_WAKE_TIMEOUT_MS = 2_147_483_647;
+
 interface AskCommandDeps extends StatusDeps {
   identityResolver?: typeof resolveIdentitySource;
   wakeRunner?: WakeRunner;
@@ -126,7 +129,14 @@ Exit codes:
     // an unresolvable seat REFUSES with teaching (never a guessed wake).
     if (opts.wake) {
       const target = opts.wake;
-      const timeoutMs = opts.wakeTimeout ? Math.max(1, Number(opts.wakeTimeout)) * 1000 : undefined;
+      // execFile throws on a NaN, infinite or fractional timeout, and Node timers run a
+      // delay above 2^31-1 ms after 1ms, so validate the milliseconds before any call.
+      const timeoutMs = opts.wakeTimeout ? Math.round(Math.max(1, Number(opts.wakeTimeout)) * 1000) : undefined;
+      if (timeoutMs !== undefined && !(timeoutMs <= MAX_WAKE_TIMEOUT_MS)) {
+        console.error(`--wake-timeout must be a number of seconds from 1 to ${Math.floor(MAX_WAKE_TIMEOUT_MS / 1000)}; got '${opts.wakeTimeout}'`);
+        process.exitCode = 1;
+        return;
+      }
 
       let token = target;
       let runtime: "claude" | "codex" = opts.runtime === "codex" ? "codex" : "claude";

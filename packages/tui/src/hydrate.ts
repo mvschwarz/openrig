@@ -19,7 +19,7 @@ import type { ConfigRead } from "./config/config-model.js";
 import type { ConnectionsRead, ControlPlaneRead, SlackManifestRead } from "./connections/connections-model.js";
 import { DaemonClient } from "./daemon-client.js";
 import { parse as parseYaml } from "yaml";
-import type { AgentRow, FleetSnapshot, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
+import type { AgentRow, FleetSnapshot, HealthCoverage, HealthRecord, HostNode, NeedsItem, PodNode, QueueRead, RecentTransitionSnap, SeatActivitySummary, SliceDetailSnap, SpecEntry, ViewState } from "./types.js";
 import { isHumanSeatSession } from "./pulse/pulse-model.js";
 
 // Narrow read-shapes: just the served fields this module consumes (names match
@@ -45,6 +45,7 @@ interface HealthProjectionRead {
   limit: number;
   truncated: boolean;
   records: HealthRecord[];
+  coverage?: HealthCoverage[];
 }
 interface NodeInventoryRead {
   nodeId?: string;
@@ -725,6 +726,7 @@ export async function hydrateSnapshot(
           total: healthProjection.total,
           truncated: healthProjection.truncated,
           records: healthProjection.records,
+          ...(healthProjection.coverage?.length ? { coverage: healthProjection.coverage } : {}),
         }
       : healthRequested ? { availability: "unavailable", evaluatedAt: null, total: 0, truncated: false, records: [] } : undefined,
     hosts: [localHost, ...remoteHosts],
