@@ -462,7 +462,7 @@ async function run(): Promise<void> {
       inputRevision += 1; startup?.interacted();
       // The bound endpoint's copy label remains usable in startup/palette/restore
       // contexts, whose input handlers otherwise consume the status-row click.
-      if (ev.type === "mouse" && (ev.button & 64) === 0 && lastScreen) {
+      if (ev.type === "mouse" && ev.button === 0 && lastScreen) {
         const hit = lastScreen.hitMap.find((h) => h.y === ev.y && ev.x >= h.x1 && ev.x <= h.x2);
         if (hit?.action.type === "print-for-copy" && hit.action.value === socket.path) {
           perform(hit.action);
@@ -473,7 +473,7 @@ async function run(): Promise<void> {
         if (ev.type === "char" && ev.ch === "q") { void shutdown(); return; }
         if (ev.type === "char") void startup.key(ev.ch);
         else if (ev.type === "key") void startup.key(ev.key);
-        else if (ev.type === "mouse" && lastScreen) {
+        else if (ev.type === "mouse" && ev.button === 0 && lastScreen) {
           const hit = lastScreen.hitMap.find((h) => h.y === ev.y && ev.x >= h.x1 && ev.x <= h.x2);
           if (hit?.action.type === "startup") void startup.key(hit.action.key);
         }
@@ -661,7 +661,7 @@ async function run(): Promise<void> {
       } else if (ev.type === "mouse" && lastScreen) {
         const wheel = resolveMouseAction(ev, view.get(), lastScreen, computeExplorerRows(view.get(), snapshot).length);
         if (wheel) perform(wheel);
-        else {
+        else if (ev.button === 0) {
           const hit = lastScreen.hitMap.find((h) => h.y === ev.y && ev.x >= h.x1 && ev.x <= h.x2);
           if (hit) perform(hit.action);
         }
