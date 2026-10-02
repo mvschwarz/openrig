@@ -1712,7 +1712,10 @@ describe("RestoreOrchestrator", () => {
 
   it.each(["exact", "wrong-token", "foreign-process", "replaced-pane", "replaced-process",
     "chooser", "login", "trust", "mcp", "error", "missing-token",
-    "hook-token", "hook-equal", "operator-token", "operator-equal", "hook-wrong-type", "hook-late", "hook-join", "hook-join-equal"])(
+    "hook-token", "hook-equal", "operator-token", "operator-equal", "hook-wrong-type", "hook-late", "hook-join", "hook-join-equal",
+    "join-native-loss", "join-native-loss-hook",
+    "join-native-loss-exited", "join-native-loss-foreign", "join-native-loss-replacement",
+    "join-metadata-exited", "join-metadata-foreign", "join-metadata-replacement"])(
     "pod-aware headerless Claude resume keeps native proof and new-row metadata: %s", async (mode) => {
       const { ClaudeCodeAdapter } = await import("../src/adapters/claude-code-adapter.js");
       const token = "00000000-0000-4000-8000-000000000086";
@@ -1745,18 +1748,47 @@ describe("RestoreOrchestrator", () => {
       const identitySql = "SELECT resume_type, resume_token, resume_provenance, resume_last_verified, resume_last_probe_status FROM sessions WHERE id = ?";
       let protectedIdentity: unknown;
       let protectedBinding: unknown;
+      let joinSessionId: string | undefined;
+      let joinIdentity: unknown;
+      let untouchedSessions: unknown;
+      const sessionsSql = "SELECT * FROM sessions ORDER BY id";
+      const lostOwnership = /-(exited|foreign|replacement)$/.test(mode);
+      const startupWrites = vi.spyOn(sessionRegistry, "updateStartupStatus");
       const rows = managedClaudeRows(mode === "wrong-token" ? "different-session" : token);
       rows[2]!.command = `/fixture/.local/share/claude/versions/2.1.287 --dangerously-skip-permissions --resume ${mode === "wrong-token" ? "different-session" : token} --name dev-owner@headerless`;
       rows[2]!.executableName = mode === "foreign-process" ? "printf" : "2.1.287";
       const listProcesses = vi.fn(async () => {
         samples++;
-        return rows.map(row => ({ ...row, startedAt: mode === "replaced-process" && row.pid === 1236 && samples % 2 === 0 ? "changed" : row.startedAt }));
+        const observed = mode.startsWith("join-native-loss") && joinSessionId ? rows.slice(0, 2) : rows;
+        return observed.map(row => ({ ...row, startedAt: mode === "replaced-process" && row.pid === 1236 && samples % 2 === 0 ? "changed" : row.startedAt }));
       });
       const tmux = {
         ...mockTmux(),
         createSession: vi.fn(async () => { launched = true; return { ok: true as const }; }),
         hasSession: vi.fn(async () => launched),
         getPaneCommand: vi.fn(async (target: string) => {
+          if (mode.startsWith("join-") && target === "%1" && !joinSessionId) {
+            const current = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1").get(node.id) as { id: string };
+            joinSessionId = current.id;
+            if (mode.endsWith("-hook") || mode.startsWith("join-metadata")) {
+              sessionRegistry.updateResumeToken(current.id, "claude_id", "protected-other-token", "hook");
+            }
+            joinIdentity = db.prepare(identitySql).get(current.id);
+            if (mode.endsWith("-exited")) sessionRegistry.updateStatus(current.id, "exited");
+            if (mode.endsWith("-foreign")) {
+              const foreign = rigRepo.addNode(rig.id, "dev.foreign", { runtime: "claude-code" });
+              db.prepare("UPDATE sessions SET node_id = ?, session_name = ? WHERE id = ?").run(foreign.id, "dev-foreign@headerless", current.id);
+            }
+            if (mode.endsWith("-replacement")) {
+              const replacement = sessionRegistry.registerSession(node.id, "dev-owner@headerless", "fresh");
+              sessionRegistry.updateStatus(replacement.id, "running");
+              sessionRegistry.updateResumeToken(replacement.id, "claude_id", "replacement-token", "operator");
+              // Ensure an unambiguous newer row even within SQLite's one-second timestamp resolution.
+              db.prepare("UPDATE sessions SET created_at = datetime('now', '+1 second') WHERE id = ?").run(replacement.id);
+            }
+            untouchedSessions = db.prepare(sessionsSql).all();
+            startupWrites.mockClear();
+          }
           if (protectedSource && !protectedIdentity && (mode !== "hook-late" || samples > 0)
             && (!mode.startsWith("hook-join") || target === "%1")) {
             const latest = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as { id: string };
@@ -1786,7 +1818,18 @@ describe("RestoreOrchestrator", () => {
         expect({ id: binding.id, pane: binding.tmuxPane, session: binding.tmuxSession,
           generation: sessionRegistry.currentOccupantTenure(node.id)?.generationUuid }).toEqual(protectedBinding);
       }
-      if (mode === "exact" || mode.endsWith("-equal")) {
+      if (mode.startsWith("join-")) {
+        expect(joinSessionId).toBeDefined();
+        expect(outcome.status).toBe("attention_required");
+        expect(db.prepare(identitySql).get(joinSessionId!)).toEqual(joinIdentity);
+        if (lostOwnership) {
+          expect(startupWrites).not.toHaveBeenCalled();
+          expect(db.prepare(sessionsSql).all()).toEqual(untouchedSessions);
+        } else {
+          expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(joinSessionId!)).toEqual({ startup_status: "attention_required" });
+          expect(startupWrites).toHaveBeenCalledExactlyOnceWith(joinSessionId, "attention_required");
+        }
+      } else if (mode === "exact" || mode.endsWith("-equal")) {
         expect({ status: outcome.status, token: latest.resumeToken }).toEqual({ status: "resumed", token });
         expect(latest.id).not.toBe(old.id);
         expect(latest.startupStatus).toBe("ready");
@@ -1805,7 +1848,7 @@ describe("RestoreOrchestrator", () => {
       expect(tmux.killSession).not.toHaveBeenCalled();
       if (mode !== "missing-token") {
         expect(tmux.createSession).toHaveBeenCalledTimes(1);
-        expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
+        if (!lostOwnership) expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(latest.id)).toEqual({ status: "running" });
         expect(tmux.sendText).toHaveBeenCalledTimes(1); // launch command only, no startup replay
         expect(tmux.sendText).toHaveBeenCalledWith("dev-owner@headerless", expect.stringContaining(`--dangerously-skip-permissions --resume ${token}`));
         expect(tmux.sendKeys).toHaveBeenCalledTimes(1);

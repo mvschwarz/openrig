@@ -1514,7 +1514,19 @@ export class RestoreOrchestrator {
       requireExactResumeLineage: true,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
     });
+    const markManagedResumeAttention = () => {
+      if (!managedClaudeResume || !sessionId) return;
+      // The join awaits native observations. Only the exact launched row, still
+      // current and running, owns this readiness write after those awaits.
+      const current = this.db.prepare(
+        "SELECT id, session_name, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+      ).get(node.id) as { id: string; session_name: string; status: string } | undefined;
+      if (current?.id === sessionId && current.session_name === sessionName && current.status === "running") {
+        this.sessionRegistry.updateStartupStatus(sessionId, "attention_required");
+      }
+    };
     if (!identity.ok) {
+      markManagedResumeAttention();
       return {
         nodeId: node.id,
         logicalId: node.logicalId,
@@ -1538,7 +1550,7 @@ export class RestoreOrchestrator {
         : current.resume_token === resumeToken
           || (!current.resume_token && this.sessionRegistry.updateResumeToken(sessionId, node.runtime === "codex" ? "codex_id" : "claude_id", resumeToken, "scrape")));
       if (!retained) {
-        if (managedClaudeResume) this.sessionRegistry.updateStartupStatus(sessionId, "attention_required");
+        markManagedResumeAttention();
         const store = new SeatIdentityStore(this.db);
         const proof = store.getForNode(node.id);
         if (proof) store.upsert({ ...proof, verdict: "mismatch", reason: "process_identity_mismatch" });
