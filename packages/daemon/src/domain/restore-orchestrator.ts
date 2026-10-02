@@ -46,6 +46,9 @@ import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 // does NOT meet all four evidence preconditions is a no-op with a missing
 // reason, NOT an error. Decision 3: terminal post-reconciliation outcome is
 // `operator_recovered`; `ready` is forbidden.
+
+const CURSOR_RETRY_FRESH_REASON = "Cursor's approval mode changed since this chat last ran, or OpenRig has no record of it; a fresh chat is required for the new mode to apply.";
+
 export type ReconcileNodeResult =
   | {
       ok: true;
@@ -1230,10 +1233,15 @@ export class RestoreOrchestrator {
           // OPR.0.3.4.2 (B): resume CONCLUDED failed — the launched session is
           // a confirmed blank agent (precision guard trigger (i)). Roll back to
           // zero sessions; the stop-and-ask is realized as awaiting-decision.
-          // Carry the reason only for a permission-selection mismatch (that message never quotes a
-          // resume token); every other failure text may, so it stays out of the operator-visible error.
+          // Carry the reason only for a permission-selection mismatch or a fixed retry_fresh reason
+          // (neither quotes a resume token); every other failure text may, so it stays out of the
+          // operator-visible error.
           await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
-          const reason = resumeOutcome.kind === "failed" && typeof resumeOutcome.message === "string" && resumeOutcome.message.startsWith("Permission selection:") ? resumeOutcome.message.trim() : "";
+          const reason = resumeOutcome.kind === "retry_fresh"
+            ? resumeOutcome.reason ?? ""
+            : resumeOutcome.kind === "failed" && typeof resumeOutcome.message === "string" && resumeOutcome.message.startsWith("Permission selection:")
+              ? resumeOutcome.message.trim()
+              : "";
           const reasonText = reason ? ` Reason: ${/[.!?]$/.test(reason) ? reason : `${reason}.`}` : "";
           return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume attempted but failed.${reasonText} The blank session was rolled back; no session is running. Re-run with --fresh ${node.logicalId} for a deliberate fresh-primed seat, or check the harness state manually.` };
         }
@@ -1640,7 +1648,7 @@ export class RestoreOrchestrator {
     resolvedPosture?: "floor" | "full_bypass",
   ): Promise<
     | { kind: "resumed" }
-    | { kind: "retry_fresh" }
+    | { kind: "retry_fresh"; reason?: string }
     | { kind: "failed"; message: string }
     | { kind: "attention_required"; message: string; evidence?: string }
   > {
@@ -1698,7 +1706,8 @@ export class RestoreOrchestrator {
     if (this.cursorResume?.canResume(resumeType, resumeToken)) {
       const result = await this.cursorResume.resume(sessionName, resumeType, resumeToken, cwd, nodeId, model, resolvedPosture, permissionMode);
       if (result.ok) return { kind: "resumed" };
-      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
+      // Fixed text, never the adapter's message, so no chat id can reach the operator-visible error.
+      if (result.code === "retry_fresh") return { kind: "retry_fresh", reason: CURSOR_RETRY_FRESH_REASON };
       if (result.code === "attention_required") {
         return { kind: "attention_required", message: result.message, evidence: (result as { evidence?: string }).evidence };
       }

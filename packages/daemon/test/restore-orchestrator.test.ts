@@ -948,6 +948,27 @@ describe("RestoreOrchestrator", () => {
     expect(node.error).toContain("Seat runtime changed since permission selection");
   });
 
+  it("says why when a Cursor resume needs a fresh chat, without the adapter's message or the token", async () => {
+    const token = "167733b3-080d-4eb0-a30a-7d22c40b5195";
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "cursor" }],
+      edges: [],
+      resumeType: "cursor_chat_id",
+      resumeToken: token,
+      restorePolicy: "resume_if_possible",
+    });
+    const cursor = { canResume: vi.fn((type: string | null, tok: string | null) => type === "cursor_chat_id" && !!tok), resume: vi.fn(async () => ({ ok: false as const, code: "retry_fresh" as const, message: `adapter text ${token}` })) } as unknown as CursorResumeAdapter;
+    const result = await createOrchestrator({ cursor }).restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node = result.result.nodes.find((n) => n.logicalId === "worker")!;
+    expect(node.status).toBe("awaiting-decision");
+    expect(node.error).toContain("Reason: Cursor's approval mode changed since this chat last ran, or OpenRig has no record of it");
+    expect(node.error).not.toContain(token);
+    expect(node.error).not.toContain("adapter text");
+  });
+
   it("does not surface a non-permission Cursor resume failure's message (it may quote a token)", async () => {
     const token = "167733b3-080d-4eb0-a30a-7d22c40b5195";
     const snap = seedRigAndSnapshot({
