@@ -48,5 +48,36 @@ try {
   assert.equal(registry.getSessionsForRig(rig.id)[0].status, "detached");
   assert.equal(registry.getSessionsForRig(neighborRig.id)[0].status, "running");
   assert.equal((await argv.probeSession("worker@demo2")).state, "present");
+  // Literal-leading-equals case also reported by lab1207 in PR #460.
+  // Each arrangement uses real tmux targets through both adapter APIs.
+  const literal = "=worker@demo", plain = "worker@demo";
+  for (const names of [[literal], [plain], [literal, plain]]) {
+    await native(["kill-server"]);
+    // Keep the private server live when the literal case removes its only pane.
+    await native(["new-session", "-d", "-s", "fixture-anchor", "sleep 120"]);
+    for (const name of names) await native(["new-session", "-d", "-s", name, "sleep 120"]);
+    for (const adapter of [argv, legacy]) {
+      for (const name of names) {
+        const expected = (await native(["display-message", "-p", "-t", `=${name}:`, "#{pane_id}"])).trim();
+        const panes = await adapter.listPanes(name);
+        assert.equal(panes.length, 1);
+        assert.equal(panes[0].id, expected, "a literal session name must select its own pane");
+        assert.equal((await adapter.listPanes(`=${name}:0`))[0].id, expected, "encoded qualified target stays exact");
+        assert.equal((await adapter.listPanes(expected))[0].id, expected, "pane id stays unchanged");
+        const ids = (await native(["display-message", "-p", "-t", `=${name}:`, "#{session_id} #{window_id}"])).trim().split(" ");
+        for (const id of ids) assert.equal((await adapter.listPanes(id))[0].id, expected);
+      }
+      for (const absent of [literal, plain].filter(name => !names.includes(name))) {
+        assert.equal((await adapter.probeSession(absent)).state, "absent");
+        await assert.rejects(adapter.listPanes(absent), /can't find (?:window|session)/);
+      }
+    }
+    if (names.includes(literal)) {
+      const [pane] = await argv.listPanes(literal);
+      await native(["kill-pane", "-t", pane.id]);
+      assert.equal((await argv.probeSession(literal)).state, "absent", "selected literal pane is really stopped");
+      if (names.includes(plain)) assert.equal((await argv.probeSession(plain)).state, "present", "plain neighbor survives literal removal");
+    }
+  }
   console.log(JSON.stringify({ nativeTmux: true, argvAndLegacy: true, missingDetached: true, neighborPreserved: true, exactPaneListing: true }));
 } finally { db.close(); await native(["kill-server"]).catch(() => {}); }

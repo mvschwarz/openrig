@@ -463,7 +463,9 @@ export class TmuxAdapter {
   async listPanes(target: string): Promise<TmuxPane[]> {
     // Callers name a session (optionally with a window), or an immutable tmux
     // id. Exact session matching prevents observing a prefix neighbor's pane.
-    const namedTarget = target.startsWith("=") ? target : `=${target}`;
+    // A bare leading '=' belongs to the literal session name. Only qualified
+    // targets already carry tmux's encoded exact-match syntax.
+    const namedTarget = target.includes(":") && target.startsWith("=") ? target : `=${target}`;
     const exactTarget = /^[%$@]\d+$/.test(target) ? target
       : namedTarget.includes(":") ? namedTarget : `${namedTarget}:`;
     try {
