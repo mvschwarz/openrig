@@ -93,6 +93,7 @@ function stateToken(word: string): Token {
   if (word === "working" || word === "done" || word === "outcome complete" || word === "active") return "ok";
   if (word === "needs input" || word === "blocked" || word === "parked") return "warn";
   if (word === "failed") return "error";
+  if (word === "retired" || word === "deferred") return "dim";
   return "dim";
 }
 
@@ -210,6 +211,10 @@ function blockerText(rows: unknown, lead: "blocker" | "row" = "row"): string {
     .join("; ");
 }
 
+function stageText(slice: SliceFacts): string {
+  return slice.scope?.stage?.trim().toLowerCase() || "";
+}
+
 /** Declared work state — the slice file's own status word, verbatim. */
 function declaredText(slice: SliceFacts): string {
   return slice.scope?.status?.trim().toLowerCase() || "no declared status";
@@ -248,6 +253,8 @@ function stateWord(slice: SliceFacts): string {
   if (outcomeComplete(slice)) return "outcome complete";
   if (slice.readiness?.items.some(i => i.state === "withdrawn" || i.state === "rejected")) return "reopened";
   if (slice.readiness?.configured) return "outcomes pending";
+  if (stageText(slice) === "retired" || declaredText(slice) === "retired") return "retired";
+  if (declaredText(slice) === "deferred" || declaredText(slice) === "closed-deferred") return "deferred";
   return declaredText(slice) === "done" ? "declared done" : "planned";
 }
 
@@ -658,10 +665,13 @@ function sliceDetail(
   ];
 
   const source = record(slice.sequencing?.["source"]);
+  const supersededBy = record(execution.sources["wave_map"])["superseded_by"];
+  const waveMapSource = typeof supersededBy === "string" && supersededBy
+    ? `superseded by ${supersededBy}` : str(source["wave_map_row"], "not named");
   const sourceRows = [
     cardField("spec", str(source["spec_path"], "not named")),
     cardField("arrangement", str(source["arrangement_path"], "not named")),
-    cardField("wave map", str(source["wave_map_row"], "not named")),
+    ...wrappedCardField("wave map", waveMapSource, width),
   ];
   const identity = slice.scope
     ? scopeIdentityLines(slice.scope, execution.mission, width)
@@ -816,8 +826,8 @@ export function executionSliceStripLines(
   const evidence = `${evidenceText(slice.cells, slice.rank)}${unconfirmed.length ? ` · ${unconfirmed.join(" / ")} unconfirmed (${slice.cells[RUNGS.find((rung) => slice.cells[rung].state === "undetermined")!].basis})` : ""}`;
   const liveWord = slice.lane ? str(activity["activity"], "claimed") : "no claimed lane";
   const declaredWord = declared?.trim().toLowerCase() || "no declared status";
-  const next = declaredWord === "done" && !slice.lane
-    ? "none — declared done"
+  const next = (declaredWord === "done" || declaredWord === "retired" || declaredWord === "deferred" || declaredWord === "closed-deferred") && !slice.lane
+    ? `none — declared ${declaredWord}`
     : nextText(slice) ?? (slice.lane ? "in progress on the lane above" : "nothing the projection can sequence");
   return [
     { text: "" },

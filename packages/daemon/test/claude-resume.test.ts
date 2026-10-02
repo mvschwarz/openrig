@@ -15,12 +15,14 @@ function mockTmux(overrides?: {
   sendKeys?: (target: string, keys: string[]) => Promise<TmuxResult>;
   getPaneCommand?: (target: string) => Promise<string | null>;
   capturePaneContent?: (target: string, lines?: number) => Promise<string | null>;
+  getPanePid?: (target: string) => Promise<number | null>;
 }) {
   return {
     sendText: overrides?.sendText ?? vi.fn(async () => ({ ok: true as const })),
     sendKeys: overrides?.sendKeys ?? vi.fn(async () => ({ ok: true as const })),
     getPaneCommand: overrides?.getPaneCommand ?? vi.fn(async () => "claude"),
     capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => ""),
+    getPanePid: overrides?.getPanePid ?? vi.fn(async () => null),
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
     listSessions: async () => [],
@@ -170,6 +172,48 @@ describe("ClaudeResumeAdapter", () => {
         code: "retry_fresh",
         message: "Claude resume failed: no conversation found for the requested session",
       });
+    });
+
+    it.each([
+      [null, null],
+      ["2.1.283", "Restored conversation\n❯\n  ⏵⏵ bypass permissions on (shift+tab to cycle)"],
+      ["zsh", "Accessing workspace:\nYes, I trust this folder"],
+    ])("preserves inconclusive observations without claiming resume (%s)", async (command, content) => {
+      const adapter = new ClaudeResumeAdapter(mockTmux({
+        getPaneCommand: async () => command,
+        capturePaneContent: async () => content,
+      }), { pollMs: 0, maxWaitMs: 0 });
+      expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
+        .toMatchObject({ ok: false, code: "attention_required", message: expect.stringContaining("launch retained") });
+    });
+
+    it.each(["command", "capture"])("preserves the launch when %s observation throws", async failedRead => {
+      const adapter = new ClaudeResumeAdapter(mockTmux({
+        getPaneCommand: async () => { if (failedRead === "command") throw new Error("observation unavailable"); return "2.1.283"; },
+        capturePaneContent: async () => { throw new Error("observation unavailable"); },
+      }), { pollMs: 0, maxWaitMs: 0 });
+      expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
+        .toMatchObject({ ok: false, code: "attention_required", message: expect.stringContaining("observation unavailable") });
+    });
+
+    it.each([
+      ["No conversation found", "retry_fresh"],
+      ["How would you like to resume?\n❯ Resume from summary\n  Resume full session as-is", "attention_required"],
+    ])("retains the final observation's distinction: %s", async (content, code) => {
+      const capturePaneContent = vi.fn().mockResolvedValueOnce("").mockResolvedValue(content);
+      const adapter = new ClaudeResumeAdapter(mockTmux({
+        getPaneCommand: async () => "2.1.283", capturePaneContent,
+      }), { pollMs: 0, maxWaitMs: 0 });
+      expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
+        .toMatchObject({ ok: false, code });
+    });
+
+    it("retains positive returned-to-shell refusal", async () => {
+      const adapter = new ClaudeResumeAdapter(mockTmux({
+        getPaneCommand: async () => "zsh", capturePaneContent: async () => "$ ",
+      }), { pollMs: 0, maxWaitMs: 0 });
+      expect(await adapter.resume("worker", "claude_id", "retained-history", "/repo"))
+        .toMatchObject({ ok: false, code: "retry_fresh" });
     });
 
     it("waits for Claude to become the foreground command before succeeding", async () => {
@@ -333,6 +377,55 @@ describe("ClaudeResumeAdapter", () => {
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
 
       expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
+    });
+
+    it.each(["2.1.283", "sh"])("accepts a headerless bypass-mode prompt with exact resume lineage behind %s", async (paneCommand) => {
+      const tmux = mockTmux({
+        getPanePid: vi.fn(async () => 1234),
+        getPaneCommand: vi.fn(async () => paneCommand),
+        capturePaneContent: vi.fn(async () => [
+          "Restored conversation",
+          "❯",
+          "⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ].join("\n")),
+      });
+      const adapter = new ClaudeResumeAdapter(tmux, {
+        pollMs: 0,
+        maxWaitMs: 0,
+        sleep: async () => {},
+        listProcesses: async () => [
+          { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "bash", executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: "claude --permission-mode acceptEdits --resume resume-id", executableName: "claude", startedAt: "Sat Jan  1 12:00:00 2000" },
+        ],
+      });
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_id", "resume-id", "/repo");
+
+      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
+    });
+
+    it.each([
+      ["2.1.283", "attention_required"],
+      ["sh", "retry_fresh"],
+    ] as const)("does not accept the prompt behind %s when the native process carries another resume token", async (paneCommand, expectedCode) => {
+      const tmux = mockTmux({
+        getPanePid: vi.fn(async () => 1234),
+        getPaneCommand: vi.fn(async () => paneCommand),
+        capturePaneContent: vi.fn(async () => "Restored conversation\n❯\n⏵⏵ bypass permissions on"),
+      });
+      const adapter = new ClaudeResumeAdapter(tmux, {
+        pollMs: 0,
+        maxWaitMs: 0,
+        sleep: async () => {},
+        listProcesses: async () => [
+          { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "bash", executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: "claude --permission-mode acceptEdits --resume another-session", executableName: "claude", startedAt: "Sat Jan  1 12:00:00 2000" },
+        ],
+      });
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_id", "resume-id", "/repo");
+
+      expect(result).toMatchObject({ ok: false, code: expectedCode });
     });
   });
 });

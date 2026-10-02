@@ -13,6 +13,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -125,7 +126,13 @@ export class ContextPackLibraryService {
         // Overlapping roots share one address space. The first configured root
         // owns each physical pack, so a nested root cannot give that pack a
         // second ref or shadow a different pack already using that ref.
-        const physicalPackDir = resolve(packDir);
+        let physicalPackDir = resolve(packDir);
+        try {
+          physicalPackDir = realpathSync(packDir);
+        } catch {
+          // Keep the ordinary read/error path below if a discovered pack
+          // disappears or becomes unreadable while this scan is running.
+        }
         if (claimedPackDirs.has(physicalPackDir)) continue;
         claimedPackDirs.add(physicalPackDir);
         // DISCOVERY trust boundary (Atom 2): every discovered ref passes the

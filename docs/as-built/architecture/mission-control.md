@@ -1,164 +1,220 @@
 ---
 kind: as-built
-title: Mission Control — Queue Observability + 7-Verb Contract (PL-005)
+title: Mission Control — Queue Observability + Verb Contract
 status: active
 topics: [coordination, observability]
 domains: [engineering-advisor, operating-advisor, orchestrator, human-operator]
 applies-when: |
   Need to know how the daemon-backed Mission Control surface works — the
-  seven views, the seven write verbs, the action audit table, the
-  bearer-token middleware, or how queue observability maps to PL-004 sources.
+  seven views, the eight write verbs, the action audit table, the
+  bearer-token middleware, or how queue observability maps to the
+  coordination primitive's sources.
 siblings: [coordination-primitive.md, workflow-runtime.md, ../ui/project-and-for-you.md]
 prerequisite-reads: [../README.md, coordination-primitive.md]
-last-verified-against-source: 7eaf524c
-last-updated: 2026-05-16
+last-verified-against-source: e6a391b6
+last-updated: 2026-10-02
 ---
 
-# Mission Control — Queue Observability + 7-Verb Contract (PL-005)
+# Mission Control — Queue Observability + Verb Contract
 
-Mission Control (PL-005) is the daemon-backed queue-observability surface: an
-integrated product UI inside the existing shell (a top-level `/mission-control`
-route, NOT a new managed app) over the PL-004 Phase A coordination primitive.
-Per the PRD acceptance criteria: seven views, seven verbs, first-class human
-seats, recent-ships=10, and a daemon-backed action audit table; no
-old-dashboard migration/cutover (`architecture.md` §3 L368, L390).
+Mission Control is the daemon's queue-observability and operator-action
+surface, mounted at `/api/mission-control` over the coordination primitive's
+`queue_items` and `stream_items` (see `coordination-primitive.md`). It has
+seven views, eight verbs, a recent-ships cap of 10
+(`mission-control-read-layer.ts:107`), and a daemon-backed action audit
+table. In the web UI the old `/mission-control` page now redirects to
+`/for-you`, and the For You feed carries the verb actions (§6).
 
-> Verified against source at HEAD `7eaf524c`. Mission Control is PL-005 (an
-> early-0.3.0 graft); plugins and Claude auto-compaction are 0.3.1 features
-> and are NOT back-attributed here (slice-00 0.3.0-ground-truth seams a/row-7).
+> Verified against source at main `e6a391b6`. A bare file name such as
+> `mission-control-read-layer.ts:32` is in
+> `packages/daemon/src/domain/mission-control/`; `domain/…`, `routes/…`,
+> `middleware/…`, `db/…`, `index.ts`, `server.ts` and `startup.ts` are under
+> `packages/daemon/src/`. Each count sits beside the command that produces
+> it; run the command from the repository root to refresh it.
 
 ## 1. The seven views
 
-`MISSION_CONTROL_VIEWS` is the canonical view list (re-confirmed at HEAD
-`packages/daemon/src/domain/mission-control/mission-control-read-layer.ts:32–42`):
-`my-queue`, `human-gate`, `fleet`, `active-work`, `recent-ships`,
-`recently-active`, `recent-observations`.
+`MISSION_CONTROL_VIEWS` is the canonical view list
+(`mission-control-read-layer.ts:32-40`): `my-queue`, `human-gate`, `fleet`,
+`active-work`, `recent-ships`, `recently-active`, `recent-observations`.
 
-All seven return rows in the load-bearing 9-field phone-friendly content
-model (rig/mission name, current phase,
-active|idle|attention|blocked|degraded, next-action,
+Views: **7** — `sed -n '/^export const MISSION_CONTROL_VIEWS = \[/,/\] as const;/p' packages/daemon/src/domain/mission-control/mission-control-read-layer.ts | grep -c '^  "'`
+
+All seven return rows in the 9-field phone-friendly content model,
+`CompactStatusRow` (`mission-control-read-layer.ts:61`): rig/mission name,
+current phase, active|idle|attention|blocked|degraded, next-action,
 pending-human-decision, read-cost, last-update timestamp,
-confidence/freshness, evidence link). The model is non-negotiable across all
-7 views; UI may render compact, JSON preserves all 9 (`architecture.md` §3
-L370).
+confidence/freshness, evidence link. The type's doc comment
+(`mission-control-read-layer.ts:44-60`) makes the model non-negotiable across
+all seven views: UI may render compact, JSON preserves all nine. Four further
+optional fields carry the queue item's id and context.
 
-`MissionControlReadLayer` maps each view to its source-of-truth path
-(`mission-control-read-layer.ts:4–14`, re-confirmed at HEAD):
+Required row fields: **9** — `sed -n '/^export interface CompactStatusRow {/,/^}/p' packages/daemon/src/domain/mission-control/mission-control-read-layer.ts | grep -c -E '^  [a-zA-Z]+:'`
 
-- `my-queue` / `human-gate` / `active-work` / `recent-ships` query PL-004
-  Phase A `queue_items` via `QueueRepository`.
-- `fleet` consumes the per-rig CLI capability cache + queue summary.
-- `recently-active` delegates to PL-004 Phase B
-  `ViewProjector.show("recently-active")`.
-- `recent-observations` reads PL-004 Phase A `stream_items` via
-  `StreamStore`.
+`MissionControlReadLayer.readView` (`mission-control-read-layer.ts:143`) maps
+each view to its source:
 
-Filesystem fallbacks (`~/.openrig/stream/<date>.jsonl`, raw queue file grep)
-are graceful-degradation aids, NOT the primary path (`architecture.md` §3
-L378).
+- `my-queue` / `human-gate` / `active-work` / `recent-ships` query
+  `queue_items` via `QueueRepository`.
+- `fleet` calls `MissionControlFleetCliCapability.rollupFleet()`
+  (`mission-control-read-layer.ts:197`;
+  `mission-control-fleet-cli-capability.ts:185`), which walks the rig
+  registry (`:186`), summarises each rig's `queue_items` (`:204`), and runs a
+  per-rig CLI capability probe (`makeLocalCliCapabilityProbe`, `:143`, wired
+  at `startup.ts:1545`).
+- `recently-active` delegates to the view projector's built-in
+  `ViewProjector.show("recently-active")` (`mission-control-read-layer.ts:245`).
+- `recent-observations` reads `stream_items` via `StreamStore`
+  (`mission-control-read-layer.ts:264`).
 
-> Scope note (slice-00 0.3.0-ground-truth OPEN-3, carried): the exact
-> For-You verb subset is an unresolved velocity slice-01 ruling. This module
-> describes the **system-level** 7-verb vocabulary (proven, slice-00
-> §1.6/seam-c). It does NOT enumerate a For-You-surface subset — that
-> surface is described in `../ui/project-and-for-you.md` when authored.
+There is no filesystem fallback. When no `StreamStore` is wired,
+`recent-observations` returns no rows with
+`sourceFallback: "stream-store-not-wired"`
+(`mission-control-read-layer.ts:257-261`), and `fleet` always reports
+`sourceFallback: "daemon-internal-projection"`
+(`mission-control-fleet-cli-capability.ts:224`).
 
-## 2. The seven verbs (the write contract)
+> Scope note: this module describes the daemon's verb vocabulary. It does
+> NOT enumerate which verbs the For You cards offer; that surface is
+> described in `../ui/project-and-for-you.md`.
 
-The seven verbs execute through the load-bearing
-`MissionControlWriteContract` (re-confirmed at HEAD
-`packages/daemon/src/domain/mission-control/mission-control-write-contract.ts:27–36`):
+## 2. The eight verbs (the write contract)
+
+`MISSION_CONTROL_VERBS` (`mission-control-action-log.ts:14-26`) is the verb
+list. The verbs execute through `MissionControlWriteContract.act`
+(`mission-control-write-contract.ts:131`); the closure mapping is
+`verbToClosure` (`:509`).
+
+Verbs: **8** — `sed -n '/^export const MISSION_CONTROL_VERBS = \[/,/\] as const;/p' packages/daemon/src/domain/mission-control/mission-control-action-log.ts | grep -c '^  "'`
 
 | Verb | Effect |
 |---|---|
 | `approve` | `state="done"`, `closure_reason="no-follow-on"` |
 | `deny` | `state="done"`, `closure_reason="denied"` |
-| `route` | `state="done"`, `closure_reason="handed_off_to"`, `closure_target`+`handed_off_to`=route target; creates new qitem at the route target (1-hop) |
+| `route` | `state="handed-off"`, `closure_reason="handed_off_to"`, `closure_target`+`handed_off_to`=route target; creates a new queue item at the route target (1-hop) |
 | `annotate` | no queue mutation; audit record only |
 | `hold` | `state="blocked"`, `closure_reason="blocked_on"` |
 | `drop` | `state="done"`, `closure_reason="canceled"` |
-| `handoff` | the 4-step shape (see below) |
+| `handoff` | same closure and new destination item as `route`; the 4-step shape (see below) |
+| `resolve` | only for a `blocked` item parked on a human seat: moves it to `in-progress` with the required decision text as the transition note; no closure and no new item (`:369`, `:386`, `:410-411`) |
 
-Each verb is one atomic daemon transaction: queue mutation via
-`QueueRepository.updateWithinTransaction()` (which preserves Phase A
-hot-potato closure validation — see `coordination-primitive.md` §3) + an
-audit row in `mission_control_actions` + a persisted
-`mission_control.action_executed` event, all in one `db.transaction`. The
-4-step `handoff` shape (source-update + destination-create + opt-in
-best-effort notify + audit-record append) is verified atomic; notify failure
-does NOT roll back durable mutations (PRD invariant). Failure-injection rolls
-back source closure + audit row + new qitem together (`architecture.md` §3
-L380; `mission-control-write-contract.ts:5,15`).
+Each verb is one atomic daemon transaction: the queue mutation via
+`QueueRepository.updateWithinTransaction()` (`domain/queue-repository.ts:2314`,
+which keeps the hot-potato closure validation — see
+`coordination-primitive.md` §3), an audit row in `mission_control_actions`
+(`mission-control-write-contract.ts:207`), and a persisted
+`mission_control.action_executed` event (`:225`), all in one
+`db.transaction`. For every verb except `annotate`, that transaction is
+opened by `EventBus.withNotifyEnvelope` (`:157`; `domain/event-bus.ts:111`,
+`:125`); `annotate` opens `db.transaction` itself
+(`mission-control-write-contract.ts:308`).
+
+The 4-step `handoff` shape (source-update + destination-create + best-effort
+notify + audit-record append) is shared by `route`. The destination item is
+created in the same transaction (`createWithinTransaction`, `:173`), along
+with the successor's wake intent (`stageWakeIntent`, `:195`, checked by
+`assertTerminalClosureHasIntent`, `:242`). The wake itself runs after commit
+(`deliverWakeForSuccessor`, `:264`). It is on unless the caller passes
+`notify: false` (`domain/queue-repository.ts:1166`), and a notify failure
+does NOT roll back durable mutations (`mission-control-write-contract.ts:272-275`).
+A failed destination create rolls back the source closure, the audit row and
+the new item together
+(`packages/daemon/test/mission-control-write-contract.test.ts:220`).
 
 ## 3. The action audit table
 
-`mission_control_actions` (`037_mission_control_actions.ts:54` `CREATE TABLE
-IF NOT EXISTS mission_control_actions`) is append-only at the API surface:
-it records every operator action through Mission Control with before/after
-qitem snapshots for forensic reconstruction. Columns include `action_verb`
-(TEXT, app-layer enum enforcement, `:56`) and `acted_at` (TEXT NOT NULL ISO
-timestamp); indexes `(acted_at DESC, action_verb)`,
-`(qitem_id, acted_at DESC)`, `(actor_session, acted_at DESC)`
-(`037_mission_control_actions.ts:28–44`). Phase B added NO migrations — this
-Phase A table is the only data source (`architecture.md` §3 L364, L392).
+`mission_control_actions` (`db/migrations/037_mission_control_actions.ts:58`
+`CREATE TABLE IF NOT EXISTS mission_control_actions`) is append-only at the
+API surface: `record()` is the only writer `MissionControlActionLog` exposes
+(`mission-control-action-log.ts:113`). It records every operator action
+through Mission Control with before/after queue item snapshots for forensic
+reconstruction. Columns include `action_verb` (TEXT, app-layer enum
+enforcement, `:60`) and `acted_at` (TEXT NOT NULL ISO timestamp, `:63`);
+indexes `(acted_at DESC, action_verb)`, `(qitem_id, acted_at DESC)`,
+`(actor_session, acted_at DESC)` (`037_mission_control_actions.ts:72-77`).
+One later migration adds a nullable `identity_provenance` column
+(`db/migrations/065_identity_provenance.ts:18`). The audit browse (§4) reads
+only this table.
 
-## 4. PL-005 Phase B — bearer middleware, notifications, audit browse
+## 4. Bearer middleware, notifications, audit browse
 
-Phase B extends the daemon Mission Control surface:
-
-- **Bearer-token middleware** —
-  `packages/daemon/src/middleware/auth-bearer-token.ts` (re-confirmed at
-  HEAD: header `auth-bearer-token.ts:1–9` "PL-005 Phase B"). Constant-time
-  bearer comparison via Node `crypto.timingSafeEqual`; the daemon refuses to
-  start with a non-loopback bind interface AND an empty bearer config
-  (startup-side check). Bearer enforced on the write verbs:
-  `app.post("/action", requireAuth)` (`routes/mission-control.ts:294`) and
-  `app.post("/notifications/test", requireAuth)` (`:295`). v0 is bearer-on-write;
-  no OAuth/SSO/per-user model.
+- **Bearer-token middleware** — `middleware/auth-bearer-token.ts`.
+  Constant-time comparison via Node `crypto.timingSafeEqual`
+  (`constantTimeEqual`, `:36`, `:50`). `authBearerTokenMiddleware` (`:93`)
+  passes every request through when no token is configured (`:98`). The
+  token comes from `OPENRIG_AUTH_BEARER_TOKEN` (`index.ts:280`). The daemon
+  refuses to start when the bind host is set explicitly, is neither loopback
+  nor Tailscale (a hostname is resolved first), and no bearer token is set
+  (`assertBindAuthInvariant`, `auth-bearer-token.ts:240`, called at
+  `index.ts:288`). Bearer enforced on the write routes:
+  `app.post("/action", requireAuth)` (`routes/mission-control.ts:305`) and
+  `app.post("/notifications/test", requireAuth)` (`:306`). Reads are not
+  gated. It is one static token; no OAuth/SSO/per-user model
+  (`auth-bearer-token.ts:11-14`).
 - **Notification dispatcher** — two adapters
-  (`notification-adapter-ntfy.ts` default + `notification-adapter-webhook.ts`
-  alternate; selected via `OPENRIG_NOTIFICATIONS_MECHANISM` env) plus
-  `notification-dispatcher.ts` (re-confirmed in
-  `domain/mission-control/`). ntfy.sh recommended for the operator's phone
-  via tailnet.
-- **Read-only audit-history browse** — `audit-browse.ts` over
-  `mission_control_actions`, exposed at `GET /api/mission-control/audit`
-  (`routes/mission-control.ts:346`) with filters and `(limit, before_id)`
-  pagination cursored on SQLite `rowid` (`architecture.md` §3 L392).
+  (`notification-adapter-ntfy.ts`, `notification-adapter-webhook.ts`) plus
+  `notification-dispatcher.ts`. `OPENRIG_NOTIFICATIONS_MECHANISM` selects
+  `ntfy`, `webhook` or `none`, and the default is `none`
+  (`startup.ts:1590`). A dispatcher starts only when
+  `OPENRIG_NOTIFICATIONS_TARGET` is also set (`:1591`, `:1598`) and the
+  target URL passes validation (`:1609`). The ntfy adapter posts to a topic
+  URL that the ntfy phone app subscribes to
+  (`notification-adapter-ntfy.ts:1-6`).
+
+  Adapters: **2** — `git grep -l 'implements NotificationAdapter' -- packages/daemon/src | wc -l`
+- **Read-only audit-history browse** — `MissionControlAuditBrowse.query`
+  (`audit-browse.ts:67`) over `mission_control_actions`, exposed at
+  `GET /api/mission-control/audit` (`routes/mission-control.ts:439`) with
+  filters and `(limit, before_id)` pagination cursored on SQLite `rowid`
+  (`audit-browse.ts:121`).
 
 ## 5. Mission Control events
 
-> Drift-fix D8 / OPEN-4 (carried verbatim, slice-00): `architecture.md` §3
-> L394 says "Existing 32 PL-004 events untouched" — internally inconsistent
-> with §3 L410's "20" and predates 0.3.x. **Do NOT carry either number.**
-> The current `RigEvent` union (`packages/daemon/src/domain/types.ts:94`)
-> has **73 members** total (slice-00 §1.8, re-confirmed at HEAD); the
-> additive `mission_control.*` events are described below WITHOUT asserting
-> a contested PL-004 sub-count.
+The `RigEvent` union starts at `domain/types.ts:105`; its five
+`mission_control.*` members are at `domain/types.ts:307-313`.
 
-Re-confirmed `domain/types.ts:212–218`: Phase A added
-`mission_control.action_executed`, `mission_control.cli_drift_detected`,
-`mission_control.view_refreshed`; Phase B added
-`mission_control.notification_sent`, `mission_control.notification_failed`
-(5 `mission_control.*` members at HEAD).
+`RigEvent` members: **99** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "'`
+
+`mission_control.*` members: **5** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "mission_control\.'`
+
+- `mission_control.action_executed` — written by the write contract
+  (`mission-control-write-contract.ts:225`).
+- `mission_control.cli_drift_detected` — emitted by the fleet capability
+  probe (`mission-control-fleet-cli-capability.ts:239`).
+- `mission_control.view_refreshed` — declared, and forwarded by the SSE
+  route, but nothing in `packages/daemon/src` constructs it.
+- `mission_control.notification_sent` / `mission_control.notification_failed`
+  — emitted by the notification dispatcher (`notification-dispatcher.ts:174`,
+  `:184`).
 
 ## 6. Route surface
 
-`missionControlRoutes({ bearerToken })` is mounted at `server.ts:498`. Key
-routes (`routes/mission-control.ts`): `GET /views` (`:245`),
-`GET /cli-capabilities` (`:250`), `POST /action` (`:298`, auth-gated),
-`GET /audit` (`:346`), `POST /notifications/test` (auth-gated), plus an SSE
-surface. The integrated UI is the `/mission-control` top-level route in
-`packages/ui/src/routes.tsx` mounting `MissionControlSurface`
-(`architecture.md` §3 L390); UI detail lands in
-`../ui/project-and-for-you.md`.
+`missionControlRoutes({ bearerToken })` is mounted at `/api/mission-control`
+(`server.ts:791-794`). Routes (`routes/mission-control.ts`): `GET /views`
+(`:256`), `GET /cli-capabilities` (`:261`), `GET /destinations` (`:273`),
+`GET /sse` and its alias `GET /watch` (`:301-302`; they forward
+`action_executed`, `cli_drift_detected` and `view_refreshed` events,
+`:286-289`), `POST /action` (`:312`, auth-gated), `GET /audit` (`:439`),
+`POST /notifications/test` (`:472`, auth-gated), and `GET /views/:view-name`
+(`:500`).
+
+In the web UI (`packages/ui/src/routes.tsx`), `/mission-control` is a
+redirect to `/for-you` (`:495-500`). `/for-you` renders the For You `Feed`
+(`:130-134`), whose cards call `POST /action` through `VerbActions`
+(`packages/ui/src/components/for-you/FeedCard.tsx:13`), and `/search` renders
+`AuditHistoryView` over `GET /audit` (`routes.tsx:304-308`).
+`MissionControlSurface`
+(`packages/ui/src/components/mission-control/MissionControlSurface.tsx:9`)
+still exists and renders the same `Feed`, but nothing imports it. UI detail
+lands in `../ui/project-and-for-you.md`.
 
 ## See also
 
-- `coordination-primitive.md` — the PL-004 Phase A `queue_items`/`stream_items`
-  sources Mission Control reads, and the hot-potato closure contract verbs honor.
-- `workflow-runtime.md` — PL-004 Phase D transactional-scribe runtime.
-- `../ui/project-and-for-you.md` — the UI surface counterpart (authored phase).
+- `coordination-primitive.md` — the `queue_items`/`stream_items` sources
+  Mission Control reads, and the hot-potato closure contract verbs honor.
+- `workflow-runtime.md` — the workflow transactional-scribe runtime.
+- `../ui/project-and-for-you.md` — the For You feed that carries the verb
+  actions in the web UI.
 - Source roots: `packages/daemon/src/domain/mission-control/`,
   `packages/daemon/src/middleware/auth-bearer-token.ts`,
   `packages/daemon/src/routes/mission-control.ts`,

@@ -10,8 +10,6 @@ metadata:
       - session-compaction-and-restore
       - claude-compaction-restore
       - seat-continuity-and-handover
-      - human-agent-operator-posture
-      - security-and-consequence-boundary-policy
       - openrig-user
 ---
 

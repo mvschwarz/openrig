@@ -47,6 +47,13 @@ Examples:
 
       const res = await client.get<Record<string, unknown>>(`/api/rigs/${encodeURIComponent(rigId)}/env`);
 
+      if (res.status >= 400) {
+        if (opts.json) console.log(JSON.stringify(res.data, null, 2));
+        else console.error(res.data?.["error"] ?? `Failed to get service status (HTTP ${res.status})`);
+        process.exitCode = res.status >= 500 ? 2 : 1;
+        return;
+      }
+
       if (opts.json) {
         console.log(JSON.stringify(res.data, null, 2));
         return;

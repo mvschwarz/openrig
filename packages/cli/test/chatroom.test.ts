@@ -354,6 +354,19 @@ describe("Chatroom CLI", () => {
     expect(logs.join("\n")).toContain("Timed out");
   });
 
+  it("chatroom wait rejects a non-numeric --timeout instead of polling the daemon without pause", { timeout: 5000 }, async () => {
+    // parseInt("abc") is NaN: it never satisfied either timeout check and made the
+    // poll sleep ~1ms, so the wait spun against the daemon forever.
+    capturedUrls.length = 0;
+    const { exitCode, logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "chatroom", "wait", "my-rig", "--timeout", "abc"]);
+    });
+
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("--timeout must be a non-negative number of seconds; got 'abc'");
+    expect(capturedUrls.some((u) => u.includes("/chat/history"))).toBe(false);
+  });
+
   it("chatroom wait --json returns messages as JSON", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "chatroom", "wait", "my-rig", "--after", "000", "--timeout", "2", "--json"]);

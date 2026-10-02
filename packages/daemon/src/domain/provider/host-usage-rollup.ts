@@ -175,11 +175,17 @@ function rollupClaude(input: HostUsageRollupInput): HostUsageRow | null {
   const maxUsed = Math.max(...meterRows.map((s) => s.usedPercent!));
   if (maxUsed >= 100) {
     const exhausted = meterRows.filter((s) => s.usedPercent! >= 100);
-    const resets = exhausted
-      .map((s) => s.resetsAt)
-      .filter((x): x is string => typeof x === "string")
-      .sort();
-    return { ...base, state: "limited", ...(resets[0] !== undefined ? { resetsAt: resets[0] } : {}) };
+    // Every exhausted window must reset before the provider limit can lift.
+    // Preserve source timestamps, compare instants (not lexical offsets), and
+    // omit a lift time when any blocking window has no usable reset evidence.
+    const resets = exhausted.map((s) => s.resetsAt);
+    const knownResets = resets.filter((reset): reset is string =>
+      typeof reset === "string" && Number.isFinite(Date.parse(reset)),
+    );
+    const resetsAt = knownResets.length === resets.length
+      ? knownResets.reduce((latest, reset) => Date.parse(reset) > Date.parse(latest) ? reset : latest)
+      : undefined;
+    return { ...base, state: "limited", ...(resetsAt !== undefined ? { resetsAt } : {}) };
   }
   if (maxUsed >= NEARING_THRESHOLD_PERCENT) return { ...base, state: "nearing" };
   return { ...base, state: "ok" };

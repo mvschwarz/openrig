@@ -6,7 +6,7 @@
 // behavior verbatim against §2 + the sealed contract — never merely that the
 // assert was invoked. Colon-id addressing stays intact (strip = LATER atom).
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
@@ -87,6 +87,32 @@ describe("ATOM 2 — recursive path-addressed discovery (spec §2 refs)", () => 
     expect(result).toMatchObject({ count: 2, errors: [] });
     expect(service.getByRef("baseline")?.sourcePath).toBe(join(root, "baseline"));
     expect(service.getByRef("system/baseline")?.sourcePath).toBe(join(root, "system", "baseline"));
+  });
+
+  it.each([false, true])("keeps physical pack custody when a configured nested root is an alias (top-level collision: %s)", (collision) => {
+    writePackAt(root, "system/baseline", "system-baseline");
+    if (collision) writePackAt(root, "baseline", "operator-baseline");
+    const alias = join(tmp, "system-alias");
+    symlinkSync(join(root, "system"), alias, "dir");
+    const service = new ContextPackLibraryService({
+      roots: [
+        { path: root, sourceType: "user_file" },
+        { path: alias, sourceType: "workspace" },
+      ],
+    });
+
+    expect(service.scan()).toMatchObject({ count: collision ? 2 : 1, errors: [] });
+    expect(service.getByRef("system/baseline")?.sourcePath).toBe(join(root, "system", "baseline"));
+    if (collision) {
+      expect(service.getByRef("baseline")?.name).toBe("operator-baseline");
+      const removed = service.removeByRef("baseline");
+      expect(removed.removedPath).toBe(join(root, "baseline"));
+      expect(existsSync(join(root, "system", "baseline", "manifest.yaml"))).toBe(true);
+      expect(service.getByRef("system/baseline")?.name).toBe("system-baseline");
+      expect(service.getByRef("baseline")).toBeNull();
+    } else {
+      expect(service.getByRef("baseline")).toBeNull();
+    }
   });
 
   it("packs are LEAVES: a manifest below a pack dir belongs to that pack's subtree and is not indexed as its own pack", () => {

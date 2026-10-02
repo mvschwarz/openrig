@@ -11,8 +11,8 @@ applies-when: |
   compatibility limits that still describe the shipped system.
 siblings: [daemon-core.md, coordination-primitive.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 7eaf524c
-last-updated: 2026-05-16
+last-verified-against-source: 264fade9
+last-updated: 2026-10-02
 ---
 
 # Architecture Invariants, Event System, Compatibility Notes
@@ -21,20 +21,25 @@ This module collects the cross-cutting invariants that do not belong to any
 single subsystem: the architecture rules the codebase holds itself to, the
 event-system shape, and the intentional compatibility limits.
 
-> Verified against source at HEAD `7eaf524c` (`git describe` →
-> `v0.3.1-6-g7eaf524c`); package version **0.3.1** across all three packages
-> (slice-00 §1.1). HEAD carries 6 commits of unreleased 0.3.2 work; no
-> `v0.3.2` tag exists.
+> Verified against source at main `264fade9`. Each count below sits beside the
+> command that produces it; run the command from the repository root to refresh
+> it.
 
 ## 1. Architecture rules
 
-These are the invariants the codebase is built to preserve (`architecture.md`
-§7). Rule 6 (startup layering) and rule 7 (restore-policy narrowing) are the
-spec/startup contract — see `agent-spec-and-startup.md` for their flow detail;
-they are restated here as system-level invariants.
+These are the invariants the codebase is built to preserve. Rule 6 (startup
+layering) and rule 7 (restore-policy narrowing) are the spec/startup contract —
+see `agent-spec-and-startup.md` for their flow detail; they are restated here as
+system-level invariants.
 
-1. Zero Hono in `domain/` and `adapters/`.
-2. Routes depend on the domain; the domain never depends on routes.
+1. No runtime Hono in `domain/` and `adapters/`. `adapters/` has none; `domain/`
+   has type-only Hono imports (`import type`) in **3** files
+   (`git grep -l 'from "hono' -- packages/daemon/src/domain packages/daemon/src/adapters | wc -l`).
+2. Routes depend on the domain; the domain does not depend on routes at
+   runtime. **1** type-only import crosses back:
+   `domain/project-classifier.ts:1` imports `IdentityProvenance` from
+   `routes/require-sender-identity.js`
+   (`git grep -lE 'from "(\.\./)+routes/' -- packages/daemon/src/domain packages/daemon/src/adapters | wc -l`).
 3. Shared DB-handle invariants are enforced at construction time.
 4. The reboot is engine-first: domain services land before public-surface
    rewiring.
@@ -50,31 +55,48 @@ they are restated here as system-level invariants.
    in the owning artifact.
 10. Restore replay uses classification-free projection intent, not stale
     startup-time `no_op` / conflict classifications.
-11. Startup status is explicit session state: `pending`, `ready`, `failed`.
+11. Startup status is explicit session state: `pending`, `ready`,
+    `attention_required`, `failed` (`types.ts:99`).
 12. Session recency depends on monotonic ULIDs: `session-registry.ts` uses
-    `monotonicFactory()`; restore selects the newest session by max ULID.
+    `monotonicFactory()`. Restore does not pick the newest session by max
+    ULID; it resolves the active occupant recorded in the snapshot
+    (`resolveActiveSnapshotSession`, `active-occupant.ts:74`, called at
+    `restore-orchestrator.ts:1170`).
 13. Readiness checking is a retry loop with exponential backoff and
     configurable timeout, using adapter-specific probes (Claude TUI
     indicator, Codex ready message, terminal immediate).
-14. Resume states are locked: `resumed` / `rebuilt` / `fresh`. `rebuilt` =
+14. Restore outcome states are a fixed set (`RestoreNodeResult.status`,
+    `types.ts:475`): `resumed`, `rebuilt`, `fresh-primed`,
+    `awaiting-decision`, `attention_required`, `failed`, plus
+    `operator_recovered` (set only by later reconciliation) and `fresh`
+    (retained only for the legacy continuity-restoring skip path). `rebuilt` =
     new process assembled from artifacts.
-15. Restore honesty: failed resume is FAILED loudly. No automatic fresh
-    fallback. Fresh launch is explicit follow-up only.
+15. Restore honesty: a failed resume stops loudly as `awaiting-decision`, with
+    the blank session rolled back and no session running
+    (`restore-orchestrator.ts:1229`). No automatic fresh fallback. Fresh launch
+    is explicit follow-up only (`rig up --fresh <logicalId>`,
+    `packages/cli/src/commands/up.ts:85`).
 16. Post-command handoff required on `up`, `down`, `restore`,
     `snapshot create`: what happened + current state + next action.
 17. Session naming: `{pod}-{member}@{rig}` — human-authored,
     system-validated. No generation, no slugification.
 18. Communication: tmux is transport, not truth. `send/capture/broadcast`
     wrap tmux reliably with honest errors.
-19. Transcripts: raw capture via pipe-pane, ANSI strip on read. `rg`
-    preferred, `grep -E` fallback.
+19. Transcripts: bounded capture — a periodic `tmux capture-pane` snapshot of
+    the trailing lines (default 1000, every 2 s) overwrites the transcript
+    file, replacing pipe-pane (`transcript-rotation.ts:3`, `:27`–`28`; started
+    at `node-launcher.ts:181`). ANSI strip on read. `rig ask` transcript
+    search: `rg` preferred, `grep -E` fallback.
 20. Config precedence: CLI flag > env var > config file
-    (`~/.openrig/config.json`, with legacy fallback from
-    `~/.rigged/config.json`) > default.
+    (`~/.openrig/config.json`, or `$OPENRIG_HOME/config.json` when
+    `OPENRIG_HOME` is set; `packages/cli/src/config-store.ts:915`) > default.
 21. Semi-deterministic calibration: build what agents use constantly. Agent
     handles edge cases from error messages.
 22. `rig ask` is context engineering: gathers evidence, does NOT call an
-    external LLM. The agent IS the LLM.
+    external LLM. The agent IS the LLM. The exception is the explicit `--wake`
+    flag (`packages/cli/src/commands/ask.ts:88`), which runs one headless
+    question against an existing agent session (`codex exec resume` or
+    `claude -p --resume`, `packages/cli/src/ask-wake.ts:58`–`60`).
 23. Spec library truth is YAML on disk; daemon owns the structured
     review/index/cache layer.
 24. Adopted-session parity is tmux-metadata parity, not fake env-var parity.
@@ -84,133 +106,132 @@ they are restated here as system-level invariants.
 ### Startup action constraints
 
 - No shell startup actions.
-- Action types are `slash_command` and `send_text` only.
+- Action types are `slash_command`, `send_text` and `startup_proof` only
+  (`startup-validation.ts:7`).
 - Non-idempotent actions must not apply on restore.
 - Retrying failed startup is handled as restore.
 
 ### Remote import constraints
 
 The reboot supports `local:...` and `path:/abs/...` agent refs. Remote
-`agent_ref` sources remain unsupported and fail in preflight
-(`architecture.md` §7 "Remote import constraints"; restated in compat note 1).
+`agent_ref` sources remain unsupported and fail in preflight (schema
+validation, `rigspec-schema.ts:545`; restated in compat note 1).
 
 ## 2. Event system
 
 The daemon's event surface is the single `RigEvent` discriminated union.
 
-> Drift-fix D8 / OPEN-4 (carried verbatim, slice-00): `architecture.md` §8
-> says "PL-004 Phase A adds 9 coordination events" and (in §3) "Existing 32
-> PL-004 events" / "Existing 20 PL-004 events" — internally inconsistent
-> contested PL-004 sub-counts. **Do NOT carry the 9 / 32 / 20 figures.** The
-> `architecture.md` §8 "Currently emitted in production code" / "Present in
-> the union but not yet emitted" lists also predate 0.3.x and are stale. The
-> union shape below is re-derived from source at HEAD, not migrated.
+`RigEvent` is declared at `packages/daemon/src/domain/types.ts:105`
+(`export type RigEvent =`) and runs through `types.ts:313`. It has **99 union
+members** declaring **100** `type` literals: one member (`types.ts:106`) carries
+both `proof.judged` and `proof.sources_changed`.
 
-`RigEvent` is declared at `packages/daemon/src/domain/types.ts:94`
-(`export type RigEvent =`) and runs through `types.ts:218`. It has **73
-union members** (slice-00 §1.8, re-confirmed at HEAD:
-`grep -cE '^\s*\| \{ type:'` over L94–218 = 73). Every one of the 73
-declared `type:` literals is also constructed somewhere in
-`packages/daemon/src/{domain,routes}` (re-verified at HEAD: the set of
-`type: "<x>"` literals in domain+routes exactly equals the 73 union members
-— zero union-only-but-never-referenced types).
+- Members:
+  `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "'`
+- Type literals:
+  `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | sort -u | wc -l`
 
-### Per-prefix event families (grep-verified at HEAD)
+**95** of the 100 literals appear as a `type: "<x>"` literal somewhere in
+`packages/daemon/src` outside `types.ts` (mostly in `domain/` and `routes/`;
+`seat.model_divergence` is built in `startup.ts`). **5** are declared but never
+constructed: `session.status_changed`, `continuity.sync`, `continuity.degraded`,
+`qitem.closure_overdue` and `mission_control.view_refreshed` (the last two are
+still named in SSE filters, `routes/queue.ts:967` and
+`routes/mission-control.ts:289`). List them with:
 
-Each count below is a fresh, primary-source-grep-verified, explicitly-labeled
-per-prefix family count over the union body
-(`types.ts:94–218`) — NOT the contested PL-004 sub-count (OPEN-4 ruling:
-labeled grep-verified family counts are ground truth; the `9`/`32`/`20`
-figures are forbidden).
+`for t in $(sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | tr -d '"'); do git grep -q -F "type: \"$t\"" -- packages/daemon/src ':!packages/daemon/src/domain/types.ts' || echo "$t"; done`
 
-| Prefix | Members | Sample / role |
+### Per-prefix event families
+
+Each count below is the number of `type` literals per prefix in the union body
+(`types.ts:105`–`313`):
+`sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | tr -d '"' | cut -d. -f1 | sort | uniq -c | sort -rn`.
+
+| Prefix | Types | Sample / role |
 |---|---|---|
-| `node.*` | 7 | `node.added` (`types.ts:97`) … `node.startup_failed` (`:139`) — lifecycle/startup |
-| `workflow.*` | 6 | PL-004 Phase D workflow runtime (detail in `workflow-runtime.md`) |
-| `watchdog.*` | 5 | `watchdog.evaluation_fired` (`:187`) … `watchdog.job_stopped` (`:191`) — PL-004 Phase C |
-| `rig.*` | 5 | `rig.created` / `rig.deleted` / `rig.imported` / `rig.stopped` / `rig.expanded` (`:151`) |
-| `queue.*` | 5 | PL-004 Phase A queue lifecycle (`:156`–`:159`, `:169`; detail in `coordination-primitive.md`) |
+| `node.*` | 15 | `node.added` (`types.ts:123`) … `node.startup_proof_rejected` (`:226`) — lifecycle/startup |
+| `workflow.*` | 8 | workflow runtime (detail in `workflow-runtime.md`) |
+| `session.*` | 8 | session discovery / status / detach / vanish / stop / clean / resume-token audit |
+| `rig.*` | 7 | `rig.created` / `rig.deleted` / `rig.imported` / `rig.stopped` / `rig.archived` / `rig.unarchived` / `rig.expanded` (`:238`) |
+| `watchdog.*` | 5 | `watchdog.evaluation_fired` (`:277`) … `watchdog.job_stopped` (`:281`) |
+| `seat.*` | 5 | `seat.model_divergence` (`:112`) … `seat.handover_completed` (`:197`) — model divergence, fresh launch, attention clear, handover |
+| `queue.*` | 5 | queue lifecycle (`:246`–`:249`, `:259`; detail in `coordination-primitive.md`) |
 | `package.*` | 5 | legacy package/install engine events |
-| `mission_control.*` | 5 | PL-005 audit/notification (`:212`–`:218`; detail in `mission-control.md`) |
+| `mission_control.*` | 5 | audit/notification (`:307`–`:313`; detail in `mission-control.md`) |
 | `bootstrap.*` | 5 | legacy bootstrap-run events |
-| `session.*` | 4 | session discovery / status / detach / vanish |
-| `classifier.*` | 4 | PL-004 Phase B classifier-lease lifecycle |
-| `restore.*` | 3 | restore start/complete/reconcile (detail in `lifecycle-snapshot-restore.md`) |
-| `qitem.*` | 2 | `qitem.fallback_routed` (`:160`), `qitem.closure_overdue` (`:161`) |
-| `pod.*` | 2 | `pod.created` (`:135`), `pod.deleted` (`:136`) |
-| `inbox.*` | 2 | `inbox.absorbed` (`:162`), `inbox.denied` (`:163`) |
-| `continuity.*` | 2 | `continuity.sync` (`:140`), `continuity.degraded` (`:141`) |
-| singletons | 11 | one member each: `workflow_spec.*`, `view.*`, `stream.*` (`:155`), `snapshot.*`, `seat.*`, `project.*`, `kernel.*`, `chat.*` (`:149`), `bundle.*`, `binding.*`, `agent.*` |
+| `restore.*` | 4 | restore start/complete/subset-complete/reconcile (detail in `lifecycle-snapshot-restore.md`) |
+| `classifier.*` | 4 | classifier-lease lifecycle |
+| `qitem.*` | 2 | `qitem.fallback_routed` (`:250`), `qitem.closure_overdue` (`:251`) |
+| `proof.*` | 2 | `proof.judged`, `proof.sources_changed` — one union member (`:106`) |
+| `pod.*` | 2 | `pod.created` (`:212`), `pod.deleted` (`:213`) |
+| `inbox.*` | 2 | `inbox.absorbed` (`:252`), `inbox.denied` (`:253`) |
+| `continuity.*` | 2 | `continuity.sync` (`:227`), `continuity.degraded` (`:228`) |
+| `agent.*` | 2 | `agent.activity` (`:148`), `agent.session_identity` (`:155`) |
+| singletons | 12 | one type each: `workflow_spec.*`, `view.*`, `transport.*` (`:152`), `topology.*` (`:135`), `stream.*` (`:242`), `snapshot.*`, `project.*`, `kernel.*`, `event.*` (`:107`), `chat.*` (`:236`), `bundle.*`, `binding.*` |
 
-Family counts sum to 73 (15 multi-member families totalling 62 + 11
-singletons), re-confirmed at HEAD.
+Family counts sum to 100 type literals (18 multi-type families totalling 88 +
+12 singletons).
 
 ### Emission and delivery
 
-Events are constructed and emitted via `eventBus.emit({ type: ... })` across
-domain services (`stream-store.ts`, `workflow-runtime.ts`,
-`restore-orchestrator.ts`, `node-launcher.ts`, etc.) and route handlers. The
-event log is append-only and SQLite-backed.
+Events are emitted via `eventBus.emit({ type: ... })` (`event-bus.ts:56`) or,
+inside a caller-managed transaction, `eventBus.persistWithinTransaction(...)`
+(`event-bus.ts:69`) with subscribers notified after commit — across domain
+services (`stream-store.ts`, `workflow-runtime.ts`, `restore-orchestrator.ts`,
+`node-launcher.ts`, etc.) and route handlers. The event log is append-only and
+SQLite-backed.
 
-Three SSE delivery surfaces (re-confirmed at HEAD):
+SSE delivery surfaces include the following. The daemon has **11**
+`streamSSE(` call sites across **10** files in `packages/daemon/src/routes/`
+(`git grep -o 'streamSSE(' -- packages/daemon/src/routes | wc -l`;
+`git grep -l 'streamSSE(' -- packages/daemon/src/routes | wc -l`).
 
-- `GET /api/events` — global stream of all events (`server.ts:457`
+- `GET /api/events` — global stream of all events (`server.ts:731`
   `app.route("/api/events", eventsRoute)`).
-- `GET /api/stream/watch` — new stream items (`routes/stream.ts:117`).
+- `GET /api/stream/watch` — new stream items (`routes/stream.ts:194`).
 - `GET /api/queue/watch` — queue/inbox coordination events
-  (`routes/queue.ts:357`).
+  (`routes/queue.ts:985`).
 - The chat SSE stream `GET /api/rigs/:rigId/chat/watch` delivers
-  `chat.message` for one rig (rig-scoped; see compat note 6).
-
-> OPEN-4 (carried verbatim, slice-00): the precise PL-004-only vs PL-005-only
-> sub-partition is NOT asserted here. `architecture.md`'s `32`/`20`/`9`
-> figures are internally inconsistent and not reconcilable without
-> classifying all 73 members by introducing slice — flagged, not smoothed.
-> The grep-verified per-prefix family counts above are the substituted ground
-> truth.
+  `chat.message` for one rig (`routes/chat.ts:68`, mounted at `server.ts:783`;
+  rig-scoped; see compat note 6).
 
 ## 3. Remaining compatibility notes
 
-Intentional limits that still describe the shipped system (`architecture.md`
-§11), verified as still-current at HEAD:
+Intentional limits that still describe the shipped system:
 
 1. Remote `agent_ref` imports remain unsupported (see §1 remote import
    constraints).
 2. Startup actions remain intentionally constrained (`slash_command`,
-   `send_text`).
+   `send_text`, `startup_proof`).
 3. Legacy compatibility seams still ship for pre-reboot data and v1
    artifacts.
-4. `rig ask` gathers context only — does not call an external LLM (rule 22).
-5. Transcript search prefers `rg`, falls back to `grep -E`; quality/perf
-   varies by backend.
+4. `rig ask` gathers context only — does not call an external LLM — unless
+   `--wake` is passed (rule 22).
+5. `rig ask` transcript search prefers `rg`, falls back to `grep -E`
+   (`history-query.ts:252`, `:267`); quality/perf varies by backend.
 6. Chat is rig-scoped only — no cross-rig channels or DMs.
-7. `--verify` on `rig send` checks pane content for message visibility but
-   can produce false positives from pre-existing matching content. Known
-   limitation.
+7. `--verify` on `rig send` checks pane content for message visibility, not
+   agent acknowledgement: it compares occurrences of the message's first 40
+   characters before and after the send (`session-transport.ts:1413`–`1415`).
 8. Terminal node readiness is shell-ready only — no service health probes.
-9. `rig env down --volumes` exists in the CLI surface, but the explicit
-   daemon-side override is not fully plumbed through yet.
-10. Managed-app service surfaces are descriptive only — OpenRig does not
-    auto-inject service URLs/tokens into agent prompts beyond authored
-    startup/context files.
-11. Specialist delegation is conventional, not automatic — addressed by
+9. Managed-app service surfaces are descriptive only — OpenRig does not
+   auto-inject service URLs/tokens into agent prompts beyond authored
+   startup/context files.
+10. Specialist delegation is conventional, not automatic — addressed by
     session name or normal communication surfaces.
 
 ## 4. Cross-references
 
-`architecture.md` §12 names itself the architecture-level source of truth and
-points at `codemap.md` for file-by-file structure. Under the modular
-as-built, that role is distributed: this module owns the invariants + event
-shape; the source-of-truth pointer is the rewritten `../codemap.md`
-navigation index.
+Under the modular as-built, this module owns the invariants and event shape;
+`../codemap.md` is the navigation index for file-by-file structure.
 
 ## See also
 
-- `daemon-core.md` — wiring, DB, migrations, startup; footprint drift-fixes.
-- `coordination-primitive.md` — PL-004 Phase A queue/stream/inbox/outbox
-  events.
-- `workflow-runtime.md` — PL-004 Phase D `workflow.*` events.
-- `mission-control.md` — PL-005 `mission_control.*` events.
+- `daemon-core.md` — wiring, DB, migrations, startup.
+- `coordination-primitive.md` — queue/stream/inbox/outbox events.
+- `workflow-runtime.md` — `workflow.*` events.
+- `mission-control.md` — `mission_control.*` events.
 - Source roots: `packages/daemon/src/domain/types.ts` (RigEvent union),
+  `packages/daemon/src/domain/event-bus.ts` (emit/persist),
   `packages/daemon/src/routes/{stream,queue}.ts` (SSE watch),
   `packages/daemon/src/server.ts` (`/api/events`).

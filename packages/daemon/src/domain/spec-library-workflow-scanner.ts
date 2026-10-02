@@ -447,15 +447,25 @@ export function scanWorkflowSpecFolder(
     // is `T - 999ms` would always look "newer" than its cached_at at
     // exactly `T` and never skip.
     const cachedAt = opts.db
-      .prepare(`SELECT cached_at FROM workflow_specs WHERE source_path = ?`)
-      .get(filePath) as { cached_at: string } | undefined;
+      .prepare(`SELECT cached_at, source_hash FROM workflow_specs WHERE source_path = ?`)
+      .get(filePath) as { cached_at: string; source_hash: string } | undefined;
     if (cachedAt) {
       const cachedAtMs = Date.parse(cachedAt.cached_at);
       const cachedAtSec = Math.floor(cachedAtMs / 1000);
       const mtimeSec = Math.floor(mtimeMs / 1000);
       if (Number.isFinite(cachedAtMs) && cachedAtSec >= mtimeSec) {
-        result.skipped += 1;
-        continue;
+        let unchanged = cachedAtSec > mtimeSec;
+        if (!unchanged) {
+          // A same-second edit shares the timestamp bucket. Consult the
+          // cache's existing content hash before treating it as unchanged.
+          try {
+            unchanged = createHash("sha256").update(readFileSync(filePath)).digest("hex") === cachedAt.source_hash;
+          } catch { /* The existing readThrough path records the diagnostic. */ }
+        }
+        if (unchanged) {
+          result.skipped += 1;
+          continue;
+        }
       }
     }
 
@@ -503,6 +513,9 @@ export function scanWorkflowSpecFolder(
       version: string | null;
     }>;
   for (const row of cachedUnderFolder) {
+    // LIKE treats _ and % in real folder names as patterns. Only this
+    // literal directory owns deletion; neighboring cache rows must survive.
+    if (!row.source_path.startsWith(folderPrefix)) continue;
     if (seenPaths.has(row.source_path)) continue;
     const removed = opts.cache.removeBySourcePath(row.source_path);
     if (removed > 0) {

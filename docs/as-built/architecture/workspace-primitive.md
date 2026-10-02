@@ -9,92 +9,72 @@ applies-when: |
   defaultRepo / knowledgeRoot), how that block is persisted and resolved into
   whoami / node-inventory, how per-item target_repo scope is validated, or how
   the file-backed missions/slices tree is indexed and projected into the
-  Project UI. Author-mode module — no prior architecture.md prose; every
-  load-bearing claim is sourced to file:line at HEAD.
+  Project UI.
 siblings: [content-surfaces.md, daemon-core.md, ../ui/project-and-for-you.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 7eaf524c
-last-updated: 2026-05-16
+last-verified-against-source: e6a391b6
+last-updated: 2026-10-02
 ---
 
 # Workspace Primitive — RigSpec.workspace, Migrations 038/039, Missions/Projects/Slices
 
-The **workspace primitive (PL-007)** is the typed declaration that lets a rig
-name *where its work lives* — a workspace root, a set of named repos with
-kinds, an optional default repo, and an optional knowledge root — and have
-that surface through `whoami` / node-inventory and gate per-item repo scope.
-Alongside it, a **file-backed missions/slices tree** is indexed read-only and
-projected into the Project UI's mission / slice surfaces.
+The **workspace primitive** is the typed declaration that lets a rig name
+*where its work lives* — a workspace root, a set of named repos with kinds, an
+optional default repo, and an optional knowledge root — and have that surface
+through `whoami` / node-inventory and gate per-item repo scope. Alongside it, a
+**file-backed missions/slices tree** is indexed read-only and projected into
+the Project UI's mission / slice surfaces.
 
-> **AUTHOR-FROM-SOURCE module.** No prior `architecture.md` prose exists for
-> this. Every load-bearing claim carries `> Source: <file:line> @HEAD`;
-> ambiguity is declared as an OPEN item, never smoothed. Paths are relative to
-> `packages/daemon/src/` unless prefixed `packages/` or `docs/`.
->
-> Verified at HEAD `7eaf524c` (`git describe` → `v0.3.1-6-g7eaf524c`).
-> Package version **0.3.1**; HEAD carries 6 unreleased release-0.3.2 commits;
-> no `v0.3.2` tag (daemon-core.md; slice-00 §1.1).
->
-> **SPLIT NOTE (§10.6).** The honest source-grounded scope of
-> `workspace-and-content-primitives` (proposed-structure.md §4.9 / D13)
-> exceeds ~400 lines across two distinct subsystem clusters with distinct
-> source roots. Per the §10.6 SPLIT DIRECTIVE it is split by subsystem
-> cluster into this module (workspace primitive + migrations 038/039 +
-> missions/projects/slices) and the sibling `content-surfaces.md`
-> (files/markdown/progress/steering). This is a transparent noted deviation
-> from ratified Q7 "18", a faithful application of the founder's own
-> ratified Q3 principle ("distinct primitive / distinct source root →
-> split"); surfaced at the slice-08 review gate, not a mid-execution
-> interrupt.
+> Paths are relative to `packages/daemon/src/` unless prefixed `packages/` or
+> `docs/`. Verified against source at main `e6a391b6`. Each count sits beside
+> the command that produces it; run the commands from the repository root.
+> The files / markdown / progress / steering surfaces are in the sibling
+> `content-surfaces.md`.
 
-## 0. Release attribution (forensic proof — read first)
+## 0. Release attribution
 
-Per §10.8, re-verified at HEAD via `git cat-file -e <tag>:<path>`:
+Checked with `git cat-file -e <tag>:packages/daemon/src/<path>`. The table
+records when each file first appeared; most have changed since.
 
-| Subsystem | Release | Forensic proof @HEAD |
+| Subsystem | First release | Check |
 |---|---|---|
-| `domain/workspace/{workspace-resolver,frontmatter-validator,default-workspace-scaffold}.ts` | **≤0.3.0** | `v0.3.0:<path>` → present |
-| migrations `038_workspace_primitive.ts`, `039_queue_target_repo.ts` | **≤0.3.0** | `v0.3.0:<path>` → present |
-| `domain/slices/{slice-indexer,slice-detail-projector}.ts` | **≤0.3.0** | `v0.3.0:<path>` → present |
-| `routes/{workspace,slices,projects}.ts` | **≤0.3.0** | `v0.3.0:<path>` → present |
-| `domain/workspace/getting-started-narrative.ts` | **0.3.1** | `v0.3.0:` → **ABSENT**; `v0.3.1:` → present |
-| `routes/missions.ts` | **0.3.1** | `v0.3.0:` → **ABSENT**; `v0.3.1:` → present |
+| `domain/workspace/{workspace-resolver,frontmatter-validator,default-workspace-scaffold}.ts` | **≤0.3.0** | present at `v0.3.0` |
+| migrations `038_workspace_primitive.ts`, `039_queue_target_repo.ts` | **≤0.3.0** | present at `v0.3.0` |
+| `domain/slices/{slice-indexer,slice-detail-projector}.ts` | **≤0.3.0** | present at `v0.3.0` |
+| `routes/{workspace,slices,projects}.ts` | **≤0.3.0** | present at `v0.3.0` |
+| `domain/workspace/getting-started-narrative.ts` | **0.3.1** | absent at `v0.3.0`; present at `v0.3.1` |
+| `routes/missions.ts` | **0.3.1** | absent at `v0.3.0`; present at `v0.3.1` |
+| `domain/workspace/workspace-doctor.ts` | **0.3.2** | absent at `v0.3.1`; present at `v0.3.2` |
 
-> Source: §10.8 proof re-run at HEAD `7eaf524c` —
-> `git cat-file -e v0.3.0:packages/daemon/src/domain/workspace/getting-started-narrative.ts`
-> and `...routes/missions.ts` both fail ("exists on disk, but not in
-> 'v0.3.0'"); all other listed paths resolve at `v0.3.0`. The workspace
-> primitive itself is a **0.3.0** feature (slice-00 0.3.0-GT §1.4, PL-007,
-> migrations 038/039) — do not back-attribute it to 0.3.1. The
-> `missions` route + the getting-started narrative scaffold are the
-> **0.3.1** additions layered on top (slice 12 mission scope; slice 21
-> onboarding-conveyor).
+The workspace primitive itself (declaration, resolver, validator, migrations
+038/039) is a **0.3.0** feature — do not back-attribute it to 0.3.1. The
+`missions` route and the getting-started narrative are **0.3.1** additions;
+the workspace doctor is **0.3.2**.
 
-slice-00 0.3.0-GT §1.4 independently confirms the primitive shipped 0.3.0:
-workspace-primitive merge `2ce54abc` (PL-007) with migrations
-`038_workspace_primitive` + `039_queue_target_repo`, "fresh databases apply
-migrations through `039_queue_target_repo`".
+`getting-started-narrative.ts` is still in the tree, but nothing imports it:
+**0** files reference it (`git grep -l 'workspace/getting-started-narrative' -- packages | wc -l`).
+Workspace initialization no longer seeds a getting-started mission (§3).
 
-## 1. The typed workspace declaration (PL-007) — 0.3.0
+## 1. The typed workspace declaration — 0.3.0
 
 `RigSpec.workspace` is an **optional** typed block. Rigs without it stay valid;
 `whoami` / node-inventory return a null workspace block in that case.
 
-> Source: `domain/types.ts:762-770` (`WorkspaceSpec`), `:751-758`
-> (`WorkspaceRepoSpec`), `:780` (`RigSpec.workspace?`) @HEAD.
+> Source: `domain/types.ts:1154-1161` (`WorkspaceSpec`), `:1144-1150`
+> (`WorkspaceRepoSpec`), `:1177` (`RigSpec.workspace?`).
 
 | Field | Shape | Notes |
 |---|---|---|
 | `workspaceRoot` | string | Verbatim from spec |
-| `repos[]` | `{ name, path, kind }[]` | `path` resolved to absolute at parse time; authors may declare relative to `workspaceRoot` in YAML |
+| `repos[]` | `{ name, path, kind }[]` | `path` resolved to absolute at parse time (`domain/rigspec-schema.ts:350-352`); authors may declare it relative to `workspaceRoot` in YAML |
 | `defaultRepo?` | string | active repo when no env override / cwd match |
 | `knowledgeRoot?` | string | treated as `kind=knowledge` when surfaced |
 
-`WorkspaceKind` is a closed 5-member union: `user`, `project`, `knowledge`,
-`lab`, `delivery`.
+`WorkspaceKind` is a closed union of **5** members
+(`grep '^export const WORKSPACE_KINDS' packages/daemon/src/domain/types.ts | grep -o '"[a-z]*"' | wc -l`):
+`user`, `project`, `knowledge`, `lab`, `delivery`.
 
-> Source: `domain/types.ts:748-749` (`WORKSPACE_KINDS` /
-> `WorkspaceKind`) @HEAD.
+> Source: `domain/types.ts:1140-1141` (`WORKSPACE_KINDS` / `WorkspaceKind`).
 
 ### 1.1 Persistence — migration 038 + RigRepository
 
@@ -103,8 +83,8 @@ typed `RigSpec.workspace` block as JSON when a rig declares one; NULL for rigs
 without a workspace block.
 
 > Source: `db/migrations/038_workspace_primitive.ts:16-21`
-> (`ALTER TABLE rigs ADD COLUMN workspace_json TEXT`); doc-comment
-> `:3-14` @HEAD.
+> (`ALTER TABLE rigs ADD COLUMN workspace_json TEXT` at `:19`); doc comment
+> `:3-15`.
 
 `RigRepository.setRigWorkspace(rigId, workspace)` persists it (UPDATE
 `workspace_json` + `updated_at`); `getRigWorkspace(rigId)` reads it back,
@@ -113,302 +93,422 @@ are **defensive no-ops** when the column is absent (`hasRigColumn` probe) —
 older test fixtures that bypass the canonical migration list don't have the
 column; the setter's contract is "best-effort persistence".
 
-> Source: `domain/rig-repository.ts:98-105` (setter, column probe
-> L99), `:106-117` (getter; parse-fail → null L114-116) @HEAD.
+> Source: `domain/rig-repository.ts:173-178` (setter; column probe `:174`),
+> `:181-191` (getter; probe `:182`; parse failure → null `:188-190`);
+> `hasRigColumn` `:323`.
 
-The instantiator persists the block at rig-create time **only when declared**:
+The block is written only when declared. **3** call sites write it
+(`git grep -n 'setRigWorkspace(' -- packages/daemon/src | grep -v 'rig-repository.ts' | wc -l`):
+the instantiator's two rig-persist paths, `materializeValidatedSpec` and
+`instantiateOnce`, each guarded by `if (rigSpec.workspace)`; and the
+workspace-only import route `POST /api/rigs/import/workspace`
+(`rig import --workspace-only --target-rig <rigId>`), which validates and
+normalizes the block and writes it only when it differs from the stored one.
 
-> Source: `domain/rigspec-instantiator.ts:653-655` (`if
-> (rigSpec.workspace) … setRigWorkspace(rigId, rigSpec.workspace)`) @HEAD.
+> Source: `domain/rigspec-instantiator.ts:617` (`materializeValidatedSpec`),
+> `:653-655`; `:1258` (`instantiateOnce`), `:1345-1347`;
+> `routes/rigspec.ts:131-169` (validation `:154`; compare-and-write
+> `:164-166`), mounted `server.ts:735`; CLI
+> `packages/cli/src/commands/import.ts:82`.
 
 ### 1.2 Runtime resolution — workspace-resolver
 
 `resolveWorkspaceContext({ spec, cwd, envOverride })` (consumed by
 `whoami-service`) returns the `WhoamiWorkspaceBlock` or `null` when no spec.
-`activeRepo` resolution: an `envOverride` (non-empty, trimmed) wins
-**verbatim** — even an unknown repo name is honored, because operators set
-`OPENRIG_TARGET_REPO` consciously (PL-007 PRD § Item 3); otherwise
-`defaultRepo` is used **only if it names a declared repo**. `knowledgeKind`
-is `"knowledge"` when `knowledgeRoot` is declared, else `null`.
+`activeRepo` resolution: a non-blank `envOverride` wins **verbatim** — even an
+unknown repo name is honored, because operators set `OPENRIG_TARGET_REPO`
+consciously (the comment at `:35-36`); otherwise `defaultRepo` is used **only
+if it names a declared repo**. `knowledgeKind` is `"knowledge"` when
+`knowledgeRoot` is declared, else `null`.
 
-> Source: `domain/workspace/workspace-resolver.ts:26-52` (resolver;
-> env-override-verbatim L34-43, including the "honored verbatim"
-> comment L35-36) @HEAD.
+> Source: `domain/workspace/workspace-resolver.ts:26-52` (resolver; null
+> without a spec `:32`; env override `:39-40`; declared `defaultRepo`
+> `:41-42`; `knowledgeKind` `:50`).
 
 `whoami-service` reads the persisted spec and resolves with the query's
-`targetRepoOverride`, falling back to `process.env["OPENRIG_TARGET_REPO"]`:
+`targetRepoOverride`, falling back to the daemon's own
+`process.env["OPENRIG_TARGET_REPO"]`. `rig whoami` forwards the caller's
+`OPENRIG_TARGET_REPO` as `?targetRepo=`, which the route passes on as
+`targetRepoOverride`.
 
-> Source: `domain/whoami-service.ts:319-324` (`getRigWorkspace` +
-> `resolveWorkspaceContext`, env fallback L323); `whoami` returns
-> `workspace` in its payload `:335` @HEAD.
+> Source: `domain/whoami-service.ts:333-338` (`getRigWorkspace` +
+> `resolveWorkspaceContext`, env fallback `:337`); `whoami` returns
+> `workspace` in its payload `:350`; `routes/whoami.ts:29`;
+> `packages/cli/src/commands/whoami.ts:261-262`.
 
 `resolveNodeWorkspace({ spec, cwd })` (consumed by `node-inventory`) derives a
-per-node `NodeWorkspaceInfo` by walking the node's `cwd` up the directory
-tree for the **longest-prefix repo path** that contains it; falls back to
-`knowledge` when cwd is under `knowledgeRoot`, then to the rig's
-`defaultRepo` when cwd doesn't resolve. Containment uses a `path.relative`
-boundary check (not a string `startsWith`) so `/foo/bar` does not match
-`/foo/bar-other`.
+per-node `NodeWorkspaceInfo` by picking the **longest declared repo path that
+contains** the node's `cwd`. When no repo contains it, `kind` falls back to
+`knowledge` if cwd is under `knowledgeRoot`; `activeRepo` then falls back to
+the rig's `defaultRepo` (taking that repo's kind if `kind` is still unset).
+Containment uses a `path.relative` boundary check (not a string `startsWith`)
+so `/foo/bar` does not match `/foo/bar-other`. Node-inventory reads
+`workspace_json` with its own queries rather than through `RigRepository`.
 
-> Source: `domain/workspace/workspace-resolver.ts:57-95`
-> (longest-prefix L67-73; knowledge fallback L77-79; default-repo
-> fallback L82-88), `isInside` `:97-103`;
-> `domain/node-inventory.ts:397` (`workspace: resolveNodeWorkspace(...)`),
-> `:434-437` (`NodeWorkspaceInfo`) @HEAD.
+> Source: `domain/workspace/workspace-resolver.ts:57-95` (longest match
+> `:67-73`; knowledge fallback `:77-79`; default-repo fallback `:82-88`),
+> `isInside` `:97-103`; `domain/node-inventory.ts:626`
+> (`workspace: resolveNodeWorkspace(...)`), readers `:711-720`
+> (`readRigWorkspaceJson`) and `:637-647` (`readAllRigWorkspaceJson`,
+> batched); `NodeWorkspaceInfo` `domain/types.ts:791-795`.
 
 ### 1.3 Per-item repo scope — migration 039 + queue validation
 
 Migration **039** adds `target_repo TEXT` to `queue_items` plus
-`idx_queue_items_target_repo`. It carries the per-item typed repo scope when
-an operator passes `--target-repo <name>`; NULL when the qitem is
-unambiguous against the rig's `default_repo` or no workspace is declared.
-Mission Control views surface the field for cross-rig handoff clarity.
+`idx_queue_items_target_repo`. Per the migration's comment it carries the
+per-item typed repo scope when an operator passes `--target-repo <name>`; it
+is NULL when the item is unambiguous against the rig's `default_repo` or no
+workspace is declared, and Mission Control views surface the field for
+cross-rig handoff clarity.
 
 > Source: `db/migrations/039_queue_target_repo.ts:16-22`
-> (`ALTER TABLE queue_items ADD COLUMN target_repo TEXT` +
-> `CREATE INDEX … idx_queue_items_target_repo`); doc-comment
-> `:3-14` @HEAD.
+> (`ALTER TABLE queue_items ADD COLUMN target_repo TEXT` at `:19`;
+> `CREATE INDEX … idx_queue_items_target_repo` at `:20`); doc comment
+> `:3-15`; CLI flag `packages/cli/src/commands/queue.ts:430`.
 
-The queue route validates `target_repo` at the route layer against the
-**source rig's** `RigSpec.workspace.repos[]`: it parses the rig name out of
-`source_session` (`<member>@<rig>`), looks up the rig, reads
-`getRigWorkspace`, and rejects an unknown repo with `unknown_target_repo` +
-the known-repo list. It **fails open** (`{ ok: true }`) when there is no
-rigRepo, no parseable rig, the rig is unknown, or no workspace is declared —
-validation only bites when a workspace actively declares repos.
+`validateTargetRepo` checks an explicit `targetRepo` against the **source
+rig's** `RigSpec.workspace.repos[]`: it parses the source session with
+`parseSessionName`, looks the rig up by name, reads `getRigWorkspace`, and
+rejects an unknown repo with 400 `unknown_target_repo` plus the `knownRepos`
+list. It **fails open** (`{ ok: true }`) when there is no rigRepo, the session
+is not a canonical `<member>@<rig>` name, the rig is unknown, or no workspace
+is declared — validation only bites when a workspace actively declares repos.
 
-> Source: `routes/queue.ts:49-57` (fail-open guards), `:55`
-> (`getRigWorkspace`), `:58-66` (`unknown_target_repo` +
-> `knownRepos`) @HEAD.
+It runs on **3** routes (`grep -c 'validateTargetRepo(c,' packages/daemon/src/routes/queue.ts`):
+`POST /create`, `POST /:qitemId/handoff` and
+`POST /:qitemId/handoff-and-complete`, each before any cross-host forwarding,
+because the source rig's workspace lives on the source host. A handoff that
+inherits the source row's `targetRepo` without an override is not
+re-validated.
 
-## 2. Workspace HTTP route — frontmatter validator (0.3.0)
+> Source: `routes/queue.ts:94-121` (fail-open guards `:100`, `:104`, `:107`,
+> `:110`; `getRigWorkspace` `:109`; `unknown_target_repo` + `knownRepos`
+> `:112-118`); calls `:450`, `:632`, `:705` in handlers `:400`, `:603`,
+> `:679`; ordering note `:442-448`; inherited value `:629-630`; mounted
+> `server.ts:785`.
 
-`workspaceRoutes()` (mounted `server.ts:491` as `/api/workspace`) exposes a
-**single read-only endpoint** at v0:
+## 2. Workspace HTTP route — frontmatter validator and doctor
 
-`POST /api/workspace/validate` — body `{ root, workspaceKind?, recursive?,
-requireFrontmatter?, maxFiles? }`; returns a `FrontmatterValidationReport`.
-`root` is required (400 `root_required`); an out-of-vocabulary
-`workspaceKind` is rejected 400 `invalid_workspace_kind`; validator throws
-→ 500 `validate_failed`. **No filesystem mutation.**
+`workspaceRoutes()` (mounted `server.ts:786` as `/api/workspace`) exposes **2**
+endpoints (`grep -c -E 'app\.(get|post)\(' packages/daemon/src/routes/workspace.ts`).
+**Neither mutates the filesystem.**
 
-> Source: `routes/workspace.ts:23-65` (handler; root-required L35-37;
-> kind-enum L39-47; 500 L59-62); mounted `server.ts:491` @HEAD.
+- `POST /api/workspace/validate` — body `{ root, workspaceKind?, recursive?,
+  requireFrontmatter?, maxFiles? }`; returns a `FrontmatterValidationReport`.
+  `root` is required (400 `root_required`); an out-of-vocabulary
+  `workspaceKind` is rejected 400 `invalid_workspace_kind`; validator throws →
+  500 `validate_failed`.
+- `POST /api/workspace/doctor` — runs `runWorkspaceDoctor` against the
+  daemon's resolved `workspace.root`, or a `workspaceRoot` given in the body,
+  and returns its report. 503 `settings_unavailable` without a settings
+  store; 500 `doctor_failed` when it throws.
 
-`validateWorkspaceFrontmatter()` walks a root, parses each `.md` file's
-YAML frontmatter (delimited `---` on the first line), and emits a structured
-gap report — **advisory only, never modifies files**. Gap kinds:
+> Source: `routes/workspace.ts:16` (no mutation), `:37-74` (validate;
+> root-required `:46-48`; kind check `:50-58`; 500 `:72`), `:85-160`
+> (doctor; 503 `:87`; `runWorkspaceDoctor` call `:145`; 500 `:158`);
+> `domain/workspace/workspace-doctor.ts:643`; mounted `server.ts:786`.
+
+`validateWorkspaceFrontmatter()` walks a root, parses each `.md` file's YAML
+frontmatter (delimited `---` on the first line), and emits a structured gap
+report — **advisory only, never modifies files**. There are **4** gap kinds
+(`sed -n '/^export type FrontmatterGapKind/,/;$/p' packages/daemon/src/domain/workspace/frontmatter-validator.ts | grep -c '^  | '`):
 `missing-required-field`, `unrecognized-status-value`, `parse-error`,
-`missing-frontmatter`. Per-kind required fields: `user`/`project` →
-`["doc"]`; `knowledge`/`lab`/`delivery` → `["doc","status","created","owner"]`.
-Valid `status` enum: `active|draft|archived|superseded`. Default behavior
-skips files without `---` silently (informal notes) unless
-`requireFrontmatter`; recurses by default; skips `node_modules` / `.git` /
-`.worktrees` / `dist` / `build`; hard cap `maxFiles` default 10000.
+`missing-frontmatter`. Per-kind required fields (checked only when a kind is
+given): `user`/`project` → `["doc"]`; `knowledge`/`lab`/`delivery` →
+`["doc","status","created","owner"]`. The `status` enum has **4** values
+(`grep '^const VALID_STATUS_VALUES' packages/daemon/src/domain/workspace/frontmatter-validator.ts | grep -o '"[a-z]*"' | wc -l`):
+`active|draft|archived|superseded`. Default behavior skips files without
+`---` silently (informal notes) unless `requireFrontmatter`; recurses by
+default; skips `node_modules` / `.git` / `.worktrees` / `dist` / `build`;
+hard cap `maxFiles` default 10000.
 
-> Source: `domain/workspace/frontmatter-validator.ts:53` (status enum),
-> `:56-62` (per-kind required), `:23-27` (gap kinds), `:90-122` (walk;
-> skip-dirs L105-111), `:160-172` (missing-frontmatter behavior),
-> `:201-226` (required + status check) @HEAD.
+> Source: `domain/workspace/frontmatter-validator.ts:12` (advisory), `:23-27`
+> (gap kinds), `:53` (status enum), `:56-62` (per-kind required), `:81-83`
+> (defaults), `:90-121` (walk; skip-dirs `:105-111`), `:160-172`
+> (missing-frontmatter behavior), `:201-226` (required + status check), `:239`
+> (opening delimiter).
 
-CLI surface: `rig workspace validate [root]` — v0 is intentionally narrow
-(`validate` only); future versions add typed-kind authoring on the same
-walker.
+CLI surface: `rig workspace validate [root]` and `rig workspace doctor`. The
+CLI reference lists typed-kind authoring on the same walker as future work.
 
-> Source: `docs/as-built/cli-reference.md:931-941` @HEAD.
+> Source: `packages/cli/src/commands/workspace.ts:86` (`validate`), `:146`
+> (`doctor`); `docs/as-built/cli-reference.md:1759-1770`.
 
 ## 3. Default project-workspace scaffold
 
-`workspaceScaffoldDirs()` / `workspaceScaffoldFiles()` produce the
-repo-ready default workspace (`~/.openrig/workspace/` or `--root`). The same
-scaffold is used **idempotently by daemon startup**. It emits exactly two
-directories (`missions/`, `exhaust/`) and four files (`SPEC.md`,
-`project.yaml`, `workspace.yaml`, `.gitignore`). The catalog points its
-single default project at `.`; `project.yaml` owns project intent and mission
-discovery and exposes empty `install.context` / `install.skills` selectors.
-The ignore file excludes `exhaust/` and local `.openrig/` projection state
-while keeping authored project context versionable.
+`workspaceScaffoldDirs()` / `workspaceScaffoldFiles()` produce the repo-ready
+default workspace (`~/.openrig/workspace/`, the default `workspace.root`, or
+`--root`). It emits exactly **2** directories
+(`grep '^const WORKSPACE_DIRS' packages/daemon/src/domain/workspace/default-workspace-scaffold.ts | grep -o '"[a-z]*"' | wc -l`):
+`missions/`, `exhaust/`; and **4** files
+(`sed -n '/^export function workspaceScaffoldFiles/,/^}/p' packages/daemon/src/domain/workspace/default-workspace-scaffold.ts | grep -c 'relPath: "'`):
+`SPEC.md`, `project.yaml`, `workspace.yaml`, `.gitignore`. The catalog
+(`workspace.yaml`) points its single `default` project at `.`; `project.yaml`
+names `SPEC.md` as project intent, roots mission discovery at `missions`, and
+exposes empty `install.context` / `install.skills` selectors. The ignore file
+excludes `exhaust/` and local `.openrig/` projection state while keeping
+authored project context versionable.
 
-The workspace owner is called by the shared instance initializer used by CLI
-daemon start and direct daemon first start. The initializer is additive. It
-never deletes or overwrites an existing file;
-the retained `--force` spelling is a compatibility no-op for overwrite
-behavior. CLI and daemon scaffolds are byte-parity pinned. Mission and slice
-content is created explicitly through `rig scope`, not seeded by workspace
-initialization. Instance context, System World, skill source, runtime state,
-and the retired `artifacts/`, `evidence/`, `progress/`, `field-notes/`,
-`dogfood-evidence/`, `README.md`, and `STEERING.md` entries are not emitted.
+`ensureDefaultWorkspace()` applies the scaffold additively: it creates only
+missing paths and never deletes or overwrites an existing file. It checks
+every managed path first; if one exists with the wrong kind (a file where a
+directory belongs, or the reverse) it writes nothing and returns `ok: false`
+with the conflicts. Its callers are the shared instance initializer
+`ensureOpenRigInstance()`, which both CLI daemon start and direct daemon start
+run (so the scaffold is reconciled on every start); `rig config
+init-workspace`; and `POST /api/config/init-workspace` (409
+`init_workspace_conflict`). The retained `--force` spelling is a
+compatibility no-op. The CLI command re-exports the daemon's owner from
+`@openrig/daemon/instance-initialization` rather than keeping its own copy,
+and a parity test pins the CLI and daemon layouts as byte-identical. Mission
+and slice content is created explicitly through `rig scope`, not seeded by
+workspace initialization. Instance context, System World, skill source,
+runtime state, and the retired `artifacts/`, `evidence/`, `progress/`,
+`field-notes/`, `dogfood-evidence/`, `README.md`, and `STEERING.md` entries
+are not emitted.
 
-> Source: `domain/workspace/default-workspace-scaffold.ts`
-> (`workspaceScaffoldDirs`, `workspaceScaffoldFiles`); CLI
-> `domain/instance-initialization.ts`; daemon `index.ts`; CLI
-> `packages/cli/src/daemon-lifecycle.ts` and
-> `packages/cli/src/commands/config-init-workspace.ts` (`runInitWorkspace`);
-> parity: `packages/daemon/test/getting-started-narrative-parity.test.ts`
-> @HEAD.
+> Source: `domain/workspace/default-workspace-scaffold.ts:7` (dirs),
+> `:20-30` (`project.yaml`), `:32-36` (`workspace.yaml`), `:38-41`
+> (`.gitignore`), `:43-54` (`workspaceScaffoldDirs`,
+> `workspaceScaffoldFiles`), `:100-153` (`ensureDefaultWorkspace`; conflicts
+> checked before writes `:117-135`; write-if-missing `:140`);
+> `domain/instance-initialization.ts:39` (`ensureOpenRigInstance`; default
+> workspace root `:44`; dry-run plan `:83`; apply `:103`); default
+> `workspace.root` `domain/user-settings/settings-store.ts:27-30`; daemon
+> `index.ts:242`; CLI `packages/cli/src/daemon-lifecycle.ts:635`;
+> `packages/cli/src/commands/config-init-workspace.ts:10` (import), `:13`
+> (re-export), `:28` (`--force`), `:56-67` (`runInitWorkspace`);
+> `routes/config.ts:56-65`, mounted `server.ts:773`; `rig scope`
+> `packages/cli/src/commands/scope.ts:2071`; parity
+> `packages/daemon/test/getting-started-narrative-parity.test.ts:15-25`,
+> retired entries `:43-57`.
 
 ## 4. File-backed missions / slices tree
 
-### 4.1 SliceIndexer (Slice Story View v0) — 0.3.0
+### 4.1 SliceIndexer — 0.3.0
 
-`SliceIndexer` reads slice folders from a configured filesystem root. The
-**default workspace contract** is
-`workspace/missions/<mission>/slices/<slice>`; explicitly configured flat
-roots (`workspace/slices/<slice>`) remain supported for compatibility.
+`SliceIndexer` reads slice folders from configured filesystem roots. The
+**default workspace contract** is `workspace/missions/<mission>/slices/<slice>`;
+flat roots (`workspace/slices/<slice>`) remain supported for compatibility.
 A nested `slices/` child folder makes the parent a mission
 (`missionId = <mission-folder>`); a bare folder is a flat slice
-(`missionId = null`). NO new SQLite migration, NO new event type: read-only
-projection over existing tables (`queue_items`, `queue_transitions`,
-`mission_control_actions`) + dogfood-evidence directories. Time-bounded
-listing + detail caches (`invalidate()` drops both). `isReady()` is true
-when any configured slice root exists on disk.
+(`missionId = null`). Startup builds the indexer on `workspace.slices_root`
+(default `<workspace.root>/missions`) and adds `<workspace.root>/missions` and
+`<workspace.root>/slices` as extra roots. NO new SQLite migration, NO new event
+type: read-only projection over existing tables (`queue_items`,
+`queue_transitions`, `mission_control_actions`) + dogfood-evidence
+directories. Listing, detail and mission-status caches are time-bounded (60 s
+default); `invalidate()` drops all three plus the queue-membership index.
+`isReady()` is true when any configured slice root exists on disk.
 
-> Source: `domain/slices/slice-indexer.ts:1-14` (contract + no-new-state),
-> `:174-176` (`isReady`), `:179-182` (`invalidate`), `:212-256`
-> (`readSliceLocations`; nested-vs-flat L233-253), `:62-89`
-> (`SliceListEntry` shape: `missionId` / `slicePath` / `qitemIds` /
-> `proofPacket`) @HEAD.
+> Source: `domain/slices/slice-indexer.ts:2-15` (contract + no new state),
+> `:238` (TTL), `:297-299` (`isReady`), `:331-336` (`invalidate`), `:476-521`
+> (`readSliceLocations`; nested-vs-flat `:495-517`), `:61-88` (`SliceRecord`:
+> `missionId` `:65`, `slicePath` `:67`, `qitemIds` `:77`, `proofPacket`
+> `:81`), `:90-111` (`SliceListEntry`, which carries `qitemCount` /
+> `hasProofPacket` instead); startup `startup.ts:1666`, `:1673-1678`,
+> `:1691-1696`; default `domain/user-settings/settings-store.ts:479`.
 
-### 4.2 SliceDetailProjector (Slice Story View v0 + v1) — 0.3.0
+### 4.2 SliceDetailProjector — 0.3.0
 
 Given a `SliceRecord`, the projector assembles the full per-slice payload
 across six tabs (Story, Acceptance, Decisions, Docs, Tests/Verification,
-Topology). Read-only; composes already-shipped tables +
+Topology) — **6** tab keys in `SliceDetailPayload`
+(`sed -n '/^export interface SliceDetailPayload/,/^}/p' packages/daemon/src/domain/slices/slice-detail-projector.ts | grep -c -E '^  (story|acceptance|decisions|docs|tests|topology):'`),
+plus a `readiness` field. Read-only; composes already-shipped tables +
 `workflow_specs`/`workflow_instances`/`workflow_step_trails` + slice docs on
-disk + dogfood-evidence. **v1 removed the v0 hardcoded legacy phase enum**
+disk + dogfood-evidence. **v1 removed the v0 hardcoded legacy phase taxonomy**
 (`discovery`/`product-lab`/`delivery`/…): `StoryEvent.phase` is now an
 open-ended string-or-null — the spec-defined `step.id` when bound to a
 `workflow_instance`, else `null` (UI groups under "Untagged"). When no
 workflow runtime is constructed the projector silently degrades to v0
-behavior (`workflowBinding=null`, `specGraph=null`).
+behavior (`workflowBinding`, `specGraph`, `phaseDefinitions` and
+`currentStep` all `null`).
 
-> Source: `domain/slices/slice-detail-projector.ts:1-21` (six-tab
-> contract + v1 enrichment), `:18-21` (v0 phase enum REMOVED at v1);
-> startup degrade-path `startup.ts:1063-1076` (projector built with
-> `workflowRuntime?.specCache`; comment L1064-1071) @HEAD.
+> Source: `domain/slices/slice-detail-projector.ts:1-20` (six-tab contract +
+> v1 enrichment), `:16-20` (v0 phase taxonomy removed), `:64`
+> (`StoryEvent.phase`), `:177-203` (`SliceDetailPayload`), `:205-213`
+> (optional `workflowSpecCache`); startup degrade path
+> `startup.ts:1697-1708` (comment `:1697-1703`;
+> `workflowSpecCache: workflowRuntime?.specCache` `:1707`).
 
 ### 4.3 Slices routes — 0.3.0
 
-`slicesRoutes()` (mounted `server.ts:501` as `/api/slices`):
-`GET /` (filter `all|active|done|blocked`, default `all`; `?refresh=1`
-invalidates; optional `?boundToWorkflow=<name>:<version>` lens narrows to
-slices bound to a workflow instance), `POST /refresh` (drops both indexer
-caches — no daemon restart), `GET /:name/proof-asset/*` (path-traversal
-guarded; immutable 1-day cache), `GET /:name/doc/*` (markdown for the Docs
-tab; traversal guarded), `GET /:name` (full per-tab payload). 503
-`slices_indexer_unavailable` when unwired; 503 `slices_root_not_configured`
-+ setup hint when not ready. **Route-order discipline:** literal `/` /
-`/refresh` / `/:name/proof-asset/*` / `/:name/doc/*` are registered BEFORE
-the dynamic `/:name` so they are not shadowed.
+`slicesRoutes()` (mounted `server.ts:804` as `/api/slices`) registers **5**
+handlers (`grep -c -E 'app\.(get|post)\(' packages/daemon/src/routes/slices.ts`):
 
-> Source: `routes/slices.ts:31-177` (handlers; route-order L34-35,
-> L101-102, L109-113, L166-167; 503s L38-44; `boundToWorkflow`
-> L60-86); mounted `server.ts:501` @HEAD.
+- `GET /` — filter `all|active|done|blocked` (default `all`; anything else is
+  400 `filter_invalid`); `?refresh=1` (or `true`) invalidates first; optional
+  `?boundToWorkflow=<name>:<version>` lens narrows to slices bound to a
+  workflow instance (400 `boundToWorkflow_invalid` without the colon). Each
+  slice row carries `readiness`, and a `missions` sidecar carries authored
+  mission status and readiness. Rows sort by last activity, newest first.
+- `POST /refresh` — drops the indexer caches, no daemon restart.
+- `GET /:name/proof-asset/*` — serves a proof asset from the slice's matched
+  dogfood-evidence directory; rejects `..` (400); `Cache-Control: public,
+  max-age=86400`; byte ranges (206 / 416).
+- `GET /:name/doc/*` — markdown for the Docs tab; rejects `..`.
+- `GET /:name` — full per-tab payload. With `?project=<id>` it also requires
+  `?mission=<id>` (400 `exact_mission_and_slice_required`) and reads through
+  an indexer scoped to that project's missions root.
 
-### 4.4 Missions route — **0.3.1** (slice 12 + slice 13 + slice 18)
+503 `slices_indexer_unavailable` when unwired; on `GET /`, 503
+`slices_root_not_configured` + setup hint when not ready. **Route-order
+discipline:** literal `/` / `/refresh` / `/:name/proof-asset/*` /
+`/:name/doc/*` are registered BEFORE the dynamic `/:name` so they are not
+shadowed.
 
-`missionsRoutes()` (mounted `server.ts:505` as `/api/missions`) is the
-mission scope data layer. `GET /:missionId` returns
-`{ missionId, missionPath, slices, workflow_spec, topology, status }` —
-slices filtered from the SliceIndexer by `missionId`; `missionPath` derived
-by going up two levels from any slice's `slicePath`; `workflow_spec` parsed
-lazily from `<missionPath>/README.md` frontmatter (same `parseWorkflowSpecRef`
-helper the slice-indexer uses); `topology.specGraph` projected via
-`projectSpecGraph(spec, null)` when the spec is cached, `{ specGraph: null }`
-when declared-but-not-cached, `null` when nothing declared; `status` read
-from README frontmatter. `POST /:missionId/complete` writes
-`status: complete` to the mission README frontmatter (idempotent; preserves
-unrelated fields) — the daemon is the audit-trail surface, the UI keeps an
-optimistic localStorage mirror. 404 `mission_not_found` when no slices match.
+> Source: `routes/slices.ts:33-198` (handlers; route-order comments
+> `:36-37`, `:118`, `:126-127`, `:175`; 503s `:40-46`; filters `:31`,
+> `:47-53`; refresh `:54-57`; `boundToWorkflow` `:67-93`; readiness +
+> `missions` sidecar `:99-110`; `/refresh` `:119-124`; proof asset
+> `:131-154`, cache header `:235`, ranges `:237-266`; doc `:158-173`;
+> project scope `:180-190`); mounted `server.ts:804`.
 
-> Source: `routes/missions.ts:39-118` (handlers), `:124-142`
-> (`writeMissionStatusComplete`), `:148-150` (`computeMissionPath`
-> up-two-levels), `:171-177` (`readMissionWorkflowSpec`), `:205-215`
-> (`computeMissionTopology`); mounted `server.ts:505`; §0 proof:
-> `routes/missions.ts` ABSENT@v0.3.0 ⇒ **0.3.1** @HEAD.
+### 4.4 Missions route — 0.3.1
 
-### 4.5 Projects route — Coordination L2 classifier (PL-004 Phase B) — 0.3.0
+`missionsRoutes()` (mounted `server.ts:815` as `/api/missions`) is the
+mission scope data layer, with **2** handlers
+(`grep -c -E 'app\.(get|post)\(' packages/daemon/src/routes/missions.ts`).
 
-`projectsRoutes()` (mounted `server.ts:492` as `/api/projects`) backs the
-`rig project` CLI verb — this is the **PL-004 Phase B project *classifier***
-(lease lifecycle + idempotent classify + operator-verb reclaim + SSE), NOT
-the Project *workspace UI* (that is the slices/missions surface above; the
-naming overlap is a documented seam). Endpoints: `POST /lease/acquire`
-(optional `evaluateDeadnessFirst` clears stale/dead leases first),
-`POST /lease/heartbeat`, `POST /reclaim-classifier`, `POST /project`
-(idempotent on `stream_item_id`), `GET /lease`, `GET /list`,
-`GET /sse` + `GET /watch` (SSE), `GET /:projectId`. **Route-order
-discipline:** literal `/lease`, `/list`, `/sse`, `/watch` are registered
-BEFORE the bare `/:projectId` catchall (Phase A R1 SSE lesson).
+`GET /:missionId` returns
+`{ missionId, missionPath, readiness, slices, workflow_spec, topology, status }`:
 
-> Source: `routes/projects.ts:18-194` (handlers; route-order note
-> L15-17, L140-141, L158-159, L185); error-code → HTTP mapping
-> `:31-52`; mounted `server.ts:492` @HEAD.
+- `slices` — filtered from the SliceIndexer by `missionId`, each with its
+  `readiness`;
+- `missionPath` — two levels up from any slice's `slicePath`;
+- `workflow_spec` — parsed from the frontmatter of the mission's node file
+  (`SPEC.md`, else legacy `README.md`) with the same `parseWorkflowSpecRef`
+  helper the slice-indexer exports;
+- `topology.specGraph` — projected via `projectSpecGraph(spec, null)` when the
+  spec is cached; `{ specGraph: null }` when declared but not cached (or no
+  cache is wired); `null` when nothing is declared;
+- `readiness` — the mission's proof readiness;
+- `status` — `metadata.status` from `mission.yaml` when present, else the
+  node file's `status` frontmatter.
 
-## 5. UI route-reality (§10.7 — source-verified at routes.tsx@HEAD)
+`POST /:missionId/complete` sets the mission status to `complete`:
+`metadata.status` in `mission.yaml` when the manifest exists (other fields and
+comments kept), otherwise the `status` line in the node file's frontmatter
+(creating `SPEC.md` when the mission has no node file). It is idempotent.
+After a successful write it drops the indexer's mission-status cache so the
+next `/api/slices` read sees the new status. The daemon is the audit-trail surface; the UI keeps an
+optimistic localStorage mirror. 404 `mission_not_found` when no slices match;
+500 `mission_complete_write_failed` on a write error.
 
-`packages/ui/src/routes.tsx` is **542 lines** and uses TanStack Router
-(`createRoute({ path, component })` objects), NOT JSX `<Route>`. The
-Phase-8.1 survey's grep-derived missions/projects expectations are
-corrected here against routes.tsx reality:
+> Source: `routes/missions.ts:45-88` (GET; 503s `:46-64`; 404 `:68-70`;
+> readiness + status `:77-78`; response `:79-87`), `:95-125` (complete; 500
+> `:110-117`; cache drop `:123`), `:132-163` (`writeMissionStatusComplete`;
+> manifest `:133-141`; node file `:145-162`), `:169-171`
+> (`computeMissionPath` up two levels), `:179-186` (`readMissionStatus`),
+> `:192-198` (`readMissionWorkflowSpec`), `:226-236`
+> (`computeMissionTopology`); node-file precedence
+> `domain/scope/node-file.ts:17`; readiness
+> `domain/proof/judgments.ts:288-295`; UI mirror
+> `packages/ui/src/hooks/useCompletedMissions.ts:15`; mounted `server.ts:815`;
+> §0: `routes/missions.ts` absent at `v0.3.0` ⇒ **0.3.1**.
 
-| Survey expectation | routes.tsx@HEAD reality | routes.tsx:NN |
+### 4.5 Projects route — stream classifier — 0.3.0
+
+`projectsRoutes()` (mounted `server.ts:787` as `/api/projects`) backs the
+`rig project` CLI verb — the **stream-item classifier** (lease lifecycle +
+idempotent classify + operator-verb reclaim + attempt ledger + SSE), NOT the
+Project *workspace UI* (that is the slices/missions surface above; the naming
+overlap is a documented seam). Endpoints:
+
+- `GET /worker-sources` — requires `?project=<id>`, a workspace catalog
+  project;
+- `GET /shadow`, `POST /shadow/drain`, `POST /shadow/stop`;
+- `POST /lease/acquire` (optional `evaluateDeadnessFirst` clears stale/dead
+  leases first), `POST /lease/heartbeat`, `POST /reclaim-classifier`;
+- `POST /project` (idempotent on `stream_item_id`);
+- `POST /attempts/begin`, `POST /attempts/:attemptId/abstain`,
+  `POST /attempts/:attemptId/fail`, `GET /eligible`;
+- `GET /lease`, `GET /list`, `GET /sse` + `GET /watch` (SSE);
+- `GET /:projectId`.
+
+**Route-order discipline:** every literal path is registered BEFORE the bare
+`/:projectId` catchall, which comes last.
+
+> Source: `routes/projects.ts:27-373` (handlers; route-order notes `:25`,
+> `:238`, `:307`, `:320`, `:337-338`, `:364`); worker sources `:98-109`;
+> shadow `:111-125`; lease / reclaim / project `:135-235`
+> (`evaluateDeadnessFirst` `:140-142`); attempts and eligible `:242-304`;
+> lease and list `:308-334`; SSE `:339-362`; `/:projectId` `:365-370`;
+> error-code → HTTP mapping `:58-95`; CLI
+> `packages/cli/src/commands/project.ts:46`; mounted `server.ts:787`.
+
+## 5. UI route reality — source-verified at routes.tsx
+
+`packages/ui/src/routes.tsx` is **605** lines (`wc -l < packages/ui/src/routes.tsx`)
+and uses TanStack Router (`createRoute({ path, component })` objects), NOT JSX
+`<Route>` (**0** matches: `grep -c '<Route' packages/ui/src/routes.tsx`). The
+mission / project / slice destinations as they exist:
+
+| Path | routes.tsx reality | routes.tsx:NN |
 |---|---|---|
-| `/project` (workspace) | **REAL route** — `WorkspaceScopePage` | `:128-131` |
-| `/project/mission/$missionId` | **REAL route** — `MissionScopePage` | `:134-137` |
-| `/project/slice/$sliceId` | **REAL route** — `SliceScopePage` | `:140-143` |
-| `/files` | **REAL route** — `FilesWorkspace` (see content-surfaces.md) | `:192-195` |
-| `/mission-control` | **`<Navigate to="/for-you" />`** redirect-stub (DELETED per SC-18; the Mission Control *system* lives at daemon/PL-005, not a UI destination) | `:440-444` |
-| `/slices` | **`<Navigate to="/project" />`** redirect-stub (DELETED per project-tree.md) | `:447-451` |
-| `/slices/$name` | **`<Navigate to="/project/slice/$sliceId" />`** redirect-stub | `:453-460` |
-| `/progress` | **`<Navigate to="/project" />`** redirect-stub (folds into Project tabs, Phase 3) | `:464-468` |
-| `/steering` | **`<Navigate to="/project" />`** redirect-stub (folds into Project workspace overview tab, Phase 3) | `:470-474` |
-| `/missions` (top-level) | **NO route** — missions are reached only via `/project/mission/$missionId` | (absent) |
-| `/markdown` | **NO route** — markdown is a component in file/drawer surfaces, not a destination (see content-surfaces.md §4) | (absent) |
+| `/project` (workspace) | **REAL route** — `WorkspaceScopePage` | `:136-140` |
+| `/project/mission/$missionId` | **REAL route** — `MissionScopePage` | `:142-146` |
+| `/project/slice/$sliceId` | **REAL route** — `SliceScopePage` | `:148-152` |
+| `/files` | **REAL route** — `FilesWorkspace` (see content-surfaces.md) | `:248-252` |
+| `/mission-control` | **`<Navigate to="/for-you" />`** redirect-stub (the Mission Control *system* lives in the daemon at `/api/mission-control`, not as a UI destination) | `:496-500` |
+| `/slices` | **`<Navigate to="/project" />`** redirect-stub | `:503-507` |
+| `/slices/$name` | **`<Navigate to="/project/slice/$sliceId" />`** redirect-stub | `:509-516` |
+| `/progress` | **`<Navigate to="/project" />`** redirect-stub (folds into Project tabs) | `:519-523` |
+| `/steering` | **`<Navigate to="/project" />`** redirect-stub (folds into the Project workspace overview tab) | `:526-530` |
+| `/missions` (top-level) | **NO route** — missions are reached only via `/project/mission/$missionId` | absent: **0** (`grep -c 'path: "/missions"' packages/ui/src/routes.tsx`) |
+| `/markdown` | **NO route** — markdown is a component in file/drawer surfaces, not a destination (see content-surfaces.md) | absent: **0** (`grep -c 'path: "/markdown"' packages/ui/src/routes.tsx`) |
 
-> Source: `packages/ui/src/routes.tsx:90-195` (real routes),
-> `:435-474` (redirect-stub block; each `<Navigate>` + DELETED/folds
-> comment), `:476-490` (route tree) @HEAD. Grep-confirmed absent:
-> no `path: "/missions"` / `path: "/markdown"` declaration anywhere
-> in routes.tsx @HEAD.
+> Source: `packages/ui/src/routes.tsx:136-152` (project routes), `:248-252`
+> (`/files`), `:484-530` (redirect block, which also redirects `/context` to
+> `/topology`), `:539-597` (route tree); `/api/mission-control` mounted
+> `packages/daemon/src/server.ts:791-794`.
 
-Net §10.7 ruling: the daemon `/api/missions` + `/api/slices` +
-`/api/projects` routes are real and load-bearing; the **operator-facing UI**
-consumes them through `/project*` destinations only. `/mission-control`,
-`/slices`, `/progress`, `/steering` are redirect-stubs (the systems exist at
-the daemon layer, the URLs were collapsed into `/project` / `/for-you`).
+Net: the daemon `/api/missions` + `/api/slices` + `/api/projects` routes are
+real. The **operator-facing UI** consumes the missions and slices routes
+through the `/project*` destinations; it does not call `/api/projects`
+(**0** files: `git grep -l '/api/projects' -- packages/ui/src | wc -l`).
+`/mission-control`, `/slices`, `/progress`, `/steering` are redirect-stubs
+(the systems exist at the daemon layer; the URLs were collapsed into
+`/project` / `/for-you`).
+
+> Source: `packages/ui/src/hooks/useMission.ts:51` (`/api/missions`),
+> `packages/ui/src/hooks/useSlices.ts:84` (`/api/slices`).
 
 ## 6. Cross-cutting properties
 
 - **Optional + valid-without:** rigs without a `workspace` block stay valid;
-  whoami / node-inventory / queue-target-repo all return null / fail-open
-  (`workspace-resolver.ts:32`; `rig-repository.ts:99,107`;
-  `routes/queue.ts:55`) @HEAD.
-- **Defensive column probes:** every `workspace_json` / `target_repo` access
-  guards on column presence so partial test fixtures don't crash
-  (`rig-repository.ts:99,107`; migrations 038/039 ship separately so a
-  fixture can apply only the half it needs — `038.ts:11-14`) @HEAD.
+  whoami / node-inventory return null and queue target-repo validation fails
+  open (`workspace-resolver.ts:32`, `:62`; `rig-repository.ts:174`, `:182`;
+  `routes/queue.ts:110`).
+- **Defensive column access:** `RigRepository` probes for `workspace_json`
+  (`rig-repository.ts:174`, `:182`), node-inventory's own reads fall back to
+  null on error (`node-inventory.ts:645`, `:717-719`), and the queue
+  repository detects `target_repo` (`queue-repository.ts:744`), so partial
+  test fixtures don't crash. Migrations 038/039 ship separately so a fixture
+  can apply only the half it needs (`038_workspace_primitive.ts:12-14`).
 - **Read-only projection, no new state for the tree:** SliceIndexer /
   SliceDetailProjector add NO migration / event type; only the workspace
   declaration (038) + per-item scope (039) touch SQLite
-  (`slice-indexer.ts:12-14`) @HEAD.
-- **Advisory, never mutates:** the frontmatter validator and the
-  init-workspace scaffold never delete operator content
-  (`frontmatter-validator.ts:12-13`; `config-init-workspace.ts:12-16`) @HEAD.
+  (`slice-indexer.ts:14-15`).
+- **Advisory, never deletes:** the frontmatter validator never modifies files
+  (`frontmatter-validator.ts:12`), and the workspace scaffold never deletes or
+  overwrites operator content (`default-workspace-scaffold.ts:140`;
+  `packages/cli/src/commands/config-init-workspace.ts:18`).
 
-## OPEN items (carried, not smoothed)
+## Open items
 
-- **OPEN-A** — `resolveWorkspaceContext` honors an `envOverride`
-  **verbatim even when it names no declared repo** (`workspace-resolver.ts:34-43`,
-  by explicit PL-007 PRD § Item 3 design), whereas the queue route
-  **rejects** an unknown `target_repo` against the same `repos[]`
-  (`routes/queue.ts:58-66`). These two surfaces apply opposite policies to
-  an unknown repo name (whoami trusts the operator; queue validates). Stated
-  as-is — the asymmetry is source-real and intentional per the cited
-  comments, but the divergence is not reconciled in source.
-- **OPEN-B** — the `/api/projects` *classifier* (PL-004 Phase B) and the
-  `/project*` *workspace UI* (slices/missions) share the word "project" but
-  are unrelated subsystems. Documented as a naming seam; no source defect.
-- No slice-00 numeric-drift OPEN (1–5) applies — this module carries no
-  migration-count / route-group / PL-004-event-count claim (those land in
-  daemon-core / coordination-primitive / architecture-rules).
+- `resolveWorkspaceContext` honors an `envOverride` **verbatim even when it
+  names no declared repo** (`workspace-resolver.ts:39-40`), whereas the queue
+  route **rejects** an unknown `target_repo` against the same `repos[]`
+  (`routes/queue.ts:112-118`). These two surfaces apply opposite policies to
+  an unknown repo name (whoami trusts the operator; queue validates). The
+  resolver's comment at `:35-36` states the verbatim behavior is intended, but
+  the comment line before it (`:34`) and `whoami-service.ts:331-332` describe
+  a repo-name check that the code does not perform. Stated as-is; the
+  divergence is not reconciled in source.
+- The `/api/projects` *classifier* and the `/project*` *workspace UI*
+  (slices/missions) share the word "project" but are different subsystems.
+  Both accept a workspace catalog project as `?project=<id>`
+  (`routes/projects.ts:105`; `routes/slices.ts:181`). Documented as a naming
+  seam; no source defect.

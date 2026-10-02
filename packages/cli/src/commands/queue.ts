@@ -149,6 +149,11 @@ async function withClient<T>(
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
+  if (status >= 400 && body && typeof body === "object"
+    && (body as { error?: unknown }).error === "remote_queue_write_failed"
+    && (body as { outcome?: unknown }).outcome === "indeterminate") {
+    console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
+  }
   if (json) {
     console.log(JSON.stringify(body));
   } else {
@@ -409,7 +414,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("create")
     .description("Create a new qitem")
-    .option("--source <session>", "(deprecated, ignored) the source is derived from the seat env (X-OpenRig-Session); P21 I3 made the create route derive it from the transport header")
+    .option("--source <session>", "Declared source outside a managed seat (recorded as claimed:v1); the managed seat env takes precedence")
     .requiredOption("--destination <session>", "Destination session (the seat that owns the work)")
     .option("--body <text>", "Qitem body inline (use - to read from stdin; mutually exclusive with --body-file)")
     .option("--body-file <path>", "Read qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class for multiline bodies.")
@@ -524,9 +529,11 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           "warning: rig queue create called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding (pre-18 callers exempt).\n"
         );
       }
-      // P21 I3 reconcile: the source is DERIVED from the seat env (X-OpenRig-Session) — --source
-      // deprecated + ignored, no body sourceSession. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
-      if (!resolveCurrentSession(undefined, "source")) return;
+      // A managed seat keeps transport-derived identity; an external caller can
+      // name the existing claimed:v1 body actor without forging a transport header.
+      const managedSource = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+      const source = resolveCurrentSession(managedSource ?? opts.source, "source");
+      if (!source) return;
       const deps = getDeps();
       // OPR.0.3.2.21.FR-4(b) — first-class --mission / --slice flags
       // translate to canonical mission:<id> / slice:<id> tags. Composes
@@ -563,6 +570,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           }
         }
         const res = await client.post<Record<string, unknown>>("/api/queue/create", {
+          ...(managedSource === undefined ? { sourceSession: source } : {}),
           qitemId: opts.id,
           destinationSession: hostResolved.destination,
           body: resolvedBody,

@@ -7,10 +7,11 @@ import type { OperatingPostureService } from "./rig-mode/operating-posture.js";
 import { readHealthArtifact, healthSelectedContext } from "./health-context.js";
 import { validateMissionComposition } from "./lifecycle-manifest.js";
 import { healthHash, type HealthPolicyStore } from "./health-policy.js";
-import type { HealthDetectorObservation, HealthObservationSource } from "./health-detectors.js";
+import type { HealthDetectorObservation, HealthObservationSource, HealthSourceCoverage } from "./health-detectors.js";
 import { adaptQueueTransitionEvidence, boundHealthEvidence, deriveHealthSourceFreshness, healthEpisodeId, type HealthScope, type PassiveCeremony, type CeremonyProgressAssessment } from "./health-projection.js";
 
 const detector = "process.ceremony-amplification";
+const familyLimit = 200;
 const excluded = (tags: string[] | null | undefined) => tags?.some((t) => t === "health-diagnosis" || t === "health-human") ?? false;
 const one = (values: string[]) => { const unique = [...new Set(values)]; return unique.length === 1 ? unique[0] : undefined; };
 const tagged = (tags: string[], prefix: string) => tags.filter((t) => t.startsWith(prefix)).map((t) => t.slice(prefix.length));
@@ -22,14 +23,19 @@ export class PassiveCeremonySource implements HealthObservationSource {
     private readonly now = () => new Date().toISOString(), private readonly checkpoints?: HealthCheckpointSource,
     private readonly posture?: { reader: OperatingPostureService; instanceId: string }) {}
 
+  private lastCoverage: HealthSourceCoverage | undefined;
+  coverage(): HealthSourceCoverage[] { return this.lastCoverage ? [this.lastCoverage] : []; }
+
   read(): HealthDetectorObservation[] {
+    this.lastCoverage = undefined;
     const now = this.now(); const p = this.policy.read().policy;
     const start = new Date(Date.parse(now) - p.observationWindowSeconds * 1000).toISOString();
-    const touched = this.queue.db.prepare("SELECT DISTINCT qitem_id AS id FROM queue_transitions WHERE ts >= ? AND ts <= ? ORDER BY qitem_id LIMIT 2001").all(start, now) as Array<{ id: string }>;
+    const touched = this.queue.db.prepare("SELECT qitem_id AS id, COUNT(*) AS n FROM queue_transitions WHERE ts >= ? AND ts <= ? GROUP BY qitem_id ORDER BY qitem_id LIMIT 2001").all(start, now) as Array<{ id: string; n: number }>;
     if (touched.length > 2000) throw new Error("health_passive_queue_window_truncated");
     type Member = { qitemId: string; handedOffFrom: string | null; tags: string[] };
     const roots = new Map<string, Member>();
     const members = new Map<string, Set<string>>();
+    const activity = new Map<string, number>();
     const cached = new Map<string, Member | null>();
     // Read only linkage metadata; the queue's full row projection derives pickup
     // and notification state that this bounded source neither needs nor interprets.
@@ -50,19 +56,29 @@ export class PassiveCeremonySource implements HealthObservationSource {
           roots.set(row.qitemId, row);
           if (!members.has(row.qitemId)) members.set(row.qitemId, new Set());
           members.get(row.qitemId)!.add(item.id);
+          activity.set(row.qitemId, (activity.get(row.qitemId) ?? 0) + item.n);
           break;
         }
         row = get(row.handedOffFrom);
         if (!row) throw new Error("health_passive_lineage_parent_unavailable");
       }
     }
-    if (roots.size > 200) throw new Error("health_passive_family_limit");
+    // Past the limit, evaluate the busiest families instead of none. A family qualifies
+    // by its transition count, so ranking by transitions in the window (then lineage ID,
+    // for a stable order) keeps every family that could qualify unless more than the
+    // limit do. The rest are reported as omitted: unevaluated, never healthy.
+    const selectedFamilies = new Set([...roots.keys()]
+      .sort((a, b) => activity.get(b)! - activity.get(a)! || (a < b ? -1 : a > b ? 1 : 0))
+      .slice(0, familyLimit));
+    this.lastCoverage = { source: "passive-ceremony", evaluatedAt: now, unit: "handoff families", limit: familyLimit,
+      total: roots.size, evaluated: selectedFamilies.size, omitted: roots.size - selectedFamilies.size, partial: roots.size > familyLimit,
+      order: "most queue transitions in the observation window, then lineage ID" };
     // An explicit legacy source already owns this lineage; never route it twice.
     const explicit = new Set(this.checkpoints?.entries().map((x) => x.checkpoint.lineageQitemId) ?? []);
     const observations: HealthDetectorObservation[] = [];
     const contexts = new Map<string, PassiveCeremony["context"]>();
     for (const [lineageId, root] of roots) {
-      if (!root || explicit.has(lineageId)) continue;
+      if (!root || explicit.has(lineageId) || !selectedFamilies.has(lineageId)) continue;
       // Discovery already covered every touched qitem in this exact window.
       // Its parent joins give the complete family without rescanning dormant work.
       const ids = [...members.get(lineageId)!];

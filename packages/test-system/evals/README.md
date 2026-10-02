@@ -21,14 +21,17 @@ Grading:
   agent-browser's `--judge` shape) — switch it on later without re-authoring the cases.
 
 Layout:
-- `cases/*.ts` — selection + loading `EvalCase`s (natural prompt, expected patterns, order, rubric).
+- `cases/selection.yaml`, `cases/loading.yaml` — selection + loading `EvalCase`s as YAML lists
+  (natural prompt, expected patterns, order, rubric), validated by `eval-schema.ts` at load.
 - `fixtures/` — canonical-ref packs backing the structural canonical-ref checks only. The LIVE run
   does NOT point a seat at these; per Repair 2 the eval resolves refs against the EXACT production
   package (built by `generate-context-packs.mjs`), so fixture-vs-production drift fails structurally.
 - runner + grader code lives in `packages/daemon/test/helpers/eval-*.ts` (vitest-wired); the standalone
-  live entry is `packages/daemon/scripts/run-evals.mjs`, run via `npm run eval -w packages/daemon -- [args]`
+  entry is `packages/daemon/scripts/run-evals.mjs` (`--provider fake`, the default, grades transcripts
+  from `--transcripts`; `--provider rig` drives a live seat), run via
+  `npm run eval -w packages/daemon -- [args]`
   (the TS helpers need the tsx loader, which that command supplies) — mirroring the scenario system's
   split, node/tsx/vitest.
 
-Status: RED-first build in progress (slice-07 R6). Lock amendments (07 proof-contract + PRD R6; 05 Q3)
-land via dev-planner + r1 re-stamp BEFORE the R6 fold; the build proceeds under the ruling meanwhile.
+Status: built. `npm test` covers the harness without a model (`packages/daemon/test/eval-*.test.ts`);
+live `--provider rig` runs are manual, and CI does not run them.

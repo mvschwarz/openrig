@@ -153,6 +153,29 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result.skipped).toBe(0);
   });
 
+  it.each(["valid-edit", "invalid-edit"])("re-reads a %s within the cached timestamp's second", (edit) => {
+    const file = join(folder, "wf.yaml");
+    writeFileSync(file, VALID_YAML);
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    const before = db.prepare("SELECT cached_at FROM workflow_specs WHERE source_path = ?").get(file) as {cached_at: string};
+    writeFileSync(file, edit === "valid-edit" ? VALID_YAML.replace("A folder-scan fixture", "Updated objective") : INVALID_YAML);
+    // Deterministic same-second timing, including a broken edit made
+    // before the cached timestamp bucket has advanced.
+    const sameSecond = new Date(Math.floor(Date.parse(before.cached_at) / 1000) * 1000 + 999);
+    utimesSync(file, sameSecond, sameSecond);
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(result.valid).toBe(edit === "valid-edit" ? 1 : 0);
+    expect(result.errors).toBe(edit === "invalid-edit" ? 1 : 0);
+    expect(result.skipped).toBe(0);
+    const row = db.prepare("SELECT purpose, status, error_message FROM workflow_specs WHERE source_path = ?").get(file) as {purpose: string; status: string; error_message: string|null};
+    expect(row.status).toBe(edit === "valid-edit" ? "valid" : "error");
+    if (edit === "valid-edit") expect(row.purpose).toBe("Updated objective");
+    else expect(row.error_message).toBeTruthy();
+    // Unchanged bytes still remain a skip on a second scan.
+    const unchanged = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(unchanged.skipped).toBe(1);
+  });
+
   it("removes cache row when file disappears (OQ-4)", () => {
     writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
     writeFileSync(join(folder, "wf2.yaml"), VALID_YAML_TWO);
@@ -178,6 +201,31 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result.removed).toBe(0);
     expect(cache.listAll().some((r) => r.name === "external-spec")).toBe(true);
     rmSync(externalPath);
+  });
+
+  it.each([
+    ["project_a", "projectba"],
+    ["project%a", "project-extra-a"],
+  ])("only reaps literal folder %s, leaving neighboring %s cached", (ownName, neighborName) => {
+    const owned = join(folder, ownName);
+    const neighbor = join(folder, neighborName);
+    mkdirSync(owned); mkdirSync(neighbor);
+    const ownFile = join(owned, "owned.yaml");
+    const liveNeighbor = join(neighbor, "external.yaml");
+    const missingNeighbor = join(neighbor, "missing.yaml");
+    writeFileSync(ownFile, VALID_YAML);
+    writeFileSync(liveNeighbor, VALID_YAML.replace("folder-test", "external-workflow"));
+    cache.readThrough(liveNeighbor);
+    cache.writeDiagnostic({ sourcePath: missingNeighbor, sourceHash: "fixture", errorMessage: "Previously invalid external source" });
+    scanWorkflowSpecFolder({ db, cache, folder: owned, builtinDir: null });
+    rmSync(ownFile);
+    const eventBus = new EventBus(db);
+    const result = scanWorkflowSpecFolder({ db, cache, folder: owned, builtinDir: null, eventBus });
+    expect(result.removed).toBe(1);
+    const remaining = db.prepare("SELECT source_path FROM workflow_specs ORDER BY source_path").all() as {source_path: string}[];
+    expect(remaining.map(row => row.source_path)).toEqual([liveNeighbor, missingNeighbor].sort());
+    const events = db.prepare("SELECT payload FROM events WHERE type = 'workflow_spec.removed'").all() as {payload: string}[];
+    expect(events.map(event => JSON.parse(event.payload).sourcePath)).toEqual([ownFile]);
   });
 
   it("emits workflow_spec.removed audit event for each deleted file (HG-3)", () => {

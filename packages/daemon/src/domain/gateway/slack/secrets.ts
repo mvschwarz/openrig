@@ -31,10 +31,11 @@ export function parseEnvFile(text: string): Record<string, string> {
     const t = line.trim();
     if (!t || t.startsWith("#") || !t.includes("=")) continue;
     const i = t.indexOf("=");
-    out[t.slice(0, i).trim()] = t
-      .slice(i + 1)
-      .trim()
-      .replace(/^"|"$/g, "");
+    const value = t.slice(i + 1).trim();
+    const quote = value[0];
+    out[t.slice(0, i).trim()] = value.length >= 2 && (quote === '"' || quote === "'") && value.endsWith(quote)
+      ? value.slice(1, -1)
+      : value;
   }
   return out;
 }

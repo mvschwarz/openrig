@@ -86,6 +86,12 @@ export class TmuxOptionDefaultsApplier {
       warnings.push(`tmux "status" option not set for ${sessionName}: ${status.message}`);
     }
 
+    // Session scope: a global `detach-on-destroy off` must not retarget this seat's views.
+    const detach = await this.tmuxAdapter.setSessionOption(sessionName, "detach-on-destroy", "on");
+    if (!detach.ok) {
+      warnings.push(`tmux "detach-on-destroy" option not set for ${sessionName}: ${detach.message}`);
+    }
+
     await this.ensureServerDefaults(warnings);
     return warnings;
   }

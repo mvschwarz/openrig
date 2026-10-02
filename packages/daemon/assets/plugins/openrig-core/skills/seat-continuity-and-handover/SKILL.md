@@ -6,16 +6,11 @@ metadata:
     stage: factory-approved
     sibling_skills:
       - claude-compaction-restore
-      - mental-model-ha
-      - scope-recovery
       - session-compaction-and-restore
       - retiring-and-inheriting-a-seat
       - agent-startup-and-context-ingestion
       - agent-starters
-      - composable-priming-packs
       - session-source-fork
-      - claude-compact-in-place
-      - pre-maintenance-agent-preservation
 ---
 
 # Seat Continuity and Handover

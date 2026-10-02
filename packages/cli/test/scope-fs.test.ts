@@ -44,6 +44,45 @@ describe("frontmatter parser", () => {
     expect(body).toBe("body");
   });
 
+  it("reads CRLF frontmatter while preserving body bytes and authored mission identity", () => {
+    const dir = mktemp();
+    const body = "\r\n# Mission\r\n\r\nKeep body bytes.\r\n";
+    const source = "---\r\nid: DEMO.1.2\r\nstatus: active\r\ndepends_on: [DEMO.1.1]\r\n---\r\n" + body;
+    const missionDir = path.join(dir, "custom-mission");
+    writeFile(path.join(missionDir, "SPEC.md"), source);
+    const parsed = splitFrontmatter(source);
+    expect(parsed.frontmatter).toEqual({ id: "DEMO.1.2", status: "active", depends_on: ["DEMO.1.1"] });
+    expect(parsed.body).toBe(body);
+    const mission = findMission(dir, "custom-mission");
+    expect(mission.id).toBe("DEMO.1.2");
+    expect(ensureMissionId(mission, dir)).toBe("DEMO.1.2");
+    expect(fs.readFileSync(path.join(missionDir, "SPEC.md"), "utf8")).toBe(source);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("requires a complete closing delimiter and accepts empty or EOF-terminated frontmatter", () => {
+    for (const suffix of ["---suffix", "---\rnot-a-delimiter"]) {
+      const content = `---\nid: DEMO.1.2\n${suffix}`;
+      expect(splitFrontmatter(content)).toEqual({ frontmatter: {}, body: content });
+    }
+    expect(splitFrontmatter("---\r\n---\r\nbody")).toEqual({ frontmatter: {}, body: "body" });
+    expect(splitFrontmatter("---\nid: DEMO.1.2\n---")).toEqual({ frontmatter: { id: "DEMO.1.2" }, body: "" });
+  });
+
+  it("preserves delimiters with trailing spaces or tabs for LF, CRLF and EOF", () => {
+    for (const newline of ["\n", "\r\n"]) {
+      for (const trailing of [" ", "\t", " \t"]) {
+        const body = newline + "# Body" + newline;
+        for (const ending of [newline + body, ""]) {
+          const content = `---${trailing}${newline}id: DEMO.1.2${newline}---${trailing}${ending}`;
+          expect(splitFrontmatter(content)).toEqual({ frontmatter: { id: "DEMO.1.2" }, body: ending ? body : "" });
+        }
+      }
+    }
+    const malformed = "---\nid: DEMO.1.2\n--- \tsuffix";
+    expect(splitFrontmatter(malformed)).toEqual({ frontmatter: {}, body: malformed });
+  });
+
   it("preserves unknown keys on update", () => {
     const dir = mktemp();
     const p = path.join(dir, "README.md");

@@ -36,8 +36,9 @@ const args = process.argv.slice(2); const at = flag => args[args.indexOf(flag) +
 const stateRoot = at('--state-root'), name = at('--session-name');
 const dir = path.join(stateRoot, name); fs.mkdirSync(dir, { recursive: true });
 const sessionFile = args.includes('--session') ? at('--session') : path.join(dir, 'sessions', 'child.jsonl');
-fs.writeFileSync(path.join(dir, 'runner-state.json'), JSON.stringify({ready:true, launchId:at('--launch-id'), sessionFile, sessionId:'offline', updatedAt:new Date().toISOString()}));
 fs.writeFileSync(path.join(dir, 'received.json'), JSON.stringify({cwd:at('--cwd'), sessionFile, args}));
+// Publish readiness after the test artifact: launch/resume can return as soon as this file exists.
+fs.writeFileSync(path.join(dir, 'runner-state.json'), JSON.stringify({ready:true, launchId:at('--launch-id'), sessionFile, sessionId:'offline', updatedAt:new Date().toISOString()}));
 setInterval(() => {}, 1000);\n`);
     const parent = path.join(stateRoot, session, "sessions", "parent.jsonl");
     fs.mkdirSync(path.dirname(parent), { recursive: true });

@@ -136,10 +136,11 @@ export interface InboundDeps {
 
 export class InboundRouter {
   private readonly inflight = new Set<string>(); // same-ts double-dispatch guard (item 8)
+  private retryPass: Promise<{ retried: number; landed: number }> | undefined;
   constructor(private readonly deps: InboundDeps) {}
 
   private summaryOf(ev: SlackEvent, transfer?: InboundFileResult | null, correlationQitemId?: string): { summary: string; body: string } {
-    const text = String(ev.text ?? "").slice(0, 1800);
+    const text = String(ev.text ?? "");
     const meta = `slack channel=${ev.channel} user=${ev.user} ts=${ev.ts}`;
     // OPR.0.5.6.2 — attachments ride the row BODY by LOCAL path (Slack owns
     // nothing; the media file is OUR copy). Failures are per-file and named:
@@ -367,6 +368,19 @@ export class InboundRouter {
    * Does NOT go through route() (which would double-append) — uses attemptLand.
    */
   async retryDeadLetters(): Promise<{ retried: number; landed: number }> {
+    // Connect-time and periodic retries can overlap. Join the owned pass rather
+    // than replacing its snapshot or dropping its in-flight entries as duplicates.
+    if (this.retryPass) return this.retryPass;
+    const pass = this.retryDeadLetterPass();
+    this.retryPass = pass;
+    try {
+      return await pass;
+    } finally {
+      if (this.retryPass === pass) this.retryPass = undefined;
+    }
+  }
+
+  private async retryDeadLetterPass(): Promise<{ retried: number; landed: number }> {
     const entries = this.deps.deadLetter.readAll();
     if (entries.length === 0) return this.retryActionDeadLetters();
     this.deps.log?.(`retrying ${entries.length} dead-letter(s)`);
@@ -380,7 +394,7 @@ export class InboundRouter {
       else if (r.reason === "create_failed" || r.reason === "resolve_failed") stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 });
       // reason === "dup" (in-flight) → drop; a concurrent path owns it
     }
-    this.deps.deadLetter.replaceAll(stillFailing); // atomic; original intact until here
+    this.deps.deadLetter.replaceBatch(entries, stillFailing); // atomic; newer appends stay owed
     const actions = await this.retryActionDeadLetters();
     return { retried: entries.length + actions.retried, landed: landed + actions.landed };
   }
@@ -398,7 +412,7 @@ export class InboundRouter {
       if (r.status === "handler-failed") stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 });
       else if (r.status === "accepted") landed++;
     }
-    store.replaceAll(stillFailing);
+    store.replaceBatch(entries, stillFailing);
     return { retried: entries.length, landed };
   }
 }

@@ -1,3 +1,4 @@
+import { resolveGuardTarget } from "../src/domain/seat-delivery-guard.js";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
@@ -325,6 +326,116 @@ describe("createDaemon startup composition", () => {
 
     db.close();
   });
+
+  it("queue admission advises on missing local seats while preserving destinations", async () => {
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error("no socket"), { code: "ENOENT" });
+    };
+    const daemon = await createDaemon({ cmuxFactory, tmuxExec: async () => "" });
+    const { app, db, deps } = daemon;
+    try {
+      const source = deps.rigRepo.createRig("membership-source");
+      deps.rigRepo.addNode(source.id, "sender.ba", { runtime: null });
+      const target = deps.rigRepo.createRig("membership-target");
+      deps.rigRepo.addNode(target.id, "product.ba", { runtime: null });
+      const stopped = deps.rigRepo.addNode(target.id, "product.stopped", { runtime: null });
+      const session = deps.sessionRegistry.registerSession(stopped.id, "product-stopped@membership-target");
+      deps.sessionRegistry.updateStatus(session.id, "exited");
+      deps.rigRepo.addNode(target.id, "product.member.dot", { runtime: null });
+      deps.rigRepo.addNode(target.id, "flat", { runtime: null });
+      const adopted = deps.rigRepo.addNode(target.id, "product.adopted", { runtime: null });
+      deps.sessionRegistry.registerSession(adopted.id, "adopted-alias@membership-target");
+      const sender = "sender-ba@membership-source";
+      const post = (url: string, body: Record<string, unknown>) => app.request(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": sender },
+        body: JSON.stringify({ nudge: false, ...body }),
+      });
+      const create = (destinationSession: string) => post("/api/queue/create", {
+        destinationSession, body: "queue membership fixture",
+      });
+      const counts = () => ({
+        items: (db.prepare("SELECT COUNT(*) count FROM queue_items").get() as { count: number }).count,
+        transitions: (db.prepare("SELECT COUNT(*) count FROM queue_transitions").get() as { count: number }).count,
+      });
+
+      for (const destination of ["product-ba@unknown", "bare-seat"]) {
+        const before = counts();
+        const response = await create(destination);
+        expect(response.status).toBe(400);
+        expect((await response.json()).error).toBe("unknown_destination_rig");
+        expect(counts()).toEqual(before);
+      }
+      for (const destination of ["product-ba@membership-target", "product-stopped@membership-target",
+        "product-member.dot@membership-target", "flat@membership-target", "adopted-alias@membership-target"]) {
+        const response = await create(destination);
+        expect(response.status, destination).toBe(201);
+        expect((await response.json()).advisories, destination).toBeUndefined();
+      }
+      const membershipReads = vi.spyOn(db, "prepare");
+      for (const destination of ["product-ba@membership-target", "product-stopped@membership-target",
+        "product-member.dot@membership-target", "flat@membership-target", "adopted-alias@membership-target"]) {
+        expect(deps.queueRepo.destinationAdvisory(destination)).toBeNull();
+      }
+      const membershipSql = membershipReads.mock.calls.map(([query]) => query).join("\n");
+      membershipReads.mockRestore();
+      expect(membershipSql).not.toMatch(/\b(?:snapshots|events|node_startup_context)\b/);
+      expect(membershipSql).not.toContain("SELECT n.logical_id, s.session_name");
+      db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data) VALUES (?, ?, ?, ?, ?)")
+        .run("advisory-unrelated-snapshot", target.id, "manual", "complete", JSON.stringify({ sessions: { unexpected: true } }));
+      const withSnapshot = await create("product-ba@membership-target");
+      expect(withSnapshot.status).toBe(201);
+      expect((await withSnapshot.json()).advisories).toBeUndefined();
+      const dotted = "product.ba@membership-target";
+      expect(resolveGuardTarget(db, dotted)).toBeNull();
+      expect(resolveGuardTarget(db, "product-ba@membership-target")).not.toBeNull();
+      const dottedResponse = await create(dotted);
+      expect(dottedResponse.status).toBe(201);
+      const dottedResult = await dottedResponse.json();
+      expect(dottedResult.destinationSession).toBe(dotted);
+      expect(dottedResult.advisories[0].availableDestinations).toContain("product-ba@membership-target");
+      expect(dottedResult.advisories[0].message).toContain("matches no session address");
+      expect(deps.queueRepo.getById(dottedResult.qitemId)?.destinationSession).toBe(dotted);
+      const dottedAlias = deps.rigRepo.addNode(target.id, "pod.adopted-dot", { runtime: null });
+      deps.sessionRegistry.registerSession(dottedAlias.id, "adopted.dot@membership-target");
+      const aliasResponse = await create("adopted.dot@membership-target");
+      expect(aliasResponse.status).toBe(201);
+      expect((await aliasResponse.json()).advisories).toBeUndefined();
+      const typo = "prodcut-ba@membership-target";
+      const response = await create(typo);
+      expect(response.status).toBe(201);
+      const accepted = await response.json();
+      expect(accepted.destinationSession).toBe(typo);
+      expect(accepted.advisories[0]).toMatchObject({ code: "unmatched_destination_seat", destinationSession: typo });
+      expect(accepted.advisories[0].availableDestinations).toContain("product-ba@membership-target");
+      expect(accepted.advisories[0].message).toContain("does not guarantee pickup or delivery");
+      expect(deps.queueRepo.getById(accepted.qitemId)?.destinationSession).toBe(typo);
+      const transactional = db.transaction(() => deps.queueRepo.createWithinTransaction({
+        sourceSession: sender, destinationSession: typo,
+        body: "transaction membership fixture", nudge: false,
+      }))();
+      expect(transactional.destinationSession).toBe(typo);
+
+      for (const verb of ["handoff", "handoff-and-complete"]) {
+        const original = await create(sender);
+        expect(original.status).toBe(201);
+        const { qitemId } = await original.json() as { qitemId: string };
+        const row = () => db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(qitemId);
+        const accepted = await post(`/api/queue/${qitemId}/${verb}`, { toSession: typo });
+        expect(accepted.status).toBe(201);
+        const result = await accepted.json();
+        expect(result.created.destinationSession).toBe(typo);
+        expect(result.advisories[0].code).toBe("unmatched_destination_seat");
+        expect(deps.queueRepo.getById(result.created.qitemId)?.destinationSession).toBe(typo);
+        expect((row() as { state: string }).state).toBe(verb === "handoff" ? "handed-off" : "done");
+      }
+    } finally {
+      daemon.eventLoopMonitor.stop();
+      daemon.contextMonitor.stop();
+      deps.seatActivityService?.stop();
+      db.close();
+    }
+  }, 30000);
 
   it("createDaemon app: GET /api/adapters/cmux/status returns 200 (adapter routes mounted)", async () => {
     const cmuxFactory: CmuxTransportFactory = async () => {

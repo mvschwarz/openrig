@@ -10,22 +10,9 @@ metadata:
   openrig:
     stage: factory-approved
     sibling_skills:
-      - workflow-runtime
       - watchdog
-      - refocus
-      - looping-workflows
-      - intake-routing
+      - refocusing
       - human-in-the-loop
-      - dispatching-parallel-agents
-      - subagent-driven-development
-      - structured-ack-dispatch
-      - control-plane-capabilities
-      - status-not-chat-orchestrator
-      - control-plane-queue
-      - control-plane-watchdog
-      - control-plane-workflows
-      - control-plane-delivery-loop
-      - control-plane-rollout-manager
 ---
 
 # Queue Handoff
@@ -184,8 +171,3 @@ policies and workflow runtime project new owners off these fields.
 
 If a daemon-backed coordination command fails, debug the command/runtime/schema
 edge directly — don't fall back to stale pre-upgrade assumptions.
-
-## See also
-
-- `looping-workflows` skill — operating discipline for self-driving rig-shaped loops; queue-handoff is its current handoff substrate
-- `intake-routing` skill — how raw signals enter the system and become routed work that flows through the queue
