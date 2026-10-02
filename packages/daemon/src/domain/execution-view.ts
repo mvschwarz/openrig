@@ -624,7 +624,7 @@ function scanReviewArtifacts(rigsRoot: string, sliceDirOrId: string[], proofDir:
 
 type Rung =
   | { value: boolean; basis: string }
-  | { value: Indeterminate; basis: string };
+  | { value: Indeterminate | "NOT_APPLICABLE"; basis: string };
 
 function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha: string, ref: string): Rung {
   const run = exec ?? defaultExec;
@@ -918,21 +918,21 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
             excluded,
           };
     }
-    // folded / adopted need a repo context — any reachable EC-3 worktree shares refs.
-    let folded: Rung;
-    let adopted: Rung;
-    if (!candidateSha) {
-      folded = { value: INDETERMINATE, basis: "no candidate sha to test" };
-      adopted = { value: INDETERMINATE, basis: "no candidate sha to test" };
-    } else if (!repoCtx) {
-      folded = { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" };
-      adopted = { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" };
-    } else {
-      folded = gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, "main");
-      adopted = buildInfo.commit
-        ? gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, buildInfo.commit)
-        : { value: INDETERMINATE, basis: "daemon build stamp absent (dev run) — adopted rung underivable" };
-    }
+    // The selected project has no binding to the OpenRig daemon's source.
+    // Missing Git objects cannot establish applicability. Keep daemon ancestry
+    // only on the legacy unscoped view, with its existing unknown/false rules.
+    const folded: Rung = !candidateSha
+      ? { value: INDETERMINATE, basis: "no candidate sha to test" }
+      : !repoCtx
+        ? { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" }
+        : gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, "main");
+    const adopted: Rung = opts?.project
+      ? { value: "NOT_APPLICABLE", basis: "selected project has no binding to the OpenRig daemon source; daemon adoption is not project progress" }
+      : !candidateSha || !repoCtx
+        ? { value: INDETERMINATE, basis: folded.basis }
+        : buildInfo.commit
+          ? gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, buildInfo.commit)
+          : { value: INDETERMINATE, basis: "daemon build stamp absent (dev run) — adopted rung underivable" };
     return { slice_id: facts.id, dir: facts.dir, locked, built, reviewed, folded, adopted };
   };
 
@@ -1184,7 +1184,7 @@ export function buildExecutionView(deps: ExecutionViewDeps, opts?: { mission?: s
             }
           : {}),
       git: { basis: repoCtx ? `per-lane git -C; repo context ${repoCtx}` : "no reachable repo context", asof: asof() },
-      build_info: { commit: buildInfo.commit ?? INDETERMINATE, asof: asof() },
+      build_info: { commit: buildInfo.commit ?? INDETERMINATE, asof: asof(), basis: "OpenRig daemon source build; not a selected project deployment" },
       review_artifacts: { root: rigsRoot, asof: asof() },
       disk: { asof: asof() },
       workflow_lifecycle: {

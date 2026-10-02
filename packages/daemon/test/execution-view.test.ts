@@ -602,6 +602,53 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect(((show().q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!.reviewed as Record<string, unknown>).value).toBe("INDETERMINATE");
   });
 
+  it("marks project daemon adoption inapplicable without using Git absence as its basis", () => {
+    for (const row of db.prepare("SELECT qitem_id, tags FROM queue_items").all() as {qitem_id: string; tags: string}[]) {
+      db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run(JSON.stringify([...JSON.parse(row.tags), "project:demo"]), row.qitem_id);
+    }
+    for (const daemonCommit of [candidateSha, "0000000000000000000000000000000000000000", null]) {
+      const calls: string[][] = [];
+      const deps = {
+        db, slicesRoot: () => missionsRoot, rigsRoot: () => rigsRoot,
+        buildInfo: { semver: null, commit: daemonCommit, dirty: null, builtAt: null },
+        exec: (cmd: string, args: string[]) => {
+          calls.push(args);
+          return execFileSync(cmd, args, { encoding: "utf8" }).trim();
+        },
+      };
+      const doc = buildExecutionView(deps, { mission: MISSION, project: "demo" });
+      for (const slice of doc.q4_ladder as Record<string, unknown>[]) {
+        expect(slice.adopted).toMatchObject({ value: "NOT_APPLICABLE", basis: expect.stringContaining("selected project") });
+      }
+      expect(calls.filter(args => args.includes("merge-base")).every(args => args.at(-1) === "main")).toBe(true);
+      expect((doc.sources as Record<string, unknown>).build_info).toMatchObject({
+        commit: daemonCommit ?? "INDETERMINATE", basis: expect.stringContaining("OpenRig daemon"),
+      });
+      const legacy = buildExecutionView(deps, { mission: MISSION });
+      const first = (legacy.q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+      expect((first.adopted as Record<string, unknown>).value).toBe(daemonCommit === candidateSha ? true : "INDETERMINATE");
+    }
+  });
+
+  it("serves project N/A through the actual views route and projector", async () => {
+    fs.writeFileSync(path.join(tmp, "project.yaml"), "id: demo\n");
+    fs.writeFileSync(path.join(tmp, "SPEC.md"), "# Test project\n");
+    fs.writeFileSync(path.join(missionsRoot, MISSION, "SPEC.md"), "# Test mission\n");
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("viewProjector" as never, projector);
+      c.set("settingsStore" as never, { resolveOne: (key: string) => ({ value: key === "workspace.root" ? tmp : null }) });
+      await next();
+    });
+    app.route("/api/views", viewsRoutes());
+    const res = await app.request(`/api/views/execution?project=demo&mission=${MISSION}`);
+    const result = await res.json();
+    expect(res.status, JSON.stringify(result)).toBe(200);
+    expect(result.rows[0].q4_ladder).toHaveLength(3);
+    expect(result.rows[0].q4_ladder.every((s: {adopted: {value: string}}) => s.adopted.value === "NOT_APPLICABLE")).toBe(true);
+    expect(result.rows[0].sources.build_info.basis).toContain("OpenRig daemon");
+  });
+
   it("uses project-local review drops without joining unbound global artifacts", () => {
     for (const row of db.prepare("SELECT qitem_id, tags FROM queue_items").all() as {qitem_id: string; tags: string}[]) {
       const tags = JSON.parse(row.tags) as string[];
