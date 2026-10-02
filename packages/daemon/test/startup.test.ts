@@ -321,6 +321,20 @@ describe("createDaemon startup composition", () => {
         expect(response.status, destination).toBe(201);
         expect((await response.json()).advisories, destination).toBeUndefined();
       }
+      const membershipReads = vi.spyOn(db, "prepare");
+      for (const destination of ["product-ba@membership-target", "product-stopped@membership-target",
+        "product-member.dot@membership-target", "flat@membership-target", "adopted-alias@membership-target"]) {
+        expect(deps.queueRepo.destinationAdvisory(destination)).toBeNull();
+      }
+      const membershipSql = membershipReads.mock.calls.map(([query]) => query).join("\n");
+      membershipReads.mockRestore();
+      expect(membershipSql).not.toMatch(/\b(?:snapshots|events|node_startup_context)\b/);
+      expect(membershipSql).not.toContain("SELECT n.logical_id, s.session_name");
+      db.prepare("INSERT INTO snapshots (id, rig_id, kind, status, data) VALUES (?, ?, ?, ?, ?)")
+        .run("advisory-unrelated-snapshot", target.id, "manual", "complete", JSON.stringify({ sessions: { unexpected: true } }));
+      const withSnapshot = await create("product-ba@membership-target");
+      expect(withSnapshot.status).toBe(201);
+      expect((await withSnapshot.json()).advisories).toBeUndefined();
       const dotted = "product.ba@membership-target";
       expect(resolveGuardTarget(db, dotted)).toBeNull();
       expect(resolveGuardTarget(db, "product-ba@membership-target")).not.toBeNull();
@@ -329,6 +343,7 @@ describe("createDaemon startup composition", () => {
       const dottedResult = await dottedResponse.json();
       expect(dottedResult.destinationSession).toBe(dotted);
       expect(dottedResult.advisories[0].availableDestinations).toContain("product-ba@membership-target");
+      expect(dottedResult.advisories[0].message).toContain("matches no session address");
       expect(deps.queueRepo.getById(dottedResult.qitemId)?.destinationSession).toBe(dotted);
       const dottedAlias = deps.rigRepo.addNode(target.id, "pod.adopted-dot", { runtime: null });
       deps.sessionRegistry.registerSession(dottedAlias.id, "adopted.dot@membership-target");

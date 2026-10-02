@@ -18,8 +18,7 @@ import { migrate } from "./db/migrate.js";
 import { ALL_MIGRATIONS } from "./db/all-migrations.js";
 import { RigRepository } from "./domain/rig-repository.js";
 import { SessionRegistry } from "./domain/session-registry.js";
-import { isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
-import { deriveCanonicalFromEntry, getNodeInventory } from "./domain/node-inventory.js";
+import { deriveCanonicalSessionName, isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
 import { resolveExternal } from "./domain/gateway/external-admission.js";
 import { loadHumanRegistry } from "./domain/gateway/human-registry.js";
 import { EventBus } from "./domain/event-bus.js";
@@ -371,19 +370,35 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     if (isHumanSeatSessionRef(sessionRef) || parsed.kind !== "canonical") return null;
     const rigs = rigRepo.findUnarchivedRigsByName(parsed.rig);
     if (rigs.length === 0) return null;
-    const entries = rigs.flatMap((rig) => getNodeInventory(db, rig.id));
-    if (entries.some((entry) => entry.canonicalSessionName === sessionRef
-      || deriveCanonicalFromEntry(entry) === sessionRef
-      || (!entry.logicalId.includes(".") && entry.logicalId === parsed.member))) return null;
-    const availableDestinations = [...new Set(entries.flatMap((entry) => [
-      entry.canonicalSessionName, deriveCanonicalFromEntry(entry),
-      !entry.logicalId.includes(".") ? `${entry.logicalId}@${parsed.rig}` : null,
+    // Membership needs only registered names and logical seat coordinates,
+    // not the full ps projection (snapshots, activity and lifecycle history).
+    for (const rig of rigs) {
+      if (db.prepare(`SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id
+        WHERE n.rig_id = ? AND s.session_name = ? LIMIT 1`).get(rig.id, sessionRef)) return null;
+      if (db.prepare(`SELECT 1 FROM nodes WHERE rig_id = ? AND
+        CASE WHEN instr(logical_id, '.') = 0 THEN logical_id
+          WHEN instr(logical_id, '.') > 1 AND instr(logical_id, '.') < length(logical_id)
+          THEN substr(logical_id, 1, instr(logical_id, '.') - 1) || '-' || substr(logical_id, instr(logical_id, '.') + 1)
+        END = ? LIMIT 1`).get(rig.id, parsed.member)) return null;
+    }
+    const names = rigs.flatMap((rig) => db.prepare(`SELECT n.logical_id, s.session_name
+      FROM nodes n LEFT JOIN sessions s ON s.id =
+        (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1)
+      WHERE n.rig_id = ?`).all(rig.id) as Array<{ logical_id: string; session_name: string | null }>);
+    const canonicalName = (logicalId: string) => {
+      const dot = logicalId.indexOf(".");
+      if (dot < 0) return `${logicalId}@${parsed.rig}`;
+      return dot > 0 && dot < logicalId.length - 1
+        ? deriveCanonicalSessionName(logicalId.slice(0, dot), logicalId.slice(dot + 1), parsed.rig) : null;
+    };
+    const availableDestinations = [...new Set(names.flatMap((entry) => [
+      entry.session_name, canonicalName(entry.logical_id),
     ]).filter((destination): destination is string => !!destination && parseSessionName(destination).kind === "canonical"))].sort();
     return {
       code: "unmatched_destination_seat" as const,
       destinationSession: sessionRef,
       availableDestinations,
-      message: `Suspected seat typo: '${sessionRef}' matches no member of locally known rig '${parsed.rig}'. `
+      message: `Suspected seat typo: '${sessionRef}' matches no session address of locally known rig '${parsed.rig}'. `
         + `Available destinations: ${availableDestinations.join(", ") || "(none)"}. `
         + "The row keeps the exact destination as typed; this warning does not guarantee pickup or delivery.",
     };
