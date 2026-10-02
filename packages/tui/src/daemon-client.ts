@@ -90,7 +90,7 @@ export class DaemonClient {
       });
       if (!res.ok || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
         // No subscriber will own a rejected body; release its connection now.
-        await res.body?.cancel();
+        void res.body?.cancel().catch(() => {});
         return null;
       }
       return res;

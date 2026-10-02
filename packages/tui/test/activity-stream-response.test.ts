@@ -38,4 +38,18 @@ describe("activity stream response ownership", () => {
     expect(await client.openActivityEvents()).toBeNull();
     expect(cancel).toHaveBeenCalledOnce();
   });
+
+  it("reports unavailable while underlying response cancellation is still pending", async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    const cancel = vi.fn(() => pending);
+    const response = new Response(new ReadableStream({ cancel }), { status: 503 });
+    const client = new DaemonClient({ fetchImpl: vi.fn(async () => response) as unknown as typeof fetch });
+    try {
+      const result = await Promise.race([client.openActivityEvents(), new Promise(resolve => setTimeout(() => resolve("pending"), 100))]);
+      expect(result).toBeNull();
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally { finish(); }
+  });
+
 });

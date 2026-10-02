@@ -11,7 +11,7 @@ async function until(condition: () => boolean, timeout = 500) {
 }
 
 describe("page error response ownership", () => {
-  it.each([false, true])("closes a real HTTP 503 body before returning a failed read (cached=%s)", async cached => {
+  it.each([false, true])("requests cancellation of an HTTP 503 body while preserving the failed or cached read (cached=%s)", async cached => {
     let disconnected = false;
     const server = createServer((_request, response) => {
       response.writeHead(503, { "content-type": "application/json" });
@@ -73,4 +73,25 @@ describe("page error response ownership", () => {
     expect(page.errors).toEqual([]);
     expect(page.has("http://localhost/api/ps")).toBe(true);
   });
+
+  it("returns the cached read while discarded response cancellation is still pending", async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    const cancel = vi.fn(() => pending);
+    const page = new PageRead(() => 0);
+    const signal = new AbortController().signal;
+    page.begin();
+    await page.fetch(async () => Response.json({ previous: true }), signal)("http://localhost/api/ps");
+    page.end();
+    page.begin();
+    const rejected = new Response(new ReadableStream({ cancel }), { status: 503 });
+    try {
+      const result = await Promise.race([page.fetch(async () => rejected, signal)("http://localhost/api/ps"), new Promise(resolve => setTimeout(() => resolve("pending"), 100))]);
+      expect(result).toBeInstanceOf(Response);
+      expect(await (result as Response).json()).toEqual({ previous: true });
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(page.errors).toEqual(["/api/ps: HTTP 503"]);
+    } finally { finish(); }
+  });
+
 });

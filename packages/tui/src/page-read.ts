@@ -25,7 +25,7 @@ export class PageRead {
         const response = await fetchImpl(input, { ...init, signal: requestSignal });
         if (response.status >= 500) {
           // This response is discarded in favor of a failed read or cached value.
-          await response.body?.cancel().catch(() => {});
+          void response.body?.cancel().catch(() => {});
           throw new Error(`HTTP ${response.status}`);
         }
         // Absence/access refusal is a new answer; do not resurrect deleted or
