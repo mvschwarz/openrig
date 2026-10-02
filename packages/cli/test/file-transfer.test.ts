@@ -59,8 +59,84 @@ describe("parseFilePathArg — the explicit-or-local grammar", () => {
       expect(result.ok).toBe(true);
       if (result.ok) expect(buildRsyncArgv(result.plan).at(operandIndex)).toContain(`${host.target}:/srv/`);
     }
-    expect(planFileCopy("missing.dev:/srv/x", "/tmp/dst", { registryLoader })).toMatchObject({ ok: false, code: "unknown_host" });
+
     expect(parseFilePathArg("./edge.dev:/srv/x")).toEqual({ ok: true, arg: { kind: "local", path: "./edge.dev:/srv/x" } });
+  });
+
+  it("keeps unregistered dotted source and destination names local, including empty suffixes", () => {
+    const registryLoader = REGISTRY_OK;
+    for (const operand of ["notes.md:version", "missing.dev:/srv/x", "notes.md:"]) {
+      for (const [src, dst] of [[operand, "./out.md"], ["./in.md", operand]]) {
+        const result = planFileCopy(src!, dst!, { registryLoader });
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.plan.src.kind).toBe("local");
+          expect(result.plan.dst.kind).toBe("local");
+        }
+      }
+    }
+  });
+
+  it("preserves dotted explicit local escapes even when that host is registered", () => {
+    const registryLoader = () => ({ ok: true as const, registry: { hosts: [{ ...VPS, id: "edge.dev" }] } });
+    for (const operand of ["/edge.dev:x", "./edge.dev:x", "../edge.dev:x", "~/edge.dev:x"]) {
+      for (const [src, dst] of [[operand, "./out.md"], ["./in.md", operand]]) {
+        const result = planFileCopy(src!, dst!, { registryLoader });
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(result.plan.src.kind).toBe("local");
+          expect(result.plan.dst.kind).toBe("local");
+        }
+      }
+    }
+  });
+
+  it("does not misclassify a dotted local operand paired with a registered remote", () => {
+    const registryLoader = () => ({ ok: true as const, registry: { hosts: [{ ...VPS, id: "edge.dev" }] } });
+    for (const [src, dst] of [["notes.md:v2", "edge.dev:/srv/out"], ["edge.dev:/srv/in", "notes.md:"]]) {
+      expect(planFileCopy(src!, dst!, { registryLoader }).ok).toBe(true);
+    }
+    expect(planFileCopy("edge.dev:/srv/in", "edge.dev:/srv/out", { registryLoader }))
+      .toMatchObject({ ok: false, code: "remote_to_remote" });
+  });
+
+  it("retains remote validation failures after positive dotted registration", () => {
+    const ssh = { ...VPS, id: "edge.dev" };
+    const http = { id: "web.dev", transport: "http" as const, url: "http://h:7433" };
+    const badUser = { ...VPS, id: "bad.dev", user: "invalid user" };
+    const registryLoader = () => ({ ok: true as const, registry: { hosts: [ssh, http, badUser] } });
+    for (const [operand, code] of [["edge.dev:", "bad_operand"], ["edge.dev:relative", "denied_path"], ["edge.dev:/srv/a b", "denied_path"], ["edge.dev:/srv/.ssh/key", "denied_path"], ["web.dev:/srv/x", "unsupported_transport"], ["bad.dev:/srv/x", "invalid_registry_user"]]) {
+      for (const [src, dst] of [[operand, "./out.md"], ["./in.md", operand]]) {
+        expect(planFileCopy(src!, dst!, { registryLoader })).toMatchObject({ ok: false, code });
+      }
+    }
+  });
+
+  it("uses the registration snapshot through remote validation without a second lookup", () => {
+    let loads = 0;
+    const host = { ...VPS, id: "edge.dev" };
+    const registryLoader = () => {
+      loads++;
+      return loads === 1
+        ? { ok: true as const, registry: { hosts: [host] } }
+        : { ok: false as const, error: "later registry error" };
+    };
+    const result = planFileCopy("edge.dev:/srv/in", "./out.md", { registryLoader });
+    expect(result.ok).toBe(true);
+    expect(loads).toBe(1);
+    if (result.ok) expect(result.plan.src.kind).toBe("remote");
+  });
+
+  it("retains undotted unknown-host errors on source and destination", () => {
+    for (const [src, dst] of [["missing:/srv/x", "./out.md"], ["./in.md", "missing:/srv/x"]]) {
+      expect(planFileCopy(src!, dst!, { registryLoader: REGISTRY_OK })).toMatchObject({ ok: false, code: "unknown_host" });
+    }
+  });
+
+  it("keeps dotted local names local when no registry can be positively read", () => {
+    const registryLoader = () => ({ ok: false as const, error: "registry unreadable" });
+    expect(planFileCopy("notes.md:", "./out.md", { registryLoader }).ok).toBe(true);
+    expect(planFileCopy("known:/srv/x", "./out.md", { registryLoader })).toMatchObject({ ok: false, code: "registry_error" });
   });
 
   it("N18-1: a bare colon-named file parses as an (unknown) host — fail-closed at planning, never silent-local", () => {
