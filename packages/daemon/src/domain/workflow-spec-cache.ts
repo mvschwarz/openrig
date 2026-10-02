@@ -30,6 +30,9 @@ interface SpecRow {
   source_path: string;
   source_hash: string;
   cached_at: string;
+  /** Migration 040 diagnostic columns; absent in legacy schema fixtures. */
+  status?: string;
+  error_message?: string | null;
   /**
    * OPR.0.4.6.WF1 (migration 050): the FULL parsed spec. NULL on
    * legacy rows (pre-050 cache writes) — those degrade to the
