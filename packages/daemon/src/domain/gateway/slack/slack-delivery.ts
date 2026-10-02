@@ -233,9 +233,9 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // H — RECONCILE-BY-MARKER before any RESEND: if this decision was attempted before, the
     // prior outcome is ambiguous (a timeout may have posted). Search where the message would
     // live (the thread, else channel history) for the message's STRUCTURAL identity; FOUND →
-    // already delivered, record + ack, never repost. Search failure = stay ambiguous = retain
-    // for the next replay (never a blind repost on an unreadable channel — a duplicate human
-    // notification is the red; a delay is not).
+    // already delivered, record + ack, never repost. An initial unreadable request
+    // retains the decision. A partial scan warns and keeps main's at-least-once
+    // retry trade-off rather than indefinitely stranding a human notification.
     // fix-r3 (R2 exactly-once): the identity is reconcileToken(decisionId) — a bounded,
     // decision-scoped token the renderer reserves OUTSIDE the clamp budget, so it is
     // GUARANTEED present in the scanned top-level text at any ordinary length, and ordinary
@@ -282,7 +282,11 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
         }
         return { ok: true };
       }
-      log(`reconcile: marker "${marker}" absent — safe to send`);
+      if (scan.incomplete) {
+        log(`reconcile WARNING: incomplete scan for ${decision.decisionId}: ${scan.incomplete} — marker not located; attempting one post`);
+      } else {
+        log(`reconcile: marker "${marker}" absent — safe to send`);
+      }
     }
 
     // Marked ATTEMPTED durably BEFORE the post: from here any outcome is ambiguous until 2xx.
