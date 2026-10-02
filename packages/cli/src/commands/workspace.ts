@@ -10,7 +10,7 @@
 
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, getDaemonUrl, printDaemonNotRunning } from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
 import * as path from "node:path";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -40,10 +40,7 @@ async function withClient<T>(
   fn: (client: DaemonClient) => Promise<T>,
 ): Promise<T | undefined> {
   const status = await getDaemonStatus(deps.lifecycleDeps);
-  if (status.state !== "running" || status.healthy === false) {
-    printDaemonNotRunning();
-    return undefined;
-  }
+  if (!daemonStatusGuard(status)) return undefined;
   const client = deps.clientFactory(getDaemonUrl(status));
   return fn(client);
 }

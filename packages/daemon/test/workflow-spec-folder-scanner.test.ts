@@ -203,6 +203,31 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     rmSync(externalPath);
   });
 
+  it.each([
+    ["project_a", "projectba"],
+    ["project%a", "project-extra-a"],
+  ])("only reaps literal folder %s, leaving neighboring %s cached", (ownName, neighborName) => {
+    const owned = join(folder, ownName);
+    const neighbor = join(folder, neighborName);
+    mkdirSync(owned); mkdirSync(neighbor);
+    const ownFile = join(owned, "owned.yaml");
+    const liveNeighbor = join(neighbor, "external.yaml");
+    const missingNeighbor = join(neighbor, "missing.yaml");
+    writeFileSync(ownFile, VALID_YAML);
+    writeFileSync(liveNeighbor, VALID_YAML.replace("folder-test", "external-workflow"));
+    cache.readThrough(liveNeighbor);
+    cache.writeDiagnostic({ sourcePath: missingNeighbor, sourceHash: "fixture", errorMessage: "Previously invalid external source" });
+    scanWorkflowSpecFolder({ db, cache, folder: owned, builtinDir: null });
+    rmSync(ownFile);
+    const eventBus = new EventBus(db);
+    const result = scanWorkflowSpecFolder({ db, cache, folder: owned, builtinDir: null, eventBus });
+    expect(result.removed).toBe(1);
+    const remaining = db.prepare("SELECT source_path FROM workflow_specs ORDER BY source_path").all() as {source_path: string}[];
+    expect(remaining.map(row => row.source_path)).toEqual([liveNeighbor, missingNeighbor].sort());
+    const events = db.prepare("SELECT payload FROM events WHERE type = 'workflow_spec.removed'").all() as {payload: string}[];
+    expect(events.map(event => JSON.parse(event.payload).sourcePath)).toEqual([ownFile]);
+  });
+
   it("emits workflow_spec.removed audit event for each deleted file (HG-3)", () => {
     // OQ-4 acceptance criterion: deletion produces BOTH cache row removal
     // AND audit-log entry. Without the event emission, the Library shows a

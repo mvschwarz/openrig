@@ -49,11 +49,11 @@ function jsonResponse(payload: unknown, status = 201): Response {
   });
 }
 
-function makeHarness(opts?: { fetchImpl?: typeof fetch }) {
+function makeHarness(opts?: { fetchImpl?: typeof fetch; destinationAdvisory?: QueueRepository["destinationAdvisory"] }) {
   const db = createDb();
   migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueTargetRepoSchema]);
   const bus = new EventBus(db);
-  const repo = new QueueRepository(db, bus, { validateRig: () => true });
+  const repo = new QueueRepository(db, bus, { validateRig: () => true, destinationAdvisory: opts?.destinationAdvisory });
   const app = new Hono();
   app.use("*", async (c, next) => {
     const set = c.set.bind(c) as (k: string, v: unknown) => void;
@@ -98,6 +98,22 @@ const HANDOFF = { fromSession: "worker@rig-a", toSession: "dev@rig-b" };
 describe("MH-3 C2 — cross-host handoff (route choreography)", () => {
   let h: ReturnType<typeof makeHarness>;
   afterEach(() => h?.db.close());
+
+  it.each(["handoff", "handoff-and-complete"])("cross-host %s closes the source when the receiving advisory throws", async (verb) => {
+    const remote = makeHarness({ destinationAdvisory: () => { throw new Error("unexpected stored snapshot shape"); } });
+    try {
+      h = makeHarness({ fetchImpl: (async (url, init) => remote.app.request(new URL(String(url)).pathname, init)) as typeof fetch });
+      await seedSource(h.repo);
+      const response = await post(h.app, `/api/queue/qitem-source-1/${verb}`, { ...HANDOFF, hostId: "vps-b", nudge: false });
+      expect(response.status).toBe(201);
+      const result = await response.json();
+      expect(result.created.advisories).toBeUndefined();
+      expect(remote.repo.getById(result.created.qitemId)?.destinationSession).toBe(HANDOFF.toSession);
+      expect(h.repo.getById("qitem-source-1")?.state).toBe(verb === "handoff" ? "handed-off" : "done");
+      expect(rowCount(remote.db)).toBe(1);
+      expect(rowCount(h.db)).toBe(1);
+    } finally { remote.db.close(); }
+  });
 
   it("no-host handoff: today's LOCAL transactional path — closed+created both local, no forward (FR-6 zero-regression)", async () => {
     let forwarded = false;

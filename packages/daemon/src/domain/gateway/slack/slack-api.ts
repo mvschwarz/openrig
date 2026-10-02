@@ -317,10 +317,10 @@ export async function completeUploadExternal(
   return { ok: r.ok, error: r.error };
 }
 
-/** S10 (H) — read recent message TEXTS for reconcile-by-marker: a timeout is an AMBIGUOUS
- *  outcome (the post may have landed), so before any resend the sender searches for the
- *  embedded row-id marker. threadTs set → conversations.replies (a threaded reply lives in its
- *  thread, not channel history); absent → conversations.history. Read-only; bounded. */
+/** Search either history order (root newest-first; replies earliest-first) via
+ * supported cursors under one total timeout and a finite page bound. A found
+ * marker stops the scan; incomplete records partial evidence for the caller.
+ * No timestamp cutoff is inferred from in-memory or durable attempt records. */
 export async function fetchRecentMessageTexts(
   token: string,
   channel: string,
@@ -328,17 +328,40 @@ export async function fetchRecentMessageTexts(
   fetchImpl: FetchImpl = defaultFetch,
   limit = 100,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-): Promise<{ ok: boolean; texts: string[]; messages: { text: string; ts: string }[]; error?: string }> {
+  reconcileMarker?: string,
+): Promise<{ ok: boolean; texts: string[]; messages: { text: string; ts: string }[]; error?: string; incomplete?: string }> {
   const method = threadTs ? "conversations.replies" : "conversations.history";
-  const body: Record<string, unknown> = threadTs ? { channel, ts: threadTs, limit } : { channel, limit };
-  const r = await callWebApi(method, token, body, fetchImpl, timeoutMs, "get-query");
-  if (!r.ok) return { ok: false, texts: [], messages: [], error: r.error };
-  const messages = (r.json.messages ?? []) as { text?: string; ts?: string }[];
-  // S14 repair: retain each message's REAL Slack ts alongside its text — the
-  // reconcile-by-marker path needs the matched message's ts to open the thread
-  // map and stamp receipts with the real anchor, not a synthetic value.
-  const shaped = messages.map((m) => ({ text: String(m.text ?? ""), ts: String(m.ts ?? "") }));
-  return { ok: true, texts: shaped.map((m) => m.text), messages: shaped };
+  const messages: { text: string; ts: string }[] = [];
+  const result = (ok: boolean, error?: string) => ({ ok, texts: messages.map((m) => m.text), messages, error });
+  const deadline = performance.now() + timeoutMs;
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  let usablePages = 0;
+  // Partial history is evidence about the scan, never proof of absence. Preserve
+  // the initial-request failure outcome; after a usable page let delivery warn
+  // and retain main's at-least-once retry policy for human notifications.
+  const incomplete = (reason: string) => usablePages === 0
+    ? result(false, reason)
+    : { ...result(true), incomplete: reason.slice(0, 160) };
+  for (let page = 0; page < 10; page++) {
+    const remainingMs = deadline - performance.now();
+    if (remainingMs <= 0) return incomplete("reconcile pagination exceeded its total timeout");
+    const body: Record<string, unknown> = { channel, limit, ...(threadTs ? { ts: threadTs } : {}), ...(cursor ? { cursor } : {}) };
+    const response = await callWebApi(method, token, body, fetchImpl, remainingMs, "get-query");
+    if (!response.ok) return incomplete(response.error ?? "reconcile request failed");
+    usablePages++;
+    const pageMessages = (response.json.messages ?? []) as { text?: string; ts?: string }[];
+    messages.push(...pageMessages.map((message) => ({ text: String(message.text ?? ""), ts: String(message.ts ?? "") })));
+    if (reconcileMarker && messages.some((message) => message.text.includes(reconcileMarker))) return result(true);
+    const metadata = response.json.response_metadata as { next_cursor?: unknown } | undefined;
+    const nextCursor = typeof metadata?.next_cursor === "string" ? metadata.next_cursor.trim() : "";
+    if (!nextCursor && response.json.has_more !== true) return result(true);
+    if (!nextCursor) return incomplete("reconcile pagination has more messages but no next cursor");
+    if (cursors.has(nextCursor)) return incomplete("reconcile pagination repeated a cursor");
+    cursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+  return incomplete("reconcile pagination exceeded its 10-page bound");
 }
 
 export interface PostChatMessageInput {

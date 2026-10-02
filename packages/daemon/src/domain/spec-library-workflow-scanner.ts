@@ -513,6 +513,9 @@ export function scanWorkflowSpecFolder(
       version: string | null;
     }>;
   for (const row of cachedUnderFolder) {
+    // LIKE treats _ and % in real folder names as patterns. Only this
+    // literal directory owns deletion; neighboring cache rows must survive.
+    if (!row.source_path.startsWith(folderPrefix)) continue;
     if (seenPaths.has(row.source_path)) continue;
     const removed = opts.cache.removeBySourcePath(row.source_path);
     if (removed > 0) {

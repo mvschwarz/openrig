@@ -347,7 +347,11 @@ function podAssemblerFsOps(): PodAssemblerFsOps {
     ...assemblerFsOps(),
     readFile: (p) => fs.readFileSync(p, "utf-8"),
     readFileBuffer: (p) => fs.readFileSync(p),
-    writeFile: (p, c) => fs.writeFileSync(p, c),
+    fileMode: (p) => fs.statSync(p).mode & 0o777,
+    writeFile: (p, c, mode) => {
+      fs.writeFileSync(p, c);
+      if (mode !== undefined) fs.chmodSync(p, mode);
+    },
     exists: (p) => fs.existsSync(p),
     listFiles: (dir, onReadError) => {
       const files: string[] = [];

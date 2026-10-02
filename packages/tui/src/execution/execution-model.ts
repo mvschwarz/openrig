@@ -665,10 +665,13 @@ function sliceDetail(
   ];
 
   const source = record(slice.sequencing?.["source"]);
+  const supersededBy = record(execution.sources["wave_map"])["superseded_by"];
+  const waveMapSource = typeof supersededBy === "string" && supersededBy
+    ? `superseded by ${supersededBy}` : str(source["wave_map_row"], "not named");
   const sourceRows = [
     cardField("spec", str(source["spec_path"], "not named")),
     cardField("arrangement", str(source["arrangement_path"], "not named")),
-    cardField("wave map", str(source["wave_map_row"], "not named")),
+    ...wrappedCardField("wave map", waveMapSource, width),
   ];
   const identity = slice.scope
     ? scopeIdentityLines(slice.scope, execution.mission, width)

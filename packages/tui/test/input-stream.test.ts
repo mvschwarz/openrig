@@ -18,6 +18,25 @@ describe("stateful stdin decoding", () => {
     }
   });
 
+  it("decodes application-cursor arrows like normal arrows at every split", () => {
+    for (const suffix of ["A", "B", "C", "D"]) {
+      const bytes = Buffer.from(`\x1bO${suffix}`);
+      const expected = decodeInput(`\x1b[${suffix}`);
+      expect(decodeInput(bytes)).toEqual(expected);
+      for (let split = 1; split < bytes.length; split++) {
+        const decoder = createInputDecoder();
+        expect([...decoder.write(bytes.subarray(0, split)), ...decoder.write(bytes.subarray(split))])
+          .toEqual(expected);
+      }
+    }
+  });
+
+  it("continues ignoring unsupported SS3 keys as a whole sequence", () => {
+    for (const suffix of ["P", "Q", "R", "S"]) {
+      expect(decodeInput(`\x1bO${suffix}x`)).toEqual([{ type: "char", ch: "x" }]);
+    }
+  });
+
   it("preserves UTF-8 characters split between bytes", () => {
     const bytes = Buffer.from("界");
     for (let split = 1; split < bytes.length; split++) {
