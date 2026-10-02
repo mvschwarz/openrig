@@ -3499,6 +3499,21 @@ export class QueueRepository {
    *  posted receipt cannot mask a later human park. Legacy pre-OWNER or literal
    *  external rows retain their row-scoped fallback. */
   deliveryOutcomeFor(qitemId: string): { outcome: "posted" | "transport-failed" | "never-posted"; detail: string } | null {
+    const ledger = this.deliveryLedger(qitemId);
+    return ledger ? { outcome: ledger.outcome, detail: ledger.detail } : null;
+  }
+
+  /** #514 — true only when this row's CURRENT human-notification episode (OWNER history addressed
+   *  to a registered human, aliases included) has a POSTED receipt. Legacy rows with no OWNER
+   *  history, inactive episodes, never-posted and transport-failed all read false. Same derivation
+   *  as deliveryOutcomeFor; it reads row fields, never the waiting view. */
+  humanNotificationPostedThisEpisode(qitemId: string): boolean {
+    if (!this.hasQueueTransitionsTable || !this.transitionLog.latestOwnerNotificationForQitem(qitemId)) return false;
+    const ledger = this.deliveryLedger(qitemId);
+    return ledger !== null && ledger.episode !== null && ledger.outcome === "posted";
+  }
+
+  private deliveryLedger(qitemId: string): { outcome: "posted" | "transport-failed" | "never-posted"; detail: string; episode: { notificationKey: string; startedAt: string } | null } | null {
     // Some repository-only fixtures intentionally model the pre-transition
     // schema. Delivery projection is additive there: absence means no verdict,
     // never a list failure.
@@ -3522,16 +3537,16 @@ export class QueueRepository {
       ? notes.filter((note) => note.transition_note.split(/\s+/).includes(`notification_key=${episode.notificationKey}`))
       : notes;
     const posted = currentNotes.find((note) => note.transition_note.startsWith("slack-owner-notification-posted "));
-    if (posted) return { outcome: "posted", detail: posted.transition_note };
+    if (posted) return { outcome: "posted", detail: posted.transition_note, episode };
     const failed = currentNotes.find((note) => note.transition_note.startsWith("slack-owner-notification-transport-failed "));
-    if (failed) return { outcome: "transport-failed", detail: failed.transition_note };
+    if (failed) return { outcome: "transport-failed", detail: failed.transition_note, episode };
     const startedAt = episode?.startedAt ?? item.tsCreated;
     const gatewayRouted = episode !== null || item.lastNudgeResult?.startsWith("gateway-owned") === true;
     if (gatewayRouted) {
       const ageMs = Date.now() - new Date(startedAt.includes("T") ? startedAt : startedAt + "Z").getTime();
       if (ageMs > QueueRepository.NEVER_POSTED_WINDOW_MS) {
         const key = episode ? ` for notification_key=${episode.notificationKey}` : "";
-        return { outcome: "never-posted", detail: `gateway-routed row with no delivery receipt${key} past the post window` };
+        return { outcome: "never-posted", detail: `gateway-routed row with no delivery receipt${key} past the post window`, episode };
       }
     }
     return null;
@@ -3705,9 +3720,15 @@ export class QueueRepository {
   waitingView(qitemId: string): WaitingView | null {
     const view = readWaitingView(this.db, qitemId, this.activityReader);
     if (view && ["pending", "in-progress"].includes(view.state)) {
+      // #514 — the unclaimed sweep skips a pending ask already posted to its human in the current
+      // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
+      const awaitingHuman = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId);
+      if (awaitingHuman) {
+        view.nextBackstop = { owner: view.owner, mechanism: "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
+      }
       const recovery = readWakeLadderBackstop(this.db, qitemId);
       if (recovery) {
-        view.laterBackstop = { ...view.nextBackstop, note: "Conditional safety net; current delivery/recovery ownership is evaluated first." };
+        if (!awaitingHuman) view.laterBackstop = { ...view.nextBackstop, note: "Conditional safety net; current delivery/recovery ownership is evaluated first." };
         view.nextBackstop = recovery;
       }
     }
