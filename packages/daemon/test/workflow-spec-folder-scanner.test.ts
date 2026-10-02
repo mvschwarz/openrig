@@ -153,6 +153,29 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result.skipped).toBe(0);
   });
 
+  it.each(["valid-edit", "invalid-edit"])("re-reads a %s within the cached timestamp's second", (edit) => {
+    const file = join(folder, "wf.yaml");
+    writeFileSync(file, VALID_YAML);
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    const before = db.prepare("SELECT cached_at FROM workflow_specs WHERE source_path = ?").get(file) as {cached_at: string};
+    writeFileSync(file, edit === "valid-edit" ? VALID_YAML.replace("A folder-scan fixture", "Updated objective") : INVALID_YAML);
+    // Deterministic same-second timing, including a broken edit made
+    // before the cached timestamp bucket has advanced.
+    const sameSecond = new Date(Math.floor(Date.parse(before.cached_at) / 1000) * 1000 + 999);
+    utimesSync(file, sameSecond, sameSecond);
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(result.valid).toBe(edit === "valid-edit" ? 1 : 0);
+    expect(result.errors).toBe(edit === "invalid-edit" ? 1 : 0);
+    expect(result.skipped).toBe(0);
+    const row = db.prepare("SELECT purpose, status, error_message FROM workflow_specs WHERE source_path = ?").get(file) as {purpose: string; status: string; error_message: string|null};
+    expect(row.status).toBe(edit === "valid-edit" ? "valid" : "error");
+    if (edit === "valid-edit") expect(row.purpose).toBe("Updated objective");
+    else expect(row.error_message).toBeTruthy();
+    // Unchanged bytes still remain a skip on a second scan.
+    const unchanged = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(unchanged.skipped).toBe(1);
+  });
+
   it("removes cache row when file disappears (OQ-4)", () => {
     writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
     writeFileSync(join(folder, "wf2.yaml"), VALID_YAML_TWO);
