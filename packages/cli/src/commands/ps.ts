@@ -1463,7 +1463,7 @@ async function runHttpPs(
 
   try {
     if (opts.resources) {
-      await handleResources(client, opts.json, headers);
+      await handleResources(client, opts.json, headers, host.id);
       return;
     }
     if (opts.nodes) {
@@ -1700,9 +1700,13 @@ interface HostResources {
   };
 }
 
-async function handleResources(client: DaemonClient, json?: boolean, headers?: Record<string, string>): Promise<void> {
+async function handleResources(client: DaemonClient, json?: boolean, headers?: Record<string, string>, hostId?: string): Promise<void> {
   const response = await client.get<HostResources>("/api/ps/resources", headers ? { headers } : undefined);
   if (response.status >= 400) {
+    if (hostId && response.status !== 404) {
+      emitCrossHostError(hostId, classifyHttpFailedStep(response.status), `HTTP ${response.status}`, json);
+      return;
+    }
     console.error(`Host resource measurements unavailable (HTTP ${response.status}); this host may need a newer daemon.`);
     process.exitCode = 2;
     return;

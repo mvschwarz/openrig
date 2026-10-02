@@ -60,3 +60,71 @@ it("renders both native HTTP JSON and explicit human resource semantics", async 
   expect(log.mock.calls.flat().join("\n")).toContain(process.platform === "win32" ? "unavailable on this platform" : "not CPU utilization");
   expect(log.mock.calls.flat().join("\n")).toContain("not daemon CPU time");
 });
+
+async function remoteFixture(status: 401 | 403 | 404 | 429 | 500) {
+  vi.stubEnv("OPENRIG_RESOURCE_TEST_BEARER", "public-fixture-token");
+  let authorization: string | undefined;
+  const app = new Hono();
+  app.get("/api/ps/resources", (c) => {
+    authorization = c.req.header("authorization");
+    return c.json({ error: "fixture failure" }, status);
+  });
+  const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
+  await new Promise<void>((resolve) => server.on("listening", resolve));
+  const port = (server.address() as { port: number }).port;
+  close = () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  const command = new Command().addCommand(psCommand({
+    clientFactory: (url) => new DaemonClient(url),
+    lifecycleDeps: { exists: () => false, readFile: () => null } as never,
+    hostRegistryLoader: () => ({ ok: true, registry: { hosts: [{ id: "fixture-host", transport: "http", url: `http://127.0.0.1:${port}`, bearer_env: "OPENRIG_RESOURCE_TEST_BEARER" }] } }),
+  }));
+  return { command, authorization: () => authorization };
+}
+
+it.each([401, 403, 429, 500] as const)("preserves remote resource HTTP %s JSON classification and exit status through actual bearer transport", async (status) => {
+  const { command, authorization } = await remoteFixture(status);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    await command.parseAsync(["node", "rig", "ps", "--host", "fixture-host", "--resources", "--json"]);
+    expect(authorization()).toBe("Bearer public-fixture-token");
+    expect(process.exitCode).toBe(1);
+    expect(error).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(log.mock.calls[0]![0]))).toEqual({
+      ok: false, cross_host: { host: "fixture-host" },
+      failedStep: status === 401 || status === 403 ? "permission-gate" : "remote-command-failed",
+      error: `HTTP ${status}`,
+    });
+  } finally { process.exitCode = previousExitCode; vi.unstubAllEnvs(); }
+});
+
+it("names the remote host for a human permission failure", async () => {
+  const { command } = await remoteFixture(403);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    await command.parseAsync(["node", "rig", "ps", "--host", "fixture-host", "--resources"]);
+    expect(process.exitCode).toBe(1);
+    expect(log).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith("cross-host (host=fixture-host): HTTP 403");
+  } finally { process.exitCode = previousExitCode; vi.unstubAllEnvs(); }
+});
+
+it.each([false, true])("retains the older-daemon HTTP404 diagnostic and exit2 with json=%s", async (json) => {
+  const { command } = await remoteFixture(404);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  const previousExitCode = process.exitCode;
+  process.exitCode = undefined;
+  try {
+    await command.parseAsync(["node", "rig", "ps", "--host", "fixture-host", "--resources", ...(json ? ["--json"] : [])]);
+    expect(process.exitCode).toBe(2);
+    expect(log).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith("Host resource measurements unavailable (HTTP 404); this host may need a newer daemon.");
+  } finally { process.exitCode = previousExitCode; vi.unstubAllEnvs(); }
+});
