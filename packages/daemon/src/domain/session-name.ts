@@ -49,13 +49,20 @@ export function validateSessionName(name: string): boolean {
 /**
  * Validate characters in a session name component.
  * Returns null if valid, or an error string with the specific invalid character.
+ * When `opts.allowAt` is false, "@" is rejected because "@" is reserved as the
+ * canonical session separator ({pod}-{member}@{rig}).
  */
 export function validateSessionNameChars(
   value: string,
-  label: string
+  label: string,
+  opts?: { allowAt?: boolean }
 ): string | null {
   if (!value) return `${label} must not be empty`;
+  const allowAt = opts?.allowAt ?? true;
   for (const ch of value) {
+    if (ch === "@" && !allowAt) {
+      return `${label} "${value}" contains "@" — ${label} cannot contain "@" (reserved as session separator)`;
+    }
     if (!ALLOWED_CHARS_PATTERN.test(ch)) {
       return `${label} "${value}" contains "${ch}" — tmux session names allow: a-z, A-Z, 0-9, -, _, ., @`;
     }
@@ -66,6 +73,8 @@ export function validateSessionNameChars(
 /**
  * Validate all three components of a canonical session name.
  * Returns an array of errors (empty if valid).
+ * Pod name and member name must NOT contain "@", because the canonical session parser
+ * splits at the first "@" to separate {pod}-{member} from {rig}.
  */
 export function validateSessionComponents(
   podName: string,
@@ -77,14 +86,14 @@ export function validateSessionComponents(
   if (!podName) {
     errors.push("pod name must not be empty");
   } else {
-    const err = validateSessionNameChars(podName, "pod name");
+    const err = validateSessionNameChars(podName, "pod name", { allowAt: false });
     if (err) errors.push(err);
   }
 
   if (!memberName) {
     errors.push("member name must not be empty");
   } else {
-    const err = validateSessionNameChars(memberName, "member name");
+    const err = validateSessionNameChars(memberName, "member name", { allowAt: false });
     if (err) errors.push(err);
   }
 

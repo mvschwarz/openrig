@@ -92,4 +92,26 @@ describe("session-name", () => {
     // Valid
     expect(validateSessionComponents("dev", "impl", "auth-feats")).toEqual([]);
   });
+
+  // Test 7: validateSessionComponents rejects @ in pod and member names (#472)
+  it("validateSessionComponents rejects @ in pod and member names while accepting @ in rig name (#472)", () => {
+    const atInPod = validateSessionComponents("pod@alias", "impl", "my-rig");
+    expect(atInPod.length).toBeGreaterThan(0);
+    expect(atInPod[0]).toContain("pod name");
+    expect(atInPod[0]).toContain("@");
+
+    const atInMember = validateSessionComponents("dev", "impl@alias", "my-rig");
+    expect(atInMember.length).toBeGreaterThan(0);
+    expect(atInMember[0]).toContain("member name");
+    expect(atInMember[0]).toContain("@");
+
+    // Rig name can contain @ because parser splits at the first @
+    expect(validateSessionComponents("dev", "impl", "my@rig")).toEqual([]);
+
+    // validateSessionNameChars with allowAt: false rejects @
+    const err = validateSessionNameChars("pod@alias", "pod name", { allowAt: false });
+    expect(err).not.toBeNull();
+    expect(err).toContain("pod name");
+    expect(err).toContain("@");
+  });
 });
