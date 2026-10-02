@@ -1,3 +1,4 @@
+import { resolveNodeFile } from "./scope/node-file.js";
 import { belongsToProject } from "./workspace/project-catalog.js";
 import { inspectGraph } from "./workflow-reconciliation.js";
 import { createProofPolicyRead, readMissionReadiness, readProjectReadiness } from "./proof/judgments.js";
@@ -175,10 +176,12 @@ function missionReferences(missionsRoot: string | null, mission: string): string
   const references = new Set([mission]);
   if (!missionsRoot) return [...references];
   try {
-    const fm = parseFrontmatter(fs.readFileSync(path.join(missionsRoot, mission, "SPEC.md"), "utf8"));
+    const nodeFile = resolveNodeFile(path.join(missionsRoot, mission));
+    if (!nodeFile) return [...references];
+    const fm = parseFrontmatter(fs.readFileSync(nodeFile, "utf8"));
     if (typeof fm["id"] === "string") references.add(fm["id"] as string);
   } catch {
-    // A missing mission SPEC is valid legacy state; the directory name still binds.
+    // A missing authored node is valid legacy state; the directory name still binds.
   }
   return [...references];
 }
@@ -201,7 +204,8 @@ function readMissionSlices(missionsRoot: string, mission: string): SliceFacts[] 
   }
   const out: SliceFacts[] = [];
   for (const dir of entries.sort()) {
-    const specPath = path.join(slicesDir, dir, "SPEC.md");
+    const specPath = resolveNodeFile(path.join(slicesDir, dir));
+    if (!specPath) continue;
     let raw: string;
     try {
       raw = fs.readFileSync(specPath, "utf8");

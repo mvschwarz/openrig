@@ -273,6 +273,33 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect(q6.lanes_live).toBe(2);
   });
 
+  it("keeps indefinitely supported README-backed missions and slices on the execution board", () => {
+    const missionDir = path.join(missionsRoot, MISSION);
+    fs.renameSync(path.join(missionDir, "SPEC.md"), path.join(missionDir, "README.md"));
+    for (const slice of ["31-alpha", "32-beta", "33-gamma"]) {
+      const dir = path.join(missionDir, "slices", slice);
+      fs.renameSync(path.join(dir, "SPEC.md"), path.join(dir, "README.md"));
+    }
+    // Legacy dot-ID-only queue bindings need the mission README identity.
+    db.prepare("UPDATE queue_items SET tags = replace(tags, ?, ?), body = replace(body, ?, ?)")
+      .run(MISSION, "OPR.9.9", MISSION, "OPR.9.9");
+    const doc = show();
+    const ladder = doc.q4_ladder as Record<string, unknown>[];
+    expect(ladder).toHaveLength(3);
+    const alpha = ladder.find(slice => slice.slice_id === "OPR.9.9.31")!;
+    expect((alpha.locked as Record<string, unknown>).value).toBe(true);
+    expect((alpha.built as Record<string, unknown>).resolved_commit).toBe(candidateSha);
+    expect(doc.q1_lanes).toHaveLength(2);
+  });
+
+  it("prefers current SPEC files when a legacy README is also present", () => {
+    const missionDir = path.join(missionsRoot, MISSION);
+    fs.writeFileSync(path.join(missionDir, "README.md"), "---\nid: OTHER.1\n---\nLegacy mission\n");
+    fs.writeFileSync(path.join(missionDir, "slices", "31-alpha", "README.md"), "---\nid: OTHER.1.1\n---\nLegacy slice\n");
+    const ladder = show().q4_ladder as Record<string, unknown>[];
+    expect(ladder.map(slice => slice.slice_id)).toEqual(["OPR.9.9.31", "OPR.9.9.32", "OPR.9.9.33"]);
+  });
+
   it("defaults to the mission with real in-progress work before a newer planned release directory", () => {
     fs.mkdirSync(path.join(missionsRoot, "release-10.0", "slices"), { recursive: true });
     const result = projector.show("execution");
