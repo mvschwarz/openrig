@@ -244,7 +244,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // identity, same bytes, both sides.
     const marker = reconcileToken(decision.decisionId);
     if (attempted.has(decision.decisionId)) {
-      const scan = await fetchRecentMessageTexts(opts.botToken, opts.channel, threadTs, opts.fetchImpl);
+      const scan = await fetchRecentMessageTexts(opts.botToken, opts.channel, threadTs, opts.fetchImpl, undefined, undefined, marker);
       if (!scan.ok) {
         log(`reconcile scan failed for ${decision.decisionId} (${scan.error}) — retained, no blind repost`);
         return { ok: false, class: "reconcile-unreadable", detail: scan.error };
