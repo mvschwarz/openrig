@@ -17,6 +17,9 @@ async function fixture() {
   db.prepare("INSERT INTO rigs (id, name) VALUES ('r', 'fixture')").run();
   db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('n', 'r', 'builder')").run();
   db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('s', 'n', 'fixture-builder', 'running')").run();
+  db.prepare("INSERT INTO rigs (id, name, archived_at) VALUES ('archived', 'archived-fixture', datetime('now'))").run();
+  db.prepare("INSERT INTO nodes (id, rig_id, logical_id) VALUES ('archived-n', 'archived', 'builder')").run();
+  db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('archived-s', 'archived-n', 'archived-builder', 'running')").run();
   const app = new Hono();
   app.use("*", async (c, next) => { c.set("psProjectionService" as never, new PsProjectionService({ db }) as never); await next(); });
   app.route("/api/ps", psRoutes);
@@ -39,9 +42,10 @@ it("serves running-seat/load measurements without changing the ordinary bare-arr
   const { client } = await fixture();
   const normal = await client.get<unknown>("/api/ps");
   expect(Array.isArray(normal.data)).toBe(true);
+  expect(normal.data).toHaveLength(1);
   const response = await client.get<{ cpuCount: number; runningSeats: number; capture: { rotatingSeats: number } }>("/api/ps/resources");
   expect(response.status).toBe(200);
-  expect(response.data.runningSeats).toBe(1);
+  expect(response.data.runningSeats).toBe(2);
   expect(response.data.cpuCount).toBeGreaterThan(0);
   expect(response.data.capture.rotatingSeats).toBe(0);
 });
@@ -50,7 +54,7 @@ it("renders both native HTTP JSON and explicit human resource semantics", async 
   const { command } = await fixture();
   const log = vi.spyOn(console, "log").mockImplementation(() => {});
   await command.parseAsync(["node", "rig", "ps", "--resources", "--json"]);
-  expect(JSON.parse(String(log.mock.calls[0]![0]))).toMatchObject({ runningSeats: 1 });
+  expect(JSON.parse(String(log.mock.calls[0]![0]))).toMatchObject({ runningSeats: 2 });
   log.mockClear();
   await command.parseAsync(["node", "rig", "ps", "--resources"]);
   expect(log.mock.calls.flat().join("\n")).toContain(process.platform === "win32" ? "unavailable on this platform" : "not CPU utilization");
