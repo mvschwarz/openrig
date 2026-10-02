@@ -115,6 +115,13 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));
+        if (res.status >= 400) process.exitCode = 1;
+        return;
+      }
+
+      if (res.status >= 400) {
+        console.error((res.data as { error?: string })?.error ?? `Failed (HTTP ${res.status})`);
+        process.exitCode = 1;
         return;
       }
 
@@ -306,6 +313,12 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
         const res = await client.get<Array<Record<string, unknown>>>(
           `/api/rigs/${encodeURIComponent(rigId)}/chat/history?${params}`,
         );
+
+        if (res.status >= 400) {
+          console.error((res.data as { error?: string })?.error ?? `Failed (HTTP ${res.status})`);
+          process.exitCode = 1;
+          return;
+        }
 
         if (res.data && res.data.length > 0) {
           if (opts.json) {

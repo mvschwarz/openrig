@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
 import { chatroomCommand } from "../src/commands/chatroom.js";
@@ -70,6 +70,9 @@ describe("Chatroom CLI", () => {
   const capturedUrls: string[] = [];
   // Mutable list for dynamic injection during wait tests
   const dynamicMessages: Array<typeof chatMessages[0]> = [];
+  let historyFailure: { status: number; body: Record<string, unknown> | null } | null = null;
+
+  beforeEach(() => { historyFailure = null; });
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -92,6 +95,11 @@ describe("Chatroom CLI", () => {
         }
 
         if (url.includes("/chat/history")) {
+          if (historyFailure) {
+            res.writeHead(historyFailure.status, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(historyFailure.body));
+            return;
+          }
           res.writeHead(200, { "Content-Type": "application/json" });
           const urlObj = new URL(url, `http://localhost:${port}`);
           const senderFilter = urlObj.searchParams.get("sender");
@@ -289,6 +297,32 @@ describe("Chatroom CLI", () => {
     const parsed = JSON.parse(logs.join(""));
     expect(parsed).toHaveLength(1);
     expect(parsed[0].sender).toBe("alice");
+  });
+
+  it.each([
+    ["history", [], 404, { error: "Rig removed" }],
+    ["history", ["--json"], 500, { error: "History unavailable" }],
+    ["wait", ["--timeout", "0.05"], 404, { error: "Rig removed" }],
+    ["wait", ["--timeout", "0.05", "--json"], 500, { error: "History unavailable" }],
+    ["history", [], 503, {}],
+    ["wait", ["--timeout", "0.05"], 503, {}],
+    ["wait", ["--timeout", "0.05"], 503, null],
+  ] as const)("chatroom %s reports an HTTP error (%s, %s)", async (command, options, status, body) => {
+    historyFailure = { status, body };
+    capturedUrls.length = 0;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "chatroom", command, "my-rig", ...options]);
+    });
+
+    expect(exitCode).toBe(1);
+    if (command === "history" && options.some((option) => option === "--json")) {
+      expect(JSON.parse(logs.join(""))).toEqual(body);
+    } else {
+      expect(logs.join("\n")).toContain(body && "error" in body ? body.error : `Failed (HTTP ${status})`);
+    }
+    expect(logs.join("\n")).not.toContain("No messages.");
+    expect(logs.join("\n")).not.toContain("Timed out");
+    expect(capturedUrls.filter((url) => url.includes("/chat/history"))).toHaveLength(1);
   });
 
   it("chatroom wait with explicit --after returns new messages immediately", async () => {
