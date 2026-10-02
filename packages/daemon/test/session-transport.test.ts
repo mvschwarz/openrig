@@ -435,6 +435,56 @@ describe("SessionTransport", () => {
     expect(result.error).toContain("rig ps");
   });
 
+  // The Enter can be lost while the Claude TUI ingests the paste: tmux accepts the key, the text
+  // stays typed in the input box. The send confirms consumption and presses one guarded Enter.
+  describe("submit confirmation after the first Enter", () => {
+    const MSG = "From: dev-check@my-rig\nTo: dev-impl@my-rig\n---\nQueue handoff: check your queue.";
+
+    function stagedPaneTmux(paneAfterFirstEnter: string, keys: string[]) {
+      let typed = false;
+      return mockTmux({
+        sendText: async () => { typed = true; return { ok: true }; },
+        sendKeys: async (_t, k) => { keys.push(k.join(",")); return { ok: true }; },
+        capturePaneContent: async () => (typed ? paneAfterFirstEnter : "❯ \n"),
+      });
+    }
+
+    it("presses one more Enter when the sent text is still staged in the input box", async () => {
+      seedCanonicalRig();
+      const keys: string[] = [];
+      const staged = `Brewed for 1m\n\n❯ ${MSG.replace(/\n/g, "\n  ")}\n─────────────────────────\n  ⏵⏵ bypass permissions on`;
+      const transport = createTransport(stagedPaneTmux(staged, keys), { sleep: async () => {} });
+
+      const result = await transport.send("dev-impl@my-rig", MSG);
+
+      expect(result.ok).toBe(true);
+      expect(keys).toEqual(["C-m", "C-m"]);
+    });
+
+    it("sends no extra key when the Enter was consumed (input box empty, text only in history)", async () => {
+      seedCanonicalRig();
+      const keys: string[] = [];
+      const consumed = `❯ ${MSG.replace(/\n/g, "\n  ")}\n\n✻ Thinking…\n\n❯ \n─────────────────────────\n  ⏵⏵ bypass permissions on`;
+      const transport = createTransport(stagedPaneTmux(consumed, keys), { sleep: async () => {} });
+
+      const result = await transport.send("dev-impl@my-rig", MSG);
+
+      expect(result.ok).toBe(true);
+      expect(keys).toEqual(["C-m"]);
+    });
+
+    it("never presses Enter onto a permission prompt", async () => {
+      seedCanonicalRig();
+      const keys: string[] = [];
+      const prompt = "Authorize the release?\n\n❯ 1. Authorize publish\n  2. Roll back\n";
+      const transport = createTransport(stagedPaneTmux(prompt, keys), { sleep: async () => {} });
+
+      await transport.send("dev-impl@my-rig", MSG);
+
+      expect(keys).toEqual(["C-m"]);
+    });
+  });
+
   // Test 5: send where sendKeys C-m fails returns "text visible but not submitted"
   it("send where C-m fails returns submit_failed with guidance", async () => {
     seedCanonicalRig();
@@ -623,7 +673,8 @@ describe("SessionTransport", () => {
     expect(result.attempts).toBe(2);
     expect(result.activity?.state).toBe("idle");
     expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
-    expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys"]);
+    // trailing capture: the post-Enter staged-text confirmation
+    expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys", "capture"]);
   });
 
   it("send with wait-for-idle waits through current Claude thinking evidence and sends after idle", async () => {
@@ -677,7 +728,8 @@ describe("SessionTransport", () => {
     expect(result.attempts).toBe(2);
     expect(result.activity?.state).toBe("idle");
     expect(sendTextSpy).toHaveBeenCalledWith("dev-impl@my-rig", "hello");
-    expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys"]);
+    // trailing capture: the post-Enter staged-text confirmation
+    expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys", "capture"]);
   });
 
   it("send with wait-for-idle times out on running activity without sending text", async () => {
