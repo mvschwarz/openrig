@@ -1,0 +1,39 @@
+# Family: delivery `send` (partial: rendered delivery, not consumption).
+# Defect class: `rig send` reports success but the message body never renders in the
+#   addressed seat's pane (receipt is not render), or the envelope names the wrong seat.
+# What this proves: RENDERED TEXT. A `rig send` to one seat of a two-seat stub rig puts
+#   the OpenRig envelope addressed to that seat, and the exact marker text, into that
+#   seat's pane, read back through the shipped `rig capture --json`.
+# What this does NOT prove: that the seat read or acted on the message (the stub has no
+#   input channel, so an answer derived from a nonce needs the input-consuming stub),
+#   that the sibling seat received nothing (the runner has no negative form), or any
+#   Claude Code / Codex behaviour.
+# Planted negative: a send path that pastes only the envelope header and drops the body
+#   still reports success. The marker assertion fails with the envelope visible in the
+#   observed pane; setup, `up` and the `send` step itself still pass.
+# Deps: R-10 runner (`up`, `send`, `down`, `ps` and `pane` surfaces). No emit.
+scenario: send-renders-in-addressed-pane
+topology: ./dev-pair-stub.yaml
+steps:
+  - up: {}
+  - expect:
+      surface: ps
+      within: 30s
+      match:
+        - name: dev-pair-stub
+          status: running
+          runningCount: 2
+  - send: {to: dev-impl@dev-pair-stub, text: "s06-render-marker-4d9b"}
+  # the envelope rendered in the addressed pane names that seat as the recipient
+  - expect:
+      surface: pane
+      seat: dev-impl@dev-pair-stub
+      within: 30s
+      contains: "To: dev-impl@dev-pair-stub"
+  # the message body itself rendered there, not only the header
+  - expect:
+      surface: pane
+      seat: dev-impl@dev-pair-stub
+      within: 30s
+      contains: "s06-render-marker-4d9b"
+  - down: {}

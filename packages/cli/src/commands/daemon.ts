@@ -2,6 +2,7 @@ import { Command } from "commander";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { acquireDaemonStartLock } from "../daemon-start-lock.js";
+import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
 import { fetchWithTimeout } from "../fetch-with-timeout.js";
 import {
@@ -11,6 +12,7 @@ import {
   readLogs,
   tailLogs,
   type LifecycleDeps,
+  type ProcessLiveness,
   OPENRIG_DIR,
   STATE_FILE,
   resolveBindIntent,
@@ -32,6 +34,35 @@ export function createIsProcessAlive(deps: ProcessAliveDeps): (pid: number) => b
   };
 }
 
+export type SignalOutcome = "sent" | "missing" | "not-permitted";
+
+/** kill(pid, 0) as an outcome. POSIX: only ESRCH means no such process; EPERM means the process
+ *  EXISTS but this shell may not signal it (another user's process, or a sandbox such as Codex's). */
+export function signalProbe(pid: number, kill: (pid: number, signal: 0) => unknown = process.kill): SignalOutcome {
+  try {
+    kill(pid, 0);
+    return "sent";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM" ? "not-permitted" : "missing";
+  }
+}
+
+/** #275 — three-state liveness for status reads. Only a missing process (ESRCH) or a zombie is
+ *  dead. A process that exists but cannot be inspected (EPERM, or `ps` cannot run, as inside
+ *  Codex's macOS sandbox) is UNKNOWN, never dead: calling it dead turned a running daemon into
+ *  `stale` before any health probe. The boolean createIsProcessAlive (start/stop) is unchanged. */
+export function createProcessLiveness(deps: {
+  signal: (pid: number) => SignalOutcome;
+  readProcessState: (pid: number) => string | null;
+}): (pid: number) => ProcessLiveness {
+  return (pid: number) => {
+    if (deps.signal(pid) === "missing") return "dead";
+    const state = deps.readProcessState(pid)?.trim();
+    if (!state) return "unknown";
+    return state.startsWith("Z") ? "dead" : "alive";
+  };
+}
+
 type ExecFile = (file: string, args: string[], options: { encoding: "utf-8" }) => string;
 
 // Windows has no ps(1) and no zombie state, so the signal probe alone decides liveness there.
@@ -50,18 +81,16 @@ export function readProcessState(
 
 export function realDeps(): LifecycleDeps {
   const isProcessAlive = createIsProcessAlive({
-    signalCheck: (pid) => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    },
+    signalCheck: (pid) => signalProbe(pid) === "sent",
+    readProcessState: (pid) => readProcessState(pid),
+  });
+  const processLiveness = createProcessLiveness({
+    signal: (pid) => signalProbe(pid),
     readProcessState: (pid) => readProcessState(pid),
   });
 
   return {
+    processLiveness,
     acquireStartLock: () => acquireDaemonStartLock(OPENRIG_DIR),
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
     fetch: async (url) => {
@@ -215,7 +244,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
           const timeoutMs = opts.waitForKernelMs && /^\d+$/.test(opts.waitForKernelMs)
             ? parseInt(opts.waitForKernelMs, 10)
             : 60_000;
-          const baseUrl = `http://${state.host}:${state.port}`;
+          const baseUrl = `http://${formatDaemonHostForUrl(state.host ?? "127.0.0.1")}:${state.port}`;
           const result = await waitForKernelReady(baseUrl, timeoutMs);
           if (result.ok) {
             console.log(`Kernel ${result.kernelState}; variant=${result.variant ?? "(none)"}`);

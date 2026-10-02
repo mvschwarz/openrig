@@ -114,6 +114,7 @@ export class RigInstantiator {
             role: specNode.role,
             runtime: specNode.runtime,
             model: specNode.model,
+            effort: specNode.effort,
             cwd: specNode.cwd,
             surfaceHint: specNode.surfaceHint,
             workspace: specNode.workspace,
@@ -1185,7 +1186,7 @@ export class PodRigInstantiator {
     const initialRefusal = eligible();
     if (initialRefusal) return refuse(initialRefusal);
 
-    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "cwd", "role", "codex_config_profile", "permission_policy", "restore_policy"]);
+    const retainedFields = new Set(["id", "label", "agent_ref", "profile", "runtime", "model", "effort", "cwd", "role", "codex_config_profile", "permission_policy", "restore_policy"]);
     if (Object.keys(memberFragment).some(key => !retainedFields.has(key))) return refuse("Retry accepts only retained member fields; topology and startup overrides require a separate change.");
     const rawSpec = { version: "0.2", name: rig.rig.name, pods: [{ id: podRow.namespace, label: podRow.label, members: [memberFragment], edges: [] }], edges: [] };
     const validation = PodRigSpecSchema.validate(rawSpec);
@@ -1208,8 +1209,8 @@ export class PodRigInstantiator {
     const config = resolveNodeConfig({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
       profileName: member.profile, specRoot: rigRoot, member, pod, rig: rigSpec, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() });
     if (!config.ok) return refuse(config.errors.join("; "));
-    if (!same(config.config.model, node.model) || !same(config.config.cwd, node.cwd) || !same(config.config.restorePolicy, node.restorePolicy)) {
-      return refuse("Resolved model, cwd or restore policy differs from the failed first start.");
+    if (!same(config.config.model, node.model) || !same(config.config.effort, node.effort) || !same(config.config.cwd, node.cwd) || !same(config.config.restorePolicy, node.restorePolicy)) {
+      return refuse("Resolved model, effort, cwd or restore policy differs from the failed first start.");
     }
     const preflight = await preflightValidatedSpec(rigSpec, { rigRoot, fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(),
       ...this.systemWorldResolutionContext(), rigNameOverride: rig.rig.name, inheritedPermissionPolicy: this.inheritedPermissionPolicy(rigId), exec: this.deps.exec });
@@ -1501,7 +1502,8 @@ export class PodRigInstantiator {
             // exercised the createMemberNode paths, not bootstrap.
             role: member.role,
             runtime: member.runtime,
-            model: member.model,
+            model: member.model ?? configResult.config.model,
+            effort: member.effort ?? configResult.config.effort,
             codexConfigProfile: member.codexConfigProfile,
             // OPR.0.4.8.3 Seam B: bootstrap inline addNode is the FOURTH node-creation
             // site (see the role wire note above) — same member-ref persistence as
@@ -1771,6 +1773,7 @@ export class PodRigInstantiator {
       const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
         runtime: member.runtime,
         model: member.model,
+        effort: member.effort,
         cwd: effectiveCwd,
         restorePolicy: "checkpoint_only",
         podId,
@@ -1840,6 +1843,7 @@ export class PodRigInstantiator {
       role: input.member.role,
       runtime: input.member.runtime,
       model: input.member.model,
+      effort: input.member.effort,
       codexConfigProfile: input.member.codexConfigProfile,
       // OPR.0.4.8.3 Seam B: the member's OWN raw ref persists on the node (like role);
       // rig-level lives on the rig row; precedence applies at RESOLUTION, not storage.
@@ -2106,6 +2110,7 @@ export class PodRigInstantiator {
       updatedAt: "",
       cwd: configResult.config.cwd,
       model: configResult.config.model,
+      effort: configResult.config.effort,
       codexConfigProfile: input.member.codexConfigProfile,
       // OPR.0.4.8.3 Seam B: resolved launch posture (member > rig > persisted > FLOOR)
       // binds per-seat explicitly; adapters thread it into the yolo-mode helpers.
@@ -2395,6 +2400,7 @@ export class PodRigInstantiator {
       resolvedSpecName: string;
       resolvedSpecVersion: string;
       resolvedSpecHash: string;
+      effort?: string;
     },
   ): void {
     try {
@@ -2412,6 +2418,13 @@ export class PodRigInstantiator {
         config.resolvedSpecHash,
         nodeId,
       );
+      // Always write the resolved effort — present value sets it, absent value
+      // clears a previously-stored effort so spec changes take effect on next launch.
+      if (config.effort) {
+        this.deps.rigRepo.setNodeEffort(nodeId, config.effort);
+      } else {
+        this.deps.rigRepo.clearNodeEffort(nodeId);
+      }
     } catch {
       /* best-effort */
     }

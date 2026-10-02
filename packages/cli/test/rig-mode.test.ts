@@ -242,6 +242,15 @@ describe("rig policy cite — convention citation rules", () => {
     expect(logs.join("\n")).toContain("without an explicit");
   });
 
+  it.each([401, 403, 500])("does not fabricate an unset posture after HTTP %s", async (status) => {
+    const { client } = fakeClient({ effectiveResponse: { status, data: { error: "read_failed" } } });
+    const cmd = rigModeCommand(deps(client));
+    await cmd.parseAsync(["node", "rig", "cite", "--qitem", "q-1"]);
+    expect(process.exitCode).toBe(1);
+    expect(errs.join("\n")).toContain("read_failed");
+    expect(logs).toEqual([]);
+  });
+
   it("emits citation line when a binding resolves", async () => {
     const { client } = fakeClient({
       effectiveResponse: {

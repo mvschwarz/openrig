@@ -41,6 +41,7 @@ describe("SeatHandoverService", () => {
   let checkReady: ReturnType<typeof vi.fn>;
   let readSidecar: ReturnType<typeof vi.fn>;
   let captureCodexThreadId: ReturnType<typeof vi.fn>;
+  let claudeProcessStartedAt: ((sessionName: string) => Promise<string | null>) | undefined;
   let invalidateRetiringOccupant: ReturnType<typeof vi.fn>;
   let declareOccupantSwap: ReturnType<typeof vi.fn>;
   let resolvePredecessorRecap: ReturnType<typeof vi.fn>;
@@ -77,6 +78,7 @@ describe("SeatHandoverService", () => {
     // B2 — discovered-mode derive-helper deps (Codex thread-id capturer by default).
     readSidecar = vi.fn(() => ({ ok: true, data: { session_id: "claude-sid-123" } }));
     captureCodexThreadId = vi.fn(async () => "codex-discovered-tok");
+    claudeProcessStartedAt = undefined;
     invalidateRetiringOccupant = vi.fn();
     declareOccupantSwap = vi.fn();
     resolvePredecessorRecap = vi.fn(() => ({ unavailableReason: "test default: no record" }));
@@ -111,6 +113,7 @@ describe("SeatHandoverService", () => {
       runtimeAdapters: { codex: codexAdapter() },
       contextUsageStore: { readSidecar } as never,
       resumeTokenCapturer: { captureCodexThreadId } as never,
+      ...(claudeProcessStartedAt ? { claudeProcessStartedAt } : {}),
       occupantInvalidator,
       activityOracle: { declareOccupantSwap },
       predecessorRecapResolver: resolvePredecessorRecap as never,
@@ -119,9 +122,9 @@ describe("SeatHandoverService", () => {
     });
   }
 
-  function seedSeat(opts?: { runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string }) {
+  function seedSeat(opts?: { runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string; effort?: string }) {
     const rig = rigRepo.createRig("seat-rig");
-    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile });
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile, effort: opts?.effort });
     let sessionId: string | null = null;
     if (opts?.withSession !== false) {
       const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
@@ -837,6 +840,33 @@ describe("SeatHandoverService", () => {
     expect(JSON.stringify(payload)).not.toContain("codex-discovered-tok");
   });
 
+  // #421: the discovered successor's own sample is taken after its process started; a sidecar
+  // sampled before that can only come from an earlier process.
+  it.each([
+    ["captures the successor's own sample", 60_000, { resume_token: "claude-sid-123", outcome: "captured" }],
+    ["skips a sample from an earlier process", -3_600_000, { resume_token: null, outcome: "skipped", reason: "stale_sidecar" }],
+  ])("B2 (claude-code): %s", async (_label, offsetMs, expected) => {
+    const processStart = "Fri Oct  2 11:00:00 2026";
+    readSidecar.mockReturnValue({ ok: true, data: { session_id: "claude-sid-123", sampled_at: new Date(Date.parse(processStart) + offsetMs).toISOString() } });
+    const startedAt = vi.fn(async () => processStart);
+    claudeProcessStartedAt = startedAt;
+    service = newService();
+    const { node } = seedSeat({ runtime: "claude-code" });
+    const discovered = seedDiscovery({ runtimeHint: "claude-code" });
+
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "mvp-proof", source: `discovered:${discovered.id}` });
+
+    expect(result.ok).toBe(true);
+    const newSession = db.prepare(
+      "SELECT resume_token FROM sessions WHERE node_id = ? AND session_name = ?"
+    ).get(node.id, "successor-session") as Record<string, string | null>;
+    expect(newSession.resume_token).toBe(expected.resume_token);
+    const event = db.prepare("SELECT payload FROM events WHERE type = 'session.resume_token_captured' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+    const { resume_token: _token, ...payload } = expected;
+    expect(JSON.parse(event.payload)).toMatchObject(payload);
+    expect(startedAt).toHaveBeenCalledWith("successor-session");
+  });
+
   it("B2: honest redacted skip when the discovered token cannot be derived", async () => {
     const { node } = seedSeat({ runtime: "codex" });
     const discovered = seedDiscovery();
@@ -1239,5 +1269,19 @@ describe("SeatHandoverService", () => {
       currentOccupant: "route-successor",
       currentStatus: { handoverResult: "complete" },
     });
+  });
+
+  it("#75: an effort-pinned seat's handover launches the successor with that effort — the REAL lookupNode→createSuccessor→launchHarness path", async () => {
+    seedSeat({ runtime: "codex", effort: "high" });
+    const result = await service.handover({
+      seatRef: "dev-impl@seat-rig",
+      reason: "context-wall",
+      source: "fresh",
+      operator: "orch-lead@seat-rig",
+    });
+    expect(result.ok).toBe(true);
+    expect(launchHarness).toHaveBeenCalledTimes(1);
+    const successorBinding = launchHarness.mock.calls[0]![0] as { effort?: string };
+    expect(successorBinding.effort).toBe("high");
   });
 });

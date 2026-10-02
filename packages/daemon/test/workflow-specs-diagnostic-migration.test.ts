@@ -173,6 +173,36 @@ describe("WorkflowSpecCache diagnostic methods (slice 11)", () => {
     expect(rows[0]?.error_message).toBe("second error after edit");
   });
 
+  it.each(["new", "previously-valid"])("restores a repaired %s diagnostic in place without a duplicate library row", (initial) => {
+    const sourcePath = joinPath(tmp, "broken.yaml");
+    if (initial === "previously-valid") {
+      writeFileSync(sourcePath, VALID_DIAG_SAMPLE);
+      cache.readThrough(sourcePath);
+    }
+    cache.writeDiagnostic({ sourcePath, sourceHash: "broken-hash", errorMessage: "Fixture parse failure" });
+    // The row that survives the repair: a never-valid file's diagnostic row becomes the valid row;
+    // a previously-valid file keeps its valid row, which the diagnostic leaves untouched (#503).
+    const before = db.prepare("SELECT spec_id FROM workflow_specs WHERE source_path = ? ORDER BY rowid LIMIT 1").get(sourcePath) as {spec_id: string};
+    writeFileSync(sourcePath, "invalid: [");
+    expect(() => cache.readThrough(sourcePath)).toThrow();
+    const statuses = (db.prepare("SELECT status FROM workflow_specs WHERE source_path = ? ORDER BY rowid").all(sourcePath) as {status: string}[]).map((row) => row.status);
+    expect(statuses).toEqual(initial === "new" ? ["error"] : ["valid", "error"]);
+    writeFileSync(sourcePath, VALID_DIAG_SAMPLE);
+    cache.readThrough(sourcePath);
+    const rows = db.prepare("SELECT spec_id, name, version, status, error_message, roles_json, steps_json FROM workflow_specs WHERE source_path = ?").all(sourcePath) as {spec_id: string; name: string; version: string; status: string; error_message: string|null; roles_json: string; steps_json: string}[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.spec_id).toBe(before.spec_id);
+    expect(rows[0]!.name).toBe("valid-spec");
+    expect(rows[0]!.version).toBe("1");
+    expect(rows[0]!.status).toBe("valid");
+    expect(rows[0]!.error_message).toBeNull();
+    expect(JSON.parse(rows[0]!.roles_json)).not.toEqual({});
+    expect(JSON.parse(rows[0]!.steps_json)).not.toEqual([]);
+    expect(cache.listAll().filter(row => row.sourcePath === sourcePath)).toHaveLength(1);
+    cache.readThrough(sourcePath);
+    expect((db.prepare("SELECT spec_id FROM workflow_specs WHERE source_path = ?").get(sourcePath) as {spec_id: string}).spec_id).toBe(before.spec_id);
+  });
+
   it("removeBySourcePath removes both valid and diagnostic rows", () => {
     cache.writeDiagnostic({
       sourcePath: "/x/gone.yaml",

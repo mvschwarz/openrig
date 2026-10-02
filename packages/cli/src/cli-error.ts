@@ -13,6 +13,7 @@
 import type { Command } from "commander";
 import { InvalidArgumentError } from "commander";
 import { DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "./client.js";
+import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-reachability.js";
 
 /**
  * Commander option parser — a positive integer (>= 1). Rejects negative, zero,
@@ -98,7 +99,7 @@ export function renderDaemonTransportError(
   e: unknown,
   io: { out: (l: string) => void; err: (l: string) => void; json: boolean },
 ): boolean {
-  let parts: { fact: string; consequence: string; action: string } | undefined;
+  let parts: { fact: string; consequence: string; action: string; causeCode?: string } | undefined;
   // DaemonTimeoutError is a subclass of DaemonConnectionError — check it FIRST.
   if (e instanceof DaemonResponseError) {
     parts = {
@@ -115,10 +116,22 @@ export function renderDaemonTransportError(
         "Check the command's effect before any retry, then inspect daemon load with 'rig status' and the daemon logs if it remains slow. This is a slow response, not a stopped daemon.",
     };
   } else if (e instanceof DaemonConnectionError) {
+    const unknownWrite = e.writeOutcome === "unknown";
+    const reconcile = "Reconcile using the recovery ID before any retry. A lost connection does not prove the write failed.";
+    const delivery = unknownWrite
+      ? "The command's outcome is UNKNOWN — no usable response confirmed whether the write was applied."
+      : "The command was not delivered.";
+    // #275: a connection this machine blocked (EPERM/EACCES) is not a stopped daemon.
+    const blocked = isBlockedConnectionCode(e.causeCode) ? blockedConnectionGuidance(e.causeCode) : undefined;
     parts = {
       fact: e.message,
-      consequence: "The command was not delivered.",
-      action: "Confirm the daemon is reachable with 'rig daemon status'; if it is down, start it with 'rig up' or 'rig daemon start'.",
+      consequence: blocked ? `${delivery} ${blocked.consequence}` : delivery,
+      action: blocked
+        ? (unknownWrite ? `${blocked.action} ${reconcile}` : blocked.action)
+        : unknownWrite
+          ? `Check 'rig daemon status' on the affected host; if it is down, start it with 'rig daemon start'. ${reconcile}`
+          : "Confirm the daemon is reachable with 'rig daemon status'; if it is down, start it with 'rig up' or 'rig daemon start'.",
+      ...(e.causeCode ? { causeCode: e.causeCode } : {}),
     };
   }
   if (!parts) return false;

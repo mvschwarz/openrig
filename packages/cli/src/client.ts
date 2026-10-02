@@ -57,10 +57,24 @@ function resolveTerminalToken(): string | null {
   }
 }
 
+/** The OS code behind a failed connection (`EPERM`, `ECONNREFUSED`, …) when Node exposes one.
+ *  `fetch` reports every connection failure as "fetch failed" and keeps the code on `cause`. */
+export function connectionErrorCode(err: unknown): string | undefined {
+  const e = err as { code?: unknown; cause?: { code?: unknown } } | null | undefined;
+  const code = e?.cause?.code ?? e?.code;
+  return typeof code === "string" && code ? code : undefined;
+}
+
 export class DaemonConnectionError extends Error {
-  constructor(message: string) {
+  /** A write caller cannot infer nondelivery from losing the response. */
+  writeOutcome?: "unknown";
+  /** #275: the OS cause, so a connection this machine blocked is not rendered as a stopped daemon. */
+  causeCode?: string;
+
+  constructor(message: string, causeCode?: string) {
     super(message);
     this.name = "DaemonConnectionError";
+    if (causeCode) this.causeCode = causeCode;
   }
 }
 
@@ -98,6 +112,17 @@ export interface DaemonResponse<T = unknown> {
   data: T;
 }
 
+/**
+ * Issue #425: wrap bare IPv6 literals in brackets for URL hosts. `::1` must
+ * render as `[::1]` — `http://::1:7433` never parses in fetch. Hostnames,
+ * IPv4, and already-bracketed literals pass through unchanged.
+ */
+export function formatDaemonHostForUrl(host: string): string {
+  const trimmed = host.trim();
+  if (trimmed.startsWith("[") && trimmed.endsWith("]")) return trimmed;
+  return trimmed.includes(":") ? `[${trimmed}]` : trimmed;
+}
+
 interface DaemonRequestOptions {
   timeoutMs?: number;
   /** Per-call header overrides (e.g., `Authorization: Bearer ...`). */
@@ -119,7 +144,7 @@ function localDaemonUrl(): string | undefined {
       || (state.host !== undefined && (typeof state.host !== "string" || !state.host.trim()))) return undefined;
     // A stale PID must not redirect reads or writes to another configured daemon.
     // Keep the recorded endpoint; the request decides reachability, even after exit.
-    return `http://${state.host ?? "127.0.0.1"}:${state.port}`;
+    return `http://${formatDaemonHostForUrl(state.host ?? "127.0.0.1")}:${state.port}`;
   } catch {
     return undefined;
   }
@@ -180,7 +205,7 @@ export class DaemonClient {
           this.baseUrl = localUrl;
         } else {
           const config = new ConfigStore().resolve(); // env > file > defaults
-          this.baseUrl = `http://${config.daemon.host}:${config.daemon.port}`;
+          this.baseUrl = `http://${formatDaemonHostForUrl(config.daemon.host)}:${config.daemon.port}`;
         }
       }
     }
@@ -279,7 +304,11 @@ export class DaemonClient {
       // Headers prove that the daemon received the request, but not that a write
       // finished. A dropped body must preserve unknown-outcome guidance.
       if (responseStatus !== undefined) throw new DaemonResponseError(responseStatus, "");
-      throw new DaemonConnectionError(`Cannot connect to the OpenRig daemon at ${this.baseUrl}: ${msg}`);
+      const causeCode = connectionErrorCode(err);
+      throw new DaemonConnectionError(
+        `Cannot connect to the OpenRig daemon at ${this.baseUrl}: ${msg}${causeCode && !msg.includes(causeCode) ? ` (${causeCode})` : ""}`,
+        causeCode,
+      );
     }
   }
 

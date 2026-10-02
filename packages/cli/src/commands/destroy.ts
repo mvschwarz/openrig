@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigStore } from "../config-store.js";
+import { formatDaemonHostForUrl } from "../client.js";
 import { realDeps } from "./daemon.js";
 import { getDefaultOpenRigPath, getPreferredOpenRigHome, readOpenRigEnv } from "../openrig-compat.js";
 import {
@@ -73,7 +74,7 @@ function realDestroyDeps(): DestroyDeps {
     stopDaemon: async () => { await stopDaemon(lifecycleDeps); },
     inspectListener: async (host: string, port: number): Promise<ListenerInspection> => {
       try {
-        const res = await fetch(`http://${host}:${port}/healthz`);
+        const res = await fetch(`http://${formatDaemonHostForUrl(host)}:${port}/healthz`);
         if (!res.ok) {
           return {
             kind: "other_http",
@@ -131,7 +132,7 @@ function printPlan(
   console.log("DESTROY PLAN");
   console.log(`  scope: ${scope}`);
   console.log(`  state root: ${runtimeConfig.stateRoot}`);
-  console.log(`  daemon: http://${runtimeConfig.daemonHost}:${runtimeConfig.daemonPort}`);
+  console.log(`  daemon: http://${formatDaemonHostForUrl(runtimeConfig.daemonHost)}:${runtimeConfig.daemonPort}`);
   console.log(`  backup: ${backup ? "enabled" : "disabled"}`);
   console.log(`  tmux cleanup: ${scope === "all" ? `enabled (${managedTmuxSessions.length} managed session${managedTmuxSessions.length === 1 ? "" : "s"})` : "disabled"}`);
   for (const warning of warnings) {

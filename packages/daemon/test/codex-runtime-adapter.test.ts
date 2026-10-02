@@ -73,24 +73,27 @@ function quote(value: string): string {
   return `'${value.replace(/'/g, "'\"'\"'")}'`;
 }
 
-function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
+function expectedFreshLaunchCommand(options: { cwd?: string; model?: string; effort?: string; queueRoot?: string | null } = {}): string {
   const cwd = options.cwd ?? "/project";
   const gitDirArg = ` --add-dir ${quote(nodePath.join(cwd, ".git"))}`;
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
-  return `codex -s workspace-write -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}`;
+  const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
+  return `codex -s workspace-write -C ${quote(cwd)}${gitDirArg}${queueDirArg}${modelArg}${effortArg}`;
 }
 
-function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string): string {
+function expectedResumeCommand(token = "sess-456", queueRoot: string | null = testQueueRoot(), model?: string, effort?: string): string {
   const queueDirArg = queueRoot === null ? "" : `--add-dir ${quote(queueRoot)} `;
   const modelArg = model ? ` -m ${quote(model)}` : "";
-  return `codex -s workspace-write${modelArg} resume ${queueDirArg}${quote(token)}`;
+  const effortArg = effort ? ` -c ${quote(`model_reasoning_effort="${effort}"`)}` : "";
+  return `codex -s workspace-write${modelArg}${effortArg} resume ${queueDirArg}${quote(token)}`;
 }
 
-function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; queueRoot?: string | null } = {}): string {
+function expectedForkCommand(parentId = "parent-thread-id", options: { model?: string; effort?: string; queueRoot?: string | null } = {}): string {
   const queueDirArg = options.queueRoot === null ? "" : ` --add-dir ${quote(options.queueRoot ?? testQueueRoot())}`;
   const modelArg = options.model ? ` -m ${quote(options.model)}` : "";
-  return `codex -s workspace-write${modelArg} fork${queueDirArg} ${quote(parentId)}`;
+  const effortArg = options.effort ? ` -c ${quote(`model_reasoning_effort="${options.effort}"`)}` : "";
+  return `codex -s workspace-write${modelArg}${effortArg} fork${queueDirArg} ${quote(parentId)}`;
 }
 
 function expectedProfileFreshLaunchCommand(profile: string, options: { cwd?: string; model?: string; queueRoot?: string | null } = {}): string {
@@ -873,6 +876,61 @@ describe("Codex runtime adapter", () => {
 
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedForkCommand("parent-thread-id", { model: "gpt-5.4-cheap" }));
+  });
+
+  it("#75: launchHarness passes the reasoning effort (-c model_reasoning_effort) on fresh launch", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const binding = { ...makeBinding(), effort: "high" };
+
+    const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand({ effort: "high" }));
+  });
+
+  it("#75: launchHarness threads reasoning effort onto the codex RESUME command", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const binding = { ...makeBinding(), effort: "high" };
+
+    const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig", resumeToken: "sess-456" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedResumeCommand("sess-456", testQueueRoot(), undefined, "high"));
+  });
+
+  it("#75: launchHarness threads reasoning effort onto the codex FORK command", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({
+      tmux,
+      fsOps: mockFs(),
+      listProcesses: () => [],
+      sleep: async () => {},
+    });
+    const binding = { ...makeBinding(), effort: "high" };
+
+    await adapter.launchHarness(binding, {
+      name: "dev-qa@test-rig",
+      forkSource: { kind: "native_id", value: "parent-thread-id" },
+    });
+
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedForkCommand("parent-thread-id", { effort: "high" }));
+  });
+
+  it("#75: launchHarness emits both model (-m) and effort (-c) when both declared", async () => {
+    const tmux = mockTmux();
+    const adapter = new CodexRuntimeAdapter({ tmux, fsOps: mockFs() });
+    const binding = { ...makeBinding(), model: "gpt-5.4-cheap", effort: "high" };
+
+    const result = await adapter.launchHarness(binding, { name: "dev-qa@test-rig" });
+
+    expect(result.ok).toBe(true);
+    const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
+    expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand({ model: "gpt-5.4-cheap", effort: "high" }));
   });
 
   it("launchHarness passes the requested Codex config profile on resume", async () => {

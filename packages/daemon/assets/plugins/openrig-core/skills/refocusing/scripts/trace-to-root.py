@@ -9,6 +9,15 @@ import subprocess
 from pathlib import Path
 
 SHELVES = {"rigs", "pods", "seats", "missions", "slices"}
+# The daemon's exact current-work refusal meaning "this seat holds no in-progress typed baton"
+# (daemon domain/current-work.js, NO_TYPED_IN_PROGRESS). Only this exact text earns the work-root
+# fallback. Compare by equality, not prefix: the sibling refusal "no typed in-progress work
+# resolved to a work node" is a resolution failure and must stay a named gap. If the daemon's
+# wording changes, equality fails toward a named gap that shows the new text, never a silent fallback.
+NO_CURRENT_BATON_BASIS = (
+    "no typed in-progress work (only in-progress rows are considered; a typed row that is "
+    "pending or blocked is not current work)"
+)
 
 
 def rig_output(*args):
@@ -152,8 +161,10 @@ def render_topology(start, root, depth):
     return "\n".join(output)
 
 
-def render_work(start, root, depth):
+def render_work(start, root, depth, fallback=None):
     output = ["## WORK TRACE", f"root: {root}", f"start: {start}"]
+    if fallback:
+        output.append(f"FALLBACK — {fallback}")
     nodes, error = ascent(start, root)
     if error:
         return "\n".join(output + [f"TRACE GAP — {error}"])
@@ -235,6 +246,8 @@ def main():
     parser.add_argument("--depth", choices=("light", "full"), default=os.environ.get("OPENRIG_REFOCUS_DEPTH", "light"))
     parser.add_argument("--topology-start")
     parser.add_argument("--work-start")
+    parser.add_argument("--work-basis", help="the daemon's reason no current work node was named")
+    parser.add_argument("--work-unknown", help="why the current work node could not be read")
     args = parser.parse_args()
 
     sections = []
@@ -252,9 +265,23 @@ def main():
         if root is None:
             sections.append("## WORK TRACE\nTRACE GAP — workspace.root is unresolved")
         else:
-            start = Path(args.work_start) if args.work_start else derive_work_start(root)
-            sections.append(render_work(start, root, args.depth) if start else
-                            "## WORK TRACE\nTRACE GAP — current work node is unresolved; set OPENRIG_REFOCUS_WORK_NODE")
+            # Precedence: an explicit start wins; then the hook's daemon answer (basis or unknown);
+            # only a standalone run with neither falls back to inferring from the working directory.
+            explicit = args.work_start or os.environ.get("OPENRIG_REFOCUS_WORK_NODE")
+            if explicit:
+                sections.append(render_work(Path(explicit), root, args.depth))
+            elif args.work_basis == NO_CURRENT_BATON_BASIS:
+                sections.append(render_work(root, root, args.depth, fallback=(
+                    f"no current typed baton ({args.work_basis}). Showing the project-level chain from the work root: "
+                    "a broad orientation, not evidence of a current mission")))
+            elif args.work_basis:
+                sections.append(f"## WORK TRACE\nTRACE GAP — no single current work node: {args.work_basis}")
+            elif args.work_unknown:
+                sections.append(f"## WORK TRACE\nTRACE GAP — current work node UNKNOWN: {args.work_unknown}")
+            else:
+                start = derive_work_start(root)
+                sections.append(render_work(start, root, args.depth) if start else
+                                "## WORK TRACE\nTRACE GAP — current work node is unresolved; set OPENRIG_REFOCUS_WORK_NODE")
 
     print("\n\n".join(sections))
     return 0

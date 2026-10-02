@@ -70,6 +70,12 @@ export function queueRoutes(): Hono {
   function getRepo(c: { get: (key: string) => unknown }): QueueRepository {
     return c.get("queueRepo" as never) as QueueRepository;
   }
+  function destinationAdvisory(c: { get: (key: string) => unknown }, sessionRef: string) {
+    // This observation runs after the write commits. An unavailable lookup
+    // must neither fail that write nor misreport membership as unmatched.
+    try { return getRepo(c).destinationAdvisory(sessionRef); }
+    catch { return null; }
+  }
   function getInbox(c: { get: (key: string) => unknown }): InboxHandler {
     return c.get("inboxHandler" as never) as InboxHandler;
   }
@@ -203,10 +209,10 @@ export function queueRoutes(): Hono {
       (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ??
       loadHostRegistry;
     const fetchImpl = c.get("remoteFetchImpl" as never) as typeof fetch | undefined;
-    const fail = (detail: string, failureClass: string, remoteStatus?: number): { ok: false; response: Response } => ({
+    const fail = (detail: string, failureClass: string, remoteStatus?: number, outcome?: "indeterminate"): { ok: false; response: Response } => ({
       ok: false,
       response: c.json(
-        { error: "remote_queue_write_failed", hostId, failureClass, ...(remoteStatus !== undefined ? { remoteStatus } : {}), detail },
+        { error: "remote_queue_write_failed", hostId, failureClass, ...(remoteStatus !== undefined ? { remoteStatus } : {}), ...(outcome ? { outcome } : {}), detail },
         502,
       ),
     });
@@ -244,7 +250,7 @@ export function queueRoutes(): Hono {
           res.status,
         );
       case "network":
-        return fail(res.detail, "unreachable");
+        return fail(res.detail, "unreachable", res.status, res.outcome);
       case "http":
         // The origin refused (its own validation/auth/conflict) — its
         // structured error rides through; NO fake success.
@@ -482,7 +488,8 @@ export function queueRoutes(): Hono {
         nudge: (body as { nudge?: boolean }).nudge,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      return c.json(item, 201);
+      const advisory = destinationAdvisory(c, item.destinationSession);
+      return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -525,7 +532,8 @@ export function queueRoutes(): Hono {
   // OPR.0.3.2.21.FR-4(d-docs) — closure ≠ acceptance.
   //
   // `state=done` with `closure_reason=handed_off_to` records that the
-  // source seat has DELIVERED the work to the next stage. It does NOT
+  // source seat records a handoff claim. A row's handoffAdvisory names
+  // successor custody that this daemon cannot verify. The close does NOT
   // record that the next stage has ACCEPTED the work — that's the next
   // stage's verdict on its own qitem (typically a separate close with
   // its own closure_reason).
@@ -658,7 +666,8 @@ export function queueRoutes(): Hono {
         nudge: (body as { nudge?: boolean }).nudge,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      return c.json(result, 201);
+      const advisory = destinationAdvisory(c, result.created.destinationSession);
+      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -730,7 +739,8 @@ export function queueRoutes(): Hono {
         nudge: body.nudge,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      return c.json(result, 201);
+      const advisory = destinationAdvisory(c, result.created.destinationSession);
+      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }

@@ -612,6 +612,15 @@ describe("rig seat status", () => {
     expect(paths2).toEqual([]);
     expect(errors.join("\n")).toContain("Missing required option: --reason <reason>");
   });
+
+  it("`rig seat handover` help describes the mutation and documents --dry-run for planning", () => {
+    const seatCmd = seatCommand();
+    const handoverSubcmd = seatCmd.commands.find((c) => c.name() === "handover");
+    expect(handoverSubcmd).toBeDefined();
+    expect(handoverSubcmd!.description()).toContain("Hand a seat to a successor");
+    expect(handoverSubcmd!.description()).toContain("--dry-run");
+    expect(handoverSubcmd!.description()).not.toBe("Plan a safe two-phase seat handover");
+  });
 });
 
 // OPR.0.4.3.26 — seat-recovery switch-client VIEW retarget.

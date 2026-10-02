@@ -17,6 +17,9 @@
 //     it `done` — same choreography, one mechanism.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -49,17 +52,17 @@ function jsonResponse(payload: unknown, status = 201): Response {
   });
 }
 
-function makeHarness(opts?: { fetchImpl?: typeof fetch }) {
+function makeHarness(opts?: { fetchImpl?: typeof fetch; registry?: HostRegistry; destinationAdvisory?: QueueRepository["destinationAdvisory"] }) {
   const db = createDb();
   migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueTargetRepoSchema]);
   const bus = new EventBus(db);
-  const repo = new QueueRepository(db, bus, { validateRig: () => true });
+  const repo = new QueueRepository(db, bus, { validateRig: () => true, destinationAdvisory: opts?.destinationAdvisory });
   const app = new Hono();
   app.use("*", async (c, next) => {
     const set = c.set.bind(c) as (k: string, v: unknown) => void;
     set("eventBus", bus);
     set("queueRepo", repo);
-    set("hostRegistryLoader", () => ({ ok: true, registry: REGISTRY }));
+    set("hostRegistryLoader", () => ({ ok: true, registry: opts?.registry ?? REGISTRY }));
     if (opts?.fetchImpl) set("remoteFetchImpl", opts.fetchImpl);
     await next();
   });
@@ -98,6 +101,22 @@ const HANDOFF = { fromSession: "worker@rig-a", toSession: "dev@rig-b" };
 describe("MH-3 C2 — cross-host handoff (route choreography)", () => {
   let h: ReturnType<typeof makeHarness>;
   afterEach(() => h?.db.close());
+
+  it.each(["handoff", "handoff-and-complete"])("cross-host %s closes the source when the receiving advisory throws", async (verb) => {
+    const remote = makeHarness({ destinationAdvisory: () => { throw new Error("unexpected stored snapshot shape"); } });
+    try {
+      h = makeHarness({ fetchImpl: (async (url, init) => remote.app.request(new URL(String(url)).pathname, init)) as typeof fetch });
+      await seedSource(h.repo);
+      const response = await post(h.app, `/api/queue/qitem-source-1/${verb}`, { ...HANDOFF, hostId: "vps-b", nudge: false });
+      expect(response.status).toBe(201);
+      const result = await response.json();
+      expect(result.created.advisories).toBeUndefined();
+      expect(remote.repo.getById(result.created.qitemId)?.destinationSession).toBe(HANDOFF.toSession);
+      expect(h.repo.getById("qitem-source-1")?.state).toBe(verb === "handoff" ? "handed-off" : "done");
+      expect(rowCount(remote.db)).toBe(1);
+      expect(rowCount(h.db)).toBe(1);
+    } finally { remote.db.close(); }
+  });
 
   it("no-host handoff: today's LOCAL transactional path — closed+created both local, no forward (FR-6 zero-regression)", async () => {
     let forwarded = false;
@@ -371,4 +390,68 @@ describe("MH-3 C2 — closeCrossHostHandoffSource (repo, re-drive semantics)", (
     ).toThrowError(expect.objectContaining({ code: "cross_host_close_conflict" }));
     expect(h.repo.getById("qitem-source-1")!.closureTarget).toBe(closureTarget);
   });
+});
+
+
+it("reconciles a verified foreign successor after interrupted transport without duplicate work", async () => {
+  const foreign = makeHarness();
+  let interrupt = true;
+  const server = createServer(async (req, res) => {
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const headers = new Headers();
+      for (const [key, value] of Object.entries(req.headers)) {
+        if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(", ") : value);
+      }
+      const response = await foreign.app.fetch(new Request(`http://localhost${req.url}`, {
+        method: req.method, headers,
+        ...(req.method === "GET" ? {} : { body: Buffer.concat(chunks).toString("utf8") }),
+      }));
+      // Commit the actual foreign queue create, then lose only its response.
+      if (interrupt) { interrupt = false; req.socket.destroy(); return; }
+      res.writeHead(response.status, Object.fromEntries(response.headers));
+      res.end(Buffer.from(await response.arrayBuffer()));
+    } catch (error) { res.writeHead(500); res.end(String(error)); }
+  });
+  let local: ReturnType<typeof makeHarness> | undefined;
+  try {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    local = makeHarness({ registry: { hosts: [{ id: "remote", transport: "http", url }] } });
+    const source = await seedSource(local.repo);
+    const body = { fromSession: "worker@rig-a", toSession: "dev@rig-b", hostId: "remote", nudge: false };
+    const path = `/api/queue/${source.qitemId}/handoff-and-complete`;
+    expect((await post(local.app, path, body)).status).toBe(502);
+    expect(local.repo.getById(source.qitemId)?.state).toBe("pending");
+    expect(rowCount(foreign.db)).toBe(1);
+    const successor = foreign.repo.list({ limit: 100 })[0]!;
+    const confirmation = await fetch(`${url}/api/queue/${successor.qitemId}`);
+    expect(confirmation.status).toBe(200);
+    expect(await confirmation.json()).toMatchObject({ state: "pending", chainOfRecord: [source.qitemId] });
+
+    const repaired = await post(local.app, `/api/queue/${source.qitemId}/update`, {
+      actorSession: "worker@rig-a", state: "done", closureReason: "handed_off_to",
+      closureTarget: `${successor.qitemId}@remote`, transitionNote: "foreign successor confirmed by ID",
+    });
+    expect(repaired.status).toBe(200);
+    expect(await repaired.json()).toMatchObject({ state: "done",
+      handoffAdvisory: { status: "unverified", reason: "no-live-local-successor" } });
+    // A verified create response establishes that attempt's outcome, not an
+    // ongoing local read of remote custody. Existing re-drive remains idempotent.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const retry = await post(local.app, path, body);
+      expect(retry.status).toBe(201);
+      expect(await retry.json()).toMatchObject({ created: { qitemId: successor.qitemId },
+        closed: { handoffAdvisory: { status: "unverified" } } });
+    }
+    expect(rowCount(local.db)).toBe(1);
+    expect(rowCount(foreign.db)).toBe(1);
+    expect(local.repo.getById(source.qitemId)?.closureTarget).toBe(`${successor.qitemId}@remote`);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    local?.db.close(); foreign.db.close();
+  }
 });

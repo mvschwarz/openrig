@@ -19,6 +19,7 @@ import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { AgyResumeAdapter } from "../adapters/agy-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
+import { verifyClaudePaneProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type {
   RestoreOutcome,
@@ -1210,7 +1211,7 @@ export class RestoreOrchestrator {
         await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
         return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume requested but no token available. No session is running. Re-run with --fresh ${node.logicalId} for a deliberate fresh-primed seat, or restore the original session manually.` };
       } else {
-        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId));
+        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), node.effort);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
         } else if (resumeOutcome.kind === "attention_required") {
@@ -1376,6 +1377,7 @@ export class RestoreOrchestrator {
             // found" on every resumed Pi seat). Claude/Codex silently lost
             // their -m/--model on restore the same way.
             model: node.model ?? undefined,
+            effort: node.effort ?? undefined,
           };
 
           try {
@@ -1633,6 +1635,7 @@ export class RestoreOrchestrator {
     // OPR.0.4.8.3 Seam B: the seat's restored launch posture (persisted provenance,
     // custom policies re-validated when readable). Absent = env decision.
     resolvedPosture?: "floor" | "full_bypass",
+    effort?: string | null,
   ): Promise<
     | { kind: "resumed" }
     | { kind: "retry_fresh" }
@@ -1653,7 +1656,7 @@ export class RestoreOrchestrator {
       permissionMode = override.permissionMode;
     } catch (error) { return { kind: "failed", message: `Permission selection: ${(error as Error).message}` }; }
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
-      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId);
+      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId, ...(effort !== undefined ? [effort] : []));
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
@@ -1671,7 +1674,7 @@ export class RestoreOrchestrator {
     }
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
-      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model);
+      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model, ...(effort !== undefined ? [effort] : []));
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
@@ -1867,7 +1870,21 @@ export class RestoreOrchestrator {
     }
     const paneCommand = await this.tmuxAdapter.getPaneCommand(identity.pane);
     const paneContent = (await this.tmuxAdapter.capturePaneContent(identity.pane, 40)) ?? "";
-    const probe = assessNativeResumeProbe({ runtime, paneCommand, paneContent });
+    const claudeResumeIdentityVerified = runtime === "claude-code" && !!await verifyClaudePaneProcess({
+      target: identity.pane,
+      tmux: this.tmuxAdapter,
+      expectedToken: expectedResumeToken,
+      requireResume: true,
+      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
+    });
+    const probe = assessNativeResumeProbe({
+      runtime,
+      paneCommand,
+      paneContent,
+      // Headerless readiness requires the same stable foreground/argv proof
+      // as the resume adapter; a token-bearing descendant alone is insufficient.
+      ...(runtime === "claude-code" ? { claudeResumeIdentityVerified } : {}),
+    });
     const fgProcess = runtime === "claude-code" ? "claude" as const : runtime === "codex" ? "codex" as const : null;
     if (!fgProcess) {
       return { ok: false, code: "fg_process_not_runtime", detail: `Node runtime is ${runtime ?? "unknown"}, not claude/codex.` };

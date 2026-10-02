@@ -357,6 +357,19 @@ describe("workflowLibraryId / parseWorkflowLibraryId", () => {
     expect(parseWorkflowLibraryId("workflow:foo:1")).toEqual({ name: "foo", version: "1" });
   });
 
+  it("round-trips arbitrary version strings without colliding with a colon-bearing name", () => {
+    for (const version of ["release:1", "a:b:c", "release:%3A/β", ":"]) {
+      const id = workflowLibraryId("demo", version);
+      expect(parseWorkflowLibraryId(id)).toEqual({ name: "demo", version });
+      expect(id).not.toBe(workflowLibraryId(`demo:${version.slice(0, version.lastIndexOf(":"))}`, version.slice(version.lastIndexOf(":") + 1)));
+    }
+    expect(parseWorkflowLibraryId("workflow:legacy:name:1")).toEqual({ name: "legacy:name", version: "1" });
+    expect(parseWorkflowLibraryId("workflow:literal%3A:1")).toEqual({ name: "literal%3A", version: "1" });
+    for (const invalid of ["workflow:@", "workflow:@not-base64!", "workflow:@bnVsbA", "workflow:@WyJvbmx5Il0"]) {
+      expect(parseWorkflowLibraryId(invalid)).toBeNull();
+    }
+  });
+
   it("splits on the LAST colon so names with colons round-trip", () => {
     const id = workflowLibraryId("conveyor", "1.2.3");
     expect(parseWorkflowLibraryId(id)).toEqual({ name: "conveyor", version: "1.2.3" });

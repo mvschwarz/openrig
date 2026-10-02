@@ -261,7 +261,10 @@ export class MissionControlReadLayer {
         meta: { rowCount: 0, sourceFallback: "stream-store-not-wired" },
       };
     }
-    const items: StreamItem[] = this.streamStore.list({ limit: RECENT_OBSERVATIONS_LIMIT });
+    const items: StreamItem[] = this.streamStore.list({
+      limit: RECENT_OBSERVATIONS_LIMIT,
+      direction: "latest",
+    });
     const rows = items.map((s) => streamItemToCompactRow(s));
     return {
       viewName: "recent-observations",

@@ -261,6 +261,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // resume-cmd builder are the named A2 restore-parity follow-on, not this atom.
     const model = binding.model?.trim();
     const modelArg = model ? ` --model ${shellQuote(model)}` : "";
+    const effort = binding.effort?.trim();
+    const effortArg = effort ? ` --effort ${shellQuote(effort)}` : "";
 
     // Fork branch: build `claude --resume <parent> --fork-session --name <seat>`
     // and capture the NEW post-fork session id. The parent token is NEVER
@@ -276,9 +278,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!parentId) {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
-      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []),
+      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
         "--resume", parentId, "--fork-session", "--name", opts.name])
-        : `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${parentId} --fork-session --name ${opts.name}`;
+        : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${parentId} --fork-session --name ${opts.name}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
         : await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
@@ -304,10 +306,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
-    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []),
+    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name]) : opts.resumeToken
-      ? `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${opts.resumeToken} --name ${opts.name}`
-      : `${rendererPrefix}claude ${permissionMode}${modelArg} --session-id ${generatedSessionId} --name ${opts.name}`;
+      ? `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${opts.resumeToken} --name ${opts.name}`
+      : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
       : await this.tmux.sendText(binding.tmuxSession, cmd);
@@ -754,7 +756,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /**
    * Best-effort: provision the OpenRig context collector for managed Claude sessions.
    * Writes a collector script and merges status line config into .claude/settings.local.json.
-   * Idempotent: safe to call multiple times (merge preserves existing settings).
+   * Idempotent: safe to call multiple times (merge preserves existing settings). A user's own
+   * status line command (anything but the exact command written below), or a file that does not
+   * parse, is left as it is. The collector then never runs for that seat. While a valid sidecar
+   * from an earlier collector is retained, context usage (shown as stale once it ages) and Claude
+   * resume-token capture keep using it. That sidecar's session id may belong to an earlier Claude
+   * session, so capture can record an older session id for such a seat. Once none exists:
+   * - context usage reads unknown (`missing_sidecar`);
+   * - resume-token capture at adoption or handover is skipped (`missing_sidecar`);
+   * - its provider-usage row is an explicit unknown (`no_statusline_cache_yet`) unless an earlier
+   *   cache for that seat is retained.
+   * The read-modify-write below is not safe against a concurrent writer of the same file.
    */
   private provisionContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
     if (!this.stateDir || !this.collectorAssetPath || !binding.cwd) return;
@@ -772,14 +784,29 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
     this.fs.mkdirp(nodePath.dirname(settingsPath));
 
-    const existing = this.readJsonObject(settingsPath);
-
+    // The seat cwd can be a shared repo whose project-local settings other sessions read (#421).
+    // Like the activity hooks, never clobber text we cannot parse. An empty file holds no settings
+    // and is treated as `{}`. Valid JSON that is not an object (for example `[]`) is still
+    // replaced, as before.
+    let existing: Record<string, unknown> = {};
+    if (this.fs.exists(settingsPath)) {
+      const text = this.fs.readFile(settingsPath);
+      if (text.trim() !== "") {
+        let parsed: unknown;
+        try { parsed = JSON.parse(text); } catch { return; }
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+      }
+    }
+    const statusLine = typeof existing["statusLine"] === "object" && existing["statusLine"] !== null
+      ? existing["statusLine"] as Record<string, unknown> : {};
+    // A user's own status line command wins; only OpenRig's collector command is installed or refreshed.
+    // If this command's shape changes, keep the old shape recognised in isOwnedCollectorCommand, or
+    // seats holding it will never be refreshed.
     const collectorCmd = `node ${collectorDest} ${contextDir} ${providerUsageDir}`;
-    existing["statusLine"] = {
-      ...(typeof existing["statusLine"] === "object" && existing["statusLine"] !== null ? existing["statusLine"] as Record<string, unknown> : {}),
-      type: "command",
-      command: collectorCmd,
-    };
+    const current = statusLine["command"];
+    if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
+
+    existing["statusLine"] = { ...statusLine, type: "command", command: collectorCmd };
 
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
   }
@@ -902,6 +929,21 @@ const OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
 
 function hookCommand(hook: unknown): string | undefined {
   return isPlainObject(hook) && typeof hook["command"] === "string" ? (hook["command"] as string) : undefined;
+}
+
+// OpenRig-owned context collector. provisionContextCollector writes exactly
+// `node <cwd>/.openrig/context-collector.cjs <contextDir> <providerUsageDir>`, unquoted; older
+// releases wrote the same command without `<providerUsageDir>`. Ownership is either shape with any
+// (possibly stale) paths, on one line. A command that merely contains the path, composed with `;`,
+// `&&`, a pipe or a newline, or naming another file such as `.cjs.backup`, is the user's.
+const OWNED_COLLECTOR_SUFFIX = nodePath.sep + nodePath.join(".openrig", "context-collector.cjs");
+
+function isOwnedCollectorCommand(cmd: string): boolean {
+  if (/[\r\n]/.test(cmd)) return false;
+  const tokens = cmd.trim().split(/\s+/);
+  if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
+  if (tokens.some((token) => /[;&|<>`$()'"\\]/.test(token))) return false;
+  return tokens[1]!.endsWith(OWNED_COLLECTOR_SUFFIX);
 }
 
 function isOwnedRelayCommand(cmd: string | undefined): boolean {

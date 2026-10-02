@@ -6,62 +6,75 @@ never patched, shimmed, or worked around inside 51-03. Each item below is author
 against the locked/ruled shape so it drops in when the dependency lands.
 
 ## → 51-01 (stub runtime)
-- **R-01. Emit repertoire (items 5–8).** The TWO emit-bearing scenarios — #6
-  (`compaction`) and #8 (`slow_output`) — consume `emit.behavior ∈ {compaction,
-  slow_output, mid_turn_death, restore}`. (#2 queue-baton uses `send`+`restart`, NOT
-  `emit` — corrected count; see `scripts/README.md`.) Step-4 (CLEARED, verdict 1eb6d505)
-  built come-up + readiness only; A5 item 5 (ctx%) landed at 13e26355 (CLEARed, verdict
-  53397f73); the four emit BEHAVIORS land in 51-01 items 6–8. Until then #6/#8 PARSE but
-  their emit steps have no seam to trigger. `usage_limit` is deliberately absent
-  (real-runtime-only).
-- **R-02. Scenario-resolved stub scripts (scripted-response contract).** `scripts/*`
-  reference the 51-01 per-seat script-delivery seam delivered at `up`. The default
-  come-up-ready script (51-01 built-in) covers the lifecycle/queue/send scenarios now;
-  the behavior scripts under `scripts/` gate on R-01.
+- **R-01. Emit repertoire (items 5–8) — LANDED for launch scripts; step-time `emit`
+  still unbound.** The TWO emit-bearing scenarios — #6 (`compaction`) and #8
+  (`slow_output`) — consume `emit.behavior ∈ {compaction, slow_output, mid_turn_death,
+  restore}`. (#2 queue-baton uses an `env.queue` precondition + `daemon: {op: restart}`,
+  NOT `emit` — corrected count; see `scripts/README.md`.) Step-4 (CLEARED, verdict
+  1eb6d505) built come-up + readiness only; A5 item 5 (ctx%) landed at 13e26355 (CLEARed,
+  verdict 53397f73); the four emit BEHAVIORS have since landed, but they run only from a
+  per-seat launch script (`stub-script.ts`, executed by `stub-runner.ts`). A step-time
+  `emit` throws `UnboundActionError`, so #6/#8 PARSE but stop at their first `emit` step.
+  `usage_limit` is deliberately absent (real-runtime-only).
+- **R-02. Scenario-resolved stub scripts (scripted-response contract) — LANDED (host
+  mode).** A scenario maps a seat to a script path (relative to the scenario file) with
+  `env.stub_scripts`; the pipeline writes it to `<seat cwd>/.openrig/stub/script.json`,
+  which the stub reads at launch. Container mode refuses `env.stub_scripts`
+  (`ScenarioModeUnsupportedError`). The default come-up-ready script (51-01 built-in)
+  covers the lifecycle/queue/send scenarios now; no behavior scripts are authored under
+  `scripts/` yet.
 - **R-03. Stub ctx% eligibility (A5 item 5).** No scenario here asserts `ps` ctx% for a
   stub seat (it would gate on the A5 ContextMonitor GAP-1/GAP-2 increment). Flagged so a
   future ctx% scenario is added only once that lands.
 
 ## → 51-02 (scenario format + runner + env-helper)
-- **R-10. The runner + hermetic env-helper.** Nothing runs until the runner script and
-  the forced-local/scrubbed-env/scratch-HOME/fail-closed helper exist. The hermeticity
-  negative (proof item) is the helper's, exercised via these scenarios.
+- **R-10. The runner + hermetic env-helper — LANDED.** The runner script
+  (`packages/daemon/scripts/run-scenarios.mjs`, over `scenario-pipeline.ts`) and the
+  forced-local/scrubbed-env/scratch-HOME/fail-closed helper (`hermetic-env.ts`) exist. The
+  hermeticity negative (proof item) is the helper's, exercised via these scenarios.
 - **R-11. `daemon: {op: sigterm|restart}` step verb (#11) — LANDED in 51-02 v1.** Arch-ruled
   in ARCH-RULING-51-09 (the daemon-lifecycle verb on the SHARED env-helper lifecycle
   surface: single-owner spawn⇒kill/restart, re-spawned through the same
   forced-local/scratch/fail-closed guarantees under the injected clock). Per dev-planner's
   51-03 review: this verb is NOW IN the amended 51-02 v1 (A2 finals `28dc80cf` / `4180a007`)
   — no longer a rides-the-gate gap. #11 is authored in the ruled shape and is satisfied by
-  the 51-02 v1 verb. (Confirm the exact `op` spelling against the A2 finals at run time.)
-- **R-12. Multi-rig `up` (#9).** #9 brings up two rigs to prove ps scope honesty. The
-  locked format's `topology:` is scenario-singular; #9 uses a per-step `up: {topology:
-  fixtures/…}` override to name the second rig. CONFIRM at 51-02 build whether `up`
-  accepts a per-step topology override (multi-rig), or whether the format needs a
-  `topologies:` list. Routed as a 51-02 spec question; #9 authored in the override shape.
-- **R-13. `equals` cross-surface normalizer (#10).** The declarative {tui_socket, ps,
-  queue} normalizer ships from 51-02 (arch review rides 51-03 shaping). #10 is authored
-  to the declarative `equals:` interface; the normalizer mapping itself is 51-02's.
-- **R-14. `env.pre_existing_tmux` hermetic fixture (#5).** The hardest env fixture (a
-  pre-existing tmux server inside a scratch scaffold). If the env-helper cannot express it
-  hermetically, #5 BLOCKS on 51-02 rather than running non-hermetic — fail-closed beats
-  coverage theater.
-- **R-15. Disjunctive expect `any_of` (#5).** #5's binding acceptance is "lands on ONE of
-  two honest outcomes" (preseed reaches the seat OR the failure is visible on stream).
-  The locked `expect` is a single match; #5 uses an `any_of: [expect, expect]` form (pass
-  if any holds within its bound). CONFIRM at 51-02 whether the format adopts `any_of` or
-  the two outcomes split into two scenarios. Routed as a 51-02 spec question.
-- **R-16. `ps` scope selector on `expect` (#9).** Asserting current-rig-default vs `-A`
-  vs `--rig <name>` needs the runner to parameterize the shipped `rig ps` read. #9 uses a
-  `select: current-rig | all | {rig: <name>}` modifier on the `ps` expect. CONFIRM the
-  selector shape at 51-02 (it maps to the shipped ps flags). Routed.
-- **R-17. Handoff / queue-completion action (#11, minor).** Faithfully reproducing the
+  the 51-02 v1 verb. The ops are `sigterm` and `restart` (`DAEMON_OPS` in
+  `scenario-schema.ts`).
+- **R-12. Multi-rig `up` (#9) — OPEN.** #9 brings up two rigs to prove ps scope honesty.
+  The locked format's `topology:` is scenario-singular; #9 uses a per-step
+  `up: {topology: ./rig-beta-stub.yaml}` override to name the second rig. The runner
+  ignores that override: every `up` runs `rig up` on the scenario's top-level `topology`
+  (`scenario-real-deps.ts`). Routed as a 51-02 spec question; #9 authored in the override
+  shape.
+- **R-13. `equals` cross-surface normalizer (#10) — LANDED in the format; #10 not yet
+  converted.** The declarative normalizer ships as a per-surface projection mapping,
+  `equals: {<surface>: {pluck, path, rig}}` (`scenario-normalizer.ts`), and it is the only
+  form the validator accepts. #10 still uses a bare list of surfaces, which the validator
+  rejects (`EQUALS_NOT_DECLARATIVE`).
+- **R-14. `env.pre_existing_tmux` hermetic fixture (#5) — OPEN.** The hardest env fixture
+  (a pre-existing tmux server inside a scratch scaffold). No runner code reads
+  `env.pre_existing_tmux`: the validator accepts the key and the pipeline ignores it, so
+  #5 runs without the fixture rather than blocking.
+- **R-15. Disjunctive expect `any_of` (#5) — RESOLVED: not adopted.** #5's binding
+  acceptance was "lands on ONE of two honest outcomes" (preseed reaches the seat OR the
+  failure is visible on stream). The locked `expect` is a single match, and an `any_of`
+  step fails validation (`UNKNOWN_STEP_VERB`). #5 no longer uses it: it asserts one
+  outcome (`expect pane` contains `trust reached`) and leaves the failure-visible outcome
+  to its `seed_regression` leg.
+- **R-16. `ps` scope selector on `expect` (#9) — OPEN.** Asserting current-rig-default vs
+  `-A` vs `--rig <name>` needs the runner to parameterize the shipped `rig ps` read. The
+  `ps` reader runs only `rig ps --json` and takes no selector, so #9 asserts the default
+  (current-rig) leg only; its `-A` / `--rig` legs are comments until the selector exists.
+- **R-17. Handoff / queue-completion action (#11) — OPEN.** Faithfully reproducing the
   incident's `handoff-and-complete` closure may need a queue-completion action beyond
-  `send`. #11 drives the executed work via `send` (locked verb); if a distinct handoff
-  step is required for the exact closure-commit window, it routes to 51-02. Minor.
+  `send`. #11 drives the executed work via `send`, but `send` runs `rig send`, which
+  creates no queue item, and the grammar has no queue action verb: queue items come only
+  from an `env.queue` precondition, applied after the first `up`. #11 declares no
+  `env.queue`, so its first `expect queue` has no item to match.
 
 ## → 51-06 (transactional execution-closure) — #11 GREEN gate
 - **R-20. #11 GREEN gate = the 51-06 transactional-closure reconcile (POOLED, NOT in
-  main).** kill-daemon-mid-handoff is RED-FIRST: its SOLE green gate is the 51-06
+  main).** kill-daemon-mid-handoff is RED-FIRST: its product-side green gate is the 51-06
   transactional execution-closure + executed-unclosed reconcile, confirmed NOT in main at
   `13e26355` (dev-planner 51-03 review, grounded at source). Expected-RED until 51-06
   lands; recorded as expected-RED, never massaged. **Correction (supersedes an earlier
@@ -69,8 +82,10 @@ against the locked/ruled shape so it drops in when the dependency lands.
   `4cd2c313` is the slow-op-recorder drain latch — BOTH touch no queue/closure code and
   are orthogonal to #11; neither satisfies its gate. The daemon SIGTERM/restart is just
   the `daemon: {op}` verb (R-11); queue-claim durability across a SIGTERM is baseline
-  SQLite, not a slice gate. #11's only non-51-06 blockers are the 51-02 runner (R-10) and
-  the `daemon:{op}` verb (R-11, now landed in 51-02 v1).
+  SQLite, not a slice gate. Of #11's other blockers, the runner (R-10) and the
+  `daemon:{op}` verb (R-11) have landed. Still open: its setup (R-17), and its
+  post-restart `queue` and `stream` assertions, which match `items:` / `events:` mappings
+  while both reads (`rig queue list --json --full`, `rig stream list --json`) return lists.
 
 ## Path finalization
 These files live under `packages/test-system/` as a self-contained drop. The EXACT tree

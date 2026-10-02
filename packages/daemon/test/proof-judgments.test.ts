@@ -38,6 +38,30 @@ function fixture() {
 }
 
 describe("attributed proof judgments and derived readiness", () => {
+  it("prepares the same evidence identity that judgments use in nested mission roots", async () => {
+    const f = fixture(), nested = join(f.root, "work", "initiatives");
+    fs.mkdirSync(join(f.root, "work"));
+    fs.renameSync(f.missions, nested);
+    const alpha = join(nested, "trial", "slices", "01-alpha");
+    const app = new Hono();
+    app.use("*", async (c, next) => { c.set("sliceIndexer" as never, { isReady: () => true, slicesRoot: nested, invalidate() {} } as never); await next(); });
+    app.route("/api/proof", proofRoutes());
+    const read = await app.request("/api/proof?scope=trial/slices/01-alpha&evidence=proof/evidence.md");
+    expect(read.status).toBe(200);
+    const prepared = await read.json(), item = prepared.items[0];
+    expect(prepared.preparedEvidence[0].ref).toBe("work/initiatives/trial/slices/01-alpha/proof/evidence.md");
+    const input = { scope: "trial/slices/01-alpha", item: item.id, verdict: "accept", reason: "Prepared observed outcome", evidence: ["proof/evidence.md"], expectedEvidence: prepared.preparedEvidence, expectedRevision: item.revision, expectedPrevious: null };
+    const post = () => app.request("/api/proof/judge", { method: "POST", headers: { "Content-Type": "application/json", "X-OpenRig-Session": "judge@trial" }, body: JSON.stringify(input) });
+    const evidence = join(alpha, "proof", "evidence.md"), original = fs.readFileSync(evidence);
+    fs.writeFileSync(evidence, "Changed after preparation");
+    const stale = await post(); expect(stale.status).toBe(409); expect((await stale.json()).error).toBe("evidence_conflict");
+    expect(fs.existsSync(join(alpha, "proof", "judgments"))).toBe(false);
+    fs.writeFileSync(evidence, original);
+    const accepted = await post(); expect(accepted.status, await accepted.clone().text()).toBe(201);
+    expect(readSliceReadiness(alpha).state).toBe("ready");
+    expect((await post()).status).toBe(200);
+  });
+
   it("lifts one verdict, corrects it, preserves siblings/history, and writes no ancestor status", () => {
     const f = fixture();
     const files = [join(f.root, "project.yaml"), join(f.mission, "mission.yaml"), join(f.alpha, "SPEC.md"), join(f.beta, "SPEC.md")];
@@ -221,6 +245,42 @@ describe("retained authority negative controls", () => {
     const invalid = readMissionReadiness(f.mission);
     expect(invalid.issues).toContain("mission metadata: expected a mapping");
   });
+  it("invalidates proof sources when only mission status changes", async () => {
+    const f = fixture();
+    const manifest = join(f.mission, "mission.yaml");
+    const original = fs.readFileSync(manifest, "utf8");
+    const before = readMissionReadiness(f.mission);
+    const sliceRevision = readSliceReadiness(f.alpha).revision;
+    const events: Array<{ type: string; revision: string }> = [];
+    let invalidated = 0;
+    const watch = watchProofSources(f.missions, () => { invalidated++; }, {
+      emit: (event: { type: string; revision: string }) => events.push(event),
+    } as unknown as EventBus);
+    try {
+      f.write(manifest, original.replace("status: active", "status: draft"));
+      const after = readMissionReadiness(f.mission);
+      expect(after.historicalStatus).toBe("draft");
+      expect(after.revision).not.toBe(before.revision);
+      // On macOS, fs.watch arms its recursive FSEvents stream asynchronously, so a write made in the
+      // same tick can precede the stream and is never reported (the product's quiet refresh repairs
+      // that; this test asserts the push path). Rewrite the unchanged draft bytes until the watcher
+      // reports: the semantic basis changes once, so this still yields exactly one event.
+      const deadline = Date.now() + 5000;
+      while (events.length === 0 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        if (events.length === 0) fs.writeFileSync(manifest, fs.readFileSync(manifest));
+      }
+      expect(events).toHaveLength(1);
+      expect(events[0]!.type).toBe("proof.sources_changed");
+      expect(invalidated).toBe(1);
+      expect(readSliceReadiness(f.alpha).revision).toBe(sliceRevision);
+      const changed = watch.observation().revision;
+      fs.writeFileSync(manifest, fs.readFileSync(manifest));
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(events).toHaveLength(1);
+      expect(watch.observation().revision).toBe(changed);
+    } finally { watch.close(); }
+  });
   it("pushes changed source truth, keeps sibling basis, and ignores unchanged source bytes", async () => {
     const f = fixture(); f.judge(); const sibling = readSliceReadiness(f.beta).revision;
     const events: Array<{ type: string; revision: string }> = []; let invalidated = 0;
@@ -236,11 +296,25 @@ describe("retained authority negative controls", () => {
   });
 });
 
-async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "before" | "after" | "stale-read" | null = null) {
+async function worker(f: ReturnType<typeof fixture>, input: JudgeInput, crash: "before" | "after" | "stale-read" | "write-error" | "fsync-error" | null = null) {
   const module = new URL("../src/domain/proof/judgments.ts", import.meta.url).href;
   const script = `
     import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
     const crash = ${JSON.stringify(crash)}, original = fs.linkSync;
+    if (crash === "write-error" || crash === "fsync-error") {
+      const write = fs.writeFileSync, sync = fs.fsyncSync; let receiptFd;
+      fs.writeFileSync = (...args) => {
+        if (typeof args[0] === "number" && String(args[1]).includes("operationId:")) {
+          receiptFd = args[0];
+          if (crash === "write-error") { write(args[0], "partial receipt"); throw Object.assign(new Error("injected receipt write"), { code: "EIO" }); }
+        }
+        return write(...args);
+      };
+      fs.fsyncSync = fd => {
+        if (fd === receiptFd && crash === "fsync-error") throw Object.assign(new Error("injected receipt fsync"), { code: "EIO" });
+        return sync(fd);
+      }; syncBuiltinESMExports();
+    }
     if (crash === "stale-read") {
       let reads = 0; const originalRead = fs.readdirSync;
       fs.readdirSync = (...args) => {
@@ -270,6 +344,29 @@ async function kill(child: ChildProcess) {
   const exited = once(child, "exit"); child.kill("SIGKILL"); await exited;
 }
 describe("real process publication and recovery", () => {
+  for (const phase of ["write-error", "fsync-error"] as const) it(`cleans owned temporary receipts after repeated ${phase} failures`, async () => {
+    const f = fixture(), input = f.input(), child = await worker(f, input, phase);
+    const home = join(f.alpha, "proof", "judgments");
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        expect((await request(child)).error).toBe("EIO");
+        expect(readSliceReadiness(f.alpha).items[0]!.state).toBe("pending");
+        expect(fs.readdirSync(home)).toEqual([]);
+      }
+    } finally { await kill(child); }
+    const retry = f.judge(input);
+    expect(retry.readiness.items[0]!.state).toBe("accepted");
+    expect(f.judge(input).judgment.id).toBe(retry.judgment.id);
+    expect(fs.readdirSync(home)).toEqual(["00000001.md"]);
+    const correction = f.input(undefined, "reject"), failingCorrection = await worker(f, correction, phase);
+    try {
+      expect((await request(failingCorrection)).error).toBe("EIO");
+      expect(readSliceReadiness(f.alpha).items[0]!.judgment!.id).toBe(retry.judgment.id);
+      expect(fs.readdirSync(home)).toEqual(["00000001.md"]);
+    } finally { await kill(failingCorrection); }
+    expect(f.judge(correction).readiness.items[0]!.state).toBe("rejected");
+    expect(fs.readdirSync(home)).toEqual(["00000001.md", "00000002.md"]);
+  });
   it("publishes one concurrent correction and replays duplicate acceptance safely", async () => {
     const f = fixture(), first = f.judge(), a = await worker(f, f.input(undefined, "reject")), b = await worker(f, f.input(undefined, "withdraw"));
     try {

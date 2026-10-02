@@ -241,6 +241,24 @@ export async function verifyClaudePaneProcess(input: Parameters<typeof observeNa
   return second?.fingerprint === first.fingerprint ? second : null;
 }
 
+/** The `ps` start time (lstart, local time) of the one Claude process in the pane's foreground,
+ * located as verifyClaudePaneProcess locates it but without an expected token. Two stable samples
+ * are required; anything else (no pane, no process, several candidates) is unknown (null). */
+export async function observeClaudePaneStartedAt(input: Omit<Parameters<typeof observeNativePaneProcess>[0], "expectedToken" | "requireResume">): Promise<string | null> {
+  const sample = async (): Promise<NativeProcessObservation | null> => {
+    try {
+      const pid = await input.tmux.getPanePid(input.target);
+      if (!pid) return null;
+      const candidates = nativeProcessCandidates(await (input.listProcesses ?? listNativeProcesses)(), pid, "claude-code", input.selectedExecutable);
+      return candidates.length === 1 ? candidates[0]! : null;
+    } catch { return null; }
+  };
+  const first = await sample();
+  if (!first) return null;
+  const second = await sample();
+  return second?.fingerprint === first.fingerprint ? second.process.startedAt ?? null : null;
+}
+
 export interface ClaudeDeliveryObservation {
   state: "verified" | "unknown" | "idle_shell" | "conflict";
   detail: string;

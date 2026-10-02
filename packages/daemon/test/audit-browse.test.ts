@@ -6,7 +6,10 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
 import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
-import { MissionControlAuditBrowse } from "../src/domain/mission-control/audit-browse.js";
+import {
+  MissionControlAuditBrowse,
+  MissionControlAuditQueryError,
+} from "../src/domain/mission-control/audit-browse.js";
 
 describe("MissionControlAuditBrowse (PL-005 Phase B; read-only)", () => {
   let db: Database.Database;
@@ -81,7 +84,17 @@ describe("MissionControlAuditBrowse (PL-005 Phase B; read-only)", () => {
   });
 
   it("rejects unknown action_verb with structured error", () => {
-    expect(() => audit.query({ actionVerb: "totally-bogus" })).toThrow(/totally-bogus/);
+    try {
+      audit.query({ actionVerb: "totally-bogus" });
+      expect.fail("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(MissionControlAuditQueryError);
+      const queryErr = err as MissionControlAuditQueryError;
+      expect(queryErr.code).toBe("verb_unknown");
+      expect(queryErr.message).toContain("totally-bogus");
+      expect(queryErr.details?.actionVerb).toBe("totally-bogus");
+      expect(queryErr.details?.supported).toBeDefined();
+    }
   });
 
   it("pagination: limit honored + has_more set + next_before_id provided", () => {

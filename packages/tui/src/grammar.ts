@@ -30,8 +30,9 @@ export function parseCommand(raw: string, sections: readonly SectionDef[] = SECT
     return { type: "filter", text: input.slice(1).trim() };
   }
 
-  const [verb = "", ...rest] = input.split(/\s+/);
-  const name = rest.join(" ");
+  const separator = input.search(/\s/);
+  const verb = separator < 0 ? input : input.slice(0, separator);
+  const name = separator < 0 ? "" : input.slice(separator).trim();
 
   const entry = VERB_TABLE.get(verb);
   if (entry?.build) return entry.build(name, { sections });

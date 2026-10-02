@@ -11,6 +11,7 @@
 //  - Idempotent: calling complete twice still succeeds
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import YAML from "yaml";
 import { Hono } from "hono";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -83,6 +84,34 @@ afterEach(() => {
 });
 
 describe("POST /api/missions/:missionId/complete", () => {
+  it("completes the authored manifest and reads it back through hot mission and slice APIs", async () => {
+    const mission = path.join(missionsRoot, "authored"), slice = path.join(mission, "slices", "intro");
+    fs.mkdirSync(slice, { recursive: true });
+    const node = "---\nstatus: active\nowner: founder\n---\n# Mission narrative\n";
+    fs.writeFileSync(path.join(mission, "SPEC.md"), node);
+    fs.writeFileSync(path.join(slice, "slice.yaml"), "kind: slice\nmetadata:\n  id: intro\n  status: draft\n");
+    fs.writeFileSync(path.join(slice, "SPEC.md"), "# Intro\n");
+    const manifestPath = path.join(mission, "mission.yaml");
+    fs.writeFileSync(manifestPath, "# Author comment\nkind: mission\nmetadata:\n  name: authored\n  status: active # Preserve status comment\n  owner: founder\ncomposition:\n  slices:\n    - ref: slices/intro/slice.yaml\n      order: 1\n");
+    const beforeManifest = YAML.parse(fs.readFileSync(manifestPath, "utf8"));
+    const app = buildAppWithSlices(indexer);
+    const primed = await (await app.request("/api/slices?filter=all")).json() as SidecarBody;
+    expect(primed.missions.authored!.authoredStatus).toBe("active");
+    expect((await app.request("/api/missions/authored/complete", { method: "POST" })).status).toBe(200);
+    const detail = await (await app.request("/api/missions/authored")).json();
+    expect(detail.status).toBe("complete");
+    expect(detail.readiness.historicalStatus).toBe("complete");
+    const hot = await (await app.request("/api/slices?filter=all")).json() as SidecarBody;
+    expect(hot.missions.authored!.authoredStatus).toBe("complete");
+    const persisted = fs.readFileSync(manifestPath, "utf8");
+    expect(YAML.parse(persisted)).toEqual({ ...beforeManifest, metadata: { ...beforeManifest.metadata, status: "complete" } });
+    expect(persisted).toContain("# Author comment");
+    expect(persisted).toContain("# Preserve status comment");
+    expect(fs.readFileSync(path.join(mission, "SPEC.md"), "utf8")).toBe(node);
+    expect((await app.request("/api/missions/authored/complete", { method: "POST" })).status).toBe(200);
+    expect(fs.readFileSync(manifestPath, "utf8")).toBe(persisted);
+  });
+
   it("updates existing status: active to status: complete in README frontmatter", async () => {
     writeMissionReadme(
       missionsRoot,

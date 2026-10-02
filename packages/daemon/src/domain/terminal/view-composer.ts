@@ -151,11 +151,12 @@ export function composeView(
         });
         continue;
       }
+      const remoteCommand = `tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`;
       opened.push({
         seat: m.seat,
         ...(m.runtime ? { runtime: m.runtime } : {}),
         label: m.label,
-        paneCommand: `ssh ${shellQuote(dest)} tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
+        paneCommand: `ssh ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
         readOnly: m.readOnly,
       });
       continue;

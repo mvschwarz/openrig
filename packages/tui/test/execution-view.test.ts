@@ -234,6 +234,21 @@ describe("mission execution story — readable rows over the shipped projections
     expect(executionKeys(lines).filter((key) => key.startsWith("slice:"))).toHaveLength(4);
   });
 
+  it("distinguishes retired and deferred slices from planned in fallback state", () => {
+    const fixture = executionFixture();
+    fixture.q1_lanes = [];
+    const scopes = executionScopes(4, (index) => (index === 0 ? "active" : index === 1 ? "blocked" : "done"));
+    // Slice 2 has stage "retired"
+    scopes[0]!.slices[1]!.stage = "retired";
+    // Slice 3 has status "deferred"
+    scopes[0]!.slices[2]!.status = "closed-deferred";
+
+    const overview = text(executionContentLines(fixture, scopes, [], null, 160));
+    expect(overview).toContain("○ retired");
+    expect(overview).toContain("○ deferred");
+    expect(overview).not.toContain("2 planned");
+  });
+
   it("qualifies slice completion while a release workflow is still waiting", () => {
     const fixture = executionFixture();
     fixture.q1_lanes = [];
@@ -582,5 +597,24 @@ describe("attributed proof provenance in the ordinary execution path", () => {
     expect(page).toContain("UNKNOWN");
     delete execution.readiness;
     expect(text(executionContentLines(execution, undefined, [], "evidence", 100))).toContain("built unconfirmed");
+  });
+});
+
+
+describe("slice source provenance", () => {
+  it("reports the authoritative arrangement when it supersedes the legacy wave map", () => {
+    const fixture = executionFixture();
+    fixture.sources.wave_map = { row_id: "INDETERMINATE", superseded_by: "/work/mission.yaml + referenced slice.yaml files" };
+    const body = text(executionContentLines(fixture, executionScopes(), [], "slice:OPR.0.5.8.1", 160));
+    expect(body).toContain("wave map:     superseded by /work/mission.yaml");
+    expect(body).not.toContain("wave map:     INDETERMINATE");
+  });
+
+  it("preserves the legacy row when no superseding source is served", () => {
+    const fixture = executionFixture();
+    fixture.q2_sequencing[0]!.source = { wave_map_row: "qitem-wave-map" };
+    const body = text(executionContentLines(fixture, executionScopes(), [], "slice:OPR.0.5.8.1", 160));
+    expect(body).toContain("wave map:     qitem-wave-map");
+    expect(body).not.toContain("superseded by");
   });
 });

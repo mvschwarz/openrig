@@ -61,13 +61,26 @@ interface ActionRow {
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
+export class MissionControlAuditQueryError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "MissionControlAuditQueryError";
+  }
+}
+
 export class MissionControlAuditBrowse {
   constructor(private readonly db: Database.Database) {}
 
   query(input: AuditQueryInput): AuditQueryResult {
     if (input.actionVerb && !MISSION_CONTROL_VERBS.includes(input.actionVerb as MissionControlVerb)) {
-      throw new Error(
+      throw new MissionControlAuditQueryError(
+        "verb_unknown",
         `unknown action_verb '${input.actionVerb}'; supported: ${MISSION_CONTROL_VERBS.join(", ")}`,
+        { actionVerb: input.actionVerb, supported: [...MISSION_CONTROL_VERBS] },
       );
     }
     const limit = clampLimit(input.limit);

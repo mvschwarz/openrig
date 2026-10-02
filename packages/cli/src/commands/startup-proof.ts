@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
+import { formatDaemonHostForUrl } from "../client.js";
 
 export interface StartupProofDeps {
   env?: NodeJS.ProcessEnv;
@@ -47,7 +48,7 @@ export function resolveStartupProofEndpoint(deps: StartupProofDeps = {}): Endpoi
 
   if (!baseUrl) {
     const port = first(env["OPENRIG_PORT"], env["RIGGED_PORT"]);
-    if (port) baseUrl = `http://${first(env["OPENRIG_HOST"], env["RIGGED_HOST"]) ?? "127.0.0.1"}:${port}`;
+    if (port) baseUrl = `http://${formatDaemonHostForUrl(first(env["OPENRIG_HOST"], env["RIGGED_HOST"]) ?? "127.0.0.1")}:${port}`;
   }
 
   return baseUrl && token ? { baseUrl, token } : null;

@@ -50,6 +50,8 @@ export class CodexResumeAdapter {
     // resolvedPosture as the 6th arg stay correct; threaded so the legacy (non-pod-aware) restore boots
     // the resumed seat on its spec model, not the runtime default; absent → command byte-identical.
     model?: string | null,
+    // #75: optional reasoning effort for the seat.
+    effort?: string | null,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
@@ -91,6 +93,7 @@ export class CodexResumeAdapter {
       model,
       postureArg,
       daemonSupport?.kind === "supported",
+      effort,
     );
 
     const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.launchPath

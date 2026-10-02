@@ -1,7 +1,7 @@
 import { existsSync, accessSync, constants } from "node:fs";
-import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
+import { shellQuote as quoteShellArgument } from "../adapters/shell-quote.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 
 // --- Types ---
@@ -121,6 +121,12 @@ export interface StartupContextProjectionEntry {
   effectiveId?: string | null;
   category?: string | null;
   sourcePath?: string | null;
+  resourceType?: string | null;
+}
+
+export interface QueueStoreProbeResult {
+  available: boolean;
+  evidence: string;
 }
 
 export type StartupContextProbeResult =
@@ -195,8 +201,12 @@ export interface RestoreCheckDeps {
   exists: (path: string) => boolean;
   /** Read a declaration/config file. Kept injectable so restore-check remains testable and source-safe. */
   readFile: (path: string) => string;
-  /** Substrate root for queue file path resolution */
+  /** Shared-docs root for rig spec path resolution. */
   substrateRoot?: string;
+  /** Read-only probe of the daemon SQLite queue store. */
+  probeQueueStore?: () => QueueStoreProbeResult;
+  /** Relay-backed Claude hook events derived from the shipped hook manifest. */
+  getClaudeActivityHookEvents?: () => string[];
 }
 
 interface RigRollupInput {
@@ -223,48 +233,6 @@ interface HostInfraCheckResult {
 // --- Service ---
 
 const DAEMON_HEALTHY_PATTERN = /^Daemon running\b/m;
-// OPR.0.3.2.14 — fallback subpath uses a generic .openrig placeholder
-// rather than an internal-team layout, to close the source-side
-// privacy leak. Fallback preserved per slice README §"Architecture
-// note" (option-A removal cascaded 36 test yellows in 0.3.1 cleanup).
-const SUBSTRATE_SHARED_DOCS_ROOT = process.env["OPENRIG_SUBSTRATE_SHARED_DOCS"]
-  ?? join(homedir(), ".openrig", "shared-docs");
-// OPR.0.3.2.14 — these four constants used to be copy-pasted in 7+
-// test files. Exporting from source + importing in tests eliminates
-// the divergence class that broke 17 tests during 0.3.1 cleanup.
-export const CLAUDE_HOOKS_ROOT = join(
-  SUBSTRATE_SHARED_DOCS_ROOT,
-  "control-plane",
-  "services",
-  "claude-hooks",
-);
-export const CLAUDE_SESSION_START_COMPACT_COMMAND = join(
-  CLAUDE_HOOKS_ROOT,
-  "bin",
-  "session-start-compact-context.sh",
-);
-export const CLAUDE_USER_PROMPT_SUBMIT_COMMAND = join(
-  CLAUDE_HOOKS_ROOT,
-  "bin",
-  "userpromptsubmit-queue-attention.sh",
-);
-export const CLAUDE_HOOK_FRAGMENT_PATH = join(
-  CLAUDE_HOOKS_ROOT,
-  "config",
-  "settings.fragment.json",
-);
-
-interface ClaudeSettingsCandidate {
-  path: string;
-  scope: "host-global" | "project" | "project-local";
-}
-
-interface ClaudeHookInspection {
-  path: string;
-  hasSessionStartCompact: boolean;
-  hasUserPromptSubmit: boolean;
-}
-
 export class RestoreCheckService {
   private deps: RestoreCheckDeps;
 
@@ -389,7 +357,7 @@ export class RestoreCheckService {
         rigChecks.push(resumeCheck);
 
         if (!opts.noQueue) {
-          const queueCheck = this.checkQueueFile(rig.name, node);
+          const queueCheck = this.checkQueueStore(node);
           checks.push(queueCheck);
           rigChecks.push(queueCheck);
         }
@@ -939,29 +907,25 @@ export class RestoreCheckService {
     };
   }
 
-  private checkQueueFile(rigName: string, node: NodeInventoryEntry): CheckEntry {
+  private checkQueueStore(node: NodeInventoryEntry): CheckEntry {
     const session = node.canonicalSessionName ?? node.logicalId;
-    const check = `seat.${session}.queue-file`;
-
-    // Derive queue file path from pod/member
-    const podName = node.podNamespace ?? (node.logicalId.includes(".") ? node.logicalId.split(".")[0] : null);
-    const memberName = node.logicalId.includes(".") ? node.logicalId.split(".").slice(1).join(".") : node.logicalId;
-
-    if (!podName) {
-      return { check, status: "yellow", evidence: "Cannot derive queue path (no pod namespace)", remediation: "" };
+    const check = `seat.${session}.queue-store`;
+    let probe: QueueStoreProbeResult | undefined;
+    try {
+      probe = this.deps.probeQueueStore?.();
+    } catch (err) {
+      probe = {
+        available: false,
+        evidence: `Daemon SQLite queue_items store probe failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
-
-    // OPR.0.3.2.14 — subpath scrubbed (internal-team layout → generic placeholder).
-    const substrateRoot = this.deps.substrateRoot ?? join(process.env["HOME"] ?? "~", ".openrig", "shared-docs");
-    const queuePath = join(substrateRoot, "rigs", rigName, "state", podName, `${memberName}.queue.md`);
-
-    if (this.deps.exists(queuePath)) {
-      return { check, status: "green", evidence: `Queue file exists at ${queuePath}`, remediation: "" };
+    if (probe?.available) {
+      return { check, status: "green", evidence: probe.evidence, remediation: "" };
     }
     return {
       check, status: "yellow",
-      evidence: `Queue file missing: ${queuePath}`,
-      remediation: "Create the missing durable queue file before relying on restored queue continuity",
+      evidence: probe?.evidence ?? "Daemon SQLite queue store could not be inspected",
+      remediation: "Restore the daemon SQLite queue store before relying on queue continuity",
       remediationSafe: false,
     };
   }
@@ -985,112 +949,116 @@ export class RestoreCheckService {
       };
     }
 
-    const candidates = this.getClaudeSettingsCandidates(node);
-    const searchedPaths = candidates.map((candidate) => candidate.path);
-    const cwdUnavailable = !node.cwd;
-    const inspections: ClaudeHookInspection[] = [];
-    const malformed: string[] = [];
-
-    for (const candidate of candidates) {
-      if (!this.deps.exists(candidate.path)) continue;
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(this.deps.readFile(candidate.path));
-      } catch (err) {
-        malformed.push(`${candidate.path}: ${err instanceof Error ? err.message : String(err)}`);
-        continue;
-      }
-
-      inspections.push({
-        path: candidate.path,
-        hasSessionStartCompact: this.hasClaudeCommandHook(parsed, "SessionStart", CLAUDE_SESSION_START_COMPACT_COMMAND, "compact"),
-        hasUserPromptSubmit: this.hasClaudeCommandHook(parsed, "UserPromptSubmit", CLAUDE_USER_PROMPT_SUBMIT_COMMAND),
-      });
+    // Current Claude activity hooks are selected as a runtime resource and
+    // delivered by ClaudeCodeAdapter into the seat CWD. Do not require the
+    // retired internal control-plane shell hooks on public installs.
+    const startup = node.nodeId ? this.deps.getStartupContext(node.nodeId) : null;
+    if (startup?.status === "ok" && !startup.projectionEntries.some((entry) => (
+      entry.category === "runtime_resource" && entry.resourceType === "claude_activity_hooks"
+    ))) {
+      return {
+        check: `seat.${session}.hooks`, status: "green",
+        evidence: "Claude activity hooks are not selected for this seat; hook inspection is not applicable",
+        remediation: "",
+      };
     }
-
-    if (malformed.length > 0) {
+    if (startup?.status === "ok") {
+      if (!node.cwd) {
+        return {
+          check: `seat.${session}.hooks`, status: "yellow",
+          evidence: "Claude activity hooks are selected, but seat cwd is unavailable for delivery inspection",
+          remediation: "Restore the seat working directory before trusting activity-hook readiness",
+          remediationSafe: false,
+        };
+      }
+      const settingsPath = join(node.cwd, ".claude", "settings.local.json");
+      const relayPath = join(node.cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+      const events = this.deps.getClaudeActivityHookEvents?.() ?? [];
+      if (events.length === 0) {
+        return {
+          check: `seat.${session}.hooks`, status: "yellow",
+          evidence: "Claude activity hook events could not be derived from the shipped manifest",
+          remediation: "Restore the daemon's Claude activity-hook assets before trusting hook readiness",
+          remediationSafe: false,
+        };
+      }
+      if (!this.deps.exists(relayPath) || !this.deps.exists(settingsPath)) {
+        return {
+          check: `seat.${session}.hooks`, status: "yellow",
+          evidence: `Claude activity hook delivery is incomplete: expected relay ${relayPath} and settings ${settingsPath}`,
+          remediation: "Relaunch the seat to project its selected Claude activity hooks",
+          remediationSafe: false,
+        };
+      }
+      let settings: unknown;
+      try {
+        settings = JSON.parse(this.deps.readFile(settingsPath));
+      } catch (err) {
+        return {
+          check: `seat.${session}.hooks`, status: "yellow",
+          evidence: `Claude activity-hook settings could not be trusted at ${settingsPath}: ${err instanceof Error ? err.message : String(err)}`,
+          remediation: `Fix the Claude settings JSON at ${settingsPath}`,
+          remediationSafe: false,
+        };
+      }
+      if (isRecord(settings) && settings["disableAllHooks"] === true) {
+        return {
+          check: `seat.${session}.hooks`, status: "yellow",
+          evidence: `Selected Claude activity hooks are explicitly disabled in ${settingsPath}; projection does not prove usable hooks`,
+          remediation: "Review the intentional hook-disable setting before relying on activity-hook readiness",
+          remediationSafe: false,
+        };
+      }
+      const missingEvents = events.filter((event) => !this.hasActivityRelayHook(settings, event, relayPath));
+      if (missingEvents.length === 0) {
+        return {
+          check: `seat.${session}.hooks`, status: "green",
+          evidence: `Selected Claude activity hooks are projected in ${settingsPath}, with relay present at ${relayPath}; hook execution is not verified`,
+          remediation: "",
+        };
+      }
       return {
         check: `seat.${session}.hooks`, status: "yellow",
-        evidence: `Malformed applicable Claude settings file(s): ${malformed.join("; ")}. Claude hook configuration could not be trusted until the malformed applicable settings file is fixed. Searched settings paths: ${searchedPaths.join(", ")}`,
-        remediation: `Fix Claude settings JSON before trusting hook readiness: ${malformed.map((entry) => entry.split(":")[0]).join(", ")}`,
+        evidence: `Claude activity-hook settings at ${settingsPath} are missing relay entries for: ${missingEvents.join(", ")}`,
+        remediation: "Relaunch the seat to project its selected Claude activity hooks",
         remediationSafe: false,
       };
     }
 
-    const sessionStartPaths = inspections
-      .filter((inspection) => inspection.hasSessionStartCompact)
-      .map((inspection) => inspection.path);
-    const userPromptSubmitPaths = inspections
-      .filter((inspection) => inspection.hasUserPromptSubmit)
-      .map((inspection) => inspection.path);
-    const hasSessionStart = sessionStartPaths.length > 0;
-    const hasUserPromptSubmit = userPromptSubmitPaths.length > 0;
-
-    if (hasSessionStart && hasUserPromptSubmit) {
-      return {
-        check: `seat.${session}.hooks`, status: "green",
-        evidence: `Claude Code hook configuration present, not hook-execution verified; SessionStart matcher compact command found in ${sessionStartPaths.join(", ")}; UserPromptSubmit command found in ${userPromptSubmitPaths.join(", ")}. Searched settings paths: ${searchedPaths.join(", ")}`,
-        remediation: "",
-      };
-    }
-
-    const missing = [];
-    if (!hasSessionStart) {
-      missing.push(`SessionStart matcher compact command ${CLAUDE_SESSION_START_COMPACT_COMMAND}`);
-    }
-    if (!hasUserPromptSubmit) {
-      missing.push(`UserPromptSubmit command ${CLAUDE_USER_PROMPT_SUBMIT_COMMAND}`);
-    }
-
-    const inspected = inspections.length > 0
-      ? `Existing settings inspected: ${inspections.map((inspection) => inspection.path).join(", ")}.`
-      : "No existing Claude settings files were found.";
-    const cwdEvidence = cwdUnavailable
-      ? " project settings were not inspected because cwd is unavailable."
-      : "";
-
     return {
       check: `seat.${session}.hooks`, status: "yellow",
-      evidence: `Claude Code hook configuration missing required entries: ${missing.join("; ")}. Searched settings paths: ${searchedPaths.join(", ")}. ${inspected}${cwdEvidence}`,
-      remediation: `Merge required Claude hook entries from ${CLAUDE_HOOK_FRAGMENT_PATH} into host-global or project Claude settings`,
+      evidence: startup?.status === "probe_error"
+        ? `Claude activity-hook selection could not be inspected: ${startup.evidence}`
+        : "Claude activity-hook selection could not be inspected because persisted startup context is unavailable",
+      remediation: "Restore the seat startup context before trusting hook readiness",
       remediationSafe: false,
     };
   }
 
-  private getClaudeSettingsCandidates(node: NodeInventoryEntry): ClaudeSettingsCandidate[] {
-    const home = process.env["HOME"] ?? "~";
-    const candidates: ClaudeSettingsCandidate[] = [{
-      path: join(home, ".claude", "settings.json"),
-      scope: "host-global",
-    }];
-
-    if (node.cwd) {
-      candidates.push({
-        path: join(node.cwd, ".claude", "settings.json"),
-        scope: "project",
-      });
-      candidates.push({
-        path: join(node.cwd, ".claude", "settings.local.json"),
-        scope: "project-local",
-      });
-    }
-
-    return candidates;
-  }
-
-  private hasClaudeCommandHook(settings: unknown, eventName: string, requiredCommand: string, requiredMatcher?: string): boolean {
+  private hasActivityRelayHook(settings: unknown, eventName: string, relayPath: string): boolean {
     if (!isRecord(settings) || !isRecord(settings["hooks"])) return false;
     const eventEntries = settings["hooks"][eventName];
     if (!Array.isArray(eventEntries)) return false;
-
-    return eventEntries.some((entry) => {
-      if (!isRecord(entry)) return false;
-      if (requiredMatcher !== undefined && entry["matcher"] !== requiredMatcher) return false;
-      const hooks = entry["hooks"];
-      if (!Array.isArray(hooks)) return false;
-      return hooks.some((hook) => isRecord(hook) && hook["command"] === requiredCommand);
-    });
+    const contexts = eventName === "SessionStart" ? ["startup", "resume"]
+      : eventName === "Notification" ? ["permission_prompt", "idle_prompt"] : [null];
+    return contexts.every((context) => eventEntries.some((entry) => {
+      if (!isRecord(entry) || !Array.isArray(entry["hooks"])) return false;
+      if (context !== null && entry["matcher"] !== undefined && entry["matcher"] !== "" && entry["matcher"] !== "*") {
+        if (typeof entry["matcher"] !== "string") return false;
+        try {
+          const matcher = entry["matcher"];
+          const matches = /^[a-zA-Z0-9_\- ,|]+$/.test(matcher)
+            ? matcher.split(/[|,]/).some((value) => value.trim() === context)
+            : new RegExp(matcher).test(context);
+          if (!matches) return false;
+        }
+        catch { return false; }
+      }
+      return entry["hooks"].some((hook) => (
+        isRecord(hook) && hook["type"] === "command" && typeof hook["command"] === "string" &&
+        hook["command"] === `node ${quoteShellArgument(relayPath)}`
+      ));
+    }));
   }
 
   private checkSpecPresent(rig: { rigId: string; name: string }): CheckEntry {
@@ -1265,7 +1233,7 @@ export class RestoreCheckService {
     if (checks.some((c) => c.check === "daemon.reachable" && c.status === "green")) proven.push("daemon_reachable");
     if (checks.some((c) => c.check.endsWith(".transcript") && c.status === "green")) proven.push("transcript_readable");
     if (checks.some((c) => c.check.endsWith(".spec-present") && c.status === "green")) proven.push("spec_present");
-    if (checks.some((c) => c.check.endsWith(".queue-file") && c.status === "green")) proven.push("queue_file_present");
+    if (checks.some((c) => c.check.endsWith(".queue-store") && c.status === "green")) proven.push("queue_store_available");
     if (checks.some((c) => c.check.endsWith(".resume-path") && c.status === "green")) proven.push("seat_identity_resolvable");
     return proven;
   }

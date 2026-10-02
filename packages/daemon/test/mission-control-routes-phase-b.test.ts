@@ -222,12 +222,15 @@ describe("mission-control routes Phase B (PL-005)", () => {
       expect(body.rows[0]!.qitemId).toBe(a.qitemId);
     });
 
-    it("returns 500 on unknown action_verb (audit-browse rejects with structured error)", async () => {
+    it("returns 400 on unknown action_verb (audit-browse rejects with structured error)", async () => {
       const { app } = buildApp({ bus, queueRepo, bearerToken: null, withDispatcher: false });
       const res = await app.request("/api/mission-control/audit?action_verb=totally-bogus");
-      expect(res.status).toBe(500);
-      const body = (await res.json()) as { error: string };
-      expect(body.error).toBe("audit_query_failed");
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; message: string; actionVerb: string; supported: string[] };
+      expect(body.error).toBe("verb_unknown");
+      expect(body.message).toContain("unknown action_verb 'totally-bogus'");
+      expect(body.actionVerb).toBe("totally-bogus");
+      expect(Array.isArray(body.supported)).toBe(true);
     });
 
     it("audit GET is read-only: POST returns 404 (route not registered for POST)", async () => {

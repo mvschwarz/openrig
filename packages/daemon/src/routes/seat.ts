@@ -5,6 +5,7 @@ import type { SessionRegistry } from "../domain/session-registry.js";
 import type { DiscoveryRepository } from "../domain/discovery-repository.js";
 import type { EventBus } from "../domain/event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import { observeClaudePaneStartedAt } from "../domain/native-process-lineage.js";
 import { SeatStatusService } from "../domain/seat-status-service.js";
 import { SeatHandoverService } from "../domain/seat-handover-service.js";
 import { SeatSwitchClientService } from "../domain/seat-switch-client-service.js";
@@ -111,6 +112,8 @@ seatRoutes.post("/handover/:seatRef", async (c) => {
     // B2 — discovered-mode resume-token capture derive-helper deps.
     contextUsageStore: (c.get("contextUsageStore" as never) as import("../domain/resume-token-capture.js").ResumeTokenCaptureDeps["contextUsageStore"]) ?? undefined,
     resumeTokenCapturer: (c.get("resumeMetadataRefresher" as never) as import("../domain/resume-token-capture.js").ResumeTokenCaptureDeps["resumeTokenCapturer"]) ?? undefined,
+    // #421 — the pane's current Claude process start time, so capture skips an older sidecar.
+    claudeProcessStartedAt: (sessionName: string) => observeClaudePaneStartedAt({ target: sessionName, tmux: c.get("tmuxAdapter" as never) as TmuxAdapter }),
     // Wire the predecessor-recap resolver so the successor boot packet fires
     // with a bounded from-record recap. Reuses the full ContextUsageStore from context (readAndNormalize
     // = claude transcript_path; readCodexAndNormalize = codex rollout_path) + a resume-token lookup for

@@ -285,7 +285,7 @@ def resolve_roots():
     out = {}
     out["work_root"] = os.environ.get("OPENRIG_WORKSPACE_ROOT") or rig_config("workspace.root")
 
-    t = os.environ.get("OPENRIG_TOPOLOGY_ROOT") or rig_config("workspace.topology_root")
+    t = os.environ.get("OPENRIG_TOPOLOGY_ROOT") or rig_config("topology.root")
     if not t:
         # Resolve symlinks before walking upward; otherwise a projection ascends
         # its own tree rather than the shared-docs source.
@@ -559,7 +559,7 @@ if __name__ == "__main__":
             if v:
                 print(f"{k}={v}")
             else:
-                key = "workspace.root" if k == "work_root" else "workspace.topology_root"
+                key = "workspace.root" if k == "work_root" else "topology.root"
                 print(f"# {k} UNRESOLVED — set it: rig config set {key} <path>", file=sys.stderr)
         sys.exit(0 if all(r.values()) else 3)
     if not a.name:

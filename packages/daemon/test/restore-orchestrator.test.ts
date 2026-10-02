@@ -401,6 +401,66 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
+  it("attemptResume forwards effort to claude and codex resume adapters", async () => {
+    const claudeResume = vi.fn(async () => ({ ok: true as const }));
+    const codexResume = vi.fn(async () => ({ ok: true as const }));
+    const orch = createOrchestrator({
+      claude: { canResume: vi.fn(() => true), resume: claudeResume } as unknown as ClaudeResumeAdapter,
+      codex: { canResume: vi.fn(() => true), resume: codexResume } as unknown as CodexResumeAdapter,
+    });
+
+    const rig = rigRepo.createRig("effort-forward-test");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/work" });
+
+    // Claude forwards effort
+    await (orch as any).attemptResume(
+      node.id,
+      "claude-session",
+      "claude_id",
+      "token-claude",
+      "/work",
+      null,
+      "sonnet",
+      "floor",
+      "high",
+    );
+    expect(claudeResume).toHaveBeenCalledWith(
+      "claude-session",
+      "claude_id",
+      "token-claude",
+      "/work",
+      "floor",
+      "sonnet",
+      undefined,
+      node.id,
+      "high",
+    );
+
+    // Codex forwards effort
+    (orch as any).claudeResume.canResume = vi.fn(() => false);
+    await (orch as any).attemptResume(
+      node.id,
+      "codex-session",
+      "codex_id",
+      "token-codex",
+      "/work",
+      "profile1",
+      "o3",
+      "floor",
+      "medium",
+    );
+    expect(codexResume).toHaveBeenCalledWith(
+      "codex-session",
+      "codex_id",
+      "token-codex",
+      "/work",
+      "profile1",
+      "floor",
+      "o3",
+      "medium",
+    );
+  });
+
   it("nonexistent snapshot -> { ok: false, code: 'snapshot_not_found' }", async () => {
     const orch = createOrchestrator();
     const result = await orch.restore("nonexistent");
@@ -1198,6 +1258,45 @@ describe("RestoreOrchestrator", () => {
     // NS-T04: resume failure is now FAILED loudly, no silent fallback to checkpoint
     if (result.ok) expect(result.result.nodes[0]!.status).toBe("awaiting-decision");
     fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it.each(["opaque", "command-error", "capture-error", "null"])("legacy %s observation preserves current binding and retained history", async mode => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "retained-history", withBinding: "worker",
+    });
+    const nodeId = snap.data.nodes[0]!.id;
+    const readState = () => ({
+      binding: sessionRegistry.getBindingForNode(nodeId),
+      sessions: db.prepare("SELECT id, status, resume_type, resume_token FROM sessions WHERE node_id=? ORDER BY id").all(nodeId),
+    });
+    const tmux = mockTmux();
+    vi.mocked(tmux.getPaneCommand).mockImplementation(async () => {
+      if (mode === "command-error") throw new Error("command observation unavailable");
+      return mode === "null" ? null : "2.1.283";
+    });
+    vi.mocked(tmux.capturePaneContent).mockImplementation(async () => {
+      if (mode === "capture-error") throw new Error("capture observation unavailable");
+      return mode === "null" ? null : "Restored conversation\n❯\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+    });
+    const claude = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0 });
+    const resume = claude.resume.bind(claude);
+    let afterLaunch: ReturnType<typeof readState> | undefined;
+    vi.spyOn(claude, "resume").mockImplementation(async (...args) => {
+      afterLaunch = readState();
+      return resume(...args);
+    });
+    const result = await createOrchestrator({ tmux, claude }).restore(snap.id);
+    expect(result).toMatchObject({ ok: true, result: { rigResult: "partially_restored", nodes: [{ status: "attention_required" }] } });
+    expect(afterLaunch?.binding).not.toBeNull();
+    expect(afterLaunch).toBeDefined();
+    expect(readState()).toEqual(afterLaunch);
+    expect(readState().sessions).toContainEqual(expect.objectContaining({ resume_type: "claude_id", resume_token: "retained-history" }));
+    expect(readState().sessions).toContainEqual(expect.objectContaining({ status: "running", resume_token: null }));
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    // Only the resume command and its submit; never orientation/checkpoint input.
+    expect(tmux.sendText).toHaveBeenCalledTimes(1);
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
   });
 
   it("legacy Claude resume verification failure -> status 'failed'", async () => {
@@ -3019,6 +3118,58 @@ describe("RestoreOrchestrator", () => {
       expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(seeded.nodeId)).toEqual({ verdict: "verified" });
       expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(oldEvent);
       expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(usable ? 1 : 0);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
+    it("reconciles a headerless Claude prompt when exact resume-token lineage is verified", async () => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("2.1.283");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue([
+        "Restored conversation",
+        "❯",
+        "⏵⏵ bypass permissions on (shift+tab to cycle)",
+      ].join("\n"));
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+
+      const result = await createOrchestrator({
+        tmux,
+        listProcesses: async () => managedClaudeRows("tok-abc-123"),
+      }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: true, to: "operator_recovered" });
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
+    it.each(["background", "ambiguous", "argv-lookalike", "missing-metadata"].flatMap((failure) =>
+      ["2.1.283", "claude"].map((paneCommand) => [failure, paneCommand])
+    ))("does not reconcile headerless %s evidence under %s", async (failure, paneCommand) => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue(paneCommand);
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue("Restored conversation\n❯\n⏵⏵ bypass permissions on");
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+      const originalOutcome = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get();
+      const listProcesses = async () => {
+        const rows = managedClaudeRows("tok-abc-123");
+        if (failure === "background") {
+          rows[2]!.pgid = 9000;
+          rows.push({ ...rows[2]!, pid: 1237, pgid: 1235, command: "claude --resume another-session" });
+        }
+        if (failure === "ambiguous") rows.push({ ...rows[2]!, pid: 1237 });
+        if (failure === "argv-lookalike") rows[2]!.command = "claude --model --resume tok-abc-123";
+        if (failure === "missing-metadata") rows[2]!.startedAt = "";
+        return rows;
+      };
+
+      const result = await createOrchestrator({ tmux, listProcesses }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result.ok).toBe(false);
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(0);
+      expect(db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get()).toEqual(originalOutcome);
       expect(tmux.sendKeys).not.toHaveBeenCalled();
       expect(tmux.sendText).not.toHaveBeenCalled();
     });

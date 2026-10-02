@@ -329,13 +329,27 @@ export function getWorkflowReview(opts: ScanWorkflowSpecsOpts & { name: string; 
 }
 
 export function workflowLibraryId(name: string, version: string): string {
+  // Legacy IDs round-trip every name, but only versions without a colon.
+  // An opaque tuple keeps colon-bearing versions distinct without changing
+  // any already-unambiguous ID. Legacy valid IDs always contain another colon.
+  if (version.includes(":")) return `workflow:@${Buffer.from(JSON.stringify([name, version])).toString("base64url")}`;
   return `workflow:${name}:${version}`;
 }
 
 export function parseWorkflowLibraryId(id: string): { name: string; version: string } | null {
   if (!id.startsWith("workflow:")) return null;
   const rest = id.slice("workflow:".length);
-  // version may be numeric or an arbitrary string; split on the LAST `:`.
+  if (rest.startsWith("@") && !rest.includes(":")) {
+    try {
+      const encoded = rest.slice(1);
+      const bytes = Buffer.from(encoded, "base64url");
+      if (!encoded || bytes.toString("base64url") !== encoded) return null;
+      const pair: unknown = JSON.parse(bytes.toString("utf8"));
+      if (!Array.isArray(pair) || pair.length !== 2 || pair.some(value => typeof value !== "string")) return null;
+      return { name: pair[0], version: pair[1] };
+    } catch { return null; }
+  }
+  // Preserve legacy names (including literal percent sequences and colons).
   const lastColon = rest.lastIndexOf(":");
   if (lastColon === -1) return null;
   return { name: rest.slice(0, lastColon), version: rest.slice(lastColon + 1) };
@@ -446,16 +460,28 @@ export function scanWorkflowSpecFolder(
     // precision; without this floor a freshly-written file whose mtime
     // is `T - 999ms` would always look "newer" than its cached_at at
     // exactly `T` and never skip.
+    // A path can hold several cached versions plus a diagnostic row (#503); the most
+    // recently written row is the one that reflects the file's last scan.
     const cachedAt = opts.db
-      .prepare(`SELECT cached_at FROM workflow_specs WHERE source_path = ?`)
-      .get(filePath) as { cached_at: string } | undefined;
+      .prepare(`SELECT cached_at, source_hash FROM workflow_specs WHERE source_path = ? ORDER BY cached_at DESC, rowid DESC LIMIT 1`)
+      .get(filePath) as { cached_at: string; source_hash: string } | undefined;
     if (cachedAt) {
       const cachedAtMs = Date.parse(cachedAt.cached_at);
       const cachedAtSec = Math.floor(cachedAtMs / 1000);
       const mtimeSec = Math.floor(mtimeMs / 1000);
       if (Number.isFinite(cachedAtMs) && cachedAtSec >= mtimeSec) {
-        result.skipped += 1;
-        continue;
+        let unchanged = cachedAtSec > mtimeSec;
+        if (!unchanged) {
+          // A same-second edit shares the timestamp bucket. Consult the
+          // cache's existing content hash before treating it as unchanged.
+          try {
+            unchanged = createHash("sha256").update(readFileSync(filePath)).digest("hex") === cachedAt.source_hash;
+          } catch { /* The existing readThrough path records the diagnostic. */ }
+        }
+        if (unchanged) {
+          result.skipped += 1;
+          continue;
+        }
       }
     }
 
@@ -503,6 +529,9 @@ export function scanWorkflowSpecFolder(
       version: string | null;
     }>;
   for (const row of cachedUnderFolder) {
+    // LIKE treats _ and % in real folder names as patterns. Only this
+    // literal directory owns deletion; neighboring cache rows must survive.
+    if (!row.source_path.startsWith(folderPrefix)) continue;
     if (seenPaths.has(row.source_path)) continue;
     const removed = opts.cache.removeBySourcePath(row.source_path);
     if (removed > 0) {

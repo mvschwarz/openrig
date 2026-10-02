@@ -319,6 +319,18 @@ export interface HealthRecord {
   indeterminateReason: string | null;
 }
 
+/** A source's evaluated share of its input; omitted items are unevaluated, not healthy. */
+export interface HealthCoverage {
+  source: string;
+  unit: string;
+  limit: number;
+  total: number;
+  evaluated: number;
+  omitted: number;
+  partial: boolean;
+  order: string;
+}
+
 export interface HealthSnapshot {
   /** loaded means the canonical bounded list read answered, including [] */
   availability: "loaded" | "unavailable";
@@ -326,6 +338,7 @@ export interface HealthSnapshot {
   total: number;
   truncated: boolean;
   records: HealthRecord[];
+  coverage?: HealthCoverage[];
 }
 
 export interface ProjectSelection { id: string; root: string }

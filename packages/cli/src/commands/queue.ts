@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomBytes } from "node:crypto";
 import { Command } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
@@ -149,6 +150,11 @@ async function withClient<T>(
 }
 
 function printResult(json: boolean, body: unknown, status: number): void {
+  if (status >= 400 && body && typeof body === "object"
+    && (body as { error?: unknown }).error === "remote_queue_write_failed"
+    && (body as { outcome?: unknown }).outcome === "indeterminate") {
+    console.error("The write outcome is INDETERMINATE if the request may have reached a daemon — reconcile by ID before any retry.");
+  }
   if (json) {
     console.log(JSON.stringify(body));
   } else {
@@ -409,7 +415,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   cmd
     .command("create")
     .description("Create a new qitem")
-    .option("--source <session>", "(deprecated, ignored) the source is derived from the seat env (X-OpenRig-Session); P21 I3 made the create route derive it from the transport header")
+    .option("--source <session>", "Declared source outside a managed seat (recorded as claimed:v1); the managed seat env takes precedence")
     .requiredOption("--destination <session>", "Destination session (the seat that owns the work)")
     .option("--body <text>", "Qitem body inline (use - to read from stdin; mutually exclusive with --body-file)")
     .option("--body-file <path>", "Read qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class for multiline bodies.")
@@ -421,7 +427,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--tier <tier>", "Tier (e.g. fast, routine, deep, critical) — drives SLA")
     .option("--tags <tags>", "Comma-separated tags (composes with --mission and --slice)")
     .option("--expires-at <iso>", "ISO timestamp at which the qitem expires")
-    .option("--id <qitemId>", "Idempotent qitem_id (skip if not provided)")
+    .option("--id <qitemId>", "Retry identity: reuse for the same create after an unknown outcome; otherwise generated and printed before sending")
     .option("--target-repo <name>", "PL-007: typed repo scope (must match a repo in the source rig's RigSpec.workspace.repos[])")
     .option("--summary <text>", "Short human-readable subject, shown in the needs-you view. For a human destination, --body-file is the complete decision brief or update; keep technical continuation in the owning agent row and evidence.")
     .option("--human-intent <intent>", "decision (default) or update: a quiet informational delivery, never an approval request")
@@ -524,9 +530,11 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           "warning: rig queue create called without --summary. Pass --summary <text> to set the new qitem's short human-readable summary; without it, the Story node falls back to a bounded body preview. A good summary is 1-2 plain sentences a human skims in the needs-you view — what the work is and why it needs this seat, not the agent-speak --body. Proceeding (pre-18 callers exempt).\n"
         );
       }
-      // P21 I3 reconcile: the source is DERIVED from the seat env (X-OpenRig-Session) — --source
-      // deprecated + ignored, no body sourceSession. Verify the env or the daemon returns 400 actor_required (no seat identity to record; P18 retired the 401 refusal).
-      if (!resolveCurrentSession(undefined, "source")) return;
+      // A managed seat keeps transport-derived identity; an external caller can
+      // name the existing claimed:v1 body actor without forging a transport header.
+      const managedSource = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME");
+      const source = resolveCurrentSession(managedSource ?? opts.source, "source");
+      if (!source) return;
       const deps = getDeps();
       // OPR.0.3.2.21.FR-4(b) — first-class --mission / --slice flags
       // translate to canonical mission:<id> / slice:<id> tags. Composes
@@ -562,8 +570,23 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
             return;
           }
         }
+        // Allocate before the write: a timeout/abort cannot tell us whether the
+        // daemon committed. The existing primary-key absorb makes a retry with
+        // THIS id safe; a negative read is not permission to mint another one.
+        // Keep timestamp-based fallback consumers, with 64 random bits so an
+        // accidental collision is not mistaken for an intentional retry.
+        const qitemId = opts.id ?? `qitem-${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}-${randomBytes(8).toString("hex")}`;
+        const show = `rig queue show ${shellQuote(qitemId)} --full --json`;
+        const reconcile = hostResolved.hostId && hostResolved.hostId !== "local"
+          ? `For destination host ${shellQuote(hostResolved.hostId)}, replace <destination-daemon-url> with its registered daemon URL and run: OPENRIG_URL='<destination-daemon-url>' ${show}.`
+          : `At the same endpoint and OPENRIG_HOME, run: ${show}.`;
+        const recovery = `${reconcile} If retrying, repeat the same create with --id ${shellQuote(qitemId)} and unchanged source, destination, body and options. A missing row does not rule out a pending commit; retrying without this ID creates new work.`;
+        // stderr survives an interrupted wait without adding a second JSON
+        // document to stdout. This is a request identity, NOT a commit receipt.
+        console.error(`Queue create request ID: ${qitemId} (not proof of persistence). ${recovery}`);
         const res = await client.post<Record<string, unknown>>("/api/queue/create", {
-          qitemId: opts.id,
+          ...(managedSource === undefined ? { sourceSession: source } : {}),
+          qitemId,
           destinationSession: hostResolved.destination,
           body: resolvedBody,
           humanIntent: opts.humanIntent,
@@ -581,7 +604,27 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (omitted for
           // plain local writes — the local path stays byte-identical).
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
+        }).catch((error: unknown) => {
+          // A pre-header disconnect can follow a committed create. Preserve the
+          // typed error, but do not let the shared renderer assert nondelivery.
+          if (error instanceof DaemonConnectionError) error.writeOutcome = "unknown";
+          if (error instanceof DaemonConnectionError || error instanceof DaemonResponseError) {
+            // Keep the shared typed error/exit path, including --json, while
+            // supplying the identity missing from an unreadable/late response.
+            error.message += ` ${recovery}`;
+          }
+          throw error;
         });
+        if (res.status >= 400 && res.data?.outcome === "indeterminate") {
+          // Forwarded writes may return a structured unknown outcome rather
+          // than throw. Preserve that failure and expose the same recovery ID.
+          printResult(opts.json ?? false, { ...res.data, qitemId, recovery }, res.status);
+          return;
+        }
+        const createWarning = res.data?.createWarning as { code?: unknown; message?: unknown } | undefined;
+        if (res.status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
+          console.error(`Warning: ${createWarning.message}`);
+        }
         if (opts.verify && res.status < 400) {
           const created = res.data;
           const qitemId = typeof created.qitemId === "string" ? created.qitemId : null;

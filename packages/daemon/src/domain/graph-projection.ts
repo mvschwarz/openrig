@@ -150,6 +150,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         role: node.role,
         runtime: node.runtime,
         model: node.model,
+        effort: node.effort ?? null,
         status: latestSession ? latestSession.status : null,
         binding: node.binding,
         nodeKind: node.runtime === "terminal" ? "infrastructure" : "agent",

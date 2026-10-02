@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { EventBus } from "../event-bus.js";
-import { readProjectReadiness } from "./judgments.js";
+import { readProjectReadiness, resolveProjectRoot } from "./judgments.js";
 
 export interface ProofSourceWatch {
   close(): void;
@@ -15,6 +15,8 @@ export function proofSourceObservation(c: { get: (key: never) => unknown }) {
 /** Push invalidation over the existing bus; existing client quiet refresh is the missed-event repair. */
 export function watchProofSources(missionsRoot: string, invalidate: () => void, bus: EventBus): ProofSourceWatch {
   const workspace = path.dirname(missionsRoot);
+  let projectRoot = workspace;
+  try { projectRoot = resolveProjectRoot(missionsRoot); } catch { /* Legacy roots retain their existing watch boundary. */ }
   // ponytail: bounded local workspaces use a full semantic read after a file burst.
   // Keep this workload measured; subtree indexing is warranted only when that bound is exceeded.
   const basis = () => createHash("sha256").update(JSON.stringify(readProjectReadiness(missionsRoot).missions.map(m => [m.name, m.revision]))).digest("hex");
@@ -22,8 +24,8 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
   let revision = "unavailable", timer: NodeJS.Timeout | undefined;
   try { revision = basis(); state = "watching"; } catch { /* Direct reads name unavailable inputs; watching may recover them. */ }
   const notify = (next: string) => { try { bus.emit({ type: "proof.sources_changed", scope: missionsRoot, revision: next }); } catch { /* Quiet refresh remains the repair path. */ } };
-  let watcher: fs.FSWatcher;
-  try { watcher = fs.watch(workspace, { recursive: true, persistent: false }, () => {
+  const watchers: fs.FSWatcher[] = [];
+  const schedule = () => {
     if (timer) return;
     timer = setTimeout(() => {
       timer = undefined;
@@ -40,8 +42,20 @@ export function watchProofSources(missionsRoot: string, invalidate: () => void, 
       }
     }, 40);
     timer.unref();
-  });
-  } catch { invalidate(); notify("unavailable"); return { close() {}, observation: () => ({ state: "unavailable", revision }) }; }
-  watcher.on("error", () => { state = "unavailable"; revision = "unavailable"; invalidate(); notify("unavailable"); });
-  return { observation: () => ({ state, revision }), close: () => { state = "unavailable"; if (timer) clearTimeout(timer); watcher.close(); } };
+  };
+  try {
+    watchers.push(fs.watch(workspace, { recursive: true, persistent: false }, schedule));
+    if (projectRoot !== workspace) {
+      watchers.push(fs.watch(projectRoot, { recursive: false, persistent: false }, (_event, filename) => {
+        if (filename === null || filename.toString() === "project.yaml") schedule();
+      }));
+    }
+  } catch {
+    for (const watcher of watchers) watcher.close();
+    if (timer) clearTimeout(timer);
+    invalidate(); notify("unavailable");
+    return { close() {}, observation: () => ({ state: "unavailable", revision }) };
+  }
+  for (const watcher of watchers) watcher.on("error", () => { state = "unavailable"; revision = "unavailable"; invalidate(); notify("unavailable"); });
+  return { observation: () => ({ state, revision }), close: () => { state = "unavailable"; if (timer) clearTimeout(timer); for (const watcher of watchers) watcher.close(); } };
 }

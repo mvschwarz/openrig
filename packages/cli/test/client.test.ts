@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import http from "node:http";
-import { DaemonClient, DaemonConnectionError } from "../src/client.js";
+import { DaemonClient, DaemonConnectionError, formatDaemonHostForUrl } from "../src/client.js";
 
 // Lightweight test server that echoes request info as JSON
 function createEchoServer(): { server: http.Server; port: number; close: () => Promise<void> } {
@@ -78,6 +78,26 @@ describe("DaemonClient", () => {
   it("constructs correct URLs from base", () => {
     const client = new DaemonClient("http://localhost:9999");
     expect(client.baseUrl).toBe("http://localhost:9999");
+  });
+
+  // Issue #425: bare IPv6 literals must bracket for URL hosts.
+  it("formatDaemonHostForUrl brackets bare IPv6 literals only", () => {
+    expect(formatDaemonHostForUrl("::1")).toBe("[::1]");
+    expect(formatDaemonHostForUrl("2001:db8::1")).toBe("[2001:db8::1]");
+    expect(formatDaemonHostForUrl("[::1]")).toBe("[::1]");
+    expect(formatDaemonHostForUrl("127.0.0.1")).toBe("127.0.0.1");
+    expect(formatDaemonHostForUrl("localhost")).toBe("localhost");
+    expect(formatDaemonHostForUrl("daemon.internal")).toBe("daemon.internal");
+  });
+
+  // Issue #425 end-to-end at the URL layer: native fetch rejects unbracketed
+  // http://::1:port before contacting anyone, so assert the helper-built
+  // URL parses with the right host (a live socket is covered by repo CI).
+  it("builds a parseable URL from an IPv6 host", () => {
+    const built = `http://${formatDaemonHostForUrl("::1")}:7433`;
+    expect(() => new URL("http://::1:7433")).toThrow();
+    expect(new URL(built).hostname).toBe("[::1]");
+    expect(new URL(built).port).toBe("7433");
   });
 
   // Test 2: Client GET returns { status, data } with parsed JSON

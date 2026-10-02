@@ -104,6 +104,52 @@ describe("launchHarness — per-agent --model reaches the claude launch (51-07 A
   });
 });
 
+describe("launchHarness — per-agent --effort reaches the claude launch (#75)", () => {
+  const EFFORT = "high";
+  const POSTURE = claudePostureFlag(process.env, undefined);
+
+  const withEffort = (effort?: string, model?: string): NodeBinding => ({ ...makeBinding(), effort, model } as NodeBinding);
+  const adapterWith = (tmux: TmuxAdapter) => new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+  const lastCmd = (tmux: TmuxAdapter): string => {
+    const calls = (tmux.sendText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    return (calls[calls.length - 1]?.[1] as string) ?? "";
+  };
+
+  it("FRESH launch emits --effort when the binding declares one", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withEffort(EFFORT), { name: "seat" });
+    expect(lastCmd(tmux)).toContain(`--effort '${EFFORT}'`);
+  });
+
+  it("RESUME launch emits --effort", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withEffort(EFFORT), { name: "seat", resumeToken: "tok-123" });
+    expect(lastCmd(tmux)).toContain(`--effort '${EFFORT}'`);
+  });
+
+  it("FORK launch emits --effort", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withEffort(EFFORT), { name: "seat", forkSource: { kind: "native_id", value: "parent-xyz" } });
+    expect(lastCmd(tmux)).toContain(`--effort '${EFFORT}'`);
+  });
+
+  it("emits both --model and --effort when both declared", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withEffort(EFFORT, "claude-haiku-4-5"), { name: "seat", resumeToken: "tok-123" });
+    expect(lastCmd(tmux)).toContain(`--model 'claude-haiku-4-5'`);
+    expect(lastCmd(tmux)).toContain(`--effort '${EFFORT}'`);
+  });
+
+  it("absent effort → command byte-identical", async () => {
+    const tmuxNo = mockTmux(); await adapterWith(tmuxNo).launchHarness(withEffort(undefined), { name: "seat", resumeToken: "T" });
+    const tmuxYes = mockTmux(); await adapterWith(tmuxYes).launchHarness(withEffort(EFFORT), { name: "seat", resumeToken: "T" });
+    const noEffort = lastCmd(tmuxNo), withEff = lastCmd(tmuxYes);
+    expect(noEffort).toContain(POSTURE);
+    expect(withEff).toContain(POSTURE);
+    expect(withEff.replace(` --effort '${EFFORT}'`, "")).toBe(noEffort);
+  });
+});
+
 // OPR.0.5.3.1 slice 01 — Claude scrollback restore. Every managed launch path must prepend
 // CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 by default (classic renderer -> native scrollback);
 // an explicit OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 opts back into fullscreen (byte-identical

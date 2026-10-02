@@ -1,6 +1,8 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
+import { connectionErrorCode, formatDaemonHostForUrl } from "./client.js";
+import { blockedConnectionGuidance, isBlockedConnectionCode } from "./daemon-reachability.js";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
 import { DAEMON_STOP_WAIT_MS, DAEMON_SHUTDOWN_RECEIPT, type DaemonShutdownReceipt } from "@openrig/daemon/daemon-shutdown";
 import { ConfigStore } from "./config-store.js";
@@ -58,7 +60,12 @@ export interface DaemonStatus {
   reason?: "unresponsive" | "event-loop-starved";
   /** OPR.0.4.3.21 — event-loop evidence when healthz answered with a monitor. */
   eventLoop?: DaemonEventLoopEvidence;
+  /** #275 — the OS code behind a failed health probe (e.g. EPERM when a sandbox blocked it). */
+  probeErrorCode?: string;
 }
+
+/** "unknown": the process may exist but this shell can neither signal nor inspect it. */
+export type ProcessLiveness = "alive" | "dead" | "unknown";
 
 export interface GetDaemonStatusOptions {
   /** Observers may disable cleanup; only a matching clean shutdown permits removal. */
@@ -67,7 +74,7 @@ export interface GetDaemonStatusOptions {
 
 /** Build the daemon HTTP URL from status. Uses persisted host or defaults to 127.0.0.1. */
 export function getDaemonUrl(status: DaemonStatus): string {
-  return `http://${status.host ?? DEFAULT_HOST}:${status.port}`;
+  return `http://${formatDaemonHostForUrl(status.host ?? DEFAULT_HOST)}:${status.port}`;
 }
 
 /**
@@ -83,6 +90,8 @@ export interface DaemonNotRunningError {
   fact: string;
   consequence: string;
   action: string;
+  /** The OS code behind the failed probe, when known. */
+  causeCode?: string;
 }
 
 export function daemonNotRunningError(): DaemonNotRunningError {
@@ -106,11 +115,22 @@ export function statusGuardMessage(status: DaemonStatus): DaemonNotRunningError 
   if (status.state === "stopped" || status.state === "stale") {
     return daemonNotRunningError();
   }
+  const causeCode = status.probeErrorCode ? { causeCode: status.probeErrorCode } : {};
+  if (isBlockedConnectionCode(status.probeErrorCode)) {
+    const blocked = blockedConnectionGuidance(status.probeErrorCode);
+    return {
+      fact: `Daemon could not be checked: the health probe was blocked (${status.probeErrorCode}).`,
+      consequence: `This command needs a responsive daemon. ${blocked.consequence}`,
+      action: blocked.action,
+      ...causeCode,
+    };
+  }
   // unverified, or running-but-unhealthy: we do NOT know it is down.
   return {
     fact: "Daemon did not respond — it may be busy or stopped (state not confirmed).",
     consequence: "This command needs a responsive daemon; the outcome of proceeding would be indeterminate.",
     action: "Re-check with 'rig daemon status'. If it is confirmed stopped, run 'rig up' or 'rig daemon start'.",
+    ...causeCode,
   };
 }
 
@@ -193,6 +213,9 @@ export interface LifecycleDeps {
   openForAppend: (path: string) => number;
   closeFile?: (fd: number) => void;
   isProcessAlive: (pid: number) => boolean;
+  /** #275 — three-state liveness for status reads (production: realDeps). Optional so existing
+   *  mocks keep the boolean rule; absent = derived from isProcessAlive. */
+  processLiveness?: (pid: number) => ProcessLiveness;
   // OPR.0.4.2.1 — optional injectable delay for the status-probe bounded settle/retry.
   // Defaults to a real setTimeout in production; tests pass a no-op to stay fast. Optional so
   // existing deps / mocks / callers are untouched.
@@ -372,7 +395,7 @@ async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openr
   if (!deps.isProcessAlive(state.pid)) return "dead";
   const host = state.host ?? DEFAULT_HOST;
   try {
-    await fetchDaemonProbe(deps, `http://${host}:${state.port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
+    await fetchDaemonProbe(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
     // Any response (ok or not) means something is listening on our port → OpenRig
     return "openrig";
   } catch (err) {
@@ -552,7 +575,7 @@ export async function verifyRequiredListeners(input: {
   for (const host of required) {
     // NO catch-collapse here (r2 finding): the probe classifies its own errors; an
     // exception reaching this point is a wiring bug and should surface, not convert.
-    const outcome = await input.probe(`http://${host}:${input.port}/healthz`);
+    const outcome = await input.probe(`http://${formatDaemonHostForUrl(host)}:${input.port}/healthz`);
     if (outcome === "healthy") verified.push(host);
     else if (outcome === "unhealthy") missing.push(host);
     else indeterminate.push(host);
@@ -619,7 +642,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   } else {
     let recoveredRunning = false;
     try {
-      await fetchDaemonProbe(deps, `http://${probeHost}:${port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
+      await fetchDaemonProbe(deps, `http://${formatDaemonHostForUrl(probeHost)}:${port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
       recoveredRunning = true;
     } catch (err) {
       if (err instanceof HealthProbeTimeoutError) {
@@ -690,7 +713,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     if (!Number.isSafeInteger(pid) || pid! <= 0) throw new Error("Daemon spawn returned no valid child PID");
     if (hasExited()) throw new Error(`Daemon child ${pid} exited before startup completed`);
   };
-  const healthzUrl = `http://${probeHost}:${port}/healthz`;
+  const healthzUrl = `http://${formatDaemonHostForUrl(probeHost)}:${port}/healthz`;
   type StartHealth = { pid?: unknown; bind?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean } };
   const readOwnedHealth = async (url: string): Promise<StartHealth | null> => {
     assertChild();
@@ -826,8 +849,8 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   const state = readState(deps);
   const configured = resolveConfiguredDaemonTarget();
   const explicitUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
-  const stateUrl = state ? `http://${state.host ?? DEFAULT_HOST}:${state.port}` : undefined;
-  const target = stateUrl ?? explicitUrl?.replace(/\/+$/, "") ?? `http://${configured.host}:${configured.port}`;
+  const stateUrl = state ? `http://${formatDaemonHostForUrl(state.host ?? DEFAULT_HOST)}:${state.port}` : undefined;
+  const target = stateUrl ?? explicitUrl?.replace(/\/+$/, "") ?? `http://${formatDaemonHostForUrl(configured.host)}:${configured.port}`;
   if (stateUrl && explicitUrl && new URL(explicitUrl).origin !== new URL(stateUrl).origin) {
     throw new Error(`Cannot stop safely: addressed ${explicitUrl}/healthz does not match local PID ${state!.pid} at ${stateUrl}/healthz; no signal sent.`);
   }
@@ -954,8 +977,8 @@ export async function getDaemonStatus(
       const url = new URL(openrigUrl);
       return { state: "running", port: Number(url.port) || DEFAULT_PORT, host: url.hostname || DEFAULT_HOST, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
     } catch (err) {
-      // 1ae863d2: refusal = positive down; anything else (timeout/wedged) = unverified.
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified" };
+      // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...probeErrorCodeOf(err) };
     }
   }
 
@@ -963,7 +986,7 @@ export async function getDaemonStatus(
   if (!state) {
     const configured = resolveConfiguredDaemonTarget();
     try {
-      const res = await probeHealthzWithSettle(deps, `http://${configured.host}:${configured.port}/healthz`);
+      const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(configured.host)}:${configured.port}/healthz`);
       const ev = await readHealthEvidence(res);
       return {
         state: "running",
@@ -977,12 +1000,15 @@ export async function getDaemonStatus(
       // 1ae863d2: the resolved home has NO daemon state — before asserting anything,
       // look for a live sibling home / HOME-MOVED marker (the wrong-home class).
       const siblingHint = findSiblingHome(deps);
-      if (siblingHint) return { state: "unverified", siblingHint };
-      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified" };
+      if (siblingHint) return { state: "unverified", siblingHint, ...probeErrorCodeOf(err) };
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", ...probeErrorCodeOf(err) };
     }
   }
 
-  if (!deps.isProcessAlive(state.pid)) {
+  const liveness: ProcessLiveness = deps.processLiveness
+    ? deps.processLiveness(state.pid)
+    : deps.isProcessAlive(state.pid) ? "alive" : "dead";
+  if (liveness === "dead") {
     // A status read must not erase the identity needed to judge a failed stop.
     const stateFile = resolveLifecycleFile(deps, "daemon.json");
     const { receipt } = readShutdownReceipt(deps, stateFile);
@@ -992,26 +1018,47 @@ export async function getDaemonStatus(
     return { state: "stale" };
   }
 
-  // Process alive — check healthz
   const host = state.host ?? DEFAULT_HOST;
+  if (liveness === "unknown") {
+    // #275: this shell can neither signal nor inspect the recorded PID (a sandbox, or another
+    // user's process). Never call that stale; let the daemon answer, and touch no state file.
+    try {
+      const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
+      const ev = await readHealthEvidence(res);
+      return { state: "running", port: state.port, host, pid: state.pid, healthy: ev.healthy, reason: ev.reason, eventLoop: ev.eventLoop };
+    } catch (err) {
+      // 1ae863d2: refusal = positive down; anything else (timeout/wedged/blocked) = unverified.
+      return isRefusedError(err) ? { state: "stopped" } : { state: "unverified", pid: state.pid, ...probeErrorCodeOf(err) };
+    }
+  }
+
+  // Process alive — check healthz
   let healthy = false;
   let reason: DaemonStatus["reason"];
   let eventLoop: DaemonEventLoopEvidence | undefined;
+  let probeFailure: Pick<DaemonStatus, "probeErrorCode"> = {};
   try {
-    const res = await probeHealthzWithSettle(deps, `http://${host}:${state.port}/healthz`);
+    const res = await probeHealthzWithSettle(deps, `http://${formatDaemonHostForUrl(host)}:${state.port}/healthz`);
     const ev = await readHealthEvidence(res);
     healthy = ev.healthy;
     reason = ev.reason;
     eventLoop = ev.eventLoop;
-  } catch {
+  } catch (err) {
     // OPR.0.4.3.21 — pid alive but healthz timed out: the honest wedged-loop
     // signal. Report process-present/unhealthy (NOT "stopped") with the
     // "unresponsive" reason so the operator knows it's the control plane.
     reason = "unresponsive";
+    probeFailure = probeErrorCodeOf(err);
   }
 
   // pid alive = running (state file preserved either way)
-  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop };
+  return { state: "running", port: state.port, host, pid: state.pid, healthy, reason, eventLoop, ...probeFailure };
+}
+
+/** #275 — keep the OS code of a failed health probe (absent for a timeout). */
+function probeErrorCodeOf(err: unknown): Pick<DaemonStatus, "probeErrorCode"> {
+  const code = connectionErrorCode(err);
+  return code ? { probeErrorCode: code } : {};
 }
 
 export function readLogs(deps: LifecycleDeps): string | null {
@@ -1194,8 +1241,11 @@ export async function waitForKernelReady(
   const deadline = Date.now() + timeoutMs;
   let last: KernelReadyResult = { ok: false, kernelState: null, variant: null, detail: null };
   while (Date.now() < deadline) {
+    const remainingMs = Math.max(1, deadline - Date.now());
     try {
-      const res = await fetch(`${baseUrl}/api/kernel/status`);
+      const res = await fetch(`${baseUrl}/api/kernel/status`, {
+        signal: AbortSignal.timeout(remainingMs),
+      });
       if (res.ok) {
         const body = (await res.json()) as {
           kernel_state?: string;
@@ -1223,7 +1273,9 @@ export async function waitForKernelReady(
     } catch {
       // Transient fetch failure; keep polling until the deadline.
     }
-    await new Promise((r) => setTimeout(r, pollIntervalMs));
+    const sleepMs = Math.min(pollIntervalMs, Math.max(0, deadline - Date.now()));
+    if (sleepMs <= 0) break;
+    await new Promise((r) => setTimeout(r, sleepMs));
   }
   return last;
 }

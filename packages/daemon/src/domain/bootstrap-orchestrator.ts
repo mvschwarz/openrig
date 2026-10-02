@@ -22,6 +22,7 @@ import os from "node:os";
 import fs from "node:fs";
 import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
 import { runSyncSite } from "./sync-site-wrap.js";
+import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
 
 /** Bootstrap mode */
 export type BootstrapMode = "plan" | "apply";
@@ -617,7 +618,7 @@ export class BootstrapOrchestrator {
 
         const { execSync } = await import("node:child_process");
         const execFn = async (cmd: string) => runSyncSite("bootstrap.plan.preflight", () =>
-          execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 })
+          execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000, cwd: runtimeVersionProbeCwd(cmd) })
         );
         const preflight = await rigPreflight({
           rigSpecYaml,

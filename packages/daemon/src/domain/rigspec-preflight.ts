@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ExecFn } from "../adapters/tmux.js";
+import { runtimeProbeFailure } from "../adapters/preflight-exec.js";
 import type { LegacyRigSpec as RigSpec, PreflightResult, RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { deriveSessionName, validateSessionName, validateSessionComponents, VIRTUAL_DOMAIN_TOKENS } from "./session-name.js";
 
@@ -102,8 +103,8 @@ export class RigSpecPreflight {
       if (cmd) {
         try {
           await this.exec(cmd);
-        } catch {
-          errors.push(`Runtime '${node.runtime}' not available (${cmd} failed)`);
+        } catch (err) {
+          errors.push(`Runtime '${node.runtime}' not available (${cmd} failed: ${runtimeProbeFailure(err)})`);
         }
       }
     }
@@ -440,9 +441,9 @@ export async function verifyPiRuntimeAvailable(
   try {
     await exec(RUNTIME_COMMANDS["pi"]!);
     return [];
-  } catch {
+  } catch (err) {
     return [
-      `Runtime "pi" not available ('pi --version' failed). The spec declares a pi member, so the launch would fail. Fix: install the Pi coding agent (npm install -g @earendil-works/pi-coding-agent, or the pi.dev install script) and ensure 'pi' is on PATH.`,
+      `Runtime "pi" not available ('pi --version' failed: ${runtimeProbeFailure(err)}). Availability could not be confirmed. If Pi is not installed, install the Pi coding agent (npm install -g @earendil-works/pi-coding-agent, or the pi.dev install script) and ensure 'pi' is on PATH.`,
     ];
   }
 }
@@ -453,8 +454,8 @@ export async function verifyOmpRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecF
   try {
     await exec(RUNTIME_COMMANDS["omp"]!);
     return [];
-  } catch {
-    return ['Runtime "omp" not available (\'omp --version\' failed). Fix: install Oh My Pi and ensure \'omp\' is on PATH.'];
+  } catch (err) {
+    return [`Runtime "omp" not available ('omp --version' failed: ${runtimeProbeFailure(err)}). If OMP is not installed, install Oh My Pi and ensure 'omp' is on PATH.`];
   }
 }
 

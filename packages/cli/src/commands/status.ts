@@ -56,6 +56,14 @@ export function statusCommand(depsOverride?: StatusDeps): Command {
       return;
     }
 
+    if (status.state === "unverified") {
+      console.log(statusGuardMessage(status).fact);
+      if (status.siblingHint) {
+        console.log(`  note: OPENRIG_HOME may be wrong — resolved ${status.siblingHint.resolvedHome}, live sibling ${status.siblingHint.siblingHome}`);
+      }
+      return;
+    }
+
     // state === "running"
     if (status.healthy === false) {
       console.log(`Daemon running (pid ${status.pid}) but unhealthy — healthz failed`);

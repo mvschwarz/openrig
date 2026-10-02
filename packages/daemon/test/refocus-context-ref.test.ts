@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { deriveCurrentWork } from "../src/domain/current-work.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HOOK = resolve(HERE, "../assets/plugins/openrig-core/hooks/scripts/refocus.cjs");
@@ -14,6 +15,11 @@ const TRACE = resolve(PLUGIN, "skills/refocusing/scripts/trace-to-root.py");
 const REFOCUS_MD = resolve(PLUGIN, "skills/refocusing/references/refocus.md");
 const LEGACY_COMPOSE = resolve(PLUGIN, "skills/openrig-operating-model/scripts/compose.py");
 const REF = "packs/r5-contributing-knowledge-20260824";
+// The daemon's own "this seat holds no in-progress typed baton" refusal, taken from the
+// derivation itself (no rows, so no filesystem is touched) rather than copied, so a wording
+// change in the daemon cannot leave these tests asserting a stale string.
+const NO_BATON = deriveCurrentWork([], "/missions").currentWorkBasis;
+const AMBIGUOUS = "2 distinct typed work nodes — refusing to guess";
 
 let root: string | undefined;
 afterEach(() => {
@@ -306,9 +312,12 @@ exit 1
     return { topology, workspace, topologyStart, workStart, env };
   }
 
-  function trace(args: string[], env: NodeJS.ProcessEnv) {
-    return spawnSync("python3", [TRACE, ...args], { encoding: "utf8", env });
+  function trace(args: string[], env: NodeJS.ProcessEnv, cwd?: string) {
+    return spawnSync("python3", [TRACE, ...args], { encoding: "utf8", env, cwd });
   }
+
+  // The work-node cases below must not inherit an ambient work-node variable from the runner.
+  const unpinned = (env: NodeJS.ProcessEnv) => ({ ...env, OPENRIG_REFOCUS_WORK_NODE: undefined });
 
   it("renders both config-rooted, path-only ascents with notes at light depth", () => {
     const f = fixture();
@@ -349,6 +358,89 @@ exit 1
     expect(workFull.status).toBe(0);
     expect(workFull.stdout).toContain("feature observation secret");
     expect(workFull.stdout).not.toContain("TOPOLOGY TRACE");
+  });
+
+  it("falls back to the work root, labelled as broad orientation, for the daemon's exact no-baton basis", () => {
+    const f = fixture();
+    // cwd sits on a slice to prove the fallback does not quietly re-point to cwd inference.
+    const result = trace(["--trees", "work", "--work-basis", NO_BATON], unpinned(f.env), f.workStart);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`start: ${realpathSync(f.workspace)}\nFALLBACK — no current typed baton (${NO_BATON})`);
+    expect(result.stdout).toContain("not evidence of a current mission");
+    expect(result.stdout).toContain("Build useful things");
+    expect(result.stdout).not.toContain("Ship the release");
+    expect(result.stdout).not.toContain("Deliver refocus");
+    expect(result.stdout).not.toContain("TRACE GAP");
+  });
+
+  it("keeps the sibling 'resolved to no work node' refusal a named gap, never the fallback", () => {
+    const f = fixture();
+    const sibling = "no typed in-progress work resolved to a work node";
+    const result = trace(["--trees", "work", "--work-basis", sibling], unpinned(f.env), f.workStart);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`TRACE GAP — no single current work node: ${sibling}`);
+    expect(result.stdout).not.toContain("FALLBACK");
+    expect(result.stdout).not.toContain("Build useful things");
+  });
+
+  it("names an ambiguous basis as the gap even when the working directory is inside the workspace", () => {
+    const f = fixture();
+    const result = trace(["--trees", "work", "--work-basis", AMBIGUOUS], unpinned(f.env), f.workStart);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`TRACE GAP — no single current work node: ${AMBIGUOUS}`);
+    expect(result.stdout).not.toContain("FALLBACK");
+    expect(result.stdout).not.toContain("Deliver refocus");
+  });
+
+  it("reports an unreadable current-work answer as UNKNOWN even when the working directory is inside the workspace", () => {
+    const f = fixture();
+    const reason = "queue whoami answer was not JSON";
+    const result = trace(["--trees", "work", "--work-unknown", reason], unpinned(f.env), f.workStart);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`TRACE GAP — current work node UNKNOWN: ${reason}`);
+    expect(result.stdout).not.toContain("FALLBACK");
+    expect(result.stdout).not.toContain("Deliver refocus");
+  });
+
+  it("lets an explicit --work-start or OPENRIG_REFOCUS_WORK_NODE win over a daemon basis", () => {
+    const f = fixture();
+    const flag = trace(["--trees", "work", "--work-start", f.workStart, "--work-basis", NO_BATON], unpinned(f.env));
+    expect(flag.status).toBe(0);
+    expect(flag.stdout).toContain("Deliver refocus");
+    expect(flag.stdout).not.toContain("FALLBACK");
+    expect(flag.stdout).not.toContain("TRACE GAP");
+
+    const env = trace(["--trees", "work", "--work-basis", AMBIGUOUS], { ...f.env, OPENRIG_REFOCUS_WORK_NODE: f.workStart });
+    expect(env.status).toBe(0);
+    expect(env.stdout).toContain("Deliver refocus");
+    expect(env.stdout).not.toContain("TRACE GAP");
+  });
+
+  it("leaves a standalone run with no daemon answer on the old cwd inference and gap text", () => {
+    const f = fixture();
+    const inside = trace(["--trees", "work"], unpinned(f.env), f.workStart);
+    expect(inside.status).toBe(0);
+    expect(inside.stdout).toContain("Deliver refocus");
+    expect(inside.stdout).not.toContain("FALLBACK");
+
+    const outside = trace(["--trees", "work"], unpinned(f.env), dirname(f.workspace));
+    expect(outside.status).toBe(0);
+    expect(outside.stdout).toContain(
+      "TRACE GAP — current work node is unresolved; set OPENRIG_REFOCUS_WORK_NODE",
+    );
+  });
+
+  it("keeps the trace script's no-baton text equal to the daemon's refusal", () => {
+    // -B: importing the script must not write __pycache__ into the shipped skill, which the pack build rejects.
+    const loaded = spawnSync("python3", ["-B", "-c", [
+      "import importlib.util, sys",
+      "spec = importlib.util.spec_from_file_location('trace_to_root', sys.argv[1])",
+      "module = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(module)",
+      "sys.stdout.write(module.NO_CURRENT_BATON_BASIS)",
+    ].join("\n"), TRACE], { encoding: "utf8" });
+    expect(loaded.status, loaded.stderr).toBe(0);
+    expect(loaded.stdout).toBe(NO_BATON);
   });
 
   it("has one public refocus trace implementation and marks the old composer superseded for this use", () => {
@@ -534,5 +626,54 @@ describe("openrig-core refocus hook — current-work binding (OPR.0.5.8.14)", ()
     expect(result.status).toBe(0);
     expect(result.rigVerbs()).toContain("queue whoami");
     expect(result.traceArgv()).not.toContain("--work-start");
+  });
+
+  // The daemon always sends currentWorkBasis next to currentWork; these use that real shape.
+  const answer = (currentWork: unknown, currentWorkBasis?: string) =>
+    JSON.stringify({ currentWork, currentWorkBasis });
+
+  it("passes only --work-start when a work node resolves, even though a basis is always present", () => {
+    const result = derive({
+      whoamiStdout: answer({ workNodePath: "/w/slices/14-refocus", basis: "one typed in-progress row" }, "one typed in-progress row"),
+    });
+    expect(result.traceArgv()).toContain("--work-start /w/slices/14-refocus");
+    expect(result.traceArgv()).not.toContain("--work-basis");
+    expect(result.traceArgv()).not.toContain("--work-unknown");
+  });
+
+  it("passes the daemon's basis as --work-basis when it names no single work node", () => {
+    for (const basis of [NO_BATON, AMBIGUOUS]) {
+      const result = derive({ whoamiStdout: answer(null, basis) });
+      expect(result.rigVerbs()).toContain("queue whoami");
+      expect(result.traceArgv()).toContain(`--work-basis ${basis}`);
+      expect(result.traceArgv()).not.toContain("--work-start");
+      expect(result.traceArgv()).not.toContain("--work-unknown");
+    }
+  });
+
+  it("passes a failed or unreadable whoami as --work-unknown, never as a basis", () => {
+    const cases = [
+      { whoamiStdout: "", whoamiStatus: 1, reason: "queue whoami exited 1 with no answer" },
+      { whoamiStdout: "not json at all", reason: "queue whoami answer was not JSON" },
+      { whoamiStdout: answer(null), reason: "queue whoami named no current work and no basis" },
+    ];
+    for (const { reason, ...options } of cases) {
+      const result = derive(options);
+      expect(result.status).toBe(0);
+      expect(result.traceArgv()).toContain(`--work-unknown ${reason}`);
+      expect(result.traceArgv()).not.toContain("--work-start");
+      expect(result.traceArgv()).not.toContain("--work-basis");
+    }
+  });
+
+  it("delivers the work-root fallback through the real trace when the daemon reports no baton", () => {
+    const result = runHook({
+      whoamiStdout: answer(null, NO_BATON),
+      extraEnv: { OPENRIG_REFOCUS_WORK_NODE: undefined },
+    });
+    const context = result.payload?.hookSpecificOutput.additionalContext || "";
+    expect(result.status).toBe(0);
+    expect(context).toContain(`FALLBACK — no current typed baton (${NO_BATON})`);
+    expect(context).not.toContain("current work node is unresolved");
   });
 });

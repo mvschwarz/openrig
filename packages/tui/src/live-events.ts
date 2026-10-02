@@ -49,7 +49,6 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
         return; // feature-detect said no — the leg stays off, S16 behavior intact
       }
       established = true;
-      delayMs = baseDelayMs; // a real connection resets the backoff
       opts.onStatus?.("connected");
       const reader = res.body.getReader();
       activeReader = reader;
@@ -68,7 +67,11 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
             const raw = line.slice(5).trim();
             if (!raw) continue;
             try {
-              opts.onEvent(JSON.parse(raw) as { type: string; seatNodeId?: string; seq?: number });
+              const event = JSON.parse(raw) as { type: string; seatNodeId?: string; seq?: number };
+              // Headers and keepalives can precede another immediate disconnect.
+              // Reset only when the stream resumes delivering notifications.
+              delayMs = baseDelayMs;
+              opts.onEvent(event);
             } catch {
               // a non-JSON keepalive line is framing, not an event
             }

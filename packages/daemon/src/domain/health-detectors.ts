@@ -84,8 +84,24 @@ export type HealthDetectorObservation =
       criticalPercent?: number;
     });
 
+/** How much of its input a source actually evaluated on its latest read. Omitted
+ * items were not evaluated; their absence from the findings is not a healthy verdict. */
+export interface HealthSourceCoverage {
+  source: string;
+  evaluatedAt: string;
+  unit: string;
+  limit: number;
+  total: number;
+  evaluated: number;
+  omitted: number;
+  partial: boolean;
+  order: string;
+}
+
 export interface HealthObservationSource {
   read(): readonly HealthDetectorObservation[];
+  /** Coverage of the latest read(), when the source bounds its input. */
+  coverage?(): readonly HealthSourceCoverage[];
 }
 
 export interface HealthListQuery {
@@ -103,6 +119,8 @@ export interface HealthListProjection {
   limit: number;
   truncated: boolean;
   records: HealthRecord[];
+  /** Present when a source bounded its input; see HealthSourceCoverage. */
+  coverage?: HealthSourceCoverage[];
 }
 
 export function evaluateHealthDetectors(observations: readonly HealthDetectorObservation[], policy: HealthPolicy = DEFAULT_HEALTH_POLICY): HealthRecord[] {
@@ -133,12 +151,17 @@ export class HealthProjectionService {
     }));
   }
 
+  coverage(): HealthSourceCoverage[] {
+    return [...(this.source.coverage?.() ?? [])];
+  }
+
   list(query: HealthListQuery = {}): HealthListProjection {
     const limit = query.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
       throw new Error("limit must be an integer from 1 to 200");
     }
     const evaluated = this.records();
+    const coverage = this.coverage();
     const filtered = evaluated.filter((record) =>
       (query.scopeType === undefined || record.scope.type === query.scopeType)
       && (query.scopeId === undefined || healthScopeId(record.scope) === query.scopeId)
@@ -154,6 +177,7 @@ export class HealthProjectionService {
       limit,
       truncated: filtered.length > limit,
       records: filtered.slice(0, limit),
+      ...(coverage.length ? { coverage } : {}),
     };
   }
 

@@ -141,6 +141,7 @@ import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
 import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
+import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
 
 export interface AppDeps {
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
@@ -294,6 +295,11 @@ export interface AppDeps {
   enableNodeWebSocket?: boolean;
   /** `ui.enabled`: serve the web UI pages and its terminal WebSocket. Off unless true; /api routes are unaffected. */
   webUiEnabled?: boolean;
+  /** This machine's own extra names for the /api browser boundary (createDaemon wires the
+   *  Tailscale MagicDNS self-name lookup). Absent: loopback, IP literals and OS names only. */
+  selfNameDiscovery?: () => Promise<string[]>;
+  /** Test hook: one call per /api browser-boundary decision. */
+  browserBoundaryObserver?: BrowserBoundaryOptions["onDecision"];
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   /**
@@ -630,6 +636,19 @@ export function createApp(deps: AppDeps): Hono {
   if (deps.slowOpRecorder?.recordRequest) {
     app.use("*", createSlowOpRequestMiddleware(deps.slowOpRecorder));
   }
+
+  // Browser boundary: target name and browser Origin, checked once per /api request
+  // (WebSocket upgrades included), before the Origin guard below, the remote
+  // read-through and every route. It runs first so its refusal codes and remedies
+  // are what callers see.
+  app.use("/api/*", browserBoundary({
+    webUiEnabled: deps.webUiEnabled === true,
+    bearerTokens: [deps.terminalBearerToken, deps.missionControlBearerToken],
+    allowedOrigins: process.env.OPENRIG_ALLOWED_ORIGINS,
+    allowedHosts: process.env.OPENRIG_ALLOWED_HOSTS,
+    discoverSelfNames: deps.selfNameDiscovery,
+    onDecision: deps.browserBoundaryObserver,
+  }));
 
   // Cross-site request forgery and drive-by daemon API protection.
   // Rejects requests with unauthorized browser Origin headers on all /api/* routes.

@@ -9,4 +9,5 @@ export {
   type HealthListProjection,
   type HealthListQuery,
   type HealthObservationSource,
+  type HealthSourceCoverage,
 } from "./domain/health-detectors.js";

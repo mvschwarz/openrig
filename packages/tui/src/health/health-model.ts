@@ -134,11 +134,17 @@ function unavailableReason(snap: FleetSnapshot, scope: HealthDisplayScope): stri
   return null;
 }
 
-function emptyLine(scope: HealthDisplayScope, width: number): ContentLine {
+/** A source evaluated only part of its input; its omitted items are unevaluated. */
+function partialCoverage(snap: FleetSnapshot) {
+  return (snap.health?.coverage ?? []).filter((c) => c.partial);
+}
+
+function emptyLine(scope: HealthDisplayScope, width: number, snap: FleetSnapshot): ContentLine {
   return fitLine([
     { text: "HEALTH  ", token: "bright", bold: true },
     { text: scopedEmptyLabel(scope), token: "dim", bold: true },
     { text: " · no findings served; not a healthy verdict", token: "dim" },
+    ...(partialCoverage(snap).length ? [{ text: " · PARTIAL", token: "warn" as const, bold: true }] : []),
   ], width);
 }
 
@@ -146,7 +152,7 @@ export function healthSummaryLine(snap: FleetSnapshot, scope: HealthDisplayScope
   const unavailable = unavailableReason(snap, scope);
   if (unavailable) return unavailableLine(width, unavailable);
   const records = healthRecordsForScope(snap, scope);
-  if (records.length === 0) return emptyLine(scope, width);
+  if (records.length === 0) return emptyLine(scope, width, snap);
   const active = records.filter((record) => record.status === "active");
   const counts = {
     critical: active.filter((record) => record.severity === "critical").length,
@@ -166,9 +172,10 @@ export function healthSummaryLine(snap: FleetSnapshot, scope: HealthDisplayScope
     { text: `  WARN ${counts.warning}`, token: counts.warning ? "warn" : "dim", bold: counts.warning > 0 },
     ...(!compact ? [{ text: `  INFO ${counts.info}`, token: counts.info ? "info" as const : "dim" as const }] : []),
     ...(indeterminate > 0 ? [{ text: ` · Unknown ${indeterminate}`, token: "warn" as const, bold: true }] : []),
+    // PARTIAL precedes the variable-length summary so a narrow line cannot truncate it away.
+    ...(snap.health?.truncated || partialCoverage(snap).length ? [{ text: " · PARTIAL", token: "warn" as const, bold: true }] : []),
     ...(categoryText ? [{ text: compact ? ` · TYPE ${categoryText}` : ` · BY TYPE ${categoryText}`, token: "bright" as const }] : []),
     { text: ` · ${stateLabel(top)} ${top.summary}`, token: tokenFor(top) },
-    ...(snap.health?.truncated ? [{ text: " · PARTIAL", token: "warn" as const, bold: true }] : []),
   ], width, { type: "tab", tab: "health" });
 }
 
@@ -206,7 +213,7 @@ export function healthListLines(snap: FleetSnapshot, scope: HealthDisplayScope, 
   if (unavailable) return wrapDetailLines([{ text: `HEALTH  Unknown · ${unavailable}` }], width);
   const records = healthRecordsForScope(snap, scope);
   // Wrap the complete page explanation; compact summary callers still fit one line.
-  if (records.length === 0) return wrapDetailLines([emptyLine(scope, Infinity)], width);
+  if (records.length === 0) return wrapDetailLines([emptyLine(scope, Infinity, snap)], width);
   const { wide, sevWidth, signalWidth, scopeWidth, ageWidth, confWidth, evidenceWidth } = healthColumnWidths(width);
   const columns = [
     cell("SEV", sevWidth),
@@ -219,6 +226,7 @@ export function healthListLines(snap: FleetSnapshot, scope: HealthDisplayScope, 
   const lines: ContentLine[] = [sectionRule(`HEALTH · ${scope.kind} · canonical findings`, width), heading, { text: "─".repeat(Math.min(width, Math.max(1, heading.text.length))) }];
   lines.push(...records.map((record) => healthTableRow(record, snap, width)));
   if (snap.health?.truncated) lines.push(fitLine([{ text: "PARTIAL · daemon result limit reached", token: "warn", bold: true }], width));
+  for (const c of partialCoverage(snap)) lines.push(fitLine([{ text: `PARTIAL · ${c.source} evaluated ${c.evaluated} of ${c.total} ${c.unit}; ${c.omitted} omitted were not evaluated and are not healthy`, token: "warn", bold: true }], width));
   lines.push(fitLine([{ text: "Enter opens explanation and typed evidence · Escape returns", token: "dim" }], width));
   return lines;
 }
@@ -302,7 +310,7 @@ export function healthAgentLines(snap: FleetSnapshot, scope: Extract<HealthDispl
   const unavailable = unavailableReason(snap, scope);
   if (unavailable) return [unavailableLine(width, unavailable)];
   const records = healthRecordsForScope(snap, scope);
-  if (records.length === 0) return [emptyLine(scope, width)];
+  if (records.length === 0) return [emptyLine(scope, width, snap)];
   return records.map((record) => fitLine([
     { text: `${stateLabel(record).padEnd(13)} `, token: tokenFor(record), bold: record.status === "active" },
     { text: record.summary, token: "bright" },

@@ -94,13 +94,13 @@ describe("view-composer partition vectors", () => {
 
   it("ssh host → ssh '<user@target>' tmux attach -t (destination shell-quoted); read-only adds -r", () => {
     const rw = composeView("v", [member({ seat: "s@r", host: "vm1", tmuxSession: "s@r" })], ctxWith([SSH_HOST]));
-    expect(rw.opened[0]!.paneCommand).toBe("ssh 'admin@vm1.local' tmux attach -t 's@r'");
+    expect(rw.opened[0]!.paneCommand).toBe("ssh 'admin@vm1.local' 'tmux attach -t '\"'\"'s@r'\"'\"''");
 
     const ro = composeView("v", [member({ seat: "s@r", host: "vm1", readOnly: true })], ctxWith([SSH_HOST]));
-    expect(ro.opened[0]!.paneCommand).toBe("ssh 'admin@vm1.local' tmux attach -r -t 's@r'");
+    expect(ro.opened[0]!.paneCommand).toBe("ssh 'admin@vm1.local' 'tmux attach -r -t '\"'\"'s@r'\"'\"''");
 
     const nouser = composeView("v", [member({ seat: "s@r", host: "vm2" })], ctxWith([SSH_HOST_NO_USER]));
-    expect(nouser.opened[0]!.paneCommand).toBe("ssh '10.0.0.9' tmux attach -t 's@r'");
+    expect(nouser.opened[0]!.paneCommand).toBe("ssh '10.0.0.9' 'tmux attach -t '\"'\"'s@r'\"'\"''");
   });
 
   // Guard G1 — the ssh destination is STRUCTURED registry data injected into a
@@ -111,7 +111,7 @@ describe("view-composer partition vectors", () => {
     const v = composeView("v", [member({ seat: "s@r", host: "evil", tmuxSession: "s@r" })], ctxWith([NASTY]));
     expect(v.opened).toHaveLength(1);
     // single-quoted, embedded quote POSIX-escaped ('\'') — metacharacters are literal.
-    expect(v.opened[0]!.paneCommand).toBe(`ssh 'u'"'"'x@a b; rm -rf /' tmux attach -t 's@r'`);
+    expect(v.opened[0]!.paneCommand).toBe("ssh 'u'\"'\"'x@a b; rm -rf /' 'tmux attach -t '\"'\"'s@r'\"'\"''");
     // the dangerous run never becomes its own shell word:
     expect(v.opened[0]!.paneCommand).not.toContain("; rm -rf / tmux");
   });

@@ -143,7 +143,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t \'my-session:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
+        'tmux list-panes -t \'=my-session:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
       );
     });
 
@@ -155,7 +155,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t \'my session\'\"\'\"\'s:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
+        'tmux list-panes -t \'=my session\'\"\'\"\'s:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
       );
     });
 
@@ -464,10 +464,41 @@ describe("TmuxAdapter", () => {
 
       await adapter.killSession("r01-dev1-impl");
 
-      expect(exec).toHaveBeenCalledOnce();
-      expect(exec.mock.calls[0]![0]).toBe(
-        "tmux kill-session -t 'r01-dev1-impl'"
-      );
+      expect(exec.mock.calls.map((call) => call[0])).toEqual([
+        "tmux detach-client -s 'r01-dev1-impl'",
+        "tmux kill-session -t 'r01-dev1-impl'",
+      ]);
+    });
+
+    it("still kills the session when no client is attached", async () => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => {
+        if (cmd.includes("detach-client")) throw new Error("no current client");
+        return "";
+      });
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.killSession("r01-dev1-impl");
+
+      expect(result).toEqual({ ok: true });
+      expect(exec.mock.calls.map((call) => call[0])).toEqual([
+        "tmux detach-client -s 'r01-dev1-impl'",
+        "tmux kill-session -t 'r01-dev1-impl'",
+      ]);
+    });
+
+    it("does not kill the session when detach fails unexpectedly", async () => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => {
+        if (cmd.includes("detach-client")) throw new Error("permission denied");
+        return "";
+      });
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.killSession("r01-dev1-impl");
+
+      expect(result).toEqual({ ok: false, code: "unknown", message: "permission denied" });
+      expect(exec.mock.calls.map((call) => call[0])).toEqual([
+        "tmux detach-client -s 'r01-dev1-impl'",
+      ]);
     });
 
     it("returns { ok: true } on success", async () => {
@@ -492,10 +523,10 @@ describe("TmuxAdapter", () => {
 
       await adapter.killSession("r01-dev's session");
 
-      expect(exec).toHaveBeenCalledOnce();
-      expect(exec.mock.calls[0]![0]).toBe(
-        "tmux kill-session -t 'r01-dev'\"'\"'s session'"
-      );
+      expect(exec.mock.calls.map((call) => call[0])).toEqual([
+        "tmux detach-client -s 'r01-dev'\"'\"'s session'",
+        "tmux kill-session -t 'r01-dev'\"'\"'s session'",
+      ]);
     });
   });
 

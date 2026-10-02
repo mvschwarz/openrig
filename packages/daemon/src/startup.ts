@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { discoverTailscaleSelfNames } from "./middleware/browser-boundary.js";
 import { configureShadowCapture } from "./domain/shadow-capture.js";
 import { SeatDeliveryGuard, resolveGuardTarget } from "./domain/seat-delivery-guard.js";
 import { queueRecoveryOwnsWake } from "./domain/queue-wake-ladder.js";
@@ -18,7 +19,7 @@ import { migrate } from "./db/migrate.js";
 import { ALL_MIGRATIONS } from "./db/all-migrations.js";
 import { RigRepository } from "./domain/rig-repository.js";
 import { SessionRegistry } from "./domain/session-registry.js";
-import { isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
+import { deriveCanonicalSessionName, isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
 import { resolveExternal } from "./domain/gateway/external-admission.js";
 import { loadHumanRegistry } from "./domain/gateway/human-registry.js";
 import { EventBus } from "./domain/event-bus.js";
@@ -27,6 +28,7 @@ import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand } from "./adapters/tmux-exec.js";
+import { execPreflightCommand } from "./adapters/preflight-exec.js";
 import { createCmuxCliTransport } from "./adapters/cmux-transport.js";
 import { SnapshotRepository } from "./domain/snapshot-repository.js";
 import { CheckpointStore } from "./domain/checkpoint-store.js";
@@ -80,6 +82,7 @@ import { setSelfHostId, setSelfHostIdSource } from "./domain/hosts/fanout-contra
 import { UpCommandRouter } from "./domain/up-command-router.js";
 import { RigTeardownOrchestrator } from "./domain/rig-teardown.js";
 import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
+import { observeClaudePaneStartedAt } from "./domain/native-process-lineage.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures } from "./domain/transcript-capture.js";
 import { SessionTransport } from "./domain/session-transport.js";
@@ -340,8 +343,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     console.error("[slow-operation] setDegradedHandler registration failed", error);
   }
   // PL-004 Phase A revision (R1): topology-backed validateRig.
-  // Reject `<member>@<unknown-rig>` shapes by checking the rig portion
-  // against the rig registry. Bare ids without `@` are also rejected
+  // Reject `<member>@<unknown-rig>` shapes against the rig registry.
+  // Bare ids without `@` are also rejected
   // (no canonical rig binding).
   // OPR.0.4.6.MH1 FR-8: this gate is the ARCHETYPE consumer of the shared
   // parse contract — human-seat classification BEFORE parse, then the
@@ -364,12 +367,53 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     if (parsed.kind !== "canonical") return false;
     return rigRepo.findRigsByName(parsed.rig).length > 0;
   };
+  // Seat absence in positively known local topology is advice, never admission
+  // authority. Keep every typed destination intact, including adopted aliases.
+  const topologyDestinationAdvisory = (sessionRef: string) => {
+    const parsed = parseSessionName(sessionRef);
+    if (isHumanSeatSessionRef(sessionRef) || parsed.kind !== "canonical") return null;
+    const rigs = rigRepo.findUnarchivedRigsByName(parsed.rig);
+    if (rigs.length === 0) return null;
+    // Membership needs only registered names and logical seat coordinates,
+    // not the full ps projection (snapshots, activity and lifecycle history).
+    for (const rig of rigs) {
+      if (db.prepare(`SELECT 1 FROM sessions s JOIN nodes n ON n.id = s.node_id
+        WHERE n.rig_id = ? AND s.session_name = ? LIMIT 1`).get(rig.id, sessionRef)) return null;
+      if (db.prepare(`SELECT 1 FROM nodes WHERE rig_id = ? AND
+        CASE WHEN instr(logical_id, '.') = 0 THEN logical_id
+          WHEN instr(logical_id, '.') > 1 AND instr(logical_id, '.') < length(logical_id)
+          THEN substr(logical_id, 1, instr(logical_id, '.') - 1) || '-' || substr(logical_id, instr(logical_id, '.') + 1)
+        END = ? LIMIT 1`).get(rig.id, parsed.member)) return null;
+    }
+    const names = rigs.flatMap((rig) => db.prepare(`SELECT n.logical_id, s.session_name
+      FROM nodes n LEFT JOIN sessions s ON s.id =
+        (SELECT id FROM sessions WHERE node_id = n.id ORDER BY id DESC LIMIT 1)
+      WHERE n.rig_id = ?`).all(rig.id) as Array<{ logical_id: string; session_name: string | null }>);
+    const canonicalName = (logicalId: string) => {
+      const dot = logicalId.indexOf(".");
+      if (dot < 0) return `${logicalId}@${parsed.rig}`;
+      return dot > 0 && dot < logicalId.length - 1
+        ? deriveCanonicalSessionName(logicalId.slice(0, dot), logicalId.slice(dot + 1), parsed.rig) : null;
+    };
+    const availableDestinations = [...new Set(names.flatMap((entry) => [
+      entry.session_name, canonicalName(entry.logical_id),
+    ]).filter((destination): destination is string => !!destination && parseSessionName(destination).kind === "canonical"))].sort();
+    return {
+      code: "unmatched_destination_seat" as const,
+      destinationSession: sessionRef,
+      availableDestinations,
+      message: `Suspected seat typo: '${sessionRef}' matches no session address of locally known rig '${parsed.rig}'. `
+        + `Available destinations: ${availableDestinations.join(", ") || "(none)"}. `
+        + "The row keeps the exact destination as typed; this warning does not guarantee pickup or delivery.",
+    };
+  };
   // PL-004 Phase A — shared coordination services. Constructed early so
   // both the queueRepo dep slot and inboxHandler can share one instance.
   // Transport is wired after SessionTransport instantiation below via
   // attachTransport().
   const queueRepoInstance = new QueueRepository(db, eventBus, {
     validateRig: topologyValidateRig,
+    destinationAdvisory: topologyDestinationAdvisory,
     // OPR.0.4.6.WF3 FR-6 — the frontier close-path guard's predicate,
     // INJECTED here (arch layering pin: the queue never imports the
     // workflow domain; startup wires them — the validateRig precedent).
@@ -634,7 +678,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const podRepo = new PodRepository(db);
   const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo });
   const rigSpecPreflight = new RigSpecPreflight({
-    rigRepo, tmuxAdapter, exec: opts?.tmuxExec ?? execCommand, cmuxExec: opts?.cmuxExec ?? execCommand,
+    rigRepo, tmuxAdapter, exec: opts?.tmuxExec ?? execPreflightCommand, cmuxExec: opts?.cmuxExec ?? execCommand,
   });
   const rigInstantiator = new RigInstantiator({
     db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight: rigSpecPreflight, tmuxAdapter,
@@ -928,7 +972,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     tmuxAdapter,
     agentImageLibrary,
     continuityPolicyMaterializer,
-    exec,
+    exec: opts?.tmuxExec ?? execPreflightCommand,
     // OPR.0.5.3.6 — shipped topology chain-file defaults install under the
     // typed topology.root at materialization (copy-if-absent).
     topologyRootResolver: () => String(new ContextPackSettingsStore().resolveOne("topology.root").value),
@@ -1045,7 +1089,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const rigModeStore = new RigModeStore(db);
   const operatingPosture = new OperatingPostureService(db, rigModeStore, () => healthSettingsStore.resolveOne("workspace.root").value as string);
   const passiveCeremony = new PassiveCeremonySource(healthSettingsStore.resolveOne("workspace.root").value as string, queueRepoInstance, healthPolicy, undefined, healthCheckpoints, { reader: operatingPosture, instanceId: OPENRIG_HOME });
-  const healthProjection = new HealthProjectionService({ read: () => [...contextHealthSource.read(), ...healthCheckpoints.read(), ...passiveCeremony.read()] }, () => healthPolicy.read(), (record) => operatingPosture.forHealth(record));
+  const healthProjection = new HealthProjectionService({ read: () => [...contextHealthSource.read(), ...healthCheckpoints.read(), ...passiveCeremony.read()], coverage: () => passiveCeremony.coverage() }, () => healthPolicy.read(), (record) => operatingPosture.forHealth(record));
   const healthDiagnosis = new HealthDiagnosisService({ queue: queueRepoInstance, projection: healthProjection, policy: healthPolicy,
     authority: (record) => healthAuthority(healthSettingsStore.resolveOne("workspace.root").value as string, healthCheckpoints, record),
     resolveEvidence: (path, finding) => readHealthArtifact(finding.operatingPosture?.context?.paths?.project ?? healthSettingsStore.resolveOne("workspace.root").value as string, path),
@@ -1053,13 +1097,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   // OPR.0.4.3.20 FR-4 — inject contextUsageStore so refresh() can null-fill a
   // Claude token from the sidecar during periodic/manual snapshot refresh.
-  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore });
+  // #421 — the pane's current Claude process start time; a sidecar sampled earlier is not this
+  // process's, so capture and null-fill skip it.
+  const claudeProcessStartedAt = (sessionName: string) => observeClaudePaneStartedAt({ target: sessionName, tmux: tmuxAdapter });
+  const resumeMetadataRefresher = new ResumeMetadataRefresher({ sessionRegistry, tmuxAdapter, contextUsageStore, claudeProcessStartedAt });
   const claimService = new ClaimService({
     db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter, transcriptStore,
     claudeContextProvisioner: claudeAdapter,
     // OPR.0.4.3.20 FR-3 — adoption-boundary resume-token capture deps
     // (Claude sidecar reader + Codex thread-id capturer, both reuse).
     contextUsageStore,
+    claudeProcessStartedAt,
     resumeTokenCapturer: resumeMetadataRefresher,
     // OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader (the adapter exposes it).
     piRunnerStateStore: piAdapter,
@@ -2428,6 +2476,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   // `ui.enabled` (default off): the web UI pages and its terminal WebSocket. Read once at start.
   deps.webUiEnabled = opts?.webUiEnabled ?? new ContextPackSettingsStore().resolveOne("ui.enabled").value === true;
+  // /api browser boundary: this machine's exact Tailscale MagicDNS name, looked up on demand.
+  deps.selfNameDiscovery = () => discoverTailscaleSelfNames({ timeoutMs: 1500 });
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
   return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket };
