@@ -148,6 +148,32 @@ describe("workflow spec file removal keeps versions pinned by unfinished work (#
     expect(storedSpec()).toBeUndefined();
   });
 
+  it("a retained blanked version's file returning malformed is recorded per file and the scan goes on", async () => {
+    const { v1 } = await activeOnV1();
+    const storedSpec = () => (db.prepare("SELECT spec_json FROM workflow_specs WHERE spec_id = ?").get(v1!.specId) as { spec_json: string } | undefined)?.spec_json;
+    const storedBefore = storedSpec();
+    db.prepare(
+      `UPDATE workflow_specs SET status = 'error', error_message = 'old parse error', name = 'flow.yaml', version = '',
+         purpose = NULL, target_rig = NULL, roles_json = '{}', steps_json = '[]', coordination_terminal_turn_rule = 'hot_potato'
+       WHERE spec_id = ?`,
+    ).run(v1!.specId);
+    unlinkSync(file);
+    scan();
+
+    write(file, "workflow:\n  id: wf-keep\n  version: [unterminated\n");
+    write(join(folder, "z-good.yaml"), spec("1").replace("id: wf-keep", "id: wf-other"));
+    let result: ReturnType<typeof scan> | undefined;
+    expect(() => { result = scan(); }).not.toThrow();
+    expect(result).toMatchObject({ errors: 1, valid: 1 });
+
+    expect(storedSpec()).toBe(storedBefore);
+    expect((db.prepare("SELECT status FROM workflow_specs WHERE spec_id = ?").get(v1!.specId) as { status: string }).status).toBe("retained");
+    const diagnostics = db.prepare("SELECT spec_id, name FROM workflow_specs WHERE source_path = ? AND status = 'error'").all(file) as { spec_id: string; name: string }[];
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]!.spec_id).not.toBe(v1!.specId);
+    expect(cache.getByNameVersion("wf-other", "1")).not.toBeNull();
+  });
+
   it("still removes an old version that no unfinished instance uses", () => {
     write(file, spec("1"));
     scan();

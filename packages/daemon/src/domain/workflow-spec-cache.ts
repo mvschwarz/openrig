@@ -853,10 +853,17 @@ export class WorkflowSpecCache {
     errorMessage: string;
   }): void {
     const cachedAt = this.now().toISOString();
-    const fallbackName = opts.sourcePath.split("/").pop() ?? opts.sourcePath;
     const existing = this.db
       .prepare(`SELECT spec_id FROM workflow_specs WHERE source_path = ? AND status = 'error'`)
       .get(opts.sourcePath) as { spec_id: string } | undefined;
+    // A diagnostic row is named after its file. When another row already holds that name with no
+    // version (a retained version a previous writer blanked, or a same-named file in another
+    // folder), use the file's path instead, which no other diagnostic row holds (#511).
+    const basename = opts.sourcePath.split("/").pop() ?? opts.sourcePath;
+    const basenameTaken = this.db
+      .prepare(`SELECT 1 FROM workflow_specs WHERE name = ? AND version = '' AND spec_id != ?`)
+      .get(basename, existing?.spec_id ?? "") !== undefined;
+    const fallbackName = basenameTaken ? opts.sourcePath : basename;
     if (existing) {
       this.db
         .prepare(

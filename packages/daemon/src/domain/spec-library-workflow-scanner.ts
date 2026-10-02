@@ -506,11 +506,16 @@ export function scanWorkflowSpecFolder(
         // empty hash so the next scan re-evaluates
         sourceHash = "";
       }
-      opts.cache.writeDiagnostic({
-        sourcePath: filePath,
-        sourceHash,
-        errorMessage: message,
-      });
+      try {
+        opts.cache.writeDiagnostic({
+          sourcePath: filePath,
+          sourceHash,
+          errorMessage: message,
+        });
+      } catch (writeErr) {
+        // One file's diagnostic must not end the scan of the rest of the folder (#511).
+        console.error(`workflow spec scan: could not record the parse error for ${filePath}: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`);
+      }
       result.errors += 1;
     }
   }

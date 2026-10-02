@@ -178,6 +178,15 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(unchanged.skipped).toBe(1);
   });
 
+  it("keeps scanning the folder when recording one file's parse error fails", () => {
+    writeFileSync(join(folder, "a-bad.yaml"), INVALID_YAML);
+    writeFileSync(join(folder, "b-good.yaml"), VALID_YAML);
+    cache.writeDiagnostic = () => { throw new Error("diagnostic write failed"); };
+    let result: ReturnType<typeof scanWorkflowSpecFolder> | undefined;
+    expect(() => { result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null }); }).not.toThrow();
+    expect(result).toMatchObject({ scanned: 2, valid: 1, errors: 1 });
+  });
+
   it("removes cache row when file disappears (OQ-4)", () => {
     writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
     writeFileSync(join(folder, "wf2.yaml"), VALID_YAML_TWO);
