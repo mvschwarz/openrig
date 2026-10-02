@@ -84,9 +84,13 @@ export class DaemonClient {
    *  server) returns null — the caller disables the leg permanently and the TUI behaves
    *  exactly as S16 shipped it (click-to-refresh). Never retried on null. */
   async openActivityEvents(): Promise<Response | null> {
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), 5_000);
+    deadline.unref?.();
     try {
       const res = await this.fetchImpl(`${this.baseUrl}/api/activity/events`, {
         headers: { ...this.headers, accept: "text/event-stream" },
+        signal: controller.signal,
       });
       if (!res.ok || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
         // No subscriber will own a rejected body; release its connection now.
@@ -96,6 +100,9 @@ export class DaemonClient {
       return res;
     } catch {
       return null; // unreachable daemon at open — the leg stays off; refresh still works
+    } finally {
+      // Bound only opening headers; an established SSE stream stays live.
+      clearTimeout(deadline);
     }
   }
 
