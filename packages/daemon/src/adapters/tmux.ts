@@ -461,9 +461,14 @@ export class TmuxAdapter {
   }
 
   async listPanes(target: string): Promise<TmuxPane[]> {
+    // Callers name a session (optionally with a window), or an immutable tmux
+    // id. Exact session matching prevents observing a prefix neighbor's pane.
+    const namedTarget = target.startsWith("=") ? target : `=${target}`;
+    const exactTarget = /^[%$@]\d+$/.test(target) ? target
+      : namedTarget.includes(":") ? namedTarget : `${namedTarget}:`;
     try {
-      const output = await this.run(["tmux", "list-panes", "-t", target, "-F", PANE_FORMAT],
-        `tmux list-panes -t ${shellQuote(target)} -F "${PANE_FORMAT}"`);
+      const output = await this.run(["tmux", "list-panes", "-t", exactTarget, "-F", PANE_FORMAT],
+        `tmux list-panes -t ${shellQuote(exactTarget)} -F "${PANE_FORMAT}"`);
       return parseLines(output, parsePaneLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];

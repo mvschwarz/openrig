@@ -24,6 +24,15 @@ try {
   for (const adapter of [argv, legacy]) {
     assert.equal((await adapter.probeSession("worker@demo2")).state, "present", "exact existing session");
     missingProbes.push((await adapter.probeSession("worker@demo")).state);
+    const panes = await adapter.listPanes("worker@demo2");
+    assert.equal(panes.length, 1, "the exact existing session pane remains visible");
+    assert.equal((await adapter.listPanes("worker@demo2:0"))[0].id, panes[0].id, "named session window remains exact");
+    assert.equal((await adapter.listPanes(panes[0].id))[0].id, panes[0].id, "immutable pane-id target remains supported");
+    const ids = (await native(["display-message", "-p", "-t", "=worker@demo2:", "#{session_id} #{window_id}"])).trim().split(" ");
+    for (const id of ids) assert.equal((await adapter.listPanes(id))[0].id, panes[0].id, "immutable session/window ids remain supported");
+    assert.equal((await adapter.listPanes("=worker@demo2:0"))[0].id, panes[0].id, "already-exact target remains supported");
+    await assert.rejects(adapter.listPanes("worker@demo"), /can't find (?:window|session)/,
+      "missing list-panes target must not resolve to the live prefix neighbor");
   }
   migrate(db, ALL_MIGRATIONS);
   const repo = new RigRepository(db), registry = new SessionRegistry(db), eventBus = new EventBus(db);
@@ -39,5 +48,5 @@ try {
   assert.equal(registry.getSessionsForRig(rig.id)[0].status, "detached");
   assert.equal(registry.getSessionsForRig(neighborRig.id)[0].status, "running");
   assert.equal((await argv.probeSession("worker@demo2")).state, "present");
-  console.log(JSON.stringify({ nativeTmux: true, argvAndLegacy: true, missingDetached: true, neighborPreserved: true }));
+  console.log(JSON.stringify({ nativeTmux: true, argvAndLegacy: true, missingDetached: true, neighborPreserved: true, exactPaneListing: true }));
 } finally { db.close(); await native(["kill-server"]).catch(() => {}); }
