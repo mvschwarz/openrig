@@ -21,11 +21,9 @@ tie. Feel free to coordinate on the issue first.
 
 ## Agents and runtimes
 
-- **Claude seats in `auto` permission mode** (#33).
 - **Codex seats that can reach the local daemon by default** (#275), with an easy opt-out.
 - **Custom Codex providers such as Bedrock** (#194): accept providers that authenticate with an environment key, and
   forward their token.
-- **Claude usage-limit detection** (#99): show a seat as limited, with its reset time, as Codex seats already do.
 - **Operator recovery for Pi and Oh My Pi seats** (#41).
 - **New agent types:** OpenCode (#87, #227, #517), the Cursor CLI (#352), the Grok CLI (#522) and Devin (#44) are
   planned on a shared adapter.
