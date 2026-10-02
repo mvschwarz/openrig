@@ -247,7 +247,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `id` | string | yes | — | Pod identifier. Must not contain dots. Must be unique within the rig. Used as the first segment of session names and logical IDs. |
+| `id` | string | yes | — | Pod identifier. Must not contain dots or `@` (the session address uses `@` before the rig name). Must be unique within the rig. Used as the first segment of session names and logical IDs. |
 | `label` | string | yes | — | Human-readable pod name. Shown in UI explorer, graph groupings, and detail surfaces. |
 | `summary` | string | no | — | Pod description. |
 | `continuity_policy` | ContinuityPolicy | no | — | Pod-level continuity/restore policy. Controls compaction recovery, artifact management, and peer-driven restoration. |
@@ -258,6 +258,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 ### Pod ID Rules
 
 - Must not contain dots (`.`)
+- Must not contain `@` (the session address uses `@` before the rig name)
 - Must be unique across all pods in the rig
 - Becomes the first segment of the qualified logical ID: `{podId}.{memberId}`
 - Becomes the first segment of the canonical session name: `{podId}-{memberId}@{rigName}`
@@ -268,7 +269,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `id` | string | yes | — | Member identifier. Must not contain dots. Must be unique within the pod. |
+| `id` | string | yes | — | Member identifier. Must not contain dots or `@` (the session address uses `@` before the rig name). Must be unique within the pod. |
 | `agent_ref` | string | yes | — | Reference to an AgentSpec. Must start with `local:` (relative) or `path:` (absolute). Exception: `builtin:terminal` for infrastructure nodes. |
 | `profile` | string | yes | — | Profile name from the referenced AgentSpec. Use `default` for the default profile. Exception: `none` for terminal nodes. |
 | `codex_config_profile` | string | no | — | Codex-only native profile passed as `-p <name>`; letters, numbers, `_`, `.`, `-`. Separate from the AgentSpec `profile`. With the normal launch mode, this replaces OpenRig's explicit workspace-write sandbox flag. A full-bypass policy instead emits danger-full-access and omits this profile argument. |
@@ -551,9 +552,9 @@ These rules are enforced by the validator. A spec that violates any of these wil
 
 1. `version` and `name` are required non-empty strings.
 2. `pods` must be a non-empty array.
-3. Pod IDs must not contain dots and must be unique.
+3. Pod IDs must not contain dots or `@` and must be unique.
 4. Pod labels are required.
-5. Member IDs must not contain dots and must be unique within their pod.
+5. Member IDs must not contain dots or `@` and must be unique within their pod.
 6. `agent_ref`, `profile`, `runtime`, and `cwd` are required for every member.
 7. Terminal nodes require the exact triple: `runtime: terminal`, `agent_ref: builtin:terminal`, `profile: none`.
 8. `agent_ref` must start with `local:` (relative) or `path:` (absolute), except `builtin:terminal`.
