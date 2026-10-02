@@ -88,7 +88,11 @@ export class DaemonClient {
       const res = await this.fetchImpl(`${this.baseUrl}/api/activity/events`, {
         headers: { ...this.headers, accept: "text/event-stream" },
       });
-      if (!res.ok || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) return null;
+      if (!res.ok || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
+        // No subscriber will own a rejected body; release its connection now.
+        await res.body?.cancel();
+        return null;
+      }
       return res;
     } catch {
       return null; // unreachable daemon at open — the leg stays off; refresh still works
