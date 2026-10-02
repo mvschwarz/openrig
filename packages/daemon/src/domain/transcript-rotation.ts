@@ -114,9 +114,12 @@ export function startTranscriptRotation(
         if (fs.existsSync(outputPath)) {
           const prev = fs.readFileSync(outputPath, "utf8");
           prevContent = prev;
-          const boundaryLines = prev
+          // A pane may echo a boundary marker (for example while inspecting a
+          // transcript). Retain each structural marker once so repeated captures
+          // cannot promote the same scrollback line into an ever-growing header.
+          const boundaryLines = [...new Set(prev
             .split("\n")
-            .filter((line) => line.startsWith("--- SESSION BOUNDARY:"));
+            .filter((line) => line.startsWith("--- SESSION BOUNDARY:")))];
           if (boundaryLines.length > 0) header = boundaryLines.join("\n") + "\n";
         }
       } catch {
