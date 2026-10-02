@@ -1712,7 +1712,7 @@ describe("RestoreOrchestrator", () => {
 
   it.each(["exact", "wrong-token", "foreign-process", "replaced-pane", "replaced-process",
     "chooser", "login", "trust", "mcp", "error", "missing-token",
-    "hook-token", "hook-equal", "operator-token", "operator-equal", "hook-wrong-type", "hook-late"])(
+    "hook-token", "hook-equal", "operator-token", "operator-equal", "hook-wrong-type", "hook-late", "hook-join", "hook-join-equal"])(
     "pod-aware headerless Claude resume keeps native proof and new-row metadata: %s", async (mode) => {
       const { ClaudeCodeAdapter } = await import("../src/adapters/claude-code-adapter.js");
       const token = "00000000-0000-4000-8000-000000000086";
@@ -1756,8 +1756,9 @@ describe("RestoreOrchestrator", () => {
         ...mockTmux(),
         createSession: vi.fn(async () => { launched = true; return { ok: true as const }; }),
         hasSession: vi.fn(async () => launched),
-        getPaneCommand: vi.fn(async () => {
-          if (protectedSource && !protectedIdentity && (mode !== "hook-late" || samples > 0)) {
+        getPaneCommand: vi.fn(async (target: string) => {
+          if (protectedSource && !protectedIdentity && (mode !== "hook-late" || samples > 0)
+            && (!mode.startsWith("hook-join") || target === "%1")) {
             const latest = db.prepare("SELECT id FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1").get(node.id) as { id: string };
             sessionRegistry.updateResumeToken(latest.id, mode === "hook-wrong-type" ? "codex_id" : "claude_id", protectedToken, protectedSource);
             protectedIdentity = db.prepare(identitySql).get(latest.id);
@@ -1793,7 +1794,8 @@ describe("RestoreOrchestrator", () => {
         expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "attention_required", startup: "attention_required" });
         expect(latest.resumeToken).toBe(protectedToken);
         expect(outcome.error).toContain("session metadata");
-        expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
+        if (mode !== "hook-join") expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
+        else expect(db.prepare("SELECT verdict FROM seat_identity_verdicts WHERE node_id = ?").get(node.id)).toEqual({ verdict: "mismatch" });
       } else {
         expect(outcome.status).not.toBe("resumed");
         if (mode === "missing-token") expect(tmux.sendText).not.toHaveBeenCalled();
