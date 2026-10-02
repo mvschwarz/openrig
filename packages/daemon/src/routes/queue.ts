@@ -532,7 +532,8 @@ export function queueRoutes(): Hono {
   // OPR.0.3.2.21.FR-4(d-docs) — closure ≠ acceptance.
   //
   // `state=done` with `closure_reason=handed_off_to` records that the
-  // source seat has DELIVERED the work to the next stage. It does NOT
+  // source seat records a handoff claim. A row's handoffAdvisory names
+  // successor custody that this daemon cannot verify. The close does NOT
   // record that the next stage has ACCEPTED the work — that's the next
   // stage's verdict on its own qitem (typically a separate close with
   // its own closure_reason).

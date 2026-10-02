@@ -183,6 +183,14 @@ export interface QueueItem {
   fieldsElided?: Array<"body" | "summary" | "evidenceRef" | "humanDetail" | "waiting">;
   closureReason: ClosureReason | null;
   closureTarget: string | null;
+  /** Reporting only: local absence never proves a foreign successor is missing.
+   * A matching local row suppresses it; this is not a continuing-custody check. */
+  handoffAdvisory?: {
+    status: "unverified";
+    target: string;
+    reason: "no-live-local-successor";
+    message: string;
+  };
   closureRequiredAt: string | null;
   claimedAt: string | null;
   lastNudgeAttempt: string | null;
@@ -3691,6 +3699,39 @@ export class QueueRepository {
     return view;
   }
 
+  private handoffAdvisory(row: QueueItemRow): QueueItem["handoffAdvisory"] {
+    // handoff() creates its local successor in the same transaction. Do not
+    // scan successor history again on every projection of those source rows.
+    if (row.state === "handed-off" || !isTerminalState(row.state)
+      || row.closure_reason !== "handed_off_to" || !row.closure_target) return undefined;
+    const target = row.closure_target;
+    try {
+      const successor = this.db.prepare(
+        `SELECT 1 FROM queue_items s
+          WHERE (s.qitem_id = ? OR s.destination_session = ?) AND s.qitem_id != ?
+            AND (s.handed_off_from = ? OR EXISTS (
+              SELECT 1 FROM json_each(s.chain_of_record) WHERE value = ?
+            )) LIMIT 1`,
+      ).get(target, target, row.qitem_id, row.qitem_id, row.qitem_id);
+      // A linked row may have handed on to another owner. Its current state
+      // does not establish whether later hops still hold the work.
+      if (successor) return undefined;
+    } catch {
+      // Optional reporting must not fail a close that has already committed,
+      // or describe an unavailable lookup as proof of a missing local row.
+      return undefined;
+    }
+    const foreignTarget = /^qitem-[^@]+@[^@]+$/.test(target);
+    return {
+      status: "unverified",
+      target,
+      reason: "no-live-local-successor",
+      message: foreignTarget
+        ? `Successor custody for '${target}' is unverified on this daemon: the successor is named on that host, and this daemon cannot read its custody. This closure records a handoff claim, not proof of transfer or pickup.`
+        : `Successor custody for '${target}' is unverified on this daemon: no local row with this source's lineage was found. A successor may exist on another host. This closure records a handoff claim, not proof of transfer or pickup; reconcile the successor by ID.`,
+    };
+  }
+
   private rowToItem(row: QueueItemRow, includeWaiting = true): QueueItem {
     // S04 — derive the pickup receipt at the ONE shared projection point (list/show/overdue
     // all flow through here), so the park-vs-strand question is answered by the row face.
@@ -3706,7 +3747,9 @@ export class QueueRepository {
       lastHeartbeat: row.last_heartbeat,
       postClaimMotionCount: 0, // this reader supplies the current meaningful timestamp
     });
+    const handoffAdvisory = this.handoffAdvisory(row);
     return {
+      ...(handoffAdvisory ? { handoffAdvisory } : {}),
       pickup,
       ...(waiting ? { waiting } : {}),
       qitemId: row.qitem_id,
