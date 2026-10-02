@@ -1,4 +1,5 @@
 import path from "node:path";
+import { daemonUrl } from "./daemon-url.js";
 import { existsSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import type { DaemonStartLock } from "./daemon-start-lock.js";
@@ -67,7 +68,7 @@ export interface GetDaemonStatusOptions {
 
 /** Build the daemon HTTP URL from status. Uses persisted host or defaults to 127.0.0.1. */
 export function getDaemonUrl(status: DaemonStatus): string {
-  return `http://${status.host ?? DEFAULT_HOST}:${status.port}`;
+  return daemonUrl(status.host ?? DEFAULT_HOST, status.port);
 }
 
 /**
@@ -372,7 +373,7 @@ async function checkPid(state: DaemonState, deps: LifecycleDeps): Promise<"openr
   if (!deps.isProcessAlive(state.pid)) return "dead";
   const host = state.host ?? DEFAULT_HOST;
   try {
-    await fetchDaemonProbe(deps, `http://${host}:${state.port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
+    await fetchDaemonProbe(deps, `${daemonUrl(host, state.port)}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
     // Any response (ok or not) means something is listening on our port → OpenRig
     return "openrig";
   } catch (err) {
@@ -552,7 +553,7 @@ export async function verifyRequiredListeners(input: {
   for (const host of required) {
     // NO catch-collapse here (r2 finding): the probe classifies its own errors; an
     // exception reaching this point is a wiring bug and should surface, not convert.
-    const outcome = await input.probe(`http://${host}:${input.port}/healthz`);
+    const outcome = await input.probe(`${daemonUrl(host, input.port)}/healthz`);
     if (outcome === "healthy") verified.push(host);
     else if (outcome === "unhealthy") missing.push(host);
     else indeterminate.push(host);
@@ -619,7 +620,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
   } else {
     let recoveredRunning = false;
     try {
-      await fetchDaemonProbe(deps, `http://${probeHost}:${port}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
+      await fetchDaemonProbe(deps, `${daemonUrl(probeHost, port)}/healthz`, HEALTHZ_PROBE_TIMEOUT_MS);
       recoveredRunning = true;
     } catch (err) {
       if (err instanceof HealthProbeTimeoutError) {
@@ -690,7 +691,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     if (!Number.isSafeInteger(pid) || pid! <= 0) throw new Error("Daemon spawn returned no valid child PID");
     if (hasExited()) throw new Error(`Daemon child ${pid} exited before startup completed`);
   };
-  const healthzUrl = `http://${probeHost}:${port}/healthz`;
+  const healthzUrl = `${daemonUrl(probeHost, port)}/healthz`;
   type StartHealth = { pid?: unknown; bind?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean } };
   const readOwnedHealth = async (url: string): Promise<StartHealth | null> => {
     assertChild();
@@ -826,8 +827,8 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   const state = readState(deps);
   const configured = resolveConfiguredDaemonTarget();
   const explicitUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL");
-  const stateUrl = state ? `http://${state.host ?? DEFAULT_HOST}:${state.port}` : undefined;
-  const target = stateUrl ?? explicitUrl?.replace(/\/+$/, "") ?? `http://${configured.host}:${configured.port}`;
+  const stateUrl = state ? daemonUrl(state.host ?? DEFAULT_HOST, state.port) : undefined;
+  const target = stateUrl ?? explicitUrl?.replace(/\/+$/, "") ?? daemonUrl(configured.host, configured.port);
   if (stateUrl && explicitUrl && new URL(explicitUrl).origin !== new URL(stateUrl).origin) {
     throw new Error(`Cannot stop safely: addressed ${explicitUrl}/healthz does not match local PID ${state!.pid} at ${stateUrl}/healthz; no signal sent.`);
   }
@@ -963,7 +964,7 @@ export async function getDaemonStatus(
   if (!state) {
     const configured = resolveConfiguredDaemonTarget();
     try {
-      const res = await probeHealthzWithSettle(deps, `http://${configured.host}:${configured.port}/healthz`);
+      const res = await probeHealthzWithSettle(deps, `${daemonUrl(configured.host, configured.port)}/healthz`);
       const ev = await readHealthEvidence(res);
       return {
         state: "running",
@@ -998,7 +999,7 @@ export async function getDaemonStatus(
   let reason: DaemonStatus["reason"];
   let eventLoop: DaemonEventLoopEvidence | undefined;
   try {
-    const res = await probeHealthzWithSettle(deps, `http://${host}:${state.port}/healthz`);
+    const res = await probeHealthzWithSettle(deps, `${daemonUrl(host, state.port)}/healthz`);
     const ev = await readHealthEvidence(res);
     healthy = ev.healthy;
     reason = ev.reason;

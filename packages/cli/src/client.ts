@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { daemonUrl } from "./daemon-url.js";
 import path from "node:path";
 import { ConfigStore } from "./config-store.js";
 import { getOpenRigHome, readOpenRigEnv } from "./openrig-compat.js";
@@ -119,7 +120,7 @@ function localDaemonUrl(): string | undefined {
       || (state.host !== undefined && (typeof state.host !== "string" || !state.host.trim()))) return undefined;
     // A stale PID must not redirect reads or writes to another configured daemon.
     // Keep the recorded endpoint; the request decides reachability, even after exit.
-    return `http://${state.host ?? "127.0.0.1"}:${state.port}`;
+    return daemonUrl(state.host ?? "127.0.0.1", state.port);
   } catch {
     return undefined;
   }
@@ -180,7 +181,7 @@ export class DaemonClient {
           this.baseUrl = localUrl;
         } else {
           const config = new ConfigStore().resolve(); // env > file > defaults
-          this.baseUrl = `http://${config.daemon.host}:${config.daemon.port}`;
+          this.baseUrl = daemonUrl(config.daemon.host, config.daemon.port);
         }
       }
     }
