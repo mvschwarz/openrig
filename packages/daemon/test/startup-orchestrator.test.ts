@@ -166,6 +166,26 @@ describe("StartupOrchestrator", () => {
     expect(adapter.deliverStartup).toHaveBeenCalledWith([], expect.anything());
   });
 
+  it.each([undefined, "claude_id", "claude_name", "codex_id"])("managed Claude resume agrees with the requested type: %s", async (resumeType) => {
+    const seed = seedSession();
+    const adapter = mockAdapter();
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, {
+      adapter, isRestore: true, resumeToken: "requested-native", resumeType,
+    }));
+    const compatible = resumeType !== "codex_id";
+    expect(result).toMatchObject(compatible
+      ? { ok: true, startupStatus: "ready", continuityOutcome: "resumed" }
+      : { ok: false, startupStatus: "attention_required" });
+    expect(db.prepare("SELECT status, startup_status, resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(seed.sessionId))
+      .toEqual({ status: "running", startup_status: compatible ? "ready" : "attention_required",
+        resume_type: "claude_id", resume_token: "requested-native", resume_provenance: "scrape" });
+    expect(adapter.launchHarness).toHaveBeenCalledOnce();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    if (!compatible) expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+  });
+
   it.each(["missing", "late-hook"])("managed Claude resume checks final row agreement: %s", async (mode) => {
     const seed = seedSession();
     const token = "requested-native";

@@ -1710,7 +1710,7 @@ describe("RestoreOrchestrator", () => {
     expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
-  it.each(["exact", "wrong-token", "foreign-process", "replaced-pane", "replaced-process",
+  it.each(["exact", "requested-codex-type", "requested-legacy-type", "wrong-token", "foreign-process", "replaced-pane", "replaced-process",
     "chooser", "login", "trust", "mcp", "error", "missing-token",
     "hook-token", "hook-equal", "operator-token", "operator-equal", "hook-wrong-type", "hook-late", "hook-join", "hook-join-equal",
     "join-native-loss", "join-native-loss-hook",
@@ -1726,7 +1726,7 @@ describe("RestoreOrchestrator", () => {
       rigRepo.setRigPolicyProvenance(rig.id, { origin: "builtin", resolvedTarget: null, declaringDir: null, launchPosture: "full_bypass" });
       const old = sessionRegistry.registerSession(node.id, "dev-owner@headerless");
       sessionRegistry.updateStatus(old.id, "running");
-      if (mode !== "missing-token") sessionRegistry.updateResumeToken(old.id, "claude_id", token);
+      if (mode !== "missing-token") sessionRegistry.updateResumeToken(old.id, mode === "requested-codex-type" ? "codex_id" : mode === "requested-legacy-type" ? "claude_name" : "claude_id", token);
       db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)")
         .run(node.id, "[]", "[]", "[]", "claude-code");
       const snap = snapshotCapture.captureSnapshot(rig.id, "test");
@@ -1829,7 +1829,12 @@ describe("RestoreOrchestrator", () => {
           expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(joinSessionId!)).toEqual({ startup_status: "attention_required" });
           expect(startupWrites).toHaveBeenCalledExactlyOnceWith(joinSessionId, "attention_required");
         }
-      } else if (mode === "exact" || mode.endsWith("-equal")) {
+      } else if (mode === "requested-codex-type") {
+        expect({ status: outcome.status, startup: latest.startupStatus }).toEqual({ status: "attention_required", startup: "attention_required" });
+        expect(db.prepare("SELECT resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(latest.id))
+          .toEqual({ resume_type: "claude_id", resume_token: token, resume_provenance: "scrape" });
+        expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(node.id)).toEqual([]);
+      } else if (mode === "exact" || mode === "requested-legacy-type" || mode.endsWith("-equal")) {
         expect({ status: outcome.status, token: latest.resumeToken }).toEqual({ status: "resumed", token });
         expect(latest.id).not.toBe(old.id);
         expect(latest.startupStatus).toBe("ready");
