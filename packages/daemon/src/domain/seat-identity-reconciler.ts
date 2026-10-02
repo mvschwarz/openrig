@@ -1,4 +1,4 @@
-import { observeClaudePaneProcess, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation } from "./native-process-lineage.js";
+import { observeClaudePaneProcess, observeClaudePaneRuntime, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation } from "./native-process-lineage.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
@@ -74,7 +74,7 @@ interface RunningSeatRow {
 
 export interface SeatIdentityReconcilerDeps {
   db: Database.Database;
-  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses">>;
+  tmux: Pick<TmuxAdapter, "listSessions" | "getPanePid" | "getPaneCommand"> & Partial<Pick<TmuxAdapter, "readAllPaneProcesses" | "listPanes">>;
   now?: () => Date;
   listProcesses?: NativeProcessLister;
 }
@@ -168,7 +168,7 @@ export class SeatIdentityReconciler {
     for (const seat of seats) {
       if (!seat.tmux_pane || !liveSessions.has(seat.session_name)) continue;
       if (seat.runtime === "codex") nativeSeats.push(seat);
-      else if (seat.runtime === "claude-code" && seat.resume_token) {
+      else if (seat.runtime === "claude-code") {
         // Only shell-label contradictions consume Claude native proof. Keep
         // computeVerdict's fresh command/PID reads: a later shell transition
         // without sampled proof must remain non-green for this sweep.
@@ -191,7 +191,8 @@ export class SeatIdentityReconciler {
           return (await panesNow)?.get(target)?.pid ?? this.tmux.getPanePid(target);
         },
       });
-      return Promise.all(nativeSeats.map((seat) => (seat.runtime === "codex" ? observeCodexPaneProcess : observeClaudePaneProcess)({
+      return Promise.all(nativeSeats.map((seat) => (seat.runtime === "codex" ? observeCodexPaneProcess
+        : seat.resume_token !== null && seat.resume_token !== undefined ? observeClaudePaneProcess : observeClaudePaneRuntime)({
         target: seat.tmux_pane!, tmux, expectedToken: seat.resume_token,
         listProcesses: () => snapshot ??= this.listProcesses(),
       })));
@@ -285,16 +286,24 @@ export class SeatIdentityReconciler {
     }
 
     const command = batched ? batched.command : await this.tmux.getPaneCommand(seat.tmux_pane);
-    if (command === null && seat.runtime === "claude-code" && seat.resume_token) {
+    if (command === null && seat.runtime === "claude-code") {
       return this.tmuxUnavailableVerdict(seat, observedAt);
     }
-    if (seat.runtime === "codex" || (seat.runtime === "claude-code" && seat.resume_token
+    if (seat.runtime === "codex" || (seat.runtime === "claude-code" && (seat.resume_token != null || native !== null)
       && classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch" && isShellForeground(command?.trim().toLowerCase() ?? ""))) {
+      let verified = native?.panePid === pid;
+      if (verified && seat.runtime === "claude-code" && seat.resume_token == null) {
+        // Runtime-only proof must still refer to the sole bound pane after the
+        // two shared process snapshots. It does not clear startup/restore state.
+        const currentPanes = await this.tmux.listPanes?.(seat.session_name).catch(() => []);
+        const currentPid = await this.tmux.getPanePid(seat.tmux_pane).catch(() => null);
+        verified = currentPanes?.length === 1 && currentPanes[0]?.id === seat.tmux_pane && currentPid === pid;
+      }
       return {
-        ...base, verdict: native?.panePid === pid ? "verified" : "mismatch",
-        evidenceSource: "pane_process", reason: native?.panePid === pid ? null : "process_identity_ambiguous",
+        ...base, verdict: verified ? "verified" : "mismatch",
+        evidenceSource: "pane_process", reason: verified ? null : "process_identity_ambiguous",
         evidence: { registeredPane: seat.tmux_pane, observedPid: native?.process.pid ?? pid,
-          observedCommand: native?.process.command ?? command, matchedLayer: native?.panePid === pid ? 1 : null },
+          observedCommand: native?.process.command ?? command, matchedLayer: verified ? 1 : null },
       };
     }
     const match = classifyPaneRuntimeMatch(command, seat.runtime);
