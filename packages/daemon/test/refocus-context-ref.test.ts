@@ -297,15 +297,23 @@ describe("openrig-core refocusing skill — real dual-tree trace", () => {
     writeFileSync(rig, `#!/bin/sh
 printf '%s\\n' "$*" >> "$RIG_CALL_LOG"
 if [ -n "$RIG_HANG" ]; then exec sleep "$RIG_HANG"; fi
+# A slow call that still answers; the sleep holds no output pipe, so a timeout kill returns at once.
+slow() { if [ -n "$1" ]; then sleep "$1" </dev/null >/dev/null 2>&1; fi; }
 if [ "$1 $2" = "queue whoami" ]; then
   if [ -n "$RIG_QUEUE_WHOAMI_SLEEP" ]; then exec sleep "$RIG_QUEUE_WHOAMI_SLEEP"; fi
+  slow "$RIG_SLOW_QUEUE_WHOAMI"
   printf '%s' "$RIG_QUEUE_WHOAMI_STDOUT"; exit 0
 fi
-if [ "$1 $2" = "config --json" ]; then printf '%s' "$RIG_CONFIG_JSON_STDOUT"; exit "\${RIG_CONFIG_JSON_STATUS:-0}"; fi
+if [ "$1 $2" = "config --json" ]; then
+  slow "$RIG_SLOW_CONFIG_JSON"
+  printf '%s' "$RIG_CONFIG_JSON_STDOUT"; exit "\${RIG_CONFIG_JSON_STATUS:-0}"
+fi
+if [ "$1 $2" = "context get" ]; then slow "$RIG_SLOW_CONTEXT"; printf 'slow configured content for %s\\n' "$3"; exit 0; fi
 if [ "$1 $2" = "whoami --json" ]; then printf '{"identity":{"rigName":"demo","sessionName":"builder@demo"}}\\n'; exit 0; fi
 if [ "$1 $2 $3" = "config get topology.root" ]; then printf '%s\\n' "$OPENRIG_TEST_TOPOLOGY_ROOT"; exit 0; fi
 if [ "$1 $2 $3" = "config get workspace.root" ]; then printf '%s\\n' "$OPENRIG_TEST_WORKSPACE_ROOT"; exit 0; fi
 if [ "$1 $2" = "scope resolve-notes" ]; then
+  slow "$RIG_SLOW_RESOLVE"
   if [ -r "$3/NOTES.md" ]; then printf '{"ok":true,"resolution":{"path":"%s","name":"NOTES.md"}}\\n' "$3/NOTES.md"; exit 0; fi
   if [ -r "$3/MISSION_NOTES.md" ]; then printf '{"ok":true,"resolution":{"path":"%s","name":"MISSION_NOTES.md"}}\\n' "$3/MISSION_NOTES.md"; exit 0; fi
   printf '{"ok":true,"resolution":null}\\n'; exit 0
@@ -618,6 +626,27 @@ exit 1
       expect(result.context).toContain("TRACE GAP");
       expect(result.calls[0]).toBe("queue whoami --json");
       expect(result.calls.filter((call) => call === "config --json").length).toBeLessThanOrEqual(1);
+    }, 20_000);
+
+    // With a content ref, `rig context get` runs after python. Every call here answers, just slowly:
+    // main delivers this fire well under 5 s, so the config read must not spend the time the
+    // content lookup needs. Without the content reserve this fire took over 5.2 s and was killed.
+    it("delivers a slow but successful fire with a content ref inside the 5 s hook kill", () => {
+      const f = fixture();
+      const started = Date.now();
+      const result = hook(f, {
+        OPENRIG_REFOCUS_CONTENT_REF: "packs/slow-ref",
+        RIG_SLOW_QUEUE_WHOAMI: "0.6",
+        RIG_SLOW_CONFIG_JSON: "1.7",
+        RIG_SLOW_RESOLVE: "0.4",
+        RIG_SLOW_CONTEXT: "1.5",
+      });
+      const elapsed = Date.now() - started;
+      expect(result.status).toBe(0);
+      expect(elapsed).toBeLessThan(5_000);
+      expect(result.context).toContain("REFOCUS CONTENT SOURCE: OPENRIG_REFOCUS_CONTENT_REF=packs/slow-ref");
+      expect(result.context).toContain("slow configured content for packs/slow-ref");
+      expect(result.calls).not.toContain("config --json");
     }, 20_000);
 
     // A queue whoami past the hook's 2 s budget must reach the trace as UNKNOWN (#484 review LOW-1).

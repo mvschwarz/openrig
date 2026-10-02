@@ -14,6 +14,7 @@ const { spawnSync } = require("node:child_process");
 
 const DEFAULT_THRESHOLD = 2_600_000;
 const FALSE_VALUES = new Set(["0", "false", "off", "no"]);
+const CONTENT_LOOKUP_TIMEOUT_MS = 2_000;
 
 function runtime() {
   const index = process.argv.indexOf("--runtime");
@@ -44,7 +45,7 @@ function readConfiguredContent(home) {
     const result = spawnSync("rig", ["context", "get", contentRef], {
       encoding: "utf8",
       env: process.env,
-      timeout: 2_000,
+      timeout: CONTENT_LOOKUP_TIMEOUT_MS,
       maxBuffer: 16 * 1024 * 1024,
     });
     if (!result.error && result.status === 0 && result.stdout.trim()) {
@@ -128,8 +129,9 @@ function deriveWorkStart() {
 // exactly as before. Only the two root fields are consumed and nothing from the config is logged.
 //
 // Both harnesses kill this hook at 5 s (hooks/claude.json, hooks/codex.json). The read gets only
-// what is left of a 4.5 s budget, counted from process start, after reserving python's 2 s; with
-// 250 ms or less left it is skipped, so queue whoami + this read + python stay under the kill.
+// what is left of a 4.5 s budget, counted from process start, after reserving python's 2 s and,
+// when a content ref is configured, the content lookup that runs after python; with 250 ms or
+// less left it is skipped, so the read never pushes a fire main would deliver past the kill.
 function traceEnv(trees) {
   const env = { ...process.env };
   const missing = [
@@ -137,7 +139,8 @@ function traceEnv(trees) {
     ["OPENRIG_WORKSPACE_ROOT", "workspace", "work"],
   ].filter(([name, , tree]) => (trees === "both" || trees === tree) && !env[name]);
   if (missing.length === 0) return env;
-  const timeout = Math.floor(Math.min(2_000, 4_500 - 2_000 - process.uptime() * 1_000));
+  const contentReserve = process.env.OPENRIG_REFOCUS_CONTENT_REF ? CONTENT_LOOKUP_TIMEOUT_MS : 0;
+  const timeout = Math.floor(Math.min(2_000, 4_500 - 2_000 - contentReserve - process.uptime() * 1_000));
   if (timeout <= 250) return env;
   const result = spawnSync("rig", ["config", "--json"], {
     encoding: "utf8",
