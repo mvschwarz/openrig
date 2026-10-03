@@ -295,8 +295,8 @@ describe("S03 bound launch across existing paths", () => {
   it("production startup supplies one helper to both adapters without calling startup", () => {
     const startup = readFileSync(new URL("../src/startup.ts", import.meta.url), "utf8");
     expect(startup).toContain("new ClaudeManagedLaunch(db, { ...launchSessionEnv, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR },");
-    expect(startup).toContain("new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch })");
-    expect(startup).toContain("new ClaudeCodeAdapter({ tmux: tmuxAdapter, claudeManagedLaunch,");
+    expect(startup).toContain("new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch, seatLaunchEnvironment })");
+    expect(startup).toContain("new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch,");
   });
   it("does not submit after a context change following a valid paste; preserves partial-input semantics", async () => {
     const f = fixture(); const commands: string[] = [];
