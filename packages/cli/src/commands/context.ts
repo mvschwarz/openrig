@@ -142,7 +142,7 @@ async function installPackFromUrl(
 ): Promise<{ targetDir: string; installName: string }> {
   const manifestUrl = url.endsWith("/") ? `${url}manifest.yaml` : url;
   mkdirSync(targetRoot, { recursive: true });
-  const staging = mkdtempSync(join(dirname(targetRoot), ".tmp-add-"));
+  const staging = mkdtempSync(join(targetRoot, ".tmp-add-"));
   try {
     // Fetch + validate the manifest before touching the target namespace.
     const { text: manifestText, finalUrl: finalManifestUrl } = await fetchTextOrThrow(manifestUrl, "manifest");
@@ -835,7 +835,7 @@ Examples:
           if (targetExists) {
             throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);
           }
-          const staging = mkdtempSync(join(dirname(targetRoot), ".tmp-add-"));
+          const staging = mkdtempSync(join(targetRoot, ".tmp-add-"));
           try {
             cpSync(source, staging, { recursive: true });
             mkdirSync(dirname(targetDir), { recursive: true });

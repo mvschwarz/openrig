@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { contextCommand } from "../src/commands/context.js";
@@ -55,4 +55,37 @@ it("does not retain a partial local pack or sync it and allows a clean retry", a
   expect(readFileSync(join(library, "group/fixture", "notes.md"), "utf-8")).toBe("complete bytes");
   expect(readdirSync(library).sort()).toEqual(["fixture", "group"]);
   expect(discovery.scan()).toEqual({ count: 2, errors: [] });
+  // Skip only the installer prefix, not every invalid or hidden directory.
+  const unrelatedInvalid = join(library, ".not-a-pack");
+  mkdirSync(unrelatedInvalid); writeFileSync(join(unrelatedInvalid, "manifest.yaml"), manifest);
+  const scan = discovery.scan();
+  expect(scan.count).toBe(2);
+  expect(scan.errors).toHaveLength(1);
+  expect(scan.errors[0]!.source).toBe(unrelatedInvalid);
+  expect(scan.errors[0]!.error).toContain("unsafe pack ref");
+});
+
+it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("installs into a writable library without requiring its parent to be writable", async () => {
+  root = mkdtempSync(join(tmpdir(), "openrig-local-pack-permission-"));
+  const source = join(root, "source"), library = join(root, "library");
+  mkdirSync(source); mkdirSync(library); chmodSync(library, 0o700);
+  writeFileSync(join(source, "manifest.yaml"), 'name: fixture\nversion: "1"\ntaxonomy: world\nfiles:\n  - path: notes.md\n    role: notes\n');
+  writeFileSync(join(source, "notes.md"), "complete bytes");
+  vi.stubEnv("OPENRIG_CONTEXT_ROOT", library);
+  const post = vi.fn(async () => ({ status: 200, data: { count: 1, entries: [] } }));
+  const deps = { lifecycleDeps: { exists: (p: string) => p === STATE_FILE,
+    readFile: () => JSON.stringify({ pid: process.pid, port: 7433, db: "fixture", startedAt: new Date().toISOString() }),
+    isProcessAlive: () => true, fetch: async () => ({ ok: true }) } as never,
+    clientFactory: () => ({ post }) as never };
+  vi.spyOn(console, "log").mockImplementation(() => {});
+  const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  chmodSync(root, 0o500);
+  try {
+    await contextCommand(deps).parseAsync(["add", source, "--json"], { from: "user" });
+    expect.soft(errors.mock.calls.flat().join(" ")).toBe("");
+    expect.soft(process.exitCode).toBeUndefined();
+    expect.soft(post).toHaveBeenCalledOnce();
+    expect.soft(readdirSync(library)).toEqual(["fixture"]);
+    if (readdirSync(library).includes("fixture")) expect(readFileSync(join(library, "fixture", "notes.md"), "utf-8")).toBe("complete bytes");
+  } finally { chmodSync(root, 0o700); }
 });
