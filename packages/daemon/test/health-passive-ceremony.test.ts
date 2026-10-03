@@ -378,3 +378,38 @@ it("does not read disabled ceremony sources or retain their earlier coverage", a
   expect(t.projection.list().records).toHaveLength(1);
   expect(read).toHaveBeenCalledTimes(1);
 });
+
+
+it.each(["health_checkpoint_source_limit", "health_checkpoint_too_large"])("#613 additional: isolates %s", async (reason) => {
+  const t = await setup();
+  const dir = join(t.home, "health/checkpoints");
+  mkdirSync(dir, { recursive: true });
+  if (reason === "health_checkpoint_source_limit") {
+    for (let i = 0; i < 201; i++) writeFileSync(join(dir, `${i.toString(16).padStart(64, "0")}.json`), "{}");
+  } else writeFileSync(join(dir, `${"0".repeat(64)}.json`), "x".repeat(1048577));
+  const source = new HealthCheckpointSource(t.home, t.queue, t.policy);
+  expect(() => source.read()).toThrow(reason);
+  expect(new HealthProjectionService(source).list().coverage).toEqual([{ source: "health-checkpoints",
+    evaluatedAt: expect.any(String), status: "unavailable", partial: true, reason }]);
+});
+it("#613 additional: retains the distinct over-depth lineage refusal as unavailable", async () => {
+  const t = await setup();
+  addFamilies(t, Array(1000).fill(0), "ancestor");
+  const link = t.db.prepare("UPDATE queue_items SET handed_off_from = ? WHERE qitem_id = ?");
+  link.run("ancestor-000", "root");
+  for (let i = 0; i < 999; i++) link.run(`ancestor-${String(i+1).padStart(3, "0")}`, `ancestor-${String(i).padStart(3, "0")}`);
+  expect(() => t.source.read()).toThrow("health_passive_lineage_cycle_or_limit");
+  expect(t.projection.list().coverage?.[0]).toMatchObject({ status: "unavailable", reason: "health_passive_lineage_cycle_or_limit" });
+});
+it("#613 additional: disabled real checkpoint source never opens malformed files", async () => {
+  const t = await setup();
+  const dir = join(t.home, "health/checkpoints");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${"0".repeat(64)}.json`), "malformed");
+  const p = t.policy.read().policy;
+  t.policy.apply({ ...p, disabledDetectors: ["process.ceremony-amplification"] }, "operator@rig");
+  const source = new HealthCheckpointSource(t.home, t.queue, t.policy);
+  const read = vi.spyOn(source, "read");
+  expect(new HealthProjectionService(source, () => t.policy.read()).list().records).toEqual([]);
+  expect(read).not.toHaveBeenCalled();
+});

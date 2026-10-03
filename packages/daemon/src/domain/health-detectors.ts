@@ -86,7 +86,14 @@ export type HealthDetectorObservation =
 
 /** How much of its input a source actually evaluated on its latest read. Omitted
  * items were not evaluated; their absence from the findings is not a healthy verdict. */
-export interface HealthSourceCoverage {
+export type HealthSourceCoverage = {
+  source: string;
+  evaluatedAt: string;
+  status: "unavailable";
+  partial: true;
+  reason: string;
+} | {
+  status?: "available";
   source: string;
   evaluatedAt: string;
   unit: string;
@@ -96,9 +103,12 @@ export interface HealthSourceCoverage {
   omitted: number;
   partial: boolean;
   order: string;
-}
+};
 
 export interface HealthObservationSource {
+  readonly name?: string;
+  /** All detectors this reader can supply. Skip the read when all are disabled. */
+  readonly detectors?: readonly string[];
   read(): readonly HealthDetectorObservation[];
   /** Coverage of the latest read(), when the source bounds its input. */
   coverage?(): readonly HealthSourceCoverage[];
@@ -125,6 +135,10 @@ export interface HealthListProjection {
 
 export function evaluateHealthDetectors(observations: readonly HealthDetectorObservation[], policy: HealthPolicy = DEFAULT_HEALTH_POLICY): HealthRecord[] {
   const records = observations.flatMap((o) => evaluateObservation(o, policy)).filter((r) => !policy.disabledDetectors.includes(r.detector));
+  return deduplicateHealthRecords(records);
+}
+
+function deduplicateHealthRecords(records: readonly HealthRecord[]): HealthRecord[] {
   const episodes = new Map<string, HealthRecord>();
   for (const record of records) {
     const previous = episodes.get(record.id);
@@ -139,20 +153,42 @@ export function canonicalDetectorJson(records: readonly HealthRecord[]): string 
 }
 
 export class HealthProjectionService {
-  constructor(private readonly source: HealthObservationSource, private readonly policy?: () => EffectiveHealthPolicy,
+  private lastCoverage: HealthSourceCoverage[] = [];
+
+  constructor(private readonly source: HealthObservationSource | readonly HealthObservationSource[], private readonly policy?: () => EffectiveHealthPolicy,
     private readonly operatingPosture?: (record: HealthRecord) => NonNullable<HealthRecord["operatingPosture"]>) {}
 
   records(): HealthRecord[] {
+    this.lastCoverage = [];
+    // Policy failure still fails the query: there is no trustworthy enable/disable decision.
     const policy = this.policy?.();
-    return evaluateHealthDetectors(this.source.read(), policy?.policy).map((record) => ({
-      ...record,
-      ...(policy ? { policyVersion: policy.version } : {}),
-      ...(this.operatingPosture ? { operatingPosture: this.operatingPosture(record) } : {}),
-    }));
+    const disabled = policy?.policy.disabledDetectors ?? [];
+    const sources: readonly HealthObservationSource[] = Array.isArray(this.source) ? this.source : [this.source as HealthObservationSource];
+    const records: HealthRecord[] = [];
+    for (const source of sources) {
+      if (source.detectors?.length && source.detectors.every((detector) => disabled.includes(detector))) continue;
+      try {
+        const observations = source.read();
+        const coverage = source.coverage?.() ?? [];
+        const evaluated = evaluateHealthDetectors(observations, policy?.policy).map((record) => ({
+          ...record,
+          ...(policy ? { policyVersion: policy.version } : {}),
+          ...(this.operatingPosture ? { operatingPosture: this.operatingPosture(record) } : {}),
+        }));
+        records.push(...evaluated);
+        this.lastCoverage.push(...coverage);
+      } catch (error) {
+        // Discard this source's incomplete read and any earlier census. A limit or
+        // genuine failure remains named; it is never fabricated as a zero count.
+        this.lastCoverage.push({ source: source.name ?? "health-source", evaluatedAt: new Date().toISOString(),
+          status: "unavailable", partial: true, reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return deduplicateHealthRecords(records);
   }
 
   coverage(): HealthSourceCoverage[] {
-    return [...(this.source.coverage?.() ?? [])];
+    return [...this.lastCoverage];
   }
 
   list(query: HealthListQuery = {}): HealthListProjection {
@@ -190,6 +226,8 @@ export class HealthProjectionService {
  * detectors require structured product-change, directive, or admission facts that
  * current tables cannot express without inference. Replay sources can supply them. */
 export class LiveContextHealthSource implements HealthObservationSource {
+  readonly name = "live-context";
+  readonly detectors = ["context.pressure"];
   constructor(private readonly deps: {
     db: Database.Database;
     rigRepo: RigRepository;

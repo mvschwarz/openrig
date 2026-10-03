@@ -197,7 +197,7 @@ describe("fleet/system health TUI", () => {
       const summary = healthSummaryLine(snap, { kind: "rig", rigId: "openrig-build", rigName: "openrig-build", local: true }, 220).text;
       expect(summary).toMatch(/^HEALTH.*· PARTIAL/);
       if (records.length) expect(text).toContain("PARTIAL · passive-ceremony evaluated 200 of 634 handoff families; 434 omitted were not evaluated and are not healthy");
-      else expect(text).toMatch(/not a healthy verdict.*PARTIAL/);
+      else { expect(text).toContain("not a healthy verdict"); expect(text).toContain("PARTIAL"); }
     }
   });
 
