@@ -56,8 +56,8 @@ function expectRuntimeConfigDisclosure(result: SetupResult): void {
     {
       scope: "global",
       runtime: "claude-code",
-      path: "~/.claude.json",
-      purpose: "Pre-trust managed workspaces and mark Claude onboarding complete.",
+      path: "~/.claude.json or <CLAUDE_CONFIG_DIR>/.claude.json",
+      purpose: "Pre-trust managed workspaces and mark Claude onboarding complete. Explicit permission modes use the launch-selected HOME/config; classic startup uses the daemon home.",
     },
     {
       scope: "project",

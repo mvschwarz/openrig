@@ -250,6 +250,9 @@ OpenRig performs best-effort deterministic runtime configuration for managed ses
   installations may retain one; existing user settings are not removed.
 - Claude global state: `~/.claude.json`
   Purpose: pre-trust managed workspaces and mark onboarding complete for fresh managed sessions.
+  Explicit permission modes use the launch-selected `HOME/.claude.json`, or
+  `<CLAUDE_CONFIG_DIR>/.claude.json` when that variable is set. Classic startup
+  retains the daemon-home path.
 - Claude project-local config: `.claude/settings.local.json`
   Purpose: apply context collector/activity hooks and selected `claude_settings_fragment` resources inside the project without committing them to git.
 - Claude project-local MCP config: `.mcp.json`

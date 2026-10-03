@@ -72,10 +72,45 @@ console.log(JSON.stringify({env:{HOME:process.env.HOME,CLAUDE_CONFIG_DIR:dir}, s
   }, getPaneCommand: async () => "claude", capturePaneContent: async () => "Claude Code\n>" } as unknown as TmuxAdapter;
   const adapter = new ClaudeCodeAdapter({ tmux, fsOps, claudeManagedLaunch: managed, sessionIdFactory: () => "fixture-fresh", sleep: async () => {} });
   const binding = { id: "binding", nodeId: "node", cwd, tmuxSession: "seat", tmuxPane: "%1", permissionMode: "acceptEdits" } as NodeBinding;
-  return { root, cwd, env, statePath, untouched, reads, writes, launches, adapter, binding, fsOps };
+  return { root, cwd, env, statePath, untouched, reads, writes, launches, adapter, binding, fsOps, tmux };
 }
 
 describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects the launch config home", () => {
+  it.each(["fresh", "resume"])("classic %s keeps bootstrap in its inherited default home", async mode => {
+    const f = fixture("alternate", false, true);
+    const alternateBefore = fs.readFileSync(f.statePath, "utf8");
+    let pending = "";
+    f.tmux.sendText = async (_target, text) => { pending = text; return { ok: true }; };
+    f.tmux.sendKeys = async () => {
+      f.launches.push(JSON.parse(execFileSync("/bin/sh", ["-c", pending], {
+        encoding: "utf8", cwd: f.cwd, env: { HOME: f.env.HOME, PATH: f.env.PATH + ":/usr/bin:/bin" },
+      })));
+      return { ok: true };
+    };
+    const binding = { ...f.binding, permissionMode: undefined };
+    await f.adapter.deliverStartup([], binding);
+    expect(await f.adapter.launchHarness(binding, { name: "seat", ...(mode === "resume" ? { resumeToken: "fixture-original" } : {}) })).toMatchObject({ ok: true });
+    const observed = f.launches[0];
+    expect(observed.env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
+    expect(observed.statePath).toBe(path.join(f.env.HOME, ".claude.json"));
+    expect(observed.state).toMatchObject({ ...sentinel, hasCompletedOnboarding: true, projects: { ...sentinel.projects, [f.cwd]: { hasTrustDialogAccepted: true } } });
+    expect(new Set(f.writes)).toEqual(new Set([observed.statePath]));
+    expect(fs.readFileSync(f.statePath, "utf8")).toBe(alternateBefore);
+  });
+  it.each(["{broken", "[]", "null", '{"projects":[]}', "invalid project"])("classic bootstrap preserves unmergeable state (%s)", async value => {
+    const f = fixture("alternate", false, true);
+    const file = path.join(f.env.HOME, ".claude.json");
+    const before = value === "invalid project" ? JSON.stringify({ projects: { [f.cwd]: [] } }) : value;
+    fs.writeFileSync(file, before);
+    await f.adapter.deliverStartup([], { ...f.binding, permissionMode: undefined });
+    expect(fs.readFileSync(file, "utf8")).toBe(before);
+    expect(f.writes).toEqual([]);
+  });
+  it.each([undefined, "acceptEdits"] as const)("skips bootstrap without cwd in mode %s", async permissionMode => {
+    const f = fixture("alternate", true, true);
+    f.adapter.ensureManagedBootstrap({ ...f.binding, cwd: undefined, permissionMode });
+    expect(f.writes).toEqual([]);
+  });
   it.each(["projects", "project entry"])("preserves an unmergeable %s field", async field => {
     const f = fixture("alternate", true, true);
     const state = { ...sentinel, projects: field === "projects" ? [] : { [f.cwd]: [] } };

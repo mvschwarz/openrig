@@ -359,7 +359,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /** Best-effort public seam for user-scope Claude bootstrap used by managed sessions. */
-  ensureManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
+  ensureManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
     this.provisionManagedBootstrap(binding);
   }
 
@@ -675,12 +675,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return resolveConcreteHint(path, content);
   }
 
-  private provisionManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
+  private provisionManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
     // OPR.0.4.8.2 agnostic rip-out: provisionRigPermissions (C2) removed — OpenRig no longer
     // authors any config-file permission policy. Trust/onboarding (C3/C4) are neutral plumbing, kept.
+    if (!binding.cwd) return;
     const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    const statePath = this.claudeManagedLaunch
-      ? (binding.cwd ? this.claudeManagedLaunch.configPaths(binding.cwd).statePath : undefined)
+    // Match launchHarness: omitted permissionMode keeps the classic home path.
+    const statePath = binding.permissionMode !== undefined && this.claudeManagedLaunch
+      ? this.claudeManagedLaunch.configPaths(binding.cwd).statePath
       : (home ? nodePath.join(home, ".claude.json") : undefined);
     if (!statePath) return;
     // Preserve every existing field. Unreadable/malformed/non-object state is
