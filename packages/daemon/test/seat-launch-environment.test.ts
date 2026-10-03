@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -42,7 +42,7 @@ function fixture() {
   const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: path.join(root, "home"), OPENRIG_HOME: path.join(root, "instance"), OPENRIG_URL: "http://127.0.0.1:1", OPENRIG_ACTIVITY_HOOK_TOKEN: "synthetic-channel-secret", ANTHROPIC_API_KEY: "synthetic-provider-secret", CODEX_HOME: "/daemon/codex" };
   const rc = path.join(root, "rc");
   writeFileSync(rc, `export OPENRIG_HOME=/wrong OPENRIG_URL=http://127.0.0.1:1 OPENRIG_NODE_ID=wrong OPENRIG_OCCUPANT_GENERATION=wrong\nexport PATH=${shellQuote(userBin + ":" + bin + ":/usr/bin:/bin")}\nexport HOME=/user/home CODEX_HOME=/user/codex CLAUDE_CONFIG_DIR=/user/claude USER_VALUE=keep\n`);
-  const launch = new SeatLaunchEnvironment(tmux, env, root);
+  const launch = new SeatLaunchEnvironment(tmux, env, root, path.join(bin, "rig"));
   const commands: string[] = [];
   const binding: NodeBinding = { id: "b", nodeId: "node-current", tmuxSession: "seat@rig", tmuxPane: "%1", tmuxWindow: null, cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: path.join(root, "workspace") };
   const send = async (_session: string, command: string) => { commands.push(command); return { ok: true as const }; };
@@ -64,7 +64,12 @@ function fixture() {
     const { stdout } = await exec("/bin/bash", ["--noprofile", "--rcfile", rc, "-ic", command], { env, cwd: binding.cwd, timeout: 5000 });
     const observed = JSON.parse(stdout);
     expect(observed).toMatchObject({ body: { node: "node-current" }, home: env.OPENRIG_HOME, node: "node-current" });
-    if (!managed) expect(observed).toMatchObject({ generation: "successor-generation", HOME: "/user/home", CODEX_HOME: "/user/codex", CLAUDE_CONFIG_DIR: "/user/claude", USER_VALUE: "keep", PATH: `${bin}:${userBin}:${bin}:/usr/bin:/bin` });
+    if (!managed) expect(observed).toMatchObject({ generation: "successor-generation", HOME: "/user/home", CODEX_HOME: "/user/codex", CLAUDE_CONFIG_DIR: "/user/claude", USER_VALUE: "keep" });
+    if (!managed) {
+      const [owned, ...rest] = observed.PATH.split(":");
+      expect(rest.join(":")).toBe(`${userBin}:${bin}:/usr/bin:/bin`);
+      expect(readlinkSync(path.join(owned, "rig"))).toBe(path.join(bin, "rig"));
+    }
     return observed;
   }
   return { root, bin, env, identity, tmux, launch, binding, fsOps, commands, serve, execute };
@@ -114,20 +119,37 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
     expect(observed.HOME).toBe(f.env.HOME); expect(observed.PATH).toBe(f.env.PATH);
     expect(observed.generation).toBe("current-generation");
   });
+  it("managed Claude keeps a non-public URL on its inherited channel without changing the native context", async () => {
+    const f = fixture();
+    f.env.OPENRIG_URL = "http://user:synthetic-private-value@localhost:7433";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const db = new Database(":memory:"); cleanup.push(() => { db.close(); });
+    db.exec("CREATE TABLE nodes(id TEXT,runtime TEXT,cwd TEXT); CREATE TABLE bindings(id TEXT,node_id TEXT,tmux_session TEXT,tmux_pane TEXT); CREATE TABLE occupant_tenures(node_id TEXT,generation_uuid TEXT,generation_ordinal INTEGER)");
+    db.prepare("INSERT INTO nodes VALUES ('node-current','claude-code',?)").run(f.binding.cwd);
+    db.exec("INSERT INTO bindings VALUES ('b','node-current','seat@rig','%1'); INSERT INTO occupant_tenures VALUES ('node-current','current-generation',1)");
+    const prepared = await new ClaudeManagedLaunch(db, f.env, {}).prepare({ nodeId: "node-current", session: "seat@rig", pane: "%1" }, "auto");
+    const command = prepared.command(["--permission-mode", "auto"]);
+    expect(command).not.toContain(f.env.OPENRIG_URL);
+    expect(command).toContain('"OPENRIG_URL=${OPENRIG_URL-}"');
+    expect(command).toContain(shellQuote(`HOME=${f.env.HOME}`));
+    expect(command).toContain(shellQuote(`PATH=${f.env.PATH}`));
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("synthetic-private-value");
+  });
   it("same-pane successor reasserts its reserved generation, not tmux's predecessor environment", async () => {
     const f = fixture(); await f.serve(); f.identity.OPENRIG_OCCUPANT_GENERATION = "predecessor-generation"; f.identity.OPENRIG_RUNTIME = "codex";
     const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, fsOps: f.fsOps, seatLaunchEnvironment: f.launch });
     expect((await adapter.launchHarness({ ...f.binding, launchGeneration: "successor-generation" }, { name: "seat" })).ok).toBe(true);
     expect((await f.execute(f.commands[0]!)).runtime).toBe("claude-code");
-    await expect(f.launch.command("seat@rig", "claude", { nodeId: "different-node" })).rejects.toThrow("differs from");
+    expect(await f.launch.command("seat@rig", "claude", { nodeId: "different-node" })).toBe("claude");
   });
-  it("does not launch if the metadata transport is unavailable", async () => {
+  it("preserves the previous command if the metadata transport is unavailable", async () => {
     const f = fixture(); vi.spyOn(f.tmux, "getSessionEnv").mockRejectedValue(Error("unavailable"));
-    await expect(f.launch.command("seat@rig", "claude")).rejects.toThrow("unavailable");
+    expect(await f.launch.command("seat@rig", "claude")).toBe("claude");
     expect(f.commands).toEqual([]);
   });
   it("explicit allowlist never types unknown secrets or runtime/user variables", () => {
     expect(publicSeatEnvironment({ OPENRIG_HOME: "/instance", OPENRIG_URL: "http://127.0.0.1:1234", OPENRIG_NEW_SECRET: "secret", OPENRIG_ACTIVITY_HOOK_TOKEN: "token", ANTHROPIC_API_KEY: "key", HOME: "/home", CLAUDE_CONFIG_DIR: "/claude", CODEX_HOME: "/codex" })).toEqual({ OPENRIG_HOME: "/instance", OPENRIG_URL: "http://127.0.0.1:1234" });
-    expect(() => publicSeatEnvironment({ OPENRIG_URL: "http://user:secret@127.0.0.1" })).toThrow("must not contain");
+    expect(publicSeatEnvironment({ OPENRIG_URL: "http://user:secret@127.0.0.1" })).toEqual({});
   });
 });

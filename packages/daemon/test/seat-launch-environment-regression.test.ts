@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readlinkSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readlinkSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -54,7 +54,7 @@ it("A/B: rig need not be on the daemon PATH; the linked CLI belongs to this inst
   const command = await f.launch.command("seat@rig", "/bin/sh -c 'command -v rig'");
   const rig = (await f.run(command)).stdout.trim();
   expect(rig.startsWith(path.join(f.env.OPENRIG_HOME, "run", "seat-bin") + path.sep)).toBe(true);
-  expect(readlinkSync(rig)).toBe(f.cli); expect(readdirSync(path.dirname(rig))).toEqual(["rig"]);
+  expect(readlinkSync(rig)).toBe(realpathSync(f.cli)); expect(readdirSync(path.dirname(rig))).toEqual(["rig"]);
 });
 it("A: a missing paired CLI does not introduce a launch refusal", async () => {
   const f = fixture();
@@ -65,7 +65,7 @@ it("B: the owned rig-only directory leaves node/python/git/claude order intact",
   const f = fixture();
   const cmd = "/bin/sh -c 'for tool in rig node python git claude; do command -v \"$tool\"; done'";
   const paths = (await f.run(await f.launch.command("seat@rig", cmd))).stdout.trim().split("\n");
-  expect(readlinkSync(paths[0]!)).toBe(f.cli); expect(paths.slice(1)).toEqual(["node", "python", "git", "claude"].map(t => path.join(f.user, t)));
+  expect(readlinkSync(paths[0]!)).toBe(realpathSync(f.cli)); expect(paths.slice(1)).toEqual(["node", "python", "git", "claude"].map(t => path.join(f.user, t)));
 });
 it.each(["claude", "codex"])("D: nushell retains the previous literal %s command", async runtime => {
   const f = fixture(); f.tmux.getPaneCommand.mockResolvedValue("nu");
@@ -94,4 +94,21 @@ it.each(["fresh", "resume", "fork"] as const)("C: %s uses the probe's separate N
   const { stdout } = await exec("/bin/bash", ["--noprofile", "--norc", "-c", command], { cwd: f.cwd, env: { ...f.env, PATH: userPath }, timeout: 5000 });
   const observed = JSON.parse(stdout); expect(observed.started).toBe(true); expect(observed.node).toBe(process.execPath);
   expect(observed.path.split(":").slice(1).join(":")).toBe(userPath);
+});
+
+it("B: the default resolver links this workspace's built CLI, not its PATH-first rig", async () => {
+  const f = fixture();
+  const launch = new SeatLaunchEnvironment(f.tmux as any, f.env, f.root);
+  const rig = (await f.run(await launch.command("seat@rig", "/bin/sh -c 'command -v rig'"))).stdout.trim();
+  expect(readlinkSync(rig)).toBe(realpathSync(path.resolve(import.meta.dirname, "../../cli/dist/bin-wrapper.js")));
+  expect(f.warn).not.toHaveBeenCalled();
+});
+it("B: a reused link remains rig-only; unexpected contents are preserved and fall back", async () => {
+  const f = fixture(), command = "/bin/sh -c 'command -v rig'";
+  const rig = (await f.run(await f.launch.command("seat@rig", command))).stdout.trim();
+  expect((await f.run(await f.launch.command("seat@rig", command))).stdout.trim()).toBe(rig);
+  f.exe(path.join(path.dirname(rig), "node"), "#!/bin/sh\nexit 0\n");
+  expect(await f.launch.command("seat@rig", "claude")).toBe("claude");
+  expect(readdirSync(path.dirname(rig)).sort()).toEqual(["node", "rig"]);
+  expect(readlinkSync(rig)).toBe(realpathSync(f.cli)); expect(f.warn).toHaveBeenCalledTimes(1);
 });
