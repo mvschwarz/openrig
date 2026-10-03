@@ -222,13 +222,64 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
 
   it("only a newer arbitrated clear state can retire a positive refusal", () => {
     const refusedAt = "2026-01-01T00:00:02.000Z";
-    const idle = { activity: "idle-at-prompt" as const, needsInput: { count: 0, reason: null }, changedAt: "2026-01-01T00:00:01.000Z" };
+    const idle = { activity: "idle-at-prompt" as const, needsInput: { count: 0, reason: null }, changedAt: "2026-01-01T00:00:01.000Z",
+      rungs: [{ rung: "needs-input-chrome" as const, sourceId: "fixture", trust: "authoritative" as const, lastEvidenceAt: "2026-01-01T00:00:03.000Z" }] };
     expect(classifyPromptAfterRefusal(idle, refusedAt)).toBe("unknown");
     expect(classifyPromptAfterRefusal({ ...idle, changedAt: refusedAt }, refusedAt)).toBe("unknown");
     expect(classifyPromptAfterRefusal({ ...idle, changedAt: "2026-01-01T00:00:03.000Z" }, refusedAt)).toBe("clear");
     expect(classifyPromptAfterRefusal({ ...idle, needsInput: { count: 1, reason: "permission prompt" } }, refusedAt)).toBe("blocked");
     expect(classifyPromptAfterRefusal({ ...idle, activity: "unknown", changedAt: "2026-01-01T00:00:03.000Z" }, refusedAt)).toBe("unknown");
     expect(classifyPromptAfterRefusal(null, refusedAt)).toBe("unknown");
+  });
+
+  it("activity-only Codex and generic changes cannot clear a refused prompt", () => {
+    const refusedAt = "2026-01-01T00:00:02.000Z";
+    const sampling = { rung: "window-sampling" as const, sourceId: "tmux", trust: "authoritative" as const, lastEvidenceAt: "2026-01-01T00:00:03.000Z" };
+    const codex = { activity: "working" as const, needsInput: { count: 0, reason: null }, changedAt: "2026-01-01T00:00:03.000Z",
+      rungs: [sampling, { rung: "lifecycle-hooks" as const, sourceId: "codex", trust: "trial" as const, lastEvidenceAt: "2026-01-01T00:00:03.000Z" }] };
+    expect(classifyPromptAfterRefusal(codex, refusedAt)).toBe("unknown");
+    const generic = { ...codex, rungs: [sampling] };
+    expect(classifyPromptAfterRefusal(generic, refusedAt)).toBe("unknown");
+  });
+
+  it("a malformed prompt row logs once without stopping another destination's retry", async () => {
+    const broken = await refusal();
+    const source = await repo.create({ sourceSession: "sender@fixture", destinationSession: "relay@fixture", body: "other work", nudge: false });
+    const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "relay@fixture", toSession: "other@fixture", nudge: false });
+    db.prepare("UPDATE queue_items SET last_nudge_result = 'failed:offline' WHERE qitem_id = ?").run(created.qitemId);
+    db.prepare("UPDATE queue_items SET tags = '{' WHERE qitem_id = ?").run(broken.qitemId);
+    const log = vi.fn(); const attemptWake = vi.fn(async () => "failed:offline");
+    const result = await tick(engine([]), { log, attemptWake });
+    expect(result.outcome).not.toBe("failed");
+    expect(attemptWake).toHaveBeenCalledWith(created.qitemId, "other@fixture");
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]![0]).toContain("prompt refusal pass failed");
+  });
+
+  it("malformed unrelated tags do not hide a valid prompt alert", async () => {
+    const unrelated = await repo.create({ sourceSession: "sender@fixture", destinationSession: "other@fixture", body: "other work", nudge: false });
+    await refusal();
+    db.prepare("UPDATE queue_items SET tags = '{' WHERE qitem_id = ?").run(unrelated.qitemId);
+    const posts: unknown[] = []; const log = vi.fn();
+    const result = await tick(engine(posts), { log });
+    expect(result.outcome).not.toBe("failed");
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it("an open prompt recovery owns the shared failed-class escalation", async () => {
+    const row = await refusal();
+    // #623 maps retained:typing_guard to this existing failed class. Exercise
+    // the shared escalation seam without importing that PR's classifier change.
+    repo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: "watchdog@system", transitionNote: "parked-owner wake delivery failed: fixture" });
+    db.prepare("UPDATE queue_items SET last_nudge_result = 'failed:fixture' WHERE qitem_id = ?").run(row.qitemId);
+    const posts: unknown[] = []; const port = engine(posts, false);
+    for (let i = 0; i < 2; i++) expect((await tick(port, { retryCap: 0 })).outcome).not.toBe("failed");
+    const escalations = repo.list({ state: ["pending", "in-progress", "blocked"], limit: 1000 }).filter(r => r.tags?.includes("wake-escalation"));
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0]!.tags).toContain("wake-prompt-refusal");
+    expect(notes(row.qitemId).join("\n")).not.toContain("ladder-exhausted:");
+    expect(posts).toEqual([]);
   });
 
   it.each(["clear", "unknown"] as const)("%s activity neither dispatches nor fabricates a refusal", async value => {
