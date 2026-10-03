@@ -1,14 +1,12 @@
 import { createHash } from "node:crypto";
+import { COMPOSER_SELECTION_PATTERN, findComposerInputLineIndex } from "./composer-prompts.js";
 
 const normalize = (text: string): string => text.replace(/\s+/g, "");
 
 /** The same composer region used by the startup Enter guard. No transcript fallback. */
 function composerRegion(pane: string | null) {
   const lines = (pane ?? "").split("\n");
-  let inputAt = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i]!.trimStart().startsWith("❯")) { inputAt = i; break; }
-  }
+  const inputAt = findComposerInputLineIndex(lines);
   let end = -1;
   if (inputAt >= 0) {
     // Prompt text can itself contain rules (the startup challenge does).
@@ -20,7 +18,7 @@ function composerRegion(pane: string | null) {
       }
     }
   }
-  const body = inputAt < 0 || end < 0 || /^❯\s*\d+\./.test(lines[inputAt]!.trimStart())
+  const body = inputAt < 0 || end < 0 || COMPOSER_SELECTION_PATTERN.test(lines[inputAt]!.trimStart())
     ? null : normalize(lines.slice(inputAt, end).join("\n").trimStart().slice(1));
   return { body, markerLine: inputAt < 0 ? null : inputAt + 1,
     closingRuleLine: end < 0 ? null : end + 1, capturedLines: pane === null ? 0 : lines.length };
