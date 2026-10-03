@@ -46,3 +46,12 @@ it.skipIf(process.platform === "win32")("keeps staging names within native filen
   expect(fs.readFileSync(target, "utf8")).toBe("name: replacement\n");
   expect(fs.readdirSync(dir)).toEqual([name]);
 });
+it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("overwrites a native write-only export without requiring read access", () => {
+  dir = fs.mkdtempSync(join(tmpdir(), "export-atomic-"));
+  const target = join(dir, "rig.yaml");
+  fs.writeFileSync(target, "name: original\n"); fs.chmodSync(target, 0o200);
+  writeTextAtomically(target, "name: replacement\n", "export");
+  expect(fs.statSync(target).mode & 0o777).toBe(0o200);
+  fs.chmodSync(target, 0o600);
+  expect(fs.readFileSync(target, "utf8")).toBe("name: replacement\n");
+});

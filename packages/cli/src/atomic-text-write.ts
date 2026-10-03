@@ -1,4 +1,4 @@
-import { writeFileSync, unlinkSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
+import { constants, writeFileSync, unlinkSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
@@ -16,7 +16,7 @@ export function writeTextAtomically(path: string, content: string, label = "file
   const existing = statSync(target, { throwIfNoEntry: false });
   // Match direct writes: a writable directory must not bypass a read-only
   // target. Opening without truncation also checks native ACL permissions.
-  if (existing) closeSync(openSync(target, "r+"));
+  if (existing) closeSync(openSync(target, constants.O_WRONLY));
   const temporary = join(dirname(target), `.openrig.tmp-${randomUUID()}`);
   let owned = false;
   let canFallBack = true;
