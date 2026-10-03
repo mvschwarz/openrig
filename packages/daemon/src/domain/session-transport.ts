@@ -1468,26 +1468,28 @@ export class SessionTransport {
         };
       }
 
-      if (activity.state === "unknown") {
-        return {
-          ok: false,
-          reason: "target_activity_unknown",
-          error: `Target activity could not be determined (${activity.reason}). No text was sent.`,
-          activity,
-          waitedMs,
-          attempts,
-        };
-      }
-
+      // UNKNOWN is retried like busy, within the caller's one deadline: a transient
+      // unreadable observation is not a verdict, and it never authorizes the send.
+      // At the deadline the result names the last actual observation.
       if (waitedMs >= input.timeoutMs) {
-        return {
-          ok: false,
-          reason: "wait_for_idle_timeout",
-          error: `Target remained busy for ${waitedMs}ms. No text was sent.`,
-          activity,
-          waitedMs,
-          attempts,
-        };
+        const observed = `at the last of ${attempts} observation${attempts === 1 ? "" : "s"} over ${waitedMs}ms`;
+        return activity.state === "unknown"
+          ? {
+            ok: false,
+            reason: "target_activity_unknown",
+            error: `Target activity could not be determined (${activity.reason}) ${observed}. No text was sent.`,
+            activity,
+            waitedMs,
+            attempts,
+          }
+          : {
+            ok: false,
+            reason: "wait_for_idle_timeout",
+            error: `Target was still busy (${activity.reason}) ${observed}. No text was sent.`,
+            activity,
+            waitedMs,
+            attempts,
+          };
       }
 
       const remainingMs = input.timeoutMs - waitedMs;

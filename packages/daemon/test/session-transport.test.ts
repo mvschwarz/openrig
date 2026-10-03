@@ -756,26 +756,116 @@ describe("SessionTransport", () => {
     expect(sendTextSpy).not.toHaveBeenCalled();
   });
 
-  it("send with wait-for-idle hard-stops on unknown capture evidence without sending text", async () => {
+  // D2: an UNKNOWN observation is retried within the caller's ONE deadline and never
+  // authorizes the send. The wait loop reads Date.now(); a stepped clock makes the
+  // deadline and the attempt count exact.
+  function steppedClock() {
+    let t = 1_000_000;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => t);
+    const slept: number[] = [];
+    return { sleep: async (ms: number) => { slept.push(ms); t += ms; }, slept, restore: () => spy.mockRestore() };
+  }
+  const IDLE_PANE = "› Use /skills to list available skills\n\n  gpt-5.5 high · Context [████ ] · ~/code/projects/openrig";
+  const BUSY_PANE = "Working on task...\n⠋ Processing files\nesc to interrupt";
+  const MENU_PANE = ["Codex update available.", "", "› 1. Update now", "  2. Skip this version", "",
+    "  gpt-5.5 high · Context [████ ] · ~/code/projects/openrig"].join("\n");
+  const UNREADABLE = Symbol("unreadable");
+  function scriptedPanes(script: Array<string | typeof UNREADABLE>) {
+    let i = 0;
+    return async () => {
+      const step = script[Math.min(i++, script.length - 1)]!;
+      if (step === UNREADABLE) throw new Error("capture failed");
+      return step;
+    };
+  }
+
+  it("send with wait-for-idle retries an unknown observation and sends once explicit idle arrives", async () => {
+    seedCanonicalRig();
+    const clock = steppedClock();
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({ capturePaneContent: scriptedPanes([UNREADABLE, IDLE_PANE]), sendText: sendTextSpy });
+      const transport = createTransport(tmux, { sleep: clock.sleep, waitForIdlePollMs: 10 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+      expect(result).toMatchObject({ ok: true, sent: true, attempts: 2, activity: { state: "idle" } });
+      expect(clock.slept[0]).toBe(10); // one poll interval; the later sleep is the paste→Enter delay
+      expect(sendTextSpy).toHaveBeenCalledTimes(1);
+    } finally { clock.restore(); }
+  });
+
+  it("send with wait-for-idle still refuses a positive prompt that appears after an unknown observation", async () => {
+    seedCanonicalRig();
+    const clock = steppedClock();
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({ capturePaneContent: scriptedPanes([UNREADABLE, MENU_PANE]), sendText: sendTextSpy });
+      const transport = createTransport(tmux, { sleep: clock.sleep, waitForIdlePollMs: 10 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+      expect(result).toMatchObject({ ok: false, reason: "target_needs_input", sent: false, attempts: 2, activity: { state: "needs_input" } });
+      expect(sendTextSpy).not.toHaveBeenCalled();
+    } finally { clock.restore(); }
+  });
+
+  it("send with wait-for-idle on perpetual unknown keeps ONE deadline and reports the last unknown observation", async () => {
+    seedCanonicalRig();
+    const clock = steppedClock();
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({ capturePaneContent: scriptedPanes([UNREADABLE]), sendText: sendTextSpy });
+      const transport = createTransport(tmux, { sleep: clock.sleep, waitForIdlePollMs: 10 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+      expect(result).toMatchObject({ ok: false, reason: "target_activity_unknown", sent: false, attempts: 6, waitedMs: 50,
+        activity: { state: "unknown", reason: "capture_failed" } });
+      expect(result.error).toBe("Target activity could not be determined (capture_failed) at the last of 6 observations over 50ms. No text was sent.");
+      // The deadline is never renewed: total sleep equals the caller's timeout.
+      expect(clock.slept.reduce((a, b) => a + b, 0)).toBe(50);
+      expect(sendTextSpy).not.toHaveBeenCalled();
+    } finally { clock.restore(); }
+  });
+
+  it.each([
+    ["busy then unknown", [BUSY_PANE, BUSY_PANE, BUSY_PANE, BUSY_PANE, BUSY_PANE, UNREADABLE], "target_activity_unknown", "unknown", /could not be determined \(capture_failed\) at the last of 6 observations over 50ms/],
+    ["unknown then busy", [UNREADABLE, UNREADABLE, UNREADABLE, UNREADABLE, UNREADABLE, BUSY_PANE], "wait_for_idle_timeout", "running", /still busy \(.+\) at the last of 6 observations over 50ms/],
+  ] as const)("send with wait-for-idle at the deadline names the LAST observation (%s)", async (_label, script, reason, state, message) => {
+    seedCanonicalRig();
+    const clock = steppedClock();
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({ capturePaneContent: scriptedPanes([...script]), sendText: sendTextSpy });
+      const transport = createTransport(tmux, { sleep: clock.sleep, waitForIdlePollMs: 10 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+      expect(result).toMatchObject({ ok: false, reason, sent: false, attempts: 6, activity: { state } });
+      expect(result.error).toMatch(message);
+      expect(sendTextSpy).not.toHaveBeenCalled();
+    } finally { clock.restore(); }
+  });
+
+  it("send with wait-for-idle refuses when the recipient binding changes during an unknown retry", async () => {
+    const { node } = seedCanonicalRig();
+    const clock = steppedClock();
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({ capturePaneContent: scriptedPanes([UNREADABLE, IDLE_PANE]), sendText: sendTextSpy });
+      const transport = createTransport(tmux, {
+        sleep: async (ms) => { await clock.sleep(ms); sessionRegistry.updateBinding(node.id, { tmuxPane: "%rebound" }); },
+        waitForIdlePollMs: 10,
+      });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
+      expect(result).toMatchObject({ ok: false, reason: "target_runtime_conflict", sent: false });
+      expect(sendTextSpy).not.toHaveBeenCalled();
+    } finally { clock.restore(); }
+  });
+
+  it("an ordinary send (no wait) is unchanged: one unknown observation proceeds with an advisory, no retry loop", async () => {
     seedCanonicalRig();
     const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
-    const tmux = mockTmux({
-      capturePaneContent: async () => { throw new Error("capture failed"); },
-      sendText: sendTextSpy,
-    });
-    const transport = createTransport(tmux, {
-      sleep: async () => undefined,
-      waitForIdlePollMs: 1,
-    });
-
-    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 50 });
-
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("target_activity_unknown");
-    expect(result.sent).toBe(false);
-    expect(result.activity?.state).toBe("unknown");
-    expect(result.activity?.reason).toBe("capture_failed");
-    expect(sendTextSpy).not.toHaveBeenCalled();
+    const tmux = mockTmux({ capturePaneContent: async () => { throw new Error("capture failed"); }, sendText: sendTextSpy });
+    const transport = createTransport(tmux, { sleep: async () => undefined, waitForIdlePollMs: 10 });
+    const result = await transport.send("dev-impl@my-rig", "hello");
+    expect(result.ok).toBe(true);
+    expect(result.warning).toBeDefined();
+    expect(result.attempts).toBeUndefined();
+    expect(sendTextSpy).toHaveBeenCalledTimes(1);
   });
 
   it("send with wait-for-idle prefers fresh hook activity and waits for hook idle", async () => {
