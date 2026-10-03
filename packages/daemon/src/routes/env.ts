@@ -127,7 +127,7 @@ export function envRoutes(): Hono {
       return c.json({ ok: false, error: result.error }, 500);
     }
 
-    return c.json({ ok: true });
+    return c.json({ ok: true, ...(result.kept ? { kept: result.kept } : {}) });
   });
 
   return app;

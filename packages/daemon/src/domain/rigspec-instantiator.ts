@@ -1230,7 +1230,7 @@ export class PodRigInstantiator {
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
   }
 
-  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
+  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // #141: while an import may archive a stopped same-name generation, allow one import per rig name at
     // a time on this daemon. Otherwise two imports could each replace it, or one could archive the other's
     // in-progress replacement. Unrelated names are unaffected; an adapter that cannot probe keeps today's
@@ -1256,7 +1256,7 @@ export class PodRigInstantiator {
     }
   }
 
-  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
+  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1438,13 +1438,17 @@ export class PodRigInstantiator {
     // OPR.0.3.2.22 Bug 2: if the hook fails, roll back the rig record so
     // the spec name is left free for a clean retry. Pods rely on rigs
     // via ON DELETE CASCADE so deleting the rig is sufficient.
+    let rollbackServices: (() => Promise<void>) | undefined;
     if (opts?.prelaunchHook) {
-      const hookResult = await opts.prelaunchHook(rigId);
+      const hookResult = await opts.prelaunchHook(rigId, archivedGenerations);
       if (!hookResult.ok) {
-        this.deps.rigRepo.deleteRig(rigId);
-        restoreArchived();
-        return { ok: false, code: "service_boot_failed", message: hookResult.message };
+        if (!hookResult.retainRig) {
+          this.deps.rigRepo.deleteRig(rigId);
+          restoreArchived();
+        }
+        return { ok: false, code: hookResult.code === "compose_project_conflict" ? "compose_project_conflict" : "service_boot_failed", message: hookResult.message };
       }
+      rollbackServices = hookResult.rollback;
     }
 
     // Phase 2: Process members in launch order
@@ -1610,6 +1614,7 @@ export class PodRigInstantiator {
     const allTerminal = nodeResults.length > 0 && nodeResults.every((n) => n.status === "failed");
 
     if (allTerminal) {
+      let serviceCleanupError: string | undefined;
       const cleanup = async () => {
         if (this.deps.tmuxAdapter) {
           for (const sessionName of launchedSessionNames) {
@@ -1627,6 +1632,12 @@ export class PodRigInstantiator {
             if (!stopped.ok && (stopped.code !== "session_not_found" || /no server running/i.test(stopped.message ?? ""))) return;
           }
         }
+        try {
+          await rollbackServices?.();
+        } catch (error) {
+          serviceCleanupError = `Service cleanup failed; rig ${rigId} retained for recovery: ${String(error)}`;
+          return;
+        }
         this.deps.rigRepo.deleteRig(rigId);
         restoreArchived();
       };
@@ -1634,7 +1645,7 @@ export class PodRigInstantiator {
       if (guard) await guard.lifecycle(Object.values(nodeIdMap), cleanup);
       else await cleanup();
       const details = nodeResults.map((n) => `${n.logicalId}: ${n.error ?? "unknown"}`).join("; ");
-      return { ok: false, code: "instantiate_error", message: `all node launches/startups failed — ${details}` };
+      return { ok: false, code: "instantiate_error", message: `all node launches/startups failed — ${details}${serviceCleanupError ? `; ${serviceCleanupError}` : ""}` };
     }
 
     if (hasAttention && !hasLaunched) {

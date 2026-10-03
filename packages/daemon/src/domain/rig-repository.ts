@@ -613,9 +613,10 @@ export class RigRepository {
   setServicesRecord(rigId: string, record: RigServicesRecordInput): RigServicesRecord {
     const now = new Date().toISOString();
     const composeFile = resolve(record.rigRoot, record.composeFile);
-    const rig = this.db.prepare("SELECT name FROM rigs WHERE id = ?").get(rigId) as { name: string } | undefined;
+    const rig = this.db.prepare("SELECT 1 AS present FROM rigs WHERE id = ?").get(rigId);
     if (!rig) throw new Error(`Rig not found: ${rigId}`);
-    const projectName = record.projectName ?? deriveComposeProjectName(rig.name);
+    // Keep the fallback aligned with bootstrap's unique, stable rig-ID default.
+    const projectName = record.projectName ?? this.getServicesRecord(rigId)?.projectName ?? deriveComposeProjectName(rigId);
     this.db.prepare(`
       INSERT INTO rig_services (
         rig_id,
@@ -651,6 +652,19 @@ export class RigRepository {
     const stored = this.db.prepare("SELECT * FROM rig_services WHERE rig_id = ?").get(rigId) as RigServicesRow | undefined;
     if (!stored) throw new Error(`Failed to persist services record for rig ${rigId}`);
     return this.rowToServicesRecord(stored);
+  }
+
+  /** A retained generation must not tear down a live generation's project. */
+  getLiveServicesSuccessor(rigId: string, projectName: string): { id: string; name: string } | null {
+    if (!this.hasRigColumn("archived_at")) return null;
+    return this.db.prepare(`
+      SELECT r.id, r.name FROM rig_services s JOIN rigs r ON r.id = s.rig_id
+      JOIN rigs predecessor ON predecessor.id = ?
+      WHERE s.project_name = ? AND r.id != predecessor.id
+        AND predecessor.archived_at IS NOT NULL AND r.archived_at IS NULL
+        AND r.name = predecessor.name AND r.created_at >= predecessor.created_at
+      ORDER BY r.created_at DESC LIMIT 1
+    `).get(rigId, projectName) as { id: string; name: string } | undefined ?? null;
   }
 
   getServicesRecord(rigId: string): RigServicesRecord | null {

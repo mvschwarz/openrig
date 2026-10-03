@@ -101,6 +101,7 @@ export class RigTeardownOrchestrator {
         try {
           const serviceResult = await this.deps.serviceOrchestrator.teardown(rigId);
           if (!serviceResult.ok) result.errors.push(`Service teardown warning: ${serviceResult.error}`);
+          else if (serviceResult.kept) result.errors.push(serviceResult.kept);
         } catch (err) {
           result.errors.push(`Service teardown warning: ${(err as Error).message}`);
         }
@@ -178,6 +179,7 @@ export class RigTeardownOrchestrator {
       try {
         const serviceResult = await this.deps.serviceOrchestrator.teardown(rigId);
         if (!serviceResult.ok) result.errors.push(`Service teardown warning: ${serviceResult.error}`);
+        else if (serviceResult.kept) result.errors.push(serviceResult.kept);
       } catch (err) {
         result.errors.push(`Service teardown warning: ${(err as Error).message}`);
         // Best-effort — rig teardown continues

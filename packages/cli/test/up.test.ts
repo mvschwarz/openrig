@@ -249,6 +249,21 @@ describe("Up CLI", () => {
     failServer.close();
   });
 
+  it("prints the Compose project conflict and retry instruction without generic boot failure", async () => {
+    const message = "Replacement has multiple predecessor Compose projects (rig-1: old; rig-2: other). Set services.project_name in the rig spec YAML to the project you intend to use, then re-run the same command. No services were started.";
+    const prog = new Command();
+    prog.exitOverride();
+    prog.addCommand(upCommand({ ...runningDeps(port), clientFactory: () => ({
+      post: async () => ({ status: 400, data: { status: "failed", code: "compose_project_conflict", stages: [], errors: [message] } }),
+    } as unknown as DaemonClient) }));
+    const { logs, exitCode } = await captureLogs(async () => {
+      await prog.parseAsync(["node", "rig", "up", "/tmp/rig.yaml"]);
+    });
+    expect(logs.join("\n")).toContain(message);
+    expect(logs.join("\n")).not.toContain("unknown error");
+    expect(exitCode).toBe(2);
+  });
+
   // T13: Relative path resolved to absolute before sending
   it("resolves relative path to absolute in POST body", async () => {
     let lastBody: Record<string, unknown> = {};

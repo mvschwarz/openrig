@@ -8,7 +8,7 @@ export type ServiceBootResult =
   | { ok: false; code: string; error: string; receipt?: EnvReceipt };
 
 export type ServiceTeardownResult =
-  | { ok: true }
+  | { ok: true; kept?: string }
   | { ok: false; code: string; error: string };
 
 interface ServiceOrchestratorDeps {
@@ -141,6 +141,10 @@ export class ServiceOrchestrator {
     const record = this.rigRepo.getServicesRecord(rigId);
     if (!record) {
       return { ok: true }; // No services — nothing to tear down
+    }
+    const successor = this.rigRepo.getLiveServicesSuccessor(rigId, record.projectName);
+    if (successor) {
+      return { ok: true, kept: `kept project ${record.projectName}: still used by rig ${successor.name} (${successor.id})` };
     }
 
     const spec = this.parseSpec(record);

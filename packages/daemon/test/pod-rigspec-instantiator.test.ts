@@ -11,6 +11,9 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
+import { BootstrapOrchestrator } from "../src/domain/bootstrap-orchestrator.js";
+import { ServiceOrchestrator } from "../src/domain/service-orchestrator.js";
+import { ComposeServicesAdapter } from "../src/adapters/compose-services-adapter.js";
 import { ContinuityPolicyMaterializer } from "../src/domain/continuity-policy-materializer.js";
 import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
@@ -1004,20 +1007,76 @@ profiles:
   // failure). Unlike cycle_error, the rig record + pods have been created
   // by the time the hook runs (the hook needs rigId), so the fix wraps
   // the failure return with rigRepo.deleteRig(rigId).
-  it("service_boot_failed: rolls back the created rig record (Bug 2 prelaunch-hook rollback)", async () => {
+  it.each(["service_boot_failed", "compose_project_conflict"])("%s: propagates hook refusal and rolls back the created rig record", async (code) => {
     const { db, rigRepo, inst } = setup();
     const specName = "orphan-prelaunch-test-rig";
     const yaml = RigSpecCodec.serialize(makeRigSpec({ name: specName }));
     const result = await inst.instantiate(yaml, RIG_ROOT, {
-      prelaunchHook: async () => ({ ok: false, code: "service_boot_failed", message: "test: service boot refused" }),
+      prelaunchHook: async () => ({ ok: false, code, message: "test: service boot refused" }),
     });
     expect(result.ok).toBe(false);
     if (!result.ok && "code" in result) {
-      expect(result.code).toBe("service_boot_failed");
+      expect(result.code).toBe(code);
     }
     const orphans = rigRepo.findRigsByName(specName);
     expect(orphans, `expected no orphan rig records after service_boot_failed, found ${JSON.stringify(orphans)}`).toHaveLength(0);
     db.close();
+  });
+
+  it.each(["boot-failure", "node-failure", "boot-cleanup-failure", "node-cleanup-failure", "inherited", "inherited-boot-failure"].flatMap(scenario =>
+    (["leave_running", "down_and_volumes"] as const).map(policy => ({ scenario, policy })),
+  ))("retains or cleans up the actual service project on failed instantiation ($scenario, $policy)", async ({ scenario, policy }) => {
+    const { db, rigRepo, inst, adapter, tmux } = setup();
+    try {
+      tmux.probeSession = vi.fn(async () => ({ state: "absent" as const }));
+      adapter.project = vi.fn(async () => ({ projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }] }));
+      const commands: string[] = [];
+      let currentId: string | undefined;
+      const composeAdapter = new ComposeServicesAdapter(async cmd => {
+        commands.push(cmd);
+        if (cmd.includes("down")) {
+          expect(rigRepo.getServicesRecord(currentId!)).not.toBeNull();
+          if (scenario.includes("cleanup-failure")) throw new Error("Docker unavailable during cleanup");
+        }
+        if (cmd.includes("ps --format json") && (scenario.startsWith("boot-") || scenario === "inherited-boot-failure")) throw new Error("status failed after Compose up succeeded");
+        return "";
+      });
+      const serviceOrchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter });
+      const dbHandle = { db };
+      const bootstrap = new BootstrapOrchestrator({ db, rigRepo, serviceOrchestrator, bootstrapRepo: dbHandle,
+        runtimeVerifier: dbHandle, installExecutor: dbHandle, packageInstallService: dbHandle,
+      } as ConstructorParameters<typeof BootstrapOrchestrator>[0]);
+      const predecessor = scenario.startsWith("inherited") ? rigRepo.createRig("test-rig") : undefined;
+      if (predecessor) rigRepo.setServicesRecord(predecessor.id, {
+        kind: "compose", specJson: "{}", rigRoot: RIG_ROOT, composeFile: "compose.yaml", projectName: "legacy-project",
+      });
+      const yaml = RigSpecCodec.serialize(makeRigSpec({ services: {
+        kind: "compose", composeFile: "compose.yaml", downPolicy: policy,
+      } }));
+      type HookResult = { ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean };
+      const hook = await (bootstrap as unknown as { buildServicePrelaunchHook(yaml: string, root: string, stages: unknown[], errors: string[]): Promise<((id: string, replaced: readonly string[]) => Promise<HookResult>) | undefined> })
+        .buildServicePrelaunchHook(yaml, RIG_ROOT, [], []);
+      expect(hook).toBeDefined();
+      const result = await inst.instantiate(yaml, RIG_ROOT, { force: true, prelaunchHook: async (id, replaced) => {
+        currentId = id;
+        return hook!(id, replaced);
+      } });
+      expect(result.ok).toBe(false);
+      const down = commands.filter(cmd => cmd.includes("down"));
+      expect(down).toHaveLength(predecessor ? 0 : 1);
+      expect(down.every(cmd => !cmd.includes("--volumes"))).toBe(true);
+      if (scenario.includes("cleanup-failure")) {
+        expect(rigRepo.getServicesRecord(currentId!)).not.toBeNull();
+        if (!result.ok) expect(result.message).toContain("retained for recovery");
+      } else {
+        expect(rigRepo.getRig(currentId!)).toBeNull();
+      }
+      if (predecessor) {
+        expect(rigRepo.findUnarchivedRigsByName("test-rig").map(rig => rig.id)).toContain(predecessor.id);
+        expect(commands.some(cmd => cmd.includes("-p 'legacy-project'") && cmd.includes("up -d"))).toBe(true);
+        if (scenario === "inherited-boot-failure" && !result.ok) expect(result.message).toContain("Compose up may have changed its runtime");
+      }
+    } finally { db.close(); }
   });
 
   // NS-T05: orphan tmux sessions killed on total failure

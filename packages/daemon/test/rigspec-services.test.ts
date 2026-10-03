@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
+import path from "node:path";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
+import { deriveComposeProjectName } from "../src/domain/compose-project-name.js";
 import { migrate } from "../src/db/migrate.js";
 import { rigServicesSchema } from "../src/db/migrations/020_rig_services.js";
 import type { RigSpec, RigServicesRecordInput } from "../src/domain/types.js";
@@ -119,8 +121,8 @@ describe("RigSpec services contract", () => {
 
     const stored = repo.setServicesRecord(rig.id, initial);
     expect(stored.rigId).toBe(rig.id);
-    expect(stored.composeFile).toBe("/tmp/services-rig/compose.yaml");
-    expect(stored.projectName).toBe("services-rig");
+    expect(stored.composeFile).toBe(path.resolve("/tmp/services-rig/compose.yaml"));
+    expect(stored.projectName).toBe(deriveComposeProjectName(rig.id));
 
     const fetched = repo.getServicesRecord(rig.id);
     expect(fetched).not.toBeNull();
@@ -139,6 +141,43 @@ describe("RigSpec services contract", () => {
     expect(fetchedAgain.latestReceiptJson).toContain("healthy");
 
     db.close();
+  });
+
+  it("keeps omitted defaults distinct for names that sanitize to the same slug", () => {
+    const db = createServicesDb();
+    try {
+      const repo = new RigRepository(db);
+      const first = repo.createRig("Demo / Rig");
+      const second = repo.createRig("Demo - Rig");
+      const input = {
+        kind: "compose" as const,
+        specJson: "{}",
+        rigRoot: "/tmp/services-rig",
+        composeFile: "/tmp/services-rig/compose.yaml",
+      };
+      expect(deriveComposeProjectName(first.name)).toBe(deriveComposeProjectName(second.name));
+      const a = repo.setServicesRecord(first.id, input);
+      const b = repo.setServicesRecord(second.id, input);
+      expect(a.projectName).not.toBe(b.projectName);
+      expect(repo.setServicesRecord(first.id, input).projectName).toBe(a.projectName);
+      expect(repo.setServicesRecord(second.id, { ...input, projectName: "explicit-project" }).projectName)
+        .toBe("explicit-project");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("preserves a legacy project's identity when updating without a project name", () => {
+    const db = createServicesDb();
+    try {
+      const repo = new RigRepository(db);
+      const rig = repo.createRig("services-rig");
+      const input = { kind: "compose" as const, specJson: "{}", rigRoot: "/tmp/services-rig", composeFile: "compose.yaml" };
+      repo.setServicesRecord(rig.id, { ...input, projectName: "legacy-name-derived-project" });
+      expect(repo.setServicesRecord(rig.id, { ...input, latestReceiptJson: "{}" }).projectName)
+        .toBe("legacy-name-derived-project");
+      expect(repo.setServicesRecord(rig.id, { ...input, projectName: "replacement" }).projectName).toBe("replacement");
+    } finally { db.close(); }
   });
 
   it("createDaemon wires the rig_services migration", async () => {

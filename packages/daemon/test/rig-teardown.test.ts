@@ -84,6 +84,16 @@ describe("RigTeardownOrchestrator", () => {
   }
 
   // T1: Kills tmux sessions
+  it.each([true, false])("reports service project retention with live sessions=%s", async (live) => {
+    const rigId = live ? seedRig().rigId : rigRepo.createRig("archived").id;
+    const kept = "kept project shared: still used by rig successor (rig-2)";
+    const td = new RigTeardownOrchestrator({
+      db, rigRepo, sessionRegistry, tmuxAdapter: mockTmux(), snapshotCapture: mockSnapshotCapture(db), eventBus,
+      serviceOrchestrator: { teardown: async () => ({ ok: true, kept }) } as never,
+    });
+    expect((await td.teardown(rigId)).errors).toContain(kept);
+  });
+
   it("teardown kills tmux sessions", async () => {
     const { rigId } = seedRig();
     const tmux = mockTmux();

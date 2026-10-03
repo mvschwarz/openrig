@@ -209,6 +209,14 @@ describe("env routes", () => {
     expect(capturedOpts).toBeUndefined();
   });
 
+  it("POST /env/down carries the archived project's retention reason", async () => {
+    const kept = "kept project shared: still used by rig successor (rig-2)";
+    const app = createApp({ getServicesRecord: () => SERVICE_RECORD, teardown: async () => ({ ok: true, kept }) });
+    const res = await app.request("/api/rigs/rig-1/env/down", { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, kept });
+  });
+
   it("GET /env does not include probeStatus when hasServices is false", async () => {
     const app = createApp({ getServicesRecord: () => null });
     const res = await app.request("/api/rigs/rig-1/env");

@@ -468,7 +468,7 @@ Examples:
         } else if (code === "invalid_topology_manifest") {
           const errors = (res.data["errors"] as string[]) ?? [];
           console.error(`Topology manifest invalid:\n${errors.map((e) => `  ${e}`).join("\n")}\nFix: the manifest key set is CLOSED — rigs[]{source, host?} plus optional concurrency.`);
-        } else if (code === "rig_name_running" || code === "generation_unconfirmed") {
+        } else if (code === "rig_name_running" || code === "generation_unconfirmed" || code === "compose_project_conflict") {
           // S5b final-fix F1 (OPR.0.5.4.11): the guard's teaching refusal is
           // self-describing (running rig identity, what was checked,
           // nothing-created, alternatives) — render it verbatim, never the

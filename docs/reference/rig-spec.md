@@ -464,7 +464,7 @@ The services block is optional. When present, services boot before any agent nod
 |-------|------|----------|---------|-------------|
 | `kind` | string | yes | — | Service backend. Only `compose` is supported in v1. |
 | `compose_file` | string | yes | — | Relative path to the Docker Compose file. Must be a safe relative path. Resolved relative to rig root. |
-| `project_name` | string | no | derived from rig name | Docker Compose project name. Must match `[a-z0-9][a-z0-9_-]*`. If omitted, derived by sanitizing the rig name. |
+| `project_name` | string | no | stored predecessor project or unique rig-ID default | Docker Compose project name. Must match `[a-z0-9][a-z0-9_-]*`. An explicit value takes precedence. A new rig uses a stable, unique rig-ID-derived name. A same-name replacement inherits the stored project of the exact generations it replaces; conflicting predecessor projects require an explicit value. Existing stored names remain unchanged. |
 | `profiles` | string[] | no | — | Compose profiles to activate. |
 | `down_policy` | string | no | `down` | What happens on `rig down`. One of: `leave_running`, `down`, `down_and_volumes`. |
 | `wait_for` | WaitTarget[] | no | — | Health targets that must pass before agent launch. |

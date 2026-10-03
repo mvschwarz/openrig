@@ -1281,6 +1281,7 @@ export type InstantiateOutcome =
   | { ok: false; code: "instantiate_error"; message: string }
   | { ok: false; code: "cycle_error"; message: string }
   | { ok: false; code: "service_boot_failed"; message: string }
+  | { ok: false; code: "compose_project_conflict"; message: string }
   // S5b (OPR.0.5.4.11) — the running-name guard refusal: a same-name rig is
   // RUNNING, so instantiation refuses before any create/launch. The message
   // teaches the running rig's identity and the supported alternatives.
