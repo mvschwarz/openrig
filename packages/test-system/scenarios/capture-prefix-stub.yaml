@@ -5,7 +5,8 @@ pods:
   - id: dev
     label: Prefix-overlap Pair
     members:
-      # impl2's seat name has impl's member id as a prefix: dev-impl2@ vs dev-impl@
+      # impl2's member id has impl's as a prefix, so their pod-qualified names (dev-impl2,
+      # dev-impl) overlap too; the full seat names don't.
       - {id: impl, agent_ref: "local:agents/worker", profile: default, runtime: stub, cwd: .}
       - {id: impl2, agent_ref: "local:agents/worker", profile: default, runtime: stub, cwd: .}
     edges: []

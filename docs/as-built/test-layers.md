@@ -339,10 +339,12 @@ every seat stopped and the rig still listed. `send` has partial coverage in
 the addressed seat's pane. `transcript` has partial coverage in
 `transcript-reads-addressed-seat.yaml`: each of two seats' scripted output is readable through
 that seat's `rig transcript --tail 200 --json`. `capture` has partial coverage in
-`capture-returns-addressed-seat.yaml`: in a rig whose member names overlap by prefix
-(`dev-impl`, `dev-impl2`), `rig capture <seat>` returns each seat's own pane. The scenario
-catches resolving the seat by member name or by first match, not a prefix match on the full
-seat name. These four
+`capture-returns-addressed-seat.yaml`: in a rig whose member names overlap by prefix (`impl`,
+`impl2`; `dev-impl`, `dev-impl2` with the pod), `rig capture <seat>` returns each seat's own
+pane. The scenario catches a capture that resolves the seat by a prefix match on its member
+name (so `dev-impl` also matches `dev-impl2`) and takes the first hit, or any resolver that
+returns the same pane for both seats; it does not exercise a prefix match on the full seat
+name. These four
 run with the local runner (`run-scenarios.mjs`), not in the CI job; the transcript and capture
 scenarios use `env.stub_scripts`, which is host-mode only, so they can't join the container job
 yet. They do not prove that panes are gone or that a seat consumed a message. The transcript

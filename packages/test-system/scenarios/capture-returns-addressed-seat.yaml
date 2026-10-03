@@ -1,12 +1,12 @@
 # Family: delivery `capture` (partial: single-seat capture of the visible pane).
-# Defect class: `rig capture <seat>` returns a different seat's pane, most plausibly when
-#   member names overlap by prefix (dev-impl, dev-impl2) and the seat is resolved by member
-#   name or by first match. It does not catch a prefix match on the full seat name: neither
-#   full name is a prefix of the other.
+# Defect class: `rig capture <seat>` returns a different seat's pane. The scenario catches a
+#   capture that resolves the seat by a prefix match on its member name (so dev-impl also
+#   matches dev-impl2) and takes the first hit, or any resolver that returns the same pane for
+#   both seats; it does not exercise a prefix match on the full seat name.
 # What this proves: ADDRESSED PANE. In a two-seat stub rig whose member names overlap by
-#   prefix, each seat's launch script prints a distinct token, and `rig capture <seat>
-#   --json` for each seat returns a pane containing that seat's OWN token, for the shorter
-#   name as well as the longer one.
+#   prefix (impl, impl2; dev-impl, dev-impl2 with the pod), each seat's launch script prints
+#   a distinct token, and `rig capture <seat> --json` for each seat returns a pane containing
+#   that seat's OWN token, for the shorter name as well as the longer one.
 # What this does NOT prove: that the sibling's token is absent from the returned pane (the
 #   runner has no negative form); the not-found error path (the pane read throws on a
 #   non-zero exit); `--lines` tail depth (the pane surface passes none); `--rig` / `--pod`
