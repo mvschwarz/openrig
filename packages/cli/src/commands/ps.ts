@@ -1703,7 +1703,7 @@ interface HostResources {
   capture: {
     rotatingSeats: number; idleSeats: number; captures: number; failures: number;
     capturedBytes: number; captureDurationMs: number;
-    activeIntervalMs: number | null; lines: number | null; maxIdleIntervalMs: number;
+    activeIntervalMs: number | null; lines: number | null; maxIdleIntervalMs: number | null;
     settingsReloadError?: string | null;
   };
 }
@@ -1728,6 +1728,6 @@ async function handleResources(client: DaemonClient, json?: boolean, headers?: R
   const capture = data.capture;
   console.log(`Transcript capture: ${capture.rotatingSeats} rotating · ${capture.idleSeats} backed off · ${capture.captures} attempts · ${capture.failures} failures`);
   console.log(`Capture cost for currently rotating seats: ${capture.capturedBytes} bytes · ${capture.captureDurationMs.toFixed(1)} ms elapsed across captures (not daemon CPU time)`);
-  console.log(`Effective capture: ${capture.activeIntervalMs ?? "unavailable"} ms active · ${capture.maxIdleIntervalMs} ms idle ceiling · ${capture.lines ?? "unavailable"} trailing lines`);
+  console.log(`Effective capture: ${capture.activeIntervalMs ?? "unavailable"} ms active · ${capture.maxIdleIntervalMs ?? "unavailable"} ms idle ceiling · ${capture.lines ?? "unavailable"} trailing lines`);
   if (capture.settingsReloadError) console.log(capture.settingsReloadError);
 }

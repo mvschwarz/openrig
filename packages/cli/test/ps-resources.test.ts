@@ -43,11 +43,12 @@ it("serves running-seat/load measurements without changing the ordinary bare-arr
   const normal = await client.get<unknown>("/api/ps");
   expect(Array.isArray(normal.data)).toBe(true);
   expect(normal.data).toHaveLength(1);
-  const response = await client.get<{ cpuCount: number; runningSeats: number; capture: { rotatingSeats: number } }>("/api/ps/resources");
+  const response = await client.get<{ cpuCount: number; runningSeats: number; capture: { rotatingSeats: number; maxIdleIntervalMs: number | null } }>("/api/ps/resources");
   expect(response.status).toBe(200);
   expect(response.data.runningSeats).toBe(2);
   expect(response.data.cpuCount).toBeGreaterThan(0);
   expect(response.data.capture.rotatingSeats).toBe(0);
+  expect(response.data.capture.maxIdleIntervalMs).toBeNull();
 });
 
 it("renders both native HTTP JSON and explicit human resource semantics", async () => {
@@ -59,6 +60,8 @@ it("renders both native HTTP JSON and explicit human resource semantics", async 
   await command.parseAsync(["node", "rig", "ps", "--resources"]);
   expect(log.mock.calls.flat().join("\n")).toContain(process.platform === "win32" ? "unavailable on this platform" : "not CPU utilization");
   expect(log.mock.calls.flat().join("\n")).toContain("not daemon CPU time");
+  expect(log.mock.calls.flat().join("\n")).toContain("unavailable ms idle ceiling");
+  expect(log.mock.calls.flat().join("\n")).not.toContain("0 ms idle ceiling");
 });
 
 async function remoteFixture(status: 200 | 401 | 403 | 404 | 429 | 500) {
@@ -89,6 +92,7 @@ it("names the registered remote host in successful human resource output", async
   const log = vi.spyOn(console, "log").mockImplementation(() => {});
   await command.parseAsync(["node", "rig", "ps", "--host", "fixture-host", "--resources"]);
   expect(log.mock.calls[0]![0]).toBe("Host: fixture-host · 4 available CPUs · 2 running seats");
+  expect(log.mock.calls.flat().join("\n")).toContain("6000 ms idle ceiling");
 });
 
 it.each([401, 403, 429, 500] as const)("preserves remote resource HTTP %s JSON classification and exit status through actual bearer transport", async (status) => {

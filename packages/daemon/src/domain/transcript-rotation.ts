@@ -103,7 +103,7 @@ export function getTranscriptCaptureStats() {
     captureDurationMs: entries.reduce((n, s) => n + s.durationMs, 0),
     activeIntervalMs: entries.length ? entries.reduce((max, s) => Math.max(max, s.intervalMs), 0) : null,
     lines: entries.length ? entries.reduce((max, s) => Math.max(max, s.lines), 0) : null,
-    maxIdleIntervalMs: entries.reduce((max, s) => Math.max(max, s.idleCeilingMs), 0),
+    maxIdleIntervalMs: entries.length ? entries.reduce((max, s) => Math.max(max, s.idleCeilingMs), 0) : null,
     settingsReloadError,
     activityHintDeadlineMs: ACTIVITY_HINT_DEADLINE_MS,
     captureResultDeadlineMs: CAPTURE_RESULT_DEADLINE_MS,
