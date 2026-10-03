@@ -312,7 +312,7 @@ export interface PreparationState {
 }
 interface PreparationAttempt extends PreparationState {
   sends: number;
-  enabledAtStart: boolean;
+  policyWasEnabled: boolean;
   controller: AbortController;
 }
 
@@ -669,7 +669,7 @@ export class ClaudeCompactionEnforcer {
       deadlineAt: mode === "manual" ? this.now() + this.manualPrepWaitMs : null,
       mapPath: path.join(this.openrigHome, "compaction", "preparation", sanitizeSessionKey(input.sessionName), attemptId, "RESTORE-MAP.md"),
       marker: `<!-- openrig-compaction-complete ${JSON.stringify({ attemptId, session: input.sessionName, occupantGeneration })} -->`,
-      enabledAtStart: this.settingsStore.resolveClaudeCompactionPolicy().enabled,
+      policyWasEnabled: this.settingsStore.resolveClaudeCompactionPolicy().enabled,
       controller: new AbortController(),
     };
     this.pendingPreCompactPrep.set(input.sessionName, attempt);
@@ -753,8 +753,9 @@ export class ClaudeCompactionEnforcer {
       const generation = this.resolveOccupantGeneration?.(session)
         ?? this.sessionTransport.deliveryGuard?.maybeTarget(session)?.occupant ?? null;
       if (generation !== attempt.occupantGeneration) this.stopPreparation(session, "stale_generation");
-      else if (!enabled && (attempt.mode === "automatic" || attempt.enabledAtStart)) this.stopPreparation(session, "disabled");
+      else if (!enabled && (attempt.mode === "automatic" || attempt.policyWasEnabled)) this.stopPreparation(session, "disabled");
       else if (attempt.deadlineAt !== null && this.now() >= attempt.deadlineAt) this.stopPreparation(session, "preparation_incomplete");
+      if (enabled) attempt.policyWasEnabled = true;
     }
   }
 
@@ -774,7 +775,7 @@ export class ClaudeCompactionEnforcer {
     this.reconcilePreparations();
     const attempt = this.pendingPreCompactPrep.get(session);
     if (!attempt) return null;
-    const { controller: _controller, sends: _sends, enabledAtStart: _enabled, ...state } = attempt;
+    const { controller: _controller, sends: _sends, policyWasEnabled: _enabled, ...state } = attempt;
     return state;
   }
 

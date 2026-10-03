@@ -51,12 +51,12 @@ it('ignores old maps, wrong-attempt/occupant markers, partial final and staging 
  renameSync(a.mapPath+'.tmp',a.mapPath);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
 });
 for(const end of ['expiry','cancel','disable','replacement'])it(`${end} disarms; a late map cannot compact or start automatic prep again`,async()=>{
- const f=fixture();await f.e.maybeAutoCompact(input);publish(f);
+ const f=fixture();await f.e.maybeAutoCompact(input);
  if(end==='expiry')f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);
  if(end==='cancel')f.e.cancelPreparation(seat);
  if(end==='disable')f.policy.enabled=false;
  if(end==='replacement')f.generation('generation-two');
- f.e.reconcilePreparations();f.policy.enabled=true;
+ f.e.reconcilePreparations();publish(f);f.policy.enabled=true;
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
  expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
 });
@@ -186,4 +186,15 @@ it('a post-paste recipient conflict or unclassified transport failure does not r
   expect(send).toHaveBeenCalledTimes(1);
   expect(f.e.getPreparationState(seat)?.delivery).toBe('uncertain');
  }
+});
+
+it('manual started while auto was off still disarms on a subsequently observed disable',async()=>{
+ const f=fixture();f.policy.enabled=false;
+ f.onSleep(async()=>{
+  f.policy.enabled=true;f.e.reconcilePreparations();
+  f.policy.enabled=false;f.e.reconcilePreparations();publish(f);
+ });
+ expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'disabled'});
+ f.policy.enabled=true;await f.e.maybeAutoCompact(input);
+ expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
 });
