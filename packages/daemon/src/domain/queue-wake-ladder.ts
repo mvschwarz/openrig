@@ -1,3 +1,5 @@
+import type { OperatorDeliveryEngine } from "./gateway/operator-delivery-engine.js";
+import { openPromptRefusals, CLOSE_PREFIX, REFUSED_PREFIX } from "./policies/parked-owner-consumer.js";
 import { findQueueRecovery, recoveryTag } from "./queue-recovery.js";
 import { lastMeaningfulTransition, type WaitingView } from "./queue-waiting.js";
 // S01 (OPR.0.5.5.1) — WAKE OR ESCALATE ON BATONS. A handoff whose wake fails must never
@@ -182,14 +184,14 @@ export interface WakeLadderDeps {
    *  every pre-S16 ladder path byte-identical. */
   getProviderReadModel?: () => Promise<Pick<FourBlockReadModel, "signals" | "bindings">>;
   usageLimitJitterSeconds?: number;
+  /** Cached arbitrated activity only: no new probe or native input. */
+  readPromptState?: (destination: string) => "blocked" | "clear" | "unknown";
   now?: Date;
   log?: (line: string) => void;
   /** OPR.0.5.6.1 — the operator rung's delivery leg. dispatchEscalation delivers
    *  (or defers) through the rules engine and reports whether the outcome
    *  resolved synchronously; absent = pre-engine floor behavior. */
-  deliveryEngine?: {
-    dispatchEscalation: (row: QueueItem, reason: string) => Promise<{ decision: string; resolved: boolean; notificationKey?: string }>;
-  };
+  deliveryEngine?: OperatorDeliveryEngine;
 }
 
 export interface WakeLadderAction {
@@ -218,6 +220,7 @@ interface LadderView {
   opEngineDispatched: boolean;
   opEngineKey: string | null;
   opOutcomeResolved: boolean;
+  opUnresolved: string | null;
   exhausted: boolean;
   suspendEpisodeOpen: boolean;
   firstMarkerTs: number | null;
@@ -236,6 +239,7 @@ function readLadder(db: Database.Database, qitemId: string): LadderView {
     opEngineDispatched: false,
     opEngineKey: null,
     opOutcomeResolved: false,
+    opUnresolved: null,
     exhausted: false,
     suspendEpisodeOpen: false,
     firstMarkerTs: null,
@@ -252,6 +256,9 @@ function readLadder(db: Database.Database, qitemId: string): LadderView {
       view.orchRungFailed = /outcome=failed:/.test(note);
     }
     if (isRung && /^escalation-rung:\s*operator/.test(note)) view.opRung = true;
+    if (isRung && note.startsWith(`${LADDER_RUNG_PREFIX} operator unresolved-route decision=`)) {
+      view.opUnresolved = note.slice(`${LADDER_RUNG_PREFIX} operator unresolved-route decision=`.length);
+    }
     if (isRung && /^escalation-rung:\s*operator dispatched-to-engine/.test(note)) {
       view.opEngineDispatched = true;
       const keyMatch = note.match(/notification_key=(\S+)/);
@@ -363,7 +370,12 @@ function unclaimedWakeMode(row: Pick<QueueItem, "state" | "claimedAt" | "handedO
  * Diagnosis remains visible; only duplicate delivery is suppressed. */
 export function queueRecoveryOwnsWake(db: Database.Database, row: QueueItem | null): boolean {
   if (!row || !["pending", "in-progress", "blocked"].includes(row.state)) return false;
-  if (findQueueRecovery(db, row.qitemId)) return true;
+  const recovery = findQueueRecovery(db, row.qitemId);
+  if (recovery) {
+    const endedPrompt = !["pending", "in-progress", "blocked"].includes(recovery.state)
+      && Boolean(db.prepare("SELECT 1 FROM queue_items WHERE qitem_id = ? AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)").get(recovery.qitemId, PROMPT_ALERT_TAG));
+    if (!endedPrompt) return true;
+  }
   const mode = unclaimedWakeMode(row);
   if (!mode) return false;
   if (row.state === "pending" && !row.claimedAt && row.handedOffFrom) {
@@ -562,6 +574,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
     // resolved. Legacy untagged history is not interpreted from its body.
     const aggregates = deps.db.prepare("SELECT qitem_id, source_session, tags, ts_created FROM queue_items WHERE state IN ('pending','in-progress','blocked') AND tags LIKE ?").all(`%"${WAKE_ESCALATION_TAG}"%`) as Array<{ qitem_id: string; source_session: string; tags: string; ts_created: string }>;
     for (const aggregate of aggregates) {
+      if ((JSON.parse(aggregate.tags) as string[]).includes(PROMPT_ALERT_TAG)) continue;
       const ids = (JSON.parse(aggregate.tags) as string[]).filter(t => t.startsWith("recovery-for:")).map(t => t.slice("recovery-for:".length));
       if (ids.length && ids.every(id => {
         const row = deps.queueRepo.getById(id);
@@ -582,6 +595,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       });
 
     const actions: WakeLadderAction[] = [];
+    await advancePromptRefusals(deps, now, intervalS, graceS, resolveOrch, attemptWake, actions);
     let exhaustedThisTick = 0;
     const usagePoolBySeat = new Map<string, UsageLimitPool>();
     if (deps.getProviderReadModel) {
@@ -818,7 +832,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 
       // Orchestrator rung recorded and failed → advance to the operator rung.
       for (const m of actionable) {
-        if (m.view.orchRung && m.view.orchRungFailed && !m.view.opRung) {
+        if (m.view.orchRung && (m.view.orchRungFailed || m.view.opUnresolved !== null) && !m.view.opEngineDispatched) {
           if (await operatorRung(deps, m.row, m.reason, actions, m.view)) {
             appendExhausted(deps.queueRepo, m.row, "operator rung resolved");
             exhaustedThisTick += 1;
@@ -856,6 +870,129 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
   }
 }
 
+const PROMPT_ALERT_TAG = "wake-prompt-refusal";
+const PROMPT_EPISODE_TAG = "prompt-episode:";
+
+/** Positive refusals enter the existing rungs without ever retrying the blocked
+ * seat. One aggregate carries the episode's obligations and notification key;
+ * original work remains owned by its current recipient. */
+async function advancePromptRefusals(
+  deps: WakeLadderDeps,
+  now: Date,
+  intervalS: number,
+  graceS: number,
+  resolveOrch: (destination: string) => string | null,
+  attemptWake: (qitemId: string, target: string) => Promise<string>,
+  actions: WakeLadderAction[],
+): Promise<void> {
+  const groups = new Map<string, { keys: string[]; rows: Map<string, QueueItem> }>();
+  const candidates = deps.db.prepare(`SELECT DISTINCT q.qitem_id FROM queue_items q
+    JOIN queue_transitions t ON t.qitem_id = q.qitem_id
+    WHERE t.transition_note LIKE ? AND (q.state IN ('pending','in-progress','blocked') OR EXISTS (
+      SELECT 1 FROM queue_items a WHERE a.state IN ('pending','in-progress','blocked')
+      AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = ?)
+      AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = 'recovery-for:' || q.qitem_id)))`)
+    .all(`${REFUSED_PREFIX}%`, PROMPT_ALERT_TAG) as Array<{ qitem_id: string }>;
+  for (const { qitem_id } of candidates) {
+    const primary = deps.queueRepo.getById(qitem_id)!;
+    // The shared no-route change is prospective, never a revival of old ladders.
+    if (readLadder(deps.db, qitem_id).exhausted) continue;
+    for (const episode of openPromptRefusals(deps.queueRepo.listTransitions(qitem_id))) {
+      if (!episode.key.startsWith(`${primary.destinationSession}|`)) continue;
+      const rows = episode.ids.map(id => deps.queueRepo.getById(id)).filter((row): row is QueueItem =>
+        Boolean(row && row.destinationSession === primary.destinationSession && ["pending", "in-progress", "blocked"].includes(row.state)));
+      if (!rows.length) continue;
+      let group = groups.get(primary.destinationSession);
+      if (!group) { group = { keys: [], rows: new Map() }; groups.set(primary.destinationSession, group); }
+      group.keys.push(`${PROMPT_EPISODE_TAG}${episode.key}`);
+      for (const row of rows) group.rows.set(row.qitemId, row);
+    }
+  }
+
+  const promptState = (dest: string) => {
+    try { return deps.readPromptState?.(dest) ?? "unknown"; } catch { return "unknown"; }
+  };
+  const aggregates = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
+    AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`)
+    .all(PROMPT_ALERT_TAG) as Array<{ qitem_id: string }>;
+  for (const { qitem_id } of aggregates) {
+    const aggregate = deps.queueRepo.getById(qitem_id)!;
+    const dest = aggregate.tags!.find(t => t.startsWith("prompt-destination:"))!.slice("prompt-destination:".length);
+    const group = groups.get(dest);
+    const sameEpisode = group?.keys.some(key => aggregate.tags!.includes(key));
+    if (!sameEpisode || promptState(dest) === "clear") {
+      await deps.queueRepo.update({ qitemId: qitem_id, actorSession: aggregate.sourceSession, state: "done",
+        closureReason: "no-follow-on", transitionNote: "prompt escalation retired: prompt cleared or original episode ended; not a delivery receipt" });
+    }
+  }
+
+  for (const [dest, group] of groups) {
+    const state = promptState(dest);
+    if (state === "clear") {
+      for (const row of group.rows.values()) {
+        for (const { key } of openPromptRefusals(deps.queueRepo.listTransitions(row.qitemId))) {
+          appendMarker(deps.queueRepo, row, `${CLOSE_PREFIX} ${key} (interactive prompt cleared)`);
+        }
+      }
+      continue;
+    }
+    if (state !== "blocked" || suspensionReason(deps.db, dest, graceS, now)) continue;
+    const members = [...group.rows.values()].map(row => ({ row, reason: "interactive prompt refuses the parked-owner wake" }));
+    // Recovery owned elsewhere already has a route. A fallback finding sent
+    // into this same blocked seat does not: include it in the aggregate while
+    // retaining its original body/custody, rather than treating it as delivery.
+    const selfRecoveries = new Map<string, QueueItem>();
+    const ownedElsewhere = members.some(({ row }) => {
+      const recovery = findQueueRecovery(deps.db, row.qitemId);
+      if (!recovery || !["pending", "in-progress", "blocked"].includes(recovery.state)) return false;
+      const held = deps.queueRepo.getById(recovery.qitemId)!;
+      if (held.tags?.includes(PROMPT_ALERT_TAG)) return false;
+      if (held.destinationSession !== dest) return true;
+      selfRecoveries.set(held.qitemId, held);
+      return false;
+    });
+    if (ownedElsewhere) continue;
+    for (const row of selfRecoveries.values()) {
+      if (!group.rows.has(row.qitemId)) members.push({ row, reason: "recovery fallback also targets the prompt-blocked seat" });
+    }
+    const orch = resolveOrch(dest);
+    const toOperator = orch === null || orch === dest;
+    const reason = "interactive prompt blocks outstanding work; no input was sent";
+    const aggregate = await ensureEscalationRow(deps, dest,
+      toOperator ? resolveOperatorSeat() ?? members[0]!.row.sourceSession : orch!, members, reason,
+      `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...group.keys]);
+    const row = deps.queueRepo.getById(aggregate.qitemId)!;
+    const addedKeys = group.keys.filter(key => !row.tags?.includes(key));
+    if (addedKeys.length) {
+      deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
+        .run(JSON.stringify([...(row.tags ?? []), ...addedKeys]), row.qitemId);
+    }
+    const view = readLadder(deps.db, row.qitemId);
+    if (view.exhausted) continue;
+    if (view.opEngineDispatched) {
+      if (view.opOutcomeResolved) appendExhausted(deps.queueRepo, row, "engine outcome resolved");
+      continue; // accepted/deferred delivery retains gateway custody
+    }
+    if (view.lastMarkerTs !== null && now.getTime() - view.lastMarkerTs < intervalS * 1000) continue;
+    // Re-read at the send boundary after aggregate persistence.
+    if (promptState(dest) !== "blocked" || !members.some(m => {
+      const fresh = deps.queueRepo.getById(m.row.qitemId);
+      return fresh && fresh.destinationSession === dest && ["pending", "in-progress", "blocked"].includes(fresh.state);
+    })) continue;
+    if (!view.orchRung) {
+      if (!toOperator) {
+        const outcome = await attemptWake(row.qitemId, orch!);
+        appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator -> ${orch} outcome=${outcome} reason=${reason}`);
+        actions.push({ qitemId: row.qitemId, action: "escalate-orchestrator", target: orch! });
+        if (!outcome.startsWith("failed:")) appendExhausted(deps.queueRepo, row, `escalated to orchestrator (${outcome})`);
+        continue;
+      }
+      appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
+    }
+    if (await operatorRung(deps, row, reason, actions, view)) appendExhausted(deps.queueRepo, row, "operator rung resolved");
+  }
+}
+
 /** The operator rung (OPR.0.5.6.1 A1.2/AM-F3): the delivery rules engine IS the rung's
  *  delivery leg. With an engine port wired, the rung dispatches exactly once per episode,
  *  records the decision, and exhausts ONLY when the outcome resolves (synchronously, or
@@ -884,10 +1021,19 @@ async function operatorRung(
     return view.opOutcomeResolved;
   }
   const outcome = await deps.deliveryEngine.dispatchEscalation(row, reason);
+  if (outcome.dispatched === false) {
+    // A real policy change: no route used to exhaust. Re-resolution is silent
+    // while the reason is unchanged; the scheduler supplies the retry cadence.
+    if (view.opUnresolved !== outcome.decision) {
+      appendMarker(repo, row, `${LADDER_RUNG_PREFIX} operator unresolved-route decision=${outcome.decision}`);
+      actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
+    }
+    return false;
+  }
   appendMarker(
     repo,
     row,
-    `${LADDER_RUNG_PREFIX} operator dispatched-to-engine decision=${outcome.decision} resolved=${outcome.resolved}${outcome.notificationKey ? ` notification_key=${outcome.notificationKey}` : ""} reason=${reason}`,
+    `${LADDER_RUNG_PREFIX} operator dispatched-to-engine decision=${outcome.decision} resolved=${outcome.resolved}${outcome.notificationKey ? ` notification_key=${outcome.notificationKey}` : ""}${outcome.decisionId ? ` decision_id=${outcome.decisionId}` : ""} reason=${reason}`,
   );
   actions.push({ qitemId: row.qitemId, action: "escalate-operator" });
   return outcome.resolved;
@@ -907,13 +1053,14 @@ async function refreshEscalationRowIfExists(
   deps: WakeLadderDeps,
   dest: string,
   members: Array<{ row: QueueItem }>,
+  dedupTag = escalationDedupTag(dest),
 ): Promise<void> {
   const existing = deps.db
     .prepare(
       `SELECT qitem_id FROM queue_items
         WHERE state IN ('pending','in-progress','blocked') AND tags LIKE ? LIMIT 1`,
     )
-    .get(`%"${escalationDedupTag(dest)}"%`) as { qitem_id: string } | undefined;
+    .get(`%"${dedupTag}"%`) as { qitem_id: string } | undefined;
   if (!existing) return;
   const row = deps.queueRepo.getById(existing.qitem_id)!;
   const tags = row.tags ?? [];
@@ -932,8 +1079,9 @@ async function ensureEscalationRow(
   orch: string,
   members: Array<{ row: QueueItem; reason: string }>,
   reason: string,
+  dedupTag = escalationDedupTag(dest),
+  extraTags: string[] = [],
 ): Promise<{ qitemId: string }> {
-  const dedupTag = escalationDedupTag(dest);
   const existing = deps.db
     .prepare(
       `SELECT qitem_id FROM queue_items
@@ -941,7 +1089,7 @@ async function ensureEscalationRow(
     )
     .get(`%"${dedupTag}"%`) as { qitem_id: string } | undefined;
   if (existing) {
-    await refreshEscalationRowIfExists(deps, dest, members);
+    await refreshEscalationRowIfExists(deps, dest, members, dedupTag);
     return { qitemId: existing.qitem_id };
   }
   const body =
@@ -949,14 +1097,14 @@ async function ensureEscalationRow(
     `destination: ${dest}\n` +
     `reason: ${reason}\n` +
     `stuck batons (${members.length}):\n` +
-    members.map((m) => `- ${m.row.qitemId} (${m.reason})`).join("\n") +
+    members.map((m) => `- ${m.row.qitemId}: ${m.row.summary ?? "outstanding work"} (${m.reason})`).join("\n") +
     `\nThe rows above still carry their obligations exactly-once; this escalation is the wake, not the content.`;
   const created = await deps.queueRepo.create({
     sourceSession: members[0]!.row.sourceSession,
     destinationSession: orch,
     body,
     summary: `Wake escalation: ${members.length} baton(s) stuck at ${dest} — ${reason}`,
-    tags: [WAKE_ESCALATION_TAG, dedupTag, ...members.map(m => recoveryTag(m.row.qitemId))],
+    tags: [WAKE_ESCALATION_TAG, dedupTag, ...extraTags, ...members.map(m => recoveryTag(m.row.qitemId))],
     nudge: false, // delivery is the ladder's own rung attempt, recorded with its outcome
   });
   return { qitemId: created.qitemId };
