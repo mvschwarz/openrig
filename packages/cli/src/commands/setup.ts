@@ -141,7 +141,7 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   {
     scope: "global",
     runtime: "codex",
-    path: "~/.codex/config.toml",
+    path: "$CODEX_HOME/config.toml (default: ~/.codex/config.toml)",
     purpose: "Pre-trust managed workspaces and apply selected Codex config runtime-resource fragments.",
   },
 ];

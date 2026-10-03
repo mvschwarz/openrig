@@ -274,7 +274,7 @@ export function collectAllowlistedProviderAuthEnv(
 
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const daemonHome = os.homedir();
-  const configuredCodexHome = process.env.CODEX_HOME;
+  const configuredCodexHome = process.env.CODEX_HOME || undefined;
   if (configuredCodexHome && !nodePath.isAbsolute(configuredCodexHome)) {
     throw new Error(`CODEX_HOME must be an absolute path for managed seats: ${configuredCodexHome}`);
   }
