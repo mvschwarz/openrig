@@ -26,11 +26,12 @@ it.each(['return','exit','errexit'])('keeps pane environment, lifetime and histo
   await tm(['new-session','-d','-s','pane','/bin/bash --noprofile --rcfile '+q(rc)+' -i']);await until(()=>fs.existsSync(status)&&fs.existsSync(before));fs.unlinkSync(status);
   const rcInitial=fs.readFileSync(before,'utf8');fs.unlinkSync(before);
   // Capture the real comparison after Bash has finished rc processing. The
-  // unchanged ordinary-input control distinguishes startup's stdin flag.
+  // ordinary-input control allows only Bash's version-dependent stdin flag
+  // transition here. The post-launch comparison below is exact, including flags.
   expect(await transport.sendText('pane',`${snapshot} > ${q(before)}`)).toEqual({ok:true});expect(await transport.sendKeys('pane',['Enter'])).toEqual({ok:true});await until(()=>fs.existsSync(before)&&fs.existsSync(status));
   const initial=fs.readFileSync(before,'utf8');const rcFields=rcInitial.split('|');const steadyFields=initial.split('|');
-  expect(steadyFields.filter((_,i)=>i!==4)).toEqual(rcFields.filter((_,i)=>i!==4));expect(steadyFields[4]).toContain('s');expect(rcFields[4]).not.toContain('s');expect(new Set(steadyFields[4])).toEqual(new Set(rcFields[4]+'s'));
-  console.log('CLAUDE_STARTUP_CONTROL='+JSON.stringify({kind,rcOptions:rcFields[4],steadyOptions:steadyFields[4],onlyStdinFlagAddedBeforeStagedLaunch:true}));
+  expect(steadyFields.filter((_,i)=>i!==4)).toEqual(rcFields.filter((_,i)=>i!==4));expect(steadyFields[4]).toContain('i');expect(new Set(steadyFields[4].replace('s',''))).toEqual(new Set(rcFields[4].replace('s','')));
+  console.log('CLAUDE_STARTUP_CONTROL='+JSON.stringify({kind,rcOptions:rcFields[4],steadyOptions:steadyFields[4],onlyPossibleStdinFlagDifferenceBeforeStagedLaunch:true}));
   fs.unlinkSync(status);writes.length=0;
   const body='#'+ 'x'.repeat(4096)+String.fromCharCode(10)+`export FIXTURE_MUTATION=child OPENRIG_HOME=child-home; cd /; `+(kind==='exit'?'exit 7':kind==='errexit'?`set -e; false; printf unexpected > ${q(unreachable)}`:':');
   expect(await transport.sendShellCommand('pane',body,undefined,{sourceInPane:true})).toEqual({ok:true});await until(()=>fs.existsSync(status));

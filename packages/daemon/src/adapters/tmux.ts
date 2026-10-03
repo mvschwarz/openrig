@@ -11,7 +11,7 @@ interface TmuxShellCommandOptions {
   stageIfLong?: boolean;
   /** A staged single-executable runner must replace the staging shell. */
   execInScript?: boolean;
-  /** Preserve the pane shell's rc aliases/functions without changing its environment. */
+  /** Preserve rc aliases/functions in a POSIX pane shell; other shells use /bin/sh. */
   sourceInPane?: boolean;
 }
 
@@ -655,8 +655,12 @@ export class TmuxAdapter {
 
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
     const commandBytes = Buffer.byteLength(command, "utf8");
+    // The subshell/source syntax is not valid in fish or nu. Unknown/unreadable
+    // panes retain the portable /bin/sh invocation used by ordinary staging.
+    const paneShell = options.sourceInPane ? (await this.getPaneCommand(target) ?? "").replace(/^-/, "") : "";
+    const sourceInPane = ["bash", "zsh", "sh", "dash", "ksh"].includes(paneShell);
     let path = options.stageIfLong && commandBytes <= 512 ? undefined : this.fileOps.tmpName();
-    let invocation = path ? options.sourceInPane ? `( . ${shellQuote(path)} )` : `/bin/sh ${shellQuote(path)}` : command;
+    let invocation = path ? sourceInPane ? `( . ${shellQuote(path)} )` : `/bin/sh ${shellQuote(path)}` : command;
     if (Buffer.byteLength(invocation, "utf8") > 512) {
       // Pi commands below the canonical tty limit still fit when staging cannot.
       if (options.stageIfLong && commandBytes < 1024) {
