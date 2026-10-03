@@ -123,7 +123,7 @@ function scanHeaders(lines: string[]): HeaderScan {
       continue;
     }
     if (fence) continue;
-    const header = line.match(/^(#{1,6})\s+(.*\S)\s*$/);
+    const header = line.match(/^ {0,3}(#{1,6})\s+(.*\S)\s*$/);
     if (header) hits.push({ level: header[1]!.length, title: header[2]!, line: i });
   }
   return { hits, unterminatedFenceLine: fence?.line ?? null };
