@@ -80,7 +80,6 @@ import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discov
 import { configRoutes } from "./routes/config.js";
 import { hostsRoutes } from "./routes/hosts.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
-import { apiOriginProtection } from "./middleware/origin-guard.js";
 import { jsonBodyErrorHandler, trackJsonBodyParseErrors } from "./middleware/json-body-error.js";
 import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
@@ -642,9 +641,7 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   // Browser boundary: target name and browser Origin, checked once per /api request
-  // (WebSocket upgrades included), before the Origin guard below, the remote
-  // read-through and every route. It runs first so its refusal codes and remedies
-  // are what callers see.
+  // (WebSocket upgrades included), before the remote read-through and every route.
   app.use("/api/*", browserBoundary({
     webUiEnabled: deps.webUiEnabled === true,
     bearerTokens: [deps.terminalBearerToken, deps.missionControlBearerToken],
@@ -653,10 +650,6 @@ export function createApp(deps: AppDeps): Hono {
     discoverSelfNames: deps.selfNameDiscovery,
     onDecision: deps.browserBoundaryObserver,
   }));
-
-  // Cross-site request forgery and drive-by daemon API protection.
-  // Rejects requests with unauthorized browser Origin headers on all /api/* routes.
-  app.use("/api/*", apiOriginProtection());
 
   // OPR.0.4.6.MH2 FR-2/FR-7 — the single-host READ-THROUGH edge (the read
   // twin of the mission-control remote-forward). Consumes a `?host=<id>`

@@ -4,6 +4,7 @@ import { createNodeWebSocket } from "@hono/node-ws";
 import { serve, type ServerType } from "@hono/node-server";
 import http from "node:http";
 import * as fs from "node:fs";
+import { browserBoundary } from "../src/middleware/browser-boundary.js";
 import { registerTerminalWs } from "../src/routes/terminal-ws.js";
 
 const TOKEN = "test-ws-route-token";
@@ -25,6 +26,7 @@ beforeAll(async () => {
     });
     await next();
   });
+  app.use("/api/*", browserBoundary({ webUiEnabled: true, bearerTokens: [TOKEN], warn: () => {} }));
   const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
   registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: TOKEN });
   server = serve({ fetch: app.fetch, port: PORT, hostname: "127.0.0.1" });
@@ -69,7 +71,7 @@ describe("terminal WebSocket route (production path)", () => {
   it("valid token WS upgrade does NOT return 404 (the QA blocker regression)", async () => {
     const result = await rawUpgrade(
       `/api/terminal/test-session?token=${TOKEN}`,
-      { Origin: "http://127.0.0.1" },
+      { Origin: `http://127.0.0.1:${PORT}` },
     );
     expect(result.statusCode, `expected non-404, got ${result.statusCode}: ${result.body}`).not.toBe(404);
   });
@@ -77,7 +79,7 @@ describe("terminal WebSocket route (production path)", () => {
   it("missing token returns 401", async () => {
     const result = await rawUpgrade(
       "/api/terminal/test-session",
-      { Origin: "http://127.0.0.1" },
+      { Origin: `http://127.0.0.1:${PORT}` },
     );
     expect(result.statusCode).toBe(401);
   });
@@ -93,7 +95,7 @@ describe("terminal WebSocket route (production path)", () => {
   it("wrong token returns 401", async () => {
     const result = await rawUpgrade(
       `/api/terminal/test-session?token=wrong`,
-      { Origin: "http://127.0.0.1" },
+      { Origin: `http://127.0.0.1:${PORT}` },
     );
     expect(result.statusCode).toBe(401);
   });
@@ -117,6 +119,10 @@ describe("terminal WebSocket DNS rebinding and origin protection", () => {
       });
       await next();
     });
+    app.use("/api/*", browserBoundary({
+      webUiEnabled: true, bearerTokens: [], warn: () => {},
+      allowedOrigins: "https://custom-dashboard.corp,https://custom-dashboard.corp:8443",
+    }));
     const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
     registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: null });
     noAuthServer = serve({ fetch: app.fetch, port: NO_AUTH_PORT, hostname: "127.0.0.1" });
@@ -168,11 +174,11 @@ describe("terminal WebSocket DNS rebinding and origin protection", () => {
     expect(result.statusCode).toBe(403);
   });
 
-  it("allows loopback origins in no-auth mode", async () => {
-    for (const origin of ["http://127.0.0.1", "http://127.0.0.2", "http://localhost", "http://[::1]"]) {
+  it("allows each loopback address at its own UI origin in no-auth mode", async () => {
+    for (const host of ["127.0.0.1", "127.0.0.2", "localhost", "[::1]"]) {
       const result = await noAuthUpgrade(
         "/api/terminal/test-session",
-        { Origin: origin },
+        { Host: `${host}:${NO_AUTH_PORT}`, Origin: `http://${host}:${NO_AUTH_PORT}` },
       );
       expect(result.statusCode).not.toBe(403);
     }
@@ -190,41 +196,31 @@ describe("terminal WebSocket DNS rebinding and origin protection", () => {
   });
 
   it("allows origins configured in OPENRIG_ALLOWED_ORIGINS", async () => {
-    process.env.OPENRIG_ALLOWED_ORIGINS = "https://custom-dashboard.corp";
-    try {
-      const result = await noAuthUpgrade(
-        "/api/terminal/test-session",
-        { Origin: "https://custom-dashboard.corp" },
-      );
-      expect(result.statusCode).not.toBe(403);
-    } finally {
-      delete process.env.OPENRIG_ALLOWED_ORIGINS;
-    }
+    const result = await noAuthUpgrade(
+      "/api/terminal/test-session",
+      { Origin: "https://custom-dashboard.corp" },
+    );
+    expect(result.statusCode).not.toBe(403);
   });
 
   it("enforces protocol and port boundaries for full URL origins in OPENRIG_ALLOWED_ORIGINS", async () => {
-    process.env.OPENRIG_ALLOWED_ORIGINS = "https://custom-dashboard.corp:8443";
-    try {
-      const match = await noAuthUpgrade(
-        "/api/terminal/test-session",
-        { Origin: "https://custom-dashboard.corp:8443" },
-      );
-      expect(match.statusCode).not.toBe(403);
+    const match = await noAuthUpgrade(
+      "/api/terminal/test-session",
+      { Origin: "https://custom-dashboard.corp:8443" },
+    );
+    expect(match.statusCode).not.toBe(403);
 
-      const wrongPort = await noAuthUpgrade(
-        "/api/terminal/test-session",
-        { Origin: "https://custom-dashboard.corp:9000" },
-      );
-      expect(wrongPort.statusCode).toBe(403);
+    const wrongPort = await noAuthUpgrade(
+      "/api/terminal/test-session",
+      { Origin: "https://custom-dashboard.corp:9000" },
+    );
+    expect(wrongPort.statusCode).toBe(403);
 
-      const wrongScheme = await noAuthUpgrade(
-        "/api/terminal/test-session",
-        { Origin: "http://custom-dashboard.corp:8443" },
-      );
-      expect(wrongScheme.statusCode).toBe(403);
-    } finally {
-      delete process.env.OPENRIG_ALLOWED_ORIGINS;
-    }
+    const wrongScheme = await noAuthUpgrade(
+      "/api/terminal/test-session",
+      { Origin: "http://custom-dashboard.corp:8443" },
+    );
+    expect(wrongScheme.statusCode).toBe(403);
   });
 });
 
