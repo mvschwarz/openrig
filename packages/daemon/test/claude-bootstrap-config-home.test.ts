@@ -201,3 +201,29 @@ describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects 
     for (const [file, text] of f.untouched) expect(fs.readFileSync(file, "utf8")).toBe(text);
   });
 });
+// A classic (omitted permission mode) seat types `claude` into its pane's shell, which inherits the tmux
+// server's environment, not the daemon's. The bootstrap cannot see that environment, so when the daemon
+// has CLAUDE_CONFIG_DIR it provisions both homes the classic child might read.
+function classicLaunch(f: ReturnType<typeof fixture>, childEnv: Record<string, string>) {
+  let pending = "";
+  f.tmux.sendText = async (_target, text) => { pending = text; return { ok: true }; };
+  f.tmux.sendKeys = async () => {
+    f.launches.push(JSON.parse(execFileSync("/bin/sh", ["-c", pending], {
+      encoding: "utf8", cwd: f.cwd, env: { ...childEnv, PATH: f.env.PATH + ":/usr/bin:/bin" },
+    })));
+    return { ok: true };
+  };
+  return { ...f.binding, permissionMode: undefined };
+}
+
+describe.skipIf(process.platform === "win32")("classic bootstrap when the daemon selects CLAUDE_CONFIG_DIR", () => {
+  it("child inheriting the daemon's default-looking selection gets onboarding and trust (the mvs-dev-01 shape)", async () => {
+    const f = fixture("default-looking", false, false);
+    const binding = classicLaunch(f, { HOME: f.env.HOME, CLAUDE_CONFIG_DIR: f.env.CLAUDE_CONFIG_DIR });
+    await f.adapter.deliverStartup([], binding);
+    expect(await f.adapter.launchHarness(binding, { name: "seat" })).toMatchObject({ ok: true });
+    const observed = f.launches[0];
+    expect(observed.statePath).toBe(f.statePath);
+    expect(observed.state).toMatchObject({ hasCompletedOnboarding: true, projects: { [f.cwd]: { hasTrustDialogAccepted: true } } });
+  });
+});
