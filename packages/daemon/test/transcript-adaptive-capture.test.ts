@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { TranscriptStore } from "../src/domain/transcript-store.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { startTranscriptRotation, clearAllTranscriptRotationsForTest, getLastCaptureAt, getTranscriptCaptureStats } from "../src/domain/transcript-rotation.js";
 
@@ -28,13 +29,14 @@ function start(adapter: object, session = "seat", resolve?: () => { lines: numbe
 describe("adaptive capture", () => {
   it("backs off unchanged output, shares hints across seats, and reconciles without a changed hint", async () => {
     const { adapter, activity } = fixture();
-    const file = start(adapter); start(adapter, "other");
+    const options = () => ({ lines: 1000, pollIntervalMs: 2000 });
+    const file = start(adapter, "seat", options); start(adapter, "other", options);
     await vi.advanceTimersByTimeAsync(16_000);
-    // Each seat captures at 0, 2, 6 and 12s, rather than every 2s.
-    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(8);
-    expect(adapter.readAllSessionWindowActivity).toHaveBeenCalledTimes(9);
+    // Idle captures at 0, 2, 5, 8, 11 and 14s fit the freshness budget.
+    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(12);
+    expect(adapter.readAllSessionWindowActivity).toHaveBeenCalledTimes(17);
     expect(getTranscriptCaptureStats().idleSeats).toBe(2);
-    expect(Date.now() - getLastCaptureAt("seat")!).toBe(4000);
+    expect(Date.now() - getLastCaptureAt("seat")!).toBe(2000);
     activity(1, "same-second output not reflected by the hint\n");
     await vi.advanceTimersByTimeAsync(6000);
     expect(fs.readFileSync(file, "utf8")).toBe("same-second output not reflected by the hint\n");
@@ -68,7 +70,7 @@ describe("adaptive capture", () => {
     const captures = adapter.capturePaneContent.mock.calls.length;
     adapter.readAllSessionWindowActivity.mockResolvedValue(new Map());
     await vi.advanceTimersByTimeAsync(1000);
-    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(captures);
+    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(captures + 1);
     await vi.advanceTimersByTimeAsync(1000);
     expect(adapter.capturePaneContent).toHaveBeenCalledTimes(captures + 1);
     expect(getTranscriptCaptureStats().idleSeats).toBe(0);
@@ -124,12 +126,54 @@ describe("adaptive capture", () => {
     start(adapter, "seat", () => ({ lines: 1000, pollIntervalMs: 2000 }));
     await vi.advanceTimersByTimeAsync(8000);
     expect(getTranscriptCaptureStats().idleSeats).toBe(1);
-    expect(getTranscriptCaptureStats().maxIdleIntervalMs).toBe(6000);
+    expect(getTranscriptCaptureStats().maxIdleIntervalMs).toBe(3000);
     // Includes tick spacing, a slow hint and capture, after backoff reaches its ceiling.
     for (let n = 0; n < 250; n++) {
       await vi.advanceTimersByTimeAsync(100);
       expect(Date.now() - getLastCaptureAt("seat")!).toBeLessThan(10_000);
     }
+  });
+
+  it("keeps actual ingest health fresh when one ordinary idle capture takes 4.2s", async () => {
+    const { adapter } = fixture();
+    let calls = 0;
+    adapter.capturePaneContent.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, ++calls === 5 ? 4200 : 10));
+      return "unchanged\n";
+    });
+    const store = new TranscriptStore({ transcriptsRoot: root });
+    const file = store.getTranscriptPath("rig", "seat");
+    startTranscriptRotation(adapter as TmuxAdapter, "seat", file, { lines: 1000, pollIntervalMs: 2000 }, () => ({ lines: 1000, pollIntervalMs: 2000 }));
+    await vi.advanceTimersByTimeAsync(8000);
+    for (let n = 0; n < 300; n++) {
+      await vi.advanceTimersByTimeAsync(100);
+      expect(store.getIngestHealth("rig", "seat")).toMatchObject({ state: "live", reason: "capture_fresh" });
+    }
+  });
+
+  it("does not refresh or overlap a capture that outlives its deadline", async () => {
+    const { adapter } = fixture();
+    start(adapter, "seat", () => ({ lines: 1000, pollIntervalMs: 2000 }));
+    await vi.advanceTimersByTimeAsync(0);
+    const first = getLastCaptureAt("seat");
+    let release!: (value: string) => void;
+    adapter.capturePaneContent.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    await vi.advanceTimersByTimeAsync(2000);
+    const count = adapter.capturePaneContent.mock.calls.length;
+    try {
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(getLastCaptureAt("seat")).toBe(first);
+      expect(adapter.capturePaneContent).toHaveBeenCalledTimes(count);
+      expect(getTranscriptCaptureStats().failures).toBe(1);
+    } finally {
+      release("late output must not persist\n");
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(fs.readFileSync(path.join(root, "seat"), "utf8")).toBe("first\n");
+    expect(getLastCaptureAt("seat")).toBe(first);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(adapter.capturePaneContent.mock.calls.length).toBeGreaterThan(count);
+    expect(getLastCaptureAt("seat")).toBeGreaterThan(first!);
   });
 
   it("retains active tick cadence despite nonzero capture duration and a normal stop", async () => {

@@ -2,7 +2,7 @@ import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, s
 import { join, dirname, relative, isAbsolute, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
-import { getLastCaptureAt } from "./transcript-rotation.js";
+import { getLastCaptureAt, DEFAULT_TRANSCRIPT_STALE_AFTER_MS } from "./transcript-rotation.js";
 
 export interface TranscriptStoreOpts {
   transcriptsRoot?: string;
@@ -19,7 +19,7 @@ export interface TranscriptIngestHealth {
 }
 
 const DEFAULT_ROOT = getCompatibleOpenRigPath("transcripts");
-export const DEFAULT_TRANSCRIPT_STALE_AFTER_MS = 10_000;
+export { DEFAULT_TRANSCRIPT_STALE_AFTER_MS } from "./transcript-rotation.js";
 
 function applyBackspaces(text: string): string {
   const chars: string[] = [];

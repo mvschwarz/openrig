@@ -30,6 +30,8 @@ export const DEFAULT_TRANSCRIPT_POLL_INTERVAL_MS = 2000;
 // spacing, activity hints and capture work on a busy host. Activity hints are
 // advisory: reconciliation still reads the complete bounded trailing buffer.
 export const MAX_IDLE_CAPTURE_INTERVAL_MS = 6000;
+export const DEFAULT_TRANSCRIPT_STALE_AFTER_MS = 10_000;
+export const CAPTURE_RESULT_DEADLINE_MS = 5000;
 export const ACTIVITY_HINT_DEADLINE_MS = 1000;
 
 /** A shared live resolver retains a usable policy during partial config writes.
@@ -64,7 +66,7 @@ export function getTranscriptRotationOptionsFromEnv(): TranscriptRotationOptions
 
 interface CaptureStats {
   captures: number; failures: number; bytes: number; durationMs: number;
-  idle: boolean; intervalMs: number; lines: number;
+  idle: boolean; intervalMs: number; lines: number; idleCeilingMs: number;
 }
 const captureStats = new Map<string, CaptureStats>();
 let activitySnapshots = new WeakMap<TmuxAdapter, { at: number; pending: boolean; result: Promise<Map<string, number> | null> }>();
@@ -101,9 +103,10 @@ export function getTranscriptCaptureStats() {
     captureDurationMs: entries.reduce((n, s) => n + s.durationMs, 0),
     activeIntervalMs: entries.length ? entries.reduce((max, s) => Math.max(max, s.intervalMs), 0) : null,
     lines: entries.length ? entries.reduce((max, s) => Math.max(max, s.lines), 0) : null,
-    maxIdleIntervalMs: entries.reduce((max, s) => Math.max(max, s.intervalMs), MAX_IDLE_CAPTURE_INTERVAL_MS),
+    maxIdleIntervalMs: entries.reduce((max, s) => Math.max(max, s.idleCeilingMs), 0),
     settingsReloadError,
     activityHintDeadlineMs: ACTIVITY_HINT_DEADLINE_MS,
+    captureResultDeadlineMs: CAPTURE_RESULT_DEADLINE_MS,
   };
 }
 
@@ -153,7 +156,12 @@ export function startTranscriptRotation(
   // once stop() or a replacing start() has run. Guards the async gap so a stale
   // in-flight tick performs no write and records no liveness.
   const isCurrent = (): boolean => activeGeneration.get(sessionName) === myGeneration;
-  const stats: CaptureStats = { captures: 0, failures: 0, bytes: 0, durationMs: 0, idle: false, intervalMs: opts.pollIntervalMs, lines: opts.lines };
+  const timerStepMs = resolveOptions ? Math.min(opts.pollIntervalMs, 1000) : opts.pollIntervalMs;
+  // Reserve the worst-case hint, capture result and timer spacing in the
+  // default freshness window. Longer configured cadences remain explicit.
+  const idleCeiling = () => Math.max(opts.pollIntervalMs, Math.min(MAX_IDLE_CAPTURE_INTERVAL_MS,
+    DEFAULT_TRANSCRIPT_STALE_AFTER_MS - ACTIVITY_HINT_DEADLINE_MS - CAPTURE_RESULT_DEADLINE_MS - timerStepMs));
+  const stats: CaptureStats = { captures: 0, failures: 0, bytes: 0, durationMs: 0, idle: false, intervalMs: opts.pollIntervalMs, lines: opts.lines, idleCeilingMs: idleCeiling() };
   captureStats.set(sessionName, stats);
   let nextCaptureAt = 0;
   let lastCaptureStartedAt = 0;
@@ -165,6 +173,9 @@ export function startTranscriptRotation(
     const tickStartedAt = Date.now();
     capturingSessions.add(sessionName);
     let captureStartedAt: number | undefined;
+    let captureStillRunning = false;
+    let captureTimedOut = false;
+    let captureDeadline: NodeJS.Timeout | undefined;
     try {
       const currentOptions = resolveOptions?.() ?? opts;
       if (currentOptions.pollIntervalMs !== opts.pollIntervalMs || currentOptions.lines !== opts.lines) {
@@ -175,6 +186,7 @@ export function startTranscriptRotation(
       }
       stats.intervalMs = opts.pollIntervalMs;
       stats.lines = opts.lines;
+      stats.idleCeilingMs = idleCeiling();
       const hint = typeof tmuxAdapter.readAllSessionWindowActivity === "function"
         ? await activityHint(tmuxAdapter, sessionName, opts.pollIntervalMs) : undefined;
       if (!isCurrent()) return;
@@ -197,7 +209,21 @@ export function startTranscriptRotation(
       lastCaptureStartedAt = tickStartedAt;
       captureStartedAt = performance.now();
       stats.captures += 1;
-      const content = await tmuxAdapter.capturePaneContent(sessionName, opts.lines);
+      captureStillRunning = true;
+      const request = Promise.resolve().then(() => tmuxAdapter.capturePaneContent(sessionName, opts.lines))
+        .finally(() => {
+          captureStillRunning = false;
+          // A result deadline never releases ownership of an unfinished child.
+          if (captureTimedOut) capturingSessions.delete(sessionName);
+        });
+      const content = await Promise.race([
+        request,
+        new Promise<null>((resolve) => {
+          captureDeadline = setTimeout(() => { captureTimedOut = true; resolve(null); }, CAPTURE_RESULT_DEADLINE_MS);
+          captureDeadline.unref?.();
+        }),
+      ]);
+      clearTimeout(captureDeadline);
       // Re-check AFTER the async capture: stop()/replacement may have run while we
       // awaited. A dead session (null) is deliberately not recorded either way,
       // so getIngestHealth falls back to a stale mtime for it.
@@ -246,8 +272,10 @@ export function startTranscriptRotation(
         // this IS a completed healthy tick — record liveness, skip the rewrite.
         lastCaptureAtBySession.set(sessionName, Date.now());
         stats.idle = hint !== undefined && !activityChanged;
-        idleIntervalMs = stats.idle ? Math.min(Math.max(opts.pollIntervalMs, MAX_IDLE_CAPTURE_INTERVAL_MS), idleIntervalMs * 2) : opts.pollIntervalMs;
-        nextCaptureAt = tickStartedAt + idleIntervalMs;
+        idleIntervalMs = stats.idle ? Math.min(idleCeiling(), idleIntervalMs * 2) : opts.pollIntervalMs;
+        // Idle work starts after the last healthy completion; the derived
+        // ceiling reserves enough time for the following bounded capture.
+        nextCaptureAt = (stats.idle ? Date.now() : tickStartedAt) + idleIntervalMs;
         return;
       }
 
@@ -272,12 +300,13 @@ export function startTranscriptRotation(
       // does not bubble up to the daemon's launch / lifecycle paths.
     } finally {
       if (captureStartedAt !== undefined) stats.durationMs += performance.now() - captureStartedAt;
-      capturingSessions.delete(sessionName);
+      clearTimeout(captureDeadline);
+      if (!captureStillRunning) capturingSessions.delete(sessionName);
     }
   };
 
   void tick();
-  const timer = setInterval(tick, resolveOptions ? Math.min(opts.pollIntervalMs, 1000) : opts.pollIntervalMs);
+  const timer = setInterval(tick, timerStepMs);
   // Don't keep the daemon process alive solely on transcript timers.
   if (typeof timer.unref === "function") timer.unref();
   activeTimers.set(sessionName, timer);
