@@ -10,14 +10,14 @@ applies-when: |
   its own source-verification stamp.
 siblings: [codemap.md, arteries.md, test-layers.md, cli-reference.md, frontmatter-schema.md]
 prerequisite-reads: []
-last-verified-against-source: 712a61fbcc5ffe5a7c786fea12132567083ab507
-last-updated: 2026-10-02
+last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-updated: 2026-10-03
 ---
 
 # OpenRig as-built docs
 
 These pages describe the code and point to its owning files. This index was checked against
-main commit `712a61fbcc5ffe5a7c786fea12132567083ab507`. A linked module's
+main commit `254122872cf477511514979a4300b695d77cd1f7`. A linked module's
 `last-verified-against-source` is its own verification boundary; updating this index does not
 revalidate that module or identify a running daemon or published package.
 
@@ -93,11 +93,11 @@ At the named commit there are **26 Markdown files**: **14** under `architecture/
 these counts from the repository root:
 
 ```bash
-source_commit=712a61fbcc5ffe5a7c786fea12132567083ab507
-git ls-tree -r --name-only "$source_commit" -- docs/as-built | rg '\.md$' | wc -l
-git ls-tree -r --name-only "$source_commit" -- docs/as-built/architecture | rg '\.md$' | wc -l
-git ls-tree -r --name-only "$source_commit" -- docs/as-built/ui | rg '\.md$' | wc -l
-git ls-tree -r --name-only "$source_commit" -- docs/as-built | rg '^docs/as-built/[^/]+\.md$' | wc -l
+source_commit=254122872cf477511514979a4300b695d77cd1f7
+git ls-tree -r --name-only "$source_commit" -- docs/as-built | grep -E '\.md$' | wc -l
+git ls-tree -r --name-only "$source_commit" -- docs/as-built/architecture | grep -E '\.md$' | wc -l
+git ls-tree -r --name-only "$source_commit" -- docs/as-built/ui | grep -E '\.md$' | wc -l
+git ls-tree -r --name-only "$source_commit" -- docs/as-built | grep -E '^docs/as-built/[^/]+\.md$' | wc -l
 ```
 
 Read a module's source stamp and prerequisite pointers before relying on it. Source code at the

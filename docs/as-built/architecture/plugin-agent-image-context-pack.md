@@ -9,14 +9,14 @@ applies-when: |
   agent-image capture/fork/protection, or Claude guided-compaction behavior.
 siblings: [packaging-bootstrap-bundles.md, agent-spec-and-startup.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 712a61fbcc5ffe5a7c786fea12132567083ab507
-last-updated: 2026-10-02
+last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-updated: 2026-10-03
 ---
 
 # Content libraries and compaction
 
 This module describes source at main commit
-`712a61fbcc5ffe5a7c786fea12132567083ab507`. Source paths below are repository-relative.
+`254122872cf477511514979a4300b695d77cd1f7`. Source paths below are repository-relative.
 Context packs, plugins and agent images have filesystem-backed content and daemon-side
 discovery. Their consumers can read database identity, mutate files, deliver messages or
 launch sessions; the whole layer is not a read-only catalog.

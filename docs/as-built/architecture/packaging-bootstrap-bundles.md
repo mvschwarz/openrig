@@ -9,14 +9,14 @@ applies-when: |
   source routing, bootstrap plan/apply, or the retained package install engine.
 siblings: [agent-spec-and-startup.md, plugin-agent-image-context-pack.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 712a61fbcc5ffe5a7c786fea12132567083ab507
-last-updated: 2026-10-02
+last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-updated: 2026-10-03
 ---
 
 # Packaging, bootstrap and bundles
 
 This module describes source at main commit
-`712a61fbcc5ffe5a7c786fea12132567083ab507`. Source paths below are repository-relative.
+`254122872cf477511514979a4300b695d77cd1f7`. Source paths below are repository-relative.
 An npm CLI artifact and a `.rigbundle` have different builders and consumers; neither
 source verification nor archive integrity establishes that a daemon has adopted an artifact.
 

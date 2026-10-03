@@ -11,8 +11,8 @@ applies-when: |
   compatibility limits that still describe the shipped system.
 siblings: [daemon-core.md, coordination-primitive.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 264fade9
-last-updated: 2026-10-02
+last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-updated: 2026-10-03
 ---
 
 # Architecture Invariants, Event System, Compatibility Notes
@@ -21,7 +21,7 @@ This module collects the cross-cutting invariants that do not belong to any
 single subsystem: the architecture rules the codebase holds itself to, the
 event-system shape, and the intentional compatibility limits.
 
-> Verified against source at main `264fade9`. Each count below sits beside the
+> Verified against source at main `254122872cf477511514979a4300b695d77cd1f7`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -56,24 +56,24 @@ system-level invariants.
 10. Restore replay uses classification-free projection intent, not stale
     startup-time `no_op` / conflict classifications.
 11. Startup status is explicit session state: `pending`, `ready`,
-    `attention_required`, `failed` (`types.ts:99`).
+    `attention_required`, `failed` (`types.ts:100`).
 12. Session recency depends on monotonic ULIDs: `session-registry.ts` uses
     `monotonicFactory()`. Restore does not pick the newest session by max
     ULID; it resolves the active occupant recorded in the snapshot
     (`resolveActiveSnapshotSession`, `active-occupant.ts:74`, called at
-    `restore-orchestrator.ts:1170`).
+    `restore-orchestrator.ts:1171`).
 13. Readiness checking is a retry loop with exponential backoff and
     configurable timeout, using adapter-specific probes (Claude TUI
     indicator, Codex ready message, terminal immediate).
 14. Restore outcome states are a fixed set (`RestoreNodeResult.status`,
-    `types.ts:475`): `resumed`, `rebuilt`, `fresh-primed`,
+    `types.ts:476`): `resumed`, `rebuilt`, `fresh-primed`,
     `awaiting-decision`, `attention_required`, `failed`, plus
     `operator_recovered` (set only by later reconciliation) and `fresh`
     (retained only for the legacy continuity-restoring skip path). `rebuilt` =
     new process assembled from artifacts.
 15. Restore honesty: a failed resume stops loudly as `awaiting-decision`, with
     the blank session rolled back and no session running
-    (`restore-orchestrator.ts:1229`). No automatic fresh fallback. Fresh launch
+    (`restore-orchestrator.ts:1230`). No automatic fresh fallback. Fresh launch
     is explicit follow-up only (`rig up --fresh <logicalId>`,
     `packages/cli/src/commands/up.ts:85`).
 16. Post-command handoff required on `up`, `down`, `restore`,
@@ -115,15 +115,15 @@ system-level invariants.
 
 The reboot supports `local:...` and `path:/abs/...` agent refs. Remote
 `agent_ref` sources remain unsupported and fail in preflight (schema
-validation, `rigspec-schema.ts:545`; restated in compat note 1).
+validation, `rigspec-schema.ts:550`; restated in compat note 1).
 
 ## 2. Event system
 
 The daemon's event surface is the single `RigEvent` discriminated union.
 
-`RigEvent` is declared at `packages/daemon/src/domain/types.ts:105`
-(`export type RigEvent =`) and runs through `types.ts:313`. It has **99 union
-members** declaring **100** `type` literals: one member (`types.ts:106`) carries
+`RigEvent` is declared at `packages/daemon/src/domain/types.ts:106`
+(`export type RigEvent =`) and runs through `types.ts:314`. It has **99 union
+members** declaring **100** `type` literals: one member (`types.ts:107`) carries
 both `proof.judged` and `proof.sources_changed`.
 
 - Members:
@@ -136,47 +136,47 @@ both `proof.judged` and `proof.sources_changed`.
 `seat.model_divergence` is built in `startup.ts`). **5** are declared but never
 constructed: `session.status_changed`, `continuity.sync`, `continuity.degraded`,
 `qitem.closure_overdue` and `mission_control.view_refreshed` (the last two are
-still named in SSE filters, `routes/queue.ts:967` and
-`routes/mission-control.ts:289`). List them with:
+still named in SSE filters, `routes/queue.ts:968` and
+`routes/mission-control.ts:292`). List them with:
 
 `for t in $(sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | tr -d '"'); do git grep -q -F "type: \"$t\"" -- packages/daemon/src ':!packages/daemon/src/domain/types.ts' || echo "$t"; done`
 
 ### Per-prefix event families
 
 Each count below is the number of `type` literals per prefix in the union body
-(`types.ts:105`–`313`):
+(`types.ts:106`–`314`):
 `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | tr -d '"' | cut -d. -f1 | sort | uniq -c | sort -rn`.
 
 | Prefix | Types | Sample / role |
 |---|---|---|
-| `node.*` | 15 | `node.added` (`types.ts:123`) … `node.startup_proof_rejected` (`:226`) — lifecycle/startup |
+| `node.*` | 15 | `node.added` (`types.ts:124`) … `node.startup_proof_rejected` (`:227`) — lifecycle/startup |
 | `workflow.*` | 8 | workflow runtime (detail in `workflow-runtime.md`) |
 | `session.*` | 8 | session discovery / status / detach / vanish / stop / clean / resume-token audit |
-| `rig.*` | 7 | `rig.created` / `rig.deleted` / `rig.imported` / `rig.stopped` / `rig.archived` / `rig.unarchived` / `rig.expanded` (`:238`) |
-| `watchdog.*` | 5 | `watchdog.evaluation_fired` (`:277`) … `watchdog.job_stopped` (`:281`) |
-| `seat.*` | 5 | `seat.model_divergence` (`:112`) … `seat.handover_completed` (`:197`) — model divergence, fresh launch, attention clear, handover |
-| `queue.*` | 5 | queue lifecycle (`:246`–`:249`, `:259`; detail in `coordination-primitive.md`) |
+| `rig.*` | 7 | `rig.created` / `rig.deleted` / `rig.imported` / `rig.stopped` / `rig.archived` / `rig.unarchived` / `rig.expanded` (`:239`) |
+| `watchdog.*` | 5 | `watchdog.evaluation_fired` (`:278`) … `watchdog.job_stopped` (`:282`) |
+| `seat.*` | 5 | `seat.model_divergence` (`:113`) … `seat.handover_completed` (`:198`) — model divergence, fresh launch, attention clear, handover |
+| `queue.*` | 5 | queue lifecycle (`:247`–`:250`, `:260`; detail in `coordination-primitive.md`) |
 | `package.*` | 5 | legacy package/install engine events |
-| `mission_control.*` | 5 | audit/notification (`:307`–`:313`; detail in `mission-control.md`) |
+| `mission_control.*` | 5 | audit/notification (`:308`–`:314`; detail in `mission-control.md`) |
 | `bootstrap.*` | 5 | legacy bootstrap-run events |
 | `restore.*` | 4 | restore start/complete/subset-complete/reconcile (detail in `lifecycle-snapshot-restore.md`) |
 | `classifier.*` | 4 | classifier-lease lifecycle |
-| `qitem.*` | 2 | `qitem.fallback_routed` (`:250`), `qitem.closure_overdue` (`:251`) |
-| `proof.*` | 2 | `proof.judged`, `proof.sources_changed` — one union member (`:106`) |
-| `pod.*` | 2 | `pod.created` (`:212`), `pod.deleted` (`:213`) |
-| `inbox.*` | 2 | `inbox.absorbed` (`:252`), `inbox.denied` (`:253`) |
-| `continuity.*` | 2 | `continuity.sync` (`:227`), `continuity.degraded` (`:228`) |
-| `agent.*` | 2 | `agent.activity` (`:148`), `agent.session_identity` (`:155`) |
-| singletons | 12 | one type each: `workflow_spec.*`, `view.*`, `transport.*` (`:152`), `topology.*` (`:135`), `stream.*` (`:242`), `snapshot.*`, `project.*`, `kernel.*`, `event.*` (`:107`), `chat.*` (`:236`), `bundle.*`, `binding.*` |
+| `qitem.*` | 2 | `qitem.fallback_routed` (`:251`), `qitem.closure_overdue` (`:252`) |
+| `proof.*` | 2 | `proof.judged`, `proof.sources_changed` — one union member (`:107`) |
+| `pod.*` | 2 | `pod.created` (`:213`), `pod.deleted` (`:214`) |
+| `inbox.*` | 2 | `inbox.absorbed` (`:253`), `inbox.denied` (`:254`) |
+| `continuity.*` | 2 | `continuity.sync` (`:228`), `continuity.degraded` (`:229`) |
+| `agent.*` | 2 | `agent.activity` (`:149`), `agent.session_identity` (`:156`) |
+| singletons | 12 | one type each: `workflow_spec.*`, `view.*`, `transport.*` (`:153`), `topology.*` (`:136`), `stream.*` (`:243`), `snapshot.*`, `project.*`, `kernel.*`, `event.*` (`:108`), `chat.*` (`:237`), `bundle.*`, `binding.*` |
 
 Family counts sum to 100 type literals (18 multi-type families totalling 88 +
 12 singletons).
 
 ### Emission and delivery
 
-Events are emitted via `eventBus.emit({ type: ... })` (`event-bus.ts:56`) or,
+Events are emitted via `eventBus.emit({ type: ... })` (`event-bus.ts:57`) or,
 inside a caller-managed transaction, `eventBus.persistWithinTransaction(...)`
-(`event-bus.ts:69`) with subscribers notified after commit — across domain
+(`event-bus.ts:70`) with subscribers notified after commit — across domain
 services (`stream-store.ts`, `workflow-runtime.ts`, `restore-orchestrator.ts`,
 `node-launcher.ts`, etc.) and route handlers. The event log is append-only and
 SQLite-backed.
@@ -190,7 +190,7 @@ SSE delivery surfaces include the following. The daemon has **11**
   `app.route("/api/events", eventsRoute)`).
 - `GET /api/stream/watch` — new stream items (`routes/stream.ts:194`).
 - `GET /api/queue/watch` — queue/inbox coordination events
-  (`routes/queue.ts:985`).
+  (`routes/queue.ts:986`).
 - The chat SSE stream `GET /api/rigs/:rigId/chat/watch` delivers
   `chat.message` for one rig (`routes/chat.ts:68`, mounted at `server.ts:783`;
   rig-scoped; see compat note 6).
