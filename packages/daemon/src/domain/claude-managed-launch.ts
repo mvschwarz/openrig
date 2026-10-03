@@ -43,6 +43,11 @@ export class ClaudeManagedLaunch {
     return row;
   }
 
+  /** Bootstrap shares prepare's stored-node cwd when the binding omits it. */
+  boundCwd(nodeId: string): string {
+    return this.target(nodeId).cwd!;
+  }
+
   /** Bootstrap and the launched child must use the same native selection.
    * Unset config uses HOME/.claude.json; even an explicit default-looking
    * directory selects <configDir>/.claude.json instead (#154/#225).

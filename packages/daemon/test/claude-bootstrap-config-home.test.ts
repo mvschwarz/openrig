@@ -8,6 +8,9 @@ import * as fs from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
+import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
+import type { SessionRegistry } from "../src/domain/session-registry.js";
+import type { EventBus } from "../src/domain/event-bus.js";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
@@ -72,7 +75,7 @@ console.log(JSON.stringify({env:{HOME:process.env.HOME,CLAUDE_CONFIG_DIR:dir}, s
   }, getPaneCommand: async () => "claude", capturePaneContent: async () => "Claude Code\n>" } as unknown as TmuxAdapter;
   const adapter = new ClaudeCodeAdapter({ tmux, fsOps, claudeManagedLaunch: managed, sessionIdFactory: () => "fixture-fresh", sleep: async () => {} });
   const binding = { id: "binding", nodeId: "node", cwd, tmuxSession: "seat", tmuxPane: "%1", permissionMode: "acceptEdits" } as NodeBinding;
-  return { root, cwd, env, statePath, untouched, reads, writes, launches, adapter, binding, fsOps, tmux };
+  return { root, cwd, env, statePath, untouched, reads, writes, launches, adapter, binding, fsOps, tmux, db };
 }
 
 describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects the launch config home", () => {
@@ -106,10 +109,38 @@ describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects 
     expect(fs.readFileSync(file, "utf8")).toBe(before);
     expect(f.writes).toEqual([]);
   });
-  it.each([undefined, "acceptEdits"] as const)("skips bootstrap without cwd in mode %s", async permissionMode => {
-    const f = fixture("alternate", true, true);
-    f.adapter.ensureManagedBootstrap({ ...f.binding, cwd: undefined, permissionMode });
-    expect(f.writes).toEqual([]);
+  it.each(["relative", "unset"] as const)("startup with missing binding cwd bootstraps the stored node's %s selection", async selection => {
+    const f = fixture(selection, true, true);
+    f.db.exec(`CREATE TABLE node_permission_selections(node_id TEXT, runtime TEXT, mode TEXT);
+      CREATE TABLE node_startup_context(node_id TEXT PRIMARY KEY, projection_entries_json TEXT, resolved_files_json TEXT, startup_actions_json TEXT, runtime TEXT);`);
+    const statuses: string[] = [];
+    // Persistence/readiness boundaries are synthetic; orchestration, projection,
+    // bootstrap, prepare and the emitted child command are the production path.
+    const registry = { db: f.db, currentOccupantTenure: () => null,
+      updateStartupStatus: (_id: string, state: string) => statuses.push(state),
+      updateResumeToken: () => {} } as unknown as SessionRegistry;
+    const eventBus = { db: f.db, emit: () => {} } as unknown as EventBus;
+    f.adapter.checkReady = async () => ({ ready: true });
+    const orchestrator = new StartupOrchestrator({ db: f.db, sessionRegistry: registry, eventBus, tmuxAdapter: f.tmux });
+    const binding = { ...f.binding };
+    delete (binding as Partial<NodeBinding>).cwd;
+    const result = await orchestrator.startNode({ rigId: "rig", nodeId: "node", sessionId: "session",
+      binding, adapter: f.adapter,
+      plan: { runtime: "claude-code", cwd: f.cwd, entries: [], startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] },
+      resolvedStartupFiles: [], startupActions: [], isRestore: false });
+    expect(result).toMatchObject({ ok: true });
+    expect(statuses).toEqual(["pending", "ready"]);
+    expect(f.launches[0].statePath).toBe(f.statePath);
+    expect(f.launches[0].state).toMatchObject({ ...sentinel, hasCompletedOnboarding: true,
+      projects: { ...sentinel.projects, [f.cwd]: { hasTrustDialogAccepted: true } } });
+    expect(new Set(f.writes)).toEqual(new Set([f.statePath]));
+    for (const [file, before] of f.untouched) expect(fs.readFileSync(file, "utf8")).toBe(before);
+  });
+  it("classic bootstrap without cwd preserves known-home onboarding", () => {
+    const f = fixture("alternate", false, true);
+    f.adapter.ensureManagedBootstrap({ ...f.binding, cwd: undefined, permissionMode: undefined });
+    expect(JSON.parse(fs.readFileSync(path.join(f.env.HOME, ".claude.json"), "utf8")))
+      .toMatchObject({ ...sentinel, hasCompletedOnboarding: true });
   });
   it.each(["projects", "project entry"])("preserves an unmergeable %s field", async field => {
     const f = fixture("alternate", true, true);
