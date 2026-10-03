@@ -759,6 +759,35 @@ function buildMissionShowCommand(): Command {
     });
 }
 
+function resolveMissionCreateRoot(override?: string | null): string {
+  const selected = override ?? process.env.OPENRIG_WORK_ROOT;
+  if (!selected) return resolveMissionsRoot();
+
+  const candidate = path.isAbsolute(selected) ? selected : path.resolve(process.cwd(), selected);
+  const childMissionsRoot = path.join(candidate, "missions");
+  const hasChildMissionsRoot =
+    fs.existsSync(childMissionsRoot) && fs.statSync(childMissionsRoot).isDirectory();
+  const directMissionsRoot = path.basename(candidate) === "missions" && !hasChildMissionsRoot;
+  const workspaceRoot = directMissionsRoot ? path.dirname(candidate) : candidate;
+  if (!fs.existsSync(workspaceRoot) || !fs.statSync(workspaceRoot).isDirectory()) {
+    throw new ScopeCliError({
+      fact: `Explicit workspace root is not a readable directory: ${workspaceRoot}.`,
+      consequence: "Mission not created.",
+      action: "Create the workspace directory or pass --workspace with an existing workspace root.",
+    });
+  }
+
+  const missionsRoot = directMissionsRoot ? candidate : childMissionsRoot;
+  if (fs.existsSync(missionsRoot) && !fs.statSync(missionsRoot).isDirectory()) {
+    throw new ScopeCliError({
+      fact: `Mission root is not a directory: ${missionsRoot}.`,
+      consequence: "Mission not created.",
+      action: "Move the conflicting path and retry mission creation.",
+    });
+  }
+  return missionsRoot;
+}
+
 function buildMissionCreateCommand(): Command {
   return new Command("create")
     .description("Create a new mission with SPEC.md and mission.yaml (mints a stable dot-ID into frontmatter)")
@@ -783,7 +812,7 @@ function buildMissionCreateCommand(): Command {
             action: "Pick a name with no whitespace or path separators.",
           });
         }
-        const missionsRoot = resolveMissionsRoot({ override: getOpts(command).workspace });
+        const missionsRoot = resolveMissionCreateRoot(getOpts(command).workspace);
         const absPath = path.join(missionsRoot, name);
         if (fs.existsSync(absPath)) {
           throw new ScopeCliError({
