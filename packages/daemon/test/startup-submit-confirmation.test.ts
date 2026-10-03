@@ -7,6 +7,7 @@ import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js"
 import { seatDeliveryGuardSchema } from "../src/db/migrations/087_seat_delivery_guard.js";
 import { SeatDeliveryGuard } from "../src/domain/seat-delivery-guard.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { SessionTransport } from "../src/domain/session-transport.js";
 import { startupSubmissionEvidence } from "../src/domain/startup-submission-evidence.js";
 import { StartupOrchestrator, type StartupInput } from "../src/domain/startup-orchestrator.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
@@ -287,6 +288,21 @@ describe("startup prompt submission", () => {
     expect(JSON.stringify(evidence).length).toBeLessThan(700);
     expect(JSON.stringify(evidence)).not.toContain("xxxxx");
     expect(startupSubmissionEvidence("❯ 1. Continue\n────────────────────\n? for shortcuts", "1. Continue", 200)?.observed).toBeNull();
+  });
+
+  it("ignores a failing diagnostic sink without changing the guard verdict", async () => {
+    const f = fixture(Infinity);
+    f.tmux.capturePaneContent.mockResolvedValue(screen("different composer"));
+    const sink = vi.fn(() => { throw new Error("diagnostic sink unavailable"); });
+    const transport = new SessionTransport({ db: f.db, rigRepo: new RigRepository(f.db),
+      sessionRegistry: new SessionRegistry(f.db), eventBus: new EventBus(f.db), tmuxAdapter: f.tmux as unknown as TmuxAdapter });
+    expect(await transport.send("worker@startup-submit", "", {
+      submitOnly: true, requireFullStagedText: true, expectedStagedText: "original composer", onStartupMismatch: sink,
+    })).toMatchObject({ ok: false, reason: "staged_mismatch" });
+    expect(sink).toHaveBeenCalledTimes(1);
+    expect(f.tmux.sendText).not.toHaveBeenCalled();
+    expect(f.tmux.sendKeys).not.toHaveBeenCalled();
+    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(1);
   });
 
   it("does not change the delivery verdict when diagnostic hashing fails", async () => {
