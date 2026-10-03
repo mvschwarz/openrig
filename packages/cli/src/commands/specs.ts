@@ -206,6 +206,7 @@ Examples:
         const client = await getClient();
         const url = opts.kind ? `/api/specs/library?kind=${opts.kind}` : "/api/specs/library";
         const res = await client.get<LibraryEntry[]>(url);
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         const entries = res.data ?? [];
 
         if (opts.json) {

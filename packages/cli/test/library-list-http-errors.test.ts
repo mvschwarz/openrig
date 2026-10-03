@@ -2,6 +2,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import http from "node:http";
 import { agentImageCommand } from "../src/commands/agent-image.js";
 import { pluginCommand } from "../src/commands/plugin.js";
+import { contextCommand } from "../src/commands/context.js";
+import { specsCommand } from "../src/commands/specs.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE } from "../src/daemon-lifecycle.js";
 
@@ -10,9 +12,14 @@ afterEach(async () => {
   if (server) { server.closeAllConnections(); await new Promise<void>((resolve) => server!.close(() => resolve())); server = undefined; }
   vi.restoreAllMocks(); process.exitCode = undefined;
 });
-it.each(["plugins", "agent-images"])("%s inventory rejects unsuccessful native HTTP responses in both output modes", async (kind) => {
+const libraries = { plugins: { command: pluginCommand, route: "/api/plugins", verb: "list" },
+  "agent-images": { command: agentImageCommand, route: "/api/agent-images/library", verb: "list" },
+  "context-packs": { command: contextCommand, route: "/api/context-packs/library", verb: "list" },
+  specs: { command: specsCommand, route: "/api/specs/library", verb: "ls" } };
+it.each(Object.keys(libraries) as Array<keyof typeof libraries>)("%s inventory rejects unsuccessful native HTTP responses in both output modes", async (kind) => {
   let status = 503;
-  const route = kind === "plugins" ? "/api/plugins" : "/api/agent-images/library";
+  const library = libraries[kind];
+  const route = library.route;
   const requests: string[] = [];
   server = http.createServer((req, res) => { requests.push(req.url!); res.writeHead(status, { "Content-Type": "application/json" }); res.end("[]"); });
   await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
@@ -26,16 +33,16 @@ it.each(["plugins", "agent-images"])("%s inventory rejects unsuccessful native H
   for (const output of [[], ["--json"]]) {
     for (const code of [401, 503]) {
       status = code; process.exitCode = undefined; log.mockClear(); error.mockClear();
-      const cmd = kind === "plugins" ? pluginCommand(deps) : agentImageCommand(deps);
-      await cmd.parseAsync(["list", ...output], { from: "user" });
+      const cmd = library.command(deps);
+      await cmd.parseAsync([library.verb, ...output], { from: "user" });
       expect(process.exitCode).toBe(1);
       expect(error.mock.calls.flat().join(" ")).toContain(`HTTP ${code}`);
       expect(log).not.toHaveBeenCalled();
     }
   }
   status = 200; process.exitCode = undefined; log.mockClear(); error.mockClear();
-  const cmd = kind === "plugins" ? pluginCommand(deps) : agentImageCommand(deps);
-  await cmd.parseAsync(["list", "--json"], { from: "user" });
+  const cmd = library.command(deps);
+  await cmd.parseAsync([library.verb, "--json"], { from: "user" });
   expect(process.exitCode).toBeUndefined(); expect(error).not.toHaveBeenCalled();
   expect(JSON.parse(String(log.mock.calls[0]![0]))).toEqual([]);
   expect(requests).toEqual(Array(5).fill(route));

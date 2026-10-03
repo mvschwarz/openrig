@@ -466,6 +466,7 @@ Examples:
       try {
         const client = await getClient();
         const res = await client.get<ContextPackEntryWire[]>("/api/context-packs/library");
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         const entries = res.data ?? [];
         if (opts.json) {
           console.log(JSON.stringify(entries, null, 2));
