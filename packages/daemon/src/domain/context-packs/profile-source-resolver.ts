@@ -133,8 +133,9 @@ export function makeProfileReadFile(opts: {
       // hunting for a file that is right there in their listing.
       let dangling = false;
       try {
-        lstatSync(abs);
-        dangling = true;
+        const stat = lstatSync(abs);
+        const code = (err as NodeJS.ErrnoException).code;
+        dangling = stat.isSymbolicLink() && (code === "ENOENT" || code === "ENOTDIR");
       } catch {
         /* genuinely absent */
       }
