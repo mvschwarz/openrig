@@ -50,6 +50,7 @@ function makeApp(opts: {
   db: Database.Database;
   bus: EventBus;
   fetchImpl?: typeof fetch;
+  registry?: HostRegistry;
 }): Hono {
   const queueRepo = new QueueRepository(opts.db, opts.bus, { validateRig: () => true });
   const app = new Hono();
@@ -57,7 +58,7 @@ function makeApp(opts: {
     const set = c.set.bind(c) as (k: string, v: unknown) => void;
     set("eventBus", opts.bus);
     set("queueRepo", queueRepo);
-    set("hostRegistryLoader", () => ({ ok: true, registry: REGISTRY }));
+    set("hostRegistryLoader", () => ({ ok: true, registry: opts.registry ?? REGISTRY }));
     if (opts.fetchImpl) set("remoteFetchImpl", opts.fetchImpl);
     await next();
   });
@@ -341,5 +342,71 @@ describe("MH-3 C1 — pure helpers", () => {
     expect(isQitemPrimaryKeyConflict(byMsg)).toBe(true);
     expect(isQitemPrimaryKeyConflict(new Error("some other error"))).toBe(false);
     expect(isQitemPrimaryKeyConflict("not an error")).toBe(false);
+  });
+});
+
+// A host envelope naming the RECEIVING daemon's own resolved id is a local write. The registry
+// below deliberately has no self entry; the receiver's identity comes only from its resolved id.
+describe("cross-host queue create addressed to the receiving daemon's own host id", () => {
+  let db: Database.Database;
+  let bus: EventBus;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, [coreSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema, queueTargetRepoSchema]);
+    bus = new EventBus(db);
+    setSelfHostId("host-self");
+  });
+  afterEach(() => {
+    setSelfHostId(null);
+    db.close();
+  });
+
+  function recordingFetch(urls: string[]) {
+    return (async (url: string | URL | Request) => {
+      urls.push(String(url));
+      return jsonResponse({ qitemId: "remote-row" });
+    }) as unknown as typeof fetch;
+  }
+
+  it("exact self id with no registry self-alias: the local path writes one row, nothing is forwarded", async () => {
+    const urls: string[] = [];
+    const res = await post(makeApp({ db, bus, fetchImpl: recordingFetch(urls) }), { ...BASE, hostId: "host-self" });
+    expect(res.status).toBe(201);
+    expect(urls).toEqual([]);
+    expect(rowCount(db)).toBe(1);
+    const item = (await res.json()) as { sourceSession: string; tags: string[] | null };
+    // Local semantics: no cross-host provenance, sender not re-stamped.
+    expect(item.sourceSession).toBe("orch@rig-a");
+    expect(item.tags ?? []).not.toContain(CROSS_HOST_TAG);
+  });
+
+  it("a real remote is still forwarded while a self id is resolved", async () => {
+    const urls: string[] = [];
+    const res = await post(makeApp({ db, bus, fetchImpl: recordingFetch(urls) }), { ...BASE, hostId: "vps-b" });
+    expect(res.status).toBe(201);
+    expect(urls).toEqual(["http://vps-b:7433/api/queue/create"]);
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it.each([
+    ["case-different self id", "Host-Self", "host-self"],
+    ["unknown host", "nope", "host-self"],
+    ["unresolved self id", "host-self", null],
+  ] as const)("%s: unknown-host failure as today, nothing written", async (_label, hostId, self) => {
+    setSelfHostId(self);
+    const res = await post(makeApp({ db, bus }), { ...BASE, hostId });
+    expect(res.status).toBe(502);
+    expect((await res.json()) as { failureClass: string }).toMatchObject({ failureClass: "unknown-host" });
+    expect(rowCount(db)).toBe(0);
+  });
+
+  it("a registered host at a loopback URL is still forwarded: URL spelling never implies self", async () => {
+    const urls: string[] = [];
+    const registry: HostRegistry = { hosts: [{ id: "tunnel", transport: "http", url: "http://127.0.0.1:7433" }] };
+    const res = await post(makeApp({ db, bus, fetchImpl: recordingFetch(urls), registry }), { ...BASE, hostId: "tunnel" });
+    expect(res.status).toBe(201);
+    expect(urls).toEqual(["http://127.0.0.1:7433/api/queue/create"]);
+    expect(rowCount(db)).toBe(0);
   });
 });

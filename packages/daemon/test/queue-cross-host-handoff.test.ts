@@ -36,6 +36,7 @@ import {
 } from "../src/domain/queue-repository.js";
 import { queueRoutes, CROSS_HOST_TAG } from "../src/routes/queue.js";
 import type { HostRegistry } from "../src/domain/hosts/hosts-registry-reader.js";
+import { setSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 
 const REGISTRY: HostRegistry = {
   hosts: [
@@ -454,4 +455,64 @@ it("reconciles a verified foreign successor after interrupted transport without 
     await new Promise<void>(resolve => server.close(() => resolve()));
     local?.db.close(); foreign.db.close();
   }
+});
+
+// A handoff whose host envelope names the RECEIVING daemon's own resolved id is a local handoff:
+// the same atomic close+create record as a no-host handoff, with no forward, extra write or nudge.
+describe("cross-host handoff addressed to the receiving daemon's own host id", () => {
+  let h: ReturnType<typeof makeHarness>;
+  beforeEach(() => setSelfHostId("host-self"));
+  afterEach(() => {
+    setSelfHostId(null);
+    h?.db.close();
+  });
+
+  async function runLocal(verb: string, hostId?: string) {
+    let forwarded = false;
+    const local = makeHarness({ fetchImpl: (async () => { forwarded = true; return jsonResponse({}); }) as unknown as typeof fetch });
+    try {
+      await seedSource(local.repo, { tags: ["origin-tag"] });
+      const res = await post(local.app, `/api/queue/qitem-source-1/${verb}`, { ...HANDOFF, ...(hostId ? { hostId } : {}), nudge: false });
+      const out = (await res.json()) as { created?: { qitemId: string }; failureClass?: string };
+      const source = local.repo.getById("qitem-source-1")!;
+      const successor = out.created ? local.repo.getById(out.created.qitemId) : null;
+      const count = (sql: string) => (local.db.prepare(sql).get() as { c: number }).c;
+      return {
+        status: res.status, failureClass: out.failureClass, forwarded, rows: rowCount(local.db),
+        transitions: count("SELECT COUNT(*) c FROM queue_transitions"),
+        nudges: count("SELECT COUNT(*) c FROM queue_items WHERE last_nudge_attempt IS NOT NULL OR last_nudge_result IS NOT NULL"),
+        source: { state: source.state, closureReason: source.closureReason, closureTarget: source.closureTarget, handedOffTo: source.handedOffTo },
+        successor: successor && {
+          organicId: !successor.qitemId.startsWith("qitem-xh-"), sourceSession: successor.sourceSession,
+          destinationSession: successor.destinationSession, tags: successor.tags, chainOfRecord: successor.chainOfRecord,
+        },
+      };
+    } finally { local.db.close(); }
+  }
+
+  it.each(["handoff", "handoff-and-complete"])("%s with the exact self id keeps the no-host local record", async (verb) => {
+    const baseline = await runLocal(verb);
+    const self = await runLocal(verb, "host-self");
+    expect(self).toEqual(baseline);
+    expect(self.status).toBe(201);
+    expect(self.forwarded).toBe(false);
+    expect(self.source.closureTarget).toBe("dev@rig-b");
+    expect(self.successor?.tags ?? []).not.toContain(CROSS_HOST_TAG);
+  });
+
+  it.each([
+    ["handoff", "Host-Self", "host-self"],
+    ["handoff-and-complete", "Host-Self", "host-self"],
+    ["handoff", "host-self", null],
+    ["handoff-and-complete", "host-self", null],
+  ] as const)("%s to %s with self id %s: unknown-host as today, source untouched", async (verb, hostId, self) => {
+    setSelfHostId(self);
+    h = makeHarness();
+    await seedSource(h.repo);
+    const res = await post(h.app, `/api/queue/qitem-source-1/${verb}`, { ...HANDOFF, hostId, nudge: false });
+    expect(res.status).toBe(502);
+    expect((await res.json()) as { failureClass: string }).toMatchObject({ failureClass: "unknown-host" });
+    expect(h.repo.getById("qitem-source-1")!.state).toBe("pending");
+    expect(rowCount(h.db)).toBe(1);
+  });
 });

@@ -17,7 +17,7 @@ import { type OutboxHandler } from "../domain/outbox-handler.js";
 import { aggregateAttention } from "../domain/feed/attention-aggregator.js";
 import type { AttentionItem } from "../domain/feed/attention-aggregator.js";
 import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-reader.js";
-import { LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
+import { getSelfHostId, resolvesToLocalHost } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { deriveCurrentWork, deriveRole, type RoleOrientation } from "../domain/current-work.js";
@@ -453,7 +453,7 @@ export function queueRoutes(): Hono {
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
     }
 
-    if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
+    if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       const mintedId = body.qitemId ?? newQitemId();
       const { hostId: _dropped, ...rest } = body;
       const forwardBody: Record<string, unknown> = {
@@ -636,7 +636,7 @@ export function queueRoutes(): Hono {
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
     }
 
-    if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
+    if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       return crossHostHandoff(c, qitemId, body.hostId, "handed-off", {
         fromSession,
         toSession: body.toSession,
@@ -709,7 +709,7 @@ export function queueRoutes(): Hono {
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
     }
 
-    if (typeof body.hostId === "string" && body.hostId !== "" && body.hostId !== LOCAL_HOST_ID) {
+    if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       return crossHostHandoff(c, qitemId, body.hostId, "done", {
         fromSession,
         toSession: body.toSession,
