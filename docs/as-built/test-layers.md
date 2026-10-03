@@ -233,8 +233,12 @@ The most useful next pieces of harness work, roughly in dependency order:
 
 ### Library status
 
-Only `queue-baton-survives-restart` runs in CI (since #243). The other ten scenarios are
-authored but not yet runnable as meaningful checks:
+Only `queue-baton-survives-restart` runs in CI (since #243). Four later scenarios,
+`down-stops-every-seat`, `send-renders-in-addressed-pane`, `transcript-reads-addressed-seat` and
+`capture-returns-addressed-seat`, run with the local runner but not in CI and are not in this
+table; see "Status today" under
+[Help wanted](#help-wanted-command-families-without-a-behavioural-scenario). The other ten
+scenarios are authored but not yet runnable as meaningful checks:
 
 | Scenario | Why it doesn't run as a check yet | Smallest useful next step |
 |---|---|---|
