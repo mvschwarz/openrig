@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { inspectStartupStagedText, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -463,32 +465,6 @@ export type ResolveResult =
   | { ok: true; sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> }
   | { ok: false; code: "not_found" | "ambiguous"; error: string };
 
-/** Startup retries need the whole visible message, not the identity header shared by
- * every startup. An echoed turn or a partial/opaque composer stays unverified. */
-export function inspectStartupStagedText(pane: string | null, expected: string): "staged" | "clear" | "unverified" {
-  const lines = (pane ?? "").split("\n");
-  let inputAt = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i]!.trimStart().startsWith("❯")) { inputAt = i; break; }
-  }
-  if (inputAt < 0) return "unverified";
-  // Prompt text can itself contain rules (the startup challenge does). A rule
-  // closes the composer only when followed by recognized composer chrome.
-  let end = -1;
-  for (let i = lines.length - 1; i > inputAt; i--) {
-    if (/^[─═-]{10,}$/.test(lines[i]!.trim())
-      && /(?:shift\+tab to cycle|\? for shortcuts)/i.test(lines.slice(i + 1).find((next) => next.trim()) ?? "")) {
-      end = i;
-      break;
-    }
-  }
-  if (end < 0 || /^❯\s*\d+\./.test(lines[inputAt]!.trimStart())) return "unverified";
-  const norm = (text: string) => text.replace(/\s+/g, "");
-  const body = norm(lines.slice(inputAt, end).join("\n").trimStart().slice(1));
-  if (!body) return "clear";
-  return body === norm(expected) ? "staged" : "unverified";
-}
-
 /** The existing submit-only identity check, also used to inspect startup's own paste.
  * A false result is no matching staged evidence, not proof of model consumption. */
 export function hasExpectedStagedText(pane: string | null, expected: string): boolean {
@@ -626,6 +602,8 @@ export interface BroadcastOpts extends SendOpts {
 }
 
 export interface SendResult {
+  /** Internal full-text startup precheck metadata; never contains prompt/pane text. */
+  startupMismatch?: StartupSubmissionEvidence;
   ok: boolean;
   sessionName: string;
   verified?: boolean;
@@ -1246,6 +1224,7 @@ export class SessionTransport {
           ok: false,
           sessionName,
           reason: "staged_mismatch",
+          ...(opts.requireFullStagedText ? { startupMismatch: startupSubmissionEvidence(pane, expected, opts.submitOnlyCaptureLines ?? 50) } : {}),
           error: `submitOnly refused: the pane of '${sessionName}' does not show the expected staged text — pressing Enter here could drive something else entirely. Nothing was submitted.`,
         };
       }
