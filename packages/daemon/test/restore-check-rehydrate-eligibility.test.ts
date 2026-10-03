@@ -50,7 +50,7 @@ describe("restore-check current-state eligibility correction", () => {
   const changes = () => setup.db.prepare("SELECT total_changes() AS n").get();
   const check = (rig: string, compact = false) => app.request(`/api/restore-check?rig=${rig}&noQueue=true&noHooks=true${compact ? "&compact=1" : ""}`).then((r) => r.json());
 
-  // Uses the review50-r2 stale-occupant specimen: stopped Claude, current token,
+  // Retains the stale-occupant specimen: stopped Claude, current token,
   // persisted context, and an older session id in the selected snapshot.
   it.each([false, true])("keeps the stale-occupant manual up hint without capture (compact=%s)", async (compact) => {
     const rig = seed("stale-occupant");
