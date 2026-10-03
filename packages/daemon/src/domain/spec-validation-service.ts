@@ -1,6 +1,14 @@
 import { parseAgentSpec, validateAgentSpec } from "./agent-manifest.js";
 import { RigSpecCodec } from "./rigspec-codec.js";
-import { RigSpecSchema } from "./rigspec-schema.js";
+import { LegacyRigSpecSchema, RigSpecSchema } from "./rigspec-schema.js";
+import type { ValidationResult } from "./types.js";
+
+/** Shared CLI/import validation. Parsing errors propagate to the caller's error surface. */
+export function validateRigSpecImport(yaml: string): ValidationResult {
+  const raw = RigSpecCodec.parse(yaml);
+  const isPodAware = raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).pods);
+  return isPodAware ? RigSpecSchema.validate(raw) : LegacyRigSpecSchema.validate(raw);
+}
 
 /**
  * Validate an AgentSpec from raw YAML text.

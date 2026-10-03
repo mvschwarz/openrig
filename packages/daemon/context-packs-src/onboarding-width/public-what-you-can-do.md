@@ -491,7 +491,8 @@ working arrangement becomes something someone else can instantiate.
 - **`rig spec validate` → `preflight` → `audit`** — three different questions, in order: is the
   file well-formed, would it boot *on this host*, and **will the agents it launches actually know
   anything when they arrive**. The third is the one people skip. Unknown structural keys refuse
-  with their path instead of being normalized away.
+  with their path instead of being normalized away. Use `rig spec validate --help` for its current
+  behavior and options.
 - **`rig context trace --pod <pod>`** — walk the context chain through instance → rig → pod → seat
   when the pod altitude matters.
 - **`rig specs show` / `preview` / `add` / `sync` / `rename` / `remove`** — where a spec lives,
