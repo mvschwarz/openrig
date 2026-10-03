@@ -1068,11 +1068,13 @@ export class RestoreCheckService {
     const rigYaml = join(rigRoot, "rig.yaml");
 
     if (!this.deps.exists(rigRoot)) {
+      // A rig can launch from a spec anywhere, and restore reads the snapshot, never the spec,
+      // so a spec this check cannot find is a caveat, not a blocker.
       return {
-        check: `rig.${rig.name}.spec-present`, status: "red",
-        evidence: `Rig root missing: ${rigRoot}`,
-        remediation: `Create the rig root directory at ${rigRoot} with a rig.yaml spec`,
-      remediationSafe: false,
+        check: `rig.${rig.name}.spec-present`, status: "yellow",
+        evidence: `Not checked: no launch spec location could be established; looked for ${rigYaml}, and ${rigRoot} does not exist`,
+        remediation: `Confirm where this rig's spec lives; restore-check only looks at ${rigYaml}`,
+        remediationSafe: true,
       };
     }
     if (!this.deps.exists(rigYaml)) {

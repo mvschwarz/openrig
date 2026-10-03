@@ -145,6 +145,27 @@ describe("Restore check routes", () => {
     }
   });
 
+  it("reports a rig launched from a spec outside the shared-docs root as not checked, not red (#130)", async () => {
+    const sharedDocs = path.join(openRigHome, "empty shared-docs");
+    fs.mkdirSync(sharedDocs, { recursive: true });
+    vi.stubEnv("OPENRIG_SHARED_DOCS_ROOT", sharedDocs);
+    try {
+      rigRepo.createRig("outside-rig");
+
+      const res = await app.request("/api/restore-check?rig=outside-rig&noQueue=true&noHooks=true");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      const spec = body.checks.find((c: { check: string }) => c.check === "rig.outside-rig.spec-present");
+      expect(spec).toEqual(expect.objectContaining({ status: "yellow", remediationSafe: true }));
+      expect(spec.evidence).toContain("Not checked: no launch spec location could be established");
+      expect(spec.evidence).toContain(path.join(sharedDocs, "rigs", "outside-rig", "rig.yaml"));
+      expect(body.counts.red).toBe(0);
+      expect(body.verdict).toBe("restorable_with_caveats");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("GET /api/restore-check returns JSON with verdict + checks + repairPacket", async () => {
     rigRepo.createRig("test-rig");
 
