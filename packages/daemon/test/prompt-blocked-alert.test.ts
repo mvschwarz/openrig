@@ -478,4 +478,52 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled();
   });
 
+  it("QA independent: malformed prompt-bearing row cannot hide another valid prompt alert", async () => {
+    const bad = await repo.create({sourceSession:"sender@fixture",destinationSession:"broken@fixture",body:"broken",nudge:false});
+    const key = "broken@fixture|qa-broken#1";
+    for (const transitionNote of [
+      `parked-owner wake reserved: ${key}; obligations ${bad.qitemId}`,
+      `${REFUSED_PREFIX} ${key}; Refused: interactive prompt`,
+    ]) repo.transitionLog.append({qitemId:bad.qitemId,state:"pending",actorSession:"watchdog@system",transitionNote});
+    db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run("{",bad.qitemId);
+    await refusal(); const posts: unknown[] = []; const log=vi.fn();
+    for (let i=0;i<2;i++) expect((await tick(engine(posts),{log})).outcome).not.toBe("failed");
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+  });
+
+  it("an unreadable episode member leaves other destinations actionable", async () => {
+    const primary = await repo.create({ sourceSession: "sender@fixture", destinationSession: "broken@fixture", body: "primary", nudge: false });
+    const member = await repo.create({ sourceSession: "sender@fixture", destinationSession: "broken@fixture", body: "member", nudge: false });
+    const key = "broken@fixture|member#1";
+    for (const transitionNote of [
+      `parked-owner wake reserved: ${key}; obligations ${primary.qitemId},${member.qitemId}`,
+      `${REFUSED_PREFIX} ${key}; Refused: interactive prompt`,
+    ]) repo.transitionLog.append({ qitemId: primary.qitemId, state: "pending", actorSession: "watchdog@system", transitionNote });
+    db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run("{", member.qitemId);
+    await refusal(); const posts: unknown[] = []; const port = engine(posts); const log = vi.fn();
+    for (let i = 0; i < 2; i++) expect((await tick(port, { log })).outcome).not.toBe("failed");
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(posts)).toContain(episodeRows[0]);
+    expect(JSON.stringify(posts)).not.toContain(primary.qitemId);
+    expect(log.mock.calls.filter(([message]) => String(message).includes(member.qitemId))).toHaveLength(2);
+  });
+
+  it.each(["primary", "member"] as const)("an unreadable %s cannot retire an existing alert or clear its episode", async (which) => {
+    await refusal(2); const posts: unknown[] = []; const port = engine(posts, false);
+    await tick(port); const alert = alerts()[0]!;
+    const badId = episodeRows[which === "primary" ? 0 : 1]!;
+    const before = repo.listTransitions(alert.qitemId);
+    db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run("{", badId);
+    const log = vi.fn(); state = "clear";
+    for (let i = 0; i < 2; i++) expect((await tick(port, { log })).outcome).not.toBe("failed");
+    expect(repo.getById(alert.qitemId)?.state).toBe("pending");
+    expect(repo.listTransitions(alert.qitemId)).toEqual(before);
+    expect(notes(episodeRows[0]!).some(note => note.includes("interactive prompt cleared"))).toBe(false);
+    expect(log.mock.calls.filter(([message]) => String(message).includes(badId))).toHaveLength(2);
+    expect(posts).toEqual([]);
+    db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?").run("[]", badId);
+    await tick(port);
+    expect(repo.getById(alert.qitemId)?.state).toBe("done");
+  });
+
 });

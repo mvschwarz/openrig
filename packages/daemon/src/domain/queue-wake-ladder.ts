@@ -918,15 +918,27 @@ async function advancePromptRefusals(
   actions: WakeLadderAction[],
 ): Promise<void> {
   const groups = new Map<string, { keys: string[]; rows: Map<string, QueueItem>; refusedAt: string }>();
-  const candidates = deps.db.prepare(`SELECT DISTINCT q.qitem_id FROM queue_items q
+  const unreadableDestinations = new Set<string>();
+  const loggedRows = new Set<string>();
+  const readCandidate = (id: string, destination: string): QueueItem | null => {
+    try { return deps.queueRepo.getById(id); } catch {
+      unreadableDestinations.add(destination);
+      if (!loggedRows.has(id)) {
+        loggedRows.add(id);
+        (deps.log ?? console.error)(`[wake-ladder] unreadable prompt row ${JSON.stringify(id)}; retaining its destination for this tick`);
+      }
+      return null;
+    }
+  };
+  const candidates = deps.db.prepare(`SELECT DISTINCT q.qitem_id, q.destination_session FROM queue_items q
     JOIN queue_transitions t ON t.qitem_id = q.qitem_id
     WHERE t.transition_note LIKE ? AND (q.state IN ('pending','in-progress','blocked') OR EXISTS (
       SELECT 1 FROM queue_items a WHERE a.state IN ('pending','in-progress','blocked')
       AND json_valid(a.tags) AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = ?)
       AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = 'recovery-for:' || q.qitem_id)))`)
-    .all(`${REFUSED_PREFIX}%`, PROMPT_ALERT_TAG) as Array<{ qitem_id: string }>;
-  for (const { qitem_id } of candidates) {
-    const primary = deps.queueRepo.getById(qitem_id);
+    .all(`${REFUSED_PREFIX}%`, PROMPT_ALERT_TAG) as Array<{ qitem_id: string; destination_session: string }>;
+  for (const { qitem_id, destination_session } of candidates) {
+    const primary = readCandidate(qitem_id, destination_session);
     if (!primary) continue;
     // The shared no-route change is prospective, never a revival of old ladders.
     if (readLadder(deps.db, qitem_id).exhausted) continue;
@@ -938,7 +950,7 @@ async function advancePromptRefusals(
         AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
         AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?) LIMIT 1`)
         .get(PROMPT_ALERT_TAG, `${PROMPT_EPISODE_TAG}${episode.key}`)) continue;
-      const rows = episode.ids.map(id => deps.queueRepo.getById(id)).filter((row): row is QueueItem =>
+      const rows = episode.ids.map(id => readCandidate(id, primary.destinationSession)).filter((row): row is QueueItem =>
         Boolean(row && row.destinationSession === primary.destinationSession && ["pending", "in-progress", "blocked"].includes(row.state)));
       if (!rows.length) continue;
       let group = groups.get(primary.destinationSession);
@@ -961,6 +973,8 @@ async function advancePromptRefusals(
     const destinationTag = aggregate.tags.find(t => typeof t === "string" && t.startsWith("prompt-destination:"));
     const dest = destinationTag?.slice("prompt-destination:".length);
     if (!dest) continue;
+    // Incomplete membership is not evidence that an episode ended.
+    if (unreadableDestinations.has(dest)) continue;
     const group = groups.get(dest);
     const tags = aggregate.tags;
     const sameEpisode = group?.keys.some(key => tags.includes(key));
@@ -971,6 +985,7 @@ async function advancePromptRefusals(
   }
 
   for (const [dest, group] of groups) {
+    if (unreadableDestinations.has(dest)) continue;
     const state = promptState(dest);
     if (state === "clear") {
       for (const row of group.rows.values()) {
@@ -1023,10 +1038,10 @@ async function advancePromptRefusals(
     }
     if (view.lastMarkerTs !== null && now.getTime() - view.lastMarkerTs < intervalS * 1000) continue;
     // Re-read at the send boundary after aggregate persistence.
-    if (promptState(dest) !== "blocked" || !members.some(m => {
-      const fresh = deps.queueRepo.getById(m.row.qitemId);
-      return fresh && fresh.destinationSession === dest && ["pending", "in-progress", "blocked"].includes(fresh.state);
-    })) continue;
+    if (promptState(dest) !== "blocked") continue;
+    const freshMembers = members.map(m => readCandidate(m.row.qitemId, dest));
+    if (unreadableDestinations.has(dest) || !freshMembers.some(fresh =>
+      fresh && fresh.destinationSession === dest && ["pending", "in-progress", "blocked"].includes(fresh.state))) continue;
     if (!view.orchRung) {
       if (!toOperator) {
         const outcome = await attemptWake(row.qitemId, orch!);
