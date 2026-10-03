@@ -484,8 +484,8 @@ describe("TmuxAdapter", () => {
       await adapter.killSession("r01-dev1-impl");
 
       expect(exec.mock.calls.map((call) => call[0])).toEqual([
-        "tmux detach-client -s 'r01-dev1-impl'",
-        "tmux kill-session -t 'r01-dev1-impl'",
+        "tmux detach-client -s '=r01-dev1-impl'",
+        "tmux kill-session -t '=r01-dev1-impl'",
       ]);
     });
 
@@ -500,8 +500,8 @@ describe("TmuxAdapter", () => {
 
       expect(result).toEqual({ ok: true });
       expect(exec.mock.calls.map((call) => call[0])).toEqual([
-        "tmux detach-client -s 'r01-dev1-impl'",
-        "tmux kill-session -t 'r01-dev1-impl'",
+        "tmux detach-client -s '=r01-dev1-impl'",
+        "tmux kill-session -t '=r01-dev1-impl'",
       ]);
     });
 
@@ -516,7 +516,7 @@ describe("TmuxAdapter", () => {
 
       expect(result).toEqual({ ok: false, code: "unknown", message: "permission denied" });
       expect(exec.mock.calls.map((call) => call[0])).toEqual([
-        "tmux detach-client -s 'r01-dev1-impl'",
+        "tmux detach-client -s '=r01-dev1-impl'",
       ]);
     });
 
@@ -543,8 +543,8 @@ describe("TmuxAdapter", () => {
       await adapter.killSession("r01-dev's session");
 
       expect(exec.mock.calls.map((call) => call[0])).toEqual([
-        "tmux detach-client -s 'r01-dev'\"'\"'s session'",
-        "tmux kill-session -t 'r01-dev'\"'\"'s session'",
+        "tmux detach-client -s '=r01-dev'\"'\"'s session'",
+        "tmux kill-session -t '=r01-dev'\"'\"'s session'",
       ]);
     });
   });
