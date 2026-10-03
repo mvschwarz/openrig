@@ -1,18 +1,23 @@
-// Captures, the session-environment read and pipe-pane address the exact session. tmux resolves a bare
-// `-t name` by prefix when no session has that exact name (checked against tmux 3.6a: with only
-// `dev-impl@my-rig2` alive, `capture-pane -t dev-impl@my-rig` printed its screen, `show-environment` read its
-// environment, and `pipe-pane` attached to it). So a seat whose session just ended must read as missing, never as
-// its prefix sibling. The fake tmux below resolves targets the same way, in both exec modes.
+// Captures, the session-environment read, pipe-pane, the pane command and pid reads, the window option and
+// resize, and the unguarded kill address the exact session. tmux resolves a bare `-t name` by prefix when no session
+// has that exact name (checked against tmux 3.6a: with only `dev-impl@my-rig2` alive, `capture-pane -t
+// dev-impl@my-rig` printed its screen, `show-environment` read its environment, `pipe-pane` attached to it,
+// `display-message` reported its command and pid, `set-option -w` and `resize-window` changed its window, and
+// `kill-session` killed it). So a seat whose session just ended must read as missing and must not act on its prefix
+// sibling. The fake tmux below resolves targets the same way, in both exec modes.
 import { describe, it, expect } from "vitest";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 
-interface Session { screen: string; env: Record<string, string>; pipedTo?: string }
+interface Session {
+  screen: string; env: Record<string, string>; pipedTo?: string;
+  command?: string; pid?: number; options?: Record<string, string>; size?: string;
+}
 type Sessions = Record<string, Session>;
 
 /** tmux's session resolution: `=name` is exact; a bare name is exact first, then a unique prefix. `%N` is a pane id. */
 function resolve(target: string, sessions: Sessions): string | null {
   const names = Object.keys(sessions);
-  if (/^%\d+$/.test(target)) return names[Number(target.slice(1))] ?? null;
+  if (/^[%$]\d+$/.test(target)) return names[Number(target.slice(1))] ?? null;
   if (target.startsWith("=")) {
     const name = target.slice(1).replace(/:$/, "");
     return name in sessions ? name : null;
@@ -24,11 +29,24 @@ function resolve(target: string, sessions: Sessions): string | null {
 }
 
 function runTmux(argv: string[], sessions: Sessions): string {
-  const target = argv[argv.indexOf("-t") + 1]!;
+  const flag = argv[1] === "detach-client" ? "-s" : "-t";
+  const target = argv[argv.indexOf(flag) + 1]!;
   const name = resolve(target, sessions);
-  if (name === null) throw new Error(`can't find session: ${target.replace(/^=/, "").replace(/:$/, "")}`);
+  if (name === null) {
+    if (argv[1] === "display-message") return "\n"; // tmux 3.6a: an unresolved target prints empty fields, exit 0
+    if (argv[1] === "detach-client") throw new Error("no current client");
+    throw new Error(`can't find session: ${target.replace(/^=/, "").replace(/:$/, "")}`);
+  }
   const session = sessions[name]!;
   switch (argv[1]) {
+    case "display-message": {
+      const format = argv[argv.length - 1]!;
+      return `${format === "#{pane_pid}" ? session.pid : session.command}\n`;
+    }
+    case "set-option": { session.options = { ...session.options, [argv[argv.length - 2]!]: argv[argv.length - 1]! }; return ""; }
+    case "resize-window": { session.size = `${argv[argv.indexOf("-x") + 1]}x${argv[argv.indexOf("-y") + 1]}`; return ""; }
+    case "detach-client": throw new Error("no current client");
+    case "kill-session": { delete sessions[name]; return ""; }
     case "capture-pane": return session.screen;
     case "show-environment": return Object.entries(session.env).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
     case "pipe-pane": { session.pipedTo = argv[argv.indexOf("-t") + 2]; return ""; }
@@ -36,10 +54,12 @@ function runTmux(argv: string[], sessions: Sessions): string {
   }
 }
 
-/** The shell-string mode: split the legacy command back into argv (single quotes). */
+/** The shell-string mode: split the legacy command back into argv (single quotes, plain double quotes). */
 function shellToArgv(cmd: string): string[] {
   const argv: string[] = [];
-  for (const m of cmd.matchAll(/'((?:[^']|'"'"')*)'|(\S+)/g)) argv.push(m[1] !== undefined ? m[1].replace(/'"'"'/g, "'") : m[2]!);
+  for (const m of cmd.matchAll(/'((?:[^']|'"'"')*)'|"([^"]*)"|(\S+)/g)) {
+    argv.push(m[1] !== undefined ? m[1].replace(/'"'"'/g, "'") : m[2] !== undefined ? m[2] : m[3]!);
+  }
   return argv;
 }
 
@@ -56,7 +76,55 @@ describe("exact session targets for capture, session environment and pipe-pane",
         : new TmuxAdapter(async (cmd: string) => run(shellToArgv(cmd)));
       return { a, calls };
     }
-    const onlySibling = (): Sessions => ({ [SIBLING]: { screen: "SIBLING-SCREEN\n", env: { OPENRIG_PROBE: "yes" } } });
+    const onlySibling = (): Sessions => ({
+      [SIBLING]: { screen: "SIBLING-SCREEN\n", env: { OPENRIG_PROBE: "yes" }, command: "cat", pid: 4242, size: "120x40" },
+    });
+
+    it(`${mode}: the pane command and pid of an ended session are null, not the sibling's`, async () => {
+      const { a, calls } = adapter(onlySibling());
+      expect(await a.getPaneCommand(GONE)).toBeNull();
+      expect(await a.getPanePid(GONE)).toBeNull();
+      expect(calls.map((c) => c[c.indexOf("-t") + 1])).toEqual([`=${GONE}:`, `=${GONE}:`]);
+    });
+
+    it(`${mode}: a window option or resize on an ended session fails and leaves the sibling's window alone`, async () => {
+      const sessions = onlySibling();
+      const { a } = adapter(sessions);
+      expect(await a.setWindowOption(GONE, "automatic-rename", "off")).toMatchObject({ ok: false });
+      expect(await a.resizeWindow(GONE, 50, 20)).toMatchObject({ ok: false });
+      expect(sessions[SIBLING]).toMatchObject({ size: "120x40" });
+      expect(sessions[SIBLING]!.options).toBeUndefined();
+    });
+
+    it(`${mode}: killing an ended session by name kills nothing; the sibling survives`, async () => {
+      const sessions = onlySibling();
+      const { a, calls } = adapter(sessions);
+      expect(await a.killSession(GONE)).toMatchObject({ ok: false, code: "session_not_found" });
+      expect(Object.keys(sessions)).toEqual([SIBLING]);
+      expect(calls.map((c) => c[c.indexOf(c[1] === "detach-client" ? "-s" : "-t") + 1])).toEqual([`=${GONE}`, `=${GONE}`]);
+    });
+
+    it(`${mode}: the guarded kill's immutable $N id passes through and kills exactly that session`, async () => {
+      const sessions: Sessions = { ...onlySibling(), [GONE]: { screen: "OWN-SCREEN\n", env: {} } };
+      const { a, calls } = adapter(sessions);
+      const unchecked = (a as unknown as { killSessionUnchecked(name: string): Promise<{ ok: boolean }> }).killSessionUnchecked;
+      expect(await unchecked.call(a, "$1")).toEqual({ ok: true });
+      expect(Object.keys(sessions)).toEqual([SIBLING]);
+      expect(calls.map((c) => c[c.indexOf(c[1] === "detach-client" ? "-s" : "-t") + 1])).toEqual(["$1", "$1"]);
+    });
+
+    it(`${mode}: a live session's command, pid, window and kill act on itself only`, async () => {
+      const sessions: Sessions = { ...onlySibling(), [GONE]: { screen: "OWN-SCREEN\n", env: {}, command: "codex", pid: 7, size: "80x24" } };
+      const { a } = adapter(sessions);
+      expect(await a.getPaneCommand(GONE)).toBe("codex");
+      expect(await a.getPanePid(GONE)).toBe(7);
+      expect(await a.setWindowOption(GONE, "automatic-rename", "off")).toEqual({ ok: true });
+      expect(await a.resizeWindow(GONE, 100, 30)).toEqual({ ok: true });
+      expect(sessions[GONE]).toMatchObject({ size: "100x30", options: { "automatic-rename": "off" } });
+      expect(sessions[SIBLING]).toMatchObject({ size: "120x40" });
+      expect(await a.killSession(GONE)).toEqual({ ok: true });
+      expect(Object.keys(sessions)).toEqual([SIBLING]);
+    });
 
     it(`${mode}: a capture of a session that has ended is missing, not its prefix sibling's screen`, async () => {
       const { a, calls } = adapter(onlySibling());
