@@ -679,16 +679,45 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // OPR.0.4.8.2 agnostic rip-out: provisionRigPermissions (C2) removed — OpenRig no longer
     // authors any config-file permission policy. Trust/onboarding (C3/C4) are neutral plumbing, kept.
     const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    // Match launchHarness: omitted permissionMode keeps the classic home path.
+    // Match launchHarness: an explicit permission mode exports the selected home to the child, so
+    // only that home is provisioned.
     const managed = binding.permissionMode !== undefined ? this.claudeManagedLaunch : undefined;
     const cwd = binding.cwd === undefined && managed && binding.nodeId
       ? managed.boundCwd(binding.nodeId) : binding.cwd;
-    const statePath = managed
-      ? (cwd ? managed.configPaths(cwd).statePath : undefined)
-      : (home ? nodePath.join(home, ".claude.json") : undefined);
-    if (!statePath) return;
+    const statePaths: string[] = [];
+    const failures: string[] = [];
+    if (managed) {
+      if (cwd) statePaths.push(managed.configPaths(cwd).statePath);
+    } else {
+      if (home) statePaths.push(nodePath.join(home, ".claude.json"));
+      // A classic seat types `claude` into its pane's shell, which inherits the tmux server's
+      // environment, not the daemon's, so the bootstrap cannot see which home that child reads.
+      // When the daemon selects CLAUDE_CONFIG_DIR, provision that home too. This deliberately
+      // replaces #565's rule that classic bootstrap writes exactly one file and leaves the
+      // selected home untouched: a child that inherits the daemon's selection read neither.
+      try {
+        const selectedCwd = cwd ?? (binding.nodeId ? this.claudeManagedLaunch?.boundCwd(binding.nodeId) : undefined);
+        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd) : undefined;
+        if (selected && !statePaths.includes(selected)) statePaths.push(selected);
+      } catch (err) {
+        failures.push((err as Error).message);
+      }
+    }
+    // Each file is merged on its own: unmergeable state in one is preserved and reported,
+    // and never stops the other from being provisioned.
+    for (const statePath of statePaths) {
+      try {
+        this.provisionClaudeState(statePath, cwd);
+      } catch (err) {
+        failures.push(`${statePath}: ${(err as Error).message}`);
+      }
+    }
+    if (failures.length > 0) throw new Error(failures.join("; "));
+  }
+
+  private provisionClaudeState(statePath: string, cwd: string | null | undefined): void {
     // Preserve every existing field. Unreadable/malformed/non-object state is
-    // left untouched by the caller's existing best-effort bootstrap boundary.
+    // left untouched and reported through the caller's best-effort bootstrap boundary.
     const state = this.fs.exists(statePath) ? this.readJsonObjectStrict(statePath) : {};
     if (cwd) {
       const projects = this.readJsonObjectField(state, "projects");

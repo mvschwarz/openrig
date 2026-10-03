@@ -59,6 +59,12 @@ export class ClaudeManagedLaunch {
     return { configDir, statePath: path.join(CLAUDE_CONFIG_DIR === undefined ? HOME : configDir, ".claude.json") };
   }
 
+  /** The state file under the daemon's own non-empty CLAUDE_CONFIG_DIR, or undefined when the daemon
+   * selects none. Classic bootstrap provisions it in addition to HOME/.claude.json. */
+  selectedStatePath(cwd: string): string | undefined {
+    return this.sessionEnv.CLAUDE_CONFIG_DIR ? this.configPaths(cwd).statePath : undefined;
+  }
+
   private context(cwd: string) {
     const { PATH, HOME, CLAUDE_CONFIG_DIR } = this.sessionEnv;
     if (!PATH || !HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: managed PATH and absolute HOME are required.");
