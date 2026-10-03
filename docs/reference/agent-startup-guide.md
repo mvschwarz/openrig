@@ -286,6 +286,14 @@ rules were translated or applied. See [permission precedence and limits](getting
 - Approval policy and sandbox access are separate controls. OpenRig's default
   `-s workspace-write` selects the sandbox; it does not force `-a`. A member's
   `codex_config_profile` selects native `-p`, distinct from the AgentSpec `profile`.
+- On that plain `-s workspace-write` launch (fresh, resume, fork or restore), a
+  short-lived `codex app-server` first reads Codex's own configuration with the
+  seat's executable, home and working directory. OpenRig adds
+  `-c sandbox_workspace_write.network_access=true` only when no configuration
+  layer sets network access and no managed requirement could restrict it. A
+  timeout, error or unrecognized answer adds nothing. Named profiles and full
+  bypass are not read. The read may write Codex's own state files in
+  `CODEX_HOME`, read its login and fetch managed policy, as a Codex start does.
 - Can self-install dependencies from instructions but timer/recurring behavior is not reliably available
 
 When authoring startup content, note which instructions are runtime-specific. For example, an orchestrator that needs a monitoring loop should include instructions like: "If running Claude Code, use `/loop 3m` to periodically check rig health. If running Codex, check rig health at the start of each task cycle instead."

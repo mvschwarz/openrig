@@ -40,8 +40,9 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
   it("codex adapter: the resume branch passes the model into buildCodexResumeCore", () => {
     const src = read("adapters/codex-runtime-adapter.ts");
     // The LAUNCH resume call threads binding.launchPosture, model, then the exact precomputed
-    // posture segment. The latter prevents W3 observation from re-deciding policy.
-    expect(src).toMatch(/buildCodexResumeCore\([^;]*binding\.launchPosture,\s*model,\s*postureArg(?:,\s*daemonOptOut)?(?:,\s*effort)?\)/);
+    // posture segment (followed by #275's network segment). The latter prevents W3 observation
+    // from re-deciding policy.
+    expect(src).toMatch(/buildCodexResumeCore\([^;]*binding\.launchPosture,\s*model,\s*(?:postureArg|`\$\{postureArg\}\$\{networkArg\}`)(?:,\s*daemonOptOut)?(?:,\s*effort)?\)/);
   });
 
   it("claude adapter: every claude seat-launch template threads modelArg", () => {
