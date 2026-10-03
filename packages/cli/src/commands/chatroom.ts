@@ -267,7 +267,9 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output")
     .action(async (rig: string, opts: { after?: string; topic?: string; sender?: string; timeout: string; json?: boolean }) => {
       // A NaN timeout would never expire and would poll with a ~1ms sleep.
-      const timeoutSeconds = Number(opts.timeout);
+      // Preserve numeric forms and legacy numeric prefixes (e.g. 30s) without truncating fractions.
+      const numericTimeout = Number(opts.timeout);
+      const timeoutSeconds = Number.isNaN(numericTimeout) ? Number.parseFloat(opts.timeout) : numericTimeout;
       if (opts.timeout.trim() === "" || !Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) {
         console.error(`--timeout must be a non-negative number of seconds; got '${opts.timeout}'`);
         process.exitCode = 1;
