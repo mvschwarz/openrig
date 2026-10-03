@@ -18,6 +18,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import type { NativeProcessRow } from "../src/domain/native-process-lineage.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 
@@ -338,6 +339,7 @@ describe("SessionTransport", () => {
     sleep?: (ms: number) => Promise<void>;
     waitForIdlePollMs?: number;
     now?: () => Date;
+    listProcesses?: () => NativeProcessRow[];
   }) {
     return new SessionTransport({
       db,
@@ -1416,6 +1418,43 @@ describe("SessionTransport", () => {
     expect(result.ok).toBe(true);
     expect(result.warning).toContain("mid-task");
     expect(sendTextSpy).toHaveBeenCalled();
+  });
+
+  describe("agy foreground proof", () => {
+    const startedAt = "Sat Jan  1 12:00:00 2000";
+    const agyTree = (): NativeProcessRow[] => [
+      { pid: 30, ppid: 1, pgid: 30, tpgid: 31, executableName: "bash", command: "-bash", startedAt },
+      { pid: 31, ppid: 30, pgid: 31, tpgid: 31, executableName: "sh", command: "/bin/sh /tmp/openrig-tmux-send-abc.txt", startedAt },
+      { pid: 32, ppid: 31, pgid: 31, tpgid: 31, executableName: "agy", command: "/usr/local/bin/agy --dangerously-skip-permissions --model claude-sonnet-5-5", startedAt },
+    ];
+    async function sendToAgy(rows: NativeProcessRow[]) {
+      const rig = rigRepo.createRig("agy-rig");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { role: "worker", runtime: "agy" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@agy-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@agy-rig", tmuxPane: "%3" });
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = { ...mockTmux({ getPaneCommand: async () => "sh", sendText: sendTextSpy }), getPanePid: async () => 30 } as unknown as TmuxAdapter;
+      const result = await createTransport(tmux, { listProcesses: () => rows }).send("dev-impl@agy-rig", "hello");
+      return { result, sendTextSpy };
+    }
+
+    it("delivers when tmux reports sh but the agy owns the pane foreground", async () => {
+      const { result, sendTextSpy } = await sendToAgy(agyTree());
+      expect(result.reason).not.toBe("target_runtime_unverified");
+      expect(sendTextSpy).toHaveBeenCalled();
+    });
+    it.each([
+      ["a bare idle shell", (r: NativeProcessRow[]) => [{ ...r[0]!, tpgid: 30 }]],
+      ["two agy candidates", (r: NativeProcessRow[]) => [...r, { ...r[2]!, pid: 33 }]],
+      ["an agy that is not a pane descendant", (r: NativeProcessRow[]) => r.map(x => x.pid === 32 ? { ...x, ppid: 999 } : x)],
+      ["an agy in a different process group", (r: NativeProcessRow[]) => r.map(x => x.pid === 32 ? { ...x, pgid: 99 } : x)],
+    ])("refuses with target_runtime_unverified for %s and sends nothing", async (_name, mutate) => {
+      const { result, sendTextSpy } = await sendToAgy(mutate(agyTree()));
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("target_runtime_unverified");
+      expect(sendTextSpy).not.toHaveBeenCalled();
+    });
   });
 
   // Test 9: an UNEXPECTED probe throw (the fail-closed class — not the
