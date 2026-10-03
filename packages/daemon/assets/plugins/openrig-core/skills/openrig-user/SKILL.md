@@ -410,8 +410,23 @@ rig seat clear-attention <session> --reason "operator attested: the operator re-
 rig seat clear-attention <session> --json
 ```
 
-`--reason <text>` is the operator-attestation override path; without it the
-command runs the evidence gate. Either way the action is audited.
+`--reason <text>` can acknowledge startup-status and subset-restore attention.
+It does not bypass full-restore continuity checks or an active pane-identity
+mismatch/missing-pane check; those run first. Successful identity re-verification
+can also clear coexisting startup or subset-restore attention. If neither earlier
+path clears attention, omitting `--reason` requires activity or send evidence.
+Startup and restore clears write their corresponding audit events; an identity-only
+clear updates the current binding and identity verdict without a clear event.
+Acknowledgment or responsiveness alone does not prove that the original
+conversation resumed.
+
+A 422 response names the uncleared class and its failed check. If the recorded
+native token needs correction and you know the actual token, use
+`rig seat set-resume-token <session> --token-stdin --reason <explanation>`, then
+rerun `rig seat clear-attention <session>` to check the live evidence. The token
+update records operator provenance; it does not itself prove continuity.
+Stopping/relaunching a working seat is a separate disruptive operation, not a
+required cleanup or proof of resumed lineage.
 
 ### Periodic snapshots — crash-insurance floor
 
@@ -575,7 +590,15 @@ Read-only audit of the skill cascade. Detects `missing` / `stale` / `self-refere
 
 ### `rig seat clear-attention` — extended to derived projection staleness
 
-v0.3.4 shipped `clear-attention` gating on `session.startupStatus` only. v0.4.0 extends the verb to also reach **restoreOutcome-derived** attention (seat is `startupStatus=ready` + `sessionStatus=running` but carries `restoreOutcome=failed` / `continuityOutcome=failed`). Same evidence-gated audit row applies; the `--reason <text>` operator-attestation override carries the runtime / cwd-uncertainty disclosure honestly.
+`clear-attention` also reaches restore-derived attention even when
+`startupStatus=ready` and `sessionStatus=running`. Full-restore attention requires
+the restore reconciler's exact native-token and usable-pane checks; `--reason`
+cannot replace them. Subset-restore attention can reach the attestation path
+when no active pane-identity class takes precedence. That path records
+`operator_recovered` with `runtimeCwdVerified:false`; it is an acknowledgment,
+not proof of resumed lineage. Current inventory can still derive `resumed` from
+that outcome when no explicit continuity outcome exists, so do not use that
+label alone as continuity evidence.
 
 ### Native Codex session id capture
 
