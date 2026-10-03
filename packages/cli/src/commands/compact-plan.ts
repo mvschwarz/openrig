@@ -420,6 +420,9 @@ Examples:
 
       try {
         const psResult = await client.get<RigEntry[]>("/api/ps");
+        if (psResult.status !== 200) {
+          throw new Error(`Rig inventory returned HTTP ${psResult.status}`);
+        }
         const rigs = psResult.data ?? [];
         const targetRigs = opts.rig ? rigs.filter((rig) => rig.name === opts.rig) : rigs;
 
@@ -452,9 +455,13 @@ Examples:
         const allNodes: NodeEntry[] = [];
         for (const rig of targetRigs) {
           const nodesResult = await client.get<NodeEntry[]>(`/api/rigs/${rig.rigId}/nodes`);
-          if (Array.isArray(nodesResult.data)) {
-            allNodes.push(...nodesResult.data);
+          if (nodesResult.status !== 200) {
+            throw new Error(`Node inventory for rig "${rig.name}" returned HTTP ${nodesResult.status}`);
           }
+          if (!Array.isArray(nodesResult.data)) {
+            throw new Error(`Node inventory for rig "${rig.name}" is not an array`);
+          }
+          allNodes.push(...nodesResult.data);
         }
 
         const plan = buildPlan(allNodes, thresholds.value);
