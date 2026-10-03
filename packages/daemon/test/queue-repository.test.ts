@@ -1254,7 +1254,7 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
     expect(repo.getById(parked.qitemId)!.state, "the unparked row is untouched by the redrive").toBe("pending");
   });
 
-  it("recordClosureOverdue with minimal schema (no transitions table) dedups one event per claim across timestamp formats and escaped LIKE", async () => {
+  it("recordClosureOverdue with minimal schema (no transitions table) dedups one event per claim across timestamp formats and exact json_extract match", async () => {
     const minDb = createDb();
     migrate(minDb, [coreSchema, eventsSchema, queueItemsSchema, outboxEntriesSchema]);
     const minBus = new EventBus(minDb);
@@ -1265,7 +1265,7 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
     minBus.subscribe((e) => events.push(e));
 
     // Create item directly in queue_items (without queue_transitions table)
-    // with an underscore in the ID to also verify LIKE wildcard escaping
+    // with an underscore in the ID to verify exact JSON matching
     const qitemId = "qitem-test_minimal_123";
     const nowIso = "2026-10-03T08:00:00.000Z";
     const claimTime1 = "2026-10-03T10:00:00.000Z";
@@ -1279,7 +1279,7 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
       "in-progress", "routine", "test minimal schema dedup", "2026-10-03T09:00:00.000Z", claimTime1,
     );
 
-    // Also insert a decoy event for a similar item (x instead of _) to verify LIKE escaping
+    // Also insert a decoy event for a similar item (x instead of _) to verify exact qitemId matching
     minDb.prepare("INSERT INTO events (type, payload) VALUES (?, ?)").run(
       "qitem.closure_overdue",
       JSON.stringify({ qitemId: "qitem-testxminimal_123" }),

@@ -3374,10 +3374,9 @@ export class QueueRepository {
         if (alreadyRecordedArchive) return null;
       }
     } else {
-      const escapedQitemId = qitemId.replace(/[\\%_]/g, "\\$&");
       const alreadyRecorded = this.db.prepare(
-        `SELECT 1 FROM events WHERE type = 'qitem.closure_overdue' AND payload LIKE ? ESCAPE '\\' AND julianday(created_at) >= julianday(?) LIMIT 1`,
-      ).get(`%"qitemId":"${escapedQitemId}"%`, claimSince);
+        `SELECT 1 FROM events WHERE type = 'qitem.closure_overdue' AND json_extract(payload, '$.qitemId') = ? AND julianday(created_at) >= julianday(?) LIMIT 1`,
+      ).get(qitemId, claimSince);
       if (alreadyRecorded) return null;
     }
     const txn = this.db.transaction(() => {
