@@ -1212,7 +1212,7 @@ export class SessionTransport {
       if (targetFailure) return targetFailure;
       const submitResult = await this.runStage(
         "session_transport.submit",
-        () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
+        () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
         (result) => result.ok ? "ok" : "failed",
       );
       if (!submitResult.ok) {
@@ -1258,6 +1258,10 @@ export class SessionTransport {
     // the positive-picker guard (FR-4 — the footgun separation). The advisory is carried on the
     // success result via `warning` so the honest telemetry is surfaced.
     let sendAdvisory: string | undefined;
+    // GH #519 — an audited --dangerously-interact prompt override drives the target's
+    // interactive prompt below. Its delivery differs from an ordinary send (typed, not
+    // pasted; conditional Enter) — see steps 3/5.
+    let promptOverride = false;
     if (waitForIdleMs === undefined) {
       const readiness = await this.classifySendReadiness({
         sessionName,
@@ -1298,7 +1302,8 @@ export class SessionTransport {
               error: `Refused: --dangerously-interact requires an auditable override record, which could not be persisted (${audit.reason}). No text was sent.`,
             };
           }
-          // audited → proceed to the send.
+          // audited → proceed to the send, driving the prompt (typed, not pasted).
+          promptOverride = true;
         } else {
           return {
             ok: false,
@@ -1356,11 +1361,17 @@ export class SessionTransport {
     const targetFailure = await checkClaudeTarget();
     if (targetFailure) return observe(targetFailure);
 
-    // 3. Send text (paste)
+    // 3. Send text. A prompt override is TYPED, never pasted: agent-TUI choice
+    //    dialogs ignore bracketed-pasted digits/arrow sequences, so a pasted
+    //    answer sits inert while the trailing Enter confirms the focused
+    //    option (GH #519 — a pasted "3" approved "1. Yes"). Typed keystrokes
+    //    are real key events: a typed digit selects AND submits on choice UIs.
     if (observed) observed.sentHash = hashSentText(text);
     const textResult = await this.runStage(
-      "session_transport.send_text",
-      () => this.tmuxAdapter.sendText(sessionName, text),
+      promptOverride ? "session_transport.prompt_override_type" : "session_transport.send_text",
+      () => promptOverride
+        ? this.tmuxAdapter.sendKeysLiteral(sessionName, text)
+        : this.tmuxAdapter.sendText(sessionName, text),
       (result) => result.ok ? "ok" : "failed",
     );
     if (!textResult.ok) {
@@ -1379,21 +1390,44 @@ export class SessionTransport {
 
     if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
 
-    // 5. Submit (Enter)
-    const submitResult = await this.runStage(
-      "session_transport.submit",
-      () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
-      (result) => result.ok ? "ok" : "failed",
-    );
-    if (!submitResult.ok) {
-      return observe({
-        ok: false,
-        sessionName,
-        reason: "submit_failed",
-        outcome: "failed",
-        error: `Text is visible in '${sessionName}' but was not submitted (Enter failed). The agent may need manual attention.`,
-        ...(waitMode ? { sent: true, ...waitEvidence } : {}),
-      });
+    // 5. Submit (C-m). For a prompt override the trailing Enter is CONDITIONAL:
+    //    a typed choice already selected AND submitted on choice UIs, so a blind
+    //    Enter would confirm whatever dialog appears NEXT (the stray-submit
+    //    hazard: a second queued prompt gets its focused option approved). Enter
+    //    lands only when the typed answer is still staged in the target's input
+    //    — a text field that did not self-submit — never onto a fresh prompt.
+    //    This mirrors the submitOnly staged-text gate below.
+    let submitSkipped = false;
+    if (promptOverride) {
+      const postTypePane = await this.runStage(
+        "session_transport.prompt_override_pre_submit_capture",
+        () => this.tmuxAdapter.capturePaneContent(sessionName, 50),
+      );
+      if (!this.promptOverrideAnswerStaged(postTypePane, text)) {
+        submitSkipped = true;
+        sendAdvisory = (sendAdvisory ? `${sendAdvisory} ` : "")
+          + "prompt-override: answer typed (not pasted); trailing Enter withheld — the answer is not staged in the target's input (choice consumed it or the prompt changed).";
+      } else {
+        sendAdvisory = (sendAdvisory ? `${sendAdvisory} ` : "")
+          + "prompt-override: answer typed (not pasted); trailing Enter submitted the still-staged answer.";
+      }
+    }
+    if (!submitSkipped) {
+      const submitResult = await this.runStage(
+        "session_transport.submit",
+        () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
+        (result) => result.ok ? "ok" : "failed",
+      );
+      if (!submitResult.ok) {
+        return observe({
+          ok: false,
+          sessionName,
+          reason: "submit_failed",
+          outcome: "failed",
+          error: `Text is visible in '${sessionName}' but was not submitted (Enter failed). The agent may need manual attention.`,
+          ...(waitMode ? { sent: true, ...waitEvidence } : {}),
+        });
+      }
     }
 
     // 6. Verify if requested. At this point text + Enter BOTH succeeded, so the
@@ -1423,6 +1457,36 @@ export class SessionTransport {
     }
 
     return observe({ ok: true, sessionName, ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
+  }
+
+  // GH #519 — a prompt-override answer counts as STAGED (still awaiting Enter) only when the
+  // target's CURRENT input visibly holds the typed text. Mirrors the submitOnly staged-text
+  // gate above: only the pane's last ❯-marked input region counts, and a numbered-option
+  // line (`❯ 1. …`) is a prompt SELECTION, never staged input — so a consumed choice (or a
+  // freshly appeared prompt) can never draw a stray Enter.
+  private promptOverrideAnswerStaged(pane: string | null, text: string): boolean {
+    if (!pane) return false;
+    const norm = (s: string) => s.replace(/\s+/g, "");
+    const head = norm(text).slice(0, 24);
+    if (head.length === 0) return false;
+    const lines = pane.split("\n");
+    let inputAt = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i]!.trimStart().startsWith("❯")) { inputAt = i; break; }
+    }
+    if (inputAt < 0) return false;
+    const inputLine = lines[inputAt]!.trimStart();
+    if (/^❯\s*\d+\./.test(inputLine)) return false;
+    // The region is the last ❯-line through the input box's closing separator (a box-drawing
+    // line) or pane end — wrapped input continues below the marker; everything above the
+    // marker is history and everything below the separator is hint-bar chrome.
+    let regionEnd = lines.length;
+    for (let i = inputAt + 1; i < lines.length; i++) {
+      const t = lines[i]!.trim();
+      if (t.length >= 10 && /^[─═-]+$/.test(t)) { regionEnd = i; break; }
+    }
+    const region = lines.slice(inputAt, regionEnd).join("\n");
+    return norm(region).includes(head);
   }
 
   private runStage<T>(

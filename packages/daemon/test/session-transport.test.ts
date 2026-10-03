@@ -293,6 +293,7 @@ function mockTmux(overrides?: Partial<{
   hasSession: (name: string) => Promise<boolean>;
   sendText: (target: string, text: string) => Promise<TmuxResult>;
   sendKeys: (target: string, keys: string[]) => Promise<TmuxResult>;
+  sendKeysLiteral: (target: string, text: string) => Promise<TmuxResult>;
   capturePaneContent: (paneId: string, lines?: number) => Promise<string | null>;
   getPaneCommand: (paneId: string) => Promise<string | null>;
 }>): TmuxAdapter {
@@ -305,6 +306,7 @@ function mockTmux(overrides?: Partial<{
       (await hasSession(name)) ? { state: "present" as const } : { state: "absent" as const },
     sendText: overrides?.sendText ?? (async () => ({ ok: true as const })),
     sendKeys: overrides?.sendKeys ?? (async () => ({ ok: true as const })),
+    sendKeysLiteral: overrides?.sendKeysLiteral ?? (async () => ({ ok: true as const })),
     capturePaneContent: overrides?.capturePaneContent ?? (async () => "idle prompt\n❯ "),
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
@@ -384,8 +386,8 @@ describe("SessionTransport", () => {
     return { rig, node, session };
   }
 
-  // Test 1: send calls sendText -> delay -> sendKeys Enter
-  it("send calls sendText then sendKeys Enter with delay", async () => {
+  // Test 1: send calls sendText -> delay -> sendKeys C-m
+  it("send calls sendText then sendKeys C-m with delay", async () => {
     seedCanonicalRig();
     const callOrder: string[] = [];
     const tmux = mockTmux({
@@ -396,7 +398,101 @@ describe("SessionTransport", () => {
 
     const result = await transport.send("dev-impl@my-rig", "hello");
     expect(result.ok).toBe(true);
-    expect(callOrder).toEqual(["sendText", "sendKeys:Enter"]);
+    expect(callOrder).toEqual(["sendText", "sendKeys:C-m"]);
+  });
+
+  // GH #519: a --dangerously-interact prompt override must TYPE the answer, never paste it —
+  // agent-TUI choice dialogs ignore bracketed-pasted digits, so a pasted "3" sat inert while
+  // the trailing Enter confirmed the focused "1. Yes".
+  it("prompt override types the answer via sendKeysLiteral and withholds Enter when the choice is consumed", async () => {
+    seedCanonicalRig();
+    const eventBus = new EventBus(db);
+    const agentActivityStore = {
+      getLatestForNode: () => undefined,
+      resolveSession: () => ({ rigId: "r1", nodeId: "n1", sessionName: "dev-impl@my-rig" }),
+    } as unknown as AgentActivityStore;
+    const typeSpy = vi.fn(async () => ({ ok: true as const }));
+    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+    const sendKeysSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      // Readiness probe: a Claude Code permission prompt (needs_input) → override path.
+      // Post-typing capture: the prompt is gone, the agent is working → Enter withheld.
+      capturePaneContent: vi.fn()
+        .mockResolvedValueOnce([
+          "Bash(touch a1.txt)",
+          "",
+          "❯ 1. Yes",
+          "  2. Yes, and always allow …",
+          "  3. No",
+        ].join("\n"))
+        .mockResolvedValue("Working on task...\n⠋ Processing\nesc to interrupt"),
+      sendText: sendTextSpy,
+      sendKeys: sendKeysSpy,
+      sendKeysLiteral: typeSpy,
+    });
+    const transport = createTransport(tmux, {
+      eventBus,
+      agentActivityStore,
+      sleep: async () => undefined,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "3", {
+      dangerouslyInteract: true,
+      reason: "deny the tool call",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(typeSpy).toHaveBeenCalledWith("dev-impl@my-rig", "3");
+    expect(sendTextSpy).not.toHaveBeenCalled();
+    // The typed digit selected AND submitted — no trailing Enter (stray-submit hazard).
+    expect(sendKeysSpy).not.toHaveBeenCalled();
+    expect(result.warning).toContain("withheld");
+  });
+
+  // GH #519, second half: when the typed answer did NOT self-submit (a text field holding
+  // the answer staged in its input), the trailing Enter is still required.
+  it("prompt override sends Enter when the typed answer is still staged in the target input", async () => {
+    seedCanonicalRig();
+    const eventBus = new EventBus(db);
+    const agentActivityStore = {
+      getLatestForNode: () => undefined,
+      resolveSession: () => ({ rigId: "r1", nodeId: "n1", sessionName: "dev-impl@my-rig" }),
+    } as unknown as AgentActivityStore;
+    const typeSpy = vi.fn(async () => ({ ok: true as const }));
+    const sendKeysSpy = vi.fn(async () => ({ ok: true as const }));
+    const tmux = mockTmux({
+      capturePaneContent: vi.fn()
+        .mockResolvedValueOnce([
+          "Bash(touch a1.txt)",
+          "",
+          "❯ 1. Yes",
+          "  2. Yes, and always allow …",
+          "  3. No",
+        ].join("\n"))
+        .mockResolvedValue([
+          "What should the commit message say?",
+          "❯ fix the thing",
+          "────────────────────────────────────────",
+          "  enter to submit",
+        ].join("\n")),
+      sendKeys: sendKeysSpy,
+      sendKeysLiteral: typeSpy,
+    });
+    const transport = createTransport(tmux, {
+      eventBus,
+      agentActivityStore,
+      sleep: async () => undefined,
+    });
+
+    const result = await transport.send("dev-impl@my-rig", "fix the thing", {
+      dangerouslyInteract: true,
+      reason: "answer the free-text prompt",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(typeSpy).toHaveBeenCalledWith("dev-impl@my-rig", "fix the thing");
+    expect(sendKeysSpy).toHaveBeenCalledWith("dev-impl@my-rig", ["C-m"]);
+    expect(result.warning).toContain("still-staged");
   });
 
   // Test 2: send to canonical session name resolves correctly
@@ -435,8 +531,8 @@ describe("SessionTransport", () => {
     expect(result.error).toContain("rig ps");
   });
 
-  // Test 5: send where sendKeys Enter fails returns "text visible but not submitted"
-  it("send where Enter fails returns submit_failed with guidance", async () => {
+  // Test 5: send where sendKeys C-m fails returns "text visible but not submitted"
+  it("send where C-m fails returns submit_failed with guidance", async () => {
     seedCanonicalRig();
     const tmux = mockTmux({
       sendKeys: async () => ({ ok: false, code: "session_not_found", message: "session died" }),
