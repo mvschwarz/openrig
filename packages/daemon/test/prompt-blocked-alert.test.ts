@@ -85,7 +85,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     });
     await policy.evaluate(job);
     expect(repo.listTransitions(row.qitemId).some(t => t.transitionNote?.startsWith(REFUSED_PREFIX))).toBe(true);
-    expect(repo.getById(row.qitemId)?.lastNudgeResult).not.toMatch(/^failed:/);
+    expect(repo.getById(row.qitemId)?.lastNudgeResult ?? "").not.toMatch(/^failed:/);
     return repo.getById(row.qitemId)!;
   }
 
