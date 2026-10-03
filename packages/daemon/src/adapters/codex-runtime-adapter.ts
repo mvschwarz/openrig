@@ -397,7 +397,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
       const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
       const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.seatLaunchEnvironment
-        ? await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, binding.cwd)
+        ? await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
         : this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${cmd}` : cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
@@ -429,7 +429,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}${effortArg}`;
 
     const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.seatLaunchEnvironment
-        ? await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, binding.cwd)
+        ? await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
         : this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${cmd}` : cmd);
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };

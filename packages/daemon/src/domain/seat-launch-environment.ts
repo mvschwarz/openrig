@@ -34,7 +34,7 @@ export function launchExecutable(name: string, searchPath: string, cwd: string):
 }
 
 /** Reassert only public seat metadata after shell startup. Session identity is
- * read from tmux's launch environment, including a reserved successor generation.
+ * read from tmux's launch environment; a successor's reserved identity wins.
  * Neither credentials nor user/runtime config variables enter the command.
  */
 export class SeatLaunchEnvironment {
@@ -42,7 +42,7 @@ export class SeatLaunchEnvironment {
     private readonly sessionEnv: Readonly<Record<string, string | undefined>>,
     private readonly daemonCwd: string) {}
 
-  async command(session: string, command: string, codexCwd?: string): Promise<string> {
+  async command(session: string, command: string, target: { codexCwd?: string; nodeId?: string; generation?: string; runtime?: string } = {}): Promise<string> {
     const searchPath = this.sessionEnv.PATH;
     if (!searchPath) throw new Error("Seat launch requires the daemon launch PATH.");
     const binDir = path.dirname(launchExecutable("rig", searchPath, this.daemonCwd));
@@ -53,12 +53,19 @@ export class SeatLaunchEnvironment {
     if (!identity.OPENRIG_NODE_ID || !identity.OPENRIG_SESSION_NAME) {
       throw new Error("Seat launch requires the session's OpenRig identity.");
     }
+    if (target.nodeId !== undefined && identity.OPENRIG_NODE_ID !== target.nodeId) {
+      throw new Error("Seat launch identity differs from the intended node.");
+    }
+    // Handover respawns an existing pane with -e; tmux's session environment
+    // still names the predecessor. The caller owns the reserved generation.
+    if (target.runtime !== undefined) identity.OPENRIG_RUNTIME = target.runtime;
+    if (target.generation !== undefined) identity.OPENRIG_OCCUPANT_GENERATION = target.generation;
     const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
     // Codex help/preflight uses the daemon PATH. Keep that executable selection
     // while child tools retain the user's PATH, with the current rig bin first.
-    if (codexCwd !== undefined) {
+    if (target.codexCwd !== undefined) {
       if (!command.startsWith("codex ")) throw new Error("Expected a Codex launch command.");
-      command = shellQuote(launchExecutable("codex", searchPath, codexCwd)) + command.slice(5);
+      command = shellQuote(launchExecutable("codex", searchPath, target.codexCwd)) + command.slice(5);
     }
     const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));
     return `/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;

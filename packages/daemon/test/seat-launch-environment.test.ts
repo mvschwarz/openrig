@@ -30,7 +30,7 @@ function fixture() {
   writeExe(path.join(userBin, "rig"), "#!/bin/sh\necho wrong-rig\n");
   writeExe(path.join(userBin, "codex"), "#!/bin/sh\necho wrong-codex\n");
   writeExe(path.join(userBin, "user-tool"), "#!/bin/sh\necho user-tool-preserved\n");
-  writeExe(path.join(bin, "rig"), `#!${process.execPath}\nconst http=require('node:http');const r=http.get(process.env.OPENRIG_URL+'/whoami',{headers:{authorization:'Bearer '+process.env.OPENRIG_ACTIVITY_HOOK_TOKEN}},s=>{let b='';s.on('data',c=>b+=c);s.on('end',()=>{console.log(JSON.stringify({body:JSON.parse(b),home:process.env.OPENRIG_HOME,node:process.env.OPENRIG_NODE_ID,generation:process.env.OPENRIG_OCCUPANT_GENERATION,PATH:process.env.PATH,HOME:process.env.HOME,CODEX_HOME:process.env.CODEX_HOME,CLAUDE_CONFIG_DIR:process.env.CLAUDE_CONFIG_DIR,USER_VALUE:process.env.USER_VALUE}));});});r.on('error',e=>{console.error(e.message);process.exitCode=1;});\n`);
+  writeExe(path.join(bin, "rig"), `#!${process.execPath}\nconst http=require('node:http');const r=http.get(process.env.OPENRIG_URL+'/whoami',{headers:{authorization:'Bearer '+process.env.OPENRIG_ACTIVITY_HOOK_TOKEN}},s=>{let b='';s.on('data',c=>b+=c);s.on('end',()=>{console.log(JSON.stringify({body:JSON.parse(b),home:process.env.OPENRIG_HOME,node:process.env.OPENRIG_NODE_ID,runtime:process.env.OPENRIG_RUNTIME,generation:process.env.OPENRIG_OCCUPANT_GENERATION,PATH:process.env.PATH,HOME:process.env.HOME,CODEX_HOME:process.env.CODEX_HOME,CLAUDE_CONFIG_DIR:process.env.CLAUDE_CONFIG_DIR,USER_VALUE:process.env.USER_VALUE}));});});r.on('error',e=>{console.error(e.message);process.exitCode=1;});\n`);
   for (const name of ["claude", "codex"]) writeExe(path.join(bin, name), `#!/bin/sh\nif [ "$1" = --help ]; then printf '%s\\n' '--permission-mode <mode> (choices: "auto", "default")'; else rig whoami; user-tool >/dev/null; fi\n`);
   const identity: Record<string, string> = { OPENRIG_NODE_ID: "node-current", OPENRIG_SESSION_NAME: "seat@rig", OPENRIG_RUNTIME: "claude-code", OPENRIG_OCCUPANT_GENERATION: "successor-generation" };
   const tmux = new TmuxAdapter(async cmd => {
@@ -113,6 +113,13 @@ describe.skipIf(process.platform === "win32")("seat launch environment after she
     const observed = await f.execute(prepared.command(["--permission-mode", "auto"]), true);
     expect(observed.HOME).toBe(f.env.HOME); expect(observed.PATH).toBe(f.env.PATH);
     expect(observed.generation).toBe("current-generation");
+  });
+  it("same-pane successor reasserts its reserved generation, not tmux's predecessor environment", async () => {
+    const f = fixture(); await f.serve(); f.identity.OPENRIG_OCCUPANT_GENERATION = "predecessor-generation"; f.identity.OPENRIG_RUNTIME = "codex";
+    const adapter = new ClaudeCodeAdapter({ tmux: f.tmux, fsOps: f.fsOps, seatLaunchEnvironment: f.launch });
+    expect((await adapter.launchHarness({ ...f.binding, launchGeneration: "successor-generation" }, { name: "seat" })).ok).toBe(true);
+    expect((await f.execute(f.commands[0]!)).runtime).toBe("claude-code");
+    await expect(f.launch.command("seat@rig", "claude", { nodeId: "different-node" })).rejects.toThrow("differs from");
   });
   it("does not launch if the metadata transport is unavailable", async () => {
     const f = fixture(); vi.spyOn(f.tmux, "getSessionEnv").mockRejectedValue(Error("unavailable"));

@@ -103,7 +103,7 @@ export class CodexResumeAdapter {
     );
 
     const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.seatLaunchEnvironment
-      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, cwd)
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex" })
       : this.options.launchPath ? `env PATH=${shellQuote(this.options.launchPath)} ${cmd}` : cmd);
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };

@@ -83,7 +83,7 @@ export class ClaudeResumeAdapter {
 
     const textResult = managed ? await this.tmux.sendShellCommand(tmuxSessionName, cmd, managed.assertCurrent)
       : this.options.seatLaunchEnvironment
-        ? await this.tmux.sendShellCommand(tmuxSessionName, await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd))
+        ? await this.tmux.sendShellCommand(tmuxSessionName, await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: "claude-code", nodeId }))
         : await this.tmux.sendText(tmuxSessionName, cmd);
     if (!textResult.ok) {
       // sendText failed — nothing in the buffer, no cleanup needed
