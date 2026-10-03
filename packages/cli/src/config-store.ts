@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, renameSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { join, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import {
   getDefaultOpenRigPath,
@@ -921,6 +922,28 @@ export class ConfigStore {
   // resolves the legacy ~/.rigged sidecar), so a persisted read here IS proof the daemon sees it.
   // A read-back MISMATCH means the write silently did not take — we REFUSE loudly rather than report
   // a phantom success (the accept-and-drop / config-set-success-without-persist class).
+  /** Publish a complete config without truncating the previous usable file. */
+  private writeConfig(content: string): void {
+    let target = this.configPath;
+    // Follow config-file links just as writeFileSync did; rename the target,
+    // never the link. A dangling final target is still created normally.
+    for (let depth = 0; ; depth++) {
+      const entry = lstatSync(target, { throwIfNoEntry: false });
+      if (!entry?.isSymbolicLink()) break;
+      if (depth >= 40) throw Object.assign(new Error("Too many config symlinks"), { code: "ELOOP" });
+      target = resolve(dirname(target), readlinkSync(target));
+    }
+    const mode = statSync(target, { throwIfNoEntry: false })?.mode;
+    const temporary = `${target}.tmp-${randomUUID()}`;
+    try {
+      writeFileSync(temporary, content, { encoding: "utf-8", flag: "wx", mode: mode === undefined ? 0o666 : mode & 0o777 });
+      if (mode !== undefined) chmodSync(temporary, mode & 0o777);
+      renameSync(temporary, target);
+    } finally {
+      try { unlinkSync(temporary); } catch { /* Renamed or already removed. */ }
+    }
+  }
+
   private verifyPersisted(keyPath: string[], expected: unknown): void {
     let reread: Record<string, unknown>;
     try {
@@ -1199,7 +1222,7 @@ export class ConfigStore {
       const fcDyn = this.readConfigFile();
       setNestedValue(fcDyn, ["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
       mkdirSync(dirname(this.configPath), { recursive: true });
-      writeFileSync(this.configPath, JSON.stringify(fcDyn, null, 2) + "\n", "utf-8");
+      this.writeConfig(JSON.stringify(fcDyn, null, 2) + "\n");
       this.verifyPersisted(["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
       return;
     }
@@ -1222,7 +1245,7 @@ export class ConfigStore {
       }
     }
     mkdirSync(dirname(this.configPath), { recursive: true });
-    writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");
+    this.writeConfig(JSON.stringify(fileConfig, null, 2) + "\n");
     this.verifyPersisted(KEY_TO_PATH[key], coerced);
   }
 
@@ -1247,7 +1270,7 @@ export class ConfigStore {
       const fcDyn = this.readConfigFile();
       const subsParent = getNestedValue(fcDyn, ["feed", "subscriptions"]) as Record<string, unknown> | undefined;
       if (subsParent && feedHost.hostId in subsParent) delete subsParent[feedHost.hostId];
-      writeFileSync(this.configPath, JSON.stringify(fcDyn, null, 2) + "\n", "utf-8");
+      this.writeConfig(JSON.stringify(fcDyn, null, 2) + "\n");
       return;
     }
     if (!isValidKey(key)) {
@@ -1274,7 +1297,7 @@ export class ConfigStore {
         }
       }
     }
-    writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");
+    this.writeConfig(JSON.stringify(fileConfig, null, 2) + "\n");
   }
 
   private readConfigFile(): Record<string, unknown> {
