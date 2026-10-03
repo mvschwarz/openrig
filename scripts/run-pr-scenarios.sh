@@ -7,12 +7,19 @@ cd "$REPO_ROOT"
 REMOTE=false
 CASES=(fixture library)
 MODES=(healthy lost-baton healthy)
+# Stub-script scenarios run once each, healthy only: their planted failures are
+# product-code mutations, kept as per-PR evidence outside CI.
+PASSING_CASES=(transcript capture)
 OUT="$REPO_ROOT/dist/pr-scenarios"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --remote) REMOTE=true; shift ;;
     --case)
-      case "${2:-}" in fixture|library) CASES=("$2");; *) echo 'Expected --case fixture|library' >&2; exit 2;; esac
+      case "${2:-}" in
+        fixture|library) CASES=("$2"); PASSING_CASES=();;
+        transcript|capture) CASES=(); PASSING_CASES=("$2");;
+        *) echo 'Expected --case fixture|library|transcript|capture' >&2; exit 2;;
+      esac
       shift 2 ;;
     --mode)
       case "${2:-}" in healthy|lost-baton) MODES=("$2");; *) echo 'Expected --mode healthy|lost-baton' >&2; exit 2;; esac
@@ -21,6 +28,11 @@ while [ "$#" -gt 0 ]; do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+# The passing-only cases have no lost-baton form.
+if [ "${MODES[*]}" = lost-baton ]; then
+  test "${#CASES[@]}" -gt 0 || { echo 'transcript and capture run healthy only' >&2; exit 2; }
+  PASSING_CASES=()
+fi
 if "$REMOTE"; then
   case "${DOCKER_HOST:-}" in ssh://?*) ;; *) echo '--remote requires explicit DOCKER_HOST=ssh://...' >&2; exit 2;; esac
   test -z "${DOCKER_CONTEXT:-}" || { echo 'Unset DOCKER_CONTEXT so it cannot override the selected DOCKER_HOST' >&2; exit 2; }
@@ -59,10 +71,9 @@ docker build --network none --platform "$TARGET_PLATFORM" --build-arg TESTBED_IM
 docker image inspect "$IMAGE" > "$OUT/image-inspect.json"
 
 attempt=0
-for scenario in "${CASES[@]}"; do
-for mode in "${MODES[@]}"; do
+run_case() {  # run_case <case> <mode>
+  local scenario="$1" mode="$2" status=0 LOG
   attempt=$((attempt + 1))
-  status=0
   LOG="$OUT/$attempt-$scenario-$mode.log"
   CONTAINER="openrig-pr-${SHA:0:12}-$attempt-$$"
   printf '%s\n' "$CONTAINER" > "$OUT/$attempt-$scenario-$mode.container-name.txt"
@@ -80,10 +91,21 @@ for mode in "${MODES[@]}"; do
   CONTAINER=""
   node --input-type=module - "$mode" "$status" "$LOG" "$scenario" <<'JS'
 import { readFileSync } from 'node:fs';
-import { readReport, verifyRun } from './packages/test-system/ci/result.mjs';
+import { PASSING_CASES, readReport, verifyPassingRun, verifyRun } from './packages/test-system/ci/result.mjs';
 const [mode, status, log, scenario] = process.argv.slice(2);
-verifyRun(mode, Number(status), readReport(readFileSync(log, 'utf8')), scenario);
-console.log(`${scenario}/${mode}: ${mode === 'healthy' ? 'healthy scenario passed' : 'seeded durability regression caught at the expected assertion'}`);
+const report = readReport(readFileSync(log, 'utf8'));
+if (Object.hasOwn(PASSING_CASES, scenario)) {
+  verifyPassingRun(Number(status), report, scenario);
+  console.log(`${scenario}/${mode}: passing-only scenario passed`);
+} else {
+  verifyRun(mode, Number(status), report, scenario);
+  console.log(`${scenario}/${mode}: ${mode === 'healthy' ? 'healthy scenario passed' : 'seeded durability regression caught at the expected assertion'}`);
+}
 JS
+}
+for scenario in ${CASES[@]+"${CASES[@]}"}; do
+  for mode in "${MODES[@]}"; do run_case "$scenario" "$mode"; done
 done
+for scenario in ${PASSING_CASES[@]+"${PASSING_CASES[@]}"}; do
+  run_case "$scenario" healthy
 done
