@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync, chmodSync, readFileSync, symlinkSync, renameSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { runInNewContext } from "node:vm";
 import { ClaudeManagedLaunch } from "../src/domain/claude-managed-launch.js";
 import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
@@ -69,6 +70,34 @@ function fixture() {
 const input = { seatRef: "owner@rig", mode: "auto", actor: "operator", reason: "deliberate choice" };
 
 describe("S03 production managed capability selection", () => {
+  it.skipIf(process.platform === "win32").each([
+    { USER: "fixture-user", LOGNAME: "fixture-login" },
+    { USER: "fixture-user" }, { LOGNAME: "fixture-login" }, {},
+  ])("forwards only supplied daemon user names through the actual startup channel: %j", async names => {
+    const f = fixture();
+    // Execute the actual initializer, without starting a daemon or reading its env.
+    const source = readFileSync(new URL("../src/startup.ts", import.meta.url), "utf8");
+    const start = source.indexOf("const launchSessionEnv:");
+    expect(start).toBeGreaterThan(-1);
+    const expression = source.slice(source.indexOf("{", start), source.indexOf("\n  };", start) + 4);
+    const sessionEnv = runInNewContext(`(${expression})`, {
+      process: { env: { PATH: f.env.PATH, ...names, UNRELATED_VALUE: "not-forwarded" } },
+      OPENRIG_HOME: f.env.OPENRIG_HOME, openRigPort: "1", openRigHost: "127.0.0.1",
+      resolvedActivityHookUrl: "http://127.0.0.1:1", resolvedActivityHookToken: "synthetic-only",
+      providerAuthEnv: {}, daemonHome: f.env.HOME, codexHome: path.join(f.root, "codex"),
+    });
+    for (const key of Object.keys(f.env)) delete f.env[key];
+    Object.assign(f.env, sessionEnv);
+    writeFileSync(f.executable, `#!${process.execPath}\nif (process.argv.includes('--help')) console.log(${JSON.stringify(help)}); else console.log(JSON.stringify(Object.fromEntries(['USER','LOGNAME','UNRELATED_VALUE'].filter(k => process.env[k] !== undefined).map(k => [k,process.env[k]]))));\n`);
+    const native = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    vi.mocked(execFile).mockImplementation(native.execFile);
+    const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
+    const child = native.execFileSync("/bin/sh", ["-c", prepared.command(["--permission-mode", "auto"])], {
+      encoding: "utf8", timeout: 3000,
+      env: { ...sessionEnv, UNRELATED_VALUE: "not-forwarded" },
+    });
+    expect(JSON.parse(child)).toEqual(names);
+  });
   it.each([
     ["unset", undefined, "present"], ["relative", "./config", "present"],
     ["absolute", "/inert/explicit-config", "present"], ["empty", "", "present"],
