@@ -950,7 +950,7 @@ describe("ClaudeCompactionEnforcer", () => {
 
   // OPR.0.4.3.14 — manual configurable compaction trigger.
   //
-  // Covers: guided-sequence-for-one-seat (SAME messages as auto), threshold-
+  // Covers: guided-sequence-for-one-seat (same lifecycle as auto), threshold-
   // independence + determinism (incl. auto DISABLED), two-phase wait-for-idle
   // ordering (/compact never before prep completes), single-restore-path reuse
   // (the existing poll loop drains restore→audit), state surfacing, non-Claude
@@ -975,7 +975,7 @@ describe("ClaudeCompactionEnforcer", () => {
 
       // Phase 1 — prep (a normal send, no wait option).
       expect(send.mock.calls[0]![0]).toBe(SEAT);
-      expect(send.mock.calls[0]![1]).toContain("OpenRig automatic compaction preparation is now required");
+      expect(send.mock.calls[0]![1]).toContain("OpenRig manual compaction was requested");
       expect(send.mock.calls[0]![2]).toBeUndefined();
       // Phase 2 — /compact WITH the trust-bridge AND wait-for-idle (two-phase).
       expect(send.mock.calls[1]![1]).toContain("In the continuity summary, preserve this trust-channel note");
@@ -1107,7 +1107,7 @@ describe("ClaudeCompactionEnforcer", () => {
         sessionName: SEAT, runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/claude.jsonl",
       }, { operatorInitiated: true }); // GHOST-STAGE (a): OPERATOR-initiated → drain-exempt while disabled
       expect(outcome).toEqual({ triggered: true, stage: "compact-sent" });
-      expect(send.mock.calls[0]![1]).toContain("OpenRig automatic compaction preparation");
+      expect(send.mock.calls[0]![1]).toContain("OpenRig manual compaction was requested");
       expect(send.mock.calls[1]![1]).toContain("/compact");
       expect(send).toHaveBeenCalledTimes(2);
 

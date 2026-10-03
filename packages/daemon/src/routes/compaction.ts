@@ -141,7 +141,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
 function manualReasonMessage(sessionName: string, reason: string): string {
   switch (reason) {
     case "preparation_incomplete":
-      return `This attempt's restore map was not completed in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
+      return `Preparation (restore map and idle wait) did not finish in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
     case "preparation_cancelled":
       return `Preparation for '${sessionName}' was cancelled; no further compact is armed.`;
     case "disabled":

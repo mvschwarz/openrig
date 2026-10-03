@@ -1,8 +1,8 @@
 // OPR.0.4.3.14 — manual compaction trigger route (POST /api/compaction/trigger).
 //
 // Proves: the route resolves the target + reads the EXISTING context-usage
-// projection BEFORE calling the enforcer (the prep prompt carries the sourced
-// usage %); non-Claude → 422 runtime_filter; unknown usage → 409 no_usage_data
+// projection BEFORE calling the enforcer (known usage permits a manual request
+// independently of the threshold); non-Claude → 422 runtime_filter; unknown usage → 409 no_usage_data
 // (route passes null, never invents a value); ambiguous → 409; missing field →
 // 400; enforcer-unwired → 503. Reuses the shipped SessionTransport + the SAME
 // ClaudeCompactionEnforcer (no second path).
@@ -145,7 +145,7 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     return { app, sentTexts, enforcer };
   }
 
-  it("sources the KNOWN context-usage % before triggering: prep prompt carries it, /compact follows", async () => {
+  it("known below-threshold usage permits manual preparation, then /compact follows", async () => {
     const { claudeNodeId } = seed();
     usageStore.persist(claudeNodeId, knownUsage("dev-impl@my-rig", 42));
     const { app, sentTexts } = buildApp();
@@ -158,8 +158,9 @@ describe("compaction routes — POST /api/compaction/trigger", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ ok: true, session: "dev-impl@my-rig", stage: "compact-sent" });
-    // Phase 1 prep carries the sourced usage % (proves usage read before trigger).
-    expect(sentTexts[0]).toContain("Current context usage is 42%");
+    // The manual request does not claim that the threshold was reached.
+    expect(sentTexts[0]).toContain("OpenRig manual compaction was requested");
+    expect(sentTexts[0]).not.toContain("configured compaction threshold");
     // Phase 2 /compact followed.
     expect(sentTexts[1]).toContain("/compact");
     expect(sentTexts).toHaveLength(2);

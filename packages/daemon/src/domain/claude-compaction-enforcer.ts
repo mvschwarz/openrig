@@ -133,13 +133,22 @@ function buildPreCompactPrepPrompt(input: {
   thresholdPercent: number;
   preCompactInstruction?: string | null;
   preparation: PreparationState;
+  constructedAt: number;
 }): string {
-  const pieces = [
-    "OpenRig automatic compaction preparation is now required.",
-    `Current context usage is ${input.usedPercentage}%; configured compaction threshold is ${input.thresholdPercent}%.`,
+  const pieces = input.preparation.mode === "manual"
+    ? [
+      "OpenRig manual compaction was requested for this seat. This request does not depend on the context threshold.",
+      `Preparation deadline: ${new Date(input.preparation.deadlineAt!).toISOString()} (UTC); ${Math.max(0, input.preparation.deadlineAt! - input.constructedAt)} ms remaining when this request was constructed, not guaranteed remaining on receipt. Delivery time, writing the complete restore map, and becoming idle share this deadline.`,
+    ]
+    : [
+      "OpenRig automatic compaction preparation is now required.",
+      `Current context usage is ${input.usedPercentage}%; configured compaction threshold is ${input.thresholdPercent}%.`,
+      `The ${AUTO_PREP_WAIT_MS_DEFAULT / 60_000}-minute ceiling starts after preparation delivery returns; completing the restore map and becoming idle must fit within it.`,
+    ];
+  pieces.push(
     "This is an operator-authorized normal user-channel preparation request before OpenRig sends /compact.",
     "You are about to compact.",
-  ];
+  );
   const instruction = input.preCompactInstruction?.trim();
   if (instruction) {
     pieces.push(`Operator pre-compaction instruction: ${instruction}`);
@@ -689,7 +698,7 @@ export class ClaudeCompactionEnforcer {
     try {
       prep = await this.sessionTransport.send(input.sessionName, buildPreCompactPrepPrompt({
         usedPercentage: input.usedPercentage!, thresholdPercent: policy.thresholdPercent,
-        preCompactInstruction: policy.preCompactInstruction, preparation: attempt,
+        preCompactInstruction: policy.preCompactInstruction, preparation: attempt, constructedAt: this.now(),
       }));
     } catch { prep = null; }
     if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted) return;
