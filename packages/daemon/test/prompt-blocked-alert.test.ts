@@ -282,6 +282,36 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(posts).toEqual([]);
   });
 
+  it("a pending baton delegates retries and readback to its open prompt recovery", async () => {
+    const source = await repo.create({ sourceSession: "sender@fixture", destinationSession: "relay@fixture", body: "work", nudge: false });
+    const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "relay@fixture", toSession: seat, nudge: false });
+    // Seed the durable overlap at the existing failed-class seam, without
+    // importing #623's retained-result classification or claiming policy execution.
+    const key = `${seat}|fixture#1`;
+    for (const transitionNote of [
+      `parked-owner wake reserved: ${key}; obligations ${created.qitemId}`,
+      `${REFUSED_PREFIX} ${key}; Refused: interactive prompt`,
+    ]) repo.transitionLog.append({ qitemId: created.qitemId, state: "pending", actorSession: "watchdog@system", transitionNote });
+    repo.recordNudgeAttempt(created.qitemId, "failed:fixture");
+    const posts: unknown[] = []; const port = engine(posts, false);
+    const dispatch = vi.spyOn(port, "dispatchEscalation");
+    const attemptWake = vi.fn(async () => "failed:fixture");
+    const result = await tick(port, { attemptWake });
+    expect(result.outcome).not.toBe("failed");
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    const alert = alerts()[0]!;
+    expect.soft(attemptWake).not.toHaveBeenCalled();
+    expect.soft(repo.getById(created.qitemId)?.waiting?.nextBackstop).toMatchObject({
+      owner: alert.destinationSession, mechanism: "queue-recovery:delegated", dueAt: null,
+      recovery: { qitemId: alert.qitemId, state: "pending" },
+    });
+    await tick(port, { attemptWake });
+    expect(attemptWake).not.toHaveBeenCalled();
+    expect(alerts()).toHaveLength(1);
+    expect(posts).toEqual([]);
+    expect(notes(created.qitemId).join("\n")).not.toContain("ladder-exhausted:");
+  });
+
   it.each(["clear", "unknown"] as const)("%s activity neither dispatches nor fabricates a refusal", async value => {
     await refusal(); const posts: unknown[] = []; state = value;
     await tick(engine(posts));
