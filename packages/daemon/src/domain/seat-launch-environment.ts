@@ -127,6 +127,13 @@ export class SeatLaunchEnvironment {
       }
       const binDir = this.rigBin();
       const env = publicSeatEnvironment({ OPENRIG_TRANSCRIPTS_LINES: "", OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "", ...this.sessionEnv, ...identity });
+      // Classic Claude may be an rc alias or function, not a PATH executable.
+      // Its caller sources the staged command in a pane-shell subshell. Leading
+      // assignments preserve shell lookup; /usr/bin/env would bypass it.
+      if (target.runtime === "claude-code") {
+        const assignments = Object.entries(env).map(([key, value]) => `${key}=${shellQuote(value)}`);
+        return `${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
+      }
       const assignments = Object.entries(env).map(([key, value]) => shellQuote(`${key}=${value}`));
       return `/usr/bin/env ${assignments.join(" ")} PATH=${shellQuote(binDir)}:"$PATH" ${command}`;
     } catch {
