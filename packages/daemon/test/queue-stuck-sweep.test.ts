@@ -179,6 +179,45 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(overdueEvents4).toHaveLength(2);
   });
 
+  it("OVERDUE FINDING LAST TRANSITION: shows claimant's last transition, skipping daemon closure-overdue note", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      transitionNote: "investigating edge case",
+    });
+    makeOverdue(row.qitemId);
+
+    await runSweep();
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain("last transition: investigating edge case at");
+    expect(findings[0]!.body).not.toContain("last transition: closure-overdue");
+  });
+
+  it("OVERDUE SWEEP ERROR RESILIENCE: recordClosureOverdue write failure does not crash sweep or drop findings", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    makeOverdue(row.qitemId);
+
+    const logLines: string[] = [];
+    const origRecord = repo.recordClosureOverdue.bind(repo);
+    repo.recordClosureOverdue = () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    };
+
+    try {
+      const { result } = await runSweep({ log: (msg: string) => logLines.push(msg) });
+      expect(result.outcome).toBe("findings");
+      const findings = await findingsFor(row.qitemId);
+      expect(findings).toHaveLength(1);
+      expect(logLines.some((l) => l.includes("failed to record closure-overdue") && l.includes("SQLITE_BUSY"))).toBe(true);
+    } finally {
+      repo.recordClosureOverdue = origRecord;
+    }
+  });
+
   it("S04 PICKUP SEAM: stalled-after-claim routes one finding to the claimant and later motion auto-closes it", async () => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });

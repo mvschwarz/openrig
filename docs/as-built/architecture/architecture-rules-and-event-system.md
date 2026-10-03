@@ -122,8 +122,8 @@ validation, `rigspec-schema.ts:550`; restated in compat note 1).
 The daemon's event surface is the single `RigEvent` discriminated union.
 
 `RigEvent` is declared at `packages/daemon/src/domain/types.ts:106`
-(`export type RigEvent =`) and runs through `types.ts:314`. It has **99 union
-members** declaring **100** `type` literals: one member (`types.ts:107`) carries
+(`export type RigEvent =`) and runs through `types.ts:314`. It has **98 union
+members** declaring **99** `type` literals: one member (`types.ts:107`) carries
 both `proof.judged` and `proof.sources_changed`.
 
 - Members:

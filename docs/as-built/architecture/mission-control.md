@@ -148,8 +148,8 @@ only this table.
   nor Tailscale (a hostname is resolved first), and no bearer token is set
   (`assertBindAuthInvariant`, `auth-bearer-token.ts:240`, called at
   `index.ts:288`). Bearer enforced on the write routes:
-  `app.post("/action", requireAuth)` (`routes/mission-control.ts:308`) and
-  `app.post("/notifications/test", requireAuth)` (`:309`). Reads are not
+  `app.post("/action", requireAuth)` (`routes/mission-control.ts:307`) and
+  `app.post("/notifications/test", requireAuth)` (`:308`). Reads are not
   gated. It is one static token; no OAuth/SSO/per-user model
   (`auth-bearer-token.ts:11–14`).
 - **Notification dispatcher** — two adapters
@@ -165,7 +165,7 @@ only this table.
   Adapters: **2** — `git grep -l 'implements NotificationAdapter' -- packages/daemon/src | wc -l`
 - **Read-only audit-history browse** — `MissionControlAuditBrowse.query`
   (`audit-browse.ts:78`) over `mission_control_actions`, exposed at
-  `GET /api/mission-control/audit` (`routes/mission-control.ts:442`) with
+  `GET /api/mission-control/audit` (`routes/mission-control.ts:441`) with
   filters and `(limit, before_id)` pagination cursored on SQLite `rowid`
   (`audit-browse.ts:134`).
 
@@ -193,11 +193,11 @@ The `RigEvent` union starts at `domain/types.ts:106`; its four
 `missionControlRoutes({ bearerToken })` is mounted at `/api/mission-control`
 (`server.ts:791–794`). Routes (`routes/mission-control.ts`): `GET /views`
 (`:259`), `GET /cli-capabilities` (`:264`), `GET /destinations` (`:276`),
-`GET /sse` and its alias `GET /watch` (`:304–305`; they forward
+`GET /sse` and its alias `GET /watch` (`:303–304`; they forward
 `action_executed` and `cli_drift_detected` events,
-`:289–291`), `POST /action` (`:315`, auth-gated), `GET /audit` (`:442`),
-`POST /notifications/test` (`:482`, auth-gated), and `GET /views/:view-name`
-(`:510`).
+`:289–291`), `POST /action` (`:314`, auth-gated), `GET /audit` (`:441`),
+`POST /notifications/test` (`:481`, auth-gated), and `GET /views/:view-name`
+(`:509`).
 
 In the web UI (`packages/ui/src/routes.tsx`), `/mission-control` is a
 redirect to `/for-you` (`:495–500`). `/for-you` renders the For You `Feed`

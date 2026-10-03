@@ -1253,4 +1253,62 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
     expect(unparkNotes().length, "an absorbed redrive never double-actuates").toBe(1);
     expect(repo.getById(parked.qitemId)!.state, "the unparked row is untouched by the redrive").toBe("pending");
   });
+
+  it("recordClosureOverdue with minimal schema (no transitions table) dedups one event per claim across timestamp formats and escaped LIKE", async () => {
+    const minDb = createDb();
+    migrate(minDb, [coreSchema, eventsSchema, queueItemsSchema, outboxEntriesSchema]);
+    const minBus = new EventBus(minDb);
+    const minRepo = new QueueRepository(minDb, minBus);
+    minRepo.attachOutbox(new OutboxHandler(minDb));
+
+    const events: PersistedEvent[] = [];
+    minBus.subscribe((e) => events.push(e));
+
+    // Create item directly in queue_items (without queue_transitions table)
+    // with an underscore in the ID to also verify LIKE wildcard escaping
+    const qitemId = "qitem-test_minimal_123";
+    const nowIso = "2026-10-03T08:00:00.000Z";
+    const claimTime1 = "2026-10-03T10:00:00.000Z";
+    minDb.prepare(`
+      INSERT INTO queue_items (
+        qitem_id, ts_created, ts_updated, source_session, destination_session,
+        state, priority, body, closure_required_at, claimed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      qitemId, nowIso, nowIso, "alice@rig-a", "bob@rig-b",
+      "in-progress", "routine", "test minimal schema dedup", "2026-10-03T09:00:00.000Z", claimTime1,
+    );
+
+    // Also insert a decoy event for a similar item (x instead of _) to verify LIKE escaping
+    minDb.prepare("INSERT INTO events (type, payload) VALUES (?, ?)").run(
+      "qitem.closure_overdue",
+      JSON.stringify({ qitemId: "qitem-testxminimal_123" }),
+    );
+
+    // First call emits qitem.closure_overdue
+    const ev1 = minRepo.recordClosureOverdue(qitemId, { now: "2026-10-03T11:00:00.000Z" });
+    expect(ev1).not.toBeNull();
+    expect(ev1?.type).toBe("qitem.closure_overdue");
+    expect(events.filter((e) => e.type === "qitem.closure_overdue")).toHaveLength(1);
+
+    // Verify events table has created_at in SQLite format YYYY-MM-DD HH:MM:SS
+    const eventRow = minDb.prepare("SELECT created_at FROM events WHERE type = 'qitem.closure_overdue' AND payload LIKE ?").get(`%${qitemId}%`) as { created_at: string };
+    expect(eventRow.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+    // Second call for the same claim: deduplicates (returns null) despite created_at having space instead of T
+    const ev2 = minRepo.recordClosureOverdue(qitemId, { now: "2026-10-03T11:05:00.000Z" });
+    expect(ev2).toBeNull();
+    expect(events.filter((e) => e.type === "qitem.closure_overdue")).toHaveLength(1);
+
+    // Re-claim with a new claim timestamp: new claim allows another event
+    const claimTime2 = new Date(Date.now() + 1000).toISOString();
+    minDb.prepare("UPDATE queue_items SET claimed_at = ? WHERE qitem_id = ?").run(claimTime2, qitemId);
+
+    const ev3 = minRepo.recordClosureOverdue(qitemId, { now: "2026-10-03T12:00:00.000Z" });
+    expect(ev3).not.toBeNull();
+    expect(ev3?.type).toBe("qitem.closure_overdue");
+    expect(events.filter((e) => e.type === "qitem.closure_overdue")).toHaveLength(2);
+
+    minDb.close();
+  });
 });
