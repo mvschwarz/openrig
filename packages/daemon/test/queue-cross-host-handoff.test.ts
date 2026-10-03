@@ -33,8 +33,9 @@ import { EventBus } from "../src/domain/event-bus.js";
 import {
   QueueRepository,
   deriveCrossHostSuccessorId,
+  stampSelfHostSuffix,
 } from "../src/domain/queue-repository.js";
-import { queueRoutes, CROSS_HOST_TAG } from "../src/routes/queue.js";
+import { queueRoutes, CROSS_HOST_TAG, crossHostProvenanceTags } from "../src/routes/queue.js";
 import type { HostRegistry } from "../src/domain/hosts/hosts-registry-reader.js";
 import { setSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
@@ -520,12 +521,15 @@ describe("cross-host handoff addressed to the receiving daemon's own host id", (
 });
 
 // Upgrade path: before this daemon treated its own host id as local, a registry entry naming
-// itself sent a self-addressed handoff out over HTTP and back into the SAME database, keyed by the
-// deterministic cross-host successor id. A retry after the upgrade must finish that handoff, not
-// mint a second successor or send a second nudge. Full schema, outbox and a recording transport,
-// so nudges are real sends.
-describe("self-addressed handoff retried after an interrupted pre-upgrade self-forward", () => {
+// itself sent a self-addressed handoff out over HTTP and back into the SAME database: the receiving
+// /create stored the deterministic cross-host successor, then the source closed. A retry after the
+// upgrade must behave as that route's retry did: absorb the same successor (or refuse a different
+// sender with qitem_id_reuse, or warn that a changed body was not saved), close once, nudge once.
+// Full schema, outbox and a recording transport, so nudges are real sends.
+describe("self-addressed handoff retried after a pre-upgrade self-forward", () => {
   const SELF_REGISTRY: HostRegistry = { hosts: [{ id: "self", transport: "http", url: "http://self.invalid" }] };
+  const successorId = deriveCrossHostSuccessorId("source", "next@rig", "self");
+  beforeEach(() => setSelfHostId("self"));
   afterEach(() => setSelfHostId(null));
 
   function fullHarness() {
@@ -539,84 +543,108 @@ describe("self-addressed handoff retried after an interrupted pre-upgrade self-f
       transport: { send: async (destination: string) => { sends.push(destination); return { ok: true, verified: true }; } } as never,
     });
     repo.attachOutbox(new OutboxHandler(db));
-    const app = (fetchImpl?: typeof fetch) => {
-      const a = new Hono();
-      a.use("*", async (c, next) => {
-        const set = c.set.bind(c) as (k: string, v: unknown) => void;
-        set("eventBus", bus);
-        set("queueRepo", repo);
-        set("hostRegistryLoader", () => ({ ok: true, registry: SELF_REGISTRY }));
-        if (fetchImpl) set("remoteFetchImpl", fetchImpl);
-        await next();
-      });
-      a.route("/api/queue", queueRoutes());
-      return a;
-    };
-    const seed = () => repo.create({ qitemId: "source", sourceSession: "lead@rig", destinationSession: "worker@rig", body: "retained work", tags: ["keep"], nudge: false });
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      const set = c.set.bind(c) as (k: string, v: unknown) => void;
+      set("eventBus", bus);
+      set("queueRepo", repo);
+      set("hostRegistryLoader", () => ({ ok: true, registry: SELF_REGISTRY }));
+      set("remoteFetchImpl", (async () => { throw new Error("a self-addressed write must not forward"); }) as typeof fetch);
+      await next();
+    });
+    app.route("/api/queue", queueRoutes());
     const rows = () => (db.prepare("SELECT COUNT(*) c FROM queue_items").get() as { c: number }).c;
-    return { db, repo, sends, app, seed, rows };
+    return { db, repo, sends, app, rows };
   }
 
-  // With no resolved self id, "self" is an ordinary registered host: the route forwards the handoff
-  // through the registry exactly as the pre-upgrade code did for a self entry.
-  async function preUpgradeSelfForward(h: ReturnType<typeof fullHarness>, verb: string, loseResponse: boolean) {
-    setSelfHostId(null);
-    const receiver = h.app();
-    let committed = 0;
-    const sender = h.app((async (url, init) => {
-      const res = await receiver.request(new URL(String(url)).pathname, init);
-      committed = res.status;
-      if (loseResponse) throw new Error("response lost after the successor committed");
-      return res;
-    }) as typeof fetch);
-    const res = await post(sender, `/api/queue/source/${verb}`, { fromSession: "worker@rig", toSession: "next@rig", hostId: "self", nudge: true });
-    return { status: res.status, committed };
+  // The pre-upgrade route's committed state: the receiving /create got the forward body (stamped
+  // sender, deterministic id, provenance tags, nudge) with no transport header, as a forward does.
+  // `close` also applies that route's source close; otherwise its response was lost first.
+  async function preUpgradeSelfForward(h: ReturnType<typeof fullHarness>, verb: string, close?: "current" | "legacy") {
+    const source = await h.repo.create({ qitemId: "source", sourceSession: "lead@rig", destinationSession: "worker@rig", body: "retained work", tags: ["keep"], nudge: false });
+    const forwarded = await h.app.request("/api/queue/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        qitemId: successorId, sourceSession: stampSelfHostSuffix("worker@rig"), destinationSession: "next@rig",
+        body: source.body, priority: source.priority, tags: crossHostProvenanceTags(["keep"]), chainOfRecord: ["source"], nudge: true,
+      }),
+    });
+    expect(forwarded.status).toBe(201);
+    if (close) {
+      h.repo.closeCrossHostHandoffSource({
+        qitemId: "source", fromSession: "worker@rig", toSession: "next@rig",
+        closureTarget: close === "legacy" ? "next@rig@self" : `${successorId}@self`,
+        terminalState: verb === "handoff" ? "handed-off" : "done",
+      });
+    }
+    expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
   }
 
-  it.each([["handoff", "handed-off"], ["handoff-and-complete", "done"]] as const)(
-    "%s: a retry after the upgrade closes toward the committed successor; no second successor or nudge",
-    async (verb, terminalState) => {
-      const h = fullHarness();
-      try {
-        await h.seed();
-        const first = await preUpgradeSelfForward(h, verb, true);
-        expect(first).toEqual({ status: 502, committed: 201 });
-        expect(h.repo.getById("source")!.state).toBe("pending");
-        expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
+  const retry = (h: ReturnType<typeof fullHarness>, verb: string, over: Record<string, unknown> = {}) =>
+    post(h.app, `/api/queue/source/${verb}`, { fromSession: "worker@rig", toSession: "next@rig", hostId: "self", nudge: true, ...over });
 
-        setSelfHostId("self");
-        const retry = await post(h.app((async () => { throw new Error("self must not forward"); }) as typeof fetch),
-          `/api/queue/source/${verb}`, { fromSession: "worker@rig", toSession: "next@rig", hostId: "self", nudge: true });
-        expect(retry.status).toBe(201);
-        expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
-        const successorId = deriveCrossHostSuccessorId("source", "next@rig", "self");
-        const out = (await retry.json()) as { closed: { state: string; closureTarget: string }; created: { qitemId: string } };
-        expect(out.created.qitemId).toBe(successorId);
-        expect(out.closed).toMatchObject({ state: terminalState, closureTarget: `${successorId}@self` });
-      } finally { h.db.close(); }
-    },
-  );
+  type Out = { closed: { state: string; closureTarget: string }; created: { qitemId: string; body: string; createWarning?: { code: string } }; error?: string };
+  const verbs = [["handoff", "handed-off"], ["handoff-and-complete", "done"]] as const;
 
-  it.each(["handoff", "handoff-and-complete"])("%s: a retry of a pre-upgrade self-forward that fully completed converges", async (verb) => {
+  it.each(verbs)("%s: an interrupted self-forward closes toward its committed successor; no second successor or nudge", async (verb, terminalState) => {
     const h = fullHarness();
     try {
-      await h.seed();
-      expect(await preUpgradeSelfForward(h, verb, false)).toEqual({ status: 201, committed: 201 });
-      setSelfHostId("self");
-      const retry = await post(h.app(), `/api/queue/source/${verb}`, { fromSession: "worker@rig", toSession: "next@rig", hostId: "self", nudge: true });
-      expect(retry.status).toBe(201);
+      await preUpgradeSelfForward(h, verb);
+      const res = await retry(h, verb);
+      expect(res.status).toBe(201);
+      expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
+      const out = (await res.json()) as Out;
+      expect(out.created.qitemId).toBe(successorId);
+      expect(out.closed).toMatchObject({ state: terminalState, closureTarget: `${successorId}@self` });
+    } finally { h.db.close(); }
+  });
+
+  it.each(verbs)("%s: a completed self-forward converges, including under the pre-convention close key", async (verb) => {
+    for (const close of ["current", "legacy"] as const) {
+      const h = fullHarness();
+      try {
+        await preUpgradeSelfForward(h, verb, close);
+        const res = await retry(h, verb);
+        expect(res.status).toBe(201);
+        expect(((await res.json()) as Out).closed.closureTarget).toBe(close === "legacy" ? "next@rig@self" : `${successorId}@self`);
+        expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
+      } finally { h.db.close(); }
+    }
+  });
+
+  it.each(verbs)("%s: a retry with a changed body closes but says the body was not saved", async (verb, terminalState) => {
+    const h = fullHarness();
+    try {
+      await preUpgradeSelfForward(h, verb);
+      const res = await retry(h, verb, { body: "amended instructions" });
+      expect(res.status).toBe(201);
+      const out = (await res.json()) as Out;
+      expect(out.created.createWarning?.code).toBe("qitem_body_not_saved");
+      expect(out.created.body).toBe("retained work");
+      expect(out.closed.state).toBe(terminalState);
+      expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
+    } finally { h.db.close(); }
+  });
+
+  it.each(verbs)("%s: a retry from a different sender is refused as qitem_id_reuse and the source stays open", async (verb) => {
+    const h = fullHarness();
+    try {
+      await preUpgradeSelfForward(h, verb);
+      const res = await retry(h, verb, { fromSession: "other@rig" });
+      expect(res.status).toBe(409);
+      expect(((await res.json()) as Out).error).toBe("qitem_id_reuse");
+      expect(h.repo.getById("source")!.state).toBe("pending");
       expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
     } finally { h.db.close(); }
   });
 
   it.each(["handoff", "handoff-and-complete"])("%s with nudge on: the exact self id records and sends exactly what a no-host handoff does", async (verb) => {
-    setSelfHostId("self");
     const run = async (named: boolean) => {
       const h = fullHarness();
       try {
-        await h.seed();
-        const res = await post(h.app((async () => { throw new Error("self must not forward"); }) as typeof fetch),
-          `/api/queue/source/${verb}`, { fromSession: "worker@rig", toSession: "next@rig", nudge: true, ...(named ? { hostId: "self" } : {}) });
+        await h.repo.create({ qitemId: "source", sourceSession: "lead@rig", destinationSession: "worker@rig", body: "retained work", tags: ["keep"], nudge: false });
+        const res = await post(h.app, `/api/queue/source/${verb}`, { fromSession: "worker@rig", toSession: "next@rig", nudge: true, ...(named ? { hostId: "self" } : {}) });
         const out = (await res.json()) as { created: { qitemId: string } };
         const normalize = (list: unknown[]) => list.map((row) => Object.fromEntries(Object.entries(row as Record<string, unknown>).map(([k, v]) => [k,
           ["ts_created", "ts_updated", "ts", "last_nudge_attempt", "claimed_at"].includes(k) && v !== null ? "<time>"

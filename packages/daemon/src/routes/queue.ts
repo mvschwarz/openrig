@@ -7,7 +7,7 @@ import type {
   QueueState,
 } from "../domain/queue-repository.js";
 import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure } from "../domain/queue-repository.js";
-import type { QueueItem } from "../domain/queue-repository.js";
+import type { QueueItem, QueueCreateInput } from "../domain/queue-repository.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
 import { requireSenderIdentity, resolveRecordedProvenance, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
 import { hostname as osHostname } from "node:os";
@@ -318,6 +318,8 @@ export function queueRoutes(): Hono {
       evidenceRef?: string | null;
       nudge?: boolean;
     },
+    createSuccessor: (forwardBody: Record<string, unknown>) => Promise<{ ok: true; payload: unknown } | { ok: false; response: Response }> =
+      (forwardBody) => forwardQueueWrite(c, hostId, "/api/queue/create", forwardBody),
   ): Promise<Response> {
     const repo = getRepo(c);
     const source = repo.getById(qitemId);
@@ -375,7 +377,7 @@ export function queueRoutes(): Hono {
 
     // (3) Successor-create FIRST — origin-owns-the-record; failure leaves the
     // source untouched (never-drop).
-    const fwd = await forwardQueueWrite(c, hostId, "/api/queue/create", forwardBody);
+    const fwd = await createSuccessor(forwardBody);
     if (!fwd.ok) return fwd.response;
 
     // (4) Source-close SECOND (idempotent absorb / structured conflict).
@@ -401,38 +403,26 @@ export function queueRoutes(): Hono {
   /**
    * A handoff addressed to this daemon's own host id is local. Before that was
    * so, a registry entry naming this daemon sent it out and back as a cross-host
-   * handoff keyed by the deterministic successor id. If such a successor already
-   * exists (its create committed but the source close did not), finish that
-   * handoff with the same idempotent close instead of minting a second successor.
-   * Returns null when there is no such successor.
+   * handoff keyed by the deterministic successor id. When that successor already
+   * exists, the retry runs the same cross-host choreography with the receiving
+   * create done in process: the create the forward reached, so the same
+   * primary-key absorb, id-reuse refusal and body-not-saved warning, then the
+   * same idempotent close. A fresh self write takes the ordinary local path.
    */
-  function closeTowardPriorSelfForward(
-    c: { get: (key: string) => unknown; json: (body: unknown, status?: number) => Response },
-    qitemId: string,
-    hostId: string,
-    terminalState: "handed-off" | "done",
-    body: { fromSession: string; toSession: string; transitionNote?: string },
-  ): Response | null {
-    const repo = getRepo(c);
-    const source = repo.getById(qitemId);
-    const successor = repo.getById(deriveCrossHostSuccessorId(qitemId, body.toSession, hostId));
-    if (!source || !successor || successor.destinationSession !== body.toSession || !successor.chainOfRecord?.includes(qitemId)) return null;
-    // Same close target as crossHostHandoff's re-drive, including its pre-convention key.
-    const legacyClosureTarget = `${body.toSession}@${hostId}`;
-    const sourceTerminal = source.state === "done" || source.state === "handed-off";
-    try {
-      const closed = repo.closeCrossHostHandoffSource({
-        qitemId,
-        fromSession: body.fromSession,
-        toSession: body.toSession,
-        closureTarget: sourceTerminal && source.closureTarget === legacyClosureTarget ? legacyClosureTarget : `${successor.qitemId}@${hostId}`,
-        terminalState,
-        transitionNote: body.transitionNote,
-      });
-      return c.json({ closed: closed.item, created: successor }, 201);
-    } catch (err) {
-      return errorResponse(c, err);
-    }
+  function priorSelfForwardSuccessor(c: { get: (key: string) => unknown }, qitemId: string, toSession: string, hostId: string): boolean {
+    return Boolean(getRepo(c).getById(deriveCrossHostSuccessorId(qitemId, toSession, hostId)));
+  }
+  function createSuccessorInProcess(c: { get: (key: string) => unknown; json: (body: unknown, status?: number) => Response }) {
+    return async (forwardBody: Record<string, unknown>): Promise<{ ok: true; payload: unknown } | { ok: false; response: Response }> => {
+      try {
+        // Recorded as the receiving /create records a forwarded write: no transport header, so claimed:v1.
+        const item = await getRepo(c).create({ ...(forwardBody as unknown as QueueCreateInput), identityProvenance: "claimed:v1" });
+        const advisory = destinationAdvisory(c, item.destinationSession);
+        return { ok: true, payload: { ...item, ...(advisory ? { advisories: [advisory] } : {}) } };
+      } catch (err) {
+        return { ok: false, response: errorResponse(c, err) };
+      }
+    };
   }
 
   // POST /create
@@ -673,25 +663,26 @@ export function queueRoutes(): Hono {
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
     }
 
+    const crossHostBody = {
+      fromSession,
+      toSession: body.toSession,
+      body: body.body,
+      transitionNote: body.transitionNote,
+      priority: body.priority,
+      tier: body.tier,
+      tags: body.tags,
+      targetRepo: body.targetRepo,
+      summary: body.summary,
+      evidenceRef: body.evidenceRef,
+      nudge: body.nudge,
+    };
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
-      return crossHostHandoff(c, qitemId, body.hostId, "handed-off", {
-        fromSession,
-        toSession: body.toSession,
-        body: body.body,
-        transitionNote: body.transitionNote,
-        priority: body.priority,
-        tier: body.tier,
-        tags: body.tags,
-        targetRepo: body.targetRepo,
-        summary: body.summary,
-        evidenceRef: body.evidenceRef,
-        nudge: body.nudge,
-      });
+      return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody);
     }
     // Exact self id: finish a handoff that an earlier self-forward already started.
-    if (typeof body.hostId === "string" && body.hostId === getSelfHostId()) {
-      const prior = closeTowardPriorSelfForward(c, qitemId, body.hostId, "handed-off", { fromSession, toSession: body.toSession, transitionNote: body.transitionNote });
-      if (prior) return prior;
+    if (typeof body.hostId === "string" && body.hostId === getSelfHostId()
+      && priorSelfForwardSuccessor(c, qitemId, crossHostBody.toSession, body.hostId)) {
+      return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody, createSuccessorInProcess(c));
     }
 
     try {
@@ -751,25 +742,26 @@ export function queueRoutes(): Hono {
       if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
     }
 
+    const crossHostBody = {
+      fromSession,
+      toSession: body.toSession,
+      body: body.body,
+      transitionNote: body.transitionNote,
+      priority: body.priority,
+      tier: body.tier,
+      tags: body.tags,
+      targetRepo: body.targetRepo,
+      summary: body.summary,
+      evidenceRef: body.evidenceRef,
+      nudge: body.nudge,
+    };
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
-      return crossHostHandoff(c, qitemId, body.hostId, "done", {
-        fromSession,
-        toSession: body.toSession,
-        body: body.body,
-        transitionNote: body.transitionNote,
-        priority: body.priority,
-        tier: body.tier,
-        tags: body.tags,
-        targetRepo: body.targetRepo,
-        summary: body.summary,
-        evidenceRef: body.evidenceRef,
-        nudge: body.nudge,
-      });
+      return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody);
     }
     // Exact self id: finish a handoff that an earlier self-forward already started.
-    if (typeof body.hostId === "string" && body.hostId === getSelfHostId()) {
-      const prior = closeTowardPriorSelfForward(c, qitemId, body.hostId, "done", { fromSession, toSession: body.toSession, transitionNote: body.transitionNote });
-      if (prior) return prior;
+    if (typeof body.hostId === "string" && body.hostId === getSelfHostId()
+      && priorSelfForwardSuccessor(c, qitemId, crossHostBody.toSession, body.hostId)) {
+      return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody, createSuccessorInProcess(c));
     }
 
     try {

@@ -242,7 +242,8 @@ message-passing closure (never 2PC).**
   lives). Without a `hostId`, with `local`, or with this daemon's own resolved
   host id (an exact, case-sensitive match), create and handoff take the
   local path; a self-addressed handoff whose deterministic cross-host
-  successor an earlier self-forward already created closes toward it. The
+  successor an earlier self-forward already created runs that cross-host
+  create and close in process. The
   hot-potato validation contract (§3) is unweakened across the boundary: the
   cross-host close always records `handed_off_to` with a target.
 
