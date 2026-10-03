@@ -19,6 +19,7 @@ it("rejects failed rig discovery and incomplete node inventory over native HTTP"
   let failedRoute = "/api/ps";
   let status = 503;
   let malformedNodes = false;
+  let malformedRigs = false;
   const requests: Array<{ method: string; path: string }> = [];
   const candidate = {
     rigId: "rig-a", rigName: "alpha", logicalId: "orch.lead", canonicalSessionName: "orch-lead@alpha",
@@ -31,7 +32,7 @@ it("rejects failed rig discovery and incomplete node inventory over native HTTP"
     requests.push({ method: req.method!, path: req.url! });
     const code = req.url === failedRoute ? status : 200;
     const data = req.url === "/api/ps"
-      ? code === 200 ? [{ rigId: "rig-a", name: "alpha" }, { rigId: "rig-b", name: "beta" }] : []
+      ? code === 200 ? malformedRigs ? null : [{ rigId: "rig-a", name: "alpha" }, { rigId: "rig-b", name: "beta" }] : []
       : req.url === "/api/rigs/rig-a/nodes" ? [candidate] : code === 200 && !malformedNodes ? [] : { error: "inventory unavailable" };
     res.writeHead(code, { "Content-Type": "application/json" });
     res.end(JSON.stringify(data));
@@ -58,7 +59,11 @@ it("rejects failed rig discovery and incomplete node inventory over native HTTP"
       }
     }
   }
-  failedRoute = ""; malformedNodes = true; process.exitCode = undefined; log.mockClear(); error.mockClear();
+  failedRoute = ""; malformedRigs = true; process.exitCode = undefined; log.mockClear(); error.mockClear();
+  await compactPlanCommand(deps).parseAsync(["--json"], { from: "user" });
+  expect(process.exitCode).toBe(2); expect(error.mock.calls.flat().join(" ")).toContain("Rig inventory is not an array");
+  expect(log).not.toHaveBeenCalled();
+  malformedRigs = false; malformedNodes = true; process.exitCode = undefined; log.mockClear(); error.mockClear();
   await compactPlanCommand(deps).parseAsync(["--json"], { from: "user" });
   expect(process.exitCode).toBe(2); expect(error.mock.calls.flat().join(" ")).toContain("is not an array");
   expect(log).not.toHaveBeenCalled();

@@ -423,7 +423,10 @@ Examples:
         if (psResult.status !== 200) {
           throw new Error(`Rig inventory returned HTTP ${psResult.status}`);
         }
-        const rigs = psResult.data ?? [];
+        if (!Array.isArray(psResult.data)) {
+          throw new Error("Rig inventory is not an array");
+        }
+        const rigs = psResult.data;
         const targetRigs = opts.rig ? rigs.filter((rig) => rig.name === opts.rig) : rigs;
 
         if (opts.rig && targetRigs.length === 0) {
