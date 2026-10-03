@@ -3,11 +3,10 @@
 // frames. Pushes are CHANGE NOTIFICATIONS ONLY (seat + seq) — the open view re-renders
 // by rehydrating the same /api/ps projection, so no second activity derivation exists
 // anywhere on this path (desk-accepted shape, ruling row qitem-20260827001530).
-// NO IDLE POLLING: a null open (endpoint absent / daemon unreachable / non-SSE answer)
-// DISABLES the leg permanently — zero retries, the S16 cadence contract holds
-// (one feature-detect request at startup, then silence). Reconnect happens ONLY after a
-// genuinely-established stream drops, with doubling backoff (connection maintenance,
-// never a data poll; timers unref'd).
+// A definite null open (non-OK / non-SSE answer) disables the leg permanently.
+// Opening deadlines and network errors are temporary connection failures, like an
+// established stream dropping. Retry with doubling backoff, capped at 30 seconds;
+// reconnection is connection maintenance, never a data poll (timers unref'd).
 
 export interface ActivityEventsSubscription {
   close: () => void;
@@ -15,14 +14,14 @@ export interface ActivityEventsSubscription {
 
 export interface SubscribeActivityEventsOpts {
   /** Opens the SSE stream (daemon-client.openActivityEvents). null = leg unavailable —
-   *  disable permanently, never retry. */
+   *  disable permanently, never retry. Rejection means a temporary open failure. */
   open: () => Promise<Response | null>;
   /** One pushed oracle change (parsed SSE data line). The consumer refreshes; it never
    *  reads activity fields from the push. */
   onEvent: (event: { type: string; seatNodeId?: string; seq?: number }) => void;
   /** Connection lifecycle notes (drop/reconnect/unavailable) — surfaced, never fatal. */
   onStatus?: (status: "connected" | "dropped" | "reconnecting" | "unavailable") => void;
-  /** Initial reconnect backoff (ms) after a REAL stream drops; doubles to 30s cap. */
+  /** Initial backoff (ms) after a temporary open failure or stream drop; 30s cap. */
   reconnectDelayMs?: number;
 }
 
@@ -40,7 +39,7 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
 
   const connect = async (): Promise<void> => {
     if (closed) return;
-    let established = false;
+    let retry = false;
     try {
       const res = await opts.open();
       if (closed) {
@@ -51,7 +50,7 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
         opts.onStatus?.("unavailable");
         return; // feature-detect said no — the leg stays off, S16 behavior intact
       }
-      established = true;
+      retry = true;
       opts.onStatus?.("connected");
       const reader = res.body.getReader();
       activeReader = reader;
@@ -108,13 +107,14 @@ export function subscribeActivityEvents(opts: SubscribeActivityEventsOpts): Acti
         }
       }
     } catch {
-      // Read/parser errors on an established stream are drops. Start cancelling
+      retry = true;
+      // Opening errors are temporary; read/parser errors on an established stream are drops. Start cancelling
       // its body before reconnecting, without waiting for underlying cleanup.
       void activeReader?.cancel().catch(() => {});
     } finally {
       activeReader = null;
     }
-    if (!closed && established) {
+    if (!closed && retry) {
       opts.onStatus?.("dropped");
       reconnectTimer = setTimeout(() => {
         opts.onStatus?.("reconnecting");

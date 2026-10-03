@@ -252,7 +252,8 @@ export class PodBundleAssembler {
       throw new Error(`"${relPath}" resolves outside the rig root through a symlink; copy the file into the rig to bundle it`);
     }
     const content = this.fs.readFileBuffer(realPath);
-    const mode = this.fs.fileMode?.(realPath);
+    const sourceMode = this.fs.fileMode?.(realPath);
+    const mode = sourceMode === undefined ? undefined : sourceMode | 0o600;
     assertShippableSubstance([{ path: relPath, bytes: content }]);
     this.fs.mkdirp(nodePath.dirname(nodePath.join(outputDir, relPath)));
     this.fs.writeFile(nodePath.join(outputDir, relPath), content, mode);
@@ -285,7 +286,9 @@ export class PodBundleAssembler {
     for (const { file, content, mode } of sources) {
       const destPath = nodePath.join(destDir, file);
       this.fs.mkdirp(nodePath.dirname(destPath));
-      this.fs.writeFile(destPath, content, mode);
+      // Staging may rewrite this file later; keep execute/access bits while
+      // allowing the staging owner to read and write read-only sources.
+      this.fs.writeFile(destPath, content, mode === undefined ? undefined : mode | 0o600);
       collected.push(nodePath.join(relPrefix, file).replace(/\\/g, "/"));
     }
   }

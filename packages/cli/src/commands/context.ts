@@ -466,6 +466,7 @@ Examples:
       try {
         const client = await getClient();
         const res = await client.get<ContextPackEntryWire[]>("/api/context-packs/library");
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         const entries = res.data ?? [];
         if (opts.json) {
           console.log(JSON.stringify(entries, null, 2));
@@ -671,9 +672,10 @@ Examples:
         const res = await client.get<{
           profileId?: string;
           phases?: Array<{ id: string; kind: string; sources?: string[]; estimatedTokens: number }>;
-          pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number }>;
+          pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number; writtenAt?: string }>;
           totalEstimatedTokens?: number;
           budget?: { limitTokens: number; overageTokens: number; dropCandidates: Array<{ atomId: string; priority: string; estimatedTokens: number }> };
+          warnings?: string[];
           provenanceWarnings?: string[];
           message?: string;
           error?: string;
@@ -695,6 +697,7 @@ Examples:
         }
         // Warnings and the budget report ride stderr so stdout is exactly the
         // composed walk an agent consumes.
+        for (const w of profile.warnings ?? []) console.error(`WARNING ${w}`);
         for (const w of profile.provenanceWarnings ?? []) console.error(`PROVENANCE ${w}`);
         if (profile.budget) {
           console.error(
@@ -708,7 +711,8 @@ Examples:
           // outside its root — self-describing payload, zero composed bytes
           // touched.
           const escaped = (p as { provenance?: { escapesRoot?: boolean } }).provenance?.escapesRoot ? " !ESCAPED-ROOT" : "";
-          console.log(`=== ${p.atomId} [${p.sourceKind}${escaped}] ${p.address} (~${p.estimatedTokens} tokens)`);
+          const written = p.writtenAt ? ` written ${p.writtenAt}` : "";
+          console.log(`=== ${p.atomId} [${p.sourceKind}${escaped}] ${p.address} (~${p.estimatedTokens} tokens)${written}`);
           console.log(p.text);
           console.log("");
         }
@@ -835,7 +839,14 @@ Examples:
           if (targetExists) {
             throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);
           }
-          cpSync(source, targetDir, { recursive: true });
+          const staging = mkdtempSync(join(targetRoot, ".tmp-add-"));
+          try {
+            cpSync(source, staging, { recursive: true });
+            mkdirSync(dirname(targetDir), { recursive: true });
+            renameSync(staging, targetDir);
+          } finally {
+            rmSync(staging, { recursive: true, force: true });
+          }
         }
         // Sync the daemon library so the new pack appears immediately.
         const client = await getClient();

@@ -1,7 +1,7 @@
 // Maintainer-owned file/launch fixtures only: no native Claude, daemon, tmux,
 // provider or real user configuration. The fake reads the selected state; this
 // proves OpenRig's routing, not Claude ingestion or successful login.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -79,7 +79,7 @@ console.log(JSON.stringify({env:{HOME:process.env.HOME,CLAUDE_CONFIG_DIR:dir}, s
 }
 
 describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects the launch config home", () => {
-  it.each(["fresh", "resume"])("classic %s keeps bootstrap in its inherited default home", async mode => {
+  it.each(["fresh", "resume"])("classic %s child reading its inherited default home gets bootstrap there", async mode => {
     const f = fixture("alternate", false, true);
     const alternateBefore = fs.readFileSync(f.statePath, "utf8");
     let pending = "";
@@ -97,8 +97,12 @@ describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects 
     expect(observed.env).not.toHaveProperty("CLAUDE_CONFIG_DIR");
     expect(observed.statePath).toBe(path.join(f.env.HOME, ".claude.json"));
     expect(observed.state).toMatchObject({ ...sentinel, hasCompletedOnboarding: true, projects: { ...sentinel.projects, [f.cwd]: { hasTrustDialogAccepted: true } } });
-    expect(new Set(f.writes)).toEqual(new Set([observed.statePath]));
-    expect(fs.readFileSync(f.statePath, "utf8")).toBe(alternateBefore);
+    // Deliberately replaces #565's "writes exactly one file / selected home untouched": the bootstrap
+    // cannot see the classic child's environment, so the daemon's selected home is provisioned too,
+    // with the same two flags and every other field preserved.
+    expect(new Set(f.writes)).toEqual(new Set([observed.statePath, f.statePath]));
+    expect(JSON.parse(fs.readFileSync(f.statePath, "utf8"))).toEqual({ ...JSON.parse(alternateBefore), hasCompletedOnboarding: true,
+      projects: { ...JSON.parse(alternateBefore).projects, [f.cwd]: { hasTrustDialogAccepted: true } } });
   });
   it.each(["{broken", "[]", "null", '{"projects":[]}', "invalid project"])("classic bootstrap preserves unmergeable state (%s)", async value => {
     const f = fixture("alternate", false, true);
@@ -107,7 +111,7 @@ describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects 
     fs.writeFileSync(file, before);
     await f.adapter.deliverStartup([], { ...f.binding, permissionMode: undefined });
     expect(fs.readFileSync(file, "utf8")).toBe(before);
-    expect(f.writes).toEqual([]);
+    expect(f.writes).toEqual([f.statePath]);
   });
   it.each(["relative", "unset"] as const)("startup with missing binding cwd bootstraps the stored node's %s selection", async selection => {
     const f = fixture(selection, true, true);
@@ -199,5 +203,107 @@ describe.skipIf(process.platform === "win32")("Claude managed bootstrap selects 
     expect(f.launches[0].state).toMatchObject({ ...sentinel, hasCompletedOnboarding: true, projects: { ...sentinel.projects, [f.cwd]: { hasTrustDialogAccepted: true } } });
     expect(new Set(f.writes)).toEqual(new Set([f.statePath]));
     for (const [file, text] of f.untouched) expect(fs.readFileSync(file, "utf8")).toBe(text);
+  });
+});
+// A classic (omitted permission mode) seat types `claude` into its pane's shell, which inherits the tmux
+// server's environment, not the daemon's. The bootstrap cannot see that environment, so when the daemon
+// has CLAUDE_CONFIG_DIR it provisions both homes the classic child might read.
+function classicLaunch(f: ReturnType<typeof fixture>, childEnv: Record<string, string>) {
+  let pending = "";
+  f.tmux.sendText = async (_target, text) => { pending = text; return { ok: true }; };
+  f.tmux.sendKeys = async () => {
+    f.launches.push(JSON.parse(execFileSync("/bin/sh", ["-c", pending], {
+      encoding: "utf8", cwd: f.cwd, env: { ...childEnv, PATH: f.env.PATH + ":/usr/bin:/bin" },
+    })));
+    return { ok: true };
+  };
+  return { ...f.binding, permissionMode: undefined };
+}
+
+describe.skipIf(process.platform === "win32")("classic bootstrap when the daemon selects CLAUDE_CONFIG_DIR", () => {
+  it("child inheriting the daemon's default-looking selection gets onboarding and trust (the mvs-dev-01 shape)", async () => {
+    const f = fixture("default-looking", false, false);
+    const binding = classicLaunch(f, { HOME: f.env.HOME, CLAUDE_CONFIG_DIR: f.env.CLAUDE_CONFIG_DIR });
+    await f.adapter.deliverStartup([], binding);
+    expect(await f.adapter.launchHarness(binding, { name: "seat" })).toMatchObject({ ok: true });
+    const observed = f.launches[0];
+    expect(observed.statePath).toBe(f.statePath);
+    expect(observed.state).toMatchObject({ hasCompletedOnboarding: true, projects: { [f.cwd]: { hasTrustDialogAccepted: true } } });
+  });
+  it("provisions both homes, preserving every other field in each", async () => {
+    const f = fixture("alternate", false, true);
+    const homeFile = path.join(f.env.HOME, ".claude.json");
+    const homeBefore = JSON.parse(fs.readFileSync(homeFile, "utf8"));
+    const selectedBefore = JSON.parse(fs.readFileSync(f.statePath, "utf8"));
+    await f.adapter.deliverStartup([], classicLaunch(f, { HOME: f.env.HOME }));
+    for (const [file, before] of [[homeFile, homeBefore], [f.statePath, selectedBefore]] as const) {
+      expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ ...before, hasCompletedOnboarding: true,
+        projects: { ...before.projects, [f.cwd]: { hasTrustDialogAccepted: true } } });
+    }
+    expect(new Set(f.writes)).toEqual(new Set([homeFile, f.statePath]));
+  });
+  it.each(["{broken", "[]", "null"])("unmergeable selected-home state (%s) is preserved with a warning; HOME is still provisioned", async text => {
+    const f = fixture("alternate", false, true);
+    fs.writeFileSync(f.statePath, text);
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanup.push(() => warn.mockRestore());
+    expect(await f.adapter.deliverStartup([], classicLaunch(f, { HOME: f.env.HOME }))).toEqual({ delivered: 0, failed: [] });
+    expect(fs.readFileSync(f.statePath, "utf8")).toBe(text);
+    const homeFile = path.join(f.env.HOME, ".claude.json");
+    expect(f.writes).toEqual([homeFile]);
+    expect(JSON.parse(fs.readFileSync(homeFile, "utf8"))).toMatchObject({ ...sentinel, hasCompletedOnboarding: true });
+    expect(warn.mock.calls.flat().join(" ")).toContain(f.statePath);
+  });
+  it("unmergeable state in both homes is preserved, and the warning names both", async () => {
+    const f = fixture("alternate", false, true);
+    const homeFile = path.join(f.env.HOME, ".claude.json");
+    fs.writeFileSync(homeFile, "[]"); fs.writeFileSync(f.statePath, "{broken");
+    const warn = vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanup.push(() => warn.mockRestore());
+    await f.adapter.deliverStartup([], classicLaunch(f, { HOME: f.env.HOME }));
+    expect(fs.readFileSync(homeFile, "utf8")).toBe("[]");
+    expect(fs.readFileSync(f.statePath, "utf8")).toBe("{broken");
+    expect(f.writes).toEqual([]);
+    const message = warn.mock.calls.flat().join(" ");
+    expect(message).toContain(homeFile);
+    expect(message).toContain(f.statePath);
+  });
+  it.each(["unset", "empty"] as const)("a daemon with %s CLAUDE_CONFIG_DIR provisions only HOME/.claude.json", async selection => {
+    const f = fixture(selection, false, false);
+    await f.adapter.deliverStartup([], classicLaunch(f, { HOME: f.env.HOME }));
+    expect(f.writes).toEqual([path.join(f.env.HOME, ".claude.json")]);
+  });
+});
+
+// Live Claude processes read and write these files, so a file that already carries both flags is
+// never rewritten: no lost concurrent field, no truncated read, and the formatting stays the user's.
+describe.skipIf(process.platform === "win32")("an already-provisioned state file is not rewritten", () => {
+  const provisioned = (cwd: string, extra: Record<string, unknown> = {}) => JSON.stringify({ ...sentinel, ...extra,
+    hasCompletedOnboarding: true, projects: { ...sentinel.projects, [cwd]: { hasTrustDialogAccepted: true, kept: 1 } } });
+  it.each(["managed", "classic"])("%s: both flags present means no write, byte-identical", async route => {
+    const f = fixture("alternate", false, true);
+    const files = route === "managed" ? [f.statePath] : [path.join(f.env.HOME, ".claude.json"), f.statePath];
+    for (const file of files) fs.writeFileSync(file, provisioned(f.cwd, { location: file }));
+    const before = files.map(file => fs.readFileSync(file, "utf8"));
+    const binding = route === "managed" ? f.binding : classicLaunch(f, { HOME: f.env.HOME });
+    expect(await f.adapter.deliverStartup([], binding)).toEqual({ delivered: 0, failed: [] });
+    expect(f.writes).toEqual([]);
+    expect(files.map(file => fs.readFileSync(file, "utf8"))).toEqual(before);
+  });
+  it.each([
+    ["onboarding", (cwd: string) => ({ ...JSON.parse(provisioned(cwd)), hasCompletedOnboarding: undefined })],
+    ["trust", (cwd: string) => ({ ...JSON.parse(provisioned(cwd)), projects: { ...sentinel.projects, [cwd]: { kept: 1 } } })],
+  ] as const)("a missing %s flag means exactly one write, every other field kept", async (_flag, state) => {
+    const f = fixture("alternate", true, true);
+    fs.writeFileSync(f.statePath, JSON.stringify(state(f.cwd)));
+    await f.adapter.deliverStartup([], f.binding);
+    expect(f.writes).toEqual([f.statePath]);
+    expect(JSON.parse(fs.readFileSync(f.statePath, "utf8"))).toEqual(JSON.parse(provisioned(f.cwd)));
+  });
+  it("the post-launch delivery after a provisioning write makes no second write", async () => {
+    const f = fixture("relative", true, false);
+    await f.adapter.deliverStartup([], f.binding);
+    await f.adapter.deliverStartup([], f.binding);
+    expect(f.writes).toEqual([f.statePath]);
   });
 });

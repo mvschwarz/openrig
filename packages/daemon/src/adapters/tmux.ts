@@ -585,8 +585,8 @@ export class TmuxAdapter {
    * buffer leaks. Unique temp + buffer names per call keep parallel `rig up`
    * seats from colliding.
    */
-  async sendText(target: string, text: string): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, beforeWrite));
+  async sendText(target: string, text: string, beforeInput?: () => void): Promise<TmuxResult> {
+    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }));
   }
 
   private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void): Promise<TmuxResult> {
@@ -679,8 +679,8 @@ export class TmuxAdapter {
     }
   }
 
-  async sendKeys(target: string, keys: string[]): Promise<TmuxResult> {
-    return this.guardedInput(target, pane => this.sendKeysUnchecked(pane, keys));
+  async sendKeys(target: string, keys: string[], beforeInput?: () => void): Promise<TmuxResult> {
+    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); beforeInput?.(); return this.sendKeysUnchecked(pane, keys); });
   }
 
   private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {

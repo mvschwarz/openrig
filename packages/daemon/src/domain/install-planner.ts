@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { ResolvedPackage, FsOps } from "./package-resolver.js";
 import { resolveExports, type ResolvedExports, type DeferredExport } from "./role-resolver.js";
+import { roleHookWarnings } from "./package-manifest.js";
 
 // --- Types ---
 
@@ -31,6 +32,7 @@ export interface InstallPlanEntry {
 }
 
 export interface InstallPlan {
+  warnings?: string[];
   packageId?: string; // Set by caller when persisting to DB
   packageName: string;
   packageVersion: string;
@@ -310,6 +312,7 @@ export class InstallPlanner {
     const conflicts = entries.filter((e) => !!e.conflict && !e.deferred);
 
     return {
+      warnings: roleHookWarnings(resolved.manifest),
       // packageId is undefined until caller persists to DB
       packageName: resolved.manifest.name,
       packageVersion: resolved.manifest.version,

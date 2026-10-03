@@ -25,6 +25,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
 
       const res = await client.post<{
         valid: boolean;
+        warnings?: string[];
         error?: string;
         errors?: string[];
         manifest?: { name: string; version: string; summary: string; runtimes: string[]; exportCounts: Record<string, number> };
@@ -45,6 +46,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
 
       const m = res.data.manifest!;
       console.log(`Valid: ${m.name} v${m.version}`);
+      for (const warning of res.data.warnings ?? []) console.log(`  Warning: ${warning}`);
       console.log(`  ${m.summary}`);
       console.log(`  Runtimes: ${m.runtimes.join(", ")}`);
       const ec = m.exportCounts;
@@ -66,6 +68,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
       const res = await client.post<{
         packageName: string;
         packageVersion: string;
+        warnings?: string[];
         entries: Array<{
           exportType: string;
           exportName: string;
@@ -102,6 +105,7 @@ export function packageCommand(depsOverride?: StatusDeps): Command {
       }
 
       console.log(`Plan: ${res.data.packageName} v${res.data.packageVersion}`);
+      for (const warning of res.data.warnings ?? []) console.log(`  Warning: ${warning}`);
       console.log(`  Actionable: ${res.data.actionable}  Deferred: ${res.data.deferred}  Conflicts: ${res.data.conflicts}  No-ops: ${res.data.noOps}`);
 
       if (res.data.entries.length > 0) {

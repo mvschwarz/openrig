@@ -1061,6 +1061,73 @@ profiles:
     db.close();
   });
 
+  it("removes a failed rig when its launched tmux session is already absent", async () => {
+    const { db, rigRepo, inst, adapter, tmux } = setup({
+      [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl"),
+    });
+    (adapter.project as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }],
+    });
+    tmux.probeSession = vi.fn(async () => ({ state: "absent" }));
+    tmux.killSession = vi.fn(async () => ({ ok: false, code: "guard_target_unknown", message: "ambiguous target" }));
+    const prior = rigRepo.createRig("test-rig");
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    expect(adapter.project).toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(rigRepo.findRigsByName("test-rig").map((rig) => rig.id)).toEqual([prior.id]);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig").map((rig) => rig.id)).toEqual([prior.id]);
+    db.close();
+  });
+
+  it("retains a failed rig when the tmux server cannot be reached", async () => {
+    const { db, rigRepo, inst, adapter, tmux } = setup({
+      [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl"),
+    });
+    (adapter.project as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }],
+    });
+    tmux.probeSession = vi.fn(async () => ({
+      state: "transport_unavailable", cause: "no server running on /tmp/tmux-501/default",
+    }));
+    tmux.killSession = vi.fn(async () => ({ ok: true }));
+    const prior = rigRepo.createRig("test-rig");
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    expect(adapter.project).toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(rigRepo.findRigsByName("test-rig")).toHaveLength(2);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig")).toHaveLength(1);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig")[0]?.id).not.toBe(prior.id);
+    db.close();
+  });
+
+  it("retains a failed rig if the tmux server vanishes between probe and kill", async () => {
+    const { db, rigRepo, inst, adapter, tmux } = setup({
+      [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl"),
+    });
+    (adapter.project as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }],
+    });
+    tmux.probeSession = vi.fn(async () => ({ state: "present" }));
+    tmux.killSession = vi.fn(async () => ({
+      ok: false, code: "session_not_found", message: "no server running on /tmp/tmux-501/default",
+    }));
+    const prior = rigRepo.createRig("test-rig");
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    expect(tmux.killSession).toHaveBeenCalled();
+    expect(rigRepo.findRigsByName("test-rig")).toHaveLength(2);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig")[0]?.id).not.toBe(prior.id);
+    db.close();
+  });
+
   // Agent Starter v1 vertical M1 — forward-compat smoke. A member spec
   // carrying the new `starter_ref` field (normalized as `starterRef`)
   // must pass through pod-aware instantiation without breaking the

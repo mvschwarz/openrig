@@ -84,8 +84,9 @@ issue's current status; a similar symptom alone is not a diagnosis.
 - Codex prompt variants not recognised as idle: [#79](https://github.com/mvschwarz/openrig/issues/79).
 - Codex asks about hook trust at first launch: [#17](https://github.com/mvschwarz/openrig/issues/17), not reproduced
   by the team.
-- Codex seats on the default `workspace-write` sandbox can't reach the local daemon, so their queue work fails:
-  [#275](https://github.com/mvschwarz/openrig/issues/275).
+- A Codex seat on the default `workspace-write` sandbox starts without network access, so it can't reach the local
+  daemon, when its Codex configuration sets network access off, a managed requirement could restrict it, or Codex
+  doesn't answer OpenRig's configuration read in time: [#275](https://github.com/mvschwarz/openrig/issues/275).
 - Stopping the daemon can report a timeout while closing connections:
   [#166](https://github.com/mvschwarz/openrig/issues/166).
 

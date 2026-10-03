@@ -11,7 +11,7 @@
 // composition never silently truncates (mini-req 9, D2: budgets flag, never govern).
 
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { makeProfileReadFile } from "../src/domain/context-packs/profile-source-resolver.js";
@@ -141,6 +141,35 @@ describe("composeProfile — fail-loud resolution (the Atom-1 contract carried t
     const graph = [atom({ id: "misaddressed", address: "walk.md#not-there", order: 1 })];
     expect(() => composeProfile({ atoms: graph, situation: "fresh", runtime: "claude", readFile }))
       .toThrow(/misaddressed|not-there/);
+  });
+
+  it("post-compaction skips ONLY a genuinely absent seat RECAP, and reports it; handover and other seat atoms still fail", () => {
+    const root = mkdtempSync(join(tmpdir(), "profile-absent-recap-"));
+    try {
+      const seat = join(root, "seat");
+      mkdirSync(seat);
+      writeFileSync(join(root, "walk.md"), "## Welcome\nhello");
+      const readFile = makeProfileReadFile({ packDir: root, roots: { seat } });
+      const welcome = atom({ id: "welcome", address: "walk.md#welcome", order: 1, situations: ["post-compaction"] });
+      const recap = atom({ id: "recap", address: "seat:RECAP.md#decisions", order: 9, situations: ["handover", "post-compaction"] });
+      const pc = composeProfile({ atoms: [welcome, recap], situation: "post-compaction", runtime: "claude", readFile });
+      expect(pc.pieces.map((p) => p.atomId)).toEqual(["welcome"]);
+      expect(pc.skipped).toEqual([{ atomId: "recap", address: "seat:RECAP.md#decisions" }]);
+      expect(() => composeProfile({ atoms: [welcome, recap], situation: "handover", runtime: "claude", readFile }))
+        .toThrow(/recap/);
+      const lore = atom({ id: "lore", address: "seat:LORE.md", order: 5, situations: ["post-compaction"] });
+      expect(() => composeProfile({ atoms: [welcome, lore], situation: "post-compaction", runtime: "claude", readFile }))
+        .toThrow(/lore/);
+      const missingRoot = makeProfileReadFile({ packDir: root, roots: { seat: join(root, "no-such-seat") } });
+      expect(() => composeProfile({ atoms: [welcome, recap], situation: "post-compaction", runtime: "claude", readFile: missingRoot }))
+        .toThrow(/recap/);
+      writeFileSync(join(seat, "RECAP.md"), "## Decisions\nkept");
+      const present = composeProfile({ atoms: [welcome, recap], situation: "post-compaction", runtime: "claude", readFile });
+      expect(present.pieces.map((p) => p.atomId)).toEqual(["welcome", "recap"]);
+      expect(present.skipped).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

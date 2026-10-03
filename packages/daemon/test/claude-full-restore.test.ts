@@ -105,10 +105,18 @@ describe("managed Claude full down/up", () => {
       vi.mocked(tmux.sendText).mockClear(); vi.mocked(tmux.sendKeys).mockClear();
       const transport = new SessionTransport({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, listProcesses, sleep: async () => {} });
       const sent = await transport.send(name, "ordinary restored message");
-      // A PID absent from the observation is uncertainty, not a positively wrong pane.
-      const delivers = mode === "exact" || mode === "native" || mode === "unobserved-pane-process";
+      // Ordinary delivery warns on token-only uncertainty, even though strict
+      // restore above still reports attention_required. This does not prove
+      // either conversation is current or that a /clear happened.
+      const unverified = mode === "wrong-token" || mode === "unobserved-pane-process";
+      const delivers = mode === "exact" || mode === "native" || unverified;
       expect(sent, JSON.stringify(sent)).toMatchObject({ ok: delivers });
-      if (mode === "unobserved-pane-process") expect(sent.warning).toContain("without verified native identity");
+      if (unverified) expect(sent.warning).toContain("without verified native identity");
+      if (mode === "wrong-token") {
+        expect(sent.warning).toContain("current conversation is unverified");
+        expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get((latest as { id: string }).id))
+          .toEqual({ startup_status: "attention_required" });
+      }
       if (mode !== "exact") expect(sent.reason).not.toBe("tmux_unavailable");
       expect(tmux.sendText).toHaveBeenCalledTimes(delivers ? 1 : 0);
       expect(tmux.sendKeys).toHaveBeenCalledTimes(delivers ? 1 : 0);

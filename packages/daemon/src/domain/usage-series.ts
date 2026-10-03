@@ -125,7 +125,10 @@ function hoursBetween(aIso: string, bIso: string): number {
 
 /** The money question: top-N seats by token burn over the last H hours. */
 export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
-  const sinceIso = new Date(new Date(q.nowIso).getTime() - q.windowHours * 3_600_000).toISOString();
+  const nowMs = new Date(q.nowIso).getTime();
+  const sinceIso = new Date(nowMs - q.windowHours * 3_600_000).toISOString();
+  // Stored captures use millisecond ISO timestamps; retain the exact endpoint.
+  const untilIso = new Date(nowMs + 1).toISOString();
 
   const seats = (
     db.prepare(`SELECT DISTINCT seat_session AS s FROM usage_samples`).all() as Array<{ s: string }>
@@ -135,12 +138,16 @@ export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
   const unknown: UnknownSeat[] = [];
 
   for (const seat of seats) {
-    const ctx = queryUsageSeries(db, { seatSession: seat, lane: "context", sinceIso });
-    if (ctx.length === 0) {
+    const rawContext = queryUsageSeries(db, { seatSession: seat, lane: "context", sinceIso, untilIso });
+    if (rawContext.length === 0) {
       // history exists (the seat appeared in the census) but nothing fresh
       unknown.push({ seatSession: seat, reason: "no_fresh_samples" });
       continue;
     }
+    // Missing counters are unknown observations, not a restart to zero.
+    const ctx = rawContext.filter((row): row is UsageSeriesRow & {
+      totalInputTokens: number; totalOutputTokens: number;
+    } => Number.isFinite(row.totalInputTokens) && Number.isFinite(row.totalOutputTokens));
     if (ctx.length < 2) {
       unknown.push({ seatSession: seat, reason: "insufficient_samples" });
       continue;
@@ -148,8 +155,8 @@ export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
     let tokensDelta = 0;
     let resets = 0;
     for (let i = 1; i < ctx.length; i += 1) {
-      const prev = (ctx[i - 1]!.totalInputTokens ?? 0) + (ctx[i - 1]!.totalOutputTokens ?? 0);
-      const cur = (ctx[i]!.totalInputTokens ?? 0) + (ctx[i]!.totalOutputTokens ?? 0);
+      const prev = ctx[i - 1]!.totalInputTokens + ctx[i - 1]!.totalOutputTokens;
+      const cur = ctx[i]!.totalInputTokens + ctx[i]!.totalOutputTokens;
       const delta = cur - prev;
       if (delta >= 0) tokensDelta += delta;
       else resets += 1; // a restart dropped the totals — never a negative burn
@@ -159,7 +166,7 @@ export function computeTopBurn(db: Database, q: TopBurnQuery): TopBurnResult {
 
     const windows: WindowVelocity[] = [];
     for (const w of ["five_hour", "weekly"] as const) {
-      const rows = queryUsageSeries(db, { seatSession: seat, lane: "provider_window", sinceIso }).filter(
+      const rows = queryUsageSeries(db, { seatSession: seat, lane: "provider_window", sinceIso, untilIso }).filter(
         (r) => r.window === w,
       );
       if (rows.length === 0) continue;
