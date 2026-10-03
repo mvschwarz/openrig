@@ -134,7 +134,7 @@ export function planProjection(input: ProjectionInput): PlanResult {
         resourcePath = pluginSource.path;
         if (resourcePath.startsWith("openrig-home:") && nodePath.isAbsolute(resourcePath.slice("openrig-home:".length))) {
           errors.push(`Plugin "${qr.effectiveId}": openrig-home: requires a relative path.`);
-          continue;
+          return { ok: false, errors };
         }
         absolutePath = resolvePluginPath(resourcePath, qr.sourcePath, OPENRIG_HOME);
       } else {
