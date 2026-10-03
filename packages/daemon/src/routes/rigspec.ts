@@ -13,7 +13,7 @@ import { rigPreflight } from "../domain/rigspec-preflight.js";
 import { RigNotFoundError } from "../domain/errors.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
-import { validateRigSpecImport } from "../domain/spec-validation-service.js";
+import { RigSpecParseError, validateRigSpecImport } from "../domain/spec-validation-service.js";
 
 export const rigspecImportRoutes = new Hono();
 
@@ -215,8 +215,8 @@ rigspecImportRoutes.post("/validate", async (c) => {
   try {
     return c.json(validateRigSpecImport(body));
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return c.json({ valid: false, errors: [message] }, 400);
+    if (!(err instanceof RigSpecParseError)) throw err;
+    return c.json({ valid: false, errors: [err.message] }, 400);
   }
 });
 

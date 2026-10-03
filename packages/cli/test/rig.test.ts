@@ -166,6 +166,27 @@ describe("rig spec", () => {
     for (const operation of Object.values(lifecycleDeps)) expect(operation).not.toHaveBeenCalled();
   });
 
+  it.each([
+    'version: "1"\nname: broken\nnodes: [null]\n',
+    'version: "0.2"\nname: broken\npods: [null]\n',
+    'version: "1"\nname: broken\nnodes: []\nedges: [null]\n',
+  ])("reports validator exceptions as internal failure, not invalid YAML: %s", async (yaml) => {
+    for (const json of [false, true]) {
+      const lifecycleDeps = mockLifecycleDeps();
+      const clientFactory = vi.fn(() => { throw new Error("must stay local"); });
+      const program = new Command().addCommand(rigCommand({ lifecycleDeps, clientFactory, readFile: () => yaml }));
+      const { logs, exitCode } = await captureLogs(() => program.parseAsync([
+        "node", "rig", "spec", "validate", "rig.yaml", ...(json ? ["--json"] : []),
+      ]));
+      expect(exitCode).toBe(1);
+      const message = "Internal validator error; validation did not complete.";
+      if (json) expect(JSON.parse(logs.join("\n"))).toEqual({ error: message });
+      else expect(logs.join("\n")).toBe(message);
+      expect(clientFactory).not.toHaveBeenCalled();
+      for (const operation of Object.values(lifecycleDeps)) expect(operation).not.toHaveBeenCalled();
+    }
+  });
+
   it("advertises local validation in command help", () => {
     const validate = rigCommand().commands.find(command => command.name() === "validate")!;
     expect(validate.helpInformation()).toContain("locally (no daemon required)");

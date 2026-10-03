@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { rigspecImportRoutes } from "../src/routes/rigspec.js";
 import { validateRigSpecImport } from "../src/domain/spec-validation-service.js";
@@ -27,4 +27,22 @@ it("preserves the HTTP parse-error status and parser message", async () => {
   const result = await response.json();
   expect(result.valid).toBe(false);
   expect(() => validateRigSpecImport(yaml)).toThrow(result.errors[0]);
+});
+
+// A schema implementation failure is not a client parse error.
+it.each([
+  'version: "1"\nname: broken\nnodes: [null]\n',
+  'version: "0.2"\nname: broken\npods: [null]\n',
+  'version: "1"\nname: broken\nnodes: []\nedges: [null]\n',
+])("preserves HTTP 500 for validator exceptions: %s", async (yaml) => {
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const app = new Hono().route("/api/rigs/import", rigspecImportRoutes);
+    const response = await app.request("/api/rigs/import/validate", { method: "POST", body: yaml });
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("Internal Server Error");
+    expect(log).toHaveBeenCalledWith(expect.any(TypeError));
+  } finally {
+    log.mockRestore();
+  }
 });

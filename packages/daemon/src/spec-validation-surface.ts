@@ -1,1 +1,1 @@
-export { validateRigSpecImport } from "./domain/spec-validation-service.js";
+export { RigSpecParseError, validateRigSpecImport } from "./domain/spec-validation-service.js";

@@ -201,12 +201,19 @@ export function rigCommand(depsOverride?: RigDeps): Command {
         return;
       }
 
-      const { validateRigSpecImport } = await import("@openrig/daemon/spec-validation");
+      const { RigSpecParseError, validateRigSpecImport } = await import("@openrig/daemon/spec-validation");
       let data: ReturnType<typeof validateRigSpecImport>;
       try {
         data = validateRigSpecImport(yaml);
       } catch (err) {
-        data = { valid: false, errors: [err instanceof Error ? err.message : String(err)] };
+        if (!(err instanceof RigSpecParseError)) {
+          const error = "Internal validator error; validation did not complete.";
+          if (opts.json) console.log(JSON.stringify({ error }));
+          else console.error(error);
+          process.exitCode = 1;
+          return;
+        }
+        data = { valid: false, errors: [err.message] };
       }
 
       if (opts.json) {
