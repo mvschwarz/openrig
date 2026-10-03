@@ -12,7 +12,7 @@ applies-when: |
   Project UI.
 siblings: [content-surfaces.md, daemon-core.md, ../ui/project-and-for-you.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-verified-against-source: b6d37bfadcc189be8fd61e35abfc09676437bf48
 last-updated: 2026-10-03
 ---
 
@@ -26,7 +26,7 @@ through `whoami` / node-inventory and gate per-item repo scope. Alongside it, a
 the Project UI's mission / slice surfaces.
 
 > Paths are relative to `packages/daemon/src/` unless prefixed `packages/` or
-> `docs/`. Verified against source at main `254122872cf477511514979a4300b695d77cd1f7`. Each count sits beside
+> `docs/`. Verified against source at main `b6d37bfadcc189be8fd61e35abfc09676437bf48`. Each count sits beside
 > the command that produces it; run the commands from the repository root.
 > The files / markdown / progress / steering surfaces are in the sibling
 > `content-surfaces.md`.
@@ -60,8 +60,8 @@ Workspace initialization no longer seeds a getting-started mission (§3).
 `RigSpec.workspace` is an **optional** typed block. Rigs without it stay valid;
 `whoami` / node-inventory return a null workspace block in that case.
 
-> Source: `domain/types.ts:1158–1165` (`WorkspaceSpec`), `:1148–1154`
-> (`WorkspaceRepoSpec`), `:1181` (`RigSpec.workspace?`).
+> Source: `domain/types.ts:1160–1167` (`WorkspaceSpec`), `:1150–1156`
+> (`WorkspaceRepoSpec`), `:1183` (`RigSpec.workspace?`).
 
 | Field | Shape | Notes |
 |---|---|---|
@@ -74,7 +74,7 @@ Workspace initialization no longer seeds a getting-started mission (§3).
 (`grep '^export const WORKSPACE_KINDS' packages/daemon/src/domain/types.ts | grep -o '"[a-z]*"' | wc -l`):
 `user`, `project`, `knowledge`, `lab`, `delivery`.
 
-> Source: `domain/types.ts:1144–1145` (`WORKSPACE_KINDS` / `WorkspaceKind`).
+> Source: `domain/types.ts:1146–1147` (`WORKSPACE_KINDS` / `WorkspaceKind`).
 
 ### 1.1 Persistence — migration 038 + RigRepository
 
@@ -107,8 +107,8 @@ normalizes the block and writes it only when it differs from the stored one.
 
 > Source: `domain/rigspec-instantiator.ts:618` (`materializeValidatedSpec`),
 > `:654–656`; `:1259` (`instantiateOnce`), `:1346–1348`;
-> `routes/rigspec.ts:132–170` (validation `:155`; compare-and-write
-> `:165–167`), mounted `server.ts:735`; CLI
+> `routes/rigspec.ts:133–171` (validation `:156`; compare-and-write
+> `:166–168`), mounted `server.ts:735`; CLI
 > `packages/cli/src/commands/import.ts:82`.
 
 ### 1.2 Runtime resolution — workspace-resolver
@@ -181,10 +181,10 @@ because the source rig's workspace lives on the source host. A handoff that
 inherits the source row's `targetRepo` without an override is not
 re-validated.
 
-> Source: `routes/queue.ts:94–121` (fail-open guards `:100`, `:104`, `:107`,
-> `:110`; `getRigWorkspace` `:109`; `unknown_target_repo` + `knownRepos`
-> `:112–118`); calls `:450`, `:633`, `:706` in handlers `:400`, `:604`,
-> `:680`; ordering note `:442–448`; inherited value `:630–631`; mounted
+> Source: `routes/queue.ts:96–123` (fail-open guards `:102`, `:106`, `:109`,
+> `:112`; `getRigWorkspace` `:111`; `unknown_target_repo` + `knownRepos`
+> `:114–120`); calls `:452`, `:635`, `:708` in handlers `:402`, `:606`,
+> `:682`; ordering note `:444–450`; inherited value `:632–633`; mounted
 > `server.ts:785`.
 
 ## 2. Workspace HTTP route — frontmatter validator and doctor
@@ -228,11 +228,10 @@ hard cap `maxFiles` default 10000.
 > (missing-frontmatter behavior), `:201–226` (required + status check), `:239`
 > (opening delimiter).
 
-CLI surface: `rig workspace validate [root]` and `rig workspace doctor`. The
-CLI reference lists typed-kind authoring on the same walker as future work.
+CLI surface: `rig workspace validate [root]` and `rig workspace doctor`.
 
 > Source: `packages/cli/src/commands/workspace.ts:86` (`validate`), `:146`
-> (`doctor`); `docs/as-built/cli-reference.md:1759-1770`.
+> (`doctor`); `docs/as-built/cli-reference.md:593–594`.
 
 ## 3. Default project-workspace scaffold
 
@@ -480,7 +479,7 @@ through the `/project*` destinations; it does not call `/api/projects`
 - **Optional + valid-without:** rigs without a `workspace` block stay valid;
   whoami / node-inventory return null and queue target-repo validation fails
   open (`workspace-resolver.ts:32`, `:62`; `rig-repository.ts:175`, `:183`;
-  `routes/queue.ts:110`).
+  `routes/queue.ts:112`).
 - **Defensive column access:** `RigRepository` probes for `workspace_json`
   (`rig-repository.ts:175`, `:183`), node-inventory's own reads fall back to
   null on error (`node-inventory.ts:645`, `:717–719`), and the queue
@@ -501,7 +500,7 @@ through the `/project*` destinations; it does not call `/api/projects`
 - `resolveWorkspaceContext` honors an `envOverride` **verbatim even when it
   names no declared repo** (`workspace-resolver.ts:39–40`), whereas the queue
   route **rejects** an unknown `target_repo` against the same `repos[]`
-  (`routes/queue.ts:112–118`). These two surfaces apply opposite policies to
+  (`routes/queue.ts:114–120`). These two surfaces apply opposite policies to
   an unknown repo name (whoami trusts the operator; queue validates). The
   resolver's comment at `workspace-resolver.ts:35–36` states the verbatim behavior is intended, but
   the comment line before it (`workspace-resolver.ts:34`) and `whoami-service.ts:331–332` describe

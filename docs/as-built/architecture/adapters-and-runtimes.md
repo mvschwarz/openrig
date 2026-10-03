@@ -12,7 +12,7 @@ applies-when: |
   layer).
 siblings: [daemon-core.md, agent-spec-and-startup.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-verified-against-source: b6d37bfadcc189be8fd61e35abfc09676437bf48
 last-updated: 2026-10-03
 ---
 
@@ -24,58 +24,58 @@ methods. A separate resume-honesty layer answers the question "did this harness
 *actually* resume, or did it silently fresh-launch?" truthfully rather than
 optimistically.
 
-> Verified against source at main `254122872cf477511514979a4300b695d77cd1f7`. Each count below sits beside the
+> Verified against source at main `b6d37bfadcc189be8fd61e35abfc09676437bf48`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
 ## 1. The five-method RuntimeAdapter contract
 
-`RuntimeAdapter` is `packages/daemon/src/domain/runtime-adapter.ts:132`
+`RuntimeAdapter` is `packages/daemon/src/domain/runtime-adapter.ts:134`
 (`interface RuntimeAdapter`). Every adapter declares a `readonly runtime`
-string (`runtime-adapter.ts:135`) and implements five required methods
-(`runtime-adapter.ts:141–164`; **5** =
+string (`runtime-adapter.ts:137`) and implements five required methods
+(`runtime-adapter.ts:143–166`; **5** =
 `sed -n '/^export interface RuntimeAdapter/,/^}/p' packages/daemon/src/domain/runtime-adapter.ts | grep -c -E '^  [a-zA-Z]+\('`):
 
 | Method | Signature (`runtime-adapter.ts`) | Responsibility |
 |---|---|---|
-| `listInstalled` | `(binding)` `:142` | List currently installed/projected resources for a node. |
-| `project` | `(plan, binding)` `:145` | Project resources from a `ProjectionPlan` to the runtime's target locations. |
-| `deliverStartup` | `(files, binding)` `:148` | Deliver resolved startup files to the runtime. |
-| `launchHarness` | `(binding, opts)` `:158` | Launch the harness inside the bound tmux session; return a resume token. |
-| `checkReady` | `(binding)` `:164` | Probe whether the harness is responsive and ready. |
+| `listInstalled` | `(binding)` `:144` | List currently installed/projected resources for a node. |
+| `project` | `(plan, binding)` `:147` | Project resources from a `ProjectionPlan` to the runtime's target locations. |
+| `deliverStartup` | `(files, binding)` `:150` | Deliver resolved startup files to the runtime. |
+| `launchHarness` | `(binding, opts)` `:160` | Launch the harness inside the bound tmux session; return a resume token. |
+| `checkReady` | `(binding)` `:166` | Probe whether the harness is responsive and ready. |
 
-The interface also has two optional members: `claudeManagedLaunch` (`:134`)
-and `skillTargetPath?()` (`:139`, implemented by `OmpRuntimeAdapter`,
+The interface also has two optional members: `claudeManagedLaunch` (`:136`)
+and `skillTargetPath?()` (`:141`, implemented by `OmpRuntimeAdapter`,
 `omp-runtime-adapter.ts:12`).
 
 Startup *action* execution (`slash_command` / `send_text`) is explicitly **not**
-part of this contract — the contract docstring (`runtime-adapter.ts:126–131`)
+part of this contract — the contract docstring (`runtime-adapter.ts:128–133`)
 states actions belong to the `StartupOrchestrator` *after* `checkReady()`. The
 orchestrator delivery split is in `agent-spec-and-startup.md`.
 
 ### `launchHarness` opts and the fork seam
 
 `launchHarness` opts is `{ name: string; resumeToken?: string; forkSource?:
-ForkSource }` (`runtime-adapter.ts:160`).
+ForkSource }` (`runtime-adapter.ts:162`).
 
-Per the contract docstring (`runtime-adapter.ts:150–157`) `resumeToken` and
+Per the contract docstring (`runtime-adapter.ts:152–159`) `resumeToken` and
 `forkSource` are mutually exclusive — if both are provided the adapter **must
 refuse** with a clear error, not guess; `forkSource` triggers a fork and the
 captured token is the NEW post-fork token, never the parent. `ForkSource` is
-`runtime-adapter.ts:121` (`kind: "native_id" | "artifact_path" | "name" |
-"last"`, `:122`; v1 MVP accepts `native_id` only — other shapes rejected at
-schema validation, docstring `:111–120`).
+`runtime-adapter.ts:123` (`kind: "native_id" | "artifact_path" | "name" |
+"last"`, `:124`; v1 MVP accepts `native_id` only — other shapes rejected at
+schema validation, docstring `:113–122`).
 
 ### `HarnessLaunchResult` is a discriminated union with an honest failure arm
 
-`HarnessLaunchResult` is a **discriminated union** (`runtime-adapter.ts:86–91`):
+`HarnessLaunchResult` is a **discriminated union** (`runtime-adapter.ts:88–93`):
 `| { ok: true; resumeToken?; resumeType?; appliedLaunch? }`
 `| { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence? }`.
 The failure arm carries a typed `recovery` hint
-(`HarnessLaunchRecovery = "retry_fresh" | "attention_required"`, `:84`) and
+(`HarnessLaunchRecovery = "retry_fresh" | "attention_required"`, `:86`) and
 optional `evidence` (last-N pane lines, flowed through to
 `RestoreNodeResult.attentionEvidence` for `attention_required` outcomes,
-`:88–91`). This is the honest-failure shape, not a smoothed optional `error`.
+`:90–93`). This is the honest-failure shape, not a smoothed optional `error`.
 
 ## 2. The runtime adapters
 
@@ -151,7 +151,7 @@ Hono, `git grep -l 'from "hono' -- packages/daemon/src/adapters | wc -l`).
   servers, log tails, build watchers. A terminal node cannot fork:
   `launchHarness` refuses a `forkSource` with a clear error (`:38–42`), as the
   runtime-adapter docstring requires of adapters without fork
-  (`runtime-adapter.ts:118–119`).
+  (`runtime-adapter.ts:120–121`).
 
 ### Pi, Oh My Pi and stub adapters
 

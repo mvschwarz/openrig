@@ -10,7 +10,7 @@ applies-when: |
   transactional handoff guarantee, or where queue closure is enforced.
 siblings: [workflow-runtime.md, mission-control.md, daemon-core.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-verified-against-source: b6d37bfadcc189be8fd61e35abfc09676437bf48
 last-updated: 2026-10-03
 ---
 
@@ -24,7 +24,7 @@ filesystem path remains untouched, and the daemon-backed `rig queue` /
 only to SQLite (`packages/cli/src/commands/queue.ts:19`,
 `packages/cli/src/commands/stream.ts:11`).
 
-> Verified against source at main `254122872cf477511514979a4300b695d77cd1f7`. Each count below sits beside the
+> Verified against source at main `b6d37bfadcc189be8fd61e35abfc09676437bf48`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -67,9 +67,9 @@ Five host-scoped tables back the primitive, one per migration `023`–`027` in
   `pending | sending | delivered | failed | indeterminate | retained |
   retired`.
 
-These five are migrations `023`–`027` of the daemon's **92**
+These five are migrations `023`–`027` of the daemon's **93**
 (`git ls-files packages/daemon/src/db/migrations | wc -l`), applied in the
-order of `ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts:101`).
+order of `ALL_MIGRATIONS` (`packages/daemon/src/db/all-migrations.ts:102`).
 Later migrations add columns to these tables; `daemon-core.md` covers the
 migration set.
 
@@ -94,7 +94,7 @@ Routes import these; services are Hono-free:
   (`findOverdue`, `:3333`), nudge-result tracking (`recordNudgeAttempt`,
   `:3565`). Nothing in the daemon writes the `last_heartbeat` column
   (`queue-pickup.ts:16`). Cross-rig validation hook exposed as `validateRig`
-  constructor option (`:711`).
+  constructor option (`queue-repository.ts:711`).
 - **`queue-transition-log.ts`** — append-only state-transition log; used by
   `queue-repository.ts`, exposed as the read-only property
   `QueueRepository.transitionLog` (`queue-repository.ts:660`).
@@ -104,7 +104,7 @@ Routes import these; services are Hono-free:
   `:99`), absorb (promotes a pending entry to a `queue_item`, idempotent,
   `:154`), deny (records reason, `:214`). The handler has no auth hook: the
   inbox routes take the sender or receiver from the `X-OpenRig-Session` header
-  through `requireSenderIdentity` (`routes/queue.ts:1026`), never from the body
+  through `requireSenderIdentity` (`routes/queue.ts:1034`), never from the body
   (`inbox-handler.ts:71`).
 - **`outbox-handler.ts`** — sender-side outbox: idempotent record (`:130`),
   delivery-state marks (`markDelivered` `:239`, `markFailed` `:256`,
@@ -170,13 +170,13 @@ sugar that `resolveQueueHostDestination`
 `hostId` before the request leaves the CLI. The mechanism follows the
 forward-then-strip shape of mission-control's remote action
 (`routes/mission-control.ts:353`): one shared route-layer helper
-(`forwardQueueWrite`, `routes/queue.ts:195`) resolves the host registry
+(`forwardQueueWrite`, `routes/queue.ts:197`) resolves the host registry
 daemon-side (bearers never reach the caller), rejects ssh-declared hosts
 (`unsupported-transport` — the daemon→daemon path is http-only), and forwards
-the whole body, with `hostId` stripped, via `remoteJsonRequest` (`:229`) under
-a named write-class deadline (`QUEUE_FORWARD_TIMEOUT_MS`, `:39`). The origin's
+the whole body, with `hostId` stripped, via `remoteJsonRequest` (`:231`) under
+a named write-class deadline (`QUEUE_FORWARD_TIMEOUT_MS`, `:41`). The origin's
 response returns verbatim; failures map to a structured host-named error
-(`remote_queue_write_failed`, HTTP 502, `:215`) whose `failureClass` is one of
+(`remote_queue_write_failed`, HTTP 502, `:217`) whose `failureClass` is one of
 registry / unknown-host / unsupported-transport / unreachable / auth-failed /
 remote-error. No local row is ever written on the cross-host path.
 
@@ -189,10 +189,10 @@ message-passing closure (never 2PC).**
   never reaches across a host boundary. Before forwarding, the forwarding
   daemon stamps its own host id, when it has one, onto the source session
   (`stampSelfHostSuffix`, `queue-repository.ts:542`; called at
-  `routes/queue.ts:357` and `:463`), so the target row records the sender as
+  `routes/queue.ts:359` and `:465`), so the target row records the sender as
   `member@rig@<forwarding host>`.
 - **Idempotency.** On create, the forwarding daemon mints the `qitemId` before
-  the forward unless the caller supplied one (`routes/queue.ts:455`). The
+  the forward unless the caller supplied one (`routes/queue.ts:457`). The
   forward is a single request, so a retry dedups only when it carries the same
   id (a caller re-sending `--id`, or a handoff re-drive, whose successor id is
   derived). Dedup rides the existing `qitem_id TEXT PRIMARY KEY`. On PK
@@ -202,8 +202,8 @@ message-passing closure (never 2PC).**
   `queue-repository.ts:1440`, with `isQitemPrimaryKeyConflict`, `:455`).
 - **Cross-host handoff choreography.** The local atomic close+create cannot
   span two DBs, so the route-layer choreography (`crossHostHandoff`,
-  `routes/queue.ts:297`) runs: successor-create on the target host FIRST (via
-  the one forward helper, `:376`), local source-close SECOND
+  `routes/queue.ts:299`) runs: successor-create on the target host FIRST (via
+  the one forward helper, `:378`), local source-close SECOND
   (`QueueRepository.closeCrossHostHandoffSource`, `queue-repository.ts:2000`)
   — never the reverse. A crash between the two leaves a live duplicate that
   the idempotent re-drive converges; the reverse order would leave a closed
@@ -219,9 +219,9 @@ message-passing closure (never 2PC).**
   disagreement.)*
 - **Closure across the boundary.** The source closes with
   `closure_reason=handed_off_to` and
-  `closure_target=<successor qitem id>@<host>` (`routes/queue.ts:330`); a
+  `closure_target=<successor qitem id>@<host>` (`routes/queue.ts:332`); a
   source already closed with the older `member@rig@<host>` target keeps it,
-  and a re-drive matches against it (`:331`). `closure_target` is OPAQUE
+  and a re-drive matches against it (`:333`). `closure_target` is OPAQUE
   audit metadata, never parsed for routing; the standing stuck sweep reads it
   only to check successor custody (`queue-stuck-sweep.ts:468`). The
   host-qualified key appears only in the `closure_target` column on
@@ -231,12 +231,12 @@ message-passing closure (never 2PC).**
   `queue.handed_off` event stay 2-part.
   Re-drive semantics: already-terminal + MATCHING `closure_target` = absorb;
   MISMATCH = structured `cross_host_close_conflict` (409), checked in the route
-  before any forward (`routes/queue.ts:341`) and again in the repository. The
+  before any forward (`routes/queue.ts:343`) and again in the repository. The
   successor carries `chain_of_record = [...source.chain, source.qitemId]`
-  (`routes/queue.ts:363`) — A-side ids are opaque lineage identifiers on B
+  (`routes/queue.ts:365`) — A-side ids are opaque lineage identifiers on B
   (they do not dereference in B's DB) — plus provenance tags `cross-host` +
   `from-host:<self-declared name>` (the forwarding daemon's OS hostname,
-  `routes/queue.ts:52`; honest best-effort, not authenticated identity).
+  `routes/queue.ts:54`; honest best-effort, not authenticated identity).
 - **Boundary discipline.** Claim, update and inbox routes take no `hostId` and
   stay local (after a cross-host handoff the successor lives where its worker
   lives). Without a `hostId` (or with `local`), create and handoff take the
@@ -266,9 +266,9 @@ Two SSE surfaces stream coordination events (**2**:
 `cat packages/daemon/src/routes/stream.ts packages/daemon/src/routes/queue.ts | grep -c 'return streamSSE('`):
 `/api/stream/watch` (aliased `/api/stream/sse`, `routes/stream.ts:194`–`195`)
 for new stream items, and `/api/queue/watch` (aliased `/api/queue/sse`,
-`routes/queue.ts:986`–`987`) for queue/inbox events — every coordination type
+`routes/queue.ts:994`–`995`) for queue/inbox events — every coordination type
 except `stream.emitted` and `queue.updated` (filter at
-`routes/queue.ts:963`–`970`). The event log remains append-only and
+`routes/queue.ts:971`–`978`). The event log remains append-only and
 SQLite-backed. `rig stream watch` is a thin, single-connection consumer of
 `/api/stream/sse` (`packages/cli/src/commands/stream.ts:191`); it does not add
 a daemon route or reconnect policy.
@@ -280,10 +280,10 @@ a daemon route or reconnect policy.
   `since`, `until` and `direction` filters), `GET /watch` + `/sse` SSE
   (`:194`), `GET /:streamItemId` (`:198`), `POST /:streamItemId/archive`
   (`:207`).
-- `/api/queue` (`server.ts:785`) — `POST /create` (`routes/queue.ts:400`),
-  `POST /:qitemId/claim` (`:499`), `POST /:qitemId/unclaim` (`:515`),
-  `POST /:qitemId/update` (`:554`), plus handoff (`:604`, `:680`), list
-  (`:834`) and watch (`:986`) surfaces.
+- `/api/queue` (`server.ts:785`) — `POST /create` (`routes/queue.ts:402`),
+  `POST /:qitemId/claim` (`:501`), `POST /:qitemId/unclaim` (`:517`),
+  `POST /:qitemId/update` (`:556`), plus handoff (`:606`, `:682`), list
+  (`:842`) and watch (`:994`) surfaces.
 
 ## See also
 

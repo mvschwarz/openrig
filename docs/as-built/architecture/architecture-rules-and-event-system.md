@@ -11,7 +11,7 @@ applies-when: |
   compatibility limits that still describe the shipped system.
 siblings: [daemon-core.md, coordination-primitive.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-verified-against-source: b6d37bfadcc189be8fd61e35abfc09676437bf48
 last-updated: 2026-10-03
 ---
 
@@ -21,7 +21,7 @@ This module collects the cross-cutting invariants that do not belong to any
 single subsystem: the architecture rules the codebase holds itself to, the
 event-system shape, and the intentional compatibility limits.
 
-> Verified against source at main `254122872cf477511514979a4300b695d77cd1f7`. Each count below sits beside the
+> Verified against source at main `b6d37bfadcc189be8fd61e35abfc09676437bf48`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -136,7 +136,7 @@ both `proof.judged` and `proof.sources_changed`.
 `seat.model_divergence` is built in `startup.ts`). **5** are declared but never
 constructed: `session.status_changed`, `continuity.sync`, `continuity.degraded`,
 `qitem.closure_overdue` and `mission_control.view_refreshed` (the last two are
-still named in SSE filters, `routes/queue.ts:968` and
+still named in SSE filters, `routes/queue.ts:976` and
 `routes/mission-control.ts:292`). List them with:
 
 `for t in $(sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | tr -d '"'); do git grep -q -F "type: \"$t\"" -- packages/daemon/src ':!packages/daemon/src/domain/types.ts' || echo "$t"; done`
@@ -190,7 +190,7 @@ SSE delivery surfaces include the following. The daemon has **11**
   `app.route("/api/events", eventsRoute)`).
 - `GET /api/stream/watch` — new stream items (`routes/stream.ts:194`).
 - `GET /api/queue/watch` — queue/inbox coordination events
-  (`routes/queue.ts:986`).
+  (`routes/queue.ts:994`).
 - The chat SSE stream `GET /api/rigs/:rigId/chat/watch` delivers
   `chat.message` for one rig (`routes/chat.ts:68`, mounted at `server.ts:783`;
   rig-scoped; see compat note 6).

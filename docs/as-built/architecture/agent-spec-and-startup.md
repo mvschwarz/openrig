@@ -11,7 +11,7 @@ applies-when: |
   resolve and preserve identity.
 siblings: [daemon-core.md, adapters-and-runtimes.md, lifecycle-snapshot-restore.md, packaging-bootstrap-bundles.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-verified-against-source: b6d37bfadcc189be8fd61e35abfc09676437bf48
 last-updated: 2026-10-03
 ---
 
@@ -22,7 +22,7 @@ and identity-addressable topology. The spec-and-startup contract: parse →
 resolve → project → deliver pre-launch files → persist replay context → launch
 → wait → deliver post-launch files.
 
-> Verified against source at main `254122872cf477511514979a4300b695d77cd1f7`. `domain/…` and `routes/…` paths
+> Verified against source at main `b6d37bfadcc189be8fd61e35abfc09676437bf48`. `domain/…` and `routes/…` paths
 > are under `packages/daemon/src/`; a bare file name such as
 > `rigspec-schema.ts:115` is in `packages/daemon/src/domain/`. Each count sits
 > beside the command that produces it; run the command from the repository
@@ -30,10 +30,10 @@ resolve → project → deliver pre-launch files → persist replay context → 
 
 ## 1. Canonical spec and topology types
 
-- **AgentSpec** (`types.ts:936`) — parsed from `agent.yaml`
+- **AgentSpec** (`types.ts:938`) — parsed from `agent.yaml`
   (`agent-resolver.ts:150`). Owns imports, defaults, startup, resources, and
   profiles. Canonical parse/normalize/validate is `domain/agent-manifest.ts`.
-- **RigSpec** (`types.ts:1167`) — canonical pod-aware rig topology. Uses
+- **RigSpec** (`types.ts:1169`) — canonical pod-aware rig topology. Uses
   `version: "0.2"` and `pods[]`; owns cross-pod `edges[]`, rig-level startup
   overlays, and `cultureFile`, plus the optional `summary`, `permissionPolicy`,
   `managedBlocks`, `docs`, `services` and `workspace` fields.
@@ -44,13 +44,13 @@ resolve → project → deliver pre-launch files → persist replay context → 
   value through (`rigspec-schema.ts:243`). `"0.2"` is the canonical authored
   value, and the pod-aware exporter writes it (`rigspec-exporter.ts:223`).
 
-- **RigServicesSpec** (`types.ts:1214`) — optional `services` block on a
+- **RigServicesSpec** (`types.ts:1216`) — optional `services` block on a
   pod-aware RigSpec. Shipped kind is Compose-backed env management
   (`kind: "compose"`) with `composeFile`, `projectName?`, `profiles?`,
   `downPolicy?`, `waitFor?`, `surfaces?`, `checkpoints?`.
-- **RigSpecPod** (`types.ts:1123`) — pod-local bounded context with
+- **RigSpecPod** (`types.ts:1125`) — pod-local bounded context with
   `members[]`, pod-local `edges[]`, pod startup, optional continuity policy.
-- **RigSpecPodMember** (`types.ts:1067`) — member-level runtime/startup
+- **RigSpecPodMember** (`types.ts:1069`) — member-level runtime/startup
   surface: `agentRef`, `profile`, `runtime`, `model?`, `effort?`, `cwd`, `restorePolicy?`,
   member startup overlays (`startup?`), plus `label?`, `codexConfigProfile?`,
   `role?`, `permissionPolicy?`, `compactionStrategy?`, `mechanic?`,
@@ -71,17 +71,17 @@ spec/projection types live here.
 - **ProjectionPlan** (`projection-planner.ts:41`) — runtime projection plan for
   a node: runtime, cwd, projection entries, startup block, diagnostics,
   conflict/no-op classifications.
-- **RuntimeAdapter** (`runtime-adapter.ts:132`) — the five-method contract
+- **RuntimeAdapter** (`runtime-adapter.ts:134`) — the five-method contract
   (adapter detail in `adapters-and-runtimes.md`): `listInstalled(binding)`
-  (`runtime-adapter.ts:142`), `project(plan, binding)` (`:145`),
-  `deliverStartup(files, binding)` (`:148`), `launchHarness(binding, opts)`
-  (`:158`), `checkReady(binding)` (`:164`). The interface also declares one
-  optional method, `skillTargetPath?(...)` (`:139`). Required methods: **5**
+  (`runtime-adapter.ts:144`), `project(plan, binding)` (`:147`),
+  `deliverStartup(files, binding)` (`:150`), `launchHarness(binding, opts)`
+  (`:160`), `checkReady(binding)` (`:166`). The interface also declares one
+  optional method, `skillTargetPath?(...)` (`:141`). Required methods: **5**
   (`sed -n '/^export interface RuntimeAdapter /,/^}/p' packages/daemon/src/domain/runtime-adapter.ts | grep -c -E '^  [a-zA-Z]+\('`).
-- **HarnessLaunchResult** (`runtime-adapter.ts:86`) — returned by
+- **HarnessLaunchResult** (`runtime-adapter.ts:88`) — returned by
   `launchHarness`: either `{ ok: true, resumeToken?, resumeType?,
   appliedLaunch? }` or `{ ok: false, error, recovery?, evidence? }`, where
-  `recovery` is `"retry_fresh"` or `"attention_required"` (`:84`).
+  `recovery` is `"retry_fresh"` or `"attention_required"` (`:86`).
 - **StartupOrchestrator** (`startup-orchestrator.ts:107`) — drives the full
   startup sequence (§4 below).
 
@@ -148,9 +148,9 @@ invariant; the cross-cutting architecture rules are collected in
 `architecture-rules-and-event-system.md`.
 
 **Startup action constraints** (`startup-validation.ts`): no shell startup
-actions (`:62`); action types are `slash_command`, `send_text` and
+actions (`:65`); action types are `slash_command`, `send_text` and
 `startup_proof` (`:7`); non-idempotent actions must not apply on restore
-(`:97`). Retrying a failed startup is handled as a restore, which is why the
+(`:100`). Retrying a failed startup is handled as a restore, which is why the
 orchestrator skips non-idempotent actions on restore
 (`startup-orchestrator.ts:556`, "retry-as-restore safety"). The exception is
 `PodRigInstantiator.retryFirstStart` (`rigspec-instantiator.ts:1146`), which
@@ -176,7 +176,7 @@ sources remain unsupported: RigSpec validation rejects them
 - `pod-repository.ts` — pod CRUD plus live continuity-state CRUD.
 
 `routes/rigspec.ts` is the dual-format seam; a parsed spec with a `pods` array
-takes the pod-aware path (`routes/rigspec.ts:82`): validate
+takes the pod-aware path (`routes/rigspec.ts:83`): validate
 (pod-aware → `RigSpecSchema.validate`; legacy → `LegacyRigSpecSchema.validate`),
 preflight (`rigPreflight({ rigSpecYaml, rigRoot, … })` vs
 `RigSpecPreflight.check(spec)`), import
@@ -184,6 +184,12 @@ preflight (`rigPreflight({ rigSpecYaml, rigRoot, … })` vs
 `RigInstantiator.instantiate(spec)`), export (pod-aware exports canonical
 `version: "0.2"` RigSpec; legacy exports flat-node `schemaVersion: 1`,
 `rigspec-exporter.ts:105`).
+
+The import validation route delegates to `validateRigSpecImport`
+(`routes/rigspec.ts:214–222`, `spec-validation-service.ts:10–19`). The same
+helper powers local `rig spec validate` without contacting the daemon
+(`packages/cli/src/commands/rig.ts:204–207`); it selects the pod-aware or legacy
+validator and distinguishes YAML parse failures from validator exceptions.
 
 ## 6. Identity: whoami, materialize, bind, adopt
 
@@ -213,8 +219,8 @@ session-name fallback.
   different prefix, `rig_*` (`packages/cli/src/mcp-server.ts`).
 
 **Materialize / bind / adopt**: `POST /api/rigs/import/materialize`
-(`routes/rigspec.ts:173`) creates a pod-aware topology without launching
-sessions and refuses a legacy spec (`routes/rigspec.ts:186`);
+(`routes/rigspec.ts:174`) creates a pod-aware topology without launching
+sessions and refuses a legacy spec (`routes/rigspec.ts:187`);
 `POST /api/discovery/:id/bind` (`routes/discovery.ts:77`) attaches a
 discovered live session to an existing logical node (`logicalId`), or creates
 a member in a pod (`podNamespace` + `memberName`) and binds it;
