@@ -122,6 +122,7 @@ describe("rig health — daemon-backed read-only projection", () => {
   let healthStatus = 200;
   let empty = false;
   let partial = false;
+  let unavailable = false;
 
   beforeAll(async () => {
     server = http.createServer((request, response) => {
@@ -140,7 +141,7 @@ describe("rig health — daemon-backed read-only projection", () => {
       } else if (healthStatus === 404) {
         response.end(JSON.stringify({ error: "not_found", path: "/api/health" }));
       } else {
-        response.end(JSON.stringify(empty ? { ...LIST, total: 0, records: [] } : partial ? { ...LIST, total: 0, records: [], coverage: [{
+        response.end(JSON.stringify(unavailable ? { ...LIST, coverage: [{ source: "passive-ceremony", status: "unavailable", partial: true, reason: "health_passive_queue_window_truncated" }] } : empty ? { ...LIST, total: 0, records: [] } : partial ? { ...LIST, total: 0, records: [], coverage: [{
           source: "passive-ceremony", evaluatedAt: LIST.evaluatedAt, unit: "handoff families", limit: 200, total: 634,
           evaluated: 200, omitted: 434, partial: true, order: "most queue transitions in the observation window, then lineage ID" }] } : LIST));
       }
@@ -201,6 +202,18 @@ describe("rig health — daemon-backed read-only projection", () => {
     expect(output).toContain("No health findings match this bounded query");
     expect(output).toContain("not a healthy assertion");
     expect(output).toContain("rig health --instance");
+  });
+
+  it("names a failed source while retaining other findings without fabricated counts", async () => {
+    unavailable = true;
+    const { logs, exitCode } = await run(["--instance"], runningDeps(port));
+    unavailable = false;
+    const text = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(text).toContain("UNAVAILABLE: passive-ceremony");
+    expect(text).toContain("health_passive_queue_window_truncated");
+    expect(text).toContain(RECORD.id);
+    expect(text).not.toMatch(/undefined|0 of 0/);
   });
 
   it("says a partial evaluation is partial and that omitted families are not healthy", async () => {

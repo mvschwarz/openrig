@@ -256,3 +256,19 @@ describe("fleet/system health TUI", () => {
   expect(text).toContain("context.pressure"); expect(snap.health!.records).toHaveLength(2);
   expect(lines.every(l => stripAnsi(l.text).length <= width)).toBe(true);
 });
+
+
+it("names source failures with and without findings, including narrow empty views", () => {
+  for (const hasFindings of [true, false]) {
+    const snap = healthSnapshot();
+    if (!hasFindings) snap.health!.records = [];
+    snap.health!.coverage = [{ source: "passive-ceremony", status: "unavailable", partial: true, reason: "health_passive_queue_window_truncated" }];
+    const scope = { kind: "instance", local: true } as const;
+    expect(healthSummaryLine(snap, scope, 70).text).toContain("PARTIAL");
+    const text = healthListLines(snap, scope, 70).map(l => l.text).join("\n");
+    expect(text).toContain("UNAVAILABLE · passive-ceremony");
+    expect(text).toContain("health_passive_queue_window_truncated");
+    expect(text).not.toMatch(/undefined|0 of 0/);
+    if (hasFindings) expect(text).toContain("Guard context");
+  }
+});
