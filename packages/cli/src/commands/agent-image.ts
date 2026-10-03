@@ -130,6 +130,7 @@ Examples:
       try {
         const client = await getClient();
         const res = await client.get<AgentImageEntryWire[]>("/api/agent-images/library");
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         let entries = res.data ?? [];
         if (opts.runtime) entries = entries.filter((e) => e.runtime === opts.runtime);
         if (opts.json) {

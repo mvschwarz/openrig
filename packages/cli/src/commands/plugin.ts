@@ -168,6 +168,7 @@ export function pluginCommand(depsOverride?: StatusDeps): Command {
         if (opts.source) params.push(`source=${encodeURIComponent(opts.source)}`);
         const path = `/api/plugins${params.length > 0 ? `?${params.join("&")}` : ""}`;
         const res = await client.get<PluginEntryWire[]>(path);
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         const entries = res.data ?? [];
 
         if (opts.json) {
