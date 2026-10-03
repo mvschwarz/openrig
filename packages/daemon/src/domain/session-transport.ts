@@ -1631,12 +1631,15 @@ export class SessionTransport {
   // `no_activity_signal`. NEVER surfaces a token value — env checks are
   // presence-only, and the store carries no token.
   private async diagnoseProducerLink(sessionName: string): Promise<string> {
-    // Link 1 — the SEAT ENV: can the relay even reach the daemon?
+    // Link 1 — the relay's prerequisites: the daemon URL, the activity token, and the runtime
+    // (without OPENRIG_RUNTIME the relay builds no payload and posts nothing). Only the tmux SESSION
+    // environment is inspected; the agent process's own environment is not read, and an env-prefixed
+    // launch carries these without the session environment showing them. So a name absent from the
+    // session environment is reported as UNPROVEN absent from the agent: UNKNOWN, never DOWN.
     let hasUrl: boolean | null = null;
     let hasToken: boolean | null = null;
-    let inspectedEnv = false;
+    let hasRuntime: boolean | null = null;
     if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
-      inspectedEnv = true;
       const anyPresent = async (names: string[]): Promise<boolean | null> => {
         let unknown = false;
         for (const name of names) {
@@ -1652,36 +1655,55 @@ export class SessionTransport {
       };
       hasUrl = await anyPresent(["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT"]);
       hasToken = await anyPresent(["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN"]);
+      hasRuntime = await anyPresent(["OPENRIG_RUNTIME", "RIGGED_RUNTIME"]);
     }
     let fileEndpoint: { baseUrl: string; token: string } | null = null;
     try {
       fileEndpoint = this.activityEndpointFile();
     } catch { /* unreadable fallback remains unavailable */ }
-    if (!fileEndpoint && (hasUrl === false || hasToken === false)) {
-      const label = (value: boolean | null) => value === true ? "present" : value === false ? "MISSING" : "UNKNOWN";
-      return `seat-env link DOWN — effective relay URL ${label(hasUrl)}, activity token ${label(hasToken)}, and no valid activity-endpoint.json fallback; the activity relay cannot reach the daemon. Relaunch the seat after confirming the effective endpoint is unavailable`;
-    }
-    if (!fileEndpoint && inspectedEnv && (hasUrl === null || hasToken === null)) {
-      return `seat-env link UNKNOWN — tmux session-environment lookup failed and no valid activity-endpoint.json fallback could be confirmed; URL/token absence is unproven`;
-    }
+    // The endpoint file covers the URL and token, never the runtime. Presence-only: no value is read out.
+    const prerequisites = [
+      { label: "relay URL", present: fileEndpoint ? true : hasUrl },
+      { label: "activity token", present: fileEndpoint ? true : hasToken },
+      { label: "OPENRIG_RUNTIME", present: hasRuntime },
+    ];
+    const absent = prerequisites.filter((p) => p.present === false).map((p) => p.label);
+    const unread = typeof this.tmuxAdapter?.hasSessionEnv === "function"
+      ? prerequisites.filter((p) => p.present === null).map((p) => p.label) : [];
+    const envNote = absent.length > 0 || unread.length > 0
+      ? `seat-env UNKNOWN — ${[
+        absent.length > 0 ? `${absent.join(", ")} absent from the tmux session environment` : null,
+        unread.length > 0 ? `session-environment lookup failed for ${unread.join(", ")}` : null,
+      ].filter(Boolean).join("; ")}; the agent process environment was not inspected and an env-prefixed launch can still carry them, so absence from the agent is unproven`
+      : null;
+    const withEnv = (verdict: string) => envNote ? `${verdict}. ${envNote}` : verdict;
 
-    // Link 2 — the DAEMON INGEST + store: did any hook actually land, and how stale?
+    // Link 2 — the DAEMON INGEST + store: did any hook land, and how old is it?
     const store = this.agentActivityStore;
     if (!store) {
-      return `daemon-ingest link DOWN — the activity store is not configured on this daemon (ingest returns 503)`;
+      return withEnv(`daemon-ingest link DOWN — the activity store is not configured on this daemon (ingest returns 503)`);
     }
     const latest = store.getLatestForNode({ sessionName, now: this.now() });
     if (!latest || latest.evidenceSource !== "runtime_hook") {
-      return `daemon-ingest link DOWN — no activity hook has ever been received for this seat; the ingest is rejecting posts (token mismatch → 401, or ingest unconfigured → 503) or Codex hook-trust is uncleared. Verify the seat was OpenRig-launched with hook-trust cleared`;
+      return withEnv(`no activity hook is stored for this seat — which link failed is not identified: the relay may never have posted (it needs OPENRIG_RUNTIME, the relay URL and the token in the agent process), Codex hook-trust may be uncleared, or ingest may have rejected posts (401 token mismatch, 503 unconfigured)`);
     }
-    // W2a-1 — a GENERATION verdict is stale:true but the hook is RECENT (age ~0); collapsing it to
-    // "beyond the store window / seat quiet" mislabels per-path missing carry / dead-tenure as a DARK
-    // seat and defeats the inert-visible differentiation. Distinguish the generation cause explicitly
-    // BEFORE the clock-stale fallback. generation_unverifiable is the per-hook no-generation signal
-    // (sound, not dark); the others name a real generation condition, not a quiet seat.
+    const ageMs = latest.eventAt ? this.now().getTime() - Date.parse(latest.eventAt) : NaN;
+    const ageText = Number.isFinite(ageMs) ? `${Math.round(ageMs / 1000)}s ago` : "at an unknown time";
+    const recent = Number.isFinite(ageMs) && ageMs <= store.freshnessMs;
+    // W2a-1 — a GENERATION verdict is stale:true even for a RECENT hook; collapsing a recent one to
+    // "seat quiet" mislabels per-path missing carry / dead-tenure as a DARK seat. Age is checked FIRST
+    // so an old hook is never called recent; its generation verdict is still reported, separately.
     if (latest.stale === true && typeof latest.reason === "string" && latest.reason.startsWith("generation_")) {
-      const ageS = latest.eventAt ? Math.round((this.now().getTime() - Date.parse(latest.eventAt)) / 1000) : null;
-      const age = ageS !== null ? `${ageS}s ago` : "recently";
+      if (!recent) {
+        const verdict: Record<string, string> = {
+          generation_unverifiable: "it carried NO occupant generation",
+          generation_unresolvable: "the LIVE occupant generation could not be resolved",
+          generation_mismatch: "it belongs to a PRIOR occupant generation (a dead tenure)",
+          generation_resolver_error: "the occupant-generation resolver errored",
+        };
+        return withEnv(`producer link STALE — the last activity hook arrived ${ageText}, beyond the ${Math.round(store.freshnessMs / 1000)}s store window, and ${verdict[latest.reason] ?? `its generation verdict is ${latest.reason}`}; no recent hook from this live occupant`);
+      }
+      const age = ageText;
       switch (latest.reason) {
         case "generation_unverifiable":
           // Carried generation was null on THIS hook. Managed launch and fresh-handover producers carry
@@ -1697,8 +1719,7 @@ export class SessionTransport {
       }
     }
     if (latest.stale === true) {
-      const ageS = latest.eventAt ? Math.round((this.now().getTime() - Date.parse(latest.eventAt)) / 1000) : null;
-      return `producer link OK but STALE — the last activity hook arrived ${ageS !== null ? `${ageS}s ago` : "long ago"} (beyond the store window); the seat has gone quiet or its hooks stopped firing`;
+      return withEnv(`producer link STALE — the last activity hook arrived ${ageText} (beyond the store window); the seat has gone quiet or its hooks stopped firing`);
     }
     return `a recent activity hook exists but the live pane probe could not confirm idle (possible identity mismatch between the seat env, the DB, and the stored payload)`;
   }
