@@ -15,7 +15,7 @@
 // resolveWorkspacePaths) project the raw strings into structured data
 // the daemon's UEP routes + Slice Story View consume.
 
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -1008,14 +1008,36 @@ export class SettingsStore {
       if (depth >= 40) throw Object.assign(new Error("Too many config symlinks"), { code: "ELOOP" });
       target = path.resolve(path.dirname(target), readlinkSync(target));
     }
-    const mode = statSync(target, { throwIfNoEntry: false })?.mode;
+    const existing = statSync(target, { throwIfNoEntry: false });
     const temporary = `${target}.tmp-${randomUUID()}`;
+    let owned = false;
     try {
-      writeFileSync(temporary, content, { encoding: "utf-8", flag: "wx", mode: mode === undefined ? 0o666 : mode & 0o777 });
-      if (mode !== undefined) chmodSync(temporary, mode & 0o777);
+      // Atomic replacement requires directory create/rename permission. Keep
+      // staged bytes private until the original ownership and mode are restored.
+      const fd = openSync(temporary, "wx", 0o600);
+      owned = true;
+      try { writeFileSync(fd, content, "utf-8"); } finally { closeSync(fd); }
+      if (existing && process.platform !== "win32") {
+        const staged = statSync(temporary);
+        if (staged.uid !== existing.uid || staged.gid !== existing.gid) {
+          try { chownSync(temporary, existing.uid, existing.gid); }
+          catch (error) {
+            throw Object.assign(new Error(`Cannot preserve config ownership at ${target}: ${(error as Error).message}`),
+              { code: (error as NodeJS.ErrnoException).code });
+          }
+        }
+      }
+      // chown may clear permission bits, so apply the final mode afterward.
+      chmodSync(temporary, existing ? existing.mode & 0o777 : 0o666 & ~process.umask());
       renameSync(temporary, target);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if ((code === "EACCES" || code === "EPERM") && !(error as Error).message.startsWith("Cannot preserve config ownership")) {
+        throw Object.assign(new Error(`Cannot atomically update config at ${target}: directory ${path.dirname(target)} must allow temporary entries and renames (${(error as Error).message})`), { code });
+      }
+      throw error;
     } finally {
-      try { unlinkSync(temporary); } catch { /* Renamed or already removed. */ }
+      if (owned) try { unlinkSync(temporary); } catch { /* Renamed or already removed. */ }
     }
   }
 

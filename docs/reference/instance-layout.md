@@ -104,3 +104,9 @@ runtime reads for compatibility. Treat the two-home state as an explicit
 limitation: use the live spec-library commands to determine where a spec is
 served from, and do not infer convergence merely because the canonical
 directory exists.
+
+Config updates publish a complete replacement file. The directory containing
+`config.json` (or a config symlink's target) must allow creating temporary files
+and renaming them, even when the existing config file itself is writable. On
+POSIX systems, updates preserve the existing owner, group, and read/write/execute permission bits; if
+that ownership cannot be preserved, the update fails and keeps the previous file.
