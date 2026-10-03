@@ -15,8 +15,10 @@
 // and operators write that literal path in their agent.yaml resources.
 
 import { describe, it, expect, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
+import { normalizeAgentSpec, parseAgentSpec } from "../src/domain/agent-manifest.js";
 import { planProjection, type ProjectionInput, type ProjectionFsOps } from "../src/domain/projection-planner.js";
 import type { ResolvedNodeConfig, QualifiedResource, ResolvedResources } from "../src/domain/profile-resolver.js";
 
@@ -56,6 +58,32 @@ function mockFs(): ProjectionFsOps {
 }
 
 describe("Projection planner — plugin path semantics", () => {
+  it("resolves the shipped shared agent's core plugin under the configured OpenRig home", async () => {
+    const home = mkdtempSync(nodePath.join(os.tmpdir(), "builtin-plugin-home-"));
+    vi.stubEnv("OPENRIG_HOME", home);
+    vi.resetModules();
+    try {
+      const sourcePath = nodePath.resolve(import.meta.dirname, "../specs/agents/shared");
+      const spec = normalizeAgentSpec(parseAgentSpec(readFileSync(nodePath.join(sourcePath, "agent.yaml"), "utf8")));
+      const config = makeConfig(spec.resources.plugins.map(resource => ({
+        effectiveId: resource.id, sourceSpec: spec.name, sourcePath, resource,
+      })));
+      const { planProjection: configuredPlan } = await import("../src/domain/projection-planner.js");
+      const result = configuredPlan({ config, collisions: [], fsOps: mockFs() });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.plan.entries).toMatchObject([{
+          category: "plugin", effectiveId: "openrig-core",
+          absolutePath: nodePath.join(home, "plugins/openrig-core"),
+        }]);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it.each(["OPENRIG_HOME", "RIGGED_HOME"])("resolves openrig-home: from configured %s, not later shell values", async key => {
     const config = makeConfig([makePluginQR("openrig-core", "openrig-home:plugins/openrig-core")]);
     vi.stubEnv("OPENRIG_HOME", "");
