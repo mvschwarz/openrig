@@ -105,8 +105,13 @@ limitation: use the live spec-library commands to determine where a spec is
 served from, and do not infer convergence merely because the canonical
 directory exists.
 
-Config updates publish a complete replacement file. The directory containing
-`config.json` (or a config symlink's target) must allow creating temporary files
-and renaming them, even when the existing config file itself is writable. On
-POSIX systems, updates preserve the existing owner, group, and read/write/execute permission bits; if
-that ownership cannot be preserved, the update fails and keeps the previous file.
+Config updates publish a complete replacement file atomically where directory
+permissions and the filesystem allow it. On POSIX systems, replacement preserves
+the existing owner, group, and read/write/execute permission bits. If creating or
+preparing the replacement, or renaming it, fails with `EACCES`, `EPERM`, or `EBUSY`,
+the stores write the writable target in place, preserving compatibility with
+unwritable directories and single-file bind mounts. This fallback is not atomic
+and retains the previous partial-write risk. Read-only config files are refused.
+Other errors, including `ENOSPC`, leave the original file intact on the atomic
+path. Atomic replacement does not carry extended ACLs or other inode metadata;
+a hard-linked second name continues to refer to the previous file.

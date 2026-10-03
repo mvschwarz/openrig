@@ -1009,14 +1009,21 @@ export class SettingsStore {
       target = path.resolve(path.dirname(target), readlinkSync(target));
     }
     const existing = statSync(target, { throwIfNoEntry: false });
+    // Match direct writes: a writable directory must not bypass a read-only
+    // target. Opening without truncation also checks native ACL permissions.
+    if (existing) closeSync(openSync(target, "r+"));
     const temporary = `${target}.tmp-${randomUUID()}`;
     let owned = false;
+    let canFallBack = true;
     try {
       // Atomic replacement requires directory create/rename permission. Keep
       // staged bytes private until the original ownership and mode are restored.
       const fd = openSync(temporary, "wx", 0o600);
       owned = true;
+      // A failed data write must never retry against the original file.
+      canFallBack = false;
       try { writeFileSync(fd, content, "utf-8"); } finally { closeSync(fd); }
+      canFallBack = true;
       if (existing && process.platform !== "win32") {
         const staged = statSync(temporary);
         if (staged.uid !== existing.uid || staged.gid !== existing.gid) {
@@ -1032,8 +1039,11 @@ export class SettingsStore {
       renameSync(temporary, target);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if ((code === "EACCES" || code === "EPERM") && !(error as Error).message.startsWith("Cannot preserve config ownership")) {
-        throw Object.assign(new Error(`Cannot atomically update config at ${target}: directory ${path.dirname(target)} must allow temporary entries and renames (${(error as Error).message})`), { code });
+      if (canFallBack && (code === "EACCES" || code === "EPERM" || code === "EBUSY")) {
+        // Preserve setups that permit writing the file but not replacing it,
+        // such as an unwritable parent or a single-file bind mount.
+        writeFileSync(target, content, "utf-8");
+        return;
       }
       throw error;
     } finally {
