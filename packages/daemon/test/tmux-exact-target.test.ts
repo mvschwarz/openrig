@@ -32,6 +32,10 @@ function resolve(target: string, sessions: Sessions): string | null {
 function runTmux(argv: string[], sessions: Sessions): string {
   const flag = argv[1] === "detach-client" ? "-s" : "-t";
   const target = argv[argv.indexOf(flag) + 1]!;
+  // Even session-scoped options use a target-pane. An unqualified =name is not a session target here.
+  if (["set-option", "show-option"].includes(argv[1]!) && target.startsWith("=") && !target.includes(":")) {
+    throw new Error(`no such session: ${target}`);
+  }
   const name = resolve(target, sessions);
   if (name === null) {
     if (argv[1] === "display-message") return "\n"; // tmux 3.6a: an unresolved target prints empty fields, exit 0

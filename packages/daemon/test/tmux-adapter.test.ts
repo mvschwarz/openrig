@@ -558,7 +558,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux set-option -t 'organic-session' '@rigged_node_id' 'node-abc123'"
+        "tmux set-option -t '=organic-session:' '@rigged_node_id' 'node-abc123'"
       );
     });
 
@@ -648,7 +648,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux show-option -v -t 'organic-session' '@rigged_node_id'"
+        "tmux show-option -v -t '=organic-session:' '@rigged_node_id'"
       );
       expect(val).toBe("node-abc123");
     });
@@ -840,7 +840,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux display-message -p -t 'dev@rig' '#{window_activity}'",
+        "tmux display-message -p -t '=dev@rig:' '#{window_activity}'",
       );
     });
 

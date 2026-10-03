@@ -800,12 +800,13 @@ export class TmuxAdapter {
   }
 
   private async respawnPaneUnchecked(paneTarget: string, command?: string, opts?: { cwd?: string; env?: Record<string, string> }): Promise<TmuxResult> {
-    const argv = ["tmux", "respawn-pane", "-t", paneTarget];
+    const exact = exactTarget(paneTarget, "pane");
+    const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
     // The respawn command is ONE argv unit: tmux runs it via the shell.
     if (command != null && command.length > 0) argv.push(command);
-    const legacyRespawn = ["tmux", "respawn-pane", "-t", shellQuote(paneTarget)];
+    const legacyRespawn = ["tmux", "respawn-pane", "-t", shellQuote(exact)];
     if (opts?.cwd != null) legacyRespawn.push("-c", shellQuote(opts.cwd));
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", shellQuote(`${k}=${v}`));
     if (command != null && command.length > 0) legacyRespawn.push(shellQuote(command));
@@ -822,9 +823,10 @@ export class TmuxAdapter {
    *  Set to `on` BEFORE the retiree is signalled to exit (else the pane is destroyed on exit and there
    *  is nothing to respawn into). */
   async setRemainOnExit(paneTarget: string, on: boolean): Promise<TmuxResult> {
+    const exact = exactTarget(paneTarget, "pane");
     try {
-      await this.run(["tmux", "set-option", "-p", "-t", paneTarget, "remain-on-exit", on ? "on" : "off"],
-        `tmux set-option -p -t ${shellQuote(paneTarget)} remain-on-exit ${on ? "on" : "off"}`);
+      await this.run(["tmux", "set-option", "-p", "-t", exact, "remain-on-exit", on ? "on" : "off"],
+        `tmux set-option -p -t ${shellQuote(exact)} remain-on-exit ${on ? "on" : "off"}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -834,9 +836,10 @@ export class TmuxAdapter {
   /** Seat-handover cutover: is the pane's process dead (the retiree exited; the pane held by
    *  remain-on-exit)? A known-missing pane also proves physical cutover; unknown probe errors stay false. */
   async isPaneDead(paneId: string): Promise<boolean> {
+    const exact = exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_dead}"],
-        `tmux display-message -p -t ${shellQuote(paneId)} "#{pane_dead}"`);
+      const output = await this.run(["tmux", "display-message", "-p", "-t", exact, "#{pane_dead}"],
+        `tmux display-message -p -t ${shellQuote(exact)} "#{pane_dead}"`);
       return output.trim() === "1";
     } catch (error) {
       return isNoServerError(error) || isPaneAbsenceError(error);
@@ -1070,10 +1073,11 @@ export class TmuxAdapter {
    * produces a garbage seed.
    */
   async getPaneCursorPosition(paneId: string): Promise<TmuxCursorPosition | null> {
+    const exact = exactTarget(paneId, "pane");
     try {
       const output = await this.run(
-        ["tmux", "display-message", "-p", "-t", paneId, CURSOR_FORMAT],
-        `tmux display-message -p -t ${shellQuote(paneId)} "${CURSOR_FORMAT}"`,
+        ["tmux", "display-message", "-p", "-t", exact, CURSOR_FORMAT],
+        `tmux display-message -p -t ${shellQuote(exact)} "${CURSOR_FORMAT}"`,
       );
       const [xRaw, yRaw, widthRaw, heightRaw] = output.trim().split(TMUX_FIELD_SEPARATOR);
       const x = Number.parseInt(xRaw ?? "", 10);
@@ -1097,9 +1101,11 @@ export class TmuxAdapter {
    * scopes are never crossed (guard b2).
    */
   async setSessionOption(sessionName: string, key: string, value: string): Promise<TmuxResult> {
+    // set/show-option take a target-pane even when the option is session-scoped.
+    const exact = exactTarget(sessionName, "pane");
     try {
-      await this.run(["tmux", "set-option", "-t", sessionName, key, value],
-        `tmux set-option -t ${shellQuote(sessionName)} ${shellQuote(key)} ${shellQuote(value)}`);
+      await this.run(["tmux", "set-option", "-t", exact, key, value],
+        `tmux set-option -t ${shellQuote(exact)} ${shellQuote(key)} ${shellQuote(value)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -1141,9 +1147,11 @@ export class TmuxAdapter {
 
   /** Get a session-scoped user option value. Returns null if not set or error. */
   async getSessionOption(sessionName: string, key: string): Promise<string | null> {
+    // set/show-option take a target-pane even when the option is session-scoped.
+    const exact = exactTarget(sessionName, "pane");
     try {
-      const output = await this.run(["tmux", "show-option", "-v", "-t", sessionName, key],
-        `tmux show-option -v -t ${shellQuote(sessionName)} ${shellQuote(key)}`);
+      const output = await this.run(["tmux", "show-option", "-v", "-t", exact, key],
+        `tmux show-option -v -t ${shellQuote(exact)} ${shellQuote(key)}`);
       return output.trim() || null;
     } catch {
       return null;
@@ -1216,10 +1224,11 @@ export class TmuxAdapter {
   }
 
   async readPaneLastActivity(paneId: string): Promise<number | null> {
+    const exact = exactTarget(paneId, "pane");
     try {
       const output = await this.run(
-        ["tmux", "display-message", "-p", "-t", paneId, "#{window_activity}"],
-        `tmux display-message -p -t ${shellQuote(paneId)} '#{window_activity}'`,
+        ["tmux", "display-message", "-p", "-t", exact, "#{window_activity}"],
+        `tmux display-message -p -t ${shellQuote(exact)} '#{window_activity}'`,
       );
       const trimmed = output.trim();
       if (!/^\d+$/.test(trimmed)) return null;
@@ -1257,9 +1266,10 @@ export class TmuxAdapter {
    * kills, or rebinds a session and never touches OpenRig routing/identity.
    */
   async switchClient(client: string, target: string): Promise<TmuxResult> {
+    const exact = exactTarget(target, "session");
     try {
-      await this.run(["tmux", "switch-client", "-c", client, "-t", target],
-        `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(target)}`);
+      await this.run(["tmux", "switch-client", "-c", client, "-t", exact],
+        `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(exact)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);

@@ -88,7 +88,7 @@ describe("SeatSwitchClientService", () => {
       mutated: false,
       retargeted: true,
     });
-    expect(probes.switchClient).toHaveBeenCalledWith("/dev/ttys003", "dev-impl@seat-rig:0");
+    expect(probes.switchClient).toHaveBeenCalledWith("/dev/ttys003", "=dev-impl@seat-rig:0");
   });
 
   it("remaining: a session disappearing before listWindows cannot supply its sibling's window", async () => {
@@ -163,7 +163,7 @@ describe("SeatSwitchClientService", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.message);
     expect(result.result.target).toBe("dev-impl@seat-rig:1");
-    expect(probes.switchClient).toHaveBeenCalledWith("/dev/ttys003", "dev-impl@seat-rig:1");
+    expect(probes.switchClient).toHaveBeenCalledWith("/dev/ttys003", "=dev-impl@seat-rig:1");
   });
 
   it("honest window_not_found (never a raw tmux failure) for a missing --to-window", async () => {
@@ -227,7 +227,7 @@ describe("SeatSwitchClientService", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error(result.message);
     expect(result.result.client).toBe("/dev/ttys007");
-    expect(probes.switchClient).toHaveBeenCalledWith("/dev/ttys007", "dev-impl@seat-rig:0");
+    expect(probes.switchClient).toHaveBeenCalledWith("/dev/ttys007", "=dev-impl@seat-rig:0");
   });
 
   it("client_not_found lists attached clients when --client names none of them", async () => {

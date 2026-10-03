@@ -24,7 +24,7 @@ function fakeExec() {
     const m = cmd.match(/^tmux display-message -p -t (\S+) ["']#\{(\w+)\}["']$/);
     if (!m) throw new Error(`unexpected: ${cmd}`);
     const target = unquote(m[1]!), field = m[2]!;
-    if (field === "window_activity") { const w = WINDOWS.find(([s, a]) => s === target && a === 1); if (!w) throw new Error("no session"); return `${w[2]}\n`; }
+    if (field === "window_activity") { const w = WINDOWS.find(([s, a]) => s === target.replace(/^=/, "").replace(/:$/, "") && a === 1); if (!w) throw new Error("no session"); return `${w[2]}\n`; }
     const p = PANES.find(([id]) => id === target); if (!p) throw new Error("no pane");
     return field === "pane_pid" ? `${p[1]}\n` : `${p[2]}\n`;
   });
