@@ -1703,19 +1703,21 @@ export class SessionTransport {
         };
         return withEnv(`producer link STALE — the last activity hook arrived ${ageText}, beyond the ${Math.round(store.freshnessMs / 1000)}s store window, and ${verdict[latest.reason] ?? `its generation verdict is ${latest.reason}`}; no recent hook from this live occupant`);
       }
+      // A recent hook not verified as the LIVE occupant's says nothing about this occupant's own
+      // producer prerequisites, so none of these is "producer link OK" and each keeps the env note.
       const age = ageText;
       switch (latest.reason) {
         case "generation_unverifiable":
           // Carried generation was null on THIS hook. Managed launch and fresh-handover producers carry
           // it; legacy/excluded launch paths or an occupant with no tenure at fire time may not. Sound,
           // not dark; not a quiet seat.
-          return `producer link OK — a recent hook exists (${age}) but carried NO occupant generation; the emitting launch path supplied NO occupant generation (legacy/excluded path), or the emitting occupant had no tenure at fire time. Generation UNVERIFIABLE, not a quiet seat`;
+          return withEnv(`hook received, producer unverified — a recent hook exists (${age}) but carried NO occupant generation; the emitting launch path supplied NO occupant generation (legacy/excluded path), or the emitting occupant had no tenure at fire time. Generation UNVERIFIABLE, not a quiet seat`);
         case "generation_unresolvable":
-          return `producer link OK — a recent hook exists (${age}) but the LIVE occupant generation could not be resolved (no tenure row); generation UNRESOLVABLE, not a quiet seat`;
+          return withEnv(`hook received, producer unverified — a recent hook exists (${age}) but the LIVE occupant generation could not be resolved (no tenure row); generation UNRESOLVABLE, not a quiet seat`);
         case "generation_mismatch":
-          return `producer link OK — a recent hook exists (${age}) but it belongs to a PRIOR occupant generation (a dead tenure), not this live occupant; the seat is NOT quiet`;
+          return withEnv(`hook received from a prior occupant — a recent hook exists (${age}) but it belongs to a PRIOR occupant generation (a dead tenure), not this live occupant; it is no evidence for this occupant's producer`);
         case "generation_resolver_error":
-          return `producer link OK — a recent hook exists (${age}) but the occupant-generation resolver errored; generation verdict DEGRADED, not a quiet seat`;
+          return withEnv(`hook received, producer unverified — a recent hook exists (${age}) but the occupant-generation resolver errored; generation verdict DEGRADED, not a quiet seat`);
       }
     }
     if (latest.stale === true) {

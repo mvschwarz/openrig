@@ -567,12 +567,14 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
         }),
       });
     }
-    async function adviseWith(store: AgentActivityStore, ageMs: number, generation: string | null) {
+    async function adviseWith(store: AgentActivityStore, ageMs: number, generation: string | null,
+      hasSessionEnv?: (sessionName: string, varName: string) => Promise<boolean | null>) {
       store.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit",
         occurredAt: new Date(now.getTime() - ageMs).toISOString(), generation });
       const { sendText } = spies();
-      const t = new SessionTransport({ db, rigRepo, sessionRegistry, eventBus, agentActivityStore: store, now: () => now,
-        tmuxAdapter: mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText }) });
+      const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
+      const tmuxAdapter = (hasSessionEnv ? Object.assign({}, base, { hasSessionEnv }) : base) as unknown as TmuxAdapter;
+      const t = new SessionTransport({ db, rigRepo, sessionRegistry, eventBus, agentActivityStore: store, now: () => now, tmuxAdapter });
       const r = await t.send("dev-impl@my-rig", "hi");
       expect(r.ok).toBe(true);
       expect(sendText).toHaveBeenCalled();
@@ -588,9 +590,29 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       expect(w).not.toContain("producer link OK");
     });
 
-    it("a RECENT prior-generation hook keeps the existing generation-distinct verdict", async () => {
+    it("a RECENT prior-generation hook keeps its generation-distinct verdict, never 'producer link OK'", async () => {
       const w = await adviseWith(storeWith({ generation: "dead-gen", live: "live-gen" }), 20_000, "dead-gen");
-      expect(w).toContain("producer link OK — a recent hook exists (20s ago) but it belongs to a PRIOR occupant generation");
+      expect(w).toContain("hook received from a prior occupant — a recent hook exists (20s ago) but it belongs to a PRIOR occupant generation");
+      expect(w).not.toContain("producer link OK");
+    });
+
+    // review-r2's combined-condition regressions on #606 (66305b46): a recent hook that is not the
+    // LIVE occupant's says nothing about this occupant's producer, so the env uncertainty stays.
+    it("keeps missing-runtime uncertainty when a recent prior-generation hook is stored", async () => {
+      const w = await adviseWith(storeWith({ generation: "dead-gen", live: "live-gen" }), 20_000, "dead-gen",
+        async (_s, name) => name === "OPENRIG_URL" || name === "OPENRIG_ACTIVITY_HOOK_TOKEN");
+      expect(w).toContain("PRIOR occupant generation");
+      expect(w).toContain("seat-env UNKNOWN — OPENRIG_RUNTIME absent from the tmux session environment");
+      expect(w).not.toContain("producer link OK");
+    });
+
+    it("keeps environment-lookup uncertainty with a recent unresolved-generation hook", async () => {
+      const w = await adviseWith(storeWith({ generation: "some-gen", live: null }), 20_000, "some-gen",
+        async () => { throw new Error("synthetic unavailable lookup"); });
+      expect(w).toContain("generation UNRESOLVABLE");
+      expect(w).toContain("seat-env UNKNOWN — session-environment lookup failed for relay URL, activity token, OPENRIG_RUNTIME");
+      expect(w).toContain("the agent process environment was not inspected");
+      expect(w).not.toContain("producer link OK");
     });
 
     it("an OLD hook with no carried generation is STALE and says so", async () => {
