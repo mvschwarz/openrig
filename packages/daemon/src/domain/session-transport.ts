@@ -1445,13 +1445,44 @@ export class SessionTransport {
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
     | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
   > {
-    const startedAt = Date.now();
+    // ONE deadline. UNKNOWN is retried like busy and never authorizes the send. No observation
+    // starts after the deadline (one starting exactly at it races a 0 ms timer), each one is raced
+    // against the time left, and one that completes after the deadline is discarded, so a late idle
+    // can never lead to input. At expiry the result names the last observation that completed in
+    // time; waitedMs is the wait itself.
+    const deadline = Date.now() + input.timeoutMs;
     let attempts = 0;
+    let last: AgentActivity | null = null;
+    const expire = () => {
+      const count = `${attempts} observation${attempts === 1 ? "" : "s"}`;
+      const activity: AgentActivity = last ?? {
+        state: "unknown", reason: "no_observation_in_time", evidenceSource: "pane_heuristic",
+        sampledAt: this.now().toISOString(), evidence: null,
+      };
+      return activity.state === "unknown"
+        ? {
+          ok: false as const,
+          reason: "target_activity_unknown",
+          error: last
+            ? `Target activity could not be determined (${activity.reason}) when the ${input.timeoutMs}ms wait ended (${count}). No text was sent.`
+            : `Target activity could not be determined: no observation completed within the ${input.timeoutMs}ms wait. No text was sent.`,
+          activity, waitedMs: input.timeoutMs, attempts,
+        }
+        : {
+          ok: false as const,
+          reason: "wait_for_idle_timeout",
+          error: `Target was still busy (${activity.reason}) when the ${input.timeoutMs}ms wait ended (${count}). No text was sent.`,
+          activity, waitedMs: input.timeoutMs, attempts,
+        };
+    };
 
     while (true) {
+      if (attempts > 0 && Date.now() > deadline) return expire();
       attempts++;
-      const activity = await this.classifySendReadiness(input);
-      const waitedMs = Date.now() - startedAt;
+      const activity = await this.observeReadinessWithin(input, deadline - Date.now());
+      if (activity === null || Date.now() > deadline) return expire();
+      last = activity;
+      const waitedMs = input.timeoutMs - (deadline - Date.now());
 
       if (activity.state === "idle") {
         return { ok: true, activity, waitedMs, attempts };
@@ -1468,32 +1499,28 @@ export class SessionTransport {
         };
       }
 
-      // UNKNOWN is retried like busy, within the caller's one deadline: a transient
-      // unreadable observation is not a verdict, and it never authorizes the send.
-      // At the deadline the result names the last actual observation.
-      if (waitedMs >= input.timeoutMs) {
-        const observed = `at the last of ${attempts} observation${attempts === 1 ? "" : "s"} over ${waitedMs}ms`;
-        return activity.state === "unknown"
-          ? {
-            ok: false,
-            reason: "target_activity_unknown",
-            error: `Target activity could not be determined (${activity.reason}) ${observed}. No text was sent.`,
-            activity,
-            waitedMs,
-            attempts,
-          }
-          : {
-            ok: false,
-            reason: "wait_for_idle_timeout",
-            error: `Target was still busy (${activity.reason}) ${observed}. No text was sent.`,
-            activity,
-            waitedMs,
-            attempts,
-          };
-      }
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return expire();
+      await this.sleep(Math.min(this.waitForIdlePollMs, remainingMs));
+    }
+  }
 
-      const remainingMs = input.timeoutMs - waitedMs;
-      await this.sleep(Math.min(this.waitForIdlePollMs, Math.max(1, remainingMs)));
+  /** One readiness observation, raced against the time left before the wait's deadline. Null
+   *  when the deadline wins; the abandoned observation is ignored, never delivered on. */
+  private async observeReadinessWithin(
+    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding },
+    remainingMs: number,
+  ): Promise<AgentActivity | null> {
+    const observation = this.classifySendReadiness(input);
+    observation.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        observation,
+        new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, remainingMs)); }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
