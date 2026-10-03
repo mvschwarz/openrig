@@ -824,7 +824,7 @@ Exit codes:
   cmd
     .option("--json", "JSON output for agents")
     .option("--nodes", "Show per-node detail (current rig; -A for all rigs)")
-    .option("--full", "Show all node-list fields per node (uncompacted rows; node-list recoveryGuidance/currentUsage live on the node detail, not the list)")
+    .option("--full", "Show all rig rows without cell truncation, or all node-list fields with --nodes (recoveryGuidance/currentUsage live on node detail)")
     .option("--verbose", "Alias for --full")
     .option("--limit <n>", "Limit number of entries (rigs or nodes)")
     .option("--fields <list>", "Comma-separated field list to project (JSON only)")
@@ -1016,35 +1016,37 @@ Exit codes:
       const humanList = (opts.full || limit !== null) ? tableRows : tableRows.slice(0, HUMAN_RIG_BUDGET);
       const humanTruncated = !opts.full && limit === null && tableRows.length > HUMAN_RIG_BUDGET;
 
-      const header = padRigRow("RIG", "NODES", "RUNNING", "ACTIVE", "WORK", "ATTN", "STATUS", "LIFECYCLE", "UPTIME", "SNAPSHOT");
-      console.log(header);
-      let anyArchivedShown = false;
-      for (const e of humanList as PsEntry[]) {
-        // OPR.0.3.3.19 - archived rigs only appear under --include-archived;
-        // mark them with a trailing "*" (legend footer below) so the operator
-        // can tell archived from active at a glance.
-        if (e.isArchived) anyArchivedShown = true;
-        console.log(padRigRow(
-          e.isArchived ? `${e.rigName ?? e.name} *` : (e.rigName ?? e.name),
-          String(e.nodeCount),
-          String(e.runningCount),
-          // Slice 15 — "—" when daemon predates the field; honest absence.
-          e.activeCount !== undefined ? String(e.activeCount) : "—",
-          e.hasWorkCount !== undefined ? String(e.hasWorkCount) : "—",
-          // OPR.0.4.4.21 — the founder's field-of-view anchor: where is
-          // something that might concern me. "—" = daemon predates the field.
-          e.attentionCount !== undefined ? (e.attentionCount > 0 ? `▲${e.attentionCount}` : "0") : "—",
-          e.status,
-          abbrevRigLifecycle(e.lifecycleState),
-          e.uptime ?? "—",
-          e.latestSnapshot ?? "—",
-        ));
+      const headers = ["RIG", "NODES", "RUNNING", "ACTIVE", "WORK", "ATTN", "STATUS", "LIFECYCLE", "UPTIME", "SNAPSHOT"];
+      const rows = (humanList as PsEntry[]).map((e) => [
+        e.isArchived ? `${e.rigName ?? e.name} *` : (e.rigName ?? e.name),
+        String(e.nodeCount),
+        String(e.runningCount),
+        e.activeCount !== undefined ? String(e.activeCount) : "—",
+        e.hasWorkCount !== undefined ? String(e.hasWorkCount) : "—",
+        e.attentionCount !== undefined ? (e.attentionCount > 0 ? `▲${e.attentionCount}` : "0") : "—",
+        e.status,
+        abbrevRigLifecycle(e.lifecycleState),
+        e.uptime ?? "—",
+        e.latestSnapshot ?? "—",
+      ]);
+      const widths = [24, 7, 9, 8, 6, 6, 10, 11, 11];
+      if (opts.full) {
+        for (const row of rows) {
+          for (let i = 0; i < widths.length; i++) {
+            widths[i] = Math.max(widths[i]!, row[i]!.length);
+          }
+        }
       }
+      console.log(padRigRow(headers, widths));
+      for (const row of rows) console.log(padRigRow(row, widths));
+      const anyArchivedShown = humanList.some((e) => e.isArchived);
+      const hiddenHistory = stoppedCount > 0 || (!opts.includeArchived && archivedCount > 0);
+      if (anyArchivedShown || hiddenHistory || bareDefault || humanTruncated || truncated) console.log("");
       if (anyArchivedShown) {
         console.log("* = archived (hidden from the default view; shown via --include-archived). Reverse with: rig unarchive <rig>");
       }
       // FR-1 display element 2: history as ONE count line, never rows.
-      if (stoppedCount > 0 || (!opts.includeArchived && archivedCount > 0)) {
+      if (hiddenHistory) {
         const parts: string[] = [];
         if (stoppedCount > 0) parts.push(`${stoppedCount} stopped (rig ps --filter status=stopped)`);
         if (!opts.includeArchived && archivedCount > 0) parts.push(`${archivedCount} archived (rig ps --include-archived)`);
@@ -1263,24 +1265,8 @@ function fitCell(value: string, width: number): string {
   return truncate(value, width).padEnd(width);
 }
 
-function padRigRow(rig: string, nodes: string, running: string, active: string, work: string, attn: string, status: string, lifecycle: string, uptime: string, snapshot: string): string {
-  return [
-    fitCell(rig, 24),
-    fitCell(nodes, 7),
-    fitCell(running, 9),
-    // Slice 15 — distinct columns for the three orthogonal primitives.
-    // RUNNING = process-alive (legacy); ACTIVE = terminal-active (tmux);
-    // WORK = has-assigned-work (queue). UI/CLI render them separately so
-    // operators see which dimension differs at a glance.
-    fitCell(active, 8),
-    fitCell(work, 6),
-    // OPR.0.4.4.21 — ATTN: seats needing attention (the field-of-view anchor).
-    fitCell(attn, 6),
-    fitCell(status, 10),
-    fitCell(lifecycle, 11),
-    fitCell(uptime, 11),
-    snapshot,
-  ].join("");
+function padRigRow(cells: string[], widths: number[]): string {
+  return cells.map((cell, i) => i < widths.length ? fitCell(cell, widths[i]!) : cell).join("  ");
 }
 
 export function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, model: string, status: string, startup: string, oriented: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string): string {

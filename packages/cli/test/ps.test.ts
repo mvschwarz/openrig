@@ -126,6 +126,76 @@ describe("Ps CLI", () => {
     expect(exitCode).toBeUndefined(); // 0
   });
 
+  it.each(["--full", "--verbose"])("ps %s preserves complete cells and aligns columns", async (flag) => {
+    const longName = "demo-production-integration-rig";
+    const longUptime = "12345d 23h 59m";
+    psData = [
+      { rigId: "rig-1", name: longName, nodeCount: 5, runningCount: 5, status: "running", uptime: longUptime, latestSnapshot: "1m ago" },
+      { rigId: "rig-2", name: "short", nodeCount: 2, runningCount: 2, status: "running", uptime: "1m", latestSnapshot: "2m ago" },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", flag]);
+    });
+    const header = logs.find((line) => line.startsWith("RIG"))!;
+    const longRow = logs.find((line) => line.startsWith("demo-"))!;
+    const shortRow = logs.find((line) => line.startsWith("short"))!;
+    expect(longRow).toContain(longName);
+    expect(longRow).toContain(longUptime);
+    expect(longRow).not.toContain("…");
+    expect(longRow).toMatch(new RegExp(`${longName} {2,}5`));
+    expect(longRow.indexOf("5", longName.length)).toBe(header.indexOf("NODES"));
+    expect(shortRow.indexOf("2")).toBe(header.indexOf("NODES"));
+    expect(longRow.indexOf("1m ago")).toBe(header.indexOf("SNAPSHOT"));
+    expect(shortRow.indexOf("2m ago")).toBe(header.indexOf("SNAPSHOT"));
+  });
+
+  it("ps compact rows separate truncated names from counts", async () => {
+    psData = [{ rigId: "rig-1", name: "demo-production-integration-rig", nodeCount: 5, runningCount: 5, status: "running" }];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps"]);
+    });
+    const header = logs.find((line) => line.startsWith("RIG"))!;
+    const row = logs.find((line) => line.startsWith("demo-"))!;
+    expect(row).toMatch(/… {2,}5/);
+    expect(row.indexOf("5")).toBe(header.indexOf("NODES"));
+  });
+
+  it.each([false, true])("ps separates the footer when hidden history is %s", async (hiddenHistory) => {
+    psData = [{ rigId: "rig-1", name: "live", nodeCount: 1, runningCount: 1, status: "running" }];
+    if (hiddenHistory) {
+      psData.push({ rigId: "rig-2", name: "stopped", nodeCount: 1, runningCount: 0, status: "stopped" });
+    }
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--full"]);
+    });
+    const rowIndex = logs.findIndex((line) => line.startsWith("live"));
+    expect(logs[rowIndex + 1]).toBe("");
+    expect(logs[rowIndex + 2]).toMatch(hiddenHistory ? /^not shown:/ : /^drill:/);
+    expect(logs.filter((line) => line === "")).toHaveLength(1);
+  });
+
+  it("ps --full preserves the archived marker and separates its legend", async () => {
+    const name = "demo-production-integration-archived";
+    psData = [{ rigId: "rig-1", name, nodeCount: 1, runningCount: 0, status: "stopped", isArchived: true }];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--full", "--include-archived"]);
+    });
+    const rowIndex = logs.findIndex((line) => line.startsWith(name));
+    expect(rowIndex).toBeGreaterThan(0);
+    expect(logs[rowIndex]).toContain(`${name} *  `);
+    expect(logs[rowIndex + 1]).toBe("");
+    expect(logs[rowIndex + 2]).toMatch(/^\* = archived/);
+  });
+
+  it("ps filtered output without a footer has no extra blank line", async () => {
+    psData = [{ rigId: "rig-1", name: "live", nodeCount: 1, runningCount: 1, status: "running" }];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", "--filter", "status=running"]);
+    });
+    expect(logs).toHaveLength(3);
+    expect(logs.at(-1)).toMatch(/^live/);
+  });
+
   // OPR.0.4.4.21 FR-1 (arch pin, STATED contract): the JSON-vs-table scope
   // split — default --json keeps ALL non-archived entries INCLUDING stopped
   // rigs (a stopped rig vanishing from default JSON would silently break
