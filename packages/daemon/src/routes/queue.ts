@@ -398,6 +398,43 @@ export function queueRoutes(): Hono {
     return c.json({ closed: closed.item, created: fwd.payload }, 201);
   }
 
+  /**
+   * A handoff addressed to this daemon's own host id is local. Before that was
+   * so, a registry entry naming this daemon sent it out and back as a cross-host
+   * handoff keyed by the deterministic successor id. If such a successor already
+   * exists (its create committed but the source close did not), finish that
+   * handoff with the same idempotent close instead of minting a second successor.
+   * Returns null when there is no such successor.
+   */
+  function closeTowardPriorSelfForward(
+    c: { get: (key: string) => unknown; json: (body: unknown, status?: number) => Response },
+    qitemId: string,
+    hostId: string,
+    terminalState: "handed-off" | "done",
+    body: { fromSession: string; toSession: string; transitionNote?: string },
+  ): Response | null {
+    const repo = getRepo(c);
+    const source = repo.getById(qitemId);
+    const successor = repo.getById(deriveCrossHostSuccessorId(qitemId, body.toSession, hostId));
+    if (!source || !successor || successor.destinationSession !== body.toSession || !successor.chainOfRecord?.includes(qitemId)) return null;
+    // Same close target as crossHostHandoff's re-drive, including its pre-convention key.
+    const legacyClosureTarget = `${body.toSession}@${hostId}`;
+    const sourceTerminal = source.state === "done" || source.state === "handed-off";
+    try {
+      const closed = repo.closeCrossHostHandoffSource({
+        qitemId,
+        fromSession: body.fromSession,
+        toSession: body.toSession,
+        closureTarget: sourceTerminal && source.closureTarget === legacyClosureTarget ? legacyClosureTarget : `${successor.qitemId}@${hostId}`,
+        terminalState,
+        transitionNote: body.transitionNote,
+      });
+      return c.json({ closed: closed.item, created: successor }, 201);
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  }
+
   // POST /create
   app.post("/create", async (c) => {
     const body = await c.req.json<{
@@ -651,6 +688,11 @@ export function queueRoutes(): Hono {
         nudge: body.nudge,
       });
     }
+    // Exact self id: finish a handoff that an earlier self-forward already started.
+    if (typeof body.hostId === "string" && body.hostId === getSelfHostId()) {
+      const prior = closeTowardPriorSelfForward(c, qitemId, body.hostId, "handed-off", { fromSession, toSession: body.toSession, transitionNote: body.transitionNote });
+      if (prior) return prior;
+    }
 
     try {
       const result = await getRepo(c).handoff({
@@ -723,6 +765,11 @@ export function queueRoutes(): Hono {
         evidenceRef: body.evidenceRef,
         nudge: body.nudge,
       });
+    }
+    // Exact self id: finish a handoff that an earlier self-forward already started.
+    if (typeof body.hostId === "string" && body.hostId === getSelfHostId()) {
+      const prior = closeTowardPriorSelfForward(c, qitemId, body.hostId, "done", { fromSession, toSession: body.toSession, transitionNote: body.transitionNote });
+      if (prior) return prior;
     }
 
     try {

@@ -162,7 +162,7 @@ startup injects.
 
 Three queue write routes are host-aware — `POST /create`,
 `POST /:qitemId/handoff` and `POST /:qitemId/handoff-and-complete` (**3**:
-`grep -c 'body.hostId !== LOCAL_HOST_ID' packages/daemon/src/routes/queue.ts`):
+`grep -c '!resolvesToLocalHost(body.hostId, getSelfHostId())' packages/daemon/src/routes/queue.ts`):
 a write body may carry an out-of-band `hostId` envelope. The destination
 session stays `member@rig`; the 3-part `agent@rig@host` form is CLI input
 sugar that `resolveQueueHostDestination`
@@ -239,9 +239,12 @@ message-passing closure (never 2PC).**
   `routes/queue.ts:54`; honest best-effort, not authenticated identity).
 - **Boundary discipline.** Claim, update and inbox routes take no `hostId` and
   stay local (after a cross-host handoff the successor lives where its worker
-  lives). Without a `hostId` (or with `local`), create and handoff take the
-  local path. The hot-potato validation contract (§3) is unweakened across the
-  boundary: the cross-host close always records `handed_off_to` with a target.
+  lives). Without a `hostId`, with `local`, or with this daemon's own resolved
+  host id (an exact, case-sensitive match), create and handoff take the
+  local path; a self-addressed handoff whose deterministic cross-host
+  successor an earlier self-forward already created closes toward it. The
+  hot-potato validation contract (§3) is unweakened across the boundary: the
+  cross-host close always records `handed_off_to` with a target.
 
 ## 4. Coordination events
 
