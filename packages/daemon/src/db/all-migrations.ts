@@ -1,4 +1,4 @@
-// The canonical ordered migration list (001 → 090). SINGLE SOURCE: the daemon boot path
+// The canonical ordered migration list. SINGLE SOURCE: the daemon boot path
 // (startup.ts) and any test/tool that needs a schema-faithful DB both migrate from THIS array,
 // so a reader DB is never seeded from a stale hand-copied subset (the perf-fixture-migration-parity
 // trap). Append new migrations to the END, in order.
@@ -95,9 +95,10 @@ import { classificationIdentityProvenanceSchema } from "./migrations/089_classif
 import { humanReplyToSchema } from "./migrations/090_human_reply_to.js";
 import { humanQuestionsSchema } from "./migrations/091_human_questions.js";
 import { nodeEffortSchema } from "./migrations/092_node_effort.js";
+import { usageSamplesLatestIndexesSchema } from "./migrations/094_usage_samples_latest_indexes.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered 001→092 (S02 086/089, S09 087, S03 088, #96 090, #193 091, #75 092). */
+/** Ordered migrations; numbers may be reserved by independent changes. */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -191,4 +192,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   humanReplyToSchema,
   humanQuestionsSchema,
   nodeEffortSchema,
+  usageSamplesLatestIndexesSchema,
 ];
