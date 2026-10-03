@@ -339,8 +339,10 @@ every seat stopped and the rig still listed. `send` has partial coverage in
 the addressed seat's pane. `transcript` has partial coverage in
 `transcript-reads-addressed-seat.yaml`: each of two seats' scripted output is readable through
 that seat's `rig transcript --tail 200 --json`. `capture` has partial coverage in
-`capture-returns-addressed-seat.yaml`: in a rig whose seat names overlap by prefix
-(`dev-impl@` and `dev-impl2@`), `rig capture <seat>` returns each seat's own pane. These four
+`capture-returns-addressed-seat.yaml`: in a rig whose member names overlap by prefix
+(`dev-impl`, `dev-impl2`), `rig capture <seat>` returns each seat's own pane. The scenario
+catches resolving the seat by member name or by first match, not a prefix match on the full
+seat name. These four
 run with the local runner (`run-scenarios.mjs`), not in the CI job; the transcript and capture
 scenarios use `env.stub_scripts`, which is host-mode only, so they can't join the container job
 yet. They do not prove that panes are gone or that a seat consumed a message. The transcript
@@ -433,7 +435,7 @@ Before you start, two honest constraints:
 | integration | `env` | A fixture service-backed rig. status/logs/down reflect that service and stop only it. |
 | delivery | `transcript` (partial) | Own scripted output from two addressed seats is covered by `transcript-reads-addressed-seat.yaml`. Remaining: ordering, uniqueness, no other seat's token, tail limits and restart persistence; absence/count assertions need a runner binding. |
 | delivery | `send` | (partial) Next: send a fresh nonce and require an answer derived from it. Boot text or echo can't pass. |
-| delivery | `capture` | (partial) Each seat's own token, under prefix-overlapping seat names. Next: the not-found, tail (`--lines`), sibling-absence and `--rig`/`--pod` cases, which need an error form, a tail option, an absence form and a multi-target surface in the runner. |
+| delivery | `capture` | (partial) Each seat's own token, under prefix-overlapping member names. Next: the not-found, tail (`--lines`), sibling-absence and `--rig`/`--pod` cases, which need an error form, a tail option, an absence form and a multi-target surface in the runner. |
 | delivery | `broadcast` | Broadcast a nonce to a rig or pod. Each intended seat answers once, and an excluded seat gets nothing. |
 | delivery | `walk` | Walk two pieces through an input-consuming stub. Order is kept, and a bad piece isn't reported as delivered. |
 | context | `context` | add/get/compose/trace/profile over a fixture project. Output bytes, order and roots match. |
