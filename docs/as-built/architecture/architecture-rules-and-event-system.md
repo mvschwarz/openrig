@@ -66,7 +66,7 @@ system-level invariants.
     configurable timeout, using adapter-specific probes (Claude TUI
     indicator, Codex ready message, terminal immediate).
 14. Restore outcome states are a fixed set (`RestoreNodeResult.status`,
-    `types.ts:476`): `resumed`, `rebuilt`, `fresh-primed`,
+    `types.ts:473`): `resumed`, `rebuilt`, `fresh-primed`,
     `awaiting-decision`, `attention_required`, `failed`, plus
     `operator_recovered` (set only by later reconciliation) and `fresh`
     (retained only for the legacy continuity-restoring skip path). `rebuilt` =
@@ -122,7 +122,7 @@ validation, `rigspec-schema.ts:550`; restated in compat note 1).
 The daemon's event surface is the single `RigEvent` discriminated union.
 
 `RigEvent` is declared at `packages/daemon/src/domain/types.ts:106`
-(`export type RigEvent =`) and runs through `types.ts:314`. It has **98 union
+(`export type RigEvent =`) and runs through `types.ts:311`. It has **98 union
 members** declaring **99** `type` literals: one member (`types.ts:107`) carries
 both `proof.judged` and `proof.sources_changed`.
 

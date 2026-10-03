@@ -1267,8 +1267,13 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
     // Create item directly in queue_items (without queue_transitions table)
     // with an underscore in the ID to verify exact JSON matching
     const qitemId = "qitem-test_minimal_123";
-    const nowIso = "2026-10-03T08:00:00.000Z";
-    const claimTime1 = "2026-10-03T10:00:00.000Z";
+    // The events below get created_at = datetime('now'). The claim is minutes earlier on the
+    // SAME UTC date, so a text comparison ('YYYY-MM-DD HH:MM:SS' >= '...T...Z') fails and only
+    // julianday dedups, on any day the test runs. A fixed date would let the text form pass later.
+    const realNow = Date.now();
+    const utcDayStart = Date.parse(`${new Date(realNow).toISOString().slice(0, 10)}T00:00:00.000Z`);
+    const claimTime1 = new Date(Math.max(utcDayStart, realNow - 5 * 60_000)).toISOString();
+    const nowIso = new Date(Date.parse(claimTime1) - 60_000).toISOString();
     minDb.prepare(`
       INSERT INTO queue_items (
         qitem_id, ts_created, ts_updated, source_session, destination_session,
@@ -1276,7 +1281,7 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       qitemId, nowIso, nowIso, "alice@rig-a", "bob@rig-b",
-      "in-progress", "routine", "test minimal schema dedup", "2026-10-03T09:00:00.000Z", claimTime1,
+      "in-progress", "routine", "test minimal schema dedup", claimTime1, claimTime1,
     );
 
     // Also insert a decoy event for a similar item (x instead of _) to verify exact qitemId matching
@@ -1286,7 +1291,8 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
     );
 
     // First call emits qitem.closure_overdue
-    const ev1 = minRepo.recordClosureOverdue(qitemId, { now: "2026-10-03T11:00:00.000Z" });
+    const overdueAt = new Date(realNow).toISOString();
+    const ev1 = minRepo.recordClosureOverdue(qitemId, { now: overdueAt });
     expect(ev1).not.toBeNull();
     expect(ev1?.type).toBe("qitem.closure_overdue");
     expect(events.filter((e) => e.type === "qitem.closure_overdue")).toHaveLength(1);
@@ -1296,7 +1302,7 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
     expect(eventRow.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
     // Second call for the same claim: deduplicates (returns null) despite created_at having space instead of T
-    const ev2 = minRepo.recordClosureOverdue(qitemId, { now: "2026-10-03T11:05:00.000Z" });
+    const ev2 = minRepo.recordClosureOverdue(qitemId, { now: overdueAt });
     expect(ev2).toBeNull();
     expect(events.filter((e) => e.type === "qitem.closure_overdue")).toHaveLength(1);
 
@@ -1304,7 +1310,7 @@ describe("QueueRepository — S26 blocker-actuation unification (OPR.0.5.6.26)",
     const claimTime2 = new Date(Date.now() + 1000).toISOString();
     minDb.prepare("UPDATE queue_items SET claimed_at = ? WHERE qitem_id = ?").run(claimTime2, qitemId);
 
-    const ev3 = minRepo.recordClosureOverdue(qitemId, { now: "2026-10-03T12:00:00.000Z" });
+    const ev3 = minRepo.recordClosureOverdue(qitemId, { now: new Date(Date.now() + 2000).toISOString() });
     expect(ev3).not.toBeNull();
     expect(ev3?.type).toBe("qitem.closure_overdue");
     expect(events.filter((e) => e.type === "qitem.closure_overdue")).toHaveLength(2);
