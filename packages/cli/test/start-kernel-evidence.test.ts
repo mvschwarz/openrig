@@ -21,7 +21,7 @@ async function run(kernelState?: string, httpStatus = 200, summaryStatus = 200) 
     received.push(request.url!);
     const kernel = request.url === "/api/kernel/status";
     response.writeHead(kernel ? httpStatus : request.url === "/api/rigs/summary" ? summaryStatus : 200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify(kernel ? { kernel_state: kernelState, detail: "fixture detail" } : request.url === "/api/rigs/summary" ? [] : { ok: true }));
+    response.end(JSON.stringify(kernel ? { kernel_state: kernelState, detail: "fixture detail" } : request.url === "/api/rigs/summary" ? (summaryStatus === 200 ? [] : [{ id: "restorable-rig", name: "work", nodeCount: 1, lifecycleState: "recoverable" }]) : { ok: true }));
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); }); servers.push(server);
   const port = (server.address() as { port: number }).port;
@@ -72,5 +72,6 @@ it.each([401, 503])("does not report successful empty restore discovery after HT
   expect(result.exitCode).toBe(1);
   expect(result.errors).toContain(`HTTP ${status}`);
   expect(result.received).toContain("/api/rigs/summary");
-  expect(result.received).not.toContain("/api/up");
+  expect(result.received).not.toContain("/api/rigs/restorable-rig/up");
+  expect(result.received.filter((path) => path.endsWith("/up"))).toEqual([]);
 });
