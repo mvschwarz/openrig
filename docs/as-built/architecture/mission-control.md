@@ -171,22 +171,22 @@ only this table.
 
 ## 5. Mission Control events
 
-The `RigEvent` union starts at `domain/types.ts:106`; its five
-`mission_control.*` members are at `domain/types.ts:308–314`.
+The `RigEvent` union starts at `domain/types.ts:106`; its four
+`mission_control.*` members are at `domain/types.ts:306–311`.
 
-`RigEvent` members: **99** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "'`
+`RigEvent` members: **98** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "'`
 
-`mission_control.*` members: **5** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "mission_control\.'`
+`mission_control.*` members: **4** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "mission_control\.'`
 
 - `mission_control.action_executed` — written by the write contract
   (`mission-control-write-contract.ts:225`).
 - `mission_control.cli_drift_detected` — emitted by the fleet capability
   probe (`mission-control-fleet-cli-capability.ts:171`).
-- `mission_control.view_refreshed` — declared, and forwarded by the SSE
-  route, but nothing in `packages/daemon/src` constructs it.
 - `mission_control.notification_sent` / `mission_control.notification_failed`
   — emitted by the notification dispatcher (`notification-dispatcher.ts:174`,
   `:184`).
+- *(retired)* `mission_control.view_refreshed` — retired per #490; views are
+  read-on-demand queries without background refresh caching.
 
 ## 6. Route surface
 
@@ -194,8 +194,8 @@ The `RigEvent` union starts at `domain/types.ts:106`; its five
 (`server.ts:791–794`). Routes (`routes/mission-control.ts`): `GET /views`
 (`:259`), `GET /cli-capabilities` (`:264`), `GET /destinations` (`:276`),
 `GET /sse` and its alias `GET /watch` (`:304–305`; they forward
-`action_executed`, `cli_drift_detected` and `view_refreshed` events,
-`:289–292`), `POST /action` (`:315`, auth-gated), `GET /audit` (`:442`),
+`action_executed` and `cli_drift_detected` events,
+`:289–291`), `POST /action` (`:315`, auth-gated), `GET /audit` (`:442`),
 `POST /notifications/test` (`:482`, auth-gated), and `GET /views/:view-name`
 (`:510`).
 

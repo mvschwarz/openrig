@@ -245,7 +245,7 @@ message-passing closure (never 2PC).**
 
 ## 4. Coordination events
 
-The `RigEvent` union (`packages/daemon/src/domain/types.ts:106`) has **99**
+The `RigEvent` union (`packages/daemon/src/domain/types.ts:106`) has **98**
 members
 (`sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "'`);
 this module covers only the coordination families below.
@@ -253,10 +253,10 @@ this module covers only the coordination families below.
 Coordination events emitted by these services: `stream.emitted`
 (`StreamStore.emit`, declared at `types.ts:243`); `queue.created` /
 `queue.handed_off` / `queue.claimed` / `queue.unclaimed` / `queue.updated` /
-`qitem.fallback_routed` (QueueRepository); `inbox.absorbed` (`types.ts:253`) /
-`inbox.denied` (InboxHandler). `qitem.closure_overdue` is declared
-(`types.ts:252`) and the queue watch filter lets it through, but nothing emits
-it: `types.ts` is the only file that contains its `type:` literal (**1** file:
+`qitem.fallback_routed` / `qitem.closure_overdue` (QueueRepository); `inbox.absorbed` (`types.ts:253`) /
+`inbox.denied` (InboxHandler). `qitem.closure_overdue` (`types.ts:252`) is
+emitted by `QueueRepository.recordClosureOverdue` when swept by `queue-stuck-sweep`
+and passed through the queue watch filter (**2** files contain its literal:
 `git grep -l -F 'type: "qitem.closure_overdue"' -- packages/daemon/src | wc -l`).
 The `stream|queue|inbox|qitem` families declare **10** event types (`stream` 1
 + `queue` 5 + `inbox` 2 + `qitem` 2;

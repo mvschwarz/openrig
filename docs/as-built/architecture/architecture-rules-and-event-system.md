@@ -131,20 +131,20 @@ both `proof.judged` and `proof.sources_changed`.
 - Type literals:
   `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | sort -u | wc -l`
 
-**95** of the 100 literals appear as a `type: "<x>"` literal somewhere in
+**96** of the 99 literals appear as a `type: "<x>"` literal somewhere in
 `packages/daemon/src` outside `types.ts` (mostly in `domain/` and `routes/`;
-`seat.model_divergence` is built in `startup.ts`). **5** are declared but never
-constructed: `session.status_changed`, `continuity.sync`, `continuity.degraded`,
-`qitem.closure_overdue` and `mission_control.view_refreshed` (the last two are
-still named in SSE filters, `routes/queue.ts:976` and
-`routes/mission-control.ts:292`). List them with:
+`seat.model_divergence` is built in `startup.ts`). **3** are declared but never
+constructed: `session.status_changed`, `continuity.sync`, and `continuity.degraded`
+(per #490, `qitem.closure_overdue` is produced by `QueueRepository.recordClosureOverdue`
+when swept by `queue-stuck-sweep`, and `mission_control.view_refreshed` was retired).
+List them with:
 
 `for t in $(sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | tr -d '"'); do git grep -q -F "type: \"$t\"" -- packages/daemon/src ':!packages/daemon/src/domain/types.ts' || echo "$t"; done`
 
 ### Per-prefix event families
 
 Each count below is the number of `type` literals per prefix in the union body
-(`types.ts:106`–`314`):
+(`types.ts:106`–`311`):
 `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -oE '"[a-z_]+(\.[a-z_]+)+"' | tr -d '"' | cut -d. -f1 | sort | uniq -c | sort -rn`.
 
 | Prefix | Types | Sample / role |
@@ -157,7 +157,7 @@ Each count below is the number of `type` literals per prefix in the union body
 | `seat.*` | 5 | `seat.model_divergence` (`:113`) … `seat.handover_completed` (`:198`) — model divergence, fresh launch, attention clear, handover |
 | `queue.*` | 5 | queue lifecycle (`:247`–`:250`, `:260`; detail in `coordination-primitive.md`) |
 | `package.*` | 5 | legacy package/install engine events |
-| `mission_control.*` | 5 | audit/notification (`:308`–`:314`; detail in `mission-control.md`) |
+| `mission_control.*` | 4 | audit/notification (`:306`–`:311`; detail in `mission-control.md`) |
 | `bootstrap.*` | 5 | legacy bootstrap-run events |
 | `restore.*` | 4 | restore start/complete/subset-complete/reconcile (detail in `lifecycle-snapshot-restore.md`) |
 | `classifier.*` | 4 | classifier-lease lifecycle |
@@ -169,7 +169,7 @@ Each count below is the number of `type` literals per prefix in the union body
 | `agent.*` | 2 | `agent.activity` (`:149`), `agent.session_identity` (`:156`) |
 | singletons | 12 | one type each: `workflow_spec.*`, `view.*`, `transport.*` (`:153`), `topology.*` (`:136`), `stream.*` (`:243`), `snapshot.*`, `project.*`, `kernel.*`, `event.*` (`:108`), `chat.*` (`:237`), `bundle.*`, `binding.*` |
 
-Family counts sum to 100 type literals (18 multi-type families totalling 88 +
+Family counts sum to 99 type literals (18 multi-type families totalling 87 +
 12 singletons).
 
 ### Emission and delivery

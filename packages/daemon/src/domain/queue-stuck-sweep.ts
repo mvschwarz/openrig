@@ -328,6 +328,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // routes to them.
     for (const row of deps.queueRepo.findOverdue({ now: now.toISOString() })) {
       if (isFindingRow(row)) continue;
+      deps.queueRepo.recordClosureOverdue(row.qitemId, { now: now.toISOString() });
       candidates.push({
         kind: "overdue-claim",
         row,

@@ -3350,6 +3350,52 @@ export class QueueRepository {
   }
 
   /**
+   * Record that an in-progress queue item has exceeded its closure_required_at
+   * deadline, appending a transition note and emitting `qitem.closure_overdue`.
+   *
+   * Deduplicated: if this obligation has already recorded `closure-overdue`
+   * since it was claimed (or created), no duplicate event or transition is emitted.
+   */
+  recordClosureOverdue(qitemId: string, opts?: { now?: string }): PersistedEvent | null {
+    const qitem = this.getById(qitemId);
+    if (!qitem || qitem.state !== "in-progress" || !qitem.closureRequiredAt) return null;
+    const cutoff = opts?.now ?? new Date().toISOString();
+    if (qitem.closureRequiredAt > cutoff) return null;
+    const claimSince = qitem.claimedAt ?? qitem.tsCreated;
+    if (this.hasQueueTransitionsTable) {
+      const alreadyRecorded = this.db.prepare(
+        `SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_note = 'closure-overdue' AND ts >= ? LIMIT 1`,
+      ).get(qitemId, claimSince);
+      if (alreadyRecorded) return null;
+    } else {
+      const alreadyRecorded = this.db.prepare(
+        `SELECT 1 FROM events WHERE type = 'qitem.closure_overdue' AND payload LIKE ? AND created_at >= ? LIMIT 1`,
+      ).get(`%"qitemId":"${qitemId}"%`, claimSince);
+      if (alreadyRecorded) return null;
+    }
+    const txn = this.db.transaction(() => {
+      if (this.hasQueueTransitionsTable) {
+        this.transitionLog.append({
+          qitemId,
+          state: qitem.state,
+          actorSession: "daemon@system",
+          transitionNote: "closure-overdue",
+        });
+      }
+      return this.eventBus.persistWithinTransaction({
+        type: "qitem.closure_overdue",
+        qitemId,
+        destinationSession: qitem.destinationSession,
+        closureRequiredAt: qitem.closureRequiredAt!,
+        overdueSince: qitem.closureRequiredAt!,
+      });
+    });
+    const persisted = txn();
+    this.eventBus.notifySubscribers(persisted);
+    return persisted;
+  }
+
+  /**
    * Surface two evidence-backed undelivered classes: the original pending
    * create-path nudge failures, and active human-notification episodes whose
    * gateway ledger says transport-failed or receiptless past the post window.

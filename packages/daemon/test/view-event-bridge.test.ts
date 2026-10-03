@@ -176,6 +176,33 @@ describe("view-event-bridge (PL-004 Phase B R1; BLOCKER 2 fix)", () => {
     expect(claimEvents.map((e) => e.viewName).sort()).toEqual(["activity", "pod-load", "recently-active"]);
   });
 
+  it("qitem.closure_overdue triggers view.changed for recently-active + escalations + activity", async () => {
+    const item = await queueRepo.create({
+      sourceSession: "alice@rig",
+      destinationSession: "bob@rig",
+      body: "test-overdue",
+      nudge: false,
+    });
+    queueRepo.claim({ qitemId: item.qitemId, destinationSession: "bob@rig" });
+    const past = new Date(Date.now() - 60_000).toISOString();
+    db.prepare("UPDATE queue_items SET closure_required_at = ? WHERE qitem_id = ?").run(past, item.qitemId);
+    captured.length = 0;
+    const event = queueRepo.recordClosureOverdue(item.qitemId);
+    expect(event).not.toBeNull();
+    expect(event?.type).toBe("qitem.closure_overdue");
+
+    const events = viewChangedEvents();
+    const overdueViewNames = events
+      .filter((e) => e.cause === "qitem.closure_overdue")
+      .map((e) => e.viewName)
+      .sort();
+    expect(overdueViewNames).toEqual([
+      "activity",
+      "escalations",
+      "recently-active",
+    ]);
+  });
+
   it("inbox.absorbed triggers view.changed for recently-active + pod-load + activity", async () => {
     const drop = inbox.drop({
       destinationSession: "bob@rig",
