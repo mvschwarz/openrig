@@ -576,6 +576,8 @@ export function hasExpectedStagedText(pane: string | null, expected: string): bo
 }
 
 export interface SendOpts {
+  /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
+  beforeWrite?: () => void;
   /** Stable caller request ID, reused for readback after transport uncertainty. */
   deliveryId?: string;
   auditPointer?: string;
@@ -1399,7 +1401,7 @@ export class SessionTransport {
     if (observed) observed.sentHash = hashSentText(text);
     const textResult = await this.runStage(
       "session_transport.send_text",
-      () => this.tmuxAdapter.sendText(sessionName, text),
+      () => { opts?.beforeWrite?.(); return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text); },
       (result) => result.ok ? "ok" : "failed",
     );
     if (!textResult.ok) {
@@ -1421,7 +1423,7 @@ export class SessionTransport {
     // 5. Submit (Enter)
     const submitResult = await this.runStage(
       "session_transport.submit",
-      () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
+      () => { opts?.beforeWrite?.(); return opts?.beforeWrite ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], opts.beforeWrite) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]); },
       (result) => result.ok ? "ok" : "failed",
     );
     if (!submitResult.ok) {
@@ -1474,11 +1476,19 @@ export class SessionTransport {
       : fn();
   }
 
+  /** Wait on the existing classifier without occupying the input/lifecycle lease. */
+  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal) {
+    const meta = this.getSessionMeta(sessionName);
+    return this.waitForIdle({ sessionName, runtime: meta.runtime, attachmentType: meta.attachmentType, timeoutMs, signal,
+      binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane } });
+  }
+
   private async waitForIdle(input: {
     sessionName: string;
     runtime: string | null;
     attachmentType: string | null;
     timeoutMs: number;
+    signal?: AbortSignal;
     binding?: ObservedBinding;
   }): Promise<
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
@@ -1515,10 +1525,24 @@ export class SessionTransport {
         };
     };
 
+    const cancelled = () => ({
+      ok: false as const,
+      reason: "preparation_cancelled",
+      error: "Managed preparation ended; no compact authorized.",
+      activity: last ?? {
+        state: "unknown" as const, reason: "preparation_cancelled", evidenceSource: "pane_heuristic" as const,
+        sampledAt: this.now().toISOString(), evidence: null,
+      },
+      waitedMs: Math.max(0, Math.min(input.timeoutMs, input.timeoutMs - (deadline - Date.now()))),
+      attempts,
+    });
+
     while (true) {
+      if (input.signal?.aborted) return cancelled();
       if (attempts > 0 && Date.now() > deadline) return expire();
       attempts++;
       const activity = await this.observeReadinessWithin(input, deadline - Date.now());
+      if (input.signal?.aborted) return cancelled();
       if (activity === null || Date.now() > deadline) return expire();
       last = activity;
       const waitedMs = input.timeoutMs - (deadline - Date.now());

@@ -3,8 +3,7 @@ import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 
-// The trigger is two-phase (prep → wait-for-idle → /compact); the wait-for-idle
-// half can take up to the daemon's manual-prep ceiling (~120s). Give the HTTP
+// Preparation (exact map plus idle wait) shares the existing 120s ceiling. Give the HTTP
 // call generous headroom so the client does not time out mid-sequence.
 const MANUAL_COMPACT_REQUEST_TIMEOUT_MS = 180_000;
 
@@ -24,6 +23,9 @@ export function compactCommand(depsOverride?: CompactDeps): Command {
     .description("Manually run the guided compaction sequence (prep → /compact → restore → audit) for one Claude seat")
     .argument("<session>", "Target Claude session name (e.g. dev-impl@my-rig)")
     .option("--json", "JSON output for agents")
+    .option("--skip-map", "Skip the restore-map prerequisite once; keep target, idle and permission checks")
+    .option("--cancel", "End the current preparation and disarm its future compact")
+    .option("--state", "Show the current preparation, expected map and deadline without triggering")
     .addHelpText("after", `
 Examples:
   rig compact dev-impl@my-rig          Manually compact one Claude seat now
@@ -33,14 +35,26 @@ Runs the SAME guided lifecycle the auto-compaction policy runs (pre-compact
 prep → /compact with the trust-bridge → restore-from-marker → read-depth audit)
 on demand, for ONE Claude seat, without waiting for the context threshold. It is
 NOT a bare /compact and NOT the read-only 'rig compact-plan' triage. Non-Claude
-seats are rejected. The /compact is sent only AFTER the prep turn completes.`);
+seats are rejected. Managed /compact waits for the exact attempt/occupant restore
+map named by preparation, published atomically with its completion marker. This
+checks completion identity, not map quality. Manual preparation and idle wait share
+120 seconds; expiry disarms that attempt. --state shows the map/deadline/reason;
+--cancel ends preparation. --skip-map skips only the map requirement for this one
+manual request. Cancel an active preparation before retrying or using --skip-map.
+Automatic preparation waits at most 25 minutes from prep delivery, using existing
+polls. A stopped attempt does not restart automatically; rerun this command to
+start a fresh attempt. Cancellation disarms future input; it cannot undo a command
+already submitted. Raw provider /compact and normal messages are unchanged.`);
 
   const getDepsF = (): CompactDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
   };
 
-  cmd.action(async (session: string, opts: { json?: boolean }) => {
+  cmd.action(async (session: string, opts: { json?: boolean; skipMap?: boolean; cancel?: boolean; state?: boolean }) => {
+    if ([opts.skipMap, opts.cancel, opts.state].filter(Boolean).length > 1) {
+      console.error("Choose only one of --skip-map, --cancel or --state."); process.exitCode = 1; return;
+    }
     const deps = getDepsF();
 
     const status = await getDaemonStatus(deps.lifecycleDeps);
@@ -51,9 +65,9 @@ seats are rejected. The /compact is sent only AFTER the prep turn completes.`);
     }
 
     const client = deps.clientFactory(getDaemonUrl(status));
-    const res = await client.post<Record<string, unknown>>(
-      "/api/compaction/trigger",
-      { session },
+    const res = opts.state ? await client.get<Record<string, unknown>>(`/api/compaction/state?session=${encodeURIComponent(session)}`) : await client.post<Record<string, unknown>>(
+      opts.cancel ? "/api/compaction/cancel" : "/api/compaction/trigger",
+      { session, ...(opts.skipMap ? { skipMap: true } : {}) },
       { headers: terminalAuthHeaders(), timeoutMs: MANUAL_COMPACT_REQUEST_TIMEOUT_MS },
     );
 
@@ -70,6 +84,9 @@ seats are rejected. The /compact is sent only AFTER the prep turn completes.`);
       return;
     }
 
+    if (opts.state || opts.cancel) {
+      console.log(JSON.stringify(res.data, null, 2)); return;
+    }
     const stage = res.data["stage"] as string | undefined;
     console.log(`Manual compaction triggered for ${session}${stage ? ` (stage: ${stage})` : ""}.`);
     console.log("The restore + read-depth audit prompts follow automatically as the seat drains below threshold.");

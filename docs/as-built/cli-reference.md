@@ -814,7 +814,7 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig compact <session>` | — | `--json` |
+| `rig compact <session>` | — | `--json`<br>`--skip-map`<br>`--cancel`<br>`--state` |
 
 ### heartbeat
 
