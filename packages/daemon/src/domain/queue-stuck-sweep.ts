@@ -499,21 +499,29 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // a real queue history does not raise a flood of historical findings.
     const custodyHours = deps.custodyWindowHours ?? resolveStuckSweepCustodyWindowHours();
     const custodyCutoff = new Date(now.getTime() - custodyHours * 3_600_000).toISOString();
+    const openDanglingIds: string[] = [];
+    const danglingPrefix = "stuck-sweep:dangling-closure:";
+    for (const { tags } of deps.db
+      .prepare(`SELECT tags FROM queue_items WHERE state IN ('pending', 'in-progress', 'blocked') AND tags LIKE ?`)
+      .all(`%"${danglingPrefix}%`) as Array<{ tags: string }>) {
+      try {
+        for (const tag of JSON.parse(tags) as string[]) {
+          if (tag.startsWith(danglingPrefix)) {
+            openDanglingIds.push(tag.slice(danglingPrefix.length));
+          }
+        }
+      } catch {
+        // Skip malformed tags
+      }
+    }
     const custodyRows = deps.db
       .prepare(
         `SELECT q.qitem_id FROM queue_items q
           WHERE q.state IN ('done', 'canceled')
             AND (q.closure_target LIKE 'qitem-%' OR q.closure_reason = 'handed_off_to')
-            AND (
-              q.ts_updated >= ?
-              OR EXISTS (
-                SELECT 1 FROM queue_items f
-                 WHERE f.tags LIKE '%"stuck-sweep:dangling-closure:' || q.qitem_id || '"%'
-                   AND f.state IN ('pending', 'in-progress', 'blocked')
-              )
-            )`,
+            AND (q.ts_updated >= ? OR q.qitem_id IN (SELECT value FROM json_each(?)))`,
       )
-      .all(custodyCutoff) as Array<{ qitem_id: string }>;
+      .all(custodyCutoff, JSON.stringify(openDanglingIds)) as Array<{ qitem_id: string }>;
     for (const { qitem_id } of custodyRows) {
       const row = deps.queueRepo.getById(qitem_id);
       if (!row || isFindingRow(row)) continue;
