@@ -1,4 +1,6 @@
 import {afterEach, expect, it, vi} from 'vitest';
+import {Hono} from 'hono';
+import {compactionRoutes} from '../src/routes/compaction.js';
 import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
@@ -10,7 +12,7 @@ import {ContextMonitor} from '../src/domain/context-monitor.js';
 const seat='writer@demo', input={sessionName:seat,runtime:'claude-code',usedPercentage:90};
 const homes:string[]=[];
 afterEach(()=>{vi.restoreAllMocks();for(const h of homes.splice(0))rmSync(h,{recursive:true,force:true});});
-function fixture(){
+function fixture(manualPrepWaitMs=1000){
  const home=mkdtempSync(join(tmpdir(),'compaction-preparation-'));homes.push(home);
  let clock=10000,generation='generation-one',activity='idle';
  let onSleep:(()=>Promise<void>)|undefined;
@@ -26,8 +28,8 @@ function fixture(){
  (transport as any).classifySendReadiness=async()=>({state:activity,reason:'fixture',evidenceSource:'fixture'});
  (transport as any).diagnoseProducerLink=async()=> 'fixture';
  const settings={resolveClaudeCompactionPolicy:()=>policy};
- const e=new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,manualPrepWaitMs:1000,now:()=>clock,sleep:async(ms)=>{clock+=ms;await onSleep?.();},resolveOccupantGeneration:()=>generation});
- return{e,transport,tmux,guard,onSleep:(fn:()=>Promise<void>)=>{onSleep=fn;},writes,keys,policy,home,clock:()=>clock,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;},activity:(s:string)=>{activity=s;}};
+ const e=new ClaudeCompactionEnforcer(settings as any,transport,{openrigHome:home,manualPrepWaitMs,now:()=>clock,sleep:async(ms)=>{clock+=ms;await onSleep?.();},resolveOccupantGeneration:()=>generation});
+ return{e,transport,tmux,guard,settings,onSleep:(fn:()=>Promise<void>)=>{onSleep=fn;},writes,keys,policy,home,clock:()=>clock,advance:(ms:number)=>{clock+=ms;},generation:(g:string)=>{generation=g;},activity:(s:string)=>{activity=s;}};
 }
 function publish(f:ReturnType<typeof fixture>,suffix=''){
  const a=f.e.getPreparationState(seat)!;mkdirSync(dirname(a.mapPath),{recursive:true});
@@ -202,4 +204,66 @@ it('manual started while auto was off still disarms on a subsequently observed d
  expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'disabled'});
  f.policy.enabled=true;await f.e.maybeAutoCompact(input);
  expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
+});
+
+
+it('manual preparation names the request and its existing UTC deadline, including time already spent',async()=>{
+ const f=fixture(120_000);
+ // Policy resolution consumes part of the already-started manual budget.
+ vi.spyOn(f.settings,'resolveClaudeCompactionPolicy').mockImplementationOnce(()=>{f.advance(250);return f.policy;});
+ const keys=f.tmux.sendKeys.getMockImplementation()!;
+ f.tmux.sendKeys.mockImplementationOnce(async(...args)=>{f.advance(10_000);return keys(...args);});
+ f.onSleep(async()=>{publish(f);});
+ expect((await f.e.triggerManualCompact({...input,usedPercentage:4},{operatorInitiated:true})).triggered).toBe(true);
+ const prompt=f.writes[0]!;
+ expect(prompt).toContain('OpenRig manual compaction was requested');
+ expect(prompt).not.toMatch(/automatic/i);
+ expect(prompt).not.toContain('configured compaction threshold');
+ expect(prompt).toContain('does not depend on the context threshold');
+ expect(prompt).toContain('1970-01-01T00:02:10.000Z');
+ expect(prompt).toContain('119750 ms remaining when this request was constructed');
+ expect(prompt).toContain('Delivery time, writing the complete restore map, and becoming idle share this deadline');
+ expect(f.e.getPreparationState(seat)?.deadlineAt).toBe(130_000);
+ expect(compacts(f)).toHaveLength(1);
+});
+
+it('automatic preparation gives the post-delivery ceiling without a fabricated pre-send deadline',async()=>{
+ const f=fixture();const keys=f.tmux.sendKeys.getMockImplementation()!;
+ f.tmux.sendKeys.mockImplementationOnce(async(...args)=>{f.advance(60_000);return keys(...args);});
+ await f.e.maybeAutoCompact(input);
+ const prompt=f.writes[0]!;
+ expect(prompt).toContain('OpenRig automatic compaction preparation is now required');
+ expect(prompt).toContain('Current context usage is 90%; configured compaction threshold is 80%');
+ expect(prompt).toContain('25-minute ceiling starts after preparation delivery returns');
+ expect(prompt).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+ expect(f.e.getPreparationState(seat)?.deadlineAt).toBe(f.clock()+AUTO_PREP_WAIT_MS_DEFAULT);
+ expect(prompt).toContain('Keep the normal ranked restore-map content');
+ expect(prompt).toContain('atomically rename');
+ expect(prompt).toContain(f.e.getPreparationState(seat)!.marker);
+});
+
+for(const expiry of ['missing map','idle after completed map'])it(`route reports incomplete preparation on ${expiry} expiry`,async()=>{
+ const f=fixture();
+ if(expiry==='idle after completed map')f.onSleep(async()=>{publish(f);f.activity('busy');});
+ vi.spyOn(f.transport,'resolveSessions').mockResolvedValue({ok:true,sessions:[seat]} as any);
+ const app=new Hono();
+ app.use('*',async(c,next)=>{
+  c.set('compactionEnforcer' as never,f.e);
+  c.set('sessionTransport' as never,f.transport);
+  c.set('contextUsageStore' as never,{getForNode:()=>({availability:'known',usedPercentage:4})});
+  c.set('db' as never,{prepare:()=>({get:()=>({node_id:'node-one',runtime:'claude-code'})})});
+  await next();
+ });
+ app.route('/api/compaction',compactionRoutes());
+ const response=await app.request('/api/compaction/trigger',{
+  method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:seat}),
+ });
+ const body=await response.json();
+ expect(response.status).toBe(409);
+ expect(body.reason).toBe('preparation_incomplete');
+ expect(body.error).toContain('Preparation (restore map and idle wait) did not finish in time');
+ expect(body.error).not.toContain('restore map was not completed');
+ expect(body.error).toContain('managed compaction is disarmed');
+ expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
+ expect(compacts(f)).toHaveLength(0);
 });
