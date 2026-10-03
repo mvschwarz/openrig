@@ -161,6 +161,22 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
       qitemId: row.qitemId,
       destinationSession: "worker@r",
     });
+
+    // If the transition is archived into queue_transitions_archive, deduplication still holds
+    db.prepare(`
+      INSERT INTO queue_transitions_archive (
+        transition_id, qitem_id, ts, state, transition_note,
+        actor_session, closure_reason, closure_target, archived_at
+      )
+      SELECT transition_id, qitem_id, ts, state, transition_note,
+             actor_session, closure_reason, closure_target, ?
+        FROM queue_transitions WHERE qitem_id = ?
+    `).run(new Date().toISOString(), row.qitemId);
+    db.prepare("DELETE FROM queue_transitions WHERE qitem_id = ? AND transition_note = 'closure-overdue'").run(row.qitemId);
+
+    await runSweep();
+    const overdueEvents4 = emitted.filter((e) => e.type === "qitem.closure_overdue");
+    expect(overdueEvents4).toHaveLength(2);
   });
 
   it("S04 PICKUP SEAM: stalled-after-claim routes one finding to the claimant and later motion auto-closes it", async () => {

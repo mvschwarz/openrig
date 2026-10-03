@@ -3367,6 +3367,12 @@ export class QueueRepository {
         `SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_note = 'closure-overdue' AND ts >= ? LIMIT 1`,
       ).get(qitemId, claimSince);
       if (alreadyRecorded) return null;
+      if (detectTable(this.db, "queue_transitions_archive")) {
+        const alreadyRecordedArchive = this.db.prepare(
+          `SELECT 1 FROM queue_transitions_archive WHERE qitem_id = ? AND transition_note = 'closure-overdue' AND ts >= ? LIMIT 1`,
+        ).get(qitemId, claimSince);
+        if (alreadyRecordedArchive) return null;
+      }
     } else {
       const alreadyRecorded = this.db.prepare(
         `SELECT 1 FROM events WHERE type = 'qitem.closure_overdue' AND payload LIKE ? AND created_at >= ? LIMIT 1`,
