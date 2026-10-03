@@ -31,3 +31,13 @@ it("preserves YAML-like strings in captured metadata and supplementary descripto
   const dir = library.install(root, manifest, new Map([["notes.md", "fixture bytes"]]));
   expect(parseAgentImageManifest(readFileSync(join(dir, "manifest.yaml"), "utf-8"), dir)).toEqual(manifest);
 });
+
+it.each(["  indented first\noutdented second", "no trailing newline", "multiple trailing\n\n", "windows\r\nnotes\r\n", ""])("preserves notes exactly: %j", (notes) => {
+  root = mkdtempSync(join(tmpdir(), "openrig-image-notes-"));
+  const library = new AgentImageLibraryService({ roots: [{ path: root, sourceType: "user_file" }] });
+  const manifest: AgentImageManifest = { name: "notes", version: "1", runtime: "codex",
+    sourceSeat: "dev@fixture", sourceSessionId: "session", sourceResumeToken: "session",
+    createdAt: new Date().toISOString(), notes, files: [] };
+  const dir = library.install(root, manifest, new Map());
+  expect(parseAgentImageManifest(readFileSync(join(dir, "manifest.yaml"), "utf-8"), dir)).toEqual(manifest);
+});

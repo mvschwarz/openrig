@@ -326,7 +326,13 @@ export class AgentImageLibraryService {
     }
     mkdirSync(dirname(targetDir), { recursive: true });
     // Exclusively create the target so failure cleanup owns only this attempt.
-    mkdirSync(targetDir);
+    try { mkdirSync(targetDir); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      throw new AgentImageError("image_referenced",
+        `agent image directory already exists at ${targetDir}; choose a different name or remove the existing dir`,
+        { name: manifest.name, targetDir });
+    }
     let installed = false;
     try {
       // Emit manifest as YAML — write camelCase keys mapped to snake_case
@@ -346,9 +352,8 @@ export class AgentImageLibraryService {
       if (manifest.sourceCwd) {
         yamlLines.push(`source_cwd: ${quoteYamlString(manifest.sourceCwd)}`);
       }
-      if (manifest.notes) {
-        yamlLines.push(`notes: |`);
-        for (const line of manifest.notes.split("\n")) yamlLines.push(`  ${line}`);
+      if (manifest.notes !== undefined) {
+        yamlLines.push(`notes: ${quoteYamlString(manifest.notes)}`);
       }
       if (typeof manifest.estimatedTokens === "number") yamlLines.push(`estimated_tokens: ${manifest.estimatedTokens}`);
       if (manifest.lineage && manifest.lineage.length > 0) {
