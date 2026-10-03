@@ -1,15 +1,5 @@
----
-name: claude-compaction-restore
-description: Use when a Claude Code session has just compacted, is about to compact, reached context limit, resumed after /compact, or needs to rebuild its working mental model from Claude JSONL transcripts and touched files.
-metadata:
-  openrig:
-    sibling_skills:
-      - session-compaction-and-restore
-      - agent-startup-and-context-ingestion
-      - agent-starters
-      - session-source-fork
-      - seat-continuity-and-handover
----
+> **Superseded by `../SKILL.md` (openrig-core 0.1.3). Kept for comparison only; do not follow it.**
+> This is the 0.1.2 text with its frontmatter removed so that nothing indexes it as a live skill.
 
 # Claude Compaction Restore
 

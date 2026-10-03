@@ -242,11 +242,11 @@ function buildPostCompactRestorePrompt(input: {
     `First, look for the pending restore marker at ${markerPath}.`,
   ];
   if (input.transcriptPath) {
-    pieces.push(`If the marker is missing, rebuild a packet from this Claude JSONL transcript: ${input.transcriptPath}.`);
+    pieces.push(`If the marker is missing and you have no restore map, rebuild a packet from this Claude JSONL transcript: ${input.transcriptPath}.`);
   } else if (input.sessionId) {
-    pieces.push(`If the marker is missing, inspect the newest matching packet under /tmp/claude-compaction-restore/ for session id ${input.sessionId}.`);
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for session id ${input.sessionId}.`);
   } else {
-    pieces.push("If the marker is missing, inspect the newest matching packet under /tmp/claude-compaction-restore/ for this Claude session.");
+    pieces.push("If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for this Claude session.");
   }
   const inlineInstruction = input.postCompactInstruction?.trim();
   const instructionFilePath = input.postCompactInstructionFilePath?.trim();
@@ -260,7 +260,7 @@ function buildPostCompactRestorePrompt(input: {
     // refused at the source. Tell the seat NOT to seek it out (it is not its state).
     pieces.push("A post-compaction instruction file declaring a DIFFERENT seat was present and has been IGNORED — it is not yours; do NOT read or follow it. Rely on the per-seat marker and the JSONL transcript for restore.");
   }
-  pieces.push("Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read the restore packet files and mental-model restore map, then reply with: restored from packet at <path>; resumed at step <X>.");
+  pieces.push("Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read your newest restore map and use the restore packet as a lookup, then reply with: restored from packet at <path>; resumed at step <X>.");
   return pieces.join(" ");
 }
 
@@ -275,9 +275,8 @@ function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string |
   pieces.push(
     "List every file, packet, marker, restore map, instruction file, and source document you were asked to read during restore.",
     "For each item, mark read depth as FULL, PARTIAL, or NOT_READ.",
-    "You will be given a task where all of these files are required reading in order to understand the task.",
-    "Do not optimize for token conservation.",
-    "Read every PARTIAL or NOT_READ item in full now, then report the final read-depth table before continuing.",
+    "Required items are your restore map's ranked entries above your restore class's tier line (with no map: the instruction files and the packet's restore-instructions.md); the other restore packet files and the session JSONL stay lookup-only.",
+    "Read every required item that is not FULL in full now, without skimming, then report the final read-depth table before continuing.",
   );
   return pieces.join(" ");
 }

@@ -56,11 +56,12 @@ how far down the list they go.
 
 | Class | Who | Reads |
 |---|---|---|
-| **Default** | drivers, builders, reviewers, QA, and any seat not listed below | Tier 1: the top of the list, to about **100k** |
-| **High-context** | orchestrators, planners, advisors, leads: any seat that makes product, scope or routing decisions | Tier 1 and Tier 2, to about **200k** |
+| **Default** | drivers, builders, reviewers, QA, and any seat not listed below | Tier 1: the top of the list, to about **100k** of real context |
+| **High-context** | orchestrators, planners, advisors, leads: any seat that makes product, scope or routing decisions | Tier 1 and Tier 2, to about **200k** of real context |
 
 The tiers are **real context added by the restore**, on top of what the compaction summary leaves (about 60k).
-File size is a poor guide to that cost: in tests, real context grew 1.7 to 2 times the bytes ÷ 4 estimate,
+These budgets assume a context window of about 1M tokens; on a smaller window, scale them to about 10% and
+20% of it. File size is a poor guide to that cost: in OpenRig's own runs, real context grew 1.7 to 2 times the bytes ÷ 4 estimate,
 because of line numbers on reads, tool output and your own reasoning. So rank to about **50k of bytes ÷ 4 for
 Tier 1** and about **100k for Tier 2**, and check real usage at each checkpoint with
 `rig compact-plan --json` (your seat's `estimatedUsedTokens`).
@@ -71,7 +72,7 @@ instruction file or your own map can name the class explicitly, and that overrid
 classes, transcripts and the session JSONL appear only as targeted line ranges, never as whole files.
 
 If there is no ranked list (no preparation turn happened), use this default order. Default seats stop at about
-100k:
+100k of real context:
 1. the post-compaction world profile;
 2. the mission or slice `SPEC.md` and `NOTES.md`;
 3. rows you hold.
@@ -94,12 +95,12 @@ You are about to lose every connection you have built. Spend this turn making th
    compacted): `<topology root>/rigs/<rig>/seats/<seat>/RESTORE-MAP-<UTC yyyymmdd-hhmm>.md`. Derive the
    folder from `rig whoami --json` and `rig config get topology.root`. **Run `date -u` for the timestamp and
    every time you write in the map. Do not estimate times**: an estimated time can land before events it
-   describes, as one did in the first test.
+   describes, as one did in an early run.
 3. **Open the map with a summary** of 10 to 20 lines: who you are, what you hold, what mattered in this
    window, what is next and who authorizes it, and any hold in force. **Publish that summary as your seat
    recap** too: save it, plus a line naming the map's path, to a file and run
-   `rig context recap-write --rig <rig> --seat <seat> --file <that file>`. The post-compaction world profile
-   loads the seat recap and fails without one; an old recap is served as if it were current.
+   `rig context recap-write --rig <rig> --seat <seat> --file <that file>`. If your world profile has a seat
+   recap atom, it loads this recap, and an old recap would be served as if it were current.
 4. **Then write the connections.** Choose what this seat needs; these are examples, not a template:
    - **State:** rows you hold (id, state), branches and PR heads, the hold or release in force and who gave
      it, the mission and slice you work in.
@@ -144,17 +145,19 @@ already leaves you. The edges are the point.
 You have facts without connections. Rebuild the connections before you act on anything.
 
 1. **Check for a hold first.** Read the restore request, the per-seat instruction file
-   (`<OPENRIG_HOME>/compaction/post-compact-extra/<seat>.md`) when it exists, and the newest message from the
-   seat that owns your work. A hold, a release order or an operator's own restore map overrides the default
+   (`<OPENRIG_HOME>/compaction/post-compact-extra/<session>.md`, named by your full session such as
+   `dev-impl@my-rig.md`) when it exists, the newest row or message from whoever routes your work, and any hold
+   from the authority above them. A hold, a release order or an operator's own restore map overrides the default
    order below. Before any write, also run `rig whoami --json` and `rig queue whoami`.
 2. **Name your class and state its read budget** before reading (see "Two restore classes"), with a
    checkpoint at each step below. The budget exists so that the restore leaves room for the work it was
-   restored to do. A high-context seat also reads the class's extra sources after step 5.
+   restored to do. Step 5 takes a high-context seat to its Tier 2 line; the extra sources under "Two restore classes" apply only
+   when there is no ranked list.
 3. **Re-enter the world.** Load the post-compaction world profile your instance provides. Find it with
    `rig context list`; for a private world install, run
    `rig context profile <world-ref> --situation post-compaction --rig <rig> --seat <seat>` (the seat flags are
    needed for its seat-scoped recap atom; take both values from `rig whoami --json`). Without a private world,
-   read the public `world-public` and `onboarding-width` packs. This restores how the system works before you
+   run `rig context profile world-public --situation post-compaction` and `rig context get onboarding-width`. This restores how the system works before you
    restore what you were doing in it.
 4. **Read your own restore map in full**: the newest `RESTORE-MAP-*.md` in your seat folder, which the
    compaction summary should name. If it points to an earlier map for context you need, read that too.
@@ -169,7 +172,8 @@ You have facts without connections. Rebuild the connections before you act on an
    `restore-instructions.md`, then the most recent unique narrative, tail first, within the budget; and say in
    your report that you restored without a map.
 8. Reply with the sentence the restore request asks for, normally
-   `restored from packet at <path>; resumed at step <X>`, naming the map you used.
+   `restored from packet at <path>; resumed at step <X>`, naming the map you used. When no packet exists, give
+   the map's path as `<path>` and say that you restored from the map.
 
 ## Required Read-Depth Audit
 
@@ -178,14 +182,15 @@ The audit message asks for a read-depth table and tells you not to conserve toke
 1. **List every item** you were asked to read (request, instruction files, packet, map, and the sources the
    map marks required) with `FULL`, `PARTIAL` or `NOT_READ`, the ranges you actually read, and a reason.
    Mark `FULL` only for content you read after this compaction; content carried in through the summary is
-   inherited, not read.
+   inherited, not read, and a file the harness re-attached after compaction is
+   `PARTIAL (injected)`, not `FULL`, until you read it.
 2. **Read in full now** every required item that is not yet `FULL`. "Required" means the ranked entries
    above your class's tier line, in the exact parts they name. Everything else is lookup-only: **every file in the restore packet**
    (`touched-files.md`, `restore-instructions.md`, `transcript.md`, `transcript-latest.md`, `restore-summary.json`),
    the session JSONL and archives. Those stay
    `NOT_READ` with the reason "lookup only", unless a human or the owning seat releases them. The audit
    message's "do not optimize for token conservation" applies to required items: read those fully rather
-   than skimming them. It does not turn lookups into reading lists. In the first test of this skill, reading
+   than skimming them. It does not turn lookups into reading lists. In an early run of this skill, reading
    the packet transcripts during the audit cost a default seat about 75k, more than the restore itself.
 3. **Reconnect, in writing.** In the same reply, and in a short `RESTORED-<UTC yyyymmdd-hhmm>.md` beside the
    map:
@@ -199,7 +204,7 @@ The next restore map links this note, which keeps the chain unbroken.
 ## Guardrails
 
 - Compaction is survival, not housekeeping. Compact only when a seat is genuinely near its limit, never to
-  "lean" a seat or prepare a starter image; a compacted Claude can be confident and hollow at once.
+  "lean" a seat or prepare a starter image; a compacted seat can sound confident while missing the context it needs.
 - Continue from the map and the files, not from the summary's "next step" alone: a hold placed after the
   summary was written still binds.
 - Do not launch a fresh session in place of restoring.
