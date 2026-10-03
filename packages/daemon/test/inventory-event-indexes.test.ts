@@ -64,7 +64,11 @@ function expectIndexed(db: Database.Database) {
   expect(restore.find(p => !p.args.length)?.detail).toContain("idx_events_restore_seq");
   expect(restore.find(p => p.args.length)?.detail).toContain("idx_events_restore_rig_seq");
   // Attempt binding must not reintroduce a scan of unrelated activity events.
-  for (const plan of restore) expect(plan.detail).toContain("idx_events_node_type_seq");
+  expect(restore).toHaveLength(2); // Fleet and selected-rig reads.
+  for (const plan of restore) {
+    expect(plan.detail).toContain("idx_events_node_type_seq (node_id=? AND type=?)");
+    expect(plan.detail).not.toContain("idx_events_rig_seq");
+  }
   expect(plans.find(p => p.sql.includes("node.startup_challenged"))?.detail).toContain("idx_events_startup_node_seq");
 }
 

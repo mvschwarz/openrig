@@ -286,10 +286,10 @@ function eventObject(value: unknown): Record<string, any> | undefined {
 }
 
 // One batch for either the selected rig or the fleet. Keep the outcome arm's
-// existing partial indexes; the node/type index reads rig-scoped starts (NULL
-// node_id). UNION ALL adds attempt boundaries without a per-node
-// receipt query. In ascending seq order, overwriting gives the same newest-node
-// outcome as the former descending first-wins fold. Evidence is never borrowed
+// existing partial indexes; pin starts (NULL node_id) to the node/type index
+// rather than filtering all of a rig's activity history. UNION ALL adds attempt
+// boundaries without a per-node receipt query. Ascending seq with overwrites
+// preserves the former newest-node, first-wins fold. Evidence is never borrowed
 // from an older reconciliation when a newer acknowledgment wins.
 function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<string, RestoreProjection> {
   const filter = rigId ? " AND rig_id = ?" : "";
@@ -297,7 +297,7 @@ function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<stri
     SELECT type, payload, seq, rig_id, node_id FROM events
       WHERE type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled')${filter}
     UNION ALL
-    SELECT type, payload, seq, rig_id, node_id FROM events
+    SELECT type, payload, seq, rig_id, node_id FROM events INDEXED BY idx_events_node_type_seq
       WHERE node_id IS NULL AND type = 'restore.started'${filter}
     ORDER BY seq ASC
   `).all(...(rigId ? [rigId, rigId] : [])) as {
