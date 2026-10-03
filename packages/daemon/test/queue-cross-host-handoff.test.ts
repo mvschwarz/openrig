@@ -36,6 +36,7 @@ import {
   stampSelfHostSuffix,
 } from "../src/domain/queue-repository.js";
 import { queueRoutes, CROSS_HOST_TAG, crossHostProvenanceTags } from "../src/routes/queue.js";
+import { ORIGIN_UNKNOWN_HEADER } from "../src/routes/require-sender-identity.js";
 import type { HostRegistry } from "../src/domain/hosts/hosts-registry-reader.js";
 import { setSelfHostId } from "../src/domain/hosts/fanout-contract.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
@@ -524,7 +525,8 @@ describe("cross-host handoff addressed to the receiving daemon's own host id", (
 // itself sent a self-addressed handoff out over HTTP and back into the SAME database: the receiving
 // /create stored the deterministic cross-host successor, then the source closed. A retry after the
 // upgrade must behave as that route's retry did: absorb the same successor (or refuse a different
-// sender with qitem_id_reuse, or warn that a changed body was not saved), close once, nudge once.
+// sender with qitem_id_reuse, refuse input the receiving create refused, or warn that a changed
+// body was not saved), close once, nudge once.
 // Full schema, outbox and a recording transport, so nudges are real sends.
 describe("self-addressed handoff retried after a pre-upgrade self-forward", () => {
   const SELF_REGISTRY: HostRegistry = { hosts: [{ id: "self", transport: "http", url: "http://self.invalid" }] };
@@ -543,31 +545,44 @@ describe("self-addressed handoff retried after a pre-upgrade self-forward", () =
       transport: { send: async (destination: string) => { sends.push(destination); return { ok: true, verified: true }; } } as never,
     });
     repo.attachOutbox(new OutboxHandler(db));
+    // The PL-007 authority: rig "rig" declares these repos (mutable, to model a workspace edit).
+    const workspaceRepos = ["repo-ok"];
     const app = new Hono();
     app.use("*", async (c, next) => {
       const set = c.set.bind(c) as (k: string, v: unknown) => void;
       set("eventBus", bus);
       set("queueRepo", repo);
+      set("rigRepo", {
+        findRigsByName: (name: string) => (name === "rig" ? [{ id: "rig-id" }] : []),
+        getRigWorkspace: () => ({ repos: workspaceRepos.map((name) => ({ name })) }),
+      });
       set("hostRegistryLoader", () => ({ ok: true, registry: SELF_REGISTRY }));
       set("remoteFetchImpl", (async () => { throw new Error("a self-addressed write must not forward"); }) as typeof fetch);
       await next();
     });
     app.route("/api/queue", queueRoutes());
     const rows = () => (db.prepare("SELECT COUNT(*) c FROM queue_items").get() as { c: number }).c;
-    return { db, repo, sends, app, rows };
+    return { db, repo, sends, app, rows, workspaceRepos };
   }
 
   // The pre-upgrade route's committed state: the receiving /create got the forward body (stamped
-  // sender, deterministic id, provenance tags, nudge) with no transport header, as a forward does.
-  // `close` also applies that route's source close; otherwise its response was lost first.
-  async function preUpgradeSelfForward(h: ReturnType<typeof fullHarness>, verb: string, close?: "current" | "legacy") {
-    const source = await h.repo.create({ qitemId: "source", sourceSession: "lead@rig", destinationSession: "worker@rig", body: "retained work", tags: ["keep"], nudge: false });
+  // sender, deterministic id, provenance tags, inherited target repo, nudge) with no transport
+  // header, as a forward does; an origin-unknown forward kept the sender bare and carried that
+  // marker. `close` also applies that route's source close; otherwise its response was lost first.
+  async function preUpgradeSelfForward(
+    h: ReturnType<typeof fullHarness>,
+    verb: string,
+    opts: { close?: "current" | "legacy"; targetRepo?: string; originUnknown?: boolean } = {},
+  ) {
+    const { close, targetRepo, originUnknown } = opts;
+    const source = await h.repo.create({ qitemId: "source", sourceSession: "lead@rig", destinationSession: "worker@rig", body: "retained work", tags: ["keep"], nudge: false, ...(targetRepo ? { targetRepo } : {}) });
     const forwarded = await h.app.request("/api/queue/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(originUnknown ? { [ORIGIN_UNKNOWN_HEADER]: "true" } : {}) },
       body: JSON.stringify({
-        qitemId: successorId, sourceSession: stampSelfHostSuffix("worker@rig"), destinationSession: "next@rig",
+        qitemId: successorId, sourceSession: originUnknown ? "worker@rig" : stampSelfHostSuffix("worker@rig"), destinationSession: "next@rig",
         body: source.body, priority: source.priority, tags: crossHostProvenanceTags(["keep"]), chainOfRecord: ["source"], nudge: true,
+        ...(targetRepo ? { targetRepo } : {}),
       }),
     });
     expect(forwarded.status).toBe(201);
@@ -604,7 +619,7 @@ describe("self-addressed handoff retried after a pre-upgrade self-forward", () =
     for (const close of ["current", "legacy"] as const) {
       const h = fullHarness();
       try {
-        await preUpgradeSelfForward(h, verb, close);
+        await preUpgradeSelfForward(h, verb, { close });
         const res = await retry(h, verb);
         expect(res.status).toBe(201);
         expect(((await res.json()) as Out).closed.closureTarget).toBe(close === "legacy" ? "next@rig@self" : `${successorId}@self`);
@@ -635,6 +650,50 @@ describe("self-addressed handoff retried after a pre-upgrade self-forward", () =
       expect(res.status).toBe(409);
       expect(((await res.json()) as Out).error).toBe("qitem_id_reuse");
       expect(h.repo.getById("source")!.state).toBe("pending");
+      expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
+    } finally { h.db.close(); }
+  });
+
+  it.each(verbs)("%s: a retry with an empty body is refused as the receiving create refused it and the source stays open", async (verb) => {
+    const h = fullHarness();
+    try {
+      await preUpgradeSelfForward(h, verb);
+      const res = await retry(h, verb, { body: "" });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as Out).error).toBe("body is required");
+      expect(h.repo.getById("source")!.state).toBe("pending");
+      expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
+    } finally { h.db.close(); }
+  });
+
+  // The receiving create checked an inherited target repo against the rig its sender names. A
+  // forwarded sender is host-stamped (worker@rig@self): its rig leg "rig@self" names no rig, so that
+  // check passed the repo through. An origin-unknown forward kept the sender bare, so it applied.
+  it.each(verbs)("%s: an origin-unknown retry whose inherited target repo left the workspace is refused and the source stays open", async (verb) => {
+    const h = fullHarness();
+    try {
+      await preUpgradeSelfForward(h, verb, { targetRepo: "repo-ok", originUnknown: true });
+      h.workspaceRepos.splice(0, h.workspaceRepos.length, "repo-other");
+      const res = await h.app.request(`/api/queue/source/${verb}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-OpenRig-Session": "worker@rig", [ORIGIN_UNKNOWN_HEADER]: "true" },
+        body: JSON.stringify({ fromSession: "worker@rig", toSession: "next@rig", hostId: "self", nudge: true }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as Out).error).toBe("unknown_target_repo");
+      expect(h.repo.getById("source")!.state).toBe("pending");
+      expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
+    } finally { h.db.close(); }
+  });
+
+  it.each(verbs)("%s: a host-stamped retry passes the inherited target repo through as the receiving create did", async (verb, terminalState) => {
+    const h = fullHarness();
+    try {
+      await preUpgradeSelfForward(h, verb, { targetRepo: "repo-ok" });
+      h.workspaceRepos.splice(0, h.workspaceRepos.length, "repo-other");
+      const res = await retry(h, verb);
+      expect(res.status).toBe(201);
+      expect(((await res.json()) as Out).closed.state).toBe(terminalState);
       expect({ rows: h.rows(), sends: h.sends }).toEqual({ rows: 2, sends: ["next@rig"] });
     } finally { h.db.close(); }
   });

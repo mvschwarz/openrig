@@ -122,6 +122,23 @@ export function queueRoutes(): Hono {
     return { ok: true };
   }
 
+  /** What the receiving /create checks before it writes, once the sender is
+   *  resolved. Shared with a self-forward retry's in-process create, so that
+   *  retry refuses what the forward's receiver refused. */
+  function createInputRefusal(
+    c: { get: (key: string) => unknown; json: (body: unknown, status?: number) => Response },
+    sourceSession: string,
+    body: { destinationSession?: string; body?: string; targetRepo?: string | null },
+  ): Response | null {
+    if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
+    if (!body.body) return c.json({ error: "body is required" }, 400);
+    if (body.targetRepo) {
+      const validation = validateTargetRepo(c, sourceSession, body.targetRepo);
+      if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
+    }
+    return null;
+  }
+
   function errorResponse(c: { json: (body: unknown, status?: number) => Response }, err: unknown): Response {
     if (err instanceof QueueRepositoryError) {
       const status = err.code === "qitem_not_found" ? 404
@@ -405,18 +422,22 @@ export function queueRoutes(): Hono {
    * so, a registry entry naming this daemon sent it out and back as a cross-host
    * handoff keyed by the deterministic successor id. When that successor already
    * exists, the retry runs the same cross-host choreography with the receiving
-   * create done in process: the create the forward reached, so the same
-   * primary-key absorb, id-reuse refusal and body-not-saved warning, then the
-   * same idempotent close. A fresh self write takes the ordinary local path.
+   * create done in process: the create the forward reached, so the same input
+   * checks, primary-key absorb, id-reuse refusal and body-not-saved warning,
+   * then the same idempotent close. A fresh self write takes the ordinary local
+   * path.
    */
   function priorSelfForwardSuccessor(c: { get: (key: string) => unknown }, qitemId: string, toSession: string, hostId: string): boolean {
     return Boolean(getRepo(c).getById(deriveCrossHostSuccessorId(qitemId, toSession, hostId)));
   }
   function createSuccessorInProcess(c: { get: (key: string) => unknown; json: (body: unknown, status?: number) => Response }) {
     return async (forwardBody: Record<string, unknown>): Promise<{ ok: true; payload: unknown } | { ok: false; response: Response }> => {
+      const input = forwardBody as unknown as QueueCreateInput;
+      const refusal = createInputRefusal(c, input.sourceSession, input);
+      if (refusal) return { ok: false, response: refusal };
       try {
         // Recorded as the receiving /create records a forwarded write: no transport header, so claimed:v1.
-        const item = await getRepo(c).create({ ...(forwardBody as unknown as QueueCreateInput), identityProvenance: "claimed:v1" });
+        const item = await getRepo(c).create({ ...input, identityProvenance: "claimed:v1" });
         const advisory = destinationAdvisory(c, item.destinationSession);
         return { ok: true, payload: { ...item, ...(advisory ? { advisories: [advisory] } : {}) } };
       } catch (err) {
@@ -458,8 +479,16 @@ export function queueRoutes(): Hono {
     const identity = requireSenderIdentity(c, { verb: "queue create", bodyClaim: body.sourceSession });
     if (!identity.ok) return identity.response;
     const sourceSession = identity.session;
-    if (!body.destinationSession) return c.json({ error: "destinationSession is required" }, 400);
-    if (!body.body) return c.json({ error: "body is required" }, 400);
+    // Required destination and body, then PL-007: validate target_repo against
+    // source rig's workspace.repos[].
+    // GUARD FIXBACK (OPR.0.4.6.MH3 review of 86ba8b42, Finding 1): this runs
+    // BEFORE the cross-host branch — the validation authority is the SOURCE
+    // rig's typed workspace, which lives on THIS host; the target daemon
+    // passes-through when it doesn't know the source rig, so a post-forward
+    // check cannot recover it. Local ordering is unchanged (the cross-host
+    // branch is a no-op without hostId).
+    const refusal = createInputRefusal(c, sourceSession, body);
+    if (refusal) return refusal;
 
     // OPR.0.4.6.MH3 FR-2 (C1): cross-host CREATE. A registered remote host id
     // forwards the write to that host's daemon; the qitem lives in the origin
@@ -468,18 +497,6 @@ export function queueRoutes(): Hono {
     // at-least-once + idempotent: the FORWARDING daemon MINTS the qitemId
     // before the first forward (Q-a) so every retry carries the same id. No
     // local row is ever written on the cross-host path.
-    // PL-007: validate target_repo against source rig's workspace.repos[].
-    // GUARD FIXBACK (OPR.0.4.6.MH3 review of 86ba8b42, Finding 1): this runs
-    // BEFORE the cross-host branch — the validation authority is the SOURCE
-    // rig's typed workspace, which lives on THIS host; the target daemon
-    // passes-through when it doesn't know the source rig, so a post-forward
-    // check cannot recover it. Local ordering is unchanged (the cross-host
-    // branch is a no-op without hostId).
-    if (body.targetRepo) {
-      const validation = validateTargetRepo(c, sourceSession, body.targetRepo);
-      if (!validation.ok) return c.json({ error: validation.error, message: validation.message, ...(validation.meta ?? {}) }, 400);
-    }
-
     if (typeof body.hostId === "string" && !resolvesToLocalHost(body.hostId, getSelfHostId())) {
       const mintedId = body.qitemId ?? newQitemId();
       const { hostId: _dropped, ...rest } = body;
@@ -500,8 +517,8 @@ export function queueRoutes(): Hono {
       const item = await getRepo(c).create({
         qitemId: body.qitemId,
         sourceSession,
-        destinationSession: body.destinationSession,
-        body: body.body,
+        destinationSession: body.destinationSession!, // required by createInputRefusal
+        body: body.body!,
         priority: body.priority,
         tier: body.tier,
         tags: body.tags,
