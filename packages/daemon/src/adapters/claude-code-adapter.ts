@@ -204,7 +204,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
               const textResult = await this.tmux.sendText(binding.tmuxSession, content);
               if (!textResult.ok) throw new Error(textResult.message);
               await this.sleep(200);
-              const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["C-m"]);
+              const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
               if (!submitResult.ok) throw new Error(submitResult.message);
             }
             break;
@@ -359,7 +359,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /** Best-effort public seam for user-scope Claude bootstrap used by managed sessions. */
-  ensureManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
+  ensureManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
     this.provisionManagedBootstrap(binding);
   }
 
@@ -368,9 +368,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string) {
     const input = { runtime: "claude-code", paneCommand, paneContent };
     const probe = assessNativeResumeProbe(input);
-    // Only the new headerless auto-mode case needs this additional observation.
-    // Screen-only callers cannot opt themselves into managed launch readiness.
-    if (probe.code !== "claude_auto_identity_required") return probe;
+    // Headerless managed launches (including bypass mode) use the same readiness
+    // precedence as resume. This candidate result is returned only after the
+    // exact launch identity below is proved; screen text alone is insufficient.
+    const verifiedProbe = assessNativeResumeProbe({ ...input,
+      claudeAutoIdentityVerified: true, claudeResumeIdentityVerified: true });
+    if (probe.status === "resumed" || verifiedProbe.status !== "resumed") return probe;
     const launch = this.autoLaunches.get(binding.nodeId);
     if (!launch || !binding.tmuxPane || !binding.tmuxSession
       || launch.binding.id !== binding.id || launch.binding.tmuxPane !== binding.tmuxPane
@@ -392,7 +395,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (this.autoLaunches.get(binding.nodeId) !== launch || currentPanes.length !== 1
         || currentPanes[0]?.id !== binding.tmuxPane
         || await this.tmux.getPanePid(binding.tmuxSession) !== native.panePid) return probe;
-      return assessNativeResumeProbe({ ...input, claudeAutoIdentityVerified: true });
+      return verifiedProbe;
     } catch { return probe; }
   }
 
@@ -672,11 +675,35 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return resolveConcreteHint(path, content);
   }
 
-  private provisionManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
+  private provisionManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
     // OPR.0.4.8.2 agnostic rip-out: provisionRigPermissions (C2) removed — OpenRig no longer
     // authors any config-file permission policy. Trust/onboarding (C3/C4) are neutral plumbing, kept.
-    this.provisionWorkspaceTrust(binding.cwd ?? null);
-    this.provisionOnboardingState();
+    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    // Match launchHarness: omitted permissionMode keeps the classic home path.
+    const managed = binding.permissionMode !== undefined ? this.claudeManagedLaunch : undefined;
+    const cwd = binding.cwd === undefined && managed && binding.nodeId
+      ? managed.boundCwd(binding.nodeId) : binding.cwd;
+    const statePath = managed
+      ? (cwd ? managed.configPaths(cwd).statePath : undefined)
+      : (home ? nodePath.join(home, ".claude.json") : undefined);
+    if (!statePath) return;
+    // Preserve every existing field. Unreadable/malformed/non-object state is
+    // left untouched by the caller's existing best-effort bootstrap boundary.
+    const state = this.fs.exists(statePath) ? this.readJsonObjectStrict(statePath) : {};
+    if (cwd) {
+      const projects = this.readJsonObjectField(state, "projects");
+      if (Object.hasOwn(state, "projects") && projects !== state["projects"]) throw new Error("Claude bootstrap projects must be a JSON object; existing state preserved.");
+      for (const trustKey of this.workspaceTrustKeys(cwd)) {
+        const projectState = this.readJsonObjectField(projects, trustKey);
+        if (Object.hasOwn(projects, trustKey) && projectState !== projects[trustKey]) throw new Error("Claude bootstrap project state must be a JSON object; existing state preserved.");
+        projectState["hasTrustDialogAccepted"] = true;
+        projects[trustKey] = projectState;
+      }
+      state["projects"] = projects;
+    }
+    state["hasCompletedOnboarding"] = true;
+    this.fs.mkdirp(nodePath.dirname(statePath));
+    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
   }
 
   // OPR.0.4.8.2 agnostic rip-out: the CONVENIENCE_BASELINE (global `Bash(rig:*)` allow) and its
@@ -684,35 +711,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   // `_openrig_provenance` marker) are DELETED. OpenRig no longer authors any config-file permission
   // policy; the harness-native permission surface is the control surface. Existing provenance-marked
   // user files are NOT retro-scrubbed — the new code simply never touches settings.json.
-
-  private provisionWorkspaceTrust(cwd: string | null): void {
-    if (!cwd) return;
-    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    if (!home) return;
-
-    const statePath = nodePath.join(home, ".claude.json");
-    const state = this.readJsonObject(statePath);
-    const projects = this.readJsonObjectField(state, "projects");
-
-    for (const trustKey of this.workspaceTrustKeys(cwd)) {
-      const projectState = this.readJsonObjectField(projects, trustKey);
-      projectState["hasTrustDialogAccepted"] = true;
-      projects[trustKey] = projectState;
-    }
-
-    state["projects"] = projects;
-    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
-  }
-
-  private provisionOnboardingState(): void {
-    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    if (!home) return;
-
-    const statePath = nodePath.join(home, ".claude.json");
-    const state = this.readJsonObject(statePath);
-    state["hasCompletedOnboarding"] = true;
-    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
-  }
 
   private workspaceTrustKeys(cwd: string): string[] {
     const keys = new Set<string>([nodePath.resolve(cwd)]);

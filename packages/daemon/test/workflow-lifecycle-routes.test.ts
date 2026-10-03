@@ -96,7 +96,7 @@ describe("S06 lifecycle HTTP surface", () => {
     });
     expect(first.status).toBe(201);
     const firstBody = await first.json() as { instance: { instanceId: string; workflowName: string; workflowVersion: string }; entryQitemId: string };
-    const execution = buildExecutionView({
+    const execution = await buildExecutionView({
       db,
       slicesRoot: () => join(root, "missions"),
       rigsRoot: () => join(root, "rigs"),

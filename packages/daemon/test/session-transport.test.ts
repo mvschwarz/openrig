@@ -384,8 +384,8 @@ describe("SessionTransport", () => {
     return { rig, node, session };
   }
 
-  // Test 1: send calls sendText -> delay -> sendKeys C-m
-  it("send calls sendText then sendKeys C-m with delay", async () => {
+  // Test 1: send calls sendText -> delay -> sendKeys Enter
+  it("send calls sendText then sendKeys Enter with delay", async () => {
     seedCanonicalRig();
     const callOrder: string[] = [];
     const tmux = mockTmux({
@@ -396,7 +396,7 @@ describe("SessionTransport", () => {
 
     const result = await transport.send("dev-impl@my-rig", "hello");
     expect(result.ok).toBe(true);
-    expect(callOrder).toEqual(["sendText", "sendKeys:C-m"]);
+    expect(callOrder).toEqual(["sendText", "sendKeys:Enter"]);
   });
 
   // Test 2: send to canonical session name resolves correctly
@@ -435,8 +435,8 @@ describe("SessionTransport", () => {
     expect(result.error).toContain("rig ps");
   });
 
-  // Test 5: send where sendKeys C-m fails returns "text visible but not submitted"
-  it("send where C-m fails returns submit_failed with guidance", async () => {
+  // Test 5: send where sendKeys Enter fails returns "text visible but not submitted"
+  it("send where Enter fails returns submit_failed with guidance", async () => {
     seedCanonicalRig();
     const tmux = mockTmux({
       sendKeys: async () => ({ ok: false, code: "session_not_found", message: "session died" }),

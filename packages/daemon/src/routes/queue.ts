@@ -9,7 +9,7 @@ import type {
 import { QueueRepositoryError, newQitemId, deriveCrossHostSuccessorId, stampSelfHostSuffix, classifyNudgeFailure } from "../domain/queue-repository.js";
 import type { QueueItem } from "../domain/queue-repository.js";
 import { parseSessionName, isHumanSeatSessionRef } from "../domain/session-name.js";
-import { requireSenderIdentity, resolveRecordedProvenance, ORIGIN_UNKNOWN_HEADER } from "./require-sender-identity.js";
+import { requireSenderIdentity, resolveRecordedProvenance, ORIGIN_UNKNOWN_HEADER, transportSenderSession } from "./require-sender-identity.js";
 import { hostname as osHostname } from "node:os";
 import type { InboxHandler } from "../domain/inbox-handler.js";
 import { InboxHandlerError } from "../domain/inbox-handler.js";
@@ -20,7 +20,9 @@ import { loadHostRegistry, resolveHost } from "../domain/hosts/hosts-registry-re
 import { LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
-import { deriveCurrentWork } from "../domain/current-work.js";
+import { deriveCurrentWork, deriveRole, type RoleOrientation } from "../domain/current-work.js";
+import type { WhoamiService } from "../domain/whoami-service.js";
+import type Database from "better-sqlite3";
 import type { HumanQuestion } from "../domain/human-questions.js";
 
 /**
@@ -785,7 +787,13 @@ export function queueRoutes(): Hono {
     // ambiguity refusal would degrade into a confident wrong answer. The derivation reads
     // the unbounded in-progress set, which makes it independent of recentLimit.
     const derived = deriveCurrentWork(repo.listInProgressForDestination(session), missionsRoot);
-    return c.json({ ...position, ...derived });
+    let role: RoleOrientation = { state: "unknown", reason: "calling node unavailable", files: [] };
+    try {
+      const identity = (c.get("whoamiService" as never) as WhoamiService | undefined)
+        ?.resolve({ sessionName: transportSenderSession(c) ?? session, compact: true });
+      role = deriveRole(c.get("db" as never) as Database.Database | undefined, identity?.identity.nodeId ?? null);
+    } catch { /* Ambiguous/unavailable identity is not an absent role declaration. */ }
+    return c.json({ ...position, ...derived, role });
   });
 
   // GET /list — list with filters. MUST precede /:qitemId so the literal path wins.

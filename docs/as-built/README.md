@@ -1,101 +1,105 @@
 ---
 kind: as-built
-title: As-Built Docs — Map of Territory + Module Index
+title: As-Built Docs — Module Index
 status: active
 topics: [knowledge-and-context, observability]
 domains: [engineering-advisor, operating-advisor, product-advisor]
 applies-when: |
-  Starting any technical task that needs the shipped OpenRig system as it
-  actually is. Read this first to learn what the as-built tree contains and
-  which module to open; then go to codemap.md for use-case navigation or
-  straight to the named module.
-siblings: [codemap.md, cli-reference.md, frontmatter-schema.md]
+  Starting a technical task and choosing the as-built module or source entry
+  point to read. This index describes the document tree; each module carries
+  its own source-verification stamp.
+siblings: [codemap.md, arteries.md, test-layers.md, cli-reference.md, frontmatter-schema.md]
 prerequisite-reads: []
-last-verified-against-source: 7eaf524c
-last-updated: 2026-05-16
+last-verified-against-source: 712a61fbcc5ffe5a7c786fea12132567083ab507
+last-updated: 2026-10-02
 ---
 
-# OpenRig As-Built Docs
+# OpenRig as-built docs
 
-OpenRig is a local control plane for multi-agent coding topologies — a
-multi-agent harness that manages your Claude Code and Codex sessions as a
-single system, with a daemon (`@openrig/daemon`), a CLI (`@openrig/cli`), a UI
-(`@openrig/ui`), and an MCP server all sitting on one SQLite-backed core. This
-tree is the **source-verified** description of that system as it actually
-ships — every load-bearing claim is grounded to `packages/*/src` at a named
-commit, not to memory, chat, or older docs.
+These pages describe the code and point to its owning files. This index was checked against
+main commit `712a61fbcc5ffe5a7c786fea12132567083ab507`. A linked module's
+`last-verified-against-source` is its own verification boundary; updating this index does not
+revalidate that module or identify a running daemon or published package.
 
-> Verified against source at HEAD `7eaf524c` (`git describe` →
-> `v0.3.1-6-g7eaf524c`). Package version is **0.3.1** across all three
-> packages; HEAD carries 6 commits of unreleased 0.3.2 work, no `v0.3.2` tag.
+For the repository overview and contributor recipes, start with [ARCHITECTURE.md](../../ARCHITECTURE.md).
+Use [codemap.md](codemap.md) to locate source, [arteries.md](arteries.md) to identify dependent
+paths before a change, and [test-layers.md](test-layers.md) to choose checks.
 
-## How this tree is organized
+## Repository surfaces
 
-The as-built corpus was modularized (slice 08, `context-architecture-v1`) from
-two monolithic files into a folder of thematic modules, each independently
-loadable, each frontmatter-tagged for retrieval, each ≤300 lines (author-mode
-modules with no prior prose may run to ≤400 — see the slice-08 ACK).
+The npm workspaces are `packages/daemon`, `packages/cli`, `packages/tui`, and `packages/ui`
+([root package manifest](../../package.json)). The daemon provides the SQLite-backed HTTP
+services; CLI, TUI and MCP clients consume them. Runtime adapters include Claude Code, Codex,
+Pi, OMP, terminal and stub implementations under `packages/daemon/src/adapters/`.
 
-```
-docs/as-built/
-├── README.md            ← you are here: map-of-territory + index
-├── codemap.md           ← navigation index (use-case lookup, source-root pointers)
-├── frontmatter-schema.md← the frontmatter convention these docs follow
-├── cli-reference.md     ← full rig CLI surface (kept whole)
-├── architecture/        ← 14 backend/runtime modules
-└── ui/                  ← 4 operator-surface modules
-```
-
-`docs/DESIGN.md` (the canonical visual / brand / design-system spec) **stays
-at the repo `docs/` root** by design — it is referenced by many existing
-`docs/DESIGN.md` paths and carries no source drift. This tree points at it
-(see `ui/library-specs-and-design-system.md`); it is not copied here.
+The CLI package contains the assembled daemon, TUI and web UI. User reference documents ship
+from `docs/reference/`; this as-built tree is developer documentation. The assembly is in
+[scripts/build-package.sh](../../scripts/build-package.sh), with the published file list in
+[packages/cli/package.json](../../packages/cli/package.json).
 
 ## Module index
 
-### `architecture/` — backend, daemon, runtime
+### Daemon and runtime
 
-| Module | What it covers |
+| Module | Read for |
 |---|---|
-| [daemon-core.md](architecture/daemon-core.md) | How the daemon boots, `createDaemon` wiring, the SQLite schema/40-migration set, the route-mount surface. |
-| [adapters-and-runtimes.md](architecture/adapters-and-runtimes.md) | The five-method RuntimeAdapter contract, the Claude/Codex/Terminal adapters (launch/resume/fork in tmux), and the resume-honesty layer (honest resumed-vs-fresh assessment). |
-| [coordination-primitive.md](architecture/coordination-primitive.md) | PL-004 Phase A stream/queue/inbox/outbox; the hot-potato closure contract; where queue closure is enforced. |
-| [workflow-runtime.md](architecture/workflow-runtime.md) | PL-004 Phase D Workflow Runtime — spec cache, instance state, step trails, transactional-scribe projection, watchdog policies. |
-| [mission-control.md](architecture/mission-control.md) | PL-005 queue-observability surface — seven views, seven write verbs, action audit, bearer-token middleware. |
-| [agent-spec-and-startup.md](architecture/agent-spec-and-startup.md) | AgentSpec/RigSpec types, profile resolution, additive startup layering, StartupOrchestrator, whoami/materialize/bind/adopt identity. |
-| [lifecycle-snapshot-restore.md](architecture/lifecycle-snapshot-restore.md) | Snapshot capture, honest restore (resume vs rebuild vs fresh), restore-honesty enforcement, restore-check / restore-packet probes. |
-| [transport-and-transcripts.md](architecture/transport-and-transcripts.md) | rig send/capture/broadcast over tmux, pipe-pane transcript capture + search, durable SQLite chat, `rig ask`, MCP-name vs tmux-key distinction. |
-| [workspace-primitive.md](architecture/workspace-primitive.md) | The PL-007 typed workspace declaration (root/repos/defaultRepo/knowledgeRoot), migrations 038/039, per-item repo-scope gating, file-backed missions/slices indexing. |
-| [content-surfaces.md](architecture/content-surfaces.md) | The operator-allowlisted file browser, atomic conflict-checked writes + JSONL edit audit, PROGRESS.md tree indexer, the one-screen Steering composer. |
-| [living-notes-review.md](architecture/living-notes-review.md) | **v0.4.4** — the Living Notes review surface: the ONE `ComposedSliceReview` (intent→plan→delivered) projection, pure composer + gatherer, staged-approval locks, C1-bound `verified`, `/api/review/*` routes, freeze export, ranged media serving, and the SDLC on-disk convention it projects. |
-| [plugin-agent-image-context-pack.md](architecture/plugin-agent-image-context-pack.md) | The filesystem-canonical content layer — plugin discovery, agent images, context packs, the Claude auto-compaction policy enforcer. |
-| [packaging-bootstrap-bundles.md](architecture/packaging-bootstrap-bundles.md) | Bundle assembly (schema-v2 pod bundles + legacy v1), bundle create/inspect/install + `/api/up`, the staged BootstrapOrchestrator, legacy install seams. |
-| [architecture-rules-and-event-system.md](architecture/architecture-rules-and-event-system.md) | The cross-cutting invariants — the 25 architecture rules, the RigEvent union + SSE delivery, intentional compatibility limits. |
+| [daemon-core.md](architecture/daemon-core.md) | Process startup, service wiring, database migrations and HTTP mounts. |
+| [adapters-and-runtimes.md](architecture/adapters-and-runtimes.md) | Runtime adapter methods, harness launch/resume and native-session checks. |
+| [agent-spec-and-startup.md](architecture/agent-spec-and-startup.md) | Spec resolution, resource projection, startup delivery and identity. |
+| [coordination-primitive.md](architecture/coordination-primitive.md) | Stream, queue, inbox/outbox, handoff and closure. |
+| [workflow-runtime.md](architecture/workflow-runtime.md) | Workflow specifications, instances, projection, trails and watchdog policies. |
+| [mission-control.md](architecture/mission-control.md) | Queue observations, actions and their audit records. |
+| [lifecycle-snapshot-restore.md](architecture/lifecycle-snapshot-restore.md) | Snapshot capture, restore decisions and continuity checks. |
+| [transport-and-transcripts.md](architecture/transport-and-transcripts.md) | Session messaging, capture, transcripts, chat and ask. |
+| [workspace-primitive.md](architecture/workspace-primitive.md) | Workspace and repository declarations, project resolution and scope. |
+| [content-surfaces.md](architecture/content-surfaces.md) | File reads/writes, path checks, progress indexing and steering composition. |
+| [living-notes-review.md](architecture/living-notes-review.md) | Review gathering/composition, proof records, approvals, export and media. |
+| [plugin-agent-image-context-pack.md](architecture/plugin-agent-image-context-pack.md) | Plugin discovery, agent images, context packs and compaction policy. |
+| [packaging-bootstrap-bundles.md](architecture/packaging-bootstrap-bundles.md) | Package assembly, reusable topology bundles and bootstrap/install paths. |
+| [architecture-rules-and-event-system.md](architecture/architecture-rules-and-event-system.md) | Cross-cutting invariants, events and compatibility notes. |
 
-### `ui/` — operator surfaces
+### Navigation, checks and reference
 
-| Module | What it covers |
+| Document | Read for |
 |---|---|
-| [shell-and-routing.md](ui/shell-and-routing.md) | The UI shell (rail / Explorer / center workspace / drawer / preview stack), the actual route tree the shipped UI mounts, the shared detail drawer + event consumption. |
-| [topology.md](ui/topology.md) | The topology surface — host hybrid graph, table/terminal views, activity-ring / hot-potato visual language, terminal-preview popovers, navigation/overlay contracts. |
-| [project-and-for-you.md](ui/project-and-for-you.md) | The operator destination surfaces — the For-You attention feed (5-card classifier + verb actions), the Project workspace/mission/slice scope pages, the Dashboard landing on the vellum brand system. |
-| [library-specs-and-design-system.md](ui/library-specs-and-design-system.md) | The Library (`/specs`) UI — specs/skills/plugins/agent-images surfaces, the spec-review + spec-library + live-identity flows, the design-system pointer. |
+| [codemap.md](codemap.md) | Question-to-module navigation and source entry points. |
+| [arteries.md](arteries.md) | Code paths where changes affect several subsystems. |
+| [test-layers.md](test-layers.md) | Test scope, isolation, scenarios and hosted CI. |
+| [cli-reference.md](cli-reference.md) | CLI commands and options; confirm changing details in `packages/cli/src/index.ts` and command help. |
+| [frontmatter-schema.md](frontmatter-schema.md) | Metadata fields used by these documents. |
+| [architecture.md](architecture.md) | Compatibility pointer from the former monolithic architecture page. |
+| [DESIGN.md](../DESIGN.md) | Visual and design-system specification. |
 
-### Root docs
+### Web UI reference
 
-| Doc | What it covers |
+The following pages remain discoverable at their own historical stamps. Their contents are not
+reverified by this index update.
+
+| Document | Topic |
 |---|---|
-| [codemap.md](codemap.md) | Navigation index — module map, structural relationship diagram, fast-lookup-by-use-case, source-root pointer table. Start here when you know *what* you need but not *which module*. |
-| [cli-reference.md](cli-reference.md) | The full `rig` CLI surface — command groups, subcommands, flags, JSON output, cross-host, coordination primitives. Kept as one doc (slice-08 Q4). |
-| [frontmatter-schema.md](frontmatter-schema.md) | Which frontmatter convention governs every doc in this tree, plus the one as-built-unique field (`last-verified-against-source`). |
-| `../DESIGN.md` | The canonical visual / brand / design-system spec (lives at `docs/` root by design; pointer only — not duplicated here). |
+| [ui.md](ui.md) | Compatibility pointer to the UI modules. |
+| [shell-and-routing.md](ui/shell-and-routing.md) | Web UI shell and routing. |
+| [topology.md](ui/topology.md) | Web topology views. |
+| [project-and-for-you.md](ui/project-and-for-you.md) | Project and attention surfaces. |
+| [library-specs-and-design-system.md](ui/library-specs-and-design-system.md) | Library/spec views and design-system pointers. |
 
-## Source-grounding contract
+For the terminal UI, start at `packages/tui/src/main.ts`, its HTTP client
+`packages/tui/src/daemon-client.ts`, and the TUI sections of [test-layers.md](test-layers.md).
 
-Every module declares `last-verified-against-source: <commit-sha>` — the
-commit its claims were checked against. Load-bearing corrections are recorded
-inline with an auditable annotation (`> Drift-fix Dx — said X; corrected to Y;
-slice-00 §z; re-confirmed <file:line> @HEAD`). OPEN items (counts that are
-definitional or runtime-only) are carried verbatim, never smoothed. The
-schema is defined in [frontmatter-schema.md](frontmatter-schema.md) and the
-governing convention is `openrig-work/conventions/frontmatter-for-context/`.
+## Derive the document inventory
+
+At the named commit there are **26 Markdown files**: **14** under `architecture/`, **4** under
+`ui/`, and **8** at the root of this tree (including both compatibility pointers). Reproduce
+these counts from the repository root:
+
+```bash
+source_commit=712a61fbcc5ffe5a7c786fea12132567083ab507
+git ls-tree -r --name-only "$source_commit" -- docs/as-built | rg '\.md$' | wc -l
+git ls-tree -r --name-only "$source_commit" -- docs/as-built/architecture | rg '\.md$' | wc -l
+git ls-tree -r --name-only "$source_commit" -- docs/as-built/ui | rg '\.md$' | wc -l
+git ls-tree -r --name-only "$source_commit" -- docs/as-built | rg '^docs/as-built/[^/]+\.md$' | wc -l
+```
+
+Read a module's source stamp and prerequisite pointers before relying on it. Source code at the
+named commit is the authority when prose disagrees; [frontmatter-schema.md](frontmatter-schema.md)
+describes how the stamp is represented.

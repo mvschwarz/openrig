@@ -98,27 +98,51 @@ function readConfiguredContent(home) {
 // current work, its basis travels to the trace script, which alone decides how to render it;
 // a failed or unreadable answer is passed as UNKNOWN. Never guess a work node here: a guess
 // would silently re-point the whole trace.
-function deriveWorkStart() {
-  if (process.env.OPENRIG_REFOCUS_WORK_NODE) return { start: process.env.OPENRIG_REFOCUS_WORK_NODE };
+function readQueueWhoami(timeout = 2_000) {
   const result = spawnSync("rig", ["queue", "whoami", "--json"], {
-    encoding: "utf8",
-    env: process.env,
-    timeout: 2_000,
-    maxBuffer: 16 * 1024 * 1024,
+    encoding: "utf8", env: process.env, timeout, maxBuffer: 16 * 1024 * 1024,
   });
   if (result.error) return { unknown: `queue whoami failed: ${result.error.message}` };
   if (result.status !== 0 || !result.stdout || !result.stdout.trim()) {
     return { unknown: `queue whoami exited ${result.status ?? "without a status"} with no answer` };
   }
-  try {
-    const answer = JSON.parse(result.stdout);
-    const workNodePath = answer?.currentWork?.workNodePath;
-    if (typeof workNodePath === "string" && workNodePath) return { start: workNodePath };
-    const basis = answer?.currentWorkBasis;
-    return typeof basis === "string" && basis ? { basis } : { unknown: "queue whoami named no current work and no basis" };
-  } catch {
-    return { unknown: "queue whoami answer was not JSON" };
-  }
+  try { return { answer: JSON.parse(result.stdout) }; }
+  catch { return { unknown: "queue whoami answer was not JSON" }; }
+}
+
+function deriveWorkStart(lookup) {
+  if (process.env.OPENRIG_REFOCUS_WORK_NODE) return { start: process.env.OPENRIG_REFOCUS_WORK_NODE };
+  const result = lookup();
+  if (result.unknown) return result;
+  const workNodePath = result.answer?.currentWork?.workNodePath;
+  if (typeof workNodePath === "string" && workNodePath) return { start: workNodePath };
+  const basis = result.answer?.currentWorkBasis;
+  return typeof basis === "string" && basis ? { basis } : { unknown: "queue whoami named no current work and no basis" };
+}
+
+// One optional lookup shares the trace/config budget. Reuse even a failed work lookup;
+// retrying here would spend the same budget twice and cannot make absence trustworthy.
+function remainingLookupBudget() {
+  const contentReserve = process.env.OPENRIG_REFOCUS_CONTENT_REF ? CONTENT_LOOKUP_TIMEOUT_MS : 0;
+  return Math.floor(Math.min(2_000, 4_500 - 2_000 - contentReserve - process.uptime() * 1_000));
+}
+
+function renderRole(result) {
+  const unknown = reason => `Role file: unknown (${reason})`;
+  if (result.unknown) return unknown(result.unknown);
+  const role = result.answer?.role;
+  if (!role || !Array.isArray(role.files)) return unknown("queue whoami has no role information");
+  if (role.state === "unknown") return unknown(role.reason || "role observation unavailable");
+  if (role.state === "no-record" || role.state === "not-declared") return `Role file: ${role.state}`;
+  if (!["present", "missing"].includes(role.state) || role.files.length === 0
+    || role.files.some(file => !file || typeof file.resolvedPath !== "string"
+      || !["present", "missing"].includes(file.state))) return unknown("malformed role information");
+  return [
+    ...role.files.map(file => file.state === "present"
+      ? `Your seat's role file: ${JSON.stringify(file.resolvedPath)}. Re-read it if your role is unclear.`
+      : `Role file: missing (${JSON.stringify(file.resolvedPath)})`),
+    `Binding recorded at: ${role.recordedAt || "unknown"}. ${role.note || "Current bytes and successful startup are not verified."}`,
+  ].join("\n");
 }
 
 // The trace script looks up each missing root with its own `rig config get`, two CLI starts
@@ -139,8 +163,7 @@ function traceEnv(trees) {
     ["OPENRIG_WORKSPACE_ROOT", "workspace", "work"],
   ].filter(([name, , tree]) => (trees === "both" || trees === tree) && !env[name]);
   if (missing.length === 0) return env;
-  const contentReserve = process.env.OPENRIG_REFOCUS_CONTENT_REF ? CONTENT_LOOKUP_TIMEOUT_MS : 0;
-  const timeout = Math.floor(Math.min(2_000, 4_500 - 2_000 - contentReserve - process.uptime() * 1_000));
+  const timeout = remainingLookupBudget();
   if (timeout <= 250) return env;
   const result = spawnSync("rig", ["config", "--json"], {
     encoding: "utf8",
@@ -169,7 +192,17 @@ function renderTrace() {
   if (process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE) {
     args.push("--topology-start", process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE);
   }
-  const work = deriveWorkStart();
+  let whoami;
+  const lookup = () => whoami ??= readQueueWhoami();
+  const work = deriveWorkStart(lookup);
+  let role = "";
+  if (trees === "both" || trees === "topology") {
+    if (!whoami) {
+      const timeout = remainingLookupBudget();
+      whoami = timeout > 250 ? readQueueWhoami(timeout) : { unknown: "no budget left" };
+    }
+    role = renderRole(whoami);
+  }
   if (work.start) args.push("--work-start", work.start);
   else if (work.basis) args.push("--work-basis", work.basis);
   else if (work.unknown) args.push("--work-unknown", work.unknown);
@@ -179,9 +212,10 @@ function renderTrace() {
     timeout: 2_000,
     maxBuffer: 16 * 1024 * 1024,
   });
-  if (!result.error && result.status === 0 && result.stdout.trim()) return result.stdout.trim();
   const reason = result.error?.message || result.stderr?.trim() || `trace exited ${result.status ?? "without a status"}`;
-  return `TRACE GAP — ${String(reason).replace(/\s+/g, " ").trim()}`;
+  const trace = !result.error && result.status === 0 && result.stdout.trim()
+    ? result.stdout.trim() : `TRACE GAP — ${String(reason).replace(/\s+/g, " ").trim()}`;
+  return [trace, role].filter(Boolean).join("\n\n");
 }
 
 (async () => {

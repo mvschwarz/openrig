@@ -309,14 +309,14 @@ describe("Claude Code runtime adapter", () => {
     };
     await adapter.deliverStartup([file], makeBinding());
     expect(tmux.sendText).toHaveBeenCalledWith("r01-impl", "echo hello");
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
   });
 
   // OPR.0.3.3.16 - a >100KB send_text startup pack must still travel through the
-  // sendText -> sleep -> sendKeys(["C-m"]) sequence unchanged. The large-payload
+  // sendText -> sleep -> sendKeys(["Enter"]) sequence unchanged. The large-payload
   // buffer mechanics live in TmuxAdapter; the adapter's job is to hand the full
   // content to sendText and fire the single trailing submit.
-  it("delivers a large (>100KB) send_text startup file via sendText then submits with C-m", async () => {
+  it("delivers a large (>100KB) send_text startup file via sendText then submits with Enter", async () => {
     const tmux = mockTmux();
     const big = "L".repeat(120 * 1024);
     const fs = mockFs({ "/rig/startup/big-pack.md": big });
@@ -333,7 +333,7 @@ describe("Claude Code runtime adapter", () => {
     // The full payload is handed to sendText (TmuxAdapter routes it to the buffer path).
     expect(tmux.sendText).toHaveBeenCalledWith("r01-impl", big);
     // Single trailing submit preserved.
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
   });
 
   // T6: duplicate delivery is idempotent

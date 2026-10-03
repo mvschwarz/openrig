@@ -91,7 +91,12 @@ export class RigTeardownOrchestrator {
       result.alreadyStopped = true;
       // Still tear down services even if no agent sessions are running
       if (this.deps.serviceOrchestrator) {
-        try { await this.deps.serviceOrchestrator.teardown(rigId); } catch { /* best-effort */ }
+        try {
+          const serviceResult = await this.deps.serviceOrchestrator.teardown(rigId);
+          if (!serviceResult.ok) result.errors.push(`Service teardown warning: ${serviceResult.error}`);
+        } catch (err) {
+          result.errors.push(`Service teardown warning: ${(err as Error).message}`);
+        }
       }
       // Skip to delete if requested
       if (opts?.delete) {
@@ -118,13 +123,12 @@ export class RigTeardownOrchestrator {
     // 5. Kill each live session
     let killFailures = 0;
     for (const session of liveSessions) {
-      // V1 pre-release CLI/daemon Item 1: stop the rotation timer
-      // before killing the tmux session so capture-pane stops poking
-      // a dead target. Idempotent: silent no-op if no timer registered.
-      stopTranscriptRotation(session.sessionName);
       const killResult = await this.deps.tmuxAdapter.killSession(session.sessionName);
 
       if (killResult.ok || (killResult as { code?: string }).code === "session_not_found") {
+        // Stop capture only when termination is confirmed. A failed kill leaves
+        // the session running, so its existing transcript rotation must survive.
+        stopTranscriptRotation(session.sessionName);
         // Success or already gone — update DB atomically
         this.atomicNodeCleanup(session);
         this.cleanupManagedGuidanceFileForNode(rigId, session.runtime, session.cwd);
@@ -140,7 +144,8 @@ export class RigTeardownOrchestrator {
     // 5b. Tear down services if they exist
     if (this.deps.serviceOrchestrator) {
       try {
-        await this.deps.serviceOrchestrator.teardown(rigId);
+        const serviceResult = await this.deps.serviceOrchestrator.teardown(rigId);
+        if (!serviceResult.ok) result.errors.push(`Service teardown warning: ${serviceResult.error}`);
       } catch (err) {
         result.errors.push(`Service teardown warning: ${(err as Error).message}`);
         // Best-effort — rig teardown continues

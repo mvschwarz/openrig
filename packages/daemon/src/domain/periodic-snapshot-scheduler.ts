@@ -22,6 +22,9 @@ export interface PeriodicSnapshotSchedulerDeps {
   processCensus?: ProcessCensus;
 }
 
+// Larger native Node timer delays overflow to 1ms; split long cadences instead.
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
 export class PeriodicSnapshotScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private deps: PeriodicSnapshotSchedulerDeps;
@@ -35,11 +38,32 @@ export class PeriodicSnapshotScheduler {
   start(intervalMs: number, retentionKeep: number = 10): void {
     if (this.timer) return;
     this.retentionKeep = Math.max(1, retentionKeep);
+    if (intervalMs > MAX_TIMER_DELAY_MS) {
+      this.scheduleLongInterval(intervalMs, intervalMs);
+      return;
+    }
     this.timer = setInterval(() => {
       if (this.running) return;
       void this.tick();
     }, intervalMs);
     this.timer.unref();
+  }
+
+  private scheduleLongInterval(intervalMs: number, remainingMs: number): void {
+    const delayMs = Math.min(remainingMs, MAX_TIMER_DELAY_MS);
+    const timer = setTimeout(() => {
+      if (this.timer !== timer) return;
+      if (remainingMs > delayMs) {
+        this.scheduleLongInterval(intervalMs, remainingMs - delayMs);
+        return;
+      }
+      if (!this.running) void this.tick();
+      // A synchronous tick may stop or restart scheduling through a subscriber.
+      // Never let that retired callback replace the current timer.
+      if (this.timer === timer) this.scheduleLongInterval(intervalMs, intervalMs);
+    }, delayMs);
+    this.timer = timer;
+    timer.unref();
   }
 
   stop(): void {

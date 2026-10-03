@@ -26,6 +26,8 @@ export interface NodeBinding extends Binding {
 // -- Resolved startup file with source-root provenance --
 
 export interface ResolvedStartupFile {
+  /** Explicit per-seat role orientation; never inferred from the filename. */
+  orientation?: "role";
   path: string;
   absolutePath: string;
   ownerRoot: string;

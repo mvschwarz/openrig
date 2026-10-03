@@ -70,10 +70,17 @@ describe("auto-mode startup content requires the launched Claude identity", () =
     expect(calls.filter(c => c.kind === "launch")).toEqual([{ kind: "launch", text: `claude --permission-mode auto ${resumes ? "--resume" : "--session-id"} ${token} --name ${name}` }]);
     if (mode === "resume-missing") expect(result.startupStatus).toBe("attention_required");
     expect({ ok: result.ok, content: calls.filter(c => c.kind === "content"), submit: calls.filter(c => c.kind === "submit") }).toEqual({
-      ok: good, content: good ? [{ kind: "content", text: payload }] : [], submit: good ? [{ kind: "submit", keys: ["C-m"] }] : [],
+      ok: good, content: good ? [{ kind: "content", text: payload }] : [], submit: good ? [{ kind: "submit", keys: ["Enter"] }] : [],
     });
     // Orchestrator checks readiness before content and once more at completion.
     if (good && !resumes) expect(listProcesses).toHaveBeenCalledTimes(4);
     if (mode === "plain-shell") expect(listProcesses).not.toHaveBeenCalled();
+    if (good) {
+      // The shared proof must stay tied to the exact launch binding/generation.
+      for (const changed of [{ id: "replacement" }, { tmuxSession: "replacement@rig" },
+        { tmuxPane: "%2" }, { launchGeneration: "replacement" }]) {
+        expect((await adapter.checkReady({ ...binding, ...changed })).ready).toBe(false);
+      }
+    }
   });
 });

@@ -547,12 +547,21 @@ export class TmuxAdapter {
   finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
 
   private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
+    // These are the daemon's resolved capture settings, not seat overrides.
+    // An empty per-session value prevents the tmux server's inherited values
+    // from pinning an old policy over config.json inside a newly launched seat.
+    // Explicit seat settings remain authoritative.
+    const seatEnv = {
+      OPENRIG_TRANSCRIPTS_LINES: "",
+      OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "",
+      ...env,
+    };
     const argv = ["tmux", "new-session", "-d", "-s", name];
     if (cwd != null) argv.push("-c", cwd);
-    if (env) for (const [k, v] of Object.entries(env)) argv.push("-e", `${k}=${v}`);
+    for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
     const legacyParts = ["tmux", "new-session", "-d", "-s", shellQuote(name)];
     if (cwd != null) legacyParts.push("-c", shellQuote(cwd));
-    if (env) for (const [k, v] of Object.entries(env)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
+    for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
     try {
       await this.run(argv, legacyParts.join(" "));
       return { ok: true };
@@ -567,10 +576,10 @@ export class TmuxAdapter {
    * A file keeps payload bytes out of shell/tmux argv and its size limits.
    *   `-p`  bracket the paste when the receiving application enables that mode.
    *   `-r`  preserve raw LF. tmux's default paste-buffer replaces every LF with
-   *         CR, and CR (= `C-m` = Enter) is SUBMIT in the Claude/Codex TUIs - a
+   *         CR, and CR is SUBMIT in the Claude/Codex TUIs - a
    *         default paste of a multi-line pack would submit on every newline.
    *   `-d`  drop the buffer after a successful paste.
-   * The single trailing submit stays the caller's separate `sendKeys(["C-m"])`.
+   * The single trailing submit stays the caller's separate `sendKeys(["Enter"])`.
    * Cleanup unlinks the temp file in `finally`; if the buffer was loaded but the
    * paste failed (e.g. missing target), an explicit `delete-buffer` runs so no
    * buffer leaks. Unique temp + buffer names per call keep parallel `rig up`

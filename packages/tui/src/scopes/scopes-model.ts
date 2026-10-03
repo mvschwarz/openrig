@@ -180,6 +180,34 @@ export function proofProvenanceLines(proof: ReadinessSnap | null | undefined, wi
 function itemState(detail: SliceScopeSnap, item: ScopeContractItem): string {
   return detail.readiness?.configured ? detail.readiness.items.find(i => item.id !== undefined && i.id === item.id)?.state.toUpperCase() ?? "UNKNOWN" : item.paired ? "PAIRED" : "OPEN";
 }
+/** Current evidence comes only from the served judgment; drops retain every round. */
+function proofEvidence(detail: SliceScopeSnap, item: ScopeContractItem): Array<{ text: string; token: Token }> {
+  const lines: Array<{ text: string; token: Token }> = [];
+  const current = detail.readiness?.configured
+    ? detail.readiness.items.find(i => item.id !== undefined && i.id === item.id) : undefined;
+  const judgment = current?.judgment;
+  if (judgment) {
+    lines.push({ text: `Current judgment ${judgment.id}: ${current.reason}`, token: current.state === "accepted" ? "ok" : "warn" });
+    if (judgment.previous) lines.push({ text: `Corrects: ${judgment.previous}`, token: "dim" });
+    for (const evidence of judgment.evidence ?? []) {
+      lines.push({ text: `Evidence: ${evidence.ref}`, token: "dim" });
+      lines.push({ text: `SHA256: ${evidence.sha256}`, token: "dim" });
+    }
+    if (!judgment.evidence?.length) lines.push({ text: "Evidence references not served.", token: "warn" });
+  } else if (detail.readiness?.configured) {
+    lines.push({ text: "No current attributed judgment.", token: "warn" });
+  } else if (!item.drops.length) {
+    lines.push({ text: "not recorded", token: "warn" });
+  }
+  if (item.drops.length) lines.push({ text: "Retained proof drops — all rounds", token: "dim" });
+  for (const drop of item.drops) {
+    lines.push({ text: `↳ ${(drop.artifactType ?? "drop").toUpperCase()} ${drop.verdict ?? ""}`.trimEnd(), token: drop.verdict === "PASS" || drop.verdict === "CLEAR" ? "ok" : "dim" });
+    lines.push({ text: drop.file, token: "dim" });
+    for (const media of drop.media) lines.push({ text: `media ${media}`, token: "dim" });
+  }
+  return lines;
+}
+
 function proofColumns(detail: SliceScopeSnap, width: number): ContentLine[] {
   const stateW = 8;
   const indexW = 3;
@@ -205,15 +233,8 @@ function proofColumns(detail: SliceScopeSnap, width: number): ContentLine[] {
   const lines = [column("STATE", "#", "REQUIREMENT", "EVIDENCE", "accentBright", "accentBright")];
   for (const item of detail.proofContract) {
     const requirements = wrapText(item.text, requirementW);
-    const evidence: Array<{ text: string; token: Token }> = [];
-    const judgment = detail.readiness?.items.find(i => item.id !== undefined && i.id === item.id);
-    if (judgment?.judgment) evidence.push({ text: `judgment ${judgment.judgment.id.slice(0, 12)}: ${judgment.reason}`, token: judgment.state === "accepted" ? "ok" : "warn" });
-    if (item.drops.length === 0 && !judgment?.judgment) evidence.push({ text: "not recorded", token: "warn" });
-    for (const drop of item.drops) {
-      evidence.push({ text: `↳ ${(drop.artifactType ?? "drop").toUpperCase()} ${drop.verdict ?? ""}`.trimEnd(), token: drop.verdict === "PASS" || drop.verdict === "CLEAR" ? "ok" : "dim" });
-      evidence.push(...wrapText(drop.file, evidenceW).map((text) => ({ text, token: "dim" as Token })));
-      for (const media of drop.media) evidence.push(...wrapText(`media ${media}`, evidenceW).map((text) => ({ text, token: "dim" as Token })));
-    }
+    const evidence = proofEvidence(detail, item).flatMap(line =>
+      wrapText(line.text, evidenceW).map(text => ({ text, token: line.token })));
     const count = Math.max(requirements.length, evidence.length, 1);
     for (let i = 0; i < count; i += 1) {
       lines.push(column(
@@ -238,23 +259,8 @@ function proofStack(detail: SliceScopeSnap, width: number): ContentLine[] {
       { text: status, token: status === "ACCEPTED" ? "ok" : "warn", bold: true },
     ], width));
     lines.push(...wrapped(item.text, width, "    "));
-    const judgment = detail.readiness?.items.find(i => item.id !== undefined && i.id === item.id);
-    if (judgment?.judgment) lines.push(...wrapped(`judgment ${judgment.judgment.id.slice(0, 12)}: ${judgment.reason}`, width, "    "));
-    if (item.drops.length === 0) {
-      if (judgment?.judgment) continue;
-      lines.push(semantic([{ text: "    EVIDENCE · ", token: "dim" }, { text: "not recorded", token: "warn" }], width));
-      continue;
-    }
     lines.push(semantic([{ text: "    EVIDENCE", token: "dim", bold: true }], width));
-    for (const drop of item.drops) {
-      lines.push(semantic([
-        { text: "    ↳ ", token: "chrome" },
-        { text: (drop.artifactType ?? "drop").toUpperCase(), token: "accentBright" },
-        { text: ` ${drop.verdict ?? ""}`.trimEnd(), token: drop.verdict === "PASS" || drop.verdict === "CLEAR" ? "ok" : "dim" },
-      ], width));
-      lines.push(...wrapped(drop.file, width, "    ", "dim"));
-      for (const media of drop.media) lines.push(...wrapped(`media ${media}`, width, "    ", "dim"));
-    }
+    for (const line of proofEvidence(detail, item)) lines.push(...wrapped(line.text, width, "    ", line.token));
   }
   return lines;
 }

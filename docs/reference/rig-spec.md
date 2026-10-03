@@ -399,6 +399,7 @@ Startup blocks can appear at three levels: rig, pod, and member. They are merged
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `path` | string | yes | — | Relative path to the file. Must be a safe relative path. |
+| `orientation` | string | no | — | Set to `role` to identify a per-seat role file for `rig queue whoami --json` and refocus. Does not change delivery or replay startup. |
 | `delivery_hint` | string | no | `auto` | How the file is delivered. One of: `auto`, `guidance_merge`, `skill_install`, `send_text`. |
 | `required` | boolean | no | `true` | Whether startup fails if this file cannot be delivered. |
 | `applies_on` | string[] | no | `[fresh_start, restore]` | When this file is delivered. Subset of: `fresh_start`, `restore`. |

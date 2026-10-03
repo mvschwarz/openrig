@@ -169,7 +169,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     });
     expect(r.ok).toBe(true);
     expect(sendText).toHaveBeenCalledWith("dev-impl@my-rig", "1");
-    expect(sendKeys).toHaveBeenCalledWith("dev-impl@my-rig", ["C-m"]);
+    expect(sendKeys).toHaveBeenCalledWith("dev-impl@my-rig", ["Enter"]);
     const events = overrideEvents();
     expect(events.length).toBe(1);
     expect(events[0]).toMatchObject({

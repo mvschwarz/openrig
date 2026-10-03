@@ -395,14 +395,14 @@ describe("Codex runtime adapter", () => {
     await adapter.deliverStartup([file], makeBinding());
 
     expect(tmux.sendText).toHaveBeenCalledWith("r01-qa", "echo hello");
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-qa", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-qa", ["Enter"]);
   });
 
   // OPR.0.3.3.16 - a >100KB send_text startup pack must still travel through the
-  // sendText -> sleep -> sendKeys(["C-m"]) sequence unchanged. The large-payload
+  // sendText -> sleep -> sendKeys(["Enter"]) sequence unchanged. The large-payload
   // buffer mechanics live in TmuxAdapter; the adapter hands the full content to
   // sendText and fires the single trailing submit.
-  it("delivers a large (>100KB) send_text startup file via sendText then submits with C-m", async () => {
+  it("delivers a large (>100KB) send_text startup file via sendText then submits with Enter", async () => {
     const tmux = mockTmux();
     const big = "L".repeat(120 * 1024);
     const adapter = new CodexRuntimeAdapter({
@@ -422,7 +422,7 @@ describe("Codex runtime adapter", () => {
     // The full payload is handed to sendText (TmuxAdapter routes it to the buffer path).
     expect(tmux.sendText).toHaveBeenCalledWith("r01-qa", big);
     // Single trailing submit preserved.
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-qa", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-qa", ["Enter"]);
   });
 
   // T12: replay on restore is safe for already-projected content

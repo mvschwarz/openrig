@@ -17,6 +17,11 @@ export type ResumeResult =
 
 const CLAUDE_TYPES = new Set(["claude_name", "claude_id"]);
 
+/** The legacy name and native ID are both supported Claude resume inputs. */
+export function isClaudeResumeType(resumeType: string | null | undefined): boolean {
+  return resumeType != null && CLAUDE_TYPES.has(resumeType);
+}
+
 interface ClaudeResumeOptions {
   claudeManagedLaunch?: ClaudeManagedLaunch;
   listProcesses?: NativeProcessLister;
@@ -32,7 +37,7 @@ export class ClaudeResumeAdapter {
   ) {}
 
   canResume(resumeType: string | null, resumeToken: string | null): boolean {
-    if (!resumeType || !CLAUDE_TYPES.has(resumeType)) return false;
+    if (!isClaudeResumeType(resumeType)) return false;
     if (!resumeToken) return false;
     return true;
   }

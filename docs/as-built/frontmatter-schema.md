@@ -1,65 +1,73 @@
 ---
 kind: as-built
-title: As-Built Frontmatter — Pointer + As-Built-Unique Field
+title: As-Built Frontmatter
 status: active
 topics: [knowledge-and-context, frontmatter]
 domains: [engineering-advisor, operating-advisor]
 applies-when: |
-  Authoring or updating a doc under docs/as-built/. Tells you which
-  frontmatter convention governs these docs and the one field that is
-  unique to as-built docs.
-siblings: [README.md]
-prerequisite-reads: [README.md]
-last-verified-against-source: 7eaf524c
-last-updated: 2026-05-16
+  Writing or refreshing a source-grounded document under docs/as-built/.
+last-verified-against-source: 712a61fbcc5ffe5a7c786fea12132567083ab507
+last-updated: 2026-10-02
 ---
 
-# As-Built Frontmatter — Pointer + As-Built-Unique Field
+# As-Built Frontmatter
 
-Every doc under `docs/as-built/` carries YAML frontmatter. The shape is
-**not** defined here. It is the substrate-wide context-frontmatter
-convention; this doc only points to it and documents the one field that
-is unique to as-built docs.
+Source snapshot: `712a61fbcc5ffe5a7c786fea12132567083ab507`. This describes the source at that commit;
+it does not establish the version or behavior of a running daemon.
 
-## Canonical convention (do not duplicate — read it)
+Frontmatter makes an as-built page discoverable and records the source it
+was checked against. This page describes the convention visible in this
+repository. It does not require an unpublished schema or an internal
+workspace to interpret the fields.
 
-`openrig-work/conventions/frontmatter-for-context/README.md` is the
-authoritative schema: required floor (`kind` + `title` + `status` +
-`applies-when`), recommended fields (`topics`, `domains`, `siblings`,
-`prerequisite-reads`), and the controlled vocabularies for `kind:`,
-`topics:`, and `domains:`. Author against that convention. This doc adds
-nothing to it except the field below.
+## Fields
 
-## `kind: as-built`
+The corpus uses these fields; see the [module index](README.md) and
+[CLI reference](cli-reference.md) for examples.
 
-These docs use `kind: as-built`. That value is in the convention's
-controlled `kind:` vocabulary (first row of its "Controlled vocabulary —
-`kind:`" table, source `openrig/docs/as-built/*`). Using it is conformant,
-not an extension.
+| Field | Meaning |
+|---|---|
+| `kind: as-built` | Identifies a description of implemented behavior. |
+| `title` | Human-readable subject of the page. |
+| `status` | Document status, such as `active`; not a daemon or feature status. |
+| `applies-when` | Short retrieval cue explaining when to open the page. |
+| `topics`, `domains` | Lists of indexing labels used in this corpus. They do not select permissions or runtime behavior. |
+| `siblings`, `prerequisite-reads` | Related pages and reading order, when useful. Paths are relative to the containing page. |
+| `last-verified-against-source` | A resolvable Git commit whose source was used to check the page. |
+| `last-updated` | Date of the document update, in `YYYY-MM-DD` form. |
 
-## `last-verified-against-source: <sha>` (as-built-unique)
+## Verification stamp
 
-As-built docs describe the running system. They drift when the source
-drifts. The as-built-unique field records the exact commit the doc was
-last verified against:
+Use a commit ID, preferably full length, rather than a branch name or a
+moving `HEAD` label. A source stamp identifies what was read; it is not proof
+that an installed package or a running system uses that source. Keep runtime
+observations separately qualified.
 
 ```yaml
-last-verified-against-source: 7eaf524c
+last-verified-against-source: 712a61fbcc5ffe5a7c786fea12132567083ab507
+last-updated: 2026-10-02
 ```
 
-- **Value:** the short SHA of the source HEAD the doc was verified
-  against at its last edit. Pair with `last-updated: <iso-date>`.
-- **Why it is here and not in the convention:** the convention is
-  substrate-wide; most context docs do not track a source SHA. This
-  field is meaningful only for docs that mirror code, i.e. as-built
-  docs. It is the per-module drift-detection anchor the
-  context-architecture-v1 mission dogfoods on its own production.
-- **Discipline:** when re-verifying a module against a newer HEAD,
-  bump this field (and `last-updated`) and carry an inline
-  `re-confirmed <file:line> @HEAD` annotation on each load-bearing
-  claim that was re-checked.
+Check that the commit resolves with `git cat-file -t <commit>` in a checkout
+containing that history. Verify the paths, symbols, and numeric claims cited
+by the page at that commit before changing its stamp. A newer date alone
+does not refresh the content. Missing history in a shallow checkout and an
+invalid commit ID are different conditions.
 
-## See also
+Use repository links and named symbols for source references. For numeric
+inventories, state what is counted and how it was obtained; for example, the
+CLI reference distinguishes registered command objects from aliases and
+Commander-generated help.
 
-- `openrig-work/conventions/frontmatter-for-context/README.md` — the canonical schema
-- `README.md` — the as-built corpus map of territory
+## What the repository guard checks
+
+[`scripts/check-docs-guard.mjs`](../../scripts/check-docs-guard.mjs)
+checks allowed tracked documentation paths. Its `findBlockedDocsPaths`
+function does **not** validate this frontmatter or prove the prose matches
+source. Passing that guard should not be reported as a schema or factual
+accuracy check.
+
+[As-built pages](README.md) and [operator reference pages](../reference/help.md)
+serve different purposes. `docs/reference/` is staged by
+[`scripts/build-package.sh`](../../scripts/build-package.sh); placing content
+there changes what is distributed in the package.

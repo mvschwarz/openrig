@@ -669,6 +669,10 @@ function makeStubAdapter(forkResumeToken: string): RuntimeAdapter {
       if (opts.forkSource) {
         return { ok: true, resumeToken: forkResumeToken, resumeType: "claude_id" };
       }
+      if (opts.resumeToken) {
+        // Match ClaudeCodeAdapter's successful, verified resume result.
+        return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id" };
+      }
       return { ok: true };
     }),
   };
@@ -776,6 +780,25 @@ describe("StartupOrchestrator forkSource integration", () => {
       isRestore: true,
     }));
     expect(result).toEqual({ ok: true, startupStatus: "ready", continuityOutcome: "resumed" });
+    expect(db.prepare("SELECT status, startup_status, resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(s.sessionId)).toEqual({
+      status: "running", startup_status: "ready", resume_type: "claude_id",
+      resume_token: "stored-token-xyz", resume_provenance: "scrape",
+    });
+  });
+
+  it("does not certify resume when the adapter succeeds without identity evidence", async () => {
+    const s = seed();
+    const adapter = makeStubAdapter("unused-fork-token");
+    vi.mocked(adapter.launchHarness).mockResolvedValue({ ok: true });
+    const result = await createOrch().startNode(makeInput(s, {
+      adapter, resumeToken: "stored-token-xyz", isRestore: true,
+    }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(adapter.launchHarness).toHaveBeenCalledTimes(1);
+    expect(db.prepare("SELECT status, startup_status, resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(s.sessionId)).toEqual({
+      status: "running", startup_status: "attention_required", resume_type: null,
+      resume_token: null, resume_provenance: null,
+    });
   });
 });
 

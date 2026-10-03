@@ -90,7 +90,10 @@ describe("rig view CLI (PL-004 Phase B)", () => {
   });
 
   it("show execution passes project and mission scopes to the daemon", async () => {
-    const { deps, calls } = makeDeps();
+    const document = { rows: [{ q4_ladder: [{ adopted: { value: "NOT_APPLICABLE", basis: "selected project has no daemon-source binding" } }] }] };
+    const { deps, calls } = makeDeps({ routes: {
+      "GET /api/views/execution?limit=100&mission=release-next&project=alpha": { status: 200, data: document },
+    } });
     const program = createProgram({ viewDeps: deps });
     program.exitOverride();
     await program.parseAsync([
@@ -102,6 +105,7 @@ describe("rig view CLI (PL-004 Phase B)", () => {
     const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/views/execution"));
     expect(call?.path).toContain("project=alpha");
     expect(call?.path).toContain("mission=release-next");
+    expect(JSON.parse(logs.at(-1)!)).toEqual(document);
   });
 
   it("show without query params constructs path without ?", async () => {

@@ -28,6 +28,16 @@ function runner() {
 }
 
 describe("OMP runner command and child isolation", () => {
+  it.each(["pi", "omp"] as const)("retains only supplied user names in the %s child baseline", runtime => {
+    const opts = { runtime, agentDir: "/fixture/agent", sessionsDir: "/fixture/sessions" };
+    const source = { HOME: "/fixture/home", PATH: "/fixture/bin", UNRELATED_VALUE: "not-forwarded" };
+    const absent = buildPiChildEnv(source, opts);
+    expect(absent).not.toHaveProperty("USER");
+    expect(absent).not.toHaveProperty("LOGNAME");
+    expect(absent).not.toHaveProperty("UNRELATED_VALUE");
+    expect(buildPiChildEnv({ ...source, USER: "fixture-user", LOGNAME: "fixture-login" }, opts))
+      .toEqual({ ...absent, USER: "fixture-user", LOGNAME: "fixture-login" });
+  });
   it("launches exact session/fork with OMP approval flags, never Pi-only flags", () => {
     const common = { runnerEntryPath: "/daemon/pi-runner.js", sessionName, stateRoot: "/openrig/state/omp", cwd: "/work", model: "anthropic/claude-sonnet", runtime: "omp" as const, launchId: "attempt-1" };
     for (const [trust, mode] of [["approve", "yolo"], ["no-approve", "always-ask"]] as const) {

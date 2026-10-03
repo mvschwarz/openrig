@@ -15,7 +15,7 @@
   as staged (or vice versa) has caused real misdiagnoses — check the cursor
   before you conclude anything about an un-submitted line.
 - **Text sitting AT the prompt = staged, not consumed.** The fix is one
-  `C-m`, never a re-send (a re-send delivers twice).
+  Enter, never a re-send (a re-send delivers twice).
 - **The spinner renders ABOVE the input box.** A capture of fewer than ~20
   lines shows a bare prompt for a seat deep in work; never lower the line
   count to "simplify" a liveness read.

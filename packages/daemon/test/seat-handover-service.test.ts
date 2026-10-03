@@ -553,7 +553,7 @@ describe("SeatHandoverService", () => {
     expect(target).toBe("dev-impl@seat-rig");
     expect(packet).toContain("OpenRig seat handover");
     expect(packet).toContain("predecessor screen tail");
-    expect(sendKeys).toHaveBeenCalledWith("dev-impl@seat-rig", ["C-m"]);
+    expect(sendKeys).toHaveBeenCalledWith("dev-impl@seat-rig", ["Enter"]);
     expect(sendText.mock.invocationCallOrder[0]!).toBeLessThan(hasSession.mock.invocationCallOrder[0]!);
 
     // B1: the successor was launched into a LIVE agent (launchHarness +
@@ -735,7 +735,7 @@ describe("SeatHandoverService", () => {
     expect(packet).toContain("predecessor screen tail");
   });
 
-  it("B16 rework: packet delivery uses the shared paste-then-submit sequencing — a settle sleep BETWEEN send_text and C-m (r2 live: without it the packet sat staged-unsent 46s)", async () => {
+  it("B16 rework: packet delivery uses the shared paste-then-submit sequencing — a settle sleep BETWEEN send_text and Enter (r2 live: without it the packet sat staged-unsent 46s)", async () => {
     seedSeat({ runtime: "codex" });
     const sleeps: number[] = [];
     const orderedCalls: string[] = [];

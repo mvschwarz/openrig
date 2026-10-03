@@ -65,6 +65,18 @@ describe("telemetry routes", () => {
     expect(body.totalRankedSeats).toBe(2);
   });
 
+  it.each(["2500000000", "1e308"])("out-of-range finite window %s returns 400", async (window) => {
+    const db = seeded();
+    try {
+      const res = await appWith(db, NOW).request(`/api/telemetry/usage/top?window_hours=${window}`);
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toMatch(/supported date range/);
+    } finally {
+      db.close();
+    }
+  });
+
   it("invalid window_hours is a teaching 400, never a silent default", async () => {
     const app = appWith(seeded(), NOW);
     const res = await app.request("/api/telemetry/usage/top?window_hours=zero");

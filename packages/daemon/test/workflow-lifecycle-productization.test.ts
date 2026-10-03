@@ -507,7 +507,7 @@ describe("S06 lifecycle productization", () => {
       },
     });
     const next = await runtime.project({ instanceId: accepted.instance.instanceId, currentPacketId: accepted.entryQitemId, exit: "handoff", actorSession: "producer@rig" });
-    const execution = buildExecutionView({
+    const execution = await buildExecutionView({
       db,
       slicesRoot: () => null,
       buildInfo: { semver: null, commit: null, dirty: null, builtAt: null },
@@ -592,7 +592,7 @@ describe("S06 lifecycle productization", () => {
       status: "unresolved",
       targetedAction: "none",
     }]);
-    const execution = buildExecutionView({
+    const execution = await buildExecutionView({
       db,
       slicesRoot: () => null,
       buildInfo: { semver: null, commit: null, dirty: null, builtAt: null },

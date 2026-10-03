@@ -56,7 +56,12 @@ export function telemetryRoutes(deps: TelemetryRouteDeps): Hono {
         return c.json({ error: `invalid top "${topRaw}" — must be a positive count` }, 400);
       }
     }
-    return c.json(computeTopBurn(deps.db(), { windowHours, nowIso: now(), topN }));
+    const nowIso = now();
+    const since = new Date(new Date(nowIso).getTime() - windowHours * 3_600_000);
+    if (!Number.isFinite(since.getTime())) {
+      return c.json({ error: `invalid window_hours "${windowRaw}" — exceeds the supported date range` }, 400);
+    }
+    return c.json(computeTopBurn(deps.db(), { windowHours, nowIso, topN }));
   });
 
   return app;
