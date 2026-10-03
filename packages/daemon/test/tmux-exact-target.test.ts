@@ -90,8 +90,9 @@ describe("exact session targets for capture, session environment and pipe-pane",
       expect(sessions[SIBLING]!.pipedTo).toBeUndefined();
       expect(await a.capturePaneContent("%0")).toBe("SIBLING-SCREEN\n");
       expect(await a.capturePaneContent(`${GONE}:0.0`)).toBe("OWN-SCREEN\n");
+      expect(await a.capturePaneContent("%dev")).toBeNull(); // a name that only starts like an id is still exact
       const targets = calls.map((c) => c[c.indexOf("-t") + 1]);
-      expect(targets).toEqual([`=${GONE}:`, `=${GONE}:`, `=${GONE}`, `=${GONE}:`, "%0", `${GONE}:0.0`]);
+      expect(targets).toEqual([`=${GONE}:`, `=${GONE}:`, `=${GONE}`, `=${GONE}:`, "%0", `${GONE}:0.0`, "=%dev:"]);
     });
   }
 });

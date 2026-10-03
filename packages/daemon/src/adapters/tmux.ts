@@ -219,11 +219,12 @@ function shellQuote(s: string): string {
 /**
  * An exact tmux target for a session name. tmux resolves a bare name by prefix when no session has that exact name,
  * so a read or pipe for a session that just ended would act on another (`dev-impl@my-rig` on `dev-impl@my-rig2`).
- * Pane, window and session ids (`%3`, `@1`, `$2`) and `session:window.pane` targets pass through unchanged. A pane
- * command gets `=name:` (as the batched capture uses); a session command gets `=name`.
+ * Pane, window and session ids (`%3`, `@1`, `$2`) and `session:window.pane` targets pass through unchanged (tmux
+ * turns `:` in a session name into `_`, so a `:` always means an explicit target). A pane command gets `=name:` (as the
+ * batched capture uses); a session command gets `=name`.
  */
 function exactTarget(target: string, kind: "pane" | "session"): string {
-  if (/^[%@$]/.test(target) || target.includes(":")) return target;
+  if (/^[%@$]\d+$/.test(target) || target.includes(":")) return target;
   return kind === "pane" ? `=${target}:` : `=${target}`;
 }
 
