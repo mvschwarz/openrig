@@ -26,9 +26,10 @@ export interface TranscriptRotationOptions {
 
 export const DEFAULT_TRANSCRIPT_LINES = 1000;
 export const DEFAULT_TRANSCRIPT_POLL_INTERVAL_MS = 2000;
-// Below the default ingest-health stale window (10s). Activity hints are
+// Leave room below the default ingest-health stale window (10s) for timer
+// spacing, activity hints and capture work on a busy host. Activity hints are
 // advisory: reconciliation still reads the complete bounded trailing buffer.
-export const MAX_IDLE_CAPTURE_INTERVAL_MS = 8000;
+export const MAX_IDLE_CAPTURE_INTERVAL_MS = 6000;
 export const ACTIVITY_HINT_DEADLINE_MS = 1000;
 
 /** A shared live resolver retains a usable policy during partial config writes.
@@ -155,11 +156,13 @@ export function startTranscriptRotation(
   const stats: CaptureStats = { captures: 0, failures: 0, bytes: 0, durationMs: 0, idle: false, intervalMs: opts.pollIntervalMs, lines: opts.lines };
   captureStats.set(sessionName, stats);
   let nextCaptureAt = 0;
+  let lastCaptureStartedAt = 0;
   let previousHint: number | undefined;
   let idleIntervalMs = opts.pollIntervalMs;
 
   const tick = async (): Promise<void> => {
     if (!isCurrent() || capturingSessions.has(sessionName)) return;
+    const tickStartedAt = Date.now();
     capturingSessions.add(sessionName);
     let captureStartedAt: number | undefined;
     try {
@@ -179,16 +182,19 @@ export function startTranscriptRotation(
       if (activityChanged) {
         idleIntervalMs = opts.pollIntervalMs;
         stats.idle = false;
-        nextCaptureAt = Math.min(nextCaptureAt, (lastCaptureAtBySession.get(sessionName) ?? 0) + opts.pollIntervalMs);
+        nextCaptureAt = Math.min(nextCaptureAt, lastCaptureStartedAt + opts.pollIntervalMs);
       }
       previousHint = hint;
       // Unknown hints never mean idle; keep the configured full-capture cadence.
       if (hint === undefined) {
         stats.idle = false;
         idleIntervalMs = opts.pollIntervalMs;
-        nextCaptureAt = Math.min(nextCaptureAt, (lastCaptureAtBySession.get(sessionName) ?? 0) + opts.pollIntervalMs);
+        nextCaptureAt = Math.min(nextCaptureAt, lastCaptureStartedAt + opts.pollIntervalMs);
       }
       if (Date.now() < nextCaptureAt) return;
+      // Schedule from this tick, not its eventual completion: work inside a
+      // fixed-step timer must not shift an active capture past the next tick.
+      lastCaptureStartedAt = tickStartedAt;
       captureStartedAt = performance.now();
       stats.captures += 1;
       const content = await tmuxAdapter.capturePaneContent(sessionName, opts.lines);
@@ -199,7 +205,7 @@ export function startTranscriptRotation(
       if (content === null) {
         stats.failures += 1;
         stats.idle = false;
-        nextCaptureAt = Date.now() + opts.pollIntervalMs;
+        nextCaptureAt = tickStartedAt + opts.pollIntervalMs;
         return;
       }
       stats.bytes += Buffer.byteLength(content, "utf8");
@@ -241,7 +247,7 @@ export function startTranscriptRotation(
         lastCaptureAtBySession.set(sessionName, Date.now());
         stats.idle = hint !== undefined && !activityChanged;
         idleIntervalMs = stats.idle ? Math.min(Math.max(opts.pollIntervalMs, MAX_IDLE_CAPTURE_INTERVAL_MS), idleIntervalMs * 2) : opts.pollIntervalMs;
-        nextCaptureAt = Date.now() + idleIntervalMs;
+        nextCaptureAt = tickStartedAt + idleIntervalMs;
         return;
       }
 
@@ -256,11 +262,11 @@ export function startTranscriptRotation(
       lastCaptureAtBySession.set(sessionName, Date.now());
       stats.idle = false;
       idleIntervalMs = opts.pollIntervalMs;
-      nextCaptureAt = Date.now() + idleIntervalMs;
+      nextCaptureAt = tickStartedAt + idleIntervalMs;
     } catch {
       stats.failures += 1;
       stats.idle = false;
-      nextCaptureAt = Date.now() + opts.pollIntervalMs;
+      nextCaptureAt = tickStartedAt + opts.pollIntervalMs;
       // Best-effort capture: target session may have died, output path
       // may be unwritable, etc. The next tick retries; failure here
       // does not bubble up to the daemon's launch / lifecycle paths.

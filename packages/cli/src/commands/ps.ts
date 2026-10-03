@@ -1713,7 +1713,7 @@ async function handleResources(client: DaemonClient, json?: boolean, headers?: R
   }
   const data = response.data;
   if (json) { console.log(JSON.stringify(data)); return; }
-  console.log(`Host: ${data.cpuCount} available CPUs · ${data.runningSeats} running seats`);
+  console.log(`Host: ${hostId ? `${hostId} · ` : ""}${data.cpuCount} available CPUs · ${data.runningSeats} running seats`);
   console.log(data.loadAverage && data.loadPerCpu
     ? `Load (1/5/15m): ${data.loadAverage.map((n) => n.toFixed(2)).join(" / ")} · per CPU: ${data.loadPerCpu.map((n) => n.toFixed(2)).join(" / ")} (not CPU utilization)`
     : "Load average: unavailable on this platform");

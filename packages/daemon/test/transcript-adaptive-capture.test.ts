@@ -7,7 +7,7 @@ import { startTranscriptRotation, clearAllTranscriptRotationsForTest, getLastCap
 
 let root: string;
 beforeEach(() => { root = fs.mkdtempSync(path.join(os.tmpdir(), "adaptive-capture-")); vi.useFakeTimers(); });
-afterEach(() => { clearAllTranscriptRotationsForTest(); vi.useRealTimers(); fs.rmSync(root, { recursive: true, force: true }); });
+afterEach(async () => { clearAllTranscriptRotationsForTest(); await vi.advanceTimersByTimeAsync(2000); vi.useRealTimers(); fs.rmSync(root, { recursive: true, force: true }); });
 
 function fixture() {
   let hint = 1;
@@ -30,11 +30,11 @@ describe("adaptive capture", () => {
     const { adapter, activity } = fixture();
     const file = start(adapter); start(adapter, "other");
     await vi.advanceTimersByTimeAsync(16_000);
-    // Each seat captures at 0, 2, 6 and 14s, rather than every 2s.
+    // Each seat captures at 0, 2, 6 and 12s, rather than every 2s.
     expect(adapter.capturePaneContent).toHaveBeenCalledTimes(8);
     expect(adapter.readAllSessionWindowActivity).toHaveBeenCalledTimes(9);
     expect(getTranscriptCaptureStats().idleSeats).toBe(2);
-    expect(Date.now() - getLastCaptureAt("seat")!).toBe(2000);
+    expect(Date.now() - getLastCaptureAt("seat")!).toBe(4000);
     activity(1, "same-second output not reflected by the hint\n");
     await vi.advanceTimersByTimeAsync(6000);
     expect(fs.readFileSync(file, "utf8")).toBe("same-second output not reflected by the hint\n");
@@ -82,12 +82,12 @@ describe("adaptive capture", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(adapter.readAllSessionWindowActivity).toHaveBeenCalledTimes(1);
     // Both seats keep capturing at configured cadence after the 1s hint deadline.
-    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(10);
+    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(12);
     expect(getTranscriptCaptureStats().idleSeats).toBe(0);
     release(new Map([["seat", 1], ["other", 1]]));
     await vi.advanceTimersByTimeAsync(2000);
     expect(adapter.readAllSessionWindowActivity).toHaveBeenCalledTimes(2);
-    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(12);
+    expect(adapter.capturePaneContent).toHaveBeenCalledTimes(14);
   });
 
   it("applies live intervals and line counts while keeping pending captures exclusive", async () => {
@@ -109,6 +109,47 @@ describe("adaptive capture", () => {
     release("last\n");
     await vi.advanceTimersByTimeAsync(2000);
     expect(adapter.capturePaneContent).toHaveBeenLastCalledWith("seat", 20);
+  });
+
+  it("keeps the idle ceiling below transcript staleness with slow activity hints", async () => {
+    const { adapter } = fixture();
+    adapter.readAllSessionWindowActivity.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      return new Map([["seat", 1]]);
+    });
+    adapter.capturePaneContent.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+      return "unchanged\n";
+    });
+    start(adapter, "seat", () => ({ lines: 1000, pollIntervalMs: 2000 }));
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(getTranscriptCaptureStats().idleSeats).toBe(1);
+    expect(getTranscriptCaptureStats().maxIdleIntervalMs).toBe(6000);
+    // Includes tick spacing, a slow hint and capture, after backoff reaches its ceiling.
+    for (let n = 0; n < 250; n++) {
+      await vi.advanceTimersByTimeAsync(100);
+      expect(Date.now() - getLastCaptureAt("seat")!).toBeLessThan(10_000);
+    }
+  });
+
+  it("retains active tick cadence despite nonzero capture duration and a normal stop", async () => {
+    const { adapter, activity } = fixture();
+    adapter.readAllSessionWindowActivity.mockImplementation(async () => new Map([["seat", Date.now()]]));
+    const starts: number[] = [];
+    const began = Date.now();
+    adapter.capturePaneContent.mockImplementation(async () => {
+      starts.push(Date.now() - began);
+      const content = starts.at(-1)! >= 3100 ? "last output\n" : "first\n";
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return content;
+    });
+    const file = start(adapter, "seat", () => ({ lines: 1000, pollIntervalMs: 2000 }));
+    await vi.advanceTimersByTimeAsync(3100);
+    activity(2, "last output\n");
+    await vi.advanceTimersByTimeAsync(1100);
+    clearAllTranscriptRotationsForTest();
+    expect(starts).toEqual([0, 2000, 4000]);
+    expect(fs.readFileSync(file, "utf8")).toBe("last output\n");
   });
 
   it("reports UTF8 byte cost and failures without manufacturing capture freshness", async () => {

@@ -17,7 +17,7 @@ the daemon restarts, so they are observations rather than a durable billing log.
 
 Transcript rotation still captures the bounded trailing buffer. When successive
 captures are unchanged and tmux exposes an unchanged current-window activity
-hint, capture backs off exponentially to an 8-second ceiling. One shared tmux
+hint, capture backs off exponentially to a 6-second ceiling. One shared tmux
 activity read wakes idle rotations; a changed hint restores the active cadence.
 Missing/failed hints retain the configured full-capture cadence. A hint read
 that takes longer than one second becomes unknown without starting additional

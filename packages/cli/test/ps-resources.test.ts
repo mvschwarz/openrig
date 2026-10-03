@@ -61,12 +61,15 @@ it("renders both native HTTP JSON and explicit human resource semantics", async 
   expect(log.mock.calls.flat().join("\n")).toContain("not daemon CPU time");
 });
 
-async function remoteFixture(status: 401 | 403 | 404 | 429 | 500) {
+async function remoteFixture(status: 200 | 401 | 403 | 404 | 429 | 500) {
   vi.stubEnv("OPENRIG_RESOURCE_TEST_BEARER", "public-fixture-token");
   let authorization: string | undefined;
   const app = new Hono();
   app.get("/api/ps/resources", (c) => {
     authorization = c.req.header("authorization");
+    if (status === 200) return c.json({ cpuCount: 4, runningSeats: 2, loadAverage: null, loadPerCpu: null,
+      capture: { rotatingSeats: 2, idleSeats: 1, captures: 4, failures: 0, capturedBytes: 100,
+        captureDurationMs: 10, activeIntervalMs: 2000, maxIdleIntervalMs: 6000, lines: 1000 } });
     return c.json({ error: "fixture failure" }, status);
   });
   const server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
@@ -80,6 +83,13 @@ async function remoteFixture(status: 401 | 403 | 404 | 429 | 500) {
   }));
   return { command, authorization: () => authorization };
 }
+
+it("names the registered remote host in successful human resource output", async () => {
+  const { command } = await remoteFixture(200);
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  await command.parseAsync(["node", "rig", "ps", "--host", "fixture-host", "--resources"]);
+  expect(log.mock.calls[0]![0]).toBe("Host: fixture-host · 4 available CPUs · 2 running seats");
+});
 
 it.each([401, 403, 429, 500] as const)("preserves remote resource HTTP %s JSON classification and exit status through actual bearer transport", async (status) => {
   const { command, authorization } = await remoteFixture(status);
