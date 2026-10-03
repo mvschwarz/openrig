@@ -34,8 +34,7 @@ export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
 export const STUCK_SWEEP_UNCLAIMED_AGE_KEY = "queue.stuck_sweep_unclaimed_age_minutes";
 export const DEFAULT_STUCK_SWEEP_UNCLAIMED_AGE_MINUTES = 60;
-export const STUCK_SWEEP_CUSTODY_WINDOW_HOURS_KEY = "queue.stuck_sweep_custody_window_hours";
-export const DEFAULT_STUCK_SWEEP_CUSTODY_WINDOW_HOURS = 24;
+export const STUCK_SWEEP_CUSTODY_WINDOW_HOURS = 24;
 
 /** Stamp tag on every routed finding row: the sweep's self-exclusion mark. */
 export const STUCK_SWEEP_FINDING_TAG = "stuck-sweep-finding";
@@ -117,16 +116,6 @@ export function resolveStuckSweepUnclaimedAgeMinutes(): number {
     return Number.isFinite(n) && n > 0 ? n : DEFAULT_STUCK_SWEEP_UNCLAIMED_AGE_MINUTES;
   } catch {
     return DEFAULT_STUCK_SWEEP_UNCLAIMED_AGE_MINUTES;
-  }
-}
-
-export function resolveStuckSweepCustodyWindowHours(): number {
-  try {
-    const v = new SettingsStore().resolveOne(STUCK_SWEEP_CUSTODY_WINDOW_HOURS_KEY as never).value;
-    const n = typeof v === "number" ? v : Number(v);
-    return Number.isFinite(n) && n > 0 ? n : DEFAULT_STUCK_SWEEP_CUSTODY_WINDOW_HOURS;
-  } catch {
-    return DEFAULT_STUCK_SWEEP_CUSTODY_WINDOW_HOURS;
   }
 }
 
@@ -495,9 +484,9 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // verifier's act, not ours.
     // Real handoffs (state='handed-off') create their successor in the same transaction and cannot
     // be missing one (#341); skipping them removes most of the scan.
-    // Closures outside the recent window (e.g. 24h) without open findings are skipped so upgrading
+    // Closures outside the recent 24-hour window without open findings are skipped so upgrading
     // a real queue history does not raise a flood of historical findings.
-    const custodyHours = deps.custodyWindowHours ?? resolveStuckSweepCustodyWindowHours();
+    const custodyHours = deps.custodyWindowHours ?? STUCK_SWEEP_CUSTODY_WINDOW_HOURS;
     const custodyCutoff = new Date(now.getTime() - custodyHours * 3_600_000).toISOString();
     const openDanglingIds: string[] = [];
     const danglingPrefix = "stuck-sweep:dangling-closure:";

@@ -1072,7 +1072,7 @@ describe("#318 seat-target handoff closure without successor", () => {
       closureReason: "handed_off_to",
       closureTarget: "next@r",
     });
-    // Age oldRow to 48 hours ago (outside 24h default window)
+    // Age oldRow to 48 hours ago (outside 24h window)
     const oldTime = new Date(Date.now() - 48 * 3_600_000).toISOString();
     db.prepare("UPDATE queue_items SET ts_updated = ? WHERE qitem_id = ?").run(oldTime, oldRow.qitemId);
 
@@ -1094,7 +1094,7 @@ describe("#318 seat-target handoff closure without successor", () => {
     expect(await findingsFor(recentRow.qitemId)).toHaveLength(1);
   });
 
-  it("UPGRADE / RECENT WINDOW: custodyWindowHours in deps configures the scan window", async () => {
+  it("UPGRADE / RECENT WINDOW: custodyWindowHours in deps overrides the 24h window", async () => {
     const row = await mkRow();
     await repo.update({
       qitemId: row.qitemId,
@@ -1106,12 +1106,12 @@ describe("#318 seat-target handoff closure without successor", () => {
     const pastTime = new Date(Date.now() - 36 * 3_600_000).toISOString();
     db.prepare("UPDATE queue_items SET ts_updated = ? WHERE qitem_id = ?").run(pastTime, row.qitemId);
 
-    // Outside default 24h window -> clean
+    // Outside 24h window -> clean
     const sweepDefault = await runSweep();
     expect(sweepDefault.result.outcome).toBe("clean");
     expect(await findingsFor(row.qitemId)).toHaveLength(0);
 
-    // Inside custom 48h window -> flagged
+    // Inside overridden 48h window -> flagged
     const sweepCustom = await runSweep({ custodyWindowHours: 48 });
     expect(sweepCustom.result.outcome).toBe("findings");
     expect(await findingsFor(row.qitemId)).toHaveLength(1);
