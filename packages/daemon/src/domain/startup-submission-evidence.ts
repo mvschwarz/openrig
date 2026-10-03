@@ -45,6 +45,8 @@ export interface StartupSubmissionEvidence {
   captureScrollbackLines: number;
   /** Zero-based UTF-8 byte offset; null when equal or no valid region exists. */
   firstDifferenceByte: number | null;
+  /** Diagnostic only; absent for unavailable captures or an excluded selector. */
+  reason?: "unrecognized_composer_boundary" | "extracted_text_mismatch";
   windowsOmitted: "unclassified-startup-text";
 }
 
@@ -75,8 +77,12 @@ export function startupSubmissionEvidence(pane: string | null, expected: string,
       while (i < expectedBytes.length && i < observedBytes.length && expectedBytes[i] === observedBytes[i]) i++;
       if (i !== expectedBytes.length || i !== observedBytes.length) firstDifferenceByte = i;
     }
+    const reason = !pane?.trim() ? undefined
+      : positions.markerLine === null || positions.closingRuleLine === null ? "unrecognized_composer_boundary"
+      : observedBytes !== null && firstDifferenceByte !== null ? "extracted_text_mismatch" : undefined;
     return { normalization: "whitespace-stripped-utf8", expected: digest(expectedBytes),
       observed: observedBytes === null ? null : digest(observedBytes), ...positions,
+      ...(reason ? { reason } : {}),
       captureScrollbackLines, firstDifferenceByte, windowsOmitted: "unclassified-startup-text" };
   } catch {
     return undefined;

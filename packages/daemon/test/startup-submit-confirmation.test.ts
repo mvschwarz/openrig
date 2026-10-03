@@ -191,6 +191,29 @@ describe("startup prompt submission", () => {
   const screen = (body: string) => `Previous turn\n❯ ${body}\n────────────────────\n? for shortcuts`;
   const digest = (text: string) => ({ bytes: Buffer.byteLength(text), sha256: crypto.createHash("sha256").update(text).digest("hex") });
 
+  it.each(["initial", "after_retry"])("labels an unrecognized composer boundary at %s without changing submission", async (phase) => {
+    const f = fixture(phase === "initial" ? 0 : 1);
+    const capture = f.tmux.capturePaneContent.getMockImplementation()!;
+    f.tmux.capturePaneContent.mockResolvedValue("Previous turn\n❯ \n────────────────────\nOther footer\n");
+    if (phase === "after_retry") f.tmux.capturePaneContent.mockImplementationOnce(capture).mockImplementationOnce(capture);
+    const reason = phase === "initial"
+      ? "Startup submission is unverified: the current composer boundary was not recognized."
+      : "Startup submission is unverified after the guarded retry: the current composer boundary was not recognized.";
+    const result = await f.start();
+    const event = f.db.prepare("SELECT payload FROM events WHERE type = 'node.startup_ready'").get() as { payload: string };
+    const submission = JSON.parse(event.payload).submission;
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission });
+    expect(submission).toMatchObject({ status: "unverified", reasons: [reason], diagnostics: [{
+      retry: phase === "initial" ? "not_run" : "ok",
+      observations: [{ phase, reason: "unrecognized_composer_boundary", markerLine: 2,
+        closingRuleLine: null, observed: null, firstDifferenceByte: null }],
+    }] });
+    expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(phase === "initial" ? 1 : 2);
+    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(phase === "initial" ? 1 : 3);
+    expect(f.submitted).toHaveLength(1);
+  });
+
   it("persists exact synthetic mismatch evidence without another Enter or capture", async () => {
     const f = fixture(Infinity);
     f.tmux.capturePaneContent.mockResolvedValue(screen("X ä\n b"));
@@ -198,9 +221,10 @@ describe("startup prompt submission", () => {
     const event = f.db.prepare("SELECT payload FROM events WHERE type = 'node.startup_ready'").get() as { payload: string };
     const submission = JSON.parse(event.payload).submission;
     expect(result).toMatchObject({ ok: true, submission });
+    expect(submission.reasons).toEqual(["Startup submission is unverified: the current composer does not positively match the complete prompt."]);
     expect(submission.diagnostics).toEqual([{
       startupAttemptId: expect.stringMatching(/^[0-9a-f-]{36}$/), sendOrder: 1, source: "initial_identity", retry: "not_run",
-      observations: [{ phase: "initial", normalization: "whitespace-stripped-utf8",
+      observations: [{ phase: "initial", reason: "extracted_text_mismatch", normalization: "whitespace-stripped-utf8",
         expected: digest(f.tmux.sendText.mock.calls[0]![1].replace(/\s+/g, "")), observed: digest("Xäb"),
         firstDifferenceByte: 0, markerLine: 2, closingRuleLine: 4, capturedLines: 5,
         captureScrollbackLines: 200, windowsOmitted: "unclassified-startup-text" }],
@@ -216,7 +240,7 @@ describe("startup prompt submission", () => {
     f.tmux.capturePaneContent.mockImplementationOnce(capture)
       .mockResolvedValueOnce(screen("different text")).mockResolvedValueOnce(screen(""));
     expect(await f.start()).toMatchObject({ ok: true, submission: { diagnostics: [{
-      retry: "refused_or_failed", observations: [{ phase: "guarded_retry", observed: digest("differenttext") }],
+      retry: "refused_or_failed", observations: [{ phase: "guarded_retry", reason: "extracted_text_mismatch", observed: digest("differenttext") }],
     }] } });
     expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(3);
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
@@ -287,7 +311,10 @@ describe("startup prompt submission", () => {
     expect(evidence.expected.bytes).toBe(200_003);
     expect(JSON.stringify(evidence).length).toBeLessThan(700);
     expect(JSON.stringify(evidence)).not.toContain("xxxxx");
-    expect(startupSubmissionEvidence("❯ 1. Continue\n────────────────────\n? for shortcuts", "1. Continue", 200)?.observed).toBeNull();
+    const selector = startupSubmissionEvidence("❯ 1. Continue\n────────────────────\n? for shortcuts", "1. Continue", 200)!;
+    expect(selector.observed).toBeNull();
+    expect(selector.reason).toBeUndefined();
+    expect(startupSubmissionEvidence(null, "expected", 200)?.reason).toBeUndefined();
   });
 
   it("ignores a failing diagnostic sink without changing the guard verdict", async () => {

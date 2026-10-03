@@ -719,9 +719,10 @@ export class StartupOrchestrator {
     const diagnostic: StartupSubmissionDiagnostic = { startupAttemptId: input.startupAttemptId,
       sendOrder, source, ...(actionIndex === undefined ? {} : { actionIndex }), observations: [], retry: "not_run" };
     let phase: "initial" | "guarded_retry" | "after_retry" = "initial";
-    const record = (pane: string | null): void => {
+    const record = (pane: string | null) => {
       const evidence = startupSubmissionEvidence(pane, text, STARTUP_SUBMIT_CAPTURE_LINES);
       if (evidence) diagnostic.observations.push({ ...evidence, phase });
+      return evidence;
     };
     const unverified = (reason: string): null => {
       input.submissionWarnings.push(reason);
@@ -735,7 +736,12 @@ export class StartupOrchestrator {
       if (!pane?.trim()) { record(pane); return unverified("Startup submission capture is unavailable after Enter."); }
       const before = inspectStartupStagedText(pane, text);
       if (before === "clear") return null;
-      if (before === "unverified") { record(pane); return unverified("Startup submission is unverified: the current composer does not positively match the complete prompt."); }
+      if (before === "unverified") {
+        const evidence = record(pane);
+        return unverified(evidence?.reason === "unrecognized_composer_boundary"
+          ? "Startup submission is unverified: the current composer boundary was not recognized."
+          : "Startup submission is unverified: the current composer does not positively match the complete prompt.");
+      }
       phase = "guarded_retry";
       diagnostic.retry = "threw"; // Replaced when the transport returns normally.
       const retry = await this.sessionTransport.send(tmuxSession, "", {
@@ -758,7 +764,12 @@ export class StartupOrchestrator {
         if (!retry.ok) input.submissionWarnings.push(`Guarded retry did not submit: ${retry.error ?? retry.reason}`);
         return null;
       }
-      if (observed === "unverified") { record(after); return unverified("Startup submission is unverified after the guarded retry: the current composer is ambiguous."); }
+      if (observed === "unverified") {
+        const evidence = record(after);
+        return unverified(evidence?.reason === "unrecognized_composer_boundary"
+          ? "Startup submission is unverified after the guarded retry: the current composer boundary was not recognized."
+          : "Startup submission is unverified after the guarded retry: the current composer is ambiguous.");
+      }
       if (!retry.ok) return unverified(`Guarded startup retry did not submit: ${retry.error ?? retry.reason}; matching staged text is no longer visible.`);
       return null;
     } catch (error) {
