@@ -4,7 +4,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatSwitchClientService } from "../src/domain/seat-switch-client-service.js";
-import type { TmuxAdapter, TmuxClient, TmuxWindow, TmuxResult } from "../src/adapters/tmux.js";
+import { TmuxAdapter, type TmuxClient, type TmuxWindow, type TmuxResult } from "../src/adapters/tmux.js";
 
 /**
  * OPR.0.4.3.26 — VIEW-ONLY switch-client retarget. The service holds only
@@ -36,9 +36,9 @@ function spyTmux(overrides: {
       if (overrides.hasSessionThrows) throw overrides.hasSessionThrows;
       return overrides.hasSession ?? true;
     }),
-    listWindows: vi.fn(async () => overrides.windows ?? [{ index: 0, name: "main", panes: 1, active: true }]),
+    listWindows: vi.fn(async (_target: string) => overrides.windows ?? [{ index: 0, name: "main", panes: 1, active: true }]),
     listClients: vi.fn(async () => overrides.clients ?? []),
-    switchClient: vi.fn(async () => overrides.switchResult ?? ({ ok: true as const })),
+    switchClient: vi.fn(async (_client: string, _target: string): Promise<TmuxResult> => overrides.switchResult ?? ({ ok: true as const })),
   };
   const adapter = { ...mutators, ...probes } as unknown as TmuxAdapter;
   return { adapter, mutators, probes };
@@ -89,6 +89,39 @@ describe("SeatSwitchClientService", () => {
       retargeted: true,
     });
     expect(probes.switchClient).toHaveBeenCalledWith("/dev/ttys003", "dev-impl@seat-rig:0");
+  });
+
+  it("remaining: a session disappearing before listWindows cannot supply its sibling's window", async () => {
+    seedLiveSeat();
+    const { adapter, probes } = spyTmux({ clients: [client("client", "home")] });
+    const calls: string[] = [];
+    const actual = new TmuxAdapter(async (cmd) => {
+      calls.push(cmd);
+      if (cmd.includes("'=dev-impl@seat-rig'")) throw new Error("can't find session: dev-impl@seat-rig");
+      return "1|sibling-window|1|1\n";
+    });
+    probes.listWindows.mockImplementation((target) => actual.listWindows(target));
+    const result = await new SeatSwitchClientService({ rigRepo, tmuxAdapter: adapter })
+      .switchClient({ seatRef: "dev-impl@seat-rig", toWindow: 1 });
+    expect(result).toMatchObject({ ok: false, code: "tmux_probe_failed" });
+    expect(probes.switchClient).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("remaining: a session disappearing after probes cannot switch the client to its sibling", async () => {
+    seedLiveSeat();
+    const { adapter, probes } = spyTmux({ clients: [client("client", "home")] });
+    let movedToSibling = false;
+    const actual = new TmuxAdapter(async (cmd) => {
+      if (cmd.includes("'=dev-impl@seat-rig:0'")) throw new Error("can't find session: dev-impl@seat-rig");
+      movedToSibling = true;
+      return "";
+    });
+    probes.switchClient.mockImplementation((clientName, target) => actual.switchClient(clientName, target));
+    const result = await new SeatSwitchClientService({ rigRepo, tmuxAdapter: adapter })
+      .switchClient({ seatRef: "dev-impl@seat-rig" });
+    expect(result).toMatchObject({ ok: false, code: "switch_failed" });
+    expect(movedToSibling).toBe(false);
   });
 
   // THE money proof: a successful view retarget mutates NOTHING in OpenRig.

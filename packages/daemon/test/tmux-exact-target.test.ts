@@ -11,15 +11,16 @@ import { TmuxAdapter } from "../src/adapters/tmux.js";
 interface Session {
   screen: string; env: Record<string, string>; pipedTo?: string;
   command?: string; pid?: number; options?: Record<string, string>; size?: string;
+  dead?: boolean; cursor?: string; activity?: number; respawned?: boolean; viewed?: boolean;
 }
 type Sessions = Record<string, Session>;
 
 /** tmux's session resolution: `=name` is exact; a bare name is exact first, then a unique prefix. `%N` is a pane id. */
 function resolve(target: string, sessions: Sessions): string | null {
   const names = Object.keys(sessions);
-  if (/^[%$]\d+$/.test(target)) return names[Number(target.slice(1))] ?? null;
+  if (/^[%@$]\d+$/.test(target)) return names[Number(target.slice(1))] ?? null;
   if (target.startsWith("=")) {
-    const name = target.slice(1).replace(/:$/, "");
+    const name = target.slice(1).replace(/:.*$/, "");
     return name in sessions ? name : null;
   }
   const name = target.replace(/:.*$/, "");
@@ -41,9 +42,16 @@ function runTmux(argv: string[], sessions: Sessions): string {
   switch (argv[1]) {
     case "display-message": {
       const format = argv[argv.length - 1]!;
-      return `${format === "#{pane_pid}" ? session.pid : session.command}\n`;
+      const value = format === "#{pane_pid}" ? session.pid
+        : format === "#{pane_dead}" ? Number(session.dead ?? false)
+        : format === "#{window_activity}" ? session.activity
+        : format.includes("#{cursor_x}") ? session.cursor : session.command;
+      return `${value}\n`;
     }
     case "set-option": { session.options = { ...session.options, [argv[argv.length - 2]!]: argv[argv.length - 1]! }; return ""; }
+    case "show-option": return `${session.options?.[argv[argv.length - 1]!] ?? ""}\n`;
+    case "respawn-pane": session.respawned = true; return "";
+    case "switch-client": session.viewed = true; return "";
     case "resize-window": { session.size = `${argv[argv.indexOf("-x") + 1]}x${argv[argv.indexOf("-y") + 1]}`; return ""; }
     case "detach-client": throw new Error("no current client");
     case "kill-session": { delete sessions[name]; return ""; }
@@ -79,6 +87,79 @@ describe("exact session targets for capture, session environment and pipe-pane",
     const onlySibling = (): Sessions => ({
       [SIBLING]: { screen: "SIBLING-SCREEN\n", env: { OPENRIG_PROBE: "yes" }, command: "cat", pid: 4242, size: "120x40" },
     });
+
+    it(`${mode}: remaining: respawning an ended session does not respawn its sibling`, async () => {
+      const sessions = onlySibling();
+      const { a } = adapter(sessions);
+      expect(await a.respawnPane(GONE, "cat")).toMatchObject({ ok: false });
+      expect(sessions[SIBLING]!.respawned).toBeUndefined();
+    });
+
+    it(`${mode}: remaining: switching to an ended session leaves the client alone`, async () => {
+      const sessions = onlySibling();
+      const { a } = adapter(sessions);
+      expect(await a.switchClient("client", GONE)).toMatchObject({ ok: false });
+      expect(sessions[SIBLING]!.viewed).toBeUndefined();
+    });
+
+    it(`${mode}: remaining: remain-on-exit does not change a sibling pane`, async () => {
+      const sessions = onlySibling();
+      const { a } = adapter(sessions);
+      expect(await a.setRemainOnExit(GONE, true)).toMatchObject({ ok: false });
+      expect(sessions[SIBLING]!.options).toBeUndefined();
+    });
+
+    it(`${mode}: remaining: a dead sibling is not evidence the addressed pane is dead`, async () => {
+      const sessions = onlySibling(); sessions[SIBLING]!.dead = true;
+      const { a } = adapter(sessions);
+      // display-message returns an empty field for a missing name (exit 0), not pane_dead=1.
+      expect(await a.isPaneDead(GONE)).toBe(false);
+    });
+
+    it(`${mode}: remaining: cursor coordinates do not come from the sibling`, async () => {
+      const sessions = onlySibling(); sessions[SIBLING]!.cursor = "2|3|80|24";
+      const { a } = adapter(sessions);
+      expect(await a.getPaneCursorPosition(GONE)).toBeNull();
+    });
+
+    it(`${mode}: remaining: activity does not come from the sibling`, async () => {
+      const sessions = onlySibling(); sessions[SIBLING]!.activity = 1790000100;
+      const { a } = adapter(sessions);
+      expect(await a.readPaneLastActivity(GONE)).toBeNull();
+    });
+
+    it(`${mode}: remaining: session option writes leave the sibling alone`, async () => {
+      const sessions = onlySibling();
+      const { a } = adapter(sessions);
+      expect(await a.setSessionOption(GONE, "@probe", "new")).toMatchObject({ ok: false });
+      expect(sessions[SIBLING]!.options).toBeUndefined();
+    });
+
+    it(`${mode}: remaining: session option reads do not come from the sibling`, async () => {
+      const sessions = onlySibling(); sessions[SIBLING]!.options = { "@probe": "sibling" };
+      const { a } = adapter(sessions);
+      expect(await a.getSessionOption(GONE, "@probe")).toBeNull();
+    });
+
+    for (const target of [GONE, "%1", "@1", "$1", `=${GONE}:0.0`]) {
+      it(`${mode}: remaining: live name/id/qualified target ${target} still addresses itself`, async () => {
+        const sessions: Sessions = { ...onlySibling(), [GONE]: {
+          screen: "OWN", env: {}, cursor: "2|3|80|24", activity: 1790000100, dead: true,
+        } };
+        const { a, calls } = adapter(sessions);
+        expect(await a.isPaneDead(target)).toBe(true);
+        expect(await a.getPaneCursorPosition(target)).toEqual({ x: 2, y: 3, width: 80, height: 24 });
+        expect(await a.readPaneLastActivity(target)).toBe(1790000100);
+        expect(await a.setSessionOption(target, "@probe", "own")).toEqual({ ok: true });
+        expect(await a.getSessionOption(target, "@probe")).toBe("own");
+        expect(await a.setRemainOnExit(target, true)).toEqual({ ok: true });
+        expect(await a.respawnPane(target, "cat")).toEqual({ ok: true });
+        expect(await a.switchClient("client", target)).toEqual({ ok: true });
+        expect(sessions[GONE]).toMatchObject({ respawned: true, viewed: true, options: { "@probe": "own", "remain-on-exit": "on" } });
+        expect(sessions[SIBLING]!.options).toBeUndefined();
+        if (target !== GONE) expect(calls.every((c) => c[c.indexOf("-t") + 1] === target)).toBe(true);
+      });
+    }
 
     it(`${mode}: the pane command and pid of an ended session are null, not the sibling's`, async () => {
       const { a, calls } = adapter(onlySibling());
