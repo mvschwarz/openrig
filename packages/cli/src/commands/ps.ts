@@ -1037,6 +1037,8 @@ Exit codes:
             widths[i] = Math.max(widths[i]!, stringWidth(row[i]!));
           }
         }
+      } else {
+        for (let i = 0; i < widths.length; i++) widths[i] = widths[i]! - RIG_COLUMN_SEPARATOR.length;
       }
       console.log(padRigRow(headers, widths));
       for (const row of rows) console.log(padRigRow(row, widths));
@@ -1266,6 +1268,7 @@ function fitCell(value: string, width: number): string {
   return truncate(value, width).padEnd(width);
 }
 
+const RIG_COLUMN_SEPARATOR = "  ";
 const rigCellSegmenter = new Intl.Segmenter();
 
 function fitRigCell(value: string, width: number): string {
@@ -1285,7 +1288,7 @@ function fitRigCell(value: string, width: number): string {
 }
 
 function padRigRow(cells: string[], widths: number[]): string {
-  return cells.map((cell, i) => i < widths.length ? fitRigCell(cell, widths[i]!) : cell).join("  ");
+  return cells.map((cell, i) => i < widths.length ? fitRigCell(cell, widths[i]!) : cell).join(RIG_COLUMN_SEPARATOR);
 }
 
 export function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, model: string, status: string, startup: string, oriented: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string): string {

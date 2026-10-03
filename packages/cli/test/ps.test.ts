@@ -163,7 +163,7 @@ describe("Ps CLI", () => {
     const cjkRow = logs.find((line) => line.startsWith("演示"))!;
     const shortRow = logs.find((line) => line.startsWith("short"))!;
     const nodeColumn = stringWidth(header.slice(0, header.indexOf("NODES")));
-    expect(stringWidth(cjkRow.slice(0, cjkRow.indexOf("5", name.length)))).toBe(nodeColumn);
+    expect(stringWidth(cjkRow.slice(0, cjkRow.indexOf("5")))).toBe(nodeColumn);
     expect(stringWidth(shortRow.slice(0, shortRow.indexOf("2")))).toBe(nodeColumn);
     if (flag) expect(cjkRow).toContain(name);
     else expect(cjkRow).toContain("…");
@@ -178,6 +178,21 @@ describe("Ps CLI", () => {
     const row = logs.find((line) => line.startsWith("demo-"))!;
     expect(row).toMatch(/… {2,}5/);
     expect(row.indexOf("5")).toBe(header.indexOf("NODES"));
+  });
+
+  it("ps compact table stays within its original width", async () => {
+    psData = [{
+      rigId: "rig-1", name: "short", nodeCount: 1, runningCount: 1,
+      activeCount: 0, hasWorkCount: 0, attentionCount: 0,
+      status: "running", lifecycleState: "running", uptime: "1m", latestSnapshot: "1m ago",
+    }];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps"]);
+    });
+    const header = logs.find((line) => line.startsWith("RIG"))!;
+    const row = logs.find((line) => line.startsWith("short"))!;
+    expect(stringWidth(header)).toBeLessThanOrEqual(100);
+    expect(stringWidth(row)).toBeLessThanOrEqual(98);
   });
 
   it.each([false, true])("ps separates the footer when hidden history is %s", async (hiddenHistory) => {
