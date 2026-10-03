@@ -1005,13 +1005,13 @@ describe("TmuxAdapter", () => {
       expect(exec.mock.calls[0]![0]).toBe("tmux capture-pane -p -t '%0'");
     });
 
-    it("shell-quotes a session-name target safely", async () => {
+    it("shell-quotes a session-name target safely, as an exact target", async () => {
       const exec = vi.fn<ExecFn>().mockResolvedValue("x");
       const adapter = new TmuxAdapter(exec);
 
       await adapter.capturePaneScreen("dev-impl@my-rig");
 
-      expect(exec.mock.calls[0]![0]).toBe("tmux capture-pane -p -t 'dev-impl@my-rig'");
+      expect(exec.mock.calls[0]![0]).toBe("tmux capture-pane -p -t '=dev-impl@my-rig:'");
     });
 
     it("returns null on error (pane gone)", async () => {
