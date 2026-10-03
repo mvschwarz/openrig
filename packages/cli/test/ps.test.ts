@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import { Command } from "commander";
+import stringWidth from "string-width";
 import { psCommand } from "../src/commands/ps.js";
 import { DaemonClient } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
@@ -147,6 +148,25 @@ describe("Ps CLI", () => {
     expect(shortRow.indexOf("2")).toBe(header.indexOf("NODES"));
     expect(longRow.indexOf("1m ago")).toBe(header.indexOf("SNAPSHOT"));
     expect(shortRow.indexOf("2m ago")).toBe(header.indexOf("SNAPSHOT"));
+  });
+
+  it.each(["--full", "--verbose", ""])("ps %s aligns CJK rig names by terminal width", async (flag) => {
+    const name = "演示-生产-集成-长名称-rig";
+    psData = [
+      { rigId: "rig-1", name, nodeCount: 5, runningCount: 5, status: "running" },
+      { rigId: "rig-2", name: "short", nodeCount: 2, runningCount: 2, status: "running" },
+    ];
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "ps", ...(flag ? [flag] : [])]);
+    });
+    const header = logs.find((line) => line.startsWith("RIG"))!;
+    const cjkRow = logs.find((line) => line.startsWith("演示"))!;
+    const shortRow = logs.find((line) => line.startsWith("short"))!;
+    const nodeColumn = stringWidth(header.slice(0, header.indexOf("NODES")));
+    expect(stringWidth(cjkRow.slice(0, cjkRow.indexOf("5", name.length)))).toBe(nodeColumn);
+    expect(stringWidth(shortRow.slice(0, shortRow.indexOf("2")))).toBe(nodeColumn);
+    if (flag) expect(cjkRow).toContain(name);
+    else expect(cjkRow).toContain("…");
   });
 
   it("ps compact rows separate truncated names from counts", async () => {

@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import stringWidth from "string-width";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { sessionRigOf } from "../session-name.js";
 import { DaemonClient, remoteDaemonClient } from "../client.js";
@@ -1033,7 +1034,7 @@ Exit codes:
       if (opts.full) {
         for (const row of rows) {
           for (let i = 0; i < widths.length; i++) {
-            widths[i] = Math.max(widths[i]!, row[i]!.length);
+            widths[i] = Math.max(widths[i]!, stringWidth(row[i]!));
           }
         }
       }
@@ -1265,8 +1266,26 @@ function fitCell(value: string, width: number): string {
   return truncate(value, width).padEnd(width);
 }
 
+const rigCellSegmenter = new Intl.Segmenter();
+
+function fitRigCell(value: string, width: number): string {
+  if (stringWidth(value) > width) {
+    const limit = width - 1;
+    let prefix = "";
+    let used = 0;
+    for (const { segment } of rigCellSegmenter.segment(value)) {
+      const segmentWidth = stringWidth(segment);
+      if (used + segmentWidth > limit) break;
+      prefix += segment;
+      used += segmentWidth;
+    }
+    value = prefix + "…";
+  }
+  return value + " ".repeat(width - stringWidth(value));
+}
+
 function padRigRow(cells: string[], widths: number[]): string {
-  return cells.map((cell, i) => i < widths.length ? fitCell(cell, widths[i]!) : cell).join("  ");
+  return cells.map((cell, i) => i < widths.length ? fitRigCell(cell, widths[i]!) : cell).join("  ");
 }
 
 export function padNodeRow(rig: string, pod: string, member: string, session: string, runtime: string, model: string, status: string, startup: string, oriented: string, lifecycle: string, terminal: string, work: string, activity: string, ctx: string, restore: string, error: string): string {
