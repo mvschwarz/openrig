@@ -14,12 +14,33 @@ function fixture(fail?: string, scriptPath = "/tmp/launch 'quoted'.sh") {
   const exec = vi.fn(async (command: string) => {
     commands.push(command);
     if (fail && command.includes(fail)) throw new Error("transport refused");
+    if (command.includes("#{pane_current_command}")) return "bash";
     return "";
   });
   return { adapter: new TmuxAdapter(exec, fileOps), fileOps, files, commands, scriptPath };
 }
 
 describe("shell launch transport", () => {
+  it.each(["fish", "nu", "unknown", "pwsh", null])("retains /bin/sh staging when the pane reports %s", async shell => {
+    const f = fixture();
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
+  });
+
+  it("retains /bin/sh staging when the pane command read fails", async () => {
+    const f = fixture("display-message");
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
+  });
+
+  it.each(["bash", "zsh", "sh", "dash", "ksh", "-bash"])("sources in the pane only for a reported POSIX shell (%s)", async shell => {
+    const f = fixture();
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`( . '/tmp/launch '\"'\"'quoted'\"'\"'.sh' )`);
+  });
+
   it("keeps long PATH/quoted arguments out of terminal input and retains script until consumption", async () => {
     const f = fixture();
     const command = `env PATH='${"p".repeat(4096)}' codex -s workspace-write resume 'same-native-id' -m 'chosen-model'`;

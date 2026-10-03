@@ -33,6 +33,7 @@ async function fixture() {
   const hooks: { write?: (path: string) => void; exec?: (command: string) => void } = {};
   const tmux = new TmuxAdapter(async command => {
     commands.push(command); hooks.exec?.(command);
+    if (command.includes("#{pane_current_command}")) return "bash";
     if (command.startsWith("tmux new-session")) { panes.set("worker@fixture", "%0"); return ""; }
     if (command.startsWith("tmux has-session") || command.startsWith("tmux list-panes")) {
       // Both exact session probes (=name) and window-targeted pane listings
