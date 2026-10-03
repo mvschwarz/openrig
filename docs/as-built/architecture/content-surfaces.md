@@ -7,13 +7,13 @@ domains: [engineering-advisor, operating-advisor]
 applies-when: |
   Tracing allowlisted file access, conflict-checked writes, progress indexing,
   steering composition, or the daemon health-summary endpoints.
-last-verified-against-source: 712a61fbcc5ffe5a7c786fea12132567083ab507
-last-updated: 2026-10-02
+last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-updated: 2026-10-03
 ---
 
 # Content Surfaces — Files, Progress, Steering, and Health
 
-Source snapshot: `712a61fbcc5ffe5a7c786fea12132567083ab507`. This describes the source at that commit;
+Source snapshot: `254122872cf477511514979a4300b695d77cd1f7`. This describes the source at that commit;
 it does not establish the version or behavior of a running daemon.
 
 The daemon exposes filesystem content through the files, progress, and

@@ -38,6 +38,7 @@ interface ResumeMetadataRefresherDeps {
   resolveHomeDirByPid?: ResolveHomeDirByPid;
   sleep?: (ms: number) => Promise<void>;
   homeDir?: string;
+  codexHome?: string;
   // OPR.0.4.3.20 FR-4 — the Claude status-line sidecar reader, for null-fill of a
   // Claude session's resume token from live state during snapshot refresh.
   // Optional + structurally typed (older wirings/tests omit it → Claude null-fill
@@ -72,6 +73,7 @@ export class ResumeMetadataRefresher {
     // readCodexThreadIdByPid (tests, adoption paths) is untouched.
     const threadIdResolver = new CodexThreadIdResolver({
       defaultHome: deps.homeDir ?? os.homedir(),
+      codexHome: deps.codexHome,
       resolveHomeDirByPid: this.resolveHomeDirByPid,
     });
     // S10 follow-on: identity is REQUIRED on resolve(); an identity-less read routes EXPLICITLY

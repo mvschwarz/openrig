@@ -254,6 +254,10 @@ function renderList(projection: HealthListProjection): void {
   console.log(`Fleet health — evaluated=${evaluated} findings=${projection.total} limit=${projection.limit}`);
   for (const c of projection.coverage ?? []) {
     if (!c.partial) continue;
+    if (c.status === "unavailable") {
+      console.log(`UNAVAILABLE: ${c.source}: ${c.reason}. This source was not assessed; the result is partial.`);
+      continue;
+    }
     console.log(`PARTIAL: ${c.source} evaluated ${c.evaluated} of ${c.total} ${c.unit} (limit ${c.limit}; ${c.omitted} omitted; order: ${c.order}). Omitted ${c.unit} were not evaluated and are not healthy.`);
   }
   if (projection.records.length === 0) {

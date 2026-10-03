@@ -112,6 +112,39 @@ describe("Package API routes", () => {
   }
 
   // --- Test 1: POST /validate valid manifest → 200 ---
+  it("stale role hooks warn in validate/plan and do not block either role's installation", async () => {
+    const yaml = VALID_MANIFEST_YAML + `
+roles:
+  - name: stale
+    skills: [helper]
+    hooks: [hooks/old.yaml]
+  - name: current
+    skills: [helper]
+`;
+    writePkg(pkgDir, yaml, { "skills/helper/SKILL.md": SKILL_CONTENT });
+    const request = (route: string, body: Record<string, unknown>) => app.request(`/api/packages/${route}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: pkgDir, ...body }),
+    });
+    const validation = await request("validate", {});
+    expect(validation.status).toBe(200);
+    const warning = "Role 'stale' references hook 'hooks/old.yaml' absent from exports.hooks; hooks in this package path are deferred, not installed";
+    expect((await validation.json()).warnings).toEqual([warning]);
+    for (const roleName of ["stale", "current"]) {
+      const root = path.join(targetDir, roleName);
+      fs.mkdirSync(root);
+      const plan = await request("plan", { targetRoot: root, roleName });
+      expect(plan.status).toBe(200);
+      const planned = await plan.json();
+      expect(planned.warnings).toEqual([warning]);
+      expect(planned.actionable).toBe(1);
+      const installed = await request("install", { targetRoot: root, roleName });
+      expect(installed.status).toBe(201);
+      expect(fs.readFileSync(path.join(root, ".claude/skills/helper/SKILL.md"), "utf-8")).toBe(SKILL_CONTENT);
+    }
+  });
+
   it("POST /api/packages/validate valid manifest → 200 with manifest summary", async () => {
     writePkg(pkgDir, VALID_MANIFEST_YAML, {
       "skills/helper/SKILL.md": SKILL_CONTENT,

@@ -2,7 +2,7 @@ import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, s
 import { join, dirname, relative, isAbsolute, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
-import { getLastCaptureAt } from "./transcript-rotation.js";
+import { getLastCaptureAt, DEFAULT_TRANSCRIPT_STALE_AFTER_MS } from "./transcript-rotation.js";
 
 export interface TranscriptStoreOpts {
   transcriptsRoot?: string;
@@ -19,7 +19,7 @@ export interface TranscriptIngestHealth {
 }
 
 const DEFAULT_ROOT = getCompatibleOpenRigPath("transcripts");
-export const DEFAULT_TRANSCRIPT_STALE_AFTER_MS = 10_000;
+export { DEFAULT_TRANSCRIPT_STALE_AFTER_MS } from "./transcript-rotation.js";
 
 function applyBackspaces(text: string): string {
   const chars: string[] = [];
@@ -146,12 +146,18 @@ function readTailChunked(filePath: string, rawLines: number): string | null {
       // byte (10xxxxxx = 0x80-0xBF), we've split a character. Move the offset
       // forward past the continuation bytes so the leading char bytes will be
       // included in the next (earlier) chunk read.
+      // A valid UTF-8 character has at most three continuation bytes.
+      // Capping this also guarantees progress through malformed chunks.
       let skipBytes = 0;
-      while (skipBytes < buf.length && (buf[skipBytes]! & 0xC0) === 0x80) {
+      while (skipBytes < Math.min(3, buf.length) && (buf[skipBytes]! & 0xC0) === 0x80) {
         skipBytes++;
       }
-      if (skipBytes > 0) {
+      if (skipBytes > 0 && offset > 0) {
         offset += skipBytes; // push those bytes back for the next iteration
+      } else {
+        // No earlier bytes exist at offset zero. Decode malformed prefixes as
+        // replacement characters instead of rewinding to the same position.
+        skipBytes = 0;
       }
 
       const chunk = buf.subarray(skipBytes).toString("utf-8");

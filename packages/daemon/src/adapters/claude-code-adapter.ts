@@ -2,6 +2,7 @@ import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
+import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -53,6 +54,7 @@ const FORK_POLL_DELAY_MS = 500;
 export class ClaudeCodeAdapter implements RuntimeAdapter {
   readonly runtime = "claude-code";
   private tmux: TmuxAdapter;
+  private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: ClaudeAdapterFsOps;
   private sessionIdFactory: () => string;
   private sleep: (ms: number) => Promise<void>;
@@ -70,6 +72,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   constructor(deps: {
     tmux: TmuxAdapter;
+    seatLaunchEnvironment?: SeatLaunchEnvironment;
     fsOps: ClaudeAdapterFsOps;
     sessionIdFactory?: () => string;
     sleep?: (ms: number) => Promise<void>;
@@ -88,6 +91,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     recordProjection?: (targetPath: string, content: string) => void;
   }) {
     this.tmux = deps.tmux;
+    this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.sessionIdFactory = deps.sessionIdFactory ?? randomUUID;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -282,11 +286,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         "--resume", parentId, "--fork-session", "--name", opts.name])
         : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${parentId} --fork-session --name ${opts.name}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
-        : await this.tmux.sendText(binding.tmuxSession, cmd);
+        : this.seatLaunchEnvironment
+          ? await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime }), undefined, { sourceInPane: true })
+          : await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
-      const enterResult = managed ? { ok: true as const } : await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
+      const enterResult = managed || this.seatLaunchEnvironment ? { ok: true as const } : await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
       if (!enterResult.ok) {
         return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
       }
@@ -312,12 +318,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
-      : await this.tmux.sendText(binding.tmuxSession, cmd);
+      : this.seatLaunchEnvironment
+          ? await this.tmux.sendShellCommand(binding.tmuxSession, await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime }), undefined, { sourceInPane: true })
+          : await this.tmux.sendText(binding.tmuxSession, cmd);
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }
     // Send Enter to execute
-    const enterResult = managed ? { ok: true as const } : await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
+    const enterResult = managed || this.seatLaunchEnvironment ? { ok: true as const } : await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
     if (!enterResult.ok) {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
@@ -679,29 +687,67 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // OPR.0.4.8.2 agnostic rip-out: provisionRigPermissions (C2) removed — OpenRig no longer
     // authors any config-file permission policy. Trust/onboarding (C3/C4) are neutral plumbing, kept.
     const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    // Match launchHarness: omitted permissionMode keeps the classic home path.
+    // Match launchHarness: an explicit permission mode exports the selected home to the child, so
+    // only that home is provisioned.
     const managed = binding.permissionMode !== undefined ? this.claudeManagedLaunch : undefined;
     const cwd = binding.cwd === undefined && managed && binding.nodeId
       ? managed.boundCwd(binding.nodeId) : binding.cwd;
-    const statePath = managed
-      ? (cwd ? managed.configPaths(cwd).statePath : undefined)
-      : (home ? nodePath.join(home, ".claude.json") : undefined);
-    if (!statePath) return;
+    const statePaths: string[] = [];
+    const failures: string[] = [];
+    if (managed) {
+      if (cwd) statePaths.push(managed.configPaths(cwd).statePath);
+    } else {
+      if (home) statePaths.push(nodePath.join(home, ".claude.json"));
+      // A classic seat types `claude` into its pane's shell, which inherits the tmux server's
+      // environment, not the daemon's, so the bootstrap cannot see which home that child reads.
+      // When the daemon selects CLAUDE_CONFIG_DIR, provision that home too. This deliberately
+      // replaces #565's rule that classic bootstrap writes exactly one file and leaves the
+      // selected home untouched: a child that inherits the daemon's selection read neither.
+      try {
+        const selectedCwd = cwd ?? (binding.nodeId ? this.claudeManagedLaunch?.boundCwd(binding.nodeId) : undefined);
+        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd) : undefined;
+        if (selected && !statePaths.includes(selected)) statePaths.push(selected);
+      } catch (err) {
+        failures.push((err as Error).message);
+      }
+    }
+    // Each file is merged on its own: unmergeable state in one is preserved and reported,
+    // and never stops the other from being provisioned.
+    for (const statePath of statePaths) {
+      try {
+        this.provisionClaudeState(statePath, cwd);
+      } catch (err) {
+        failures.push(`${statePath}: ${(err as Error).message}`);
+      }
+    }
+    if (failures.length > 0) throw new Error(failures.join("; "));
+  }
+
+  private provisionClaudeState(statePath: string, cwd: string | null | undefined): void {
     // Preserve every existing field. Unreadable/malformed/non-object state is
-    // left untouched by the caller's existing best-effort bootstrap boundary.
+    // left untouched and reported through the caller's best-effort bootstrap boundary.
     const state = this.fs.exists(statePath) ? this.readJsonObjectStrict(statePath) : {};
+    // Running Claude processes read and write this file, so it is rewritten only when a flag is
+    // missing: an already-provisioned file (every relaunch, resume and post-launch delivery) is left alone.
+    let changed = false;
     if (cwd) {
       const projects = this.readJsonObjectField(state, "projects");
       if (Object.hasOwn(state, "projects") && projects !== state["projects"]) throw new Error("Claude bootstrap projects must be a JSON object; existing state preserved.");
       for (const trustKey of this.workspaceTrustKeys(cwd)) {
         const projectState = this.readJsonObjectField(projects, trustKey);
         if (Object.hasOwn(projects, trustKey) && projectState !== projects[trustKey]) throw new Error("Claude bootstrap project state must be a JSON object; existing state preserved.");
+        if (projectState["hasTrustDialogAccepted"] === true) continue;
         projectState["hasTrustDialogAccepted"] = true;
         projects[trustKey] = projectState;
+        changed = true;
       }
       state["projects"] = projects;
     }
-    state["hasCompletedOnboarding"] = true;
+    if (state["hasCompletedOnboarding"] !== true) {
+      state["hasCompletedOnboarding"] = true;
+      changed = true;
+    }
+    if (!changed) return;
     this.fs.mkdirp(nodePath.dirname(statePath));
     this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
   }

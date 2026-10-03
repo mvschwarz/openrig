@@ -46,7 +46,7 @@ to `main`. In the PR description, say which layers you ran and which you could n
 | Local gate | `npm run gate` | Lint plus `npm test` on a clean tree, tied to `HEAD`, one run per machine at a time, with a JSON receipt | Anything that lint and `npm test` don't already prove | Optional. Useful when several agents share one machine, or when you want a receipt tied to a commit. |
 | Packaging | `npm run build:package`, `npm run test:tui-package`, `bash scripts/smoke-fresh-install.sh` | The publishable `@openrig/cli` assembles, the packed TUI launches, and a fresh install starts a daemon | Behaviour beyond startup | When you touch dependencies, bin entries, build scripts, or files a package ships |
 | Stub scenarios, host mode | `node --import tsx packages/daemon/scripts/run-scenarios.mjs [scenario.yaml …]` | A scenario's steps and assertions pass against a scratch daemon, real tmux and `runtime: stub` seats | The installed package. Seeded-regression pairing. Everything under [What a stub can and cannot prove](#what-a-stub-can-and-cannot-prove). | While you write or debug a scenario |
-| Stub scenarios, installed package in a container | CI job `installed-scenario`. Before pushing: `DOCKER_HOST=ssh://<your-host> bash scripts/run-pr-scenarios.sh --remote …` | A clean Linux install starts. A claimed queue item survives a daemon restart. A planted fault is caught at the intended assertion. | Native runtimes. Most command families (see [Help wanted](#help-wanted-command-families-without-a-behavioural-scenario)). | Changes that can affect daemon startup, packaging, queue durability or the scenario harness |
+| Stub scenarios, installed package in a container | CI job `installed-scenario`. Before pushing: `DOCKER_HOST=ssh://<your-host> bash scripts/run-pr-scenarios.sh --remote …` | A clean Linux install starts. A claimed queue item survives a daemon restart. A planted fault is caught at the intended assertion. Two stub seats' scripted output reads back through `rig transcript` and `rig capture` (passing form only). | Native runtimes. Most command families (see [Help wanted](#help-wanted-command-families-without-a-behavioural-scenario)). | Changes that can affect daemon startup, packaging, queue durability or the scenario harness |
 | Live-model evals | `npm run eval -w packages/daemon -- --provider rig …` | Whether a real Claude Code seat runs the expected `rig context get <entry>` for natural prompts | Determinism. Codex. Anything without a case. | Changes to shipped skills or context entries meant to steer agents. **Uses provider credits.** |
 | Testbed runbooks | `docker/testbed/runbooks/` (manual) | The testbed image itself works as a test environment | Product behaviour | Only when you change the testbed image or the container plumbing |
 
@@ -76,7 +76,7 @@ credentials are supplied.
 | `typecheck` | ubuntu | `npm run lint` |
 | `repo-checks` | ubuntu | `npm run test:repo` |
 | `package-tests` | macOS, matrix `daemon`, `cli`, `tui`, `ui` (fail-fast off) | Installs tmux, runs `npm ci` and `npm run build`. Then runs `npm run test -w packages/<pkg>` under `env -i` with a scratch `HOME`/`TMPDIR`/`TMUX_TMPDIR` and a `sandbox-exec` profile that blocks outbound network except localhost and the job's own socket directory. `scripts/ci-macos-process-probe.mjs` runs first. |
-| `installed-scenario` | ubuntu | `bash scripts/run-pr-scenarios.sh` (six container runs, described below). Uploads `dist/pr-scenarios/` as `installed-scenario-evidence`, including on failure. |
+| `installed-scenario` | ubuntu | `bash scripts/run-pr-scenarios.sh` (eight container runs, described below). Uploads `dist/pr-scenarios/` as `installed-scenario-evidence`, including on failure. |
 
 A second workflow, `.github/workflows/portability-report.yml` (job `portability-report`),
 lists lines your PR adds that contain machine-specific values: credentials, home or temp
@@ -116,7 +116,7 @@ Exit codes: 0 pass, 1 a leg failed, 2 lane busy, 3 the runner itself errored.
 |---|---|
 | `runtime: stub` adapter | `packages/daemon/src/adapters/stub-runtime-adapter.ts`, with `stub-runner.ts` (the process that runs in the pane), `stub-script.ts` (the launch-script format) and `stub-compaction.ts` / `stub-restore.ts` |
 | Scenario format and runner | `packages/daemon/test/helpers/scenario-*.ts`. Step verbs: `up`, `down`, `send`, `restart`, `daemon`, `seed_regression` are bound. `restore`, `emit`, `mutate`, `policy` parse but are unbound. Assertion surfaces: `ps`, `queue`, `stream`, `scope`, `pane`, `transcript`, `tui_socket`, `policy_provenance`. |
-| Scenario library | `packages/test-system/scenarios/`: 11 scenarios, 6 stub topologies, `agents/`, `culture.md` |
+| Scenario library | `packages/test-system/scenarios/`: 15 scenarios, 7 stub topologies, `agents/`, `culture.md`, per-seat stub scripts in `scripts/` |
 | Runner fixtures | `packages/daemon/test/fixtures/scenarios/` (`scenario-01-per-seat-scripts`, `scenario-02-baton`, `scenario-10-one-view-state`) |
 | Host runner | `packages/daemon/scripts/run-scenarios.mjs` |
 | In-container entry and result check | `packages/test-system/ci/run.mjs`, `packages/test-system/ci/result.mjs` |
@@ -146,8 +146,11 @@ node --import tsx packages/daemon/scripts/run-scenarios.mjs packages/daemon/test
 ### Container mode: the scenario pack CI runs
 
 In CI the `installed-scenario` job runs `scripts/run-pr-scenarios.sh` with no arguments:
-both cases (`fixture` = `scenario-02-baton.yaml`, `library` = `queue-baton-survives-restart.yaml`),
-each run three times as healthy, then lost-baton, then healthy. That is six fresh containers.
+both baton cases (`fixture` = `scenario-02-baton.yaml`, `library` = `queue-baton-survives-restart.yaml`),
+each run three times as healthy, then lost-baton, then healthy. Then the two stub-script
+cases (`transcript` = `transcript-reads-addressed-seat.yaml`, `capture` =
+`capture-returns-addressed-seat.yaml`) run once each, healthy only. That is eight fresh
+containers.
 
 To run a case before you push, point `DOCKER_HOST` at a Docker engine you control over SSH:
 
@@ -157,9 +160,11 @@ DOCKER_HOST=ssh://<your-host> bash scripts/run-pr-scenarios.sh \
   --remote --case library --mode healthy --out dist/scenario-check
 ```
 
-- Options: `--case fixture|library` (default: both), `--mode healthy|lost-baton` (default:
-  healthy, lost-baton, healthy) and `--out <dir>` (default `dist/pr-scenarios`). Use a fresh
-  `--out` directory for each run you want to keep.
+- Options: `--case fixture|library|transcript|capture` (default: all four), `--mode
+  healthy|lost-baton` (default: healthy, lost-baton, healthy) and `--out <dir>` (default
+  `dist/pr-scenarios`). `--mode` applies to `fixture` and `library`; `transcript` and `capture`
+  always run once, healthy, and `--mode lost-baton` leaves them out. Use a fresh `--out`
+  directory for each run you want to keep.
 - `--remote` accepts only `ssh://` values for `DOCKER_HOST`, and it refuses if
   `DOCKER_CONTEXT` is set. The engine must be Linux on amd64 or arm64. The script reads the
   *server's* platform, so a macOS/arm64 laptop driving a Linux/amd64 engine works.
@@ -188,6 +193,10 @@ What happens, in order:
    post-restart queue assertion, with `baton-1` observed as `pending` at the expected
    destination. A startup error, a timeout or any other failure does not count as a caught
    regression. Healthy runs must pass with no fault armed.
+5. The `transcript` and `capture` runs are passing form only: `result.mjs` accepts only a
+   clean PASS of the named scenario, with no seed or fault. Their planted failures are
+   product-code mutations, so they stay per-PR evidence and are not CI runs. Stub scripts
+   work here because the runner executes the pipeline in host mode inside the image.
 
 A single healthy run proves that one leg only. The paired fault run is what shows the
 assertion can catch the failure.
@@ -195,7 +204,9 @@ assertion can catch the failure.
 Adding a new case to this pack today means changing three files:
 `scripts/run-pr-scenarios.sh` (the `--case` list), `CASES` in
 `packages/test-system/ci/result.mjs`, and the fault controller in
-`packages/test-system/ci/run.mjs`, which is currently specific to the baton row.
+`packages/test-system/ci/run.mjs`, which is currently specific to the baton row. A
+passing-only case needs no fault controller: add it to `PASSING_CASES` and the `--case` list
+in `scripts/run-pr-scenarios.sh`, and to `PASSING_CASES` in `result.mjs`.
 
 ### What a green stub scenario proves
 
@@ -233,8 +244,12 @@ The most useful next pieces of harness work, roughly in dependency order:
 
 ### Library status
 
-Only `queue-baton-survives-restart` runs in CI (since #243). The other ten scenarios are
-authored but not yet runnable as meaningful checks:
+Three scenarios run in CI: `queue-baton-survives-restart` (since #243) with its seeded pair,
+and `transcript-reads-addressed-seat` and `capture-returns-addressed-seat` in passing form
+only. Two more, `down-stops-every-seat` and `send-renders-in-addressed-pane`, run with the
+local runner but not in CI. Those four later scenarios are not in this table; see "Status
+today" under [Help wanted](#help-wanted-command-families-without-a-behavioural-scenario). The
+other ten scenarios are authored but not yet runnable as meaningful checks:
 
 | Scenario | Why it doesn't run as a check yet | Smallest useful next step |
 |---|---|---|
@@ -334,11 +349,18 @@ every seat stopped and the rig still listed. `send` has partial coverage in
 `send-renders-in-addressed-pane.yaml` beside it: the envelope and the message body render in
 the addressed seat's pane. `transcript` has partial coverage in
 `transcript-reads-addressed-seat.yaml`: each of two seats' scripted output is readable through
-that seat's `rig transcript --tail 200 --json`. These three run with the local runner
-(`run-scenarios.mjs`), not in the CI job. They do not prove that panes are gone or that a seat
-consumed a message. The transcript case does not establish ordering, uniqueness, sibling-token
-absence, tail limits or restart persistence. `up` and `daemon` are used by the existing
-scenarios but have no scenario of their own. Everything else has none.
+that seat's `rig transcript --tail 200 --json`. `capture` has partial coverage in
+`capture-returns-addressed-seat.yaml`: in a rig whose member names overlap by prefix (`impl`,
+`impl2`; `dev-impl`, `dev-impl2` with the pod), `rig capture <seat>` returns each seat's own
+pane. The scenario catches a capture that resolves the seat by a prefix match on its member
+name (so `dev-impl` also matches `dev-impl2`) and takes the first hit, or any resolver that
+returns the same pane for both seats; it does not exercise a prefix match on the full seat
+name. All four run with the local runner (`run-scenarios.mjs`). The transcript and capture
+scenarios also run in the CI job, in passing form only; the down and send scenarios don't.
+They do not prove that panes are gone or that a seat consumed a message. The transcript
+case does not establish ordering, uniqueness, sibling-token absence, tail limits or restart
+persistence. `up` and `daemon` are used by the existing scenarios but have no scenario of their
+own. Everything else has none.
 
 Before you start, two honest constraints:
 
@@ -425,7 +447,7 @@ Before you start, two honest constraints:
 | integration | `env` | A fixture service-backed rig. status/logs/down reflect that service and stop only it. |
 | delivery | `transcript` (partial) | Own scripted output from two addressed seats is covered by `transcript-reads-addressed-seat.yaml`. Remaining: ordering, uniqueness, no other seat's token, tail limits and restart persistence; absence/count assertions need a runner binding. |
 | delivery | `send` | (partial) Next: send a fresh nonce and require an answer derived from it. Boot text or echo can't pass. |
-| delivery | `capture` | A unique token in the pane. Wrong-seat, tail and not-found cases are told apart. |
+| delivery | `capture` | (partial) Each seat's own token, under prefix-overlapping member names. Next: the not-found, tail (`--lines`), sibling-absence and `--rig`/`--pod` cases, which need an error form, a tail option, an absence form and a multi-target surface in the runner. |
 | delivery | `broadcast` | Broadcast a nonce to a rig or pod. Each intended seat answers once, and an excluded seat gets nothing. |
 | delivery | `walk` | Walk two pieces through an input-consuming stub. Order is kept, and a bad piece isn't reported as delivered. |
 | context | `context` | add/get/compose/trace/profile over a fixture project. Output bytes, order and roots match. |
@@ -461,7 +483,7 @@ How to make a case useful:
 Read these with care. This page notes them and proposes no changes.
 
 - `packages/test-system/README.md`: says the scenarios "DO NOT run" until a runner lands.
-  The runner exists, and one library scenario runs in CI. Its layout lists `fixtures/*.yaml`,
+  The runner exists, and three library scenarios run in CI. Its layout lists `fixtures/*.yaml`,
   a directory that no longer exists (the topologies live in `scenarios/`). It also says the
   emit behaviours don't exist yet. Launch-script `emit` now exists, but step-time `emit` is
   still unbound. `packages/test-system/ci/README.md` is the current description of the CI

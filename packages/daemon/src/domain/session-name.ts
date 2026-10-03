@@ -79,6 +79,9 @@ export function validateSessionComponents(
   } else {
     const err = validateSessionNameChars(podName, "pod name");
     if (err) errors.push(err);
+    if (podName.includes("@")) {
+      errors.push('pod name must not contain "@" — it separates the member from the rig');
+    }
   }
 
   if (!memberName) {
@@ -86,6 +89,9 @@ export function validateSessionComponents(
   } else {
     const err = validateSessionNameChars(memberName, "member name");
     if (err) errors.push(err);
+    if (memberName.includes("@")) {
+      errors.push('member name must not contain "@" — it separates the member from the rig');
+    }
   }
 
   if (!rigName) {

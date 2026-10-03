@@ -2,8 +2,9 @@
 // `set-model`, a REAL managed successor (SeatHandoverService + real CodexRuntimeAdapter,
 // real codex TUI) runs the CANONICAL (post-set-model) model, with session lineage
 // preserved. Modeled on seat-handover-model-fidelity-e2e (D15 isolation: per-run -L
-// socket, env minus $TMUX, teardown by session name, never kill-server; skips when
-// tmux/codex/auth absent).
+// socket, env minus $TMUX, teardown by session name then kill-server on this run's own
+// -L socket only; opt-in: skips unless OPENRIG_E2E_REAL_CODEX=1, and when tmux/codex/auth
+// are absent).
 //
 // DISCRIMINATOR: the node is CREATED pinned to the runtime default (gpt-5.6-sol) and
 // set-model moves it to a valid NON-default (gpt-5.6-luna). A successor footer showing
@@ -48,7 +49,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const CREATED_MODEL = "gpt-5.6-sol";  // the runtime default — what a stale/reverted read shows
 const CANONICAL_MODEL = "gpt-5.6-luna"; // set-model target; footer renders it verbatim only via the updated pin
 
+// Opt-in only: this test drives the codex CLI with whatever account is signed in
+// on the host (~/.codex/auth.json), so it never runs unless OPENRIG_E2E_REAL_CODEX=1.
+const REAL_CODEX_OPT_IN = process.env.OPENRIG_E2E_REAL_CODEX === "1";
+
 function preflightOk(): boolean {
+  if (!REAL_CODEX_OPT_IN) return false;
   try {
     execFileSync("sh", ["-c", "command -v tmux"], { env: cleanEnv, stdio: "ignore" });
     execFileSync("sh", ["-c", "command -v codex"], { env: cleanEnv, stdio: "ignore" });
@@ -72,7 +78,11 @@ function realFsOps(): any {
 
 const seats: string[] = [];
 afterAll(async () => {
-  for (const s of seats) await tmux(`kill-session -t ${q(s)}`).catch(() => {}); // BY NAME, never kill-server
+  if (!REAL_CODEX_OPT_IN) return; // a skipped run starts no tmux at all
+  for (const s of seats) await tmux(`kill-session -t ${q(s)}`).catch(() => {}); // by name first
+  // Then end this run's private server. SOCK is unique to this process (-L), so
+  // kill-server here can never reach the fleet's tmux server.
+  await tmux("kill-server").catch(() => {});
 });
 
 describe("S5 F4: set-model then a REAL managed successor runs the canonical model (real codex, isolated tmux)", () => {

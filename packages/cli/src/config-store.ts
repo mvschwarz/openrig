@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { join, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import {
   getDefaultOpenRigPath,
@@ -779,6 +780,16 @@ function percentageConstraint(key: string) {
 }
 
 const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | number | boolean) => void>> = {
+  "transcripts.lines": (raw, value) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 1_000_000) {
+      throw new Error("Invalid transcripts.lines: must be an integer in [1, 1000000]");
+    }
+  },
+  "transcripts.poll_interval_seconds": (raw, value) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 3600) {
+      throw new Error("Invalid transcripts.poll_interval_seconds: must be an integer in [1, 3600]");
+    }
+  },
   "ui.timezone": (_raw, value) => {
     try {
       if (typeof value !== "string" || !value || /^[+-]/.test(value)) throw new Error();
@@ -930,6 +941,60 @@ export class ConfigStore {
   // resolves the legacy ~/.rigged sidecar), so a persisted read here IS proof the daemon sees it.
   // A read-back MISMATCH means the write silently did not take — we REFUSE loudly rather than report
   // a phantom success (the accept-and-drop / config-set-success-without-persist class).
+  /** Publish a complete config without truncating the previous usable file. */
+  private writeConfig(content: string): void {
+    let target = this.configPath;
+    // Follow config-file links just as writeFileSync did; rename the target,
+    // never the link. A dangling final target is still created normally.
+    for (let depth = 0; ; depth++) {
+      const entry = lstatSync(target, { throwIfNoEntry: false });
+      if (!entry?.isSymbolicLink()) break;
+      if (depth >= 40) throw Object.assign(new Error("Too many config symlinks"), { code: "ELOOP" });
+      target = resolve(dirname(target), readlinkSync(target));
+    }
+    const existing = statSync(target, { throwIfNoEntry: false });
+    // Match direct writes: a writable directory must not bypass a read-only
+    // target. Opening without truncation also checks native ACL permissions.
+    if (existing) closeSync(openSync(target, "r+"));
+    const temporary = `${target}.tmp-${randomUUID()}`;
+    let owned = false;
+    let canFallBack = true;
+    try {
+      // Atomic replacement requires directory create/rename permission. Keep
+      // staged bytes private until the original ownership and mode are restored.
+      const fd = openSync(temporary, "wx", 0o600);
+      owned = true;
+      // A failed data write must never retry against the original file.
+      canFallBack = false;
+      try { writeFileSync(fd, content, "utf-8"); } finally { closeSync(fd); }
+      canFallBack = true;
+      if (existing && process.platform !== "win32") {
+        const staged = statSync(temporary);
+        if (staged.uid !== existing.uid || staged.gid !== existing.gid) {
+          try { chownSync(temporary, existing.uid, existing.gid); }
+          catch (error) {
+            throw Object.assign(new Error(`Cannot preserve config ownership at ${target}: ${(error as Error).message}`),
+              { code: (error as NodeJS.ErrnoException).code });
+          }
+        }
+      }
+      // chown may clear permission bits, so apply the final mode afterward.
+      chmodSync(temporary, existing ? existing.mode & 0o777 : 0o666 & ~process.umask());
+      renameSync(temporary, target);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (canFallBack && (code === "EACCES" || code === "EPERM" || code === "EBUSY")) {
+        // Preserve setups that permit writing the file but not replacing it,
+        // such as an unwritable parent or a single-file bind mount.
+        writeFileSync(target, content, "utf-8");
+        return;
+      }
+      throw error;
+    } finally {
+      if (owned) try { unlinkSync(temporary); } catch { /* Renamed or already removed. */ }
+    }
+  }
+
   private verifyPersisted(keyPath: string[], expected: unknown): void {
     let reread: Record<string, unknown>;
     try {
@@ -1211,7 +1276,7 @@ export class ConfigStore {
       const fcDyn = this.readConfigFile();
       setNestedValue(fcDyn, ["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
       mkdirSync(dirname(this.configPath), { recursive: true });
-      writeFileSync(this.configPath, JSON.stringify(fcDyn, null, 2) + "\n", "utf-8");
+      this.writeConfig(JSON.stringify(fcDyn, null, 2) + "\n");
       this.verifyPersisted(["feed", "subscriptions", feedHost.hostId, "enabled"], coercedDyn);
       return;
     }
@@ -1234,7 +1299,7 @@ export class ConfigStore {
       }
     }
     mkdirSync(dirname(this.configPath), { recursive: true });
-    writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");
+    this.writeConfig(JSON.stringify(fileConfig, null, 2) + "\n");
     this.verifyPersisted(KEY_TO_PATH[key], coerced);
   }
 
@@ -1259,7 +1324,7 @@ export class ConfigStore {
       const fcDyn = this.readConfigFile();
       const subsParent = getNestedValue(fcDyn, ["feed", "subscriptions"]) as Record<string, unknown> | undefined;
       if (subsParent && feedHost.hostId in subsParent) delete subsParent[feedHost.hostId];
-      writeFileSync(this.configPath, JSON.stringify(fcDyn, null, 2) + "\n", "utf-8");
+      this.writeConfig(JSON.stringify(fcDyn, null, 2) + "\n");
       return;
     }
     if (!isValidKey(key)) {
@@ -1286,7 +1351,7 @@ export class ConfigStore {
         }
       }
     }
-    writeFileSync(this.configPath, JSON.stringify(fileConfig, null, 2) + "\n", "utf-8");
+    this.writeConfig(JSON.stringify(fileConfig, null, 2) + "\n");
   }
 
   private readConfigFile(): Record<string, unknown> {

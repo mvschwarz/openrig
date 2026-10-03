@@ -5,7 +5,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
-import { runWakeLadderTick, WAKE_SUSPEND_OVERRIDE_ENV } from "../src/domain/queue-wake-ladder.js";
+import { runWakeLadderTick, queueRecoveryOwnsWake, WAKE_SUSPEND_OVERRIDE_ENV } from "../src/domain/queue-wake-ladder.js";
 import { lastMeaningfulTransition } from "../src/domain/queue-waiting.js";
 import { recoveryTag } from "../src/domain/queue-recovery.js";
 
@@ -116,5 +116,73 @@ describe("waiting face names the next action the existing ladder can actually ta
     expect(authored!.id).toBeGreaterThan(before!.id);
     queue.update({ qitemId: id, actorSession, state: "blocked", blockedOn: "operator decision" });
     expect(lastMeaningfulTransition(db, id)!.id).toBeGreaterThan(authored!.id);
+  });
+
+  // ── #344: a guard-refused wake must keep the unclaimed baton's retry path ──
+
+  it("counts a typing-guard refusal after a closed recovery as fresh evidence, reopening the retry path (#344)", async () => {
+    // Every wake this episode is refused by the typing guard: no pane input is
+    // written, and the nudge records the retained vocabulary.
+    queue = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      transport: { send: async () => ({ outcome: "retained" }) },
+    });
+    const source = await queue.create({ sourceSession: "owner@rig", destinationSession: "owner@rig", body: "Prepare result", nudge: false });
+    const id = (await queue.handoff({ qitemId: source.qitemId, fromSession: "owner@rig", toSession: "worker@rig", body: "Continue exact work", nudge: false })).created.qitemId;
+    // A terminal recovery disposition closes BEFORE the next wake attempt.
+    const recovery = await queue.create({ sourceSession: "owner@rig", destinationSession: "orch@rig", body: "Inspect failed delivery", tags: [recoveryTag(id)], nudge: false });
+    await queue.update({ qitemId: recovery.qitemId, actorSession: "orch@rig", state: "done", closureReason: "no-follow-on", resolution: "Do not retry this episode" });
+    // The ladder's later retry is refused again — the refusal is NEWER than the
+    // recovery and must count as evidence about the original obligation.
+    advance(60);
+    queue.recordNudgeAttempt(id, "retained:typing_guard");
+    expect(view(id).nextBackstop).toMatchObject({
+      mechanism: "queue-wake-ladder:retry",
+      dueAt: "2026-09-08T00:06:00.000Z",
+    });
+    advance(301);
+    expect((await tick()).actions).toContainEqual({ qitemId: id, action: "retry", target: "worker@rig" });
+  });
+
+  it("keeps an unclaimed baton whose wake was guard-refused inside the retry ladder (#344)", async () => {
+    queue = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      transport: { send: async () => ({ outcome: "retained" }) },
+    });
+    queue.attachOutbox(new OutboxHandler(db));
+    const id = await handoff();
+    // The handoff nudge was refused by the typing guard: retained:typing_guard.
+    expect(queue.getByIdOrThrow(id).lastNudgeResult).toBe("retained:typing_guard");
+    // A safe refusal still protects the prompt, but the baton keeps a retry path
+    // (each retry is another guard probe; when the prompt clears it verifies).
+    expect(view(id).nextBackstop).toMatchObject({
+      mechanism: "queue-wake-ladder:retry",
+      dueAt: "2026-09-08T00:05:00.000Z",
+    });
+    advance(301);
+    expect((await tick()).actions).toContainEqual({ qitemId: id, action: "retry", target: "worker@rig" });
+  });
+
+  it("does not let a retained nudge claim ownership of a claimed parked-owner row (#344 follow-up)", async () => {
+    // The retained class is scoped to unclaimed batons. A CLAIMED in-progress row
+    // whose last wake was retained must stay not-owned: the ladder's claimed-row
+    // retry readback selects `failed:%` only, so owning it here would let the
+    // parked-owner watchdog skip a row that nothing retries.
+    queue = new QueueRepository(db, new EventBus(db), {
+      validateRig: () => true,
+      transport: { send: async () => ({ outcome: "retained" }) },
+    });
+    queue.attachOutbox(new OutboxHandler(db));
+    const id = await handoff();
+    // Move it to the claimed parked-owner shape: in-progress, claimed, with the
+    // consumer's FAILED origin note the claimed arm keys on.
+    await queue.claim({ qitemId: id, destinationSession: "worker@rig" });
+    queue.recordNudgeAttempt(id, "retained:typing_guard");
+    queue.update({ qitemId: id, actorSession: "worker@rig", transitionNote: "parked-owner wake delivery failed: retained:typing_guard" });
+    const row = queue.getByIdOrThrow(id);
+    expect(row.state).toBe("in-progress");
+    expect(row.claimedAt).not.toBeNull();
+    expect(queueRecoveryOwnsWake(db, row)).toBe(false);
+    expect((await tick()).actions).not.toContainEqual({ qitemId: id, action: "retry", target: "worker@rig" });
   });
 });

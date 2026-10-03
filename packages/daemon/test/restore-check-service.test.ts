@@ -779,14 +779,20 @@ describe("RestoreCheckService", () => {
 
   // --- Rig spec/root checks ---
 
-  it("missing rig root produces spec-present red", () => {
+  it("missing rig root is a not-checked caveat, not a blocker (#130: rigs launch from specs elsewhere)", () => {
     const service = new RestoreCheckService(mockDeps({
+      substrateRoot: "/shared-docs",
       exists: (p) => !p.includes(path.join("rigs", "test-rig")),
     }));
-    const result = service.check({});
+    const result = service.check({ noHooks: true });
     const spec = result.checks.find((c) => c.check === "rig.test-rig.spec-present");
-    expect(spec?.status).toBe("red");
-    expect(spec?.evidence).toContain("Rig root missing");
+    expect(spec?.status).toBe("yellow");
+    expect(spec?.evidence).toContain("Not checked: no launch spec location could be established");
+    expect(spec?.evidence).toContain(path.join("/shared-docs", "rigs", "test-rig", "rig.yaml"));
+    expect(spec?.remediationSafe).toBe(true);
+    expect(result.counts.red).toBe(0);
+    expect(result.verdict).toBe("restorable_with_caveats");
+    expect(result.rigs[0]).toEqual(expect.objectContaining({ status: "ready_with_caveats", blockingChecks: [] }));
   });
 
   it("rig root exists but rig.yaml missing produces spec-present yellow", () => {

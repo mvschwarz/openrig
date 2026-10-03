@@ -54,7 +54,8 @@ export class AgentActivityStore {
   readonly db: Database.Database;
   private readonly eventBus: EventBus;
   private readonly now: () => Date;
-  private readonly freshnessMs: number;
+  /** The window within which a stored hook counts as recent (read-only for diagnostics). */
+  readonly freshnessMs: number;
   private readonly resolveOccupantGeneration?: (nodeId: string) => string | null;
   private readonly isRegisteredOccupantGeneration?: (nodeId: string, generation: string) => boolean;
 

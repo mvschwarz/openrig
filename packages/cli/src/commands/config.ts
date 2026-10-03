@@ -10,11 +10,9 @@ function summarizeSettings(store: ConfigStore): Record<ValidKey, ResolvedSetting
   return store.resolveAllWithSource();
 }
 
-// SWEEP-c (shape f2576102) — keys the daemon reads ONLY at boot: a set while it runs
-// is stale-until-restart; the honest floor is the loud notice (live-reload = its own
-// arch item, not built here).
+// These settings remain boot-only; capture interval/line settings reload live.
 const BOOT_ONLY_KEYS = ["daemon.port", "daemon.host", "db.path"];
-const BOOT_ONLY_PREFIXES = ["transcripts."];
+const BOOT_ONLY_PREFIXES = ["transcripts.enabled", "transcripts.path"];
 
 function isBootOnlyKey(key: string): boolean {
   return BOOT_ONLY_KEYS.includes(key) || BOOT_ONLY_PREFIXES.some((p) => key.startsWith(p));

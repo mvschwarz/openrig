@@ -140,7 +140,7 @@ export class SeatSwitchClientService {
     if (req.toWindow != null) {
       let windows: TmuxWindow[];
       try {
-        windows = await this.tmuxAdapter.listWindows(session);
+        windows = await this.tmuxAdapter.listWindows(`=${session}`);
       } catch (err) {
         return this.probeFailed(`list-windows for "${session}"`, err);
       }
@@ -201,7 +201,8 @@ export class SeatSwitchClientService {
     // 5. Retarget the client's VIEW (the only side effect; not a mutation of
     //    OpenRig routing/identity).
     const target = `${session}:${windowIndex}`;
-    const switchResult = await this.tmuxAdapter.switchClient(targetClient, target);
+    // The canonical session may have ended since the probes; never switch to a prefix sibling.
+    const switchResult = await this.tmuxAdapter.switchClient(targetClient, `=${target}`);
     if (!switchResult.ok) {
       return {
         ok: false,

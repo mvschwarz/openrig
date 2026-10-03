@@ -93,6 +93,18 @@ export interface VerificationConfig {
 export interface ValidationResult {
   valid: boolean;
   errors: string[];
+  warnings?: string[];
+}
+
+function missingRoleHookWarning(roleName: string, hookRef: string): string {
+  return `Role '${roleName}' references hook '${hookRef}' absent from exports.hooks; hooks in this package path are deferred, not installed`;
+}
+
+export function roleHookWarnings(manifest: PackageManifest): string[] {
+  const sources = new Set((manifest.exports.hooks ?? []).map((hook) => hook.source));
+  return (manifest.roles ?? []).flatMap((role) =>
+    (role.hooks ?? []).filter((ref) => !sources.has(ref)).map((ref) => missingRoleHookWarning(role.name, ref)),
+  );
 }
 
 // --- Constants ---
@@ -119,6 +131,7 @@ const PACKAGE_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
 export function validateManifest(raw: unknown): ValidationResult {
   const errors: string[] = [];
+  const warnings: string[] = [];
 
   if (!raw || typeof raw !== "object") {
     return { valid: false, errors: ["Manifest must be an object"] };
@@ -170,6 +183,7 @@ export function validateManifest(raw: unknown): ValidationResult {
     // Collect export names for role validation
     const skillNames = new Set<string>();
     const guidanceNames = new Set<string>();
+    const hookSources = new Set<string>();
 
     // skills
     if (Array.isArray(exports["skills"])) {
@@ -269,6 +283,8 @@ export function validateManifest(raw: unknown): ValidationResult {
           errors.push("Hook export: source is required");
         } else if (hasPathTraversal(h["source"] as string)) {
           errors.push(`Hook export source must not contain path traversal: '${h["source"]}'`);
+        } else {
+          hookSources.add(h["source"] as string);
         }
       }
     }
@@ -300,11 +316,18 @@ export function validateManifest(raw: unknown): ValidationResult {
             }
           }
         }
+        if (Array.isArray(role["hooks"])) {
+          for (const hookRef of role["hooks"] as string[]) {
+            if (!hookSources.has(hookRef)) {
+              warnings.push(missingRoleHookWarning(String(role["name"]), hookRef));
+            }
+          }
+        }
       }
     }
   }
 
-  return { valid: errors.length === 0, errors };
+  return { valid: errors.length === 0, errors, warnings };
 }
 
 // --- Normalize helpers ---

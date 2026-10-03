@@ -27,6 +27,7 @@ function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
     listWindows: vi.fn(async () => []),
     listPanes: vi.fn(async () => []),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
+    capturePaneContent: vi.fn(async () => "❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n"),
     ...overrides,
   } as unknown as TmuxAdapter;
 }
@@ -132,6 +133,16 @@ describe("StartupOrchestrator", () => {
       ...overrides,
     };
   }
+
+  it("keeps a challenge-only transport failure best-effort", async () => {
+    const seed = seedSession();
+    const tmux = mockTmux({ sendText: vi.fn(async () => ({ ok: false as const, message: "fixture transport failure" })) });
+    const result = await createOrchestrator(tmux).startNode(makeInput(seed, {
+      startupActions: [makeAction({ type: "startup_proof", value: "authenticated" })],
+    }));
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
 
   it("deliberate fresh replacement appends the named durable obligation read without an extra message", async () => {
     const seed = seedSession();

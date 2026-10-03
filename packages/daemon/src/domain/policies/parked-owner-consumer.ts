@@ -158,6 +158,17 @@ function openKeysOnRow(transitions: RowTransitionView[]): string[] {
   return open;
 }
 
+/** Open positive refusals and the exact obligation set reserved before delivery. */
+export function openPromptRefusals(transitions: RowTransitionView[]): Array<{ key: string; ids: string[]; refusedAt: string }> {
+  return openKeysOnRow(transitions).flatMap(key => {
+    const refusal = transitions.find(t => t.transitionNote?.startsWith(REFUSED_PREFIX) && keyOfNote(t.transitionNote) === key);
+    if (!refusal) return [];
+    const reserve = transitions.find(t => t.transitionNote?.startsWith(RESERVE_PREFIX) && keyOfNote(t.transitionNote) === key);
+    const ids = reserve?.transitionNote?.split("; obligations ")[1]?.split(",") ?? [];
+    return [{ key, ids, refusedAt: refusal.ts }];
+  });
+}
+
 export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Policy {
   return {
     name: PARKED_OWNER_POLICY_NAME,

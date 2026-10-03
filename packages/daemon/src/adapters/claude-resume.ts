@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
+import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { shellQuote } from "./shell-quote.js";
 import { claudePostureFlag, claudeClassicRendererEnvPrefix } from "./yolo-mode.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
@@ -23,6 +24,7 @@ export function isClaudeResumeType(resumeType: string | null | undefined): boole
 }
 
 interface ClaudeResumeOptions {
+  seatLaunchEnvironment?: SeatLaunchEnvironment;
   claudeManagedLaunch?: ClaudeManagedLaunch;
   listProcesses?: NativeProcessLister;
   pollMs?: number;
@@ -80,13 +82,15 @@ export class ClaudeResumeAdapter {
       : `${claudeClassicRendererEnvPrefix(process.env)}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(tmuxSessionName, cmd, managed.assertCurrent)
-      : await this.tmux.sendText(tmuxSessionName, cmd);
+      : this.options.seatLaunchEnvironment
+        ? await this.tmux.sendShellCommand(tmuxSessionName, await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: "claude-code", nodeId }), undefined, { sourceInPane: true })
+        : await this.tmux.sendText(tmuxSessionName, cmd);
     if (!textResult.ok) {
       // sendText failed — nothing in the buffer, no cleanup needed
       return { ok: false, code: "resume_failed", message: textResult.message };
     }
 
-    const keyResult = managed ? { ok: true as const } : await this.tmux.sendKeys(tmuxSessionName, ["Enter"]);
+    const keyResult = managed || this.options.seatLaunchEnvironment ? { ok: true as const } : await this.tmux.sendKeys(tmuxSessionName, ["Enter"]);
     if (!keyResult.ok) {
       // Partial failure: command text is in the buffer but Enter failed.
       // Best-effort cleanup: send C-c to clear the typed command.

@@ -17,6 +17,7 @@ export async function verifyCodexProfileLoads(
   profile: string,
   exec: (cmd: string) => Promise<string>,
   timeoutMs: number = PROFILE_PROBE_TIMEOUT_MS,
+  codexHome: string = process.env.CODEX_HOME || "~/.codex",
 ): Promise<CodexProfileProbeResult> {
   const cmd = `codex -p ${shellQuote(profile)} mcp list`;
   try {
@@ -39,8 +40,8 @@ export async function verifyCodexProfileLoads(
     const stderrLines = stderr.split("\n").filter((l) => l.trim());
     const reason = stderrLines.slice(0, 3).join("; ");
     const migrationHint = isLegacyTable
-      ? `Move the profile settings into ~/.codex/${profile}.config.toml and remove the legacy [profiles.${profile}] table/selector from config.toml.`
-      : `Check ~/.codex/${profile}.config.toml is valid TOML (an absent file is OK — Codex default-layers it). Run 'codex -p ${profile} mcp list' manually to diagnose.`;
+      ? `Move the profile settings into ${codexHome}/${profile}.config.toml and remove the legacy [profiles.${profile}] table/selector from config.toml.`
+      : `Check ${codexHome}/${profile}.config.toml is valid TOML (an absent file is OK — Codex default-layers it). Run 'codex -p ${profile} mcp list' ${codexHome === "~/.codex" ? "manually" : "with the same CODEX_HOME"} to diagnose.`;
     return {
       ok: false,
       profile,

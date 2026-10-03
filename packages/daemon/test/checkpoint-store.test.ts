@@ -71,6 +71,55 @@ describe("CheckpointStore", () => {
     expect(store.getLatestCheckpoint("node-1")).toBeNull();
   });
 
+  it("same-second checkpoints resolve by insertion order (rowid DESC) for getLatestCheckpoint", () => {
+    const insert = db.prepare(
+      "INSERT INTO checkpoints (id, node_id, summary, key_artifacts, created_at) VALUES (?, ?, ?, ?, ?)"
+    );
+    // Insert with inverted alphabetical IDs so ID DESC sort would give the wrong answer
+    insert.run("cp-z-first", "node-1", "first inserted", "[]", "2026-03-23 01:00:00");
+    insert.run("cp-a-second", "node-1", "second inserted", "[]", "2026-03-23 01:00:00");
+
+    const latest = store.getLatestCheckpoint("node-1");
+    expect(latest).not.toBeNull();
+    expect(latest!.id).toBe("cp-a-second");
+    expect(latest!.summary).toBe("second inserted");
+  });
+
+  it("same-second checkpoints resolve in insertion order (rowid ASC) for getCheckpointsForNode", () => {
+    const insert = db.prepare(
+      "INSERT INTO checkpoints (id, node_id, summary, key_artifacts, created_at) VALUES (?, ?, ?, ?, ?)"
+    );
+    insert.run("cp-z-1", "node-1", "first", "[]", "2026-03-23 01:00:00");
+    insert.run("cp-a-2", "node-1", "second", "[]", "2026-03-23 01:00:00");
+    insert.run("cp-m-3", "node-1", "third", "[]", "2026-03-23 01:00:00");
+
+    const cps = store.getCheckpointsForNode("node-1");
+    expect(cps.map((c) => c.id)).toEqual(["cp-z-1", "cp-a-2", "cp-m-3"]);
+  });
+
+  it("getCheckpointsForRig selects the latest inserted checkpoint on tied timestamps", () => {
+    const insert = db.prepare(
+      "INSERT INTO checkpoints (id, node_id, summary, key_artifacts, created_at) VALUES (?, ?, ?, ?, ?)"
+    );
+    insert.run("cp-1-initial", "node-1", "initial", "[]", "2026-03-23 01:00:00");
+    insert.run("cp-1-updated", "node-1", "updated", "[]", "2026-03-23 01:00:00");
+
+    const map = store.getCheckpointsForRig("rig-1");
+    expect(map["node-1"]).not.toBeNull();
+    expect(map["node-1"]!.id).toBe("cp-1-updated");
+    expect(map["node-1"]!.summary).toBe("updated");
+  });
+
+  it("createCheckpoint in rapid succession selects the most recently created checkpoint", () => {
+    store.createCheckpoint("node-1", { summary: "rapid 1" });
+    const cp2 = store.createCheckpoint("node-1", { summary: "rapid 2" });
+
+    const latest = store.getLatestCheckpoint("node-1");
+    expect(latest).not.toBeNull();
+    expect(latest!.id).toBe(cp2.id);
+    expect(latest!.summary).toBe("rapid 2");
+  });
+
   it("getCheckpointsForNode: all returned in created_at ASC order", () => {
     db.prepare(
       "INSERT INTO checkpoints (id, node_id, summary, key_artifacts, created_at) VALUES (?, ?, ?, ?, ?)"

@@ -320,7 +320,13 @@ export interface HealthRecord {
 }
 
 /** A source's evaluated share of its input; omitted items are unevaluated, not healthy. */
-export interface HealthCoverage {
+export type HealthCoverage = {
+  source: string;
+  status: "unavailable";
+  partial: true;
+  reason: string;
+} | {
+  status?: "available";
   source: string;
   unit: string;
   limit: number;
@@ -329,7 +335,7 @@ export interface HealthCoverage {
   omitted: number;
   partial: boolean;
   order: string;
-}
+};
 
 export interface HealthSnapshot {
   /** loaded means the canonical bounded list read answered, including [] */

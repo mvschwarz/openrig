@@ -11,8 +11,8 @@ applies-when: |
   vs tmux-metadata-key naming distinction.
 siblings: [daemon-core.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 264fade9
-last-updated: 2026-10-02
+last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-updated: 2026-10-03
 ---
 
 # Transport, Transcripts, Chat, Ask
@@ -22,7 +22,7 @@ capture/broadcast wrap tmux with honest errors; transcripts are bounded
 `tmux capture-pane` snapshots written to files; chat is daemon-backed SQLite;
 the daemon's `rig ask` service gathers evidence and never calls an LLM.
 
-> Verified against source at main `264fade9`. Each count below sits beside the
+> Verified against source at main `254122872cf477511514979a4300b695d77cd1f7`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -44,7 +44,7 @@ source: **0** hits
 **Axis 2 — tmux metadata keys are `@rigged_*`, and are correct as-is.** The
 tmux metadata keys written at claim/bind time are a separate thing from MCP
 tool names and were not renamed. `setRiggedMetadata` in
-`packages/daemon/src/domain/claim-service.ts:176`–`180` writes exactly **5**
+`packages/daemon/src/domain/claim-service.ts:180`–`184` writes exactly **5**
 keys (`grep -c '@rigged_' packages/daemon/src/domain/claim-service.ts`):
 `@rigged_node_id`, `@rigged_session_name`, `@rigged_rig_id`,
 `@rigged_rig_name`, `@rigged_logical_id`. Do not blanket-sed `rigged` → `rig`.
@@ -98,8 +98,8 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    `unknown` one proceeds with an advisory `warning` (`:1321`). `--force` has
    no effect on this path.
 3. Two-step tmux send: a unique file/buffer pasted with `paste-buffer -d -r -p`
-   at every payload size (`packages/daemon/src/adapters/tmux.ts:587`) →
-   ~200ms delay (`session-transport.ts:1378`) → separate `C-m` (`:1385`).
+   at every payload size (`packages/daemon/src/adapters/tmux.ts:604`) →
+   ~200ms delay (`session-transport.ts:1378`) → separate named `Enter` (`:1385`).
    Bracketed paste preserves multiline input in supporting TUIs; the payload
    never enters a shell argument. A successful paste proves transport
    execution, not runtime consumption.
@@ -180,8 +180,8 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
    creation, before the harness boots
    (`packages/daemon/src/domain/node-launcher.ts:181`).
 2. Each rotation tick runs `tmux capture-pane -p -S -<lines>`
-   (`adapters/tmux.ts:994`) and atomically overwrites (temp file + rename,
-   `transcript-rotation.ts:143`)
+   (`adapters/tmux.ts:1020`) and atomically overwrites (temp file + rename,
+   `transcript-rotation.ts:146`)
    `~/.openrig/transcripts/{rig-name}/{session-name}.log`. Defaults: 1000
    trailing lines every 2 s (`transcript-rotation.ts:27`–`28`), tunable with
    `OPENRIG_TRANSCRIPTS_LINES` and `OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS`.
@@ -193,9 +193,9 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
 4. `rig transcript <session> --tail N / --grep "pattern"` provides
    agent-facing access.
 5. On restore: a `--- SESSION BOUNDARY: … ---` marker is written before
-   re-launch (`restore-orchestrator.ts:1099`); each rotation tick keeps every
+   re-launch (`restore-orchestrator.ts:1100`); each rotation tick keeps every
    boundary line as a header above the fresh capture
-   (`transcript-rotation.ts:119`). (Restore-side detail in
+   (`transcript-rotation.ts:122`). (Restore-side detail in
    `lifecycle-snapshot-restore.md`.)
 6. `rig ask` gathers rig summary plus transcript excerpts, chat excerpts,
    insufficiency state, and guidance.

@@ -9,20 +9,20 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: 712a61fbcc5ffe5a7c786fea12132567083ab507
-last-updated: 2026-10-02
+last-verified-against-source: 30bf2ca06375680f1f8cbe68cc757e212d23dec6
+last-updated: 2026-10-03
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `712a61fbcc5ffe5a7c786fea12132567083ab507`.
+Verified against source commit `30bf2ca06375680f1f8cbe68cc757e212d23dec6`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
 There are **85 top-level registrations**, **341 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,023 explicitly registered option objects**, including the root version
+**1,026 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
 These are source counts, not a claim about a deployed release.
@@ -814,7 +814,7 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig compact <session>` | — | `--json` |
+| `rig compact <session>` | — | `--json`<br>`--skip-map`<br>`--cancel`<br>`--state` |
 
 ### heartbeat
 

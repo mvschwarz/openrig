@@ -1306,6 +1306,11 @@ edges: []
     expect(result.status).toBe("completed");
     expect(result.rigId).toBe("rig-pod-1");
     expect(mockPodInstantiator.instantiate).toHaveBeenCalledTimes(1);
+
+    // The run records the rig it produced, as the flat-spec path does, so the launch spec can be traced to the rig.
+    const run = db.prepare("SELECT status, rig_id, source_ref FROM bootstrap_runs WHERE id = ?")
+      .get(result.runId) as { status: string; rig_id: string | null; source_ref: string };
+    expect(run).toEqual({ status: "completed", rig_id: "rig-pod-1", source_ref: specPath });
   });
 
   // --- Conveyor-Trust Minimal Fix (OPR.0.3.2.CT) — guard verdict
@@ -1392,6 +1397,9 @@ edges: []
     expect(detail.attentionNodes[0]!.logicalId).toBe("dev.qa");
     expect(detail.attentionNodes[0]!.sessionName).toBe("dev-qa@pod-mixed-rig");
     expect(detail.attentionNodes[0]!.evidence).toBe("trust prompt visible");
+    const run = db.prepare("SELECT status, rig_id FROM bootstrap_runs WHERE id = ?")
+      .get(result.runId) as { status: string; rig_id: string | null };
+    expect(run).toEqual({ status: "partial", rig_id: "rig-mixed-1" });
   });
 
   it("OPR.0.3.2.CT BLOCKER-1: all-launched (no attention, no failed) → status=completed, import_rig=ok (no regression)", async () => {

@@ -40,7 +40,7 @@ import { SeatIdentityStore } from "../domain/seat-identity-store.js";
 import { parseSqliteUtcMs } from "../domain/sqlite-time.js";
 
 const generationCensus = new ProcessCensus({ freshnessMs: 0 }); // coalesce concurrent receipts; recheck each later read
-const generationThreadIds = new CodexThreadIdResolver();
+const generationThreadIds = new CodexThreadIdResolver({ codexHome: process.env.CODEX_HOME || undefined });
 
 function terminalAuthGuard(): MiddlewareHandler {
   return async (c, next) => {

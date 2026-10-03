@@ -5,6 +5,7 @@ import os from "node:os";
 import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
 import type { TmuxAdapter } from "./tmux.js";
+import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -24,6 +25,7 @@ import {
 } from "../domain/codex-thread-id.js";
 import { assessNativeResumeProbe, buildCodexResumeCore, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
+import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { parseSessionName } from "../domain/session-name.js";
@@ -61,6 +63,7 @@ export interface CodexAdapterFsOps {
 export class CodexRuntimeAdapter implements RuntimeAdapter {
   readonly runtime = "codex";
   private tmux: TmuxAdapter;
+  private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: CodexAdapterFsOps;
   private listProcesses: () => CodexProcess[] | Promise<CodexProcess[]>;
   private readThreadIdByPid: (pid: number) => Promise<string | undefined> | string | undefined;
@@ -74,10 +77,13 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // (defaultProfilePreflight, module-private); tests inject a controlled probe
   // so no real codex subprocess runs. Contract not weakened — production uses
   // the real probe by default.
-  private verifyProfilePreflight: (profile: string) => Promise<CodexProfileProbeResult>;
+  private verifyProfilePreflight: (profile: string, cwd: string) => Promise<CodexProfileProbeResult>;
   // #69: whether the installed Codex supports --no-daemon. Startup wires the real probe;
   // absent (unit tests, other embedders) keeps the existing invocation unchanged.
   private detectDaemonSupport?: CodexDaemonSupportDetector;
+  // #275: Codex's own answer on whether the plain floor may get network access. Startup wires the
+  // real reader; absent keeps every invocation unchanged.
+  private readNetworkDefault?: CodexNetworkDefaultReader;
   // Issue #121: git metadata dirs for the fresh-launch `--add-dir`s (a linked worktree's `.git` is a file).
   // Default = the real resolver; tests may inject a controlled one.
   private resolveGitAddDirs: CodexGitAddDirResolver;
@@ -89,31 +95,37 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   constructor(deps: {
     tmux: TmuxAdapter;
+    seatLaunchEnvironment?: SeatLaunchEnvironment;
     fsOps: CodexAdapterFsOps;
     listProcesses?: () => CodexProcess[] | Promise<CodexProcess[]>;
     readThreadIdByPid?: (pid: number) => Promise<string | undefined> | string | undefined;
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
     activityRelayPath?: string;
+    /** Explicit CODEX_HOME; absent preserves the legacy OS/PID home behavior. */
     codexHome?: string;
     /** Match the daemon's prerequisite probe even if the pane's login shell rewrites PATH. */
     launchPath?: string;
     verifyProfilePreflight?: (profile: string) => Promise<CodexProfileProbeResult>;
     detectDaemonSupport?: CodexDaemonSupportDetector;
+    readNetworkDefault?: CodexNetworkDefaultReader;
     resolveGitAddDirs?: CodexGitAddDirResolver;
   }) {
     this.tmux = deps.tmux;
+    this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.codexHome = deps.codexHome;
     this.launchPath = deps.launchPath;
     this.detectDaemonSupport = deps.detectDaemonSupport;
+    this.readNetworkDefault = deps.readNetworkDefault;
     this.resolveGitAddDirs = deps.resolveGitAddDirs ?? resolveCodexGitAddDirs;
     this.activityRelayPath = deps.activityRelayPath;
     this.listProcesses = deps.listProcesses ?? defaultListProcesses;
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid) => this.readThreadIdFromLogs(pid));
     this.resolveHomeDirByPid = deps.resolveHomeDirByPid ?? defaultResolveHomeDirByPid;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.verifyProfilePreflight = deps.verifyProfilePreflight ?? defaultProfilePreflight;
+    this.verifyProfilePreflight = deps.verifyProfilePreflight
+      ?? ((profile, cwd) => defaultProfilePreflight(profile, this.codexHome ? { cwd, codexHome: this.codexHome, launchPath: this.launchPath } : undefined));
   }
 
   /**
@@ -347,7 +359,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     // `codex -p <profile> resume` failure. An absent .config.toml passes
     // (Codex default-layers it; advisor Option B).
     if (profile) {
-      const probeResult = await this.verifyProfilePreflight(profile);
+      const probeResult = await this.verifyProfilePreflight(profile, binding.cwd);
       if (!probeResult.ok) {
         return {
           ok: false,
@@ -364,6 +376,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
     const daemonOptOut = daemonSupport?.kind === "supported";
     const daemonArg = daemonOptOut ? " --no-daemon" : "";
+    // #275: on the plain floor, network access unless Codex reports an opt-out or policy.
+    const networkArg = await codexNetworkDefaultArg(this.readNetworkDefault, appliedLaunch, binding.cwd, opts.name);
 
     // Fork branch: `codex fork <parent_thread_id>`. Captures the NEW thread id
     // post-fork. Parent thread id is NOT persisted onto the new seat record
@@ -383,8 +397,10 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // -s danger-full-access on every seat; otherwise the named profile, or OpenRig's explicit
       // -s workspace-write floor flag.
       // 0.5.2-07 A2-3: the FORK path threads the SPEC model too (fork-instantiate reverted it before).
-      const cmd = `codex${daemonArg}${postureArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
-      const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${cmd}` : cmd);
+      const cmd = `codex${daemonArg}${postureArg}${networkArg}${modelArg}${effortArg} fork${queueStateDirArg} ${shellQuote(parentId)}`;
+      const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.seatLaunchEnvironment
+        ? await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
+        : this.launchCommand(cmd));
       if (!textResult.ok) {
         return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
       }
@@ -411,10 +427,12 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const cmd = opts.resumeToken
       // 0.5.2-07 A2-3: the pod-aware RESUME path threads the SPEC model too (reverted before — the
       // grounding map assumed codex parity with the claude adapter, but only fresh emitted -m).
-      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, postureArg, daemonOptOut, effort)
-      : `codex${daemonArg}${postureArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}${effortArg}`;
+      ? buildCodexResumeCore(opts.resumeToken, profile, false, queueStateDirArg.trim() || undefined, binding.launchPosture, model, `${postureArg}${networkArg}`, daemonOptOut, effort)
+      : `codex${daemonArg}${postureArg}${networkArg} -C ${shellQuote(binding.cwd)}${gitDirArg}${queueStateDirArg}${modelArg}${effortArg}`;
 
-    const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.launchPath ? `env PATH=${shellQuote(this.launchPath)} ${cmd}` : cmd);
+    const textResult = await this.tmux.sendShellCommand(binding.tmuxSession, this.seatLaunchEnvironment
+        ? await this.seatLaunchEnvironment.command(binding.tmuxSession, cmd, { codexCwd: binding.cwd, nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
+        : this.launchCommand(cmd));
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }
@@ -878,9 +896,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private async readThreadIdFromLogs(pid: number): Promise<string | undefined> {
     return readCodexThreadIdFromCandidateHomes(
       pid,
-      [await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
-      (path) => this.fs.exists(path)
+      this.codexHome ? [] : [await this.resolveHomeDirByPid(pid), this.fs.homedir, os.homedir()],
+      (path) => this.fs.exists(path),
+      this.codexHome,
     );
+  }
+
+  private launchCommand(command: string): string {
+    const env = [this.launchPath ? `PATH=${shellQuote(this.launchPath)}` : "", this.codexHome ? `CODEX_HOME=${shellQuote(this.codexHome)}` : ""].filter(Boolean);
+    return env.length ? `env ${env.join(" ")} ${command}` : command;
   }
 }
 
@@ -1467,14 +1491,16 @@ function escapeRegExp(value: string): string {
 // production, execFn runs the real `codex -p <profile> mcp list` via execSync
 // (utf-8, piped stdio, 10s timeout). Injected as the adapter's default
 // verifyProfilePreflight; tests substitute a controlled stub.
-async function defaultProfilePreflight(profile: string): Promise<CodexProfileProbeResult> {
+async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
   const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
   const { execSync } = await import("node:child_process");
   const execFn = async (cmd: string) =>
     runSyncSite("codex.runtime.profile_preflight", () =>
-      execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 })
+      execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000,
+        ...(selected ? { cwd: selected.cwd, env: { ...process.env, CODEX_HOME: selected.codexHome, ...(selected.launchPath ? { PATH: selected.launchPath } : {}) } } : {}),
+      })
     );
-  return verifyCodexProfileLoads(profile, execFn);
+  return verifyCodexProfileLoads(profile, execFn, undefined, selected?.codexHome);
 }
 
 // Exported for unit test (B12-T): the REAL async sampling path — the anti-vacuity test drives

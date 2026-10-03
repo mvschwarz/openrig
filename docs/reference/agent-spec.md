@@ -269,7 +269,7 @@ Each array contains resource IDs. These can be:
 - **Unqualified** (`vault-user`) — resolves against the spec's own `resources` first, then imported specs
 - **Qualified** (`shared:openrig-user`) — resolves against a specific imported spec's resources
 
-The `uses` categories are: `skills`, `guidance`, `subagents`, `hooks`, `runtime_resources`.
+The `uses` categories are: `skills`, `guidance`, `subagents`, `plugins`, `hooks`, `runtime_resources`.
 
 ---
 
@@ -299,6 +299,40 @@ resources:
 
 Resources are the available pool. They are NOT automatically delivered to agents — profiles select them via `uses`. The only resources delivered are those that the active profile's `uses` block references.
 
+### Plugin paths
+
+A local plugin's `source.path` supports these forms:
+
+| Form | Resolution |
+|------|------------|
+| `/absolute/plugin` | The exact absolute path. |
+| `~/plugins/example` or `~` | The operating-system user home. |
+| `openrig-home:plugins/openrig-core` | Relative to the daemon's configured OpenRig home, including a non-default `OPENRIG_HOME`. |
+| `plugins/example` or `./plugins/example` | Relative to the agent spec directory. |
+
+For a plugin seeded by OpenRig, use the home-relative form so the spec selects
+that daemon's copy:
+
+```yaml
+resources:
+  plugins:
+    - id: openrig-core
+      source:
+        kind: local
+        path: "openrig-home:plugins/openrig-core"
+profiles:
+  default:
+    uses:
+      plugins: [openrig-core]
+```
+
+`openrig-home:` is resolved by the daemon from its configured state root. It is
+not shell interpolation and does not consult a seat's shell startup files. Its
+suffix must be relative. Existing absolute, tilde and spec-relative paths keep
+their meaning; `~user` is still a literal relative segment, not a user lookup.
+This form requires a daemon version that supports it; keep bundles using it
+pinned to such a version.
+
 ### Resource Categories
 
 | Category | Fields | Description |
@@ -306,6 +340,7 @@ Resources are the available pool. They are NOT automatically delivered to agents
 | `skills` | `id`, `path` | Skill directories containing a SKILL.md. Delivered via `skill_install`. |
 | `guidance` | `id`, `path`, `target`*, `merge`* | Guidance files. Delivered via `guidance_merge` into CLAUDE.md/AGENTS.md. |
 | `subagents` | `id`, `path` | Subagent definitions. |
+| `plugins` | `id`, `source` | Local plugin directories; selected with `uses.plugins`. |
 | `hooks` | `id`, `path`, `runtimes`* | Hook scripts. Optional `runtimes` array restricts to specific runtimes. |
 | `runtime_resources` | `id`, `path`, `runtime`, `type` | Runtime-specific resources. `runtime` and `type` are required. |
 

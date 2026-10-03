@@ -212,8 +212,6 @@ Examples:
             db: resolvedConfig.db.path,
             transcriptsEnabled: resolvedConfig.transcripts.enabled,
             transcriptsPath: resolvedConfig.transcripts.path,
-            transcriptsLines: resolvedConfig.transcripts.lines,
-            transcriptsPollIntervalSeconds: resolvedConfig.transcripts.pollIntervalSeconds,
             workspaceRoot: resolvedConfig.workspace.root,
             contextRoot: resolvedConfig.context.root,
             skillsRoot: resolvedConfig.skills.root,
@@ -270,9 +268,10 @@ Examples:
       let allSummaries: RigSummary[];
       try {
         const res = await client.get<RigSummary[]>("/api/rigs/summary");
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         allSummaries = res.data ?? [];
-      } catch {
-        console.error("Failed to list rigs. Daemon may not be ready.");
+      } catch (err) {
+        console.error(`Failed to list rigs: ${err instanceof Error ? err.message : String(err)}. Daemon may not be ready.`);
         process.exitCode = 1;
         return;
       }

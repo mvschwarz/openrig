@@ -103,6 +103,9 @@ export class ContextPackLibraryService {
       }
       for (const dirent of dirents) {
         if (!dirent.isDirectory()) continue;
+        // Installer staging stays on the library filesystem for atomic rename.
+        // This reserved prefix cannot be a valid pack ref; never scan its partial tree.
+        if (dirent.name.startsWith(".tmp-add-")) continue;
         const child = join(dir, dirent.name);
         if (existsSync(join(child, "manifest.yaml"))) {
           found.push({ packDir: child, ref: relative(rootPath, child).split(sep).join("/") });

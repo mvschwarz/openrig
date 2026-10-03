@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
+import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
 import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
@@ -7,6 +8,7 @@ import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
+import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 
 const CODEX_TYPES = new Set(["codex_id", "codex_last"]);
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -14,13 +16,17 @@ const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 export { type ResumeResult };
 
 interface CodexResumeOptions {
+  seatLaunchEnvironment?: SeatLaunchEnvironment;
   launchPath?: string;
+  codexHome?: string;
   pollMs?: number;
   maxWaitMs?: number;
   sleep?: (ms: number) => Promise<void>;
   exec?: (cmd: string) => Promise<string>;
   /** #69: whether the installed Codex supports --no-daemon; absent keeps the existing invocation. */
   detectDaemonSupport?: CodexDaemonSupportDetector;
+  /** #275: Codex's own answer on the plain floor's network default; absent keeps the existing invocation. */
+  readNetworkDefault?: CodexNetworkDefaultReader;
 }
 
 export class CodexResumeAdapter {
@@ -62,10 +68,12 @@ export class CodexResumeAdapter {
       const execFn = this.options.exec ?? (async (cmd: string) => {
         const { execSync } = await import("node:child_process");
         return runSyncSite("codex.resume.profile_preflight", () =>
-          execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 })
+          execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000,
+            ...(this.options.codexHome ? { cwd, env: { ...process.env, CODEX_HOME: this.options.codexHome, ...(this.options.launchPath ? { PATH: this.options.launchPath } : {}) } } : {}),
+          })
         );
       });
-      const probeResult = await verifyCodexProfileLoads(codexConfigProfile, execFn);
+      const probeResult = await verifyCodexProfileLoads(codexConfigProfile, execFn, undefined, this.options.codexHome);
       if (!probeResult.ok) {
         return {
           ok: false,
@@ -84,6 +92,7 @@ export class CodexResumeAdapter {
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
     const postureArg = codexPostureArg(profileArg, process.env, resolvedPosture);
     const appliedLaunch = observeCodexSandbox(postureArg);
+    const networkArg = await codexNetworkDefaultArg(this.options.readNetworkDefault, appliedLaunch, cwd, tmuxSessionName);
     const cmd = buildCodexResumeCore(
       resumeToken ?? "",
       codexConfigProfile,
@@ -91,13 +100,15 @@ export class CodexResumeAdapter {
       undefined,
       resolvedPosture,
       model,
-      postureArg,
+      `${postureArg}${networkArg}`,
       daemonSupport?.kind === "supported",
       effort,
     );
 
-    const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.launchPath
-      ? `env PATH=${shellQuote(this.options.launchPath)} ${cmd}` : cmd);
+    const launchEnv = [this.options.launchPath ? `PATH=${shellQuote(this.options.launchPath)}` : "", this.options.codexHome ? `CODEX_HOME=${shellQuote(this.options.codexHome)}` : ""].filter(Boolean);
+    const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.seatLaunchEnvironment
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { codexCwd: cwd, runtime: "codex" })
+      : launchEnv.length ? `env ${launchEnv.join(" ")} ${cmd}` : cmd);
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };
     }

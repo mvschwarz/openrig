@@ -91,7 +91,13 @@ interface SkippedEntry extends BasePlanEntry {
   reason: string;
 }
 
+interface IncompleteRig {
+  rig: string;
+  status: number | "invalid_inventory" | "request_failed";
+}
+
 interface CompactPlanResult {
+  incompleteRigs: IncompleteRig[];
   summary: {
     totalSeats: number;
     claudeSeats: number;
@@ -296,7 +302,7 @@ function analyzeNode(node: NodeEntry, thresholds: CompactPlanThresholds): Candid
   };
 }
 
-function buildPlan(nodes: NodeEntry[], thresholds = defaultThresholds()): CompactPlanResult {
+function buildPlan(nodes: NodeEntry[], thresholds = defaultThresholds(), incompleteRigs: IncompleteRig[] = []): CompactPlanResult {
   const candidates: CandidateEntry[] = [];
   const blocked: BlockedEntry[] = [];
   const skipped: SkippedEntry[] = [];
@@ -315,6 +321,7 @@ function buildPlan(nodes: NodeEntry[], thresholds = defaultThresholds()): Compac
   });
 
   return {
+    incompleteRigs,
     summary: {
       totalSeats: nodes.length,
       claudeSeats: nodes.filter(isClaude).length,
@@ -344,6 +351,9 @@ function buildPlan(nodes: NodeEntry[], thresholds = defaultThresholds()): Compac
 
 function printHuman(plan: CompactPlanResult): void {
   console.log("READ-ONLY PLAN - does not compact");
+  if (plan.incompleteRigs.length > 0) {
+    console.error(`Warning: partial plan; incomplete rigs: ${plan.incompleteRigs.map(({ rig, status }) => `${rig} (${typeof status === "number" ? `HTTP ${status}` : status})`).join(", ")}`);
+  }
   console.log("Policy: read_only_plan; one-seat-at-a-time marshal triage; autoCompactAllowed=false; explicit authorization required.");
   console.log(`Thresholds: ${plan.policy.thresholdTokens} estimated tokens; ${plan.policy.thresholdPercent}% when context window size is missing.`);
   console.log(`Summary: ${plan.summary.candidateCount} candidates | ${plan.summary.blockedCount} blocked | ${plan.summary.skippedCount} skipped`);
@@ -420,7 +430,13 @@ Examples:
 
       try {
         const psResult = await client.get<RigEntry[]>("/api/ps");
-        const rigs = psResult.data ?? [];
+        if (psResult.status !== 200) {
+          throw new Error(`Rig inventory returned HTTP ${psResult.status}`);
+        }
+        if (!Array.isArray(psResult.data)) {
+          throw new Error("Rig inventory is not an array");
+        }
+        const rigs = psResult.data;
         const targetRigs = opts.rig ? rigs.filter((rig) => rig.name === opts.rig) : rigs;
 
         if (opts.rig && targetRigs.length === 0) {
@@ -450,19 +466,35 @@ Examples:
         }
 
         const allNodes: NodeEntry[] = [];
+        const incompleteRigs: IncompleteRig[] = [];
         for (const rig of targetRigs) {
-          const nodesResult = await client.get<NodeEntry[]>(`/api/rigs/${rig.rigId}/nodes`);
-          if (Array.isArray(nodesResult.data)) {
+          let failureStatus: IncompleteRig["status"] = "request_failed";
+          try {
+            const nodesResult = await client.get<NodeEntry[]>(`/api/rigs/${rig.rigId}/nodes`);
+            failureStatus = nodesResult.status;
+            if (nodesResult.status !== 200) {
+              throw new Error(`Node inventory for rig "${rig.name}" returned HTTP ${nodesResult.status}`);
+            }
+            failureStatus = "invalid_inventory";
+            if (!Array.isArray(nodesResult.data)) {
+              throw new Error(`Node inventory for rig "${rig.name}" is not an array`);
+            }
             allNodes.push(...nodesResult.data);
+          } catch (err) {
+            // An explicitly selected rig has no useful partial inventory. For
+            // fleet plans, keep healthy seats while making every omission visible.
+            if (opts.rig) throw err;
+            incompleteRigs.push({ rig: rig.name, status: failureStatus });
           }
         }
 
-        const plan = buildPlan(allNodes, thresholds.value);
+        const plan = buildPlan(allNodes, thresholds.value, incompleteRigs);
         if (opts.json) {
           console.log(JSON.stringify(plan, null, 2));
         } else {
           printHuman(plan);
         }
+        if (incompleteRigs.length > 0) process.exitCode = 1;
       } catch (err) {
         console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
         console.error("Fix: check daemon status with: rig daemon status");

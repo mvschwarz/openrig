@@ -35,10 +35,11 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       }, 503);
     }
 
-    const body = await c.req.json<{ session?: string }>().catch(() => ({} as { session?: string }));
+    const body = await c.req.json<{ session?: string; skipMap?: boolean }>().catch(() => ({} as { session?: string; skipMap?: boolean }));
     if (!body.session) {
       return c.json({ ok: false, error: "Missing required field: session" }, 400);
     }
+    if (body.skipMap !== undefined && typeof body.skipMap !== "boolean") return c.json({ ok: false, error: "skipMap must be boolean" }, 400);
     const sessionName = body.session;
 
     // Ambiguity / existence check — mirror /send (409 ambiguous, 404 not found).
@@ -80,7 +81,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       // This is the OPERATOR's manual-trigger verb (bearer-auth'd); the resulting sequence is
       // drain-exempt while auto-compaction is disabled. GHOST-STAGE fix (a) actor-gate: automation
       // paths that do NOT set this are NOT exempt, so they cannot launder a drain past the gate.
-      { operatorInitiated: true },
+      { operatorInitiated: true, skipMap: body.skipMap === true },
     );
 
     if (outcome.triggered) {
@@ -111,6 +112,17 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     }, status);
   });
 
+  router.post("/cancel", async (c) => {
+    const enforcer = c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined;
+    const transport = c.get("sessionTransport" as never) as SessionTransport | undefined;
+    if (!enforcer || !transport) return c.json({ ok: false, reason: "compaction_unavailable" }, 503);
+    const body = await c.req.json<{ session?: string }>().catch(() => ({} as { session?: string }));
+    if (!body.session) return c.json({ ok: false, error: "Missing required field: session" }, 400);
+    const resolved = await transport.resolveSessions({ session: body.session });
+    if (!resolved.ok) return c.json({ ok: false, error: resolved.error }, resolved.code === "ambiguous" ? 409 : 404);
+    return c.json({ ok: true, session: body.session, preparation: enforcer.cancelPreparation(body.session) });
+  });
+
   router.get("/state", (c) => {
     const enforcer = c.get("compactionEnforcer" as never) as ClaudeCompactionEnforcer | undefined;
     if (!enforcer) {
@@ -120,7 +132,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!session) {
       return c.json({ ok: false, error: "Missing required query param: session" }, 400);
     }
-    return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session) });
+    return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation: enforcer.getPreparationState(session) });
   });
 
   return router;
@@ -128,6 +140,12 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
 
 function manualReasonMessage(sessionName: string, reason: string): string {
   switch (reason) {
+    case "preparation_incomplete":
+      return `Preparation (restore map and idle wait) did not finish in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
+    case "preparation_cancelled":
+      return `Preparation for '${sessionName}' was cancelled; no further compact is armed.`;
+    case "disabled":
+      return `Preparation for '${sessionName}' ended when the policy was disabled; enabling it does not revive that attempt.`;
     case "runtime_filter":
       return `Refused: '${sessionName}' is not a Claude (claude-code) seat. Manual compaction runs the Claude guided lifecycle only.`;
     case "no_usage_data":

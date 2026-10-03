@@ -1283,6 +1283,25 @@ describe("rig queue CLI", () => {
     }
   });
 
+  it("recipe command 'rig queue list --destination <seat>' parses successfully and rejects --session", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+
+    // The generated recipe from queue-stuck-sweep uses --destination <seat>
+    await program.parseAsync(["node", "rig", "queue", "list", "--destination", "next@r"]);
+    const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
+    expect(call).toBeDefined();
+    expect(call!.path).toContain("destinationSession=next%40r");
+
+    // --session is not an option on queue list and must fail parsing
+    const failProgram = createProgram({ queueDeps: deps });
+    failProgram.exitOverride();
+    await expect(
+      failProgram.parseAsync(["node", "rig", "queue", "list", "--session", "next@r"])
+    ).rejects.toThrow();
+  });
+
   it("list --mine scopes to caller session", async () => {
     const saved = process.env.OPENRIG_SESSION_NAME;
     process.env.OPENRIG_SESSION_NAME = "dev1-driver@openrig-delivery";

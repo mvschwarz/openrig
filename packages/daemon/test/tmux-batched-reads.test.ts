@@ -24,7 +24,7 @@ function fakeExec() {
     const m = cmd.match(/^tmux display-message -p -t (\S+) ["']#\{(\w+)\}["']$/);
     if (!m) throw new Error(`unexpected: ${cmd}`);
     const target = unquote(m[1]!), field = m[2]!;
-    if (field === "window_activity") { const w = WINDOWS.find(([s, a]) => s === target && a === 1); if (!w) throw new Error("no session"); return `${w[2]}\n`; }
+    if (field === "window_activity") { const w = WINDOWS.find(([s, a]) => s === target.replace(/^=/, "").replace(/:$/, "") && a === 1); if (!w) throw new Error("no session"); return `${w[2]}\n`; }
     const p = PANES.find(([id]) => id === target); if (!p) throw new Error("no pane");
     return field === "pane_pid" ? `${p[1]}\n` : `${p[2]}\n`;
   });
@@ -106,7 +106,7 @@ describe("SeatActivityService sweep with the batch", () => {
     expect(per.calls).toHaveLength(5);                                   // one display-message per seat before
     expect(bat.calls.filter((c) => c.startsWith("tmux list-windows -a"))).toHaveLength(1);
     // misses fall back: s3 (no valid timestamp) and gone@rig (no such session); s1, s2, s4 come from the batch
-    expect(bat.calls.filter((c) => c.startsWith("tmux display-message")).map((c) => c.match(/-t (\S+)/)![1]).map(unquote).sort()).toEqual(["gone@rig", "s3@rig"]);
+    expect(bat.calls.filter((c) => c.startsWith("tmux display-message")).map((c) => c.match(/-t (\S+)/)![1]).map(unquote).sort()).toEqual(["=gone@rig:", "=s3@rig:"]);
     expect(bat.out["s1@rig"]!.isActiveWithinWindow).toBe(true);
     expect(bat.out["s2@rig"]!.isActiveWithinWindow).toBe(false);
   });

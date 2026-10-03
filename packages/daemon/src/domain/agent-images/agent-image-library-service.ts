@@ -13,8 +13,8 @@
 // Storage filesystem-canonical at ~/.openrig/agent-images/<name>/ +
 // workspace-local .openrig/agent-images/<name>/. NO new SQLite tables.
 
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
-import { join, relative } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync, unlinkSync, rmSync } from "node:fs";
+import { join, relative, dirname } from "node:path";
 import { parseAgentImageManifest } from "./manifest-parser.js";
 import {
   AgentImageError,
@@ -316,66 +316,82 @@ export class AgentImageLibraryService {
         { name: manifest.name, targetDir },
       );
     }
-    mkdirSync(targetDir, { recursive: true });
-    // Emit manifest as YAML — write camelCase keys mapped to snake_case
-    // for forward-compat with operator hand-edits.
-    const yamlLines = [
-      `name: ${manifest.name}`,
-      `version: ${manifest.version}`,
-      `runtime: ${manifest.runtime}`,
-      `source_seat: ${quoteIfNeeded(manifest.sourceSeat)}`,
-      `source_session_id: ${quoteIfNeeded(manifest.sourceSessionId)}`,
-      `source_resume_token: ${quoteIfNeeded(manifest.sourceResumeToken)}`,
-      `created_at: ${quoteIfNeeded(manifest.createdAt)}`,
-    ];
-    // Persist sourceCwd to manifest YAML so the
-    // Use-as-starter snippet can emit `cwd: <source_cwd>` from the
-    // library entry. Omitted when capture-time cwd was unknown.
-    if (manifest.sourceCwd) {
-      yamlLines.push(`source_cwd: ${quoteIfNeeded(manifest.sourceCwd)}`);
-    }
-    if (manifest.notes) {
-      yamlLines.push(`notes: |`);
-      for (const line of manifest.notes.split("\n")) yamlLines.push(`  ${line}`);
-    }
-    if (typeof manifest.estimatedTokens === "number") yamlLines.push(`estimated_tokens: ${manifest.estimatedTokens}`);
-    if (manifest.lineage && manifest.lineage.length > 0) {
-      yamlLines.push("lineage:");
-      for (const l of manifest.lineage) yamlLines.push(`  - ${quoteIfNeeded(l)}`);
-    }
-    yamlLines.push("files:");
-    for (const f of manifest.files) {
-      yamlLines.push(`  - path: ${quoteIfNeeded(f.path)}`);
-      yamlLines.push(`    role: ${quoteIfNeeded(f.role)}`);
-      if (f.summary) yamlLines.push(`    summary: ${quoteIfNeeded(f.summary)}`);
-    }
-    writeFileSync(join(targetDir, "manifest.yaml"), yamlLines.join("\n") + "\n", "utf-8");
-    // Empty stats — fork count starts at 0; lineage from manifest.
-    const stats: AgentImageStats = {
-      forkCount: 0,
-      lastUsedAt: null,
-      estimatedSizeBytes: 0,
-      lineage: manifest.lineage ? [...manifest.lineage] : [],
-    };
-    writeFileSync(join(targetDir, STATS_FILENAME), JSON.stringify(stats, null, 2) + "\n", "utf-8");
-    for (const [relPath, content] of fileContents) {
+    for (const relPath of fileContents.keys()) {
       if (relPath.includes("..") || relPath.startsWith("/")) {
         throw new AgentImageError(
           "manifest_invalid",
           `install file path '${relPath}' must be relative inside the image (no '..', no leading '/')`,
         );
       }
-      const abs = join(targetDir, relPath);
-      mkdirSync(join(abs, ".."), { recursive: true });
-      writeFileSync(abs, content, "utf-8");
     }
-    return targetDir;
+    mkdirSync(dirname(targetDir), { recursive: true });
+    // Exclusively create the target so failure cleanup owns only this attempt.
+    try { mkdirSync(targetDir); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      throw new AgentImageError("image_referenced",
+        `agent image directory already exists at ${targetDir}; choose a different name or remove the existing dir`,
+        { name: manifest.name, targetDir });
+    }
+    let installed = false;
+    try {
+      // Emit manifest as YAML — write camelCase keys mapped to snake_case
+      // for forward-compat with operator hand-edits.
+      const yamlLines = [
+        `name: ${quoteYamlString(manifest.name)}`,
+        `version: ${quoteYamlString(manifest.version)}`,
+        `runtime: ${quoteYamlString(manifest.runtime)}`,
+        `source_seat: ${quoteYamlString(manifest.sourceSeat)}`,
+        `source_session_id: ${quoteYamlString(manifest.sourceSessionId)}`,
+        `source_resume_token: ${quoteYamlString(manifest.sourceResumeToken)}`,
+        `created_at: ${quoteYamlString(manifest.createdAt)}`,
+      ];
+      // Persist sourceCwd to manifest YAML so the
+      // Use-as-starter snippet can emit `cwd: <source_cwd>` from the
+      // library entry. Omitted when capture-time cwd was unknown.
+      if (manifest.sourceCwd) {
+        yamlLines.push(`source_cwd: ${quoteYamlString(manifest.sourceCwd)}`);
+      }
+      if (manifest.notes !== undefined) {
+        yamlLines.push(`notes: ${quoteYamlString(manifest.notes)}`);
+      }
+      if (typeof manifest.estimatedTokens === "number") yamlLines.push(`estimated_tokens: ${manifest.estimatedTokens}`);
+      if (manifest.lineage && manifest.lineage.length > 0) {
+        yamlLines.push("lineage:");
+        for (const l of manifest.lineage) yamlLines.push(`  - ${quoteYamlString(l)}`);
+      }
+      yamlLines.push("files:");
+      for (const f of manifest.files) {
+        yamlLines.push(`  - path: ${quoteYamlString(f.path)}`);
+        yamlLines.push(`    role: ${quoteYamlString(f.role)}`);
+        if (f.summary) yamlLines.push(`    summary: ${quoteYamlString(f.summary)}`);
+      }
+      // Empty stats — fork count starts at 0; lineage from manifest.
+      const stats: AgentImageStats = {
+        forkCount: 0,
+        lastUsedAt: null,
+        estimatedSizeBytes: 0,
+        lineage: manifest.lineage ? [...manifest.lineage] : [],
+      };
+      writeFileSync(join(targetDir, STATS_FILENAME), JSON.stringify(stats, null, 2) + "\n", "utf-8");
+      for (const [relPath, content] of fileContents) {
+        const abs = join(targetDir, relPath);
+        mkdirSync(join(abs, ".."), { recursive: true });
+        writeFileSync(abs, content, "utf-8");
+      }
+      // The scanner's discovery marker is published only after every member.
+      writeFileSync(join(targetDir, "manifest.yaml"), yamlLines.join("\n") + "\n", "utf-8");
+      installed = true;
+      return targetDir;
+    } finally {
+      if (!installed) {
+        try { rmSync(targetDir, { recursive: true, force: true }); } catch { /* preserve the write error */ }
+      }
+    }
   }
 }
 
-function quoteIfNeeded(s: string): string {
-  if (s === "" || /[:#\n@\\\s]/.test(s) || /^[!&*<>%`?,|\[\]{}'"]/.test(s)) {
-    return JSON.stringify(s);
-  }
-  return s;
+function quoteYamlString(s: string): string {
+  // JSON string literals are valid YAML scalars and prevent implicit coercion.
+  return JSON.stringify(s);
 }

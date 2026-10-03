@@ -534,7 +534,7 @@ describe("Starter specs", () => {
       id: "openrig-core",
       source: {
         kind: "local",
-        path: "~/.openrig/plugins/openrig-core",
+        path: "openrig-home:plugins/openrig-core",
       },
     });
   });

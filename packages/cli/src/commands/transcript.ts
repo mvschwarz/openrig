@@ -183,11 +183,11 @@ function renderTranscript(data: Record<string, unknown>, useGrep: boolean): void
     if (content) {
       // Print each line via console.log for consistent capture in tests and terminal
       const lines = content.split("\n");
+      // console.log supplies the final newline; keep every other empty line.
+      if (lines.at(-1) === "") lines.pop();
       for (const line of lines) {
-        if (line) {
-          console.log(line);
-          printed++;
-        }
+        console.log(line);
+        if (line) printed++;
       }
     }
     // OPR.0.5.3.1 item 4 — point-of-use hint: a near-empty transcript for a Claude

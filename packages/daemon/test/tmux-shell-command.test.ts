@@ -14,12 +14,33 @@ function fixture(fail?: string, scriptPath = "/tmp/launch 'quoted'.sh") {
   const exec = vi.fn(async (command: string) => {
     commands.push(command);
     if (fail && command.includes(fail)) throw new Error("transport refused");
+    if (command.includes("#{pane_current_command}")) return "bash";
     return "";
   });
   return { adapter: new TmuxAdapter(exec, fileOps), fileOps, files, commands, scriptPath };
 }
 
 describe("shell launch transport", () => {
+  it.each(["fish", "nu", "unknown", "pwsh", null])("retains /bin/sh staging when the pane reports %s", async shell => {
+    const f = fixture();
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
+  });
+
+  it("retains /bin/sh staging when the pane command read fails", async () => {
+    const f = fixture("display-message");
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
+  });
+
+  it.each(["bash", "zsh", "sh", "dash", "ksh", "-bash"])("sources in the pane only for a reported POSIX shell (%s)", async shell => {
+    const f = fixture();
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`( . '/tmp/launch '\"'\"'quoted'\"'\"'.sh' )`);
+  });
+
   it("keeps long PATH/quoted arguments out of terminal input and retains script until consumption", async () => {
     const f = fixture();
     const command = `env PATH='${"p".repeat(4096)}' codex -s workspace-write resume 'same-native-id' -m 'chosen-model'`;
@@ -34,9 +55,22 @@ describe("shell launch transport", () => {
     expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
   });
 
-  it.each(["load-buffer", "paste-buffer", "'Enter'"])("removes the unconsumed script when %s fails", async failure => {
+  it("sources a long classic command in a pane-shell subshell using the same short-input bound", async () => {
+    const f = fixture();
+    const command = `OPENRIG_HOME='/instance' claude --model '${"m".repeat(4096)}'`;
+    expect(await f.adapter.sendShellCommand("pane", command, undefined, { sourceInPane: true })).toEqual({ ok: true });
+    const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
+    expect(invocation).toBe(`( . '/tmp/launch '\"'\"'quoted'\"'\"'.sh' )`);
+    expect(Buffer.byteLength(invocation)).toBeLessThan(512);
+    expect(f.files.get(f.scriptPath)).toBe(`/bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh'\n${command}\n`);
+    expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
+  });
+
+  it.each(["load-buffer", "paste-buffer", "'Enter'"].flatMap(failure => [
+    { failure, sourceInPane: false }, { failure, sourceInPane: true },
+  ]))("removes the unconsumed script when $failure fails (source=$sourceInPane)", async ({ failure, sourceInPane }) => {
     const f = fixture(failure);
-    expect(await f.adapter.sendShellCommand("pane", "codex resume 'same-id'")).toMatchObject({ ok: false });
+    expect(await f.adapter.sendShellCommand("pane", "inert launch", undefined, { sourceInPane })).toMatchObject({ ok: false });
     expect(f.files.size).toBe(0);
     expect(f.commands.some(command => command.endsWith("'C-c'"))).toBe(failure === "'Enter'");
     expect(f.commands.some(command => command.endsWith("'Enter'"))).toBe(failure === "'Enter'");

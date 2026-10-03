@@ -1613,8 +1613,18 @@ export class PodRigInstantiator {
       const cleanup = async () => {
         if (this.deps.tmuxAdapter) {
           for (const sessionName of launchedSessionNames) {
+            if (this.deps.tmuxAdapter.probeSession) {
+              let probe;
+              try {
+                probe = await this.deps.tmuxAdapter.probeSession(sessionName);
+              } catch {
+                return; // Unknown state: retain the rig for recovery.
+              }
+              if (probe.state === "absent") continue;
+              if (probe.state !== "present") return;
+            }
             const stopped = await this.deps.tmuxAdapter.killSession(sessionName);
-            if (!stopped.ok) return; // Do not forget a still-protected/uncertain session.
+            if (!stopped.ok && (stopped.code !== "session_not_found" || /no server running/i.test(stopped.message ?? ""))) return;
           }
         }
         this.deps.rigRepo.deleteRig(rigId);

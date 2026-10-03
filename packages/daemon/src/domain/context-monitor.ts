@@ -89,6 +89,7 @@ export class ContextMonitor {
   }
 
   private async runPoll(): Promise<void> {
+    this.compactionEnforcer?.reconcilePreparations?.();
     const sessions = this.getEligibleSessions();
     for (const session of sessions) {
       let observed: ContextUsage | null = null;
