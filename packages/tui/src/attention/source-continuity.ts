@@ -19,12 +19,14 @@ function dependsOn(item: AttentionItem, source: string): boolean {
 export function retainAttentionSources(read: AttentionRead, prior?: AttentionRead) {
   const failed = read.sources.filter(s => s.state === "unavailable");
   const affected = (item: AttentionItem) => failed.some(s => dependsOn(item, s.source));
-  const retained = prior?.items.filter(affected) ?? [];
-  const detail = prior?.detail && affected(prior.detail.item) ? prior.detail : null;
+  // An unavailable aggregate can still supply fresh items from its working readers.
+  const currentIds = new Set(read.items.map(item => item.id));
+  const retained = prior?.items.filter(item => affected(item) && !currentIds.has(item.id)) ?? [];
+  const detail = !read.detail && prior?.detail && affected(prior.detail.item) ? prior.detail : null;
   const didRetain = retained.length > 0 || detail !== null;
   return {
     read: !prior || !failed.length ? read : { ...read,
-      items: [...read.items.filter(i => !affected(i)), ...retained],
+      items: [...read.items, ...retained],
       ...(detail ? { detail, detailError: null } : {}),
     },
     errors: failed.map(s => `Feed ${s.source}: ${s.detail}`),

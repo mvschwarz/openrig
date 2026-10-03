@@ -107,7 +107,13 @@ export function attentionRoutes(): Hono {
       // Canonical episodes supply status and observation time, including retained
       // clears. No liveness stream, inferred transition or new retention store.
       const records = service.records().filter(r => r.severity !== "info" && (!r.ceremony || r.ceremony.stage === "confirmed" || r.ceremony.stage === "cleared"));
-      result.sources.push({ source: "health", state: records.length > 200 ? "partial" : "available", detail: "Material canonical episodes (including retained clears), at most 200. Source retention bounds apply; absence is not proof of recovery." });
+      const coverage = service.coverage();
+      const unavailableSource = coverage.some(s => s.status === "unavailable");
+      const partial = coverage.filter(s => s.partial);
+      result.sources.push({ source: "health", state: unavailableSource ? "unavailable" : records.length > 200 || partial.length ? "partial" : "available",
+        detail: ["Material canonical episodes (including retained clears), at most 200. Source retention bounds apply; absence is not proof of recovery.",
+          ...partial.map(s => s.status === "unavailable" ? `${s.source}: unavailable — ${s.reason}`
+            : `${s.source}: partial — evaluated ${s.evaluated} of ${s.total} ${s.unit}; ${s.omitted} omitted (limit ${s.limit}, ${s.order}).`)].join(" ") });
       for (const r of records.slice(0, 200)) {
         const projectId = "projectId" in r.scope ? r.scope.projectId : undefined;
         const p = projects.find(p => p.id === projectId && !p.error);
