@@ -15,6 +15,7 @@ import { observeClaudePaneProcess, type NativeProcessLister } from "../domain/na
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
+import { isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
@@ -143,11 +144,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       (e) => e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks",
     );
     let activityOutcome: ActivityHookOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
-    try {
-      activityOutcome = this.reconcileClaudeActivityHooks(binding.cwd, activityEntries.length > 0);
-    } catch (err) {
-      console.error(`[openrig] claude activity-hook reconcile warning: ${(err as Error).message}`);
-      activityOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
+    if (isFilesystemRoot(binding.cwd)) {
+      console.error(`[openrig] claude activity hooks skipped: cwd '${binding.cwd}' resolves to the filesystem root, not a project workspace`);
+    } else {
+      try {
+        activityOutcome = this.reconcileClaudeActivityHooks(binding.cwd, activityEntries.length > 0);
+      } catch (err) {
+        console.error(`[openrig] claude activity-hook reconcile warning: ${(err as Error).message}`);
+        activityOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
+      }
     }
     // Never claim a resource as PROJECTED when delivery could not happen (missing
     // relay source or a fail-closed malformed settings file): demote to skipped so

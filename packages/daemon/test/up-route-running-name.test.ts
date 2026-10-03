@@ -20,7 +20,7 @@ const POD_YAML = (name: string) => [
   '        agent_ref: "builtin:terminal"',
   '        profile: "none"',
   "        runtime: terminal",
-  "        cwd: /",
+  "        cwd: /tmp",
   "    edges: []",
   "edges: []",
 ].join("\n");
