@@ -576,10 +576,10 @@ export class TmuxAdapter {
    * A file keeps payload bytes out of shell/tmux argv and its size limits.
    *   `-p`  bracket the paste when the receiving application enables that mode.
    *   `-r`  preserve raw LF. tmux's default paste-buffer replaces every LF with
-   *         CR, and CR is SUBMIT in the Claude/Codex TUIs - a
+   *         CR, and CR (= `C-m` = Enter) is SUBMIT in the Claude/Codex TUIs - a
    *         default paste of a multi-line pack would submit on every newline.
    *   `-d`  drop the buffer after a successful paste.
-   * The single trailing submit stays the caller's separate `sendKeys(["Enter"])`.
+   * The single trailing submit stays the caller's separate `sendKeys(["C-m"])`.
    * Cleanup unlinks the temp file in `finally`; if the buffer was loaded but the
    * paste failed (e.g. missing target), an explicit `delete-buffer` runs so no
    * buffer leaks. Unique temp + buffer names per call keep parallel `rig up`
@@ -687,6 +687,28 @@ export class TmuxAdapter {
     try {
       await this.run(["tmux", "send-keys", "-t", target, ...keys],
         `tmux send-keys -t ${shellQuote(target)} ${keys.map(shellQuote).join(" ")}`);
+      return { ok: true };
+    } catch (err) {
+      return classifyWriteError(err);
+    }
+  }
+
+  /**
+   * Type literal text as keystrokes — for driving agent-TUI choice dialogs.
+   * Agent TUIs ignore bracketed-pasted input (pasted digits/arrow sequences
+   * never reach the choice UI), but typed keystrokes are real key events.
+   *   `-l`  literal: the text is sent as-is, never parsed as a key name (so an
+   *         answer like "Enter" types the word instead of pressing the key).
+   *   `--`  ends flag parsing so a leading `-` in the text cannot become a flag.
+   */
+  async sendKeysLiteral(target: string, text: string): Promise<TmuxResult> {
+    return this.guardedInput(target, pane => this.sendKeysLiteralUnchecked(pane, text));
+  }
+
+  private async sendKeysLiteralUnchecked(target: string, text: string): Promise<TmuxResult> {
+    try {
+      await this.run(["tmux", "send-keys", "-t", target, "-l", "--", text],
+        `tmux send-keys -t ${shellQuote(target)} -l -- ${shellQuote(text)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
