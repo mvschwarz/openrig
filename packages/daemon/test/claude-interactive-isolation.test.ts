@@ -32,18 +32,33 @@ it.each(['return','exit','errexit'])('keeps pane environment, lifetime and histo
   const initial=fs.readFileSync(before,'utf8');const rcFields=rcInitial.split('|');const steadyFields=initial.split('|');
   expect(steadyFields.filter((_,i)=>i!==4)).toEqual(rcFields.filter((_,i)=>i!==4));expect(steadyFields[4]).toContain('i');expect(new Set(steadyFields[4].replace('s',''))).toEqual(new Set(rcFields[4].replace('s','')));
   console.log('CLAUDE_STARTUP_CONTROL='+JSON.stringify({kind,rcOptions:rcFields[4],steadyOptions:steadyFields[4],onlyPossibleStdinFlagDifferenceBeforeStagedLaunch:true}));
+  // Older Bash versions flush interactive history even when only a subshell
+  // exits. Measure the ordinary command before attributing a flush to staging.
+  fs.unlinkSync(status);
+  const initialHistory=fs.readFileSync(history,'utf8');
+  const ordinary=`( ${kind==='exit'?'exit 7':kind==='errexit'?'set -e; false':':'} )`;
+  expect(await transport.sendText('pane',ordinary)).toEqual({ok:true});expect(await transport.sendKeys('pane',['Enter'])).toEqual({ok:true});await until(()=>fs.existsSync(status));
+  expect(Number(fs.readFileSync(status,'utf8').trim())).toBe(kind==='exit'?7:kind==='errexit'?1:0);
+  const ordinaryHistory=fs.readFileSync(history,'utf8');
+  expect(ordinaryHistory.startsWith(initialHistory)).toBe(true);
+  const ordinaryFlush=ordinaryHistory!==initialHistory;
+  if(ordinaryFlush)expect(ordinaryHistory).toContain(ordinary);
+  console.log('CLAUDE_HISTORY_CONTROL='+JSON.stringify({kind,ordinaryFlush,priorHistoryPreserved:true}));
   fs.unlinkSync(status);writes.length=0;
   const body='#'+ 'x'.repeat(4096)+String.fromCharCode(10)+`export FIXTURE_MUTATION=child OPENRIG_HOME=child-home; cd /; `+(kind==='exit'?'exit 7':kind==='errexit'?`set -e; false; printf unexpected > ${q(unreachable)}`:':');
   expect(await transport.sendShellCommand('pane',body,undefined,{sourceInPane:true})).toEqual({ok:true});await until(()=>fs.existsSync(status));
   const exit=Number(fs.readFileSync(status,'utf8').trim());expect(exit).toBe(kind==='exit'?7:kind==='errexit'?1:0);expect(fs.existsSync(unreachable)).toBe(false);
   expect(writes).toHaveLength(2);const [script,payload]=writes;expect(Buffer.byteLength(script.content)).toBeGreaterThan(4096);expect(script.mode).toBe(0o600);expect(payload.mode).toBe(0o600);expect(script.uid).toBe(process.getuid!());expect(payload.uid).toBe(process.getuid!());
   expect(payload.content).toBe(`( . ${q(script.path)} )`);expect(Buffer.byteLength(payload.content)).toBeLessThan(512);expect(fs.existsSync(script.path)).toBe(false);expect(fs.existsSync(payload.path)).toBe(false);
-  expect(fs.readFileSync(history,'utf8')).toBe('prior-history-sentinel'+String.fromCharCode(10));
+  const stagedHistory=fs.readFileSync(history,'utf8');
+  if(ordinaryFlush){expect(stagedHistory.startsWith(ordinaryHistory)).toBe(true);expect(stagedHistory).toContain(payload.content);}
+  else expect(stagedHistory).toBe(ordinaryHistory);
+  expect(stagedHistory).not.toContain('FIXTURE_MUTATION=child');expect(stagedHistory).not.toContain('child-home');
   const probe=`${snapshot} > ${q(after)}; history -w`;
   expect(await transport.sendText('pane',probe)).toEqual({ok:true});expect(await transport.sendKeys('pane',['Enter'])).toEqual({ok:true});await until(()=>fs.existsSync(after));await until(()=>fs.readFileSync(history,'utf8').includes('history -w'));
   expect(fs.readFileSync(after,'utf8')).toBe(initial);
   const h=fs.readFileSync(history,'utf8');expect(h).toContain('prior-history-sentinel');expect(h).toContain(payload.content);expect(h).not.toContain('FIXTURE_MUTATION=child');expect(h).not.toContain('child-home');
-  console.log('CLAUDE_ISOLATION='+JSON.stringify({kind,exit,sameShellPid:true,environmentUnchanged:true,cwdUnchanged:true,optionsUnchanged:true,historyFileUnchanged:true,priorHistoryPreserved:true,scriptBodyNotInParentHistory:true,scriptBytes:Buffer.byteLength(script.content),typedBytes:Buffer.byteLength(payload.content),scriptMode:script.mode,scriptUid:script.uid,consumedFilesRemoved:true}));
+  console.log('CLAUDE_ISOLATION='+JSON.stringify({kind,exit,sameShellPid:true,environmentUnchanged:true,cwdUnchanged:true,optionsUnchanged:true,historyPathUnchanged:true,ordinaryHistoryFlush:ordinaryFlush,priorHistoryPreserved:true,scriptBodyNotInParentHistory:true,scriptBytes:Buffer.byteLength(script.content),typedBytes:Buffer.byteLength(payload.content),scriptMode:script.mode,scriptUid:script.uid,consumedFilesRemoved:true}));
  } finally {await tm(['kill-server']).catch(()=>{});fs.rmSync(root,{recursive:true,force:true});}
 },30000);
 
