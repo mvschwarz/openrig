@@ -4,6 +4,13 @@ import { dirname, join, resolve } from "node:path";
 
 /** Publish complete text while retaining the previous file on a failed staged write. */
 export function writeTextAtomically(path: string, content: string, label = "file"): void {
+  // Keep stream/device semantics, including symlinks to pipes such as /dev/stdout.
+  // Probing a FIFO for write access would deliver an empty EOF to its reader.
+  const direct = statSync(path, { throwIfNoEntry: false });
+  if (direct && !direct.isFile()) {
+    writeFileSync(path, content, "utf-8");
+    return;
+  }
   let target = path;
   // Follow file links just as writeFileSync did; rename the target,
   // never the link. A dangling final target is still created normally.
