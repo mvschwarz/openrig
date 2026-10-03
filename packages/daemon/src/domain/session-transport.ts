@@ -463,6 +463,92 @@ export type ResolveResult =
   | { ok: true; sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> }
   | { ok: false; code: "not_found" | "ambiguous"; error: string };
 
+/** The existing submit-only identity check, also used to inspect startup's own paste.
+ * A false result is no matching staged evidence, not proof of model consumption. */
+export function hasExpectedStagedText(pane: string | null, expected: string): boolean {
+  const norm = (s: string) => s.replace(/\s+/g, "");
+  // Round-2 (r2 HIGH-1): the evidence must be the CURRENT ACTIVE INPUT and must identify
+  // THIS piece — stale scrollback can carry an old placeholder while a LATER interactive
+  // prompt owns the input, and an Enter there approves the prompt. So:
+  //   1. Only the pane's LAST input-marker line counts (the current input; everything above
+  //      is history).
+  //   2. A numbered-option line (`❯ 1. …`) is a PROMPT SELECTION, never staged input: refuse.
+  //   3. A pasted-text placeholder is identity-qualified: "[Pasted text #N +X lines]" counts
+  //      only when X matches the expected piece's own line count (±1 for a trailing newline).
+  //      More than one placeholder is COALESCED staging (several pieces, one Enter): refuse.
+  //   4. Otherwise the line must carry the content's own head (24 normalized chars — a short
+  //      paste renders inline, possibly truncated).
+  const paneLines = (pane ?? "").split("\n");
+  let currentInputAt = -1;
+  for (let i = paneLines.length - 1; i >= 0; i--) {
+    if (paneLines[i]!.trimStart().startsWith("❯")) { currentInputAt = i; break; }
+  }
+  let stagedEvidence = false;
+  if (currentInputAt >= 0) {
+    const inputLine = paneLines[currentInputAt]!.trimStart();
+    // The region is the last ❯-line through the input box's closing separator (a box-drawing
+    // line) or pane end — wrapped input continues below the marker; everything ABOVE the
+    // marker is history and everything below the separator is hint-bar chrome.
+    let regionEnd = paneLines.length;
+    for (let i = currentInputAt + 1; i < paneLines.length; i++) {
+      const t = paneLines[i]!.trim();
+      if (t.length >= 10 && /^[─═-]+$/.test(t)) { regionEnd = i; break; }
+    }
+    const region = paneLines.slice(currentInputAt, regionEnd).join("\n");
+    if (!/^❯\s*\d+\./.test(inputLine)) {
+      // Round-3 (r2 R2 HIGH-1, specimen-pinned): Claude renders ONE staged piece as MANY
+      // placeholders whose displayed counts are SEGMENT sizes (sum ≤ source lines), followed
+      // by the piece's own literal tail wrapped across pane lines — and the placeholder
+      // tokens themselves wrap. So: collapse wrapping, then
+      //   IDENTITY  — the literal residual (region minus tokens minus hint chrome) must be a
+      //               CONTIGUOUS substring of the piece: the visible words are the piece's
+      //               words. Foreign residual (another piece, stale content) refuses.
+      //   SANITY    — the segment-count sum must not exceed the piece's own line count
+      //               (small slack), and with NO residual anchor must reach at least 60% of
+      //               it — a bare unrelated placeholder cannot masquerade as this piece.
+      const placeholderRe = /\[Pasted text #\d+ \+(\d+) lines\]/g;
+      const regionFlat = region.replace(/\s+/g, " ");
+      const counts = [...regionFlat.matchAll(placeholderRe)].map((m) => Number(m[1]));
+      if (counts.length === 0) {
+        const head = norm(expected).slice(0, 24);
+        stagedEvidence = head.length > 0 && norm(region).includes(head);
+      } else {
+        // Round-4 (r2 R3 HIGH-1): identity is the rendering's own structure, specimen-proven —
+        // the placeholders are the piece's HEAD chunks and the literal residual is the piece's
+        // normalized SUFFIX (524 chars in the preserved capture). Size similarity and short
+        // shared phrases are NOT identity: with no residual, or one under 48 normalized chars,
+        // or one that is not the piece's own suffix, FAIL CLOSED — the TUI did not expose
+        // enough content to identify the staged state, and a bare Enter is never guessed.
+        const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
+        const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
+        const pieceNorm = norm(expected);
+        const sum = counts.reduce((a, b) => a + b, 0);
+        // Round-5 (r2 R4 HIGH-1): the suffix anchor is JOINED to the opaque prefix. The
+        // placeholder sum identifies the hidden SOURCE BOUNDARY immediately before the
+        // visible suffix (specimen: sum 130 = the residual begins after exactly 130 of the
+        // piece's 142 source newlines). Compute the boundary from the piece bytes — the
+        // number of leading source lines whose normalized text the residual does NOT cover —
+        // and require the sum to EQUAL it exactly (round-6, r2 R5: both separately staged
+        // preserved pieces are exact — 130=130 and 82=82; a tolerance was unsupported by the
+        // renderer evidence). A matched suffix with a non-matching sum is a truncated or
+        // wrong prefix: refuse.
+        let boundary = -1;
+        if (residual.length >= 48 && pieceNorm.endsWith(residual)) {
+          const srcLines = expected.split("\n");
+          let acc = 0;
+          boundary = 0;
+          for (let i = srcLines.length - 1; i >= 0; i--) {
+            acc += norm(srcLines[i]!).length;
+            if (acc >= residual.length) { boundary = i; break; }
+          }
+        }
+        stagedEvidence = boundary >= 0 && sum === boundary;
+      }
+    }
+  }
+  return stagedEvidence;
+}
+
 export interface SendOpts {
   /** Stable caller request ID, reused for readback after transport uncertainty. */
   deliveryId?: string;
@@ -490,6 +576,8 @@ export interface SendOpts {
   // caller's `text` argument must be empty in this mode.
   submitOnly?: boolean;
   expectedStagedText?: string;
+  /** Internal startup caller needs a bounded view of an expanded multiline composer. */
+  submitOnlyCaptureLines?: 50 | 200;
   /** Round-2 (r2 HIGH-1): the walked piece's own line count — placeholder identity. A large paste
    *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
    *  as evidence of THIS piece. */
@@ -1116,91 +1204,11 @@ export class SessionTransport {
       if (expected.trim().length === 0) {
         return { ok: false, sessionName, reason: "invalid_submit_only", error: "submitOnly requires expectedStagedText — the Enter is only pressed onto the exact staged content." };
       }
-      const norm = (s: string) => s.replace(/\s+/g, "");
       const pane = await this.runStage(
         "session_transport.submit_only_precheck",
-        () => this.tmuxAdapter.capturePaneContent(sessionName, 50),
+        () => this.tmuxAdapter.capturePaneContent(sessionName, opts.submitOnlyCaptureLines ?? 50),
       );
-      // Round-2 (r2 HIGH-1): the evidence must be the CURRENT ACTIVE INPUT and must identify
-      // THIS piece — stale scrollback can carry an old placeholder while a LATER interactive
-      // prompt owns the input, and an Enter there approves the prompt. So:
-      //   1. Only the pane's LAST input-marker line counts (the current input; everything above
-      //      is history).
-      //   2. A numbered-option line (`❯ 1. …`) is a PROMPT SELECTION, never staged input: refuse.
-      //   3. A pasted-text placeholder is identity-qualified: "[Pasted text #N +X lines]" counts
-      //      only when X matches the expected piece's own line count (±1 for a trailing newline).
-      //      More than one placeholder is COALESCED staging (several pieces, one Enter): refuse.
-      //   4. Otherwise the line must carry the content's own head (24 normalized chars — a short
-      //      paste renders inline, possibly truncated).
-      const paneLines = (pane ?? "").split("\n");
-      let currentInputAt = -1;
-      for (let i = paneLines.length - 1; i >= 0; i--) {
-        if (paneLines[i]!.trimStart().startsWith("❯")) { currentInputAt = i; break; }
-      }
-      let stagedEvidence = false;
-      if (currentInputAt >= 0) {
-        const inputLine = paneLines[currentInputAt]!.trimStart();
-        // The region is the last ❯-line through the input box's closing separator (a box-drawing
-        // line) or pane end — wrapped input continues below the marker; everything ABOVE the
-        // marker is history and everything below the separator is hint-bar chrome.
-        let regionEnd = paneLines.length;
-        for (let i = currentInputAt + 1; i < paneLines.length; i++) {
-          const t = paneLines[i]!.trim();
-          if (t.length >= 10 && /^[─═-]+$/.test(t)) { regionEnd = i; break; }
-        }
-        const region = paneLines.slice(currentInputAt, regionEnd).join("\n");
-        if (!/^❯\s*\d+\./.test(inputLine)) {
-          // Round-3 (r2 R2 HIGH-1, specimen-pinned): Claude renders ONE staged piece as MANY
-          // placeholders whose displayed counts are SEGMENT sizes (sum ≤ source lines), followed
-          // by the piece's own literal tail wrapped across pane lines — and the placeholder
-          // tokens themselves wrap. So: collapse wrapping, then
-          //   IDENTITY  — the literal residual (region minus tokens minus hint chrome) must be a
-          //               CONTIGUOUS substring of the piece: the visible words are the piece's
-          //               words. Foreign residual (another piece, stale content) refuses.
-          //   SANITY    — the segment-count sum must not exceed the piece's own line count
-          //               (small slack), and with NO residual anchor must reach at least 60% of
-          //               it — a bare unrelated placeholder cannot masquerade as this piece.
-          const placeholderRe = /\[Pasted text #\d+ \+(\d+) lines\]/g;
-          const regionFlat = region.replace(/\s+/g, " ");
-          const counts = [...regionFlat.matchAll(placeholderRe)].map((m) => Number(m[1]));
-          if (counts.length === 0) {
-            const head = norm(expected).slice(0, 24);
-            stagedEvidence = head.length > 0 && norm(region).includes(head);
-          } else {
-            // Round-4 (r2 R3 HIGH-1): identity is the rendering's own structure, specimen-proven —
-            // the placeholders are the piece's HEAD chunks and the literal residual is the piece's
-            // normalized SUFFIX (524 chars in the preserved capture). Size similarity and short
-            // shared phrases are NOT identity: with no residual, or one under 48 normalized chars,
-            // or one that is not the piece's own suffix, FAIL CLOSED — the TUI did not expose
-            // enough content to identify the staged state, and a bare Enter is never guessed.
-            const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
-            const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
-            const pieceNorm = norm(expected);
-            const sum = counts.reduce((a, b) => a + b, 0);
-            // Round-5 (r2 R4 HIGH-1): the suffix anchor is JOINED to the opaque prefix. The
-            // placeholder sum identifies the hidden SOURCE BOUNDARY immediately before the
-            // visible suffix (specimen: sum 130 = the residual begins after exactly 130 of the
-            // piece's 142 source newlines). Compute the boundary from the piece bytes — the
-            // number of leading source lines whose normalized text the residual does NOT cover —
-            // and require the sum to EQUAL it exactly (round-6, r2 R5: both separately staged
-            // preserved pieces are exact — 130=130 and 82=82; a tolerance was unsupported by the
-            // renderer evidence). A matched suffix with a non-matching sum is a truncated or
-            // wrong prefix: refuse.
-            let boundary = -1;
-            if (residual.length >= 48 && pieceNorm.endsWith(residual)) {
-              const srcLines = expected.split("\n");
-              let acc = 0;
-              boundary = 0;
-              for (let i = srcLines.length - 1; i >= 0; i--) {
-                acc += norm(srcLines[i]!).length;
-                if (acc >= residual.length) { boundary = i; break; }
-              }
-            }
-            stagedEvidence = boundary >= 0 && sum === boundary;
-          }
-        }
-      }
-      if (!stagedEvidence) {
+      if (!hasExpectedStagedText(pane, expected)) {
         return {
           ok: false,
           sessionName,
