@@ -742,7 +742,7 @@ export class BootstrapOrchestrator {
       warnings.push(...result.warnings);
     }
 
-    this.deps.bootstrapRepo.updateRunStatus(run.id, finalStatus);
+    this.deps.bootstrapRepo.updateRunStatus(run.id, finalStatus, { rigId: result.rigId });
     return {
       runId: run.id,
       status: finalStatus,
