@@ -1,5 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { inspectStartupStagedText, startupSubmissionEvidence, type StartupSubmissionEvidence } from "./startup-submission-evidence.js";
+import {
+  COMPOSER_DRAFT_PATTERN,
+  COMPOSER_EMPTY_CODEX_PLACEHOLDER_PATTERN as CODEX_EMPTY_COMPOSER_PATTERN,
+  COMPOSER_EMPTY_PATTERN,
+  COMPOSER_SELECTION_PATTERN,
+  COMPOSER_SELECTION_SCAN_PATTERN,
+  findComposerInputLineIndex,
+  stripComposerPromptGlyph,
+} from "./composer-prompts.js";
 export { inspectStartupStagedText } from "./startup-submission-evidence.js";
 import { OutboxHandler } from "./outbox-handler.js";
 import type Database from "better-sqlite3";
@@ -34,7 +43,7 @@ const MID_WORK_PATTERNS = [
   /Working/,
   /^[✶✢✳✻✽·]\s+\S.*(?:…|\.{3})\s+\([^)]*\bthinking\)$/m,
   /esc to interrupt/,
-  /^[❯›]\s*\d+\.\s/m,   // trust/consent prompt choices (e.g. '› 1. Yes, continue')
+  COMPOSER_SELECTION_SCAN_PATTERN,   // trust/consent prompt choices (e.g. '› 1. Yes, continue')
 ];
 
 // Idle-prompt patterns: empty prompt line (no typed text after the char).
@@ -46,7 +55,6 @@ const MID_WORK_PATTERNS = [
 // normally sits above it, but Codex hides that row while it streams assistant output. So the
 // placeholder counts as idle only through MID_WORK_PATTERNS here, and classifySendReadiness
 // never lets a placeholder-only verdict override a display-fresh running/needs_input hook.
-const CODEX_EMPTY_COMPOSER_PATTERN = /^›\s+Ask Codex to do anything\s*$/;
 
 // Codex's live turn-status row: a bullet, a header ("Working", or the reasoning summary Codex shows in its place),
 // then the elapsed time and "esc to interrupt" in parentheses, e.g. "• Working (1h 09m 39s • esc to interrupt)".
@@ -54,12 +62,12 @@ const CODEX_EMPTY_COMPOSER_PATTERN = /^›\s+Ask Codex to do anything\s*$/;
 const CODEX_TURN_STATUS_PATTERN = /^[•◦]\s+\S.*\((?:\d+[hms]\s*)+•\s*esc to interrupt\)/;
 
 const IDLE_PROMPT_PATTERNS = [
-  /^[❯›]\s*$/,  // prompt char + optional whitespace + end-of-line only
+  COMPOSER_EMPTY_PATTERN,  // prompt char + optional whitespace + end-of-line only
   CODEX_EMPTY_COMPOSER_PATTERN,
 ];
 
 const PROMPT_DRAFT_PATTERNS = [
-  /^[❯›]\s+\S/,
+  COMPOSER_DRAFT_PATTERN,
 ];
 
 // Status-bar patterns that ONLY appear when the harness is at its idle
@@ -139,7 +147,7 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
 
   const priorTrimmed = priorLine.trim();
   const looksLikeDraft = PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(priorTrimmed));
-  const looksLikeSelection = /^[❯›]\s*\d+\.\s/.test(priorTrimmed);
+  const looksLikeSelection = COMPOSER_SELECTION_PATTERN.test(priorTrimmed);
   if (!looksLikeDraft || looksLikeSelection) return null;
 
   return truncateEvidence(priorTrimmed);
@@ -164,7 +172,7 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const selectionPromptEvidence = findPatternEvidence(promptScanLines, [/^[❯›]\s*\d+\.\s/m]);
+  const selectionPromptEvidence = findPatternEvidence(promptScanLines, [COMPOSER_SELECTION_SCAN_PATTERN]);
   if (selectionPromptEvidence) {
     return {
       state: "attention",
@@ -481,10 +489,7 @@ export function hasExpectedStagedText(pane: string | null, expected: string): bo
   //   4. Otherwise the line must carry the content's own head (24 normalized chars — a short
   //      paste renders inline, possibly truncated).
   const paneLines = (pane ?? "").split("\n");
-  let currentInputAt = -1;
-  for (let i = paneLines.length - 1; i >= 0; i--) {
-    if (paneLines[i]!.trimStart().startsWith("❯")) { currentInputAt = i; break; }
-  }
+  const currentInputAt = findComposerInputLineIndex(paneLines);
   let stagedEvidence = false;
   if (currentInputAt >= 0) {
     const inputLine = paneLines[currentInputAt]!.trimStart();
@@ -497,7 +502,7 @@ export function hasExpectedStagedText(pane: string | null, expected: string): bo
       if (t.length >= 10 && /^[─═-]+$/.test(t)) { regionEnd = i; break; }
     }
     const region = paneLines.slice(currentInputAt, regionEnd).join("\n");
-    if (!/^❯\s*\d+\./.test(inputLine)) {
+    if (!COMPOSER_SELECTION_PATTERN.test(inputLine)) {
       // Round-3 (r2 R2 HIGH-1, specimen-pinned): Claude renders ONE staged piece as MANY
       // placeholders whose displayed counts are SEGMENT sizes (sum ≤ source lines), followed
       // by the piece's own literal tail wrapped across pane lines — and the placeholder
@@ -522,7 +527,7 @@ export function hasExpectedStagedText(pane: string | null, expected: string): bo
         // or one that is not the piece's own suffix, FAIL CLOSED — the TUI did not expose
         // enough content to identify the staged state, and a bare Enter is never guessed.
         const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
-        const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
+        const residual = stripComposerPromptGlyph(norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")));
         const pieceNorm = norm(expected);
         const sum = counts.reduce((a, b) => a + b, 0);
         // Round-5 (r2 R4 HIGH-1): the suffix anchor is JOINED to the opaque prefix. The

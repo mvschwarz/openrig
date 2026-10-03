@@ -15,7 +15,7 @@ import { agentspecRebootSchema } from "../src/db/migrations/014_agentspec_reboot
 import { externalCliAttachmentSchema } from "../src/db/migrations/019_external_cli_attachment.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
-import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
+import { classifyPaneActivity, hasExpectedStagedText, inspectStartupStagedText, SessionTransport } from "../src/domain/session-transport.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import type { TmuxAdapter, TmuxResult } from "../src/adapters/tmux.js";
@@ -282,6 +282,64 @@ describe("agent pane activity classifier", () => {
 
     expect(result.state).toBe("unknown");
     expect(result.reason).toBe("empty_capture");
+  });
+
+  // #79 — Codex 0.153 variants draw the composer prompt as `»`. The shared
+  // glyph set (composer-prompts.ts) must classify it exactly like `❯`/`›`.
+  it("classifies a `»` composer as idle", () => {
+    const result = classifyPaneActivity(["prior output", "» "].join("\n"));
+
+    expect(result.state).toBe("agent_idle");
+    expect(result.reason).toBe("idle_prompt");
+  });
+
+  it("classifies a `»` draft above the Codex footer as a prompt draft", () => {
+    const result = classifyPaneActivity([
+      "prior output",
+      "» half typed input",
+      "  gpt-5.5 xhigh fast · Context [████ ] · ~/code/projects/openrig",
+    ].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("prompt_draft");
+  });
+
+  it("classifies a `»` numbered selection as attention", () => {
+    const result = classifyPaneActivity(["» 1. Yes", "  2. No"].join("\n"));
+
+    expect(result.state).toBe("attention");
+    expect(result.reason).toBe("selection_prompt");
+  });
+});
+
+describe("shared composer matchers", () => {
+  it("hasExpectedStagedText matches Claude `❯` staged text", () => {
+    expect(hasExpectedStagedText("prior\n❯ deploy the release\n────────────\nhint", "deploy the release")).toBe(true);
+  });
+
+  it("hasExpectedStagedText matches Codex `›` staged text", () => {
+    expect(hasExpectedStagedText("prior\n› deploy the release\n", "deploy the release")).toBe(true);
+  });
+
+  it("hasExpectedStagedText matches Codex 0.153 `»` staged text", () => {
+    expect(hasExpectedStagedText("prior\n» deploy the release\n", "deploy the release")).toBe(true);
+  });
+
+  it("hasExpectedStagedText never treats a numbered selection as staged input", () => {
+    expect(hasExpectedStagedText("prior\n❯ 1. Yes\n", "Yes")).toBe(false);
+    expect(hasExpectedStagedText("prior\n» 1. Yes\n", "Yes")).toBe(false);
+  });
+
+  it("inspectStartupStagedText reads a `»` composer body", () => {
+    const pane = [
+      "Previous turn",
+      "» hello world",
+      "────────────",
+      "shift+tab to cycle",
+    ].join("\n");
+
+    expect(inspectStartupStagedText(pane, "hello world")).toBe("staged");
+    expect(inspectStartupStagedText(pane, "something else")).toBe("unverified");
   });
 });
 
