@@ -222,6 +222,7 @@ it('manual preparation names the request and its existing UTC deadline, includin
  expect(prompt).toContain('does not depend on the context threshold');
  expect(prompt).toContain('1970-01-01T00:02:10.000Z');
  expect(prompt).toContain('119750 ms remaining when this request was constructed');
+ expect(prompt).toContain('not guaranteed remaining on receipt');
  expect(prompt).toContain('Delivery time, writing the complete restore map, and becoming idle share this deadline');
  expect(f.e.getPreparationState(seat)?.deadlineAt).toBe(130_000);
  expect(compacts(f)).toHaveLength(1);
