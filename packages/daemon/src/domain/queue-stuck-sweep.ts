@@ -34,6 +34,8 @@ export const STUCK_SWEEP_INTERVAL_KEY = "queue.stuck_sweep_interval_seconds";
 export const DEFAULT_STUCK_SWEEP_INTERVAL_SECONDS = 300;
 export const STUCK_SWEEP_UNCLAIMED_AGE_KEY = "queue.stuck_sweep_unclaimed_age_minutes";
 export const DEFAULT_STUCK_SWEEP_UNCLAIMED_AGE_MINUTES = 60;
+export const STUCK_SWEEP_CUSTODY_WINDOW_HOURS_KEY = "queue.stuck_sweep_custody_window_hours";
+export const DEFAULT_STUCK_SWEEP_CUSTODY_WINDOW_HOURS = 24;
 
 /** Stamp tag on every routed finding row: the sweep's self-exclusion mark. */
 export const STUCK_SWEEP_FINDING_TAG = "stuck-sweep-finding";
@@ -118,6 +120,16 @@ export function resolveStuckSweepUnclaimedAgeMinutes(): number {
   }
 }
 
+export function resolveStuckSweepCustodyWindowHours(): number {
+  try {
+    const v = new SettingsStore().resolveOne(STUCK_SWEEP_CUSTODY_WINDOW_HOURS_KEY as never).value;
+    const n = typeof v === "number" ? v : Number(v);
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_STUCK_SWEEP_CUSTODY_WINDOW_HOURS;
+  } catch {
+    return DEFAULT_STUCK_SWEEP_CUSTODY_WINDOW_HOURS;
+  }
+}
+
 export interface StuckSweepDeps {
   db: Database.Database;
   queueRepo: QueueRepository;
@@ -128,6 +140,7 @@ export interface StuckSweepDeps {
    *  layer). Injectable for tests; default derives from topology. */
   resolveOrchestrator?: (session: string) => string | null;
   unclaimedAgeMinutes?: number;
+  custodyWindowHours?: number;
   now?: Date;
   log?: (line: string) => void;
   /** Is this host id (or observed self-id) present in the operator's hosts registry?
@@ -187,7 +200,12 @@ function custodyVerifiedTargets(db: Database.Database, qitemId: string): Set<str
   for (const { transition_note: note } of notes) {
     if (!note) continue;
     const token = note.slice(CUSTODY_VERIFIED_PREFIX.length).trim().split(/\s+/)[0];
-    if (token) verified.add(token);
+    if (token) {
+      verified.add(token);
+      for (const t of token.split(",")) {
+        if (t.trim()) verified.add(t.trim());
+      }
+    }
   }
   return verified;
 }
@@ -213,6 +231,27 @@ function defaultIsRegisteredHost(log: (line: string) => void): (hostId: string) 
     }
     return known !== null && known.has(hostId);
   };
+}
+
+function hasSeatTargetSuccessor(db: Database.Database, sourceQitemId: string, target: string): boolean {
+  try {
+    const successor = db
+      .prepare(
+        `SELECT 1 FROM queue_items s
+          WHERE (s.destination_session = ? OR s.qitem_id = ?) AND s.qitem_id != ?
+            AND (s.handed_off_from = ? OR (
+              s.chain_of_record IS NOT NULL
+              AND json_valid(s.chain_of_record)
+              AND EXISTS (
+                SELECT 1 FROM json_each(s.chain_of_record) WHERE value = ?
+              )
+            )) LIMIT 1`,
+      )
+      .get(target, target, sourceQitemId, sourceQitemId, sourceQitemId);
+    return Boolean(successor);
+  } catch {
+    return false;
+  }
 }
 
 function hasLiveLadder(db: Database.Database, qitemId: string): boolean {
@@ -273,9 +312,15 @@ function evidenceIsNewer(evidenceAt: string, closedAt: string): boolean {
   return !Number.isNaN(evidence) && !Number.isNaN(closed) && evidence > closed;
 }
 
-function verificationCommand(target: string): string {
-  const successorId = target.split("@", 1)[0] ?? target;
-  return `OPENRIG_URL=<registered-host> rig queue show ${successorId}`;
+export function verificationCommand(target: string): string {
+  if (target.startsWith("qitem-")) {
+    const successorId = target.split("@", 1)[0] ?? target;
+    return `OPENRIG_URL=<registered-host> rig queue show ${successorId}`;
+  }
+  if (target === "(unspecified)") {
+    return "OPENRIG_URL=<registered-host> rig queue list";
+  }
+  return `OPENRIG_URL=<registered-host> rig queue list --destination ${target}`;
 }
 
 function evidenceBody(db: Database.Database, c: Candidate): string {
@@ -431,44 +476,71 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     }
 
     // The custody class — a terminal row whose closure names one or more successor
-    // qitems. A local miss is never proof of absence: the successor may live in another
-    // registered host's database. Comma fan-out is checked member-by-member and only
-    // unresolved members are reported. Two dispositions satisfy a member without a local
-    // hit: (1) proof-at-write — a REGISTERED host qualifier whose successor id RECOMPUTES
+    // qitems or seat-address targets (closure_reason = 'handed_off_to'). A local miss is
+    // never proof of absence: the successor may live in another registered host's database.
+    // Comma fan-out is checked member-by-member and only unresolved members are reported.
+    // Three dispositions satisfy a member without a local hit / check:
+    // (1) proof-at-write — a REGISTERED host qualifier whose successor id RECOMPUTES
     // from this row's own (qitem_id, handed_off_to, host) through the same deterministic
     // derivation the cross-host close uses. The close path records that key only AFTER
     // its forwarded successor-create succeeded, and the generic update path (which
     // accepts arbitrary closure targets) cannot accidentally synthesize the sha256-derived
-    // id — registered-host SYNTAX alone is never trusted; and (2) a durable
-    // `custody-verified:` transition note written on the source row by whoever performed
-    // the registered-host read (read from active + archived transitions). Historical
-    // source rows are never mutated by this detector — the disposition note is the
+    // id — registered-host SYNTAX alone is never trusted;
+    // (2) linked local successor for seat targets — a row in the local store whose
+    // destination matches the target seat and carries this source row's lineage (either
+    // handed_off_from or chain_of_record); and
+    // (3) a durable `custody-verified:` transition note written on the source row by
+    // whoever performed the registered-host read (read from active + archived transitions).
+    // Historical source rows are never mutated by this detector — the disposition note is the
     // verifier's act, not ours.
+    // Real handoffs (state='handed-off') create their successor in the same transaction and cannot
+    // be missing one (#341); skipping them removes most of the scan.
+    // Closures outside the recent window (e.g. 24h) without open findings are skipped so upgrading
+    // a real queue history does not raise a flood of historical findings.
+    const custodyHours = deps.custodyWindowHours ?? resolveStuckSweepCustodyWindowHours();
+    const custodyCutoff = new Date(now.getTime() - custodyHours * 3_600_000).toISOString();
     const custodyRows = deps.db
       .prepare(
         `SELECT q.qitem_id FROM queue_items q
-          WHERE q.state IN ('done', 'canceled', 'handed-off')
-            AND q.closure_target LIKE 'qitem-%'`,
+          WHERE q.state IN ('done', 'canceled')
+            AND (q.closure_target LIKE 'qitem-%' OR q.closure_reason = 'handed_off_to')
+            AND (
+              q.ts_updated >= ?
+              OR EXISTS (
+                SELECT 1 FROM queue_items f
+                 WHERE f.tags LIKE '%"stuck-sweep:dangling-closure:' || q.qitem_id || '"%'
+                   AND f.state IN ('pending', 'in-progress', 'blocked')
+              )
+            )`,
       )
-      .all() as Array<{ qitem_id: string }>;
+      .all(custodyCutoff) as Array<{ qitem_id: string }>;
     for (const { qitem_id } of custodyRows) {
       const row = deps.queueRepo.getById(qitem_id);
       if (!row || isFindingRow(row)) continue;
-      const targets = (row.closureTarget ?? "").split(",").map((target) => target.trim()).filter(Boolean);
+      const targets = (row.closureTarget ?? row.handedOffTo ?? "")
+        .split(",")
+        .map((target) => target.trim())
+        .filter(Boolean);
+      if (targets.length === 0 && row.closureReason === "handed_off_to") {
+        targets.push("(unspecified)");
+      }
       const verified = custodyVerifiedTargets(deps.db, row.qitemId);
       const verificationTargets = targets.filter((target) => {
         if (verified.has(target)) return false;
-        const at = target.indexOf("@");
-        if (at !== -1) {
-          const hostId = target.slice(at + 1);
-          const successorId = target.slice(0, at);
-          return !(
-            isRegisteredHost(hostId) &&
-            row.handedOffTo !== null &&
-            successorId === deriveCrossHostSuccessorId(row.qitemId, row.handedOffTo, hostId)
-          );
+        if (target.startsWith("qitem-")) {
+          const at = target.indexOf("@");
+          if (at !== -1) {
+            const hostId = target.slice(at + 1);
+            const successorId = target.slice(0, at);
+            return !(
+              isRegisteredHost(hostId) &&
+              row.handedOffTo !== null &&
+              successorId === deriveCrossHostSuccessorId(row.qitemId, row.handedOffTo, hostId)
+            );
+          }
+          return !deps.queueRepo.getById(target);
         }
-        return !deps.queueRepo.getById(target);
+        return !hasSeatTargetSuccessor(deps.db, row.qitemId, target);
       });
       if (verificationTargets.length === 0) continue;
       candidates.push({
