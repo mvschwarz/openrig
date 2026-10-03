@@ -3,6 +3,8 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { shellQuote as quoteShellArgument } from "../adapters/shell-quote.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
+import { validatePreRestore } from "./restore-preconditions.js";
+import type { Snapshot, RigServicesRecord } from "./types.js";
 
 // --- Types ---
 
@@ -163,6 +165,8 @@ export interface RestoreCheckOpts {
   /** OPR.0.4.0.29 FR-2: in compact mode, still assemble ready-seat detail so
    *  `--ready` shows ready seats without dropping to the full firehose. */
   includeReady?: boolean;
+  /** Composed status polls need preconditions only for rigs needing recovery. */
+  recoveryOnly?: boolean;
 }
 
 // --- Deps (framework-free per ADR-0001; reads from existing projections per ADR-0002) ---
@@ -195,6 +199,10 @@ export interface RestoreCheckDeps {
   hasSnapshot: (rigId: string) => boolean;
   /** Get the newest snapshot for exact restore planning when available */
   getLatestSnapshot?: (rigId: string) => { id: string; kind: string } | null;
+  /** Exact ordinary-restore input; never captures an auto-rehydrate snapshot. */
+  getRestoreInputs: (rigId: string) =>
+    | { snapshot: Pick<Snapshot, "id" | "kind" | "data">; servicesRecord: RigServicesRecord | null }
+    | { unavailable: string };
   /** Probe daemon health: returns { healthy: boolean; evidence: string } */
   probeDaemonHealth: () => { healthy: boolean; evidence: string };
   /** Filesystem probes */
@@ -213,6 +221,7 @@ interface RigRollupInput {
   rig: { rigId: string; name: string };
   nodes: NodeInventoryEntry[];
   checks: CheckEntry[];
+  preconditionError?: string;
 }
 
 interface RecoveryRigInput {
@@ -249,6 +258,7 @@ export class RestoreCheckService {
     const deferredAssessmentChecks: CheckEntry[] = [];
     const rigRollupInputs: RigRollupInput[] = [];
     const recoveryRigInputs: RecoveryRigInput[] = [];
+    const restoreInputsByRig = new Map<string, { snapshot: { id: string; kind: string } | null; error?: string }>();
 
     // Host-level checks — daemon probe throw produces unknown (not not_restorable).
     // Daemon definitely-down (healthy=false, negative text) is red/not_restorable.
@@ -311,6 +321,20 @@ export class RestoreCheckService {
         ]);
       }
 
+      // No added snapshot/history read on a routine status poll for an all-ready rig.
+      // Explicit restore-check still assesses its next restore, even while it is running.
+      let preconditionError: string | undefined;
+      const allReady = nodes.length > 0 && nodes.every((node) =>
+        Boolean(node.canonicalSessionName) && node.sessionStatus === "running" && node.startupStatus === "ready"
+      );
+      if (!opts.recoveryOnly || !allReady) {
+        const preconditions = this.checkRestorePreconditions(rig);
+        checks.push(preconditions.check);
+        rigChecks.push(preconditions.check);
+        preconditionError = preconditions.error;
+        restoreInputsByRig.set(rig.rigId, { snapshot: preconditions.snapshot, error: preconditions.error });
+      }
+
       for (const node of nodes) {
         const readinessCheck = this.checkSeatReadiness(node);
         checks.push(readinessCheck);
@@ -368,12 +392,12 @@ export class RestoreCheckService {
         }
       }
 
-      rigRollupInputs.push({ rig, nodes, checks: rigChecks });
+      rigRollupInputs.push({ rig, nodes, checks: rigChecks, preconditionError });
     }
 
     const rigRollups = rigRollupInputs.map((input) => this.buildRigRollup(input));
     for (const rollup of rigRollups) {
-      const latestSnapshot = this.inspectLatestSnapshot(rollup.rigId);
+      const latestSnapshot = restoreInputsByRig.get(rollup.rigId) ?? this.inspectLatestSnapshot(rollup.rigId);
       recoveryRigInputs.push({
         rigId: rollup.rigId,
         rigName: rollup.rigName,
@@ -386,6 +410,43 @@ export class RestoreCheckService {
     }
 
     return this.buildResult(checks, rigRollups, hostInfraCheck.hostInfra, recoveryRigInputs, deferredAssessmentChecks);
+  }
+
+  private checkRestorePreconditions(rig: { rigId: string; name: string }): {
+    check: CheckEntry;
+    snapshot: { id: string; kind: string } | null;
+    error?: string;
+  } {
+    const check = `rig.${rig.name}.restore-preconditions`;
+    try {
+      const input = this.deps.getRestoreInputs(rig.rigId);
+      if ("unavailable" in input) throw new Error(input.unavailable);
+      const validation = validatePreRestore(input.snapshot.data, {
+        fsOps: { exists: this.deps.exists },
+        servicesRecord: input.servicesRecord,
+      });
+      const { blockers, warnings } = validation;
+      return {
+        snapshot: { id: input.snapshot.id, kind: input.snapshot.kind },
+        check: {
+          check,
+          status: blockers.length > 0 ? "red" : warnings.length > 0 ? "yellow" : "green",
+          evidence: `Snapshot ${input.snapshot.id}: ${[
+            ...blockers.map((blocker) => `${blocker.code}: ${blocker.message}`),
+            ...warnings,
+          ].join("; ") || "restore pre-validation passed (not a native resume proof)"}`,
+          remediation: blockers.map((blocker) => blocker.remediation).join("; "),
+          remediationSafe: false,
+        },
+      };
+    } catch (err) {
+      const error = `Restore preconditions unavailable for ${rig.name}: ${err instanceof Error ? err.message : String(err)}`;
+      return {
+        snapshot: null,
+        error,
+        check: { check, status: "yellow", evidence: error, remediation: "Inspect the rig's restore snapshot and persisted inputs before trusting restore", remediationSafe: true },
+      };
+    }
   }
 
   /** Returns CheckEntry on success/definite-down; null on probe exception
@@ -1121,7 +1182,9 @@ export class RestoreCheckService {
     const green = assessed.filter((c) => c.status === "green").length;
 
     let verdict: Verdict;
-    if (red > 0) {
+    if (rigs.some((rig) => rig.status === "unknown")) {
+      verdict = "unknown";
+    } else if (red > 0) {
       verdict = "not_restorable";
     } else if (yellow > 0) {
       verdict = "restorable_with_caveats";
@@ -1216,12 +1279,12 @@ export class RestoreCheckService {
         attention_required: acc.attention_required + r.classCounts.attention_required,
         unknown: acc.unknown + r.classCounts.unknown,
       }), { ready: 0, ready_with_caveats: 0, not_ready: 0, attention_required: 0, unknown: 0 }),
-      hostInfra: result.verdict === "unknown"
+      hostInfra: hostInfra ?? (result.verdict === "unknown"
         ? {
             status: "unknown",
             evidence: "Host bootstrap/autostart source could not be inspected because restore-check state is unknown",
           }
-        : (hostInfra ?? {
+        : {
             status: "not_inspected",
             evidence: "No host bootstrap/autostart source inspected by v0; readiness only covers observable daemon, rig, and seat checks",
           }),
@@ -1245,7 +1308,7 @@ export class RestoreCheckService {
     checks: CheckEntry[],
     recoveryInputs: RecoveryRigInput[],
   ): RecoveryPlan {
-    if (verdict === "unknown") {
+    if (verdict === "unknown" && recoveryInputs.length === 0) {
       const evidence = checks.find((check) => check.status === "red")?.evidence
         ?? "Restore-check state could not be inspected";
       return {
@@ -1277,7 +1340,9 @@ export class RestoreCheckService {
       };
     }
 
-    const allReady = recoveryInputs.every((input) => input.runningReadyNodes === input.expectedNodes);
+    const allReady = recoveryInputs.every((input) => !input.snapshotLookupError
+      && input.runningReadyNodes === input.expectedNodes
+      && !input.blockingChecks.some((check) => this.classifyRecoveryBlockingCheck(check) === "restore_input"));
     if (allReady) {
       return {
         status: "not_needed",
@@ -1293,8 +1358,6 @@ export class RestoreCheckService {
     const unknown: RecoveryIssue[] = [];
 
     for (const input of recoveryInputs) {
-      if (input.runningReadyNodes === input.expectedNodes) continue;
-
       if (input.snapshotLookupError) {
         unknown.push({
           scope: "rig",
@@ -1304,7 +1367,6 @@ export class RestoreCheckService {
         });
         continue;
       }
-
       const restoreInputBlockers = input.blockingChecks.filter((check) =>
         this.classifyRecoveryBlockingCheck(check) === "restore_input"
       );
@@ -1317,6 +1379,7 @@ export class RestoreCheckService {
         });
         continue;
       }
+      if (input.runningReadyNodes === input.expectedNodes) continue;
 
       if (input.latestSnapshot) {
         actions.push({
@@ -1363,6 +1426,8 @@ export class RestoreCheckService {
 
   private classifyRecoveryBlockingCheck(check: CheckEntry): "restore_input" | "runtime" | "other" {
     if (check.status !== "red") return "other";
+
+    if (check.check.startsWith("rig.") && check.check.endsWith(".restore-preconditions")) return "restore_input";
 
     if (check.check.startsWith("seat.") && check.check.endsWith(".readiness")) {
       if (check.evidence.includes("Missing canonical session identity")) {
@@ -1445,7 +1510,10 @@ export class RestoreCheckService {
 
     let verdict: Verdict;
     let status: ReadinessStatus;
-    if (blockingChecks.length > 0) {
+    if (input.preconditionError) {
+      verdict = "unknown";
+      status = "unknown";
+    } else if (blockingChecks.length > 0) {
       verdict = "not_restorable";
       status = "not_ready";
     } else if (caveatChecks.length > 0) {

@@ -268,7 +268,7 @@ rigsRoutes.get("/:id/status", (c) => {
   let recovery: RecoveryPlan | null = null;
   try {
     recovery = createRestoreCheckService(repo, snapshotRepo)
-      .check({ rig: rig.rig.name, noQueue: true, noHooks: true })
+      .check({ rig: rig.rig.name, noQueue: true, noHooks: true, recoveryOnly: true })
       .recovery;
   } catch {
     recovery = null;

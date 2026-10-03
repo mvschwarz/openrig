@@ -103,6 +103,14 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
       } as NodeInventoryEntry,
     ],
     hasSnapshot: () => true,
+    // Independent fixture for the newly shared snapshot pre-validation.
+    getRestoreInputs: (rigId) => ({
+      snapshot: { id: "snap-1", kind: "full", data: {
+        rig: { id: rigId, name: "test-rig", createdAt: "", updatedAt: "" },
+        nodes: [], sessions: [], edges: [], checkpoints: {},
+      } },
+      servicesRecord: null,
+    }),
     getLatestSnapshot: () => null,
     probeDaemonHealth: () => ({ healthy: true, evidence: "Daemon running on port 7433" }),
     exists: () => true,
@@ -1432,7 +1440,7 @@ describe("RestoreCheckService", () => {
     expect(result.recovery.status).toBe("not_needed");
   });
 
-  it("stopped rig without latest snapshot is actionable when durable current state is present", () => {
+  it("stopped rig without a usable snapshot is unknown because auto-rehydrate is not inspected", () => {
     const service = new RestoreCheckService(mockDeps({
       hasSnapshot: () => false,
       getNodeInventory: () => [claudeNode({
@@ -1442,25 +1450,25 @@ describe("RestoreCheckService", () => {
         tmuxAttachCommand: null,
       })],
       getLatestSnapshot: () => null,
+      getRestoreInputs: () => ({ unavailable: "No usable snapshot; current-state auto-rehydrate is not inspected" }),
     }));
 
     const result = service.check({ noHooks: true }) as any;
 
-    expect(result.readiness.status).toBe("not_ready");
+    expect(result.readiness.status).toBe("unknown");
     expect(result.recovery).toEqual({
-      status: "actionable",
-      summary: expect.stringContaining("1 rig can be recovered"),
-      actions: [
+      status: "unknown",
+      summary: expect.stringContaining("1 unknown"),
+      actions: [],
+      unknown: [
         expect.objectContaining({
           scope: "rig",
           rigId: "rig-1",
           rigName: "test-rig",
-          command: "rig up --existing test-rig",
-          reason: expect.stringContaining("current DB state"),
+          reason: expect.stringContaining("auto-rehydrate is not inspected"),
         }),
       ],
       blocked: [],
-      unknown: [],
     });
   });
 

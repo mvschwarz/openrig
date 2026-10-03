@@ -8,6 +8,7 @@ import { getNodeInventory } from "../domain/node-inventory.js";
 import { resolveLegacyTopologyRigsRoot } from "../domain/user-settings/settings-store.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SnapshotRepository } from "../domain/snapshot-repository.js";
+import { snapshotMatchesCurrentOccupants } from "../domain/rehydrate-eligibility.js";
 
 function getDeps(c: { get(key: never): unknown }): {
   rigRepo: RigRepository;
@@ -189,6 +190,16 @@ export function createRestoreCheckService(
     getLatestSnapshot: (rigId: string) => {
       const snapshot = snapshotRepo.getLatestSnapshot(rigId);
       return snapshot ? { id: snapshot.id, kind: snapshot.kind } : null;
+    },
+    getRestoreInputs: (rigId: string) => {
+      const rig = rigRepo.getRig(rigId);
+      if (!rig) return { unavailable: `Rig ${rigId} no longer exists` };
+      const selected = snapshotRepo.selectRestoreUsable(rigId);
+      if (!selected.ok) return { unavailable: `${selected.message}; current-state auto-rehydrate is not inspected` };
+      if (!snapshotMatchesCurrentOccupants(snapshotRepo.db, rig, selected.snapshot)) {
+        return { unavailable: "Selected snapshot names an older occupant; current-state auto-rehydrate is not inspected" };
+      }
+      return { snapshot: selected.snapshot, servicesRecord: rigRepo.getServicesRecord(rigId) };
     },
     probeDaemonHealth: () => {
       // We're inside the daemon — if this route is responding, daemon is healthy

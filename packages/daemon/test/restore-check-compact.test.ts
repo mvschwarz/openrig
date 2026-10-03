@@ -30,6 +30,14 @@ function makeDeps(nodes: NodeInventoryEntry[]): RestoreCheckDeps {
     getNodeInventory: () => nodes,
     getStartupContext: () => ({ status: "missing" as const, evidence: "no context" }),
     hasSnapshot: () => true,
+    // Independent fixture for the newly shared snapshot pre-validation.
+    getRestoreInputs: (rigId) => ({
+      snapshot: { id: "snap-1", kind: "full", data: {
+        rig: { id: rigId, name: "test-rig", createdAt: "", updatedAt: "" },
+        nodes: [], sessions: [], edges: [], checkpoints: {},
+      } },
+      servicesRecord: null,
+    }),
     getLatestSnapshot: () => ({ id: "snap-1", kind: "full" }),
     probeDaemonHealth: () => ({ healthy: true, evidence: "OK" }),
     exists: () => false,
