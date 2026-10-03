@@ -274,3 +274,36 @@ describe.skipIf(process.platform === "win32")("classic bootstrap when the daemon
     expect(f.writes).toEqual([path.join(f.env.HOME, ".claude.json")]);
   });
 });
+
+// Live Claude processes read and write these files, so a file that already carries both flags is
+// never rewritten: no lost concurrent field, no truncated read, and the formatting stays the user's.
+describe.skipIf(process.platform === "win32")("an already-provisioned state file is not rewritten", () => {
+  const provisioned = (cwd: string, extra: Record<string, unknown> = {}) => JSON.stringify({ ...sentinel, ...extra,
+    hasCompletedOnboarding: true, projects: { ...sentinel.projects, [cwd]: { hasTrustDialogAccepted: true, kept: 1 } } });
+  it.each(["managed", "classic"])("%s: both flags present means no write, byte-identical", async route => {
+    const f = fixture("alternate", false, true);
+    const files = route === "managed" ? [f.statePath] : [path.join(f.env.HOME, ".claude.json"), f.statePath];
+    for (const file of files) fs.writeFileSync(file, provisioned(f.cwd, { location: file }));
+    const before = files.map(file => fs.readFileSync(file, "utf8"));
+    const binding = route === "managed" ? f.binding : classicLaunch(f, { HOME: f.env.HOME });
+    expect(await f.adapter.deliverStartup([], binding)).toEqual({ delivered: 0, failed: [] });
+    expect(f.writes).toEqual([]);
+    expect(files.map(file => fs.readFileSync(file, "utf8"))).toEqual(before);
+  });
+  it.each([
+    ["onboarding", (cwd: string) => ({ ...JSON.parse(provisioned(cwd)), hasCompletedOnboarding: undefined })],
+    ["trust", (cwd: string) => ({ ...JSON.parse(provisioned(cwd)), projects: { ...sentinel.projects, [cwd]: { kept: 1 } } })],
+  ] as const)("a missing %s flag means exactly one write, every other field kept", async (_flag, state) => {
+    const f = fixture("alternate", true, true);
+    fs.writeFileSync(f.statePath, JSON.stringify(state(f.cwd)));
+    await f.adapter.deliverStartup([], f.binding);
+    expect(f.writes).toEqual([f.statePath]);
+    expect(JSON.parse(fs.readFileSync(f.statePath, "utf8"))).toEqual(JSON.parse(provisioned(f.cwd)));
+  });
+  it("the post-launch delivery after a provisioning write makes no second write", async () => {
+    const f = fixture("relative", true, false);
+    await f.adapter.deliverStartup([], f.binding);
+    await f.adapter.deliverStartup([], f.binding);
+    expect(f.writes).toEqual([f.statePath]);
+  });
+});

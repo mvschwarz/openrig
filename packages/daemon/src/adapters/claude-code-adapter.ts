@@ -719,18 +719,27 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // Preserve every existing field. Unreadable/malformed/non-object state is
     // left untouched and reported through the caller's best-effort bootstrap boundary.
     const state = this.fs.exists(statePath) ? this.readJsonObjectStrict(statePath) : {};
+    // Running Claude processes read and write this file, so it is rewritten only when a flag is
+    // missing: an already-provisioned file (every relaunch, resume and post-launch delivery) is left alone.
+    let changed = false;
     if (cwd) {
       const projects = this.readJsonObjectField(state, "projects");
       if (Object.hasOwn(state, "projects") && projects !== state["projects"]) throw new Error("Claude bootstrap projects must be a JSON object; existing state preserved.");
       for (const trustKey of this.workspaceTrustKeys(cwd)) {
         const projectState = this.readJsonObjectField(projects, trustKey);
         if (Object.hasOwn(projects, trustKey) && projectState !== projects[trustKey]) throw new Error("Claude bootstrap project state must be a JSON object; existing state preserved.");
+        if (projectState["hasTrustDialogAccepted"] === true) continue;
         projectState["hasTrustDialogAccepted"] = true;
         projects[trustKey] = projectState;
+        changed = true;
       }
       state["projects"] = projects;
     }
-    state["hasCompletedOnboarding"] = true;
+    if (state["hasCompletedOnboarding"] !== true) {
+      state["hasCompletedOnboarding"] = true;
+      changed = true;
+    }
+    if (!changed) return;
     this.fs.mkdirp(nodePath.dirname(statePath));
     this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
   }
