@@ -338,11 +338,14 @@ export async function observeClaudeDelivery(input: Parameters<typeof observeNati
         const named = new Set(identities.filter((value): value is string => typeof value === "string"));
         if (named.size > 1) return { state: "conflict", detail: "Claude processes in the bound foreground name different conversations", fingerprint };
         if (!input.expectedToken) return { ...unknown, fingerprint };
-        // Any link naming the wrong conversation is mismatch evidence, but only the
-        // receiving process's own argv can prove the expected one; a shim's token
-        // is never inherited by a child that names none or cannot be parsed.
+        // argv records launch identity, not the current conversation: /clear can
+        // rotate the hook-persisted token without replacing this process. A sole
+        // launch-token mismatch cannot distinguish that from stale resume metadata.
+        // Do not promote either source over the other; ordinary delivery warns on
+        // uncertainty. Live lineage/binding conflicts and strict resume proof stay
+        // separate. A shim's token is never inherited by an opaque child.
         if (named.size === 1 && !named.has(input.expectedToken)) {
-          return { state: "conflict", detail: "The bound foreground names a different Claude conversation", fingerprint };
+          return { state: "unknown", detail: "Claude launch identity differs from the stored conversation; current conversation is unverified", fingerprint };
         }
         return identities[0] === input.expectedToken
           ? { state: "verified", detail: "Expected Claude conversation in the bound foreground", fingerprint }

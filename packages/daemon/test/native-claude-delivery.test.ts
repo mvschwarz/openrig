@@ -122,6 +122,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
       "versioned-argv-only", "versioned-comm-only", "launcher-shim",
       "launcher-shim-match", "launcher-shim-match-after", "launcher-shim-child-unparsed",
       "launcher-shim-child-two-sessions", "settings-single",
+      "wrong-token", "wrong-token-post-read-error", "wrong-token-post-read-empty", "launcher-shim-shims-differ",
     ].includes(mode);
     if (bare) expect({ ok: sent.ok, calls }).toEqual({ ok: false, calls: [] });
     expect(sent.ok).toBe(expectedSend);
@@ -134,9 +135,11 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     if (expectedSend && ["unavailable", "unknown-both", "missing-token", "missing-metadata", "background", "other-semver", "versioned-argv-only", "versioned-comm-only", "launcher-shim", "launcher-shim-child-unparsed", "launcher-shim-child-two-sessions"].includes(mode)) {
       expect(sent.warning).toContain("without verified native identity");
     }
-    // A shim's token is not inherited: only the real process's own argv verifies.
-    // Shims alone can still prove a mismatch.
-    if (mode === "launcher-shim-shims-differ") expect(sent.error).toContain("names a different Claude conversation");
+    // Static launch tokens alone cannot prove a different current recipient after
+    // /clear. This also applies when only the shim has a parseable launch token.
+    if (mode.startsWith("wrong-token") || mode === "launcher-shim-shims-differ") {
+      expect(sent.warning).toContain("without verified native identity");
+    }
     // --settings is delivery-only: the strict selector above still rejects it (observation === null).
     if (mode.startsWith("launcher-shim-match") || mode === "settings-single") expect(sent.warning ?? "").not.toContain("without verified native identity");
     if (mode.startsWith("launcher-shim-child-differs")) expect(sent.error).toContain("name different conversations");
