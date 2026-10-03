@@ -529,11 +529,8 @@ export class ClaudeCompactionEnforcer {
       this.triggeredAboveThreshold.delete(input.sessionName);
       const preparation = this.pendingPreCompactPrep.get(input.sessionName);
       if (preparation?.status === "compact-sent") this.pendingPreCompactPrep.delete(input.sessionName);
-      else if (preparation?.mode === "automatic") {
-        // An unfinished delivered request is not a new threshold crossing. Keep it
-        // stopped until an explicit retry; a later map cannot re-arm it.
-        this.stopPreparation(input.sessionName, "below_threshold");
-      }
+      // A usage dip is not cancellation: retain an unfinished attempt and its
+      // deadline so a later high sample can use its map without another prep.
       return { triggered: false, reason: "below_threshold" };
     }
 

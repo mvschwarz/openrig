@@ -52,6 +52,7 @@ it('ignores old maps, wrong-attempt/occupant markers, partial final and staging 
 });
 for(const end of ['expiry','cancel','disable','replacement'])it(`${end} disarms; a late map cannot compact or start automatic prep again`,async()=>{
  const f=fixture();await f.e.maybeAutoCompact(input);
+ await f.e.maybeAutoCompact({...input,usedPercentage:20});
  if(end==='expiry')f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);
  if(end==='cancel')f.e.cancelPreparation(seat);
  if(end==='disable')f.policy.enabled=false;
@@ -106,12 +107,16 @@ it('existing context poll reconciles expiry even with no fresh usage',async()=>{
  const monitor=new ContextMonitor({prepare:()=>({all:()=>[]})} as any,{} as any,undefined,f.e);await monitor.pollOnce();expect(f.e.getPreparationState(seat)?.status).toBe('stopped');expect(compacts(f)).toHaveLength(0);
 });
 
-it('falling below threshold never re-arms delivered unfinished preparation',async()=>{
- const f=fixture();await f.e.maybeAutoCompact(input);const attempt=f.e.getPreparationState(seat)!.attemptId;
- await f.e.maybeAutoCompact({...input,usedPercentage:20});
- await f.e.maybeAutoCompact(input);publish(f);await f.e.maybeAutoCompact(input);
- expect(f.e.getPreparationState(seat)).toMatchObject({attemptId:attempt,status:'stopped'});
- expect(f.writes).toHaveLength(1);expect(compacts(f)).toHaveLength(0);
+for(const mapBeforeRise of [true,false])it(`threshold dip retains the same attempt and deadline (map before rise: ${mapBeforeRise})`,async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);const original=f.e.getPreparationState(seat)!;
+ f.advance(1000);await f.e.maybeAutoCompact({...input,usedPercentage:20});
+ expect(f.e.getPreparationState(seat)).toMatchObject({attemptId:original.attemptId,deadlineAt:original.deadlineAt,status:'waiting'});
+ if(mapBeforeRise)publish(f);
+ await f.e.maybeAutoCompact(input);
+ if(!mapBeforeRise){expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);publish(f);await f.e.maybeAutoCompact(input);}
+ await f.e.maybeAutoCompact(input);
+ expect(f.e.getPreparationState(seat)).toMatchObject({attemptId:original.attemptId,deadlineAt:original.deadlineAt,status:'compact-sent'});
+ expect(f.writes.filter(t=>!t.startsWith('/compact'))).toHaveLength(1);expect(compacts(f)).toHaveLength(1);
 });
 for(const boundary of ['writeFile','load-buffer','key-list'])it(`actual tmux adapter checks cancellation after ${boundary} await`,async()=>{
  const f=fixture();await f.e.maybeAutoCompact(input);publish(f);

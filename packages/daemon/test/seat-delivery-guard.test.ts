@@ -421,7 +421,10 @@ it("automatic reminder records retained custody and no delivered fire or input",
   expect(f.writes.filter(command=>command.includes("paste-buffer"))).toHaveLength(1);
   expect(f.writes.some(command=>command.includes("send-keys"))).toBe(false);const count=f.writes.length;
   expect(await f.tmux.sendKeys("worker@test",["",""])).toMatchObject({ok:false,code:"typing_guard_enabled"});
-  const settings={resolveOne:()=>{throw Error("no compaction policy read or provider work while guarded");}} as never;
+  const settings={
+    resolveClaudeCompactionPolicy:()=>({enabled:true,thresholdPercent:80,preCompactInstruction:"prep",compactInstruction:"",messageInline:"",messageFilePath:"",postRestoreAuditInstruction:"audit"}),
+    resolveOne:()=>{throw Error("unexpected individual setting read while guarded");},
+  } as never;
   const enforcer=new ClaudeCompactionEnforcer(settings,f.transport,{openrigHome:process.env.OPENRIG_HOME});
   const input={sessionName:"worker@test",runtime:"claude-code",usedPercentage:99};
   expect(await enforcer.maybeAutoCompact(input)).toMatchObject({triggered:false,reason:"typing_guard_enabled"});

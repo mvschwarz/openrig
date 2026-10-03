@@ -65,7 +65,7 @@ already submitted. Raw provider /compact and normal messages are unchanged.`);
     }
 
     const client = deps.clientFactory(getDaemonUrl(status));
-    const res = opts.state ? await client.get<Record<string, unknown>>(`/api/compaction/state?session=${encodeURIComponent(session)}`) : await client.post<Record<string, unknown>>(
+    const res = opts.state ? await client.get<Record<string, unknown>>(`/api/compaction/state?session=${encodeURIComponent(session)}`, { headers: terminalAuthHeaders() }) : await client.post<Record<string, unknown>>(
       opts.cancel ? "/api/compaction/cancel" : "/api/compaction/trigger",
       { session, ...(opts.skipMap ? { skipMap: true } : {}) },
       { headers: terminalAuthHeaders(), timeoutMs: MANUAL_COMPACT_REQUEST_TIMEOUT_MS },

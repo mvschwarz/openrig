@@ -43,14 +43,21 @@ async function restorePromptFor(messageFilePath: string, seat: string): Promise<
   const { transport, send } = makeSessionTransport();
   const enforcer = new ClaudeCompactionEnforcer(settings, transport, {
     dedupWindowMs: 60_000, postCompactRestoreCooldownMs: 0, openrigHome: home,
+    resolveOccupantGeneration: () => "test-generation",
   });
   let now = 1_700_000_000_000;
   vi.spyOn(Date, "now").mockImplementation(() => now);
   await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 90 }); // prep
+  const attempt = enforcer.getPreparationState(seat)!;
+  expect(attempt).toMatchObject({ status: "waiting", occupantGeneration: "test-generation" });
+  writeFile(attempt.mapPath + ".tmp", `# Restore map\n${attempt.marker}\n`);
+  fs.renameSync(attempt.mapPath + ".tmp", attempt.mapPath);
   now += 61_000;
-  await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 95 }); // /compact
+  expect(await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 95 })).toMatchObject({ triggered: true }); // /compact
+  expect(send.mock.calls.at(-1)![1]).toMatch(/^\/compact/);
   await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/t.jsonl" }); // turn_boundary
   await enforcer.maybeAutoCompact({ sessionName: seat, runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/t.jsonl" }); // restore_prompt
+  expect(send).toHaveBeenCalledTimes(4);
   return send.mock.calls[send.mock.calls.length - 1]![1] as string;
 }
 
