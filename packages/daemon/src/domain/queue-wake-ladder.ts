@@ -454,6 +454,7 @@ export function readWakeLadderBackstop(db: Database.Database, qitemId: string): 
     note: "Current recovery disposition owns the continuation; inspect that row. New source evidence is evaluated afresh.",
   });
   if (recovery && !["pending", "in-progress", "blocked"].includes(recovery.state)) return recoveryBackstop();
+  if (recovery && disposition && JSON.parse(disposition.tags ?? "[]").includes(PROMPT_ALERT_TAG)) return recoveryBackstop();
   const mode = unclaimedWakeMode(row);
   const eligible = (row.state === "pending" && !row.claimedAt && row.handedOffFrom)
     || (row.state === "in-progress" && row.claimedAt && mode === "failed" && db.prepare(
@@ -736,6 +737,14 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         lastActivity === null || Number.isNaN(lastActivity) || now.getTime() - lastActivity >= intervalS * 1000;
       const suspended = due ? suspensionReason(deps.db, row.destinationSession, graceS, now) : null;
 
+      const recovery = findQueueRecovery(deps.db, row.qitemId);
+      const recoveryRow = recovery ? deps.queueRepo.getById(recovery.qitemId) : null;
+      // The open prompt recovery owns continuation before the retry cap too.
+      // Do not retry the blocked original, duplicate its aggregate, or exhaust
+      // the original (which would retire that aggregate).
+      if (recoveryRow?.tags?.includes(PROMPT_ALERT_TAG)
+        && ["pending", "in-progress", "blocked"].includes(recoveryRow.state)) continue;
+
       // Retry rung — failed outcomes only, under the cap, inside the destination budget.
       if (mode === "failed" && view.attempts < cap) {
         if (!due) continue;
@@ -763,12 +772,6 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         continue;
       }
 
-      const recovery = findQueueRecovery(deps.db, row.qitemId);
-      const recoveryRow = recovery ? deps.queueRepo.getById(recovery.qitemId) : null;
-      // The prompt pass already owns this episode. Do not create a second
-      // aggregate or exhaust the original (which would retire the prompt row).
-      if (recoveryRow?.tags?.includes(PROMPT_ALERT_TAG)
-        && ["pending", "in-progress", "blocked"].includes(recoveryRow.state)) continue;
       if (recovery && !recoveryRow?.tags?.includes(WAKE_ESCALATION_TAG)) {
         appendExhausted(deps.queueRepo, row, `recovery disposition already held by ${recovery.qitemId} (${recovery.state})`);
         continue;
