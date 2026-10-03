@@ -1,6 +1,6 @@
 ---
 name: claude-compaction-restore
-description: Use when a Claude Code session has just compacted, is about to compact, reached context limit, resumed after /compact, or needs to rebuild its working mental model from Claude JSONL transcripts and touched files.
+description: Use when a Claude Code session is about to compact, has just compacted, reached its context limit, resumed after /compact, or must rebuild its working picture of a long-running seat from its own restore map, its JSONL transcript and the files it touched.
 metadata:
   openrig:
     sibling_skills:
@@ -13,141 +13,207 @@ metadata:
 
 # Claude Compaction Restore
 
-Use this skill to preserve continuity before Claude Code compacts and to
-restore continuity after compaction. Follow the active restore request or
-configured continuity policy. A hook notice identifies available evidence; it
-does not by itself request a seat restoration.
+Compaction keeps facts and loses connections. After a compaction you still know file names, row ids and
+decisions as items. What you lose is the web between them: why a file matters, what depends on what, which
+decision produced which artifact, what you were about to do next, and how this window relates to the ones
+before it. Seats whose value is a wide, long-running picture (planners, orchestrators, reviewers holding a
+standard) lose the most.
+
+This skill keeps that picture alive across compactions. Before compacting, you write a **restore map**: a
+short summary plus the connections between things that already exist on disk. After compacting, you
+re-enter the world, read your own map, and rebuild the picture before acting. Over several compactions the
+maps chain into one continuous record: a global context window that outlives any single session.
+
+The previous version of this skill is kept at `reference/SKILL-v1.md` for comparison.
+
+## What survives, and what you write
+
+**Already on disk; point to it, don't copy it:**
+- your session JSONL at `~/.claude/projects/<cwd-slug>/<session-uuid>.jsonl` (the post-compaction restore
+  request names the exact path). It holds every message and tool call you made, in order. It does not hold
+  your reasoning;
+- the restore packet the PreCompact hook writes (transcript extract, touched-file triage);
+- queue rows and their transitions, mission files (`SPEC.md`, `NOTES.md`, `PROGRESS.md`), your seat's
+  `LEARNED.md`, evidence folders, branches and PRs.
+
+**Only in your head; write it down:**
+- why each important thing matters, and to whom;
+- how things relate: depends on, supersedes, answers, contradicts, was produced by, is owned by;
+- decisions and the reasons for them, options you rejected, judgment and taste you applied;
+- where you were in time: what earlier windows established, what this window did, what comes next and who
+  authorizes it;
+- where to look deeper: which JSONL range or file answers which question.
+
+The map is the second list, pinned to the first.
+
+## Two restore classes
+
+Every restored seat must come back competent. It should understand the OpenRig world and its command
+surface, the project, its own role, and where it stands in time. Some seats also need the global picture.
+
+Both classes read the same thing: the **ranked reading list** in your own map, in order. They differ only in
+how far down the list they go.
+
+| Class | Who | Reads |
+|---|---|---|
+| **Default** | drivers, builders, reviewers, QA, and any seat not listed below | Tier 1: the top of the list, to about **100k** |
+| **High-context** | orchestrators, planners, advisors, leads: any seat that makes product, scope or routing decisions | Tier 1 and Tier 2, to about **200k** |
+
+The tiers are **real context added by the restore**, on top of what the compaction summary leaves (about 60k).
+File size is a poor guide to that cost: in tests, real context grew 1.7 to 2 times the bytes ÷ 4 estimate,
+because of line numbers on reads, tool output and your own reasoning. So rank to about **50k of bytes ÷ 4 for
+Tier 1** and about **100k for Tier 2**, and check real usage at each checkpoint with
+`rig compact-plan --json` (your seat's `estimatedUsedTokens`).
+
+Tier 2 buys **width, not depth**: more sources, more connections, more of the mission's history and the wider
+worlds, not the same files read more fully. Choose your class from your role (`rig whoami --json`). A per-seat
+instruction file or your own map can name the class explicitly, and that overrides the role default. In both
+classes, transcripts and the session JSONL appear only as targeted line ranges, never as whole files.
+
+If there is no ranked list (no preparation turn happened), use this default order. Default seats stop at about
+100k:
+1. the post-compaction world profile;
+2. the mission or slice `SPEC.md` and `NOTES.md`;
+3. rows you hold.
+
+High-context seats then add, to about 200k:
+1. the full System World install;
+2. the full Project World, public and private;
+3. the mission's `PROGRESS.md` and recent returns;
+4. previous maps and `RESTORED` notes;
+5. `LEARNED.md`.
 
 ## If You Are About To Compact
 
-Prepare durable continuity before the context boundary.
+You are about to lose every connection you have built. Spend this turn making them durable.
 
-1. Identify the active task, queue item, mission/slice, branch or commit, and
-   current working directory.
-2. Record the current state: decisions made, files changed, commands/tests run,
-   evidence produced, blockers, caveats, and the next concrete step.
-3. Create or update a durable mental-model restore map. This map is the main
-   artifact future-you will use to rebuild context after compaction.
-4. In the restore map, write an ASCII file/folder tree of every path that
-   mattered to your working mental model during this session. Include:
-   - the active queue item or mission packet;
-   - mission notes, progress, decisions, and evidence files;
-   - Claude memory/project notes you used or wrote, especially when the memory
-     folder is shared by many agents;
-   - files with active edits or recently inspected source;
-   - root instructions such as `AGENTS.md`, `CLAUDE.md`, or `README.md`;
-   - as-built docs, codemaps, conventions, skills, and product docs needed
-     before code/review work;
-   - source files, tests, scripts, UI evidence, screenshots, logs, or reports
-     that shaped your current state.
-5. For every file or folder in the tree, add a short note explaining why it
-   matters and whether it is required reading after compaction.
-6. Write any important glue context that is not already on disk into the
-   handoff/restore map. This includes assumptions, partial conclusions, failed
-   paths, and why the listed files fit together.
-7. In the compaction summary, include the restore map path and the top required
-   reading paths from that map.
+1. **Think back before writing.** Walk the session and, through your previous map, the windows before it.
+   What were the threads? What did you work out about how the pieces fit? What is unfinished? What did you
+   decide, and why? What were you about to be wrong about?
+2. **Write the restore map** in your seat folder, not in scratch (scratch can be cleaned while you are
+   compacted): `<topology root>/rigs/<rig>/seats/<seat>/RESTORE-MAP-<UTC yyyymmdd-hhmm>.md`. Derive the
+   folder from `rig whoami --json` and `rig config get topology.root`. **Run `date -u` for the timestamp and
+   every time you write in the map. Do not estimate times**: an estimated time can land before events it
+   describes, as one did in the first test.
+3. **Open the map with a summary** of 10 to 20 lines: who you are, what you hold, what mattered in this
+   window, what is next and who authorizes it, and any hold in force. **Publish that summary as your seat
+   recap** too: save it, plus a line naming the map's path, to a file and run
+   `rig context recap-write --rig <rig> --seat <seat> --file <that file>`. The post-compaction world profile
+   loads the seat recap and fails without one; an old recap is served as if it were current.
+4. **Then write the connections.** Choose what this seat needs; these are examples, not a template:
+   - **State:** rows you hold (id, state), branches and PR heads, the hold or release in force and who gave
+     it, the mission and slice you work in.
+   - **Nodes with purpose:** each file, row, PR or evidence folder that matters, one line each on what it is
+     and why it matters.
+   - **Edges:** "A depends on B", "C supersedes D", "this decision produced that file", "E answers question
+     F", "G is owned by seat H", "I and J disagree; unresolved".
+   - **Judgment:** decisions with reasons, rejected options, what the human cares about here, the tells you
+     caught or nearly missed.
+   - **Time:** what the previous map said happened before, what happened this window, what is next.
+   - **Lookups:** JSONL line ranges or uuids for threads worth re-reading (`grep -n` the JSONL for a row id
+     or timestamp), and which file holds the evidence for which claim.
+   - **A small file tree** of the paths above, each with a one-line note, when that helps navigation.
+5. **Rank what your restored self should read.** End the map with a reading list ordered by importance.
+   - **What each entry gives:**
+     - the path;
+     - the exact part to read (a heading, a line range, or a JSONL range found with `grep -n`), not the
+       whole file unless the whole file is the point;
+     - its approximate size (bytes ÷ 4 ≈ tokens; `wc -c`);
+     - one line on why it matters.
+   - **The first entry** is the post-compaction world profile, with its size from
+     `rig context profile … --json` (`totalEstimatedTokens`).
+   - **Tier lines:** keep a running bytes ÷ 4 total, draw the Tier 1 line at about 50k (about 100k of real
+     context), and continue to about 100k for Tier 2 (about 200k real).
+   - **Rank for connections.** Prefer the entry that connects the most other things you need, and choose a
+     section that explains how things fit over a long file of detail you can look up later.
+6. **Link the chain.** Name the previous restore map (and its `RESTORED` note, if one exists) so a later
+   reader can walk back through earlier windows.
+7. **Keep it readable in one pass.** Aim for something you could read in a few minutes: point instead of
+   copying, and leave out what a command can re-derive.
+8. **Update the durable homes you own** as usual: a lesson that changes future decisions goes in
+   `LEARNED.md`; mission state goes in the mission's own files; work another seat must act on goes in a queue
+   row. The map points to these rather than repeating them.
+9. **End the preparation turn** by stating the map path. OpenRig sends `/compact` next; the summary should
+   name the map path and the next authorized step.
+
+A map that lists files without saying how they connect is an inventory, and an inventory is what compaction
+already leaves you. The edges are the point.
 
 ## If You Just Compacted
 
-Restore from the evidence for this session before relying on remembered task state.
+You have facts without connections. Rebuild the connections before you act on anything.
 
-1. Inspect the restore request and any named marker, packet, transcript, restore
-   map, or extra instruction file. Check recorded seat/session/transcript identity
-   against the current request, and verify that the referenced packet is readable.
-   A marker path alone does not prove a usable packet; do not substitute another
-   seat's packet or select one only because it is the newest.
-2. **Use the existing packet when usable.** Read its `restore-instructions.md`,
-   `touched-files.md`, and any named restore map. A packet already prepared for this
-   session does not need rebuilding merely because compaction occurred.
-3. **Fall back when the packet is absent or unusable.** Record what is missing or
-   mismatched. Resolve this skill's installed directory and run its
-   `scripts/restore-from-jsonl.mjs` with the matching Claude JSONL transcript and a
-   separate output directory. For a skill installed in the global Claude skill root:
-
-```bash
-node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs /path/to/session.jsonl --out /tmp/claude-compaction-restore
-```
-
-   If no transcript was named, identify the current session's transcript first.
-   The script can discover a transcript from a working directory, but inspect that
-   selection before relying on it. If the session cannot be identified, report
-   the missing input instead of reconstructing from an unrelated conversation.
-   Read the resulting `restore-instructions.md` and `touched-files.md`.
-4. Inspect the actual packet and transcript sizes before choosing how much to read.
-   The generated instructions report estimated token cost. State a read budget
-   and stopping rule that leave room for the task. For a large transcript, begin
-   with the most recent task-relevant unique narrative; read earlier material when
-   a specific missing decision or dependency requires it. Report ranges actually
-   read rather than treating a chosen budget as completed coverage.
-5. Use the restore map and touched-file list to identify current task files.
-   The list is a triage aid, not an exhaustive inventory. Prioritize the active
-   queue/mission packet, decisions and memory named in the map, files with active
-   edits, root instructions, and relevant as-built docs or codemaps. Read required
-   task files in full within the stated budget; record any remaining gaps.
-6. Re-establish the task's purpose and operating context from the current project,
-   mission and seat files. A transcript summary alone does not establish current
-   scope or obligations. Use the shipped `refocusing` skill for the path-only
-   topology/work trace when operating inside OpenRig.
-7. Report the read-depth audit below. Once the required context is restored, use
-   the packet's requested acknowledgment, normally:
-
-```text
-restored from packet at <path>; resumed at step <X>
-```
-
-   Include the main files actually read in full. If essential context remains
-   missing, report partial restoration and the next recovery action instead of
-   claiming completion.
-
-The packaged PreCompact writer can prepare a packet and a per-seat pending marker;
-the restore bridge can deliver its pointer once for a matching session. Inspect
-those actual artifacts. Their creation or delivery is not proof that a provider
-restored its context, that the files were read, or that task understanding returned.
+1. **Check for a hold first.** Read the restore request, the per-seat instruction file
+   (`<OPENRIG_HOME>/compaction/post-compact-extra/<seat>.md`) when it exists, and the newest message from the
+   seat that owns your work. A hold, a release order or an operator's own restore map overrides the default
+   order below. Before any write, also run `rig whoami --json` and `rig queue whoami`.
+2. **Name your class and state its read budget** before reading (see "Two restore classes"), with a
+   checkpoint at each step below. The budget exists so that the restore leaves room for the work it was
+   restored to do. A high-context seat also reads the class's extra sources after step 5.
+3. **Re-enter the world.** Load the post-compaction world profile your instance provides. Find it with
+   `rig context list`; for a private world install, run
+   `rig context profile <world-ref> --situation post-compaction --rig <rig> --seat <seat>` (the seat flags are
+   needed for its seat-scoped recap atom; take both values from `rig whoami --json`). Without a private world,
+   read the public `world-public` and `onboarding-width` packs. This restores how the system works before you
+   restore what you were doing in it.
+4. **Read your own restore map in full**: the newest `RESTORE-MAP-*.md` in your seat folder, which the
+   compaction summary should name. If it points to an earlier map for context you need, read that too.
+5. **Read down the map's ranked list** to your class's tier line, reading exactly the parts each entry names.
+   Then check every row you hold (`rig queue show <id> --full --json`) and anything that may have changed since
+   the map was written: merged PRs, new rows, a new hold. The map records what was true when it was written;
+   current state still has to be derived.
+6. **Use the packet and the JSONL as lookups**, not as reading lists: go to a specific line range when a
+   specific question needs it. The packet's `restore-instructions.md` and `touched-files.md` help find
+   things the map does not cover.
+7. **If there is no map** (the preparation turn did not happen), fall back to the packet: read
+   `restore-instructions.md`, then the most recent unique narrative, tail first, within the budget; and say in
+   your report that you restored without a map.
+8. Reply with the sentence the restore request asks for, normally
+   `restored from packet at <path>; resumed at step <X>`, naming the map you used.
 
 ## Required Read-Depth Audit
 
-After the first restore pass, audit yourself before continuing.
+The audit message asks for a read-depth table and tells you not to conserve tokens. Do both in this form:
 
-1. List every file, packet, marker, restore map, instruction file, and source
-   document you were asked to read during restore.
-2. Mark each item as `FULL`, `PARTIAL`, or `NOT_READ`.
-3. Distinguish essential current-task context from supplementary history, using
-   the actual restore request and active task.
-4. Read `PARTIAL`/`NOT_READ` items in full — but **to a declared budget with a stopping rule**, not
-   unbounded. Prioritize by relevance to the active task; for a large transcript read the most recent
-   unique narrative first (see *If You Just Compacted*), not front-to-back.
-5. **Stop** when either every task-relevant item is `FULL`, or you reach the budget — *a restore that
-   cannot leave room for the work it was restored to do is not a successful restore.* "Read everything,
-   never conserve" has no termination condition; that open-endedness is the bug, not the goal.
-6. Report the final read-depth table **honestly** (`FULL`/`PARTIAL`/`NOT_READ`, each with a reason)
-   before task work. **An honest `PARTIAL` with its reason is a correct outcome, not a failure** — do
-   not claim a completion you did not reach.
+1. **List every item** you were asked to read (request, instruction files, packet, map, and the sources the
+   map marks required) with `FULL`, `PARTIAL` or `NOT_READ`, the ranges you actually read, and a reason.
+   Mark `FULL` only for content you read after this compaction; content carried in through the summary is
+   inherited, not read.
+2. **Read in full now** every required item that is not yet `FULL`. "Required" means the ranked entries
+   above your class's tier line, in the exact parts they name. Everything else is lookup-only: **every file in the restore packet**
+   (`touched-files.md`, `restore-instructions.md`, `transcript.md`, `transcript-latest.md`, `restore-summary.json`),
+   the session JSONL and archives. Those stay
+   `NOT_READ` with the reason "lookup only", unless a human or the owning seat releases them. The audit
+   message's "do not optimize for token conservation" applies to required items: read those fully rather
+   than skimming them. It does not turn lookups into reading lists. In the first test of this skill, reading
+   the packet transcripts during the audit cost a default seat about 75k, more than the restore itself.
+3. **Reconnect, in writing.** In the same reply, and in a short `RESTORED-<UTC yyyymmdd-hhmm>.md` beside the
+   map:
+   - where you are in time: what earlier windows established, what the last window did, what is true now;
+   - the connections you have rebuilt, in a few lines;
+   - the connections you could not rebuild, and where you would look;
+   - the next authorized step and who authorizes it. If a hold stands, the next step is waiting.
+
+The next restore map links this note, which keeps the chain unbroken.
 
 ## Guardrails
 
-- Compaction is survival, not housekeeping — never compact to free space, "lean" a seat, or capture/prepare an agent starter (the `rig agent-image` library). It is lossy (a compacted Claude is confident-but-hollow); compact only when a seat is genuinely near its context limit, with a before/after plan. A starter's value is being *functional*, not small — see the `agent-starters` skill.
-- Do not silently launch fresh after compaction.
-- Do not continue from memory when restore evidence exists.
-- Do not defer required restore reading until a later user task. The restore is
-  the current task.
-- Do not skip root instructions, as-built docs, or codemaps before product
-  code/review work.
-- Do not treat the generated touched-file list as exhaustive.
-- Do not mark a file `FULL` unless you actually read the full file content
-  after compaction.
-- Do not resume task work until the restore sentinel and read-depth audit are
-  complete.
+- Compaction is survival, not housekeeping. Compact only when a seat is genuinely near its limit, never to
+  "lean" a seat or prepare a starter image; a compacted Claude can be confident and hollow at once.
+- Continue from the map and the files, not from the summary's "next step" alone: a hold placed after the
+  summary was written still binds.
+- Do not launch a fresh session in place of restoring.
+- An honest `PARTIAL` with its reason is a correct outcome. Claiming coverage you did not reach is the
+  failure.
+- Do not resume task work until the read-depth table and the reconnect note exist.
 
-## Failure Modes To Avoid
+## Failure modes
 
-1. **Confidently-wrong restoration**: claiming restoration after reading only
-   the touched-file list or summary.
-2. **Unreported partial restore**: continuing without essential task context or
-   claiming full coverage after a budget-limited read.
-3. **Skipping project instructions**: missing `AGENTS.md`, `CLAUDE.md`,
-   `README.md`, as-built docs, or codemaps that govern the task.
-4. **Treating the packet as exhaustive**: ignoring mission or workspace files
-   that are important but were not discovered by the script.
-5. **Waiting for the next task**: treating restore reading as conditional on a
-   future user assignment instead of completing it immediately.
+1. **Inventory instead of map:** a list of paths with no edges. The restored seat knows where things are and
+   not why they matter.
+2. **Confident restoration:** acting on the summary after reading only the touched-file list.
+3. **Reading to exhaustion:** reading the whole transcript or every linked file and leaving no room for the
+   work.
+4. **Map in scratch:** writing the map somewhere that is cleaned before you restore.
+5. **Broken chain:** a map that does not name the previous one, so earlier windows are lost on the second
+   compaction.
