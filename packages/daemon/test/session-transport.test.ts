@@ -987,6 +987,59 @@ describe("SessionTransport", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("D1 cancellation before waiting starts no observation or input", async () => {
+    seedCanonicalRig();
+    const controller = new AbortController();
+    controller.abort();
+    const capture = vi.fn(async () => IDLE_PANE);
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }));
+    const result = await transport.waitUntilIdle("dev-impl@my-rig", 50, controller.signal);
+    expect(result).toMatchObject({ ok: false, reason: "preparation_cancelled", attempts: 0 });
+    expect(capture).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("D1 cancellation during an in-flight observation discards idle and never observes again", async () => {
+    seedCanonicalRig();
+    const controller = new AbortController();
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: (text: string) => void;
+    const captured = new Promise<string>((resolve) => { release = resolve; });
+    const capture = vi.fn(async () => { entered(); return captured; });
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }));
+    const pending = transport.waitUntilIdle("dev-impl@my-rig", 1000, controller.signal);
+    await started;
+    controller.abort();
+    release(IDLE_PANE);
+    const result = await pending;
+    expect(result).toMatchObject({ ok: false, reason: "preparation_cancelled", attempts: 1 });
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("D1 cancellation between retries starts no second observation", async () => {
+    seedCanonicalRig();
+    const controller = new AbortController();
+    const capture = vi.fn(async () => { throw new Error("controlled unreadable pane"); });
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }), {
+      waitForIdlePollMs: 10, sleep: async () => { controller.abort(); },
+    });
+    const result = await transport.waitUntilIdle("dev-impl@my-rig", 1000, controller.signal);
+    expect(result).toMatchObject({ ok: false, reason: "preparation_cancelled", attempts: 1 });
+    expect(capture).toHaveBeenCalledTimes(1);
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("an ordinary send (no wait) is unchanged: one unknown observation proceeds with an advisory, no retry loop", async () => {
     seedCanonicalRig();
     const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
