@@ -19,16 +19,33 @@
 // (a profile that copies project, seat or mission content into the library is a defect —
 // Q2-Amendment 1(c)).
 
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, normalize, relative, sep } from "node:path";
 import type { SourceKind } from "./profile-composer.js";
 import { parseAddress } from "../markdown-address.js";
+import { RECAP_FILENAME } from "./seat-recap-store.js";
 
 export class SourceResolutionError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SourceResolutionError";
   }
+}
+
+/** The file is genuinely absent under a root that exists: not a dangling link,
+ *  not a missing or unconfigured root. Still a resolution failure; only the
+ *  composer's post-compaction recap rule treats it differently. */
+export class SourceAbsentError extends SourceResolutionError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SourceAbsentError";
+  }
+}
+
+/** True for the seat tree's authored recap (`seat:RECAP.md`, any section). */
+export function isSeatRecapAddress(address: string): boolean {
+  const { kind, rel } = parseSourceRef(parseAddress(address).ref);
+  return kind === "seat" && rel === RECAP_FILENAME;
 }
 
 const TREE_KINDS = ["project", "seat", "mission"] as const;
@@ -96,6 +113,8 @@ export interface SourceReadRecord {
   /** True when realPath sits outside base. Computed via path.relative — never a
    *  bare string prefix (r1: `startsWith` says /seat-evil is inside /seat). */
   escapesRoot: boolean;
+  /** The read file's mtime (ISO 8601), when it could be stat'ed after the read. */
+  writtenAt?: string;
 }
 
 /** Build the composer's fail-loud readFile over the pack dir + configured tree
@@ -132,18 +151,20 @@ export function makeProfileReadFile(opts: {
       // but its target does not — a generic "unreadable" would send an author
       // hunting for a file that is right there in their listing.
       let dangling = false;
+      let absent = false;
       try {
         const stat = lstatSync(abs);
         const code = (err as NodeJS.ErrnoException).code;
         dangling = stat.isSymbolicLink() && (code === "ENOENT" || code === "ENOTDIR");
-      } catch {
-        /* genuinely absent */
+      } catch (lstatErr) {
+        // Genuinely absent only under a root that exists: a missing seat
+        // directory is a wrong or unprovisioned root, never an absent file.
+        absent = (lstatErr as NodeJS.ErrnoException).code === "ENOENT" && isDirectory(base);
       }
-      throw new SourceResolutionError(
-        dangling
-          ? `source ref '${ref}' (${kind}) is a DANGLING symlink: ${abs} exists but its target does not — ${(err as Error).message}`
-          : `source ref '${ref}' (${kind}) did not resolve: ${abs} is unreadable — ${(err as Error).message}`,
-      );
+      const message = dangling
+        ? `source ref '${ref}' (${kind}) is a DANGLING symlink: ${abs} exists but its target does not — ${(err as Error).message}`
+        : `source ref '${ref}' (${kind}) did not resolve: ${abs} is unreadable — ${(err as Error).message}`;
+      throw absent ? new SourceAbsentError(message) : new SourceResolutionError(message);
     }
     // Provenance AFTER the successful read (r1: realpath on a missing file
     // throws, and that throw must never garble the honest read error above).
@@ -166,10 +187,24 @@ export function makeProfileReadFile(opts: {
       // root satisfied startsWith('..') — the identical class as
       // startsWith(base) saying /seat-evil is inside /seat, one level in).
       const escapesRoot = relFromBase === ".." || relFromBase.startsWith(`..${sep}`) || isAbsolute(relFromBase);
-      opts.onRead({ ref, kind, base, nominalPath: abs, realPath, escapesRoot });
+      let writtenAt: string | undefined;
+      try {
+        writtenAt = statSync(realPath).mtime.toISOString();
+      } catch {
+        /* raced away post-read; the read itself stands */
+      }
+      opts.onRead({ ref, kind, base, nominalPath: abs, realPath, escapesRoot, ...(writtenAt !== undefined ? { writtenAt } : {}) });
     }
     return text;
   };
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /** The composer's per-piece source label (Q2-Amendment 1: every assembled piece

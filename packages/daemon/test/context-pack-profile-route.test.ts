@@ -9,7 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
@@ -674,6 +674,44 @@ describe("synthetic world graph — the seat RECAP composes through the real rou
     expect(res.status).toBe(422);
     const body = await res.json() as { message: string };
     expect(body.message).toMatch(/recap/i);
+  });
+
+  it("POST-COMPACTION with no seat RECAP composes the rest and names the gap (a compacted seat still has its restore map)", async () => {
+    buildApp(false);
+    const res = await app.request(profileUrl("situation=post-compaction&runtime=claude&rig=r1&seat=s1"));
+    expect(res.status).toBe(200);
+    const body = await res.json() as { pieces: Array<{ atomId: string }>; warnings: string[]; skipped: unknown };
+    expect(body.pieces.map((p) => p.atomId)).toEqual(["ontology", "what-you-can-do", "reference-material", "a-competent-turn"]);
+    expect(body.warnings).toEqual(["no seat recap for s1@r1; read your newest restore map"]);
+    expect(body.skipped).toEqual([{ atomId: "recap", address: "seat:RECAP.md" }]);
+  });
+
+  it("POST-COMPACTION still fails LOUD for a dangling RECAP link, a missing seat directory, or no seat grant", async () => {
+    buildApp(false);
+    symlinkSync(join(tmp, "nowhere.md"), join(tmp, "topology", "rigs", "r1", "seats", "s1", "RECAP.md"));
+    const dangling = await app.request(profileUrl("situation=post-compaction&runtime=claude&rig=r1&seat=s1"));
+    expect(dangling.status).toBe(422);
+    expect(((await dangling.json()) as { message: string }).message).toMatch(/DANGLING/);
+    const noSeatDir = await app.request(profileUrl("situation=post-compaction&runtime=claude&rig=r1&seat=s2"));
+    expect(noSeatDir.status).toBe(422);
+    expect(((await noSeatDir.json()) as { message: string }).message).toMatch(/recap/i);
+    const noGrant = await app.request(profileUrl("situation=post-compaction&runtime=claude"));
+    expect(noGrant.status).toBe(422);
+    expect(((await noGrant.json()) as { message: string }).message).toMatch(/not configured/);
+  });
+
+  it("the RECAP piece carries its file's write time, so an old recap is not read as current", async () => {
+    buildApp(true);
+    const written = new Date("2026-08-26T12:00:00.000Z");
+    utimesSync(join(tmp, "topology", "rigs", "r1", "seats", "s1", "RECAP.md"), written, written);
+    for (const situation of ["post-compaction", "handover"]) {
+      const res = await app.request(profileUrl(`situation=${situation}&runtime=claude&rig=r1&seat=s1`));
+      expect(res.status).toBe(200);
+      const body = await res.json() as { pieces: Array<{ atomId: string; writtenAt?: string }>; warnings: string[] };
+      expect(body.pieces.filter((p) => p.writtenAt !== undefined).map((p) => [p.atomId, p.writtenAt]))
+        .toEqual([["recap", "2026-08-26T12:00:00.000Z"]]);
+      expect(body.warnings).toEqual([]);
+    }
   });
 
   it("FRESH needs no seat tree and stays the six-piece walk (recap never leaks into fresh)", async () => {

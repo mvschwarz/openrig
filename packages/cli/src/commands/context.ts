@@ -672,9 +672,10 @@ Examples:
         const res = await client.get<{
           profileId?: string;
           phases?: Array<{ id: string; kind: string; sources?: string[]; estimatedTokens: number }>;
-          pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number }>;
+          pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number; writtenAt?: string }>;
           totalEstimatedTokens?: number;
           budget?: { limitTokens: number; overageTokens: number; dropCandidates: Array<{ atomId: string; priority: string; estimatedTokens: number }> };
+          warnings?: string[];
           provenanceWarnings?: string[];
           message?: string;
           error?: string;
@@ -696,6 +697,7 @@ Examples:
         }
         // Warnings and the budget report ride stderr so stdout is exactly the
         // composed walk an agent consumes.
+        for (const w of profile.warnings ?? []) console.error(`WARNING ${w}`);
         for (const w of profile.provenanceWarnings ?? []) console.error(`PROVENANCE ${w}`);
         if (profile.budget) {
           console.error(
@@ -709,7 +711,8 @@ Examples:
           // outside its root — self-describing payload, zero composed bytes
           // touched.
           const escaped = (p as { provenance?: { escapesRoot?: boolean } }).provenance?.escapesRoot ? " !ESCAPED-ROOT" : "";
-          console.log(`=== ${p.atomId} [${p.sourceKind}${escaped}] ${p.address} (~${p.estimatedTokens} tokens)`);
+          const written = p.writtenAt ? ` written ${p.writtenAt}` : "";
+          console.log(`=== ${p.atomId} [${p.sourceKind}${escaped}] ${p.address} (~${p.estimatedTokens} tokens)${written}`);
           console.log(p.text);
           console.log("");
         }
