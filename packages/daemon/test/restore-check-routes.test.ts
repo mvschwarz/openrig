@@ -147,7 +147,7 @@ describe("Restore check routes", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM snapshots").get()).toEqual(before);
   });
 
-  it("returns unknown for a snapshot of an older occupant without capturing current state", async () => {
+  it("reports eligible current-state recovery for an older-occupant snapshot without capture", async () => {
     const rig = rigRepo.createRig("changed-occupant");
     const node = rigRepo.addNode(rig.id, "seat", { runtime: "terminal" });
     sessionRegistry.registerSession(node.id, "seat@changed-occupant");
@@ -155,9 +155,11 @@ describe("Restore check routes", () => {
     snapshotRepo.createSnapshot(rig.id, "auto-pre-down", minimalSnapshotData(rig.id, rig.name) as never);
     const before = db.prepare("SELECT COUNT(*) AS n FROM snapshots").get();
     const body = await (await app.request("/api/restore-check?rig=changed-occupant&noQueue=true&noHooks=true")).json();
-    expect(body.rigs[0].status).toBe("unknown");
-    expect(body.recovery.unknown[0].reason).toContain("older occupant");
-    expect(body.recovery.actions).toEqual([]);
+    expect(body.recovery.status).toBe("actionable");
+    const input = body.checks.find((c: { check: string }) => c.check.endsWith(".restore-preconditions"));
+    expect(input.status).toBe("yellow");
+    expect(input.evidence).toContain("older occupant");
+    expect(body.recovery.actions[0].command).toBe("rig up --existing changed-occupant");
     expect(db.prepare("SELECT COUNT(*) AS n FROM snapshots").get()).toEqual(before);
   });
 

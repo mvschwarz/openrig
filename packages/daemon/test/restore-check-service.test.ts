@@ -1455,7 +1455,9 @@ describe("RestoreCheckService", () => {
 
     const result = service.check({ noHooks: true }) as any;
 
-    expect(result.readiness.status).toBe("unknown");
+    // The stopped-seat red still wins the aggregate; the input unknown stays named.
+    expect(result.readiness.status).toBe("not_ready");
+    expect(result.rigs[0].status).toBe("unknown");
     expect(result.recovery).toEqual({
       status: "unknown",
       summary: expect.stringContaining("1 unknown"),

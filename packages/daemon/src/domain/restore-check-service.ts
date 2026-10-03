@@ -4,6 +4,7 @@ import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { shellQuote as quoteShellArgument } from "../adapters/shell-quote.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { validatePreRestore } from "./restore-preconditions.js";
+import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
 import type { Snapshot, RigServicesRecord } from "./types.js";
 
 // --- Types ---
@@ -202,6 +203,7 @@ export interface RestoreCheckDeps {
   /** Exact ordinary-restore input; never captures an auto-rehydrate snapshot. */
   getRestoreInputs: (rigId: string) =>
     | { snapshot: Pick<Snapshot, "id" | "kind" | "data">; servicesRecord: RigServicesRecord | null }
+    | { currentStateRehydrate: CurrentStateRehydrateEligibility; reason: string }
     | { unavailable: string };
   /** Probe daemon health: returns { healthy: boolean; evidence: string } */
   probeDaemonHealth: () => { healthy: boolean; evidence: string };
@@ -421,6 +423,21 @@ export class RestoreCheckService {
     try {
       const input = this.deps.getRestoreInputs(rig.rigId);
       if ("unavailable" in input) throw new Error(input.unavailable);
+      if ("currentStateRehydrate" in input) {
+        const { ok, blockers } = input.currentStateRehydrate;
+        return {
+          snapshot: null,
+          check: {
+            check,
+            status: ok ? "yellow" : "red",
+            evidence: ok
+              ? `${input.reason}; restore inputs not inspected. Current-state rehydrate is eligible to attempt: ordinary rig up would capture current state. This does not validate that future snapshot or prove native continuity.`
+              : `${input.reason}; current-state rehydrate is not eligible: ${blockers.join("; ")}`,
+            remediation: "Inspect the rig's persisted state before choosing manual recovery",
+            remediationSafe: true,
+          },
+        };
+      }
       const validation = validatePreRestore(input.snapshot.data, {
         fsOps: { exists: this.deps.exists },
         servicesRecord: input.servicesRecord,
@@ -1182,10 +1199,10 @@ export class RestoreCheckService {
     const green = assessed.filter((c) => c.status === "green").length;
 
     let verdict: Verdict;
-    if (rigs.some((rig) => rig.status === "unknown")) {
-      verdict = "unknown";
-    } else if (red > 0) {
+    if (red > 0) {
       verdict = "not_restorable";
+    } else if (rigs.some((rig) => rig.status === "unknown")) {
+      verdict = "unknown";
     } else if (yellow > 0) {
       verdict = "restorable_with_caveats";
     } else {
@@ -1401,7 +1418,7 @@ export class RestoreCheckService {
         rigName: input.rigName,
         action: "restore_from_latest_snapshot",
         command: `rig up --existing ${shellQuote(input.rigName)}`,
-        reason: "Rig has persisted current DB state but no latest snapshot; rig up will capture an auto-rehydrate snapshot and restore.",
+        reason: "Current persisted state is eligible for an ordinary restore attempt; rig up would capture an auto-rehydrate snapshot whose restore inputs have not been inspected.",
         safe: false,
         blocking: true,
       });
