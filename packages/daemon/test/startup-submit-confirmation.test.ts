@@ -12,6 +12,9 @@ import { StartupOrchestrator, type StartupInput } from "../src/domain/startup-or
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
+// A mockable wrapper is needed because native ESM namespace exports are immutable.
+vi.mock("node:crypto", async (importOriginal) => ({ ...await importOriginal<typeof import("node:crypto")>() }));
+
 describe("startup prompt submission", () => {
   const dbs: ReturnType<typeof createFullTestDb>[] = [];
   afterEach(() => { vi.restoreAllMocks(); for (const db of dbs.splice(0)) db.close(); });
@@ -228,12 +231,12 @@ describe("startup prompt submission", () => {
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2);
   });
 
-  it("distinguishes a thrown guarded retry without adding a pane write", async () => {
+  it("retains a thrown precheck when the delivery guard converts it to a failure", async () => {
     const f = fixture(Infinity);
     const capture = f.tmux.capturePaneContent.getMockImplementation()!;
     f.tmux.capturePaneContent.mockImplementationOnce(capture).mockRejectedValueOnce(new Error("unavailable"));
     expect(await f.start()).toMatchObject({ ok: true, submission: { diagnostics: [{
-      retry: "threw", observations: [{ phase: "guarded_retry", observed: null }],
+      retry: "refused_or_failed", observations: [{ phase: "guarded_retry", observed: null }],
     }] } });
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
   });

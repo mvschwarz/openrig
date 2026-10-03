@@ -584,6 +584,8 @@ export interface SendOpts {
   submitOnlyCaptureLines?: 50 | 200;
   /** Internal startup only: require complete visible composer identity before Enter. */
   requireFullStagedText?: boolean;
+  /** Internal, synchronous diagnostics sink. Exceptions never affect transport. */
+  onStartupMismatch?: (evidence: StartupSubmissionEvidence) => void;
   /** Round-2 (r2 HIGH-1): the walked piece's own line count — placeholder identity. A large paste
    *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
    *  as evidence of THIS piece. */
@@ -602,8 +604,6 @@ export interface BroadcastOpts extends SendOpts {
 }
 
 export interface SendResult {
-  /** Internal full-text startup precheck metadata; never contains prompt/pane text. */
-  startupMismatch?: StartupSubmissionEvidence;
   ok: boolean;
   sessionName: string;
   verified?: boolean;
@@ -1212,19 +1212,32 @@ export class SessionTransport {
       if (expected.trim().length === 0) {
         return { ok: false, sessionName, reason: "invalid_submit_only", error: "submitOnly requires expectedStagedText — the Enter is only pressed onto the exact staged content." };
       }
-      const pane = await this.runStage(
-        "session_transport.submit_only_precheck",
-        () => this.tmuxAdapter.capturePaneContent(sessionName, opts.submitOnlyCaptureLines ?? 50),
-      );
+      const recordMismatch = (pane: string | null): void => {
+        if (!opts.requireFullStagedText || !opts.onStartupMismatch) return;
+        try {
+          const evidence = startupSubmissionEvidence(pane, expected, opts.submitOnlyCaptureLines ?? 50);
+          if (evidence) opts.onStartupMismatch(evidence);
+        } catch { /* Observation has no delivery authority. */ }
+      };
+      let pane: string | null;
+      try {
+        pane = await this.runStage(
+          "session_transport.submit_only_precheck",
+          () => this.tmuxAdapter.capturePaneContent(sessionName, opts.submitOnlyCaptureLines ?? 50),
+        );
+      } catch (error) {
+        recordMismatch(null);
+        throw error; // Preserve the existing guarded/unguarded error handling.
+      }
       const staged = opts.requireFullStagedText
         ? inspectStartupStagedText(pane, expected) === "staged"
         : hasExpectedStagedText(pane, expected);
       if (!staged) {
+        recordMismatch(pane);
         return {
           ok: false,
           sessionName,
           reason: "staged_mismatch",
-          ...(opts.requireFullStagedText ? { startupMismatch: startupSubmissionEvidence(pane, expected, opts.submitOnlyCaptureLines ?? 50) } : {}),
           error: `submitOnly refused: the pane of '${sessionName}' does not show the expected staged text — pressing Enter here could drive something else entirely. Nothing was submitted.`,
         };
       }

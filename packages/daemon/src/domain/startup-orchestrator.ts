@@ -743,9 +743,9 @@ export class StartupOrchestrator {
         expectedStagedText: text,
         submitOnlyCaptureLines: STARTUP_SUBMIT_CAPTURE_LINES,
         requireFullStagedText: true,
+        onStartupMismatch: (evidence) => { diagnostic.observations.push({ ...evidence, phase: "guarded_retry" }); },
       });
       diagnostic.retry = retry.ok ? "ok" : "refused_or_failed";
-      if (retry.startupMismatch) diagnostic.observations.push({ ...retry.startupMismatch, phase });
       phase = "after_retry";
       await this.sleep(200);
       const after = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
@@ -762,7 +762,7 @@ export class StartupOrchestrator {
       if (!retry.ok) return unverified(`Guarded startup retry did not submit: ${retry.error ?? retry.reason}; matching staged text is no longer visible.`);
       return null;
     } catch (error) {
-      record(null);
+      if (!diagnostic.observations.some(observation => observation.phase === phase)) record(null);
       return unverified(`Startup submission observation is unavailable: ${(error as Error).message}`);
     } finally {
       if (diagnostic.observations.length) input.submissionDiagnostics.push(diagnostic);
