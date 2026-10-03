@@ -49,7 +49,7 @@ describe("tmux argv exec path", () => {
     const seen: string[][] = [];
     const { adapter } = argvAdapter(seen);
     await adapter.startPipePane("seat@rig", "/tmp/out dir/x.log");
-    expect(seen).toEqual([["tmux", "pipe-pane", "-t", "seat@rig", "cat >> '/tmp/out dir/x.log'"]]);
+    expect(seen).toEqual([["tmux", "pipe-pane", "-t", "=seat@rig:", "cat >> '/tmp/out dir/x.log'"]]);
   });
 
   it("respawn keeps the command as ONE trailing unit", async () => {

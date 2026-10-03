@@ -287,7 +287,7 @@ describe("TmuxAdapter", () => {
       expect(await adapter.hasSessionEnv("seat@rig", "OPENRIG_ACTIVITY_HOOK_TOKEN")).toBe(false);
       expect(await adapter.hasSessionEnv("seat@rig", "RIGGED_URL")).toBe(false);
       expect(await adapter.hasSessionEnv("seat@rig", "RIGGED_ACTIVITY_HOOK_TOKEN")).toBe(false);
-      expect(exec).toHaveBeenCalledWith("tmux show-environment -t 'seat@rig'");
+      expect(exec).toHaveBeenCalledWith("tmux show-environment -t '=seat@rig'");
     });
 
     it("returns unknown when the session environment cannot be inspected", async () => {
@@ -782,7 +782,7 @@ describe("TmuxAdapter", () => {
 
       // The command is: tmux pipe-pane -t <quoted session> <quoted 'cat >> <quoted path>'>
       const cmd = (exec as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
-      expect(cmd).toContain("tmux pipe-pane -t 'dev-impl@my-rig'");
+      expect(cmd).toContain("tmux pipe-pane -t '=dev-impl@my-rig:'");
       expect(cmd).toContain("cat >>");
       expect(cmd).toContain("dev-impl@my-rig.log");
     });
@@ -794,7 +794,7 @@ describe("TmuxAdapter", () => {
       await adapter.startPipePane("dev@rig", "/path/with spaces/transcript.log");
 
       const cmd = (exec as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
-      expect(cmd).toContain("tmux pipe-pane -t 'dev@rig'");
+      expect(cmd).toContain("tmux pipe-pane -t '=dev@rig:'");
       expect(cmd).toContain("cat >>");
       expect(cmd).toContain("with spaces");
     });
@@ -806,7 +806,7 @@ describe("TmuxAdapter", () => {
       await adapter.startPipePane("dev@rig", "/path/it's/transcript.log");
 
       const cmd = (exec as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
-      expect(cmd).toContain("tmux pipe-pane -t 'dev@rig'");
+      expect(cmd).toContain("tmux pipe-pane -t '=dev@rig:'");
       // The apostrophe should be escaped, not left raw
       expect(cmd).not.toContain("it's/");
     });
@@ -827,7 +827,7 @@ describe("TmuxAdapter", () => {
 
       await adapter.stopPipePane("dev-impl@my-rig");
 
-      expect(exec).toHaveBeenCalledWith("tmux pipe-pane -t 'dev-impl@my-rig'");
+      expect(exec).toHaveBeenCalledWith("tmux pipe-pane -t '=dev-impl@my-rig:'");
     });
   });
 
