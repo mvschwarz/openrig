@@ -15,7 +15,7 @@ import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { RigRepository } from "./rig-repository.js";
-import { SessionTransport, hasExpectedStagedText } from "./session-transport.js";
+import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
@@ -69,12 +69,12 @@ export interface StartupInput {
   readinessTimeoutMs?: number;
 }
 
-type StartupSendFailure = { error: string; staged?: true };
+type StartupSendFailure = { error: string };
 
-type StartupDeliveryInput = StartupInput & { submissionWarnings: string[] };
+type StartupDeliveryInput = StartupInput & { submissionWarnings: string[]; stagedSubmissionWarning?: string };
 
 export type StartupResult =
-  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt"; submission?: { status: "unverified"; reasons: string[] } }
+  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string } }
   // `evidence` carries the last-N pane lines for `attention_required`
   // outcomes so restore-orchestrator's per-node mapping can populate
   // `attentionEvidence` on the RestoreNodeResult. Internal type only;
@@ -433,11 +433,10 @@ export class StartupOrchestrator {
       }
     }
 
-    // Challenge-only delivery remains best-effort for transport failures. Positively
-    // observed staged text must not be reported ready, just like the identity prompt.
+    // Challenge-only delivery remains best-effort. Staging is reported without
+    // turning a recoverable composer into a startup failure/occupant rollback.
     if (challengeOnlyPrompt && input.binding.tmuxSession) {
-      const sendError = await this.sendInteractiveText(deliveryInput, challengeOnlyPrompt);
-      if (sendError?.staged) return this.fail(input, "failed", [sendError.error]);
+      await this.sendInteractiveText(deliveryInput, challengeOnlyPrompt);
     }
 
     // 8. Execute after_files actions
@@ -483,7 +482,10 @@ export class StartupOrchestrator {
     // 8. Mark ready
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
     const submission = deliveryInput.submissionWarnings.length
-      ? { status: "unverified" as const, reasons: deliveryInput.submissionWarnings } : undefined;
+      ? { status: deliveryInput.stagedSubmissionWarning ? "staged" as const : "unverified" as const,
+          reasons: deliveryInput.submissionWarnings,
+          ...(deliveryInput.stagedSubmissionWarning ? { warning: deliveryInput.stagedSubmissionWarning } : {}) }
+      : undefined;
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId, ...(submission ? { submission } : {}) });
 
     return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}) };
@@ -716,19 +718,27 @@ export class StartupOrchestrator {
       await this.sleep(200);
       const pane = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
       if (!pane?.trim()) return unverified("Startup submission capture is unavailable after Enter.");
-      if (!hasExpectedStagedText(pane, text)) return null;
+      const before = inspectStartupStagedText(pane, text);
+      if (before === "clear") return null;
+      if (before === "unverified") return unverified("Startup submission is unverified: the current composer does not positively match the complete prompt.");
       const retry = await this.sessionTransport.send(tmuxSession, "", {
         submitOnly: true,
         expectedStagedText: text,
         submitOnlyCaptureLines: STARTUP_SUBMIT_CAPTURE_LINES,
+        requireFullStagedText: true,
       });
       await this.sleep(200);
       const after = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
       if (!after?.trim()) return unverified("Startup submission capture is unavailable after the guarded retry.");
-      if (hasExpectedStagedText(after, text)) {
-        return { staged: true, error: retry.ok ? "Startup prompt is still staged after the one guarded submit retry."
-          : `Startup prompt is still staged; guarded submit failed: ${retry.error ?? retry.reason}` };
+      const observed = inspectStartupStagedText(after, text);
+      if (observed === "staged") {
+        const warning = `Startup prompt still staged in ${tmuxSession}; press Enter in that pane.`;
+        input.stagedSubmissionWarning = warning;
+        input.submissionWarnings.push(warning);
+        if (!retry.ok) input.submissionWarnings.push(`Guarded retry did not submit: ${retry.error ?? retry.reason}`);
+        return null;
       }
+      if (observed === "unverified") return unverified("Startup submission is unverified after the guarded retry: the current composer is ambiguous.");
       if (!retry.ok) return unverified(`Guarded startup retry did not submit: ${retry.error ?? retry.reason}; matching staged text is no longer visible.`);
       return null;
     } catch (error) {

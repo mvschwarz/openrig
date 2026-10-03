@@ -463,6 +463,32 @@ export type ResolveResult =
   | { ok: true; sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> }
   | { ok: false; code: "not_found" | "ambiguous"; error: string };
 
+/** Startup retries need the whole visible message, not the identity header shared by
+ * every startup. An echoed turn or a partial/opaque composer stays unverified. */
+export function inspectStartupStagedText(pane: string | null, expected: string): "staged" | "clear" | "unverified" {
+  const lines = (pane ?? "").split("\n");
+  let inputAt = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i]!.trimStart().startsWith("❯")) { inputAt = i; break; }
+  }
+  if (inputAt < 0) return "unverified";
+  // Prompt text can itself contain rules (the startup challenge does). A rule
+  // closes the composer only when followed by recognized composer chrome.
+  let end = -1;
+  for (let i = lines.length - 1; i > inputAt; i--) {
+    if (/^[─═-]{10,}$/.test(lines[i]!.trim())
+      && /(?:shift\+tab to cycle|\? for shortcuts)/i.test(lines.slice(i + 1).find((next) => next.trim()) ?? "")) {
+      end = i;
+      break;
+    }
+  }
+  if (end < 0 || /^❯\s*\d+\./.test(lines[inputAt]!.trimStart())) return "unverified";
+  const norm = (text: string) => text.replace(/\s+/g, "");
+  const body = norm(lines.slice(inputAt, end).join("\n").trimStart().slice(1));
+  if (!body) return "clear";
+  return body === norm(expected) ? "staged" : "unverified";
+}
+
 /** The existing submit-only identity check, also used to inspect startup's own paste.
  * A false result is no matching staged evidence, not proof of model consumption. */
 export function hasExpectedStagedText(pane: string | null, expected: string): boolean {
@@ -578,6 +604,8 @@ export interface SendOpts {
   expectedStagedText?: string;
   /** Internal startup caller needs a bounded view of an expanded multiline composer. */
   submitOnlyCaptureLines?: 50 | 200;
+  /** Internal startup only: require complete visible composer identity before Enter. */
+  requireFullStagedText?: boolean;
   /** Round-2 (r2 HIGH-1): the walked piece's own line count — placeholder identity. A large paste
    *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
    *  as evidence of THIS piece. */
@@ -1208,7 +1236,10 @@ export class SessionTransport {
         "session_transport.submit_only_precheck",
         () => this.tmuxAdapter.capturePaneContent(sessionName, opts.submitOnlyCaptureLines ?? 50),
       );
-      if (!hasExpectedStagedText(pane, expected)) {
+      const staged = opts.requireFullStagedText
+        ? inspectStartupStagedText(pane, expected) === "staged"
+        : hasExpectedStagedText(pane, expected);
+      if (!staged) {
         return {
           ok: false,
           sessionName,

@@ -14,7 +14,7 @@ describe("startup prompt submission", () => {
   const dbs: ReturnType<typeof createFullTestDb>[] = [];
   afterEach(() => { for (const db of dbs.splice(0)) db.close(); });
 
-  function fixture(lostEnters: number, runtime = "claude-code") {
+  function fixture(lostEnters: number, runtime = "claude-code", challengeOnly = false) {
     const db = createFullTestDb(); dbs.push(db); db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql);
     const registry = new SessionRegistry(db), eventBus = new EventBus(db);
     const repo = new RigRepository(db), rig = repo.createRig("startup-submit");
@@ -54,8 +54,8 @@ describe("startup prompt submission", () => {
       binding: { id: "binding", nodeId: node.id, tmuxSession: name, tmuxPane: "%1", tmuxWindow: null,
         cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/fixture" },
       adapter, plan: { runtime: "claude-code", cwd: "/fixture", entries: [], startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [] },
-      resolvedStartupFiles: [{ path: "role.md", absolutePath: "/fixture/role.md", ownerRoot: "/fixture", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }],
-      startupActions: [{ type: "send_text", builtin: "session_identity", value: "OpenRig session identity: worker@startup-submit", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true }],
+      resolvedStartupFiles: challengeOnly ? [] : [{ path: "role.md", absolutePath: "/fixture/role.md", ownerRoot: "/fixture", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }],
+      startupActions: challengeOnly ? [{ type: "startup_proof", value: "authenticated", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true }] : [{ type: "send_text", builtin: "session_identity", value: "OpenRig session identity: worker@startup-submit", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true }],
       isRestore: false,
     });
     return { db, session, tmux, submitted, start, composer: () => composer };
@@ -78,13 +78,13 @@ describe("startup prompt submission", () => {
     expect(f.submitted).toHaveLength(1);
   });
 
-  it("does not report ready when the one retry leaves startup text staged", async () => {
+  it("keeps startup ready with an actionable staged warning after one retry", async () => {
     const f = fixture(Infinity);
-    expect(await f.start()).toMatchObject({ ok: false });
+    expect(await f.start()).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "staged", warning: expect.stringContaining("press Enter in that pane") } });
     expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2);
     expect(f.submitted).toEqual([]);
-    expect(f.db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(f.session.id)).not.toEqual({ startup_status: "ready" });
+    expect(f.db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(f.session.id)).toEqual({ startup_status: "ready" });
   });
 
   it("uses the guarded recheck when the composer changes before the retry", async () => {
@@ -92,7 +92,7 @@ describe("startup prompt submission", () => {
     const capture = f.tmux.capturePaneContent.getMockImplementation()!;
     f.tmux.capturePaneContent.mockImplementationOnce(capture)
       .mockResolvedValueOnce("A different question\n❯ 1. Continue\n  2. Cancel\n");
-    expect(await f.start()).toMatchObject({ ok: false, errors: [expect.stringContaining("guarded submit failed")] });
+    expect(await f.start()).toMatchObject({ ok: true, submission: { status: "staged" } });
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
     expect(f.submitted).toEqual([]);
   });
@@ -135,6 +135,40 @@ describe("startup prompt submission", () => {
     f.tmux.capturePaneContent.mockImplementationOnce(capture).mockResolvedValue(null);
     expect(await f.start()).toMatchObject({ ok: true, submission: { status: "unverified" } });
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["initial", "guarded recheck"])("does not retry a different body sharing the startup header at %s", async (point) => {
+    const f = fixture(Infinity);
+    const original = f.tmux.capturePaneContent.getMockImplementation()!;
+    const different = "❯ OpenRig session identity: worker@startup-submit\nA different body, left for the operator.\n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n";
+    f.tmux.capturePaneContent.mockResolvedValue(different);
+    if (point === "guarded recheck") f.tmux.capturePaneContent.mockImplementationOnce(original);
+    const result = await f.start();
+    expect(result).toMatchObject({ ok: true, submission: { status: "unverified" } });
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+    expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a stale echo with no current composer", async () => {
+    const f = fixture(0);
+    f.tmux.capturePaneContent.mockImplementation(async () => `❯ ${f.submitted[0]}\nWorking…\nEsc to interrupt\n`);
+    expect(await f.start()).toMatchObject({ ok: true, submission: { status: "unverified" } });
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+    expect(f.submitted).toHaveLength(1);
+  });
+
+  it("does not treat a matching echo ending in a rule without composer footer as staged", async () => {
+    const f = fixture(0);
+    f.tmux.capturePaneContent.mockImplementation(async () => `❯ ${f.submitted[0]}\n────────────────────\nWorking… Esc to interrupt\n`);
+    expect(await f.start()).toMatchObject({ ok: true, submission: { status: "unverified" } });
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a staged challenge-only prompt best-effort", async () => {
+    const f = fixture(Infinity, "claude-code", true);
+    expect(await f.start()).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "staged" } });
+    expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+    expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2);
   });
 
   it("leaves the non-Claude startup path unchanged", async () => {

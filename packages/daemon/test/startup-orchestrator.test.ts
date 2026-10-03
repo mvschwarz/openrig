@@ -27,7 +27,7 @@ function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
     listWindows: vi.fn(async () => []),
     listPanes: vi.fn(async () => []),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
-    capturePaneContent: vi.fn(async () => "❯ \n────────────────────\n"),
+    capturePaneContent: vi.fn(async () => "❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n"),
     ...overrides,
   } as unknown as TmuxAdapter;
 }

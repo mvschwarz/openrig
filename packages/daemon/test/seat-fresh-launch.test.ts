@@ -575,6 +575,31 @@ describe("SeatLifecycleService.launchFresh", () => {
     });
   });
 
+  it("keeps a fresh occupant alive when its startup prompt remains staged", async () => {
+    const seat = seedSeat({ clean: true });
+    db.prepare("UPDATE node_startup_context SET startup_actions_json = ? WHERE node_id = ?").run(
+      JSON.stringify([{ type: "send_text", builtin: "session_identity", value: "OpenRig session identity: dev-impl@fresh-rig", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true }]),
+      seat.node.id,
+    );
+    let composer = "";
+    vi.mocked(tmux.sendText).mockImplementation(async (_target, text) => {
+      composer += text;
+      return { ok: true };
+    });
+    tmux.capturePaneContent = vi.fn(async () => `❯ ${composer}\n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n`);
+    const result = await service.launchFresh({ seatRef: "dev.impl", fresh: true, reason: "staged prompt preservation" });
+    expect(result).toMatchObject({ ok: true, status: "ready" });
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(tmux.sendText).toHaveBeenCalledTimes(1);
+    expect(composer).toContain("OpenRig session identity:");
+    expect(alive.has(seat.sessionName)).toBe(true);
+    expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxPane).toBe("%fresh");
+    expect(sessionRegistry.getSessionsForRig(seat.rig.id).at(-1)).toMatchObject({ status: "running", startupStatus: "ready" });
+    const event = db.prepare("SELECT payload FROM events WHERE type = 'node.startup_ready' ORDER BY seq DESC LIMIT 1").get() as { payload: string };
+    expect(JSON.parse(event.payload)).toMatchObject({ submission: { status: "staged", warning: expect.stringContaining("press Enter in that pane") } });
+    expect(db.prepare("SELECT COUNT(*) AS c FROM events WHERE type = 'seat.fresh_launch_failed'").get()).toEqual({ c: 0 });
+  });
+
   it("compensates a hard startup failure to zero live session and binding while retaining audit tenure", async () => {
     const seat = seedSeat({ clean: true });
     harnessResult = { ok: false, error: "binary missing" };
