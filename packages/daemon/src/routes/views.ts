@@ -4,6 +4,7 @@ import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { ViewProjector } from "../domain/view-projector.js";
 import { ViewProjectorError } from "../domain/view-projector.js";
+import { queryLimit } from "./query-limit.js";
 
 /**
  * Coordination L5 — View HTTP routes (PL-004 Phase B).
@@ -112,7 +113,9 @@ export function viewsRoutes(): Hono {
   app.get("/:viewName", async (c) => {
     const viewName = c.req.param("viewName");
     const rig = c.req.query("rig") || undefined;
-    const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
+    const parsed = queryLimit(c);
+    if (!parsed.ok) return parsed.response;
+    const limit = parsed.limit;
     // S27 — the execution view scopes by mission (release-scoped default derived
     // in the module; --mission widens/narrows).
     const mission = c.req.query("mission") || undefined;

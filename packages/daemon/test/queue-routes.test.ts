@@ -979,6 +979,23 @@ describe("queue routes", () => {
     expect(data[0]!.body).toBe("fyi");
   });
 
+  it("GET /api/queue/list rejects a limit that is not a positive integer", async () => {
+    for (const limit of ["abc", "1.5", "0", "-1"]) {
+      const res = await app.request(`/api/queue/list?destinationSession=b@r&limit=${limit}`);
+      expect({ limit, status: res.status }).toEqual({ limit, status: 400 });
+    }
+  });
+
+  it("inbox and outbox list reject a limit that is not a positive integer", async () => {
+    for (const path of ["/api/queue/inbox/list?destinationSession=b@r", "/api/queue/outbox/list?senderSession=a@r"]) {
+      for (const limit of ["abc", "1.5", "0", "-1"]) {
+        const res = await app.request(`${path}&limit=${limit}`);
+        expect({ path, limit, status: res.status }).toEqual({ path, limit, status: 400 });
+      }
+      expect((await app.request(`${path}&limit=5`)).status).toBe(200);
+    }
+  });
+
   it("GET /api/queue/list filters by destination + state", async () => {
     await app.request("/api/queue/create", {
       method: "POST",

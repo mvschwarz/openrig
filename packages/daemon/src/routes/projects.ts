@@ -14,6 +14,7 @@ import type { ClassificationAttemptLedger } from "../domain/classification-attem
 import { ClassificationAttemptError } from "../domain/classification-attempts.js";
 
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
+import { queryLimit } from "./query-limit.js";
 
 /**
  * Coordination L2 — Project (Classifier) HTTP routes (PL-004 Phase B).
@@ -328,7 +329,9 @@ export function projectsRoutes(): Hono {
       return c.json({ error: "needsHuman filter must be true, false or unknown" }, 400);
     }
     const needsHuman = needsHumanRaw as "true" | "false" | "unknown" | undefined;
-    const limit = c.req.query("limit") ? Number.parseInt(c.req.query("limit")!, 10) : undefined;
+    const parsed = queryLimit(c);
+    if (!parsed.ok) return parsed.response;
+    const limit = parsed.limit;
     const items = getClassifier(c).list({ classifierSession, classificationDestination, area, scopeRef, needsHuman, limit });
     return c.json(items);
   });

@@ -128,6 +128,14 @@ describe("chat routes", () => {
     expect(data[1].body).toBe("msg2");
   });
 
+  it("GET /history rejects a limit that is not a positive integer", async () => {
+    for (const limit of ["abc", "1.5", "0", "-1"]) {
+      const res = await app.request(`/api/rigs/${rigId}/chat/history?limit=${limit}`);
+      expect({ limit, status: res.status }).toEqual({ limit, status: 400 });
+    }
+    expect((await app.request(`/api/rigs/${rigId}/chat/history?limit=5`)).status).toBe(200);
+  });
+
   it("GET /history?topic=X filters", async () => {
     chatRepo.send(rigId, "alice", "before topic");
     chatRepo.sendTopic(rigId, "alice", "deploy");

@@ -184,6 +184,13 @@ describe("projects routes (PL-004 Phase B)", () => {
     expect(lease.reclaimedBySession).toBe("operator@rig");
   });
 
+  it("GET /api/projects/list rejects a limit that is not a positive integer", async () => {
+    for (const limit of ["abc", "1.5", "0", "-1"]) {
+      const res = await app.request(`/api/projects/list?limit=${limit}`);
+      expect({ limit, status: res.status }).toEqual({ limit, status: 400 });
+    }
+  });
+
   it("GET /api/projects/lease returns active lease (or 404 if none)", async () => {
     let res = await app.request("/api/projects/lease");
     expect(res.status).toBe(404);

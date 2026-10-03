@@ -3,6 +3,7 @@ import { streamSSE } from "hono/streaming";
 import type { EventBus } from "../domain/event-bus.js";
 import type { ChatRepository } from "../domain/chat-repository.js";
 import { requireSenderIdentity } from "./require-sender-identity.js";
+import { queryLimit } from "./query-limit.js";
 
 export function chatRoutes(): Hono {
   const app = new Hono();
@@ -52,11 +53,12 @@ export function chatRoutes(): Hono {
     if (!rigId) return c.json({ error: "Missing rigId" }, 400);
 
     const topic = c.req.query("topic");
-    const limitStr = c.req.query("limit");
     const after = c.req.query("after");
     const since = c.req.query("since");
     const sender = c.req.query("sender");
-    const limit = limitStr ? parseInt(limitStr, 10) : undefined;
+    const parsed = queryLimit(c);
+    if (!parsed.ok) return parsed.response;
+    const limit = parsed.limit;
 
     const chatRepo = getChatRepo(c);
     const messages = chatRepo.history(rigId, { topic, limit, after, since, sender });

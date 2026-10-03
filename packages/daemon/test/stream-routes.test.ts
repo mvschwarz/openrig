@@ -127,6 +127,13 @@ describe("stream routes", () => {
     expect(row?.identity_provenance).toBe("transport:v1");
   });
 
+  it("GET /api/stream/list rejects a limit that is not a positive integer", async () => {
+    for (const limit of ["abc", "1.5", "0", "-1"]) {
+      const res = await app.request(`/api/stream/list?limit=${limit}`);
+      expect({ limit, status: res.status }).toEqual({ limit, status: 400 });
+    }
+  });
+
   it("GET /api/stream/list returns chronological items with filters", async () => {
     store.emit({ sourceSession: "alice@rig", body: "1", hintDestination: "bob@rig" });
     store.emit({ sourceSession: "carol@rig", body: "2", hintDestination: "bob@rig" });

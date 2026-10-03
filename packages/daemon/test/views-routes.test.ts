@@ -88,6 +88,13 @@ describe("views routes (PL-004 Phase B)", () => {
     expect(err.error).toBe("view_not_found");
   });
 
+  it("GET /api/views/:viewName rejects a limit that is not a positive integer", async () => {
+    for (const limit of ["abc", "1.5", "0", "-1"]) {
+      const res = await app.request(`/api/views/recently-active?limit=${limit}`);
+      expect({ limit, status: res.status }).toEqual({ limit, status: 400 });
+    }
+  });
+
   it("GET /api/views/recently-active?limit=1 honors limit query", async () => {
     const res = await app.request("/api/views/recently-active?limit=1");
     expect(res.status).toBe(200);
