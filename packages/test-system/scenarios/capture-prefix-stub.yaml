@@ -1,0 +1,11 @@
+version: "0.2"
+name: capture-prefix-stub
+culture_file: culture.md
+pods:
+  - id: dev
+    label: Prefix-overlap Pair
+    members:
+      # impl2's seat name has impl's member id as a prefix: dev-impl2@ vs dev-impl@
+      - {id: impl, agent_ref: "local:agents/worker", profile: default, runtime: stub, cwd: .}
+      - {id: impl2, agent_ref: "local:agents/worker", profile: default, runtime: stub, cwd: .}
+    edges: []

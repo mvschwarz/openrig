@@ -1,0 +1,40 @@
+# Family: delivery `capture` (partial: single-seat capture of the visible pane).
+# Defect class: `rig capture <seat>` returns a different seat's pane, most plausibly when
+#   one seat's name is a prefix of another's (dev-impl@ vs dev-impl2@) and the session is
+#   resolved by prefix instead of exactly.
+# What this proves: ADDRESSED PANE. In a two-seat stub rig whose seat names overlap by
+#   prefix, each seat's launch script prints a distinct token, and `rig capture <seat>
+#   --json` for each seat returns a pane containing that seat's OWN token, for the shorter
+#   name as well as the longer one.
+# What this does NOT prove: that the sibling's token is absent from the returned pane (the
+#   runner has no negative form); the not-found error path (the pane read throws on a
+#   non-zero exit); `--lines` tail depth (the pane surface passes none); `--rig` / `--pod`
+#   multi-target capture (no surface binds it); container mode (`env.stub_scripts` is
+#   host-mode only); or any Claude Code / Codex behaviour.
+# Planted negative: a capture path that resolves the requested seat by member-name prefix
+#   over the sorted live sessions returns dev-impl2's pane for dev-impl. The dev-impl
+#   token assertion fails with the sibling's token visible in the observed pane; setup,
+#   `up` and the dev-impl2 assertion still pass.
+# Deps: R-10 runner (`up`, `down`, `pane` surface) and per-seat `env.stub_scripts`
+#   delivery. No emit.
+scenario: capture-returns-addressed-seat
+topology: ./capture-prefix-stub.yaml
+env:
+  stub_scripts:
+    dev-impl: ./scripts/capture-impl.json
+    dev-impl2: ./scripts/capture-impl2.json
+steps:
+  - up: {}
+  # the longer name first: it reads its own pane
+  - expect:
+      surface: pane
+      seat: dev-impl2@capture-prefix-stub
+      within: 30s
+      contains: "cap-token-sibling-a51d"
+  # the shorter name, a prefix of its sibling's, still reads its own pane
+  - expect:
+      surface: pane
+      seat: dev-impl@capture-prefix-stub
+      within: 30s
+      contains: "cap-token-impl-3e7c"
+  - down: {}
