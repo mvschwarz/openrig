@@ -40,7 +40,7 @@ function mockLifecycle(port: number): LifecycleDeps {
   };
 }
 
-async function runWalk(port: number, argv: string[], failTransportAt?: number): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined; transportPayloads: string[]; profileRequestUrls: string[] }> {
+async function runWalk(port: number, argv: string[], failTransportAt?: number, profileResponse: object = PROFILE_RESPONSE): Promise<{ logs: string[]; errLogs: string[]; exitCode: number | undefined; transportPayloads: string[]; profileRequestUrls: string[] }> {
   const transportPayloads: string[] = [];
   const profileRequestUrls: string[] = [];
   let sends = 0;
@@ -52,7 +52,7 @@ async function runWalk(port: number, argv: string[], failTransportAt?: number): 
       if (url.startsWith("/api/context-packs/library/by-ref/profile")) {
         profileRequestUrls.push(url);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(PROFILE_RESPONSE));
+        res.end(JSON.stringify(profileResponse));
       } else if (url === "/api/transport/send") {
         sends += 1;
         if (failTransportAt !== undefined && sends === failTransportAt) {
@@ -108,6 +108,15 @@ describe("rig walk --through-profile — the walk/profile join (Test-A)", () => 
       { atomId: "recap", address: "seat:RECAP.md#recent-decisions" },
     ]);
     expect(transportPayloads).toHaveLength(2);
+  });
+
+  it("a profile warning (post-compaction with no seat recap) reaches stderr; the walk delivers what composed", async () => {
+    const warning = "no seat recap for s1@r1; read your newest restore map";
+    const response = { ...PROFILE_RESPONSE, situation: "post-compaction", pieces: [PROFILE_RESPONSE.pieces[0]], warnings: [warning] };
+    const { errLogs, logs, transportPayloads } = await runWalk(0, ARGS, undefined, response);
+    expect(errLogs).toContain(`WARNING ${warning}`);
+    expect(logs.join("\n")).not.toContain(warning);
+    expect(transportPayloads).toEqual(["## Welcome\nhello world"]);
   });
 
   it("NO-COPY: the bytes sent to the seat are exactly the bytes the profile served", async () => {

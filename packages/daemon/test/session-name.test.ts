@@ -8,6 +8,22 @@ import {
 } from "../src/domain/session-name.js";
 
 describe("session-name", () => {
+  it.each([
+    ["dev@alias", "impl", "pod name"],
+    ["dev", "impl@alias", "member name"],
+  ])("rejects @ in a session component: %s / %s", (pod, member, label) => {
+    expect(validateSessionComponents(pod, member, "my-rig")).toEqual([
+      expect.stringContaining(`${label} must not contain "@"`),
+    ]);
+  });
+
+  it("keeps @ valid in rig names after the canonical session separator", () => {
+    expect(validateSessionComponents("dev", "impl", "my@rig")).toEqual([]);
+    const session = deriveCanonicalSessionName("dev", "impl", "my@rig");
+    expect(session).toBe("dev-impl@my@rig");
+    expect(validateSessionName(session)).toBe(true);
+  });
+
   // Existing legacy tests
   it("preserves managed rig stems that already match rNN-", () => {
     expect(deriveSessionName("r01", "orchestrator")).toBe("r01-orchestrator");

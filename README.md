@@ -92,7 +92,7 @@ using a published package, since repository guidance can be ahead of npm.
 | When | What changes and why |
 | --- | --- |
 | **npm installation** | Installs the CLI, bundled components and dependencies under your npm prefix (with Bun, under Bun's global directory). OpenRig's postinstall checks the Node.js version and that the SQLite module loads; Bun may block this script. It does not run daemon or provider setup. |
-| **`rig setup`** | Attempts missing tools and writes an OpenRig block in `~/.tmux.conf` for mouse support and scrollback. On macOS it can install cmux and enable its automation socket control in `~/.config/cmux/settings.json`. `--full` adds workstation tools. `--dry-run` shows setup's plan without applying it. |
+| **`rig setup`** | Attempts missing tools and writes an OpenRig block in `~/.tmux.conf` for mouse support and scrollback. On macOS it can install cmux and enable its automation socket control in `~/.config/cmux/settings.json`; cmux defaults `automation.socketControlMode` to `cmuxOnly`, which only accepts processes started inside cmux and so blocks OpenRig's control, so setup switches it to `automation`. `--full` adds workstation tools. `--dry-run` shows setup's plan without applying it. |
 | **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. With `runtime.codex.hooks_enabled` enabled (the default), writes Codex hook configuration and trust records as described below—even before a rig launches. |
 | **Rig/seat launch and attachment** | Creates tmux sessions, supplies seat identity and daemon connection environment, and projects selected guidance, skills, plugins and runtime resources into the workspace. Managed startup pre-trusts the workspace. Claude context collection can also be provisioned for attached sessions and refreshed during monitoring. |
 | **Explicit permission configuration** | The built-in bootstrap does **not** add `rig` command allow rules. Agent-guided setup recommends Yes and requires your actual answer before the agent [adds rules at your chosen scope](docs/reference/getting-started.md#have-your-agent-configure-permissions). No/no answer preserves settings; existing choices and stricter rules remain relevant. Broader access is separate. |
@@ -100,16 +100,17 @@ using a published package, since repository guidance can be ahead of npm.
 The provider files are separate from instance state. Here `~` means the daemon
 user's home; changing `OPENRIG_HOME` alone does not isolate provider configuration.
 
-- **Claude Code:** managed startup writes workspace trust and onboarding completion
-  to `~/.claude.json`. In the workspace, `.claude/settings.local.json` receives
+- **Claude Code:** startup writes workspace trust and onboarding completion.
+  With an explicit permission mode, it uses the launch-selected `HOME/.claude.json`,
+  or `<CLAUDE_CONFIG_DIR>/.claude.json` when that variable is set. Classic startup
+  retains the daemon's `~/.claude.json` path. In the workspace, `.claude/settings.local.json` receives
   the context collector's `statusLine` command and selected activity hooks;
   helper scripts live under `.openrig/`. Selected settings/MCP resources can also
   change that settings file and `.mcp.json`. The shared settings resource sets
   `permissions.defaultMode` to `acceptEdits` and enables Exa/Context7 MCP entries;
   selected MCP resources configure those external services. Built-in bootstrap
   no longer writes a command allowlist to `~/.claude/settings.json` or removes
-  older allowances. The trust writer uses the daemon home, so a custom
-  `CLAUDE_CONFIG_DIR` is not a general relocation of these writes.
+  older allowances. `CLAUDE_CONFIG_DIR` does not relocate the project-local writes.
 - **Codex:** writes the daemon's `CODEX_HOME/config.toml` (normally
   `~/.codex/config.toml`). Startup enables hooks, adds the OpenRig activity relay
   commands and pre-writes trust hashes for those commands. Seat startup adds

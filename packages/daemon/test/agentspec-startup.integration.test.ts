@@ -24,6 +24,7 @@ function mockTmux(): TmuxAdapter {
     listWindows: vi.fn(async () => []),
     listPanes: vi.fn(async () => []),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
+    capturePaneContent: vi.fn(async () => "❯ \n────────────────────\n"),
   } as unknown as TmuxAdapter;
 }
 
@@ -86,7 +87,7 @@ describe("AgentSpec startup integration", () => {
       edges: [],
     });
 
-    const agentYaml = `name: impl\nversion: "1.0.0"\nstartup:\n  files:\n    - path: startup/base.md\n      delivery_hint: auto\nresources:\n  skills:\n    - id: skill-a\n      path: skills/a\nprofiles:\n  default:\n    uses:\n      skills: [skill-a]`;
+    const agentYaml = `name: impl\nversion: "1.0.0"\nstartup:\n  files:\n    - path: startup/base.md\n      orientation: role\n      delivery_hint: auto\nresources:\n  skills:\n    - id: skill-a\n      path: skills/a\nprofiles:\n  default:\n    uses:\n      skills: [skill-a]`;
 
     const fs = mockFs({
       [`${rigRoot}/agents/impl/agent.yaml`]: agentYaml,
@@ -149,12 +150,9 @@ describe("AgentSpec startup integration", () => {
       const isAgentFile = f.path.startsWith("startup/");
       const ownerRoot = isAgentFile ? agentRoot : rigRoot;
       return {
-        path: f.path,
+        ...f,
         absolutePath: `${ownerRoot}/${f.path}`,
         ownerRoot,
-        deliveryHint: f.deliveryHint,
-        required: f.required,
-        appliesOn: f.appliesOn,
       };
     });
 
@@ -188,6 +186,8 @@ describe("AgentSpec startup integration", () => {
     expect(deriveOriented(db, node.id)).toBe(selection === "authenticated" ? "missing" : "n-a");
     const stored = db.prepare("SELECT startup_actions_json FROM node_startup_context WHERE node_id=?").get(node.id) as { startup_actions_json: string };
     expect(JSON.parse(stored.startup_actions_json)).toEqual(configResult.config.startup.actions);
+    const storedFiles = db.prepare("SELECT resolved_files_json FROM node_startup_context WHERE node_id=?").get(node.id) as { resolved_files_json: string };
+    expect(JSON.parse(storedFiles.resolved_files_json).filter((file: ResolvedStartupFile) => file.orientation === "role")).toMatchObject([{ path: "startup/base.md", ownerRoot: `${rigRoot}/agents/impl`, orientation: "role" }]);
     const sent = vi.mocked(tmux.sendText).mock.calls.map(call => call[1]);
     expect(sent).toContain("/rename impl");
     expect(sent.filter(text => text.includes("startup-proof submit"))).toHaveLength(selection === "authenticated" ? 1 : 0);

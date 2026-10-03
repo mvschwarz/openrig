@@ -377,11 +377,14 @@ initial record is explicitly reported as unverified delivery.`)
     if (opts.budget !== undefined) params.set("budget", opts.budget);
     const res = await client.get<{
       pieces?: Array<{ atomId: string; address: string; text: string }>;
+      warnings?: string[];
       message?: string; error?: string;
     }>(`/api/context-packs/library/by-ref/profile?${params.toString()}`);
     if (res.status !== 200) {
       throw new Error(res.data?.message ?? res.data?.error ?? `Daemon returned HTTP ${res.status} composing the profile.`);
     }
+    // A skipped piece (a post-compaction compose with no seat recap) is reported, never silent.
+    for (const w of res.data.warnings ?? []) console.error(`WARNING ${w}`);
     const profilePieces = res.data.pieces ?? [];
     return {
       // NO-COPY: content is the SERVED text, byte-for-byte; the label carries

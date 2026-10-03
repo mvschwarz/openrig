@@ -7,6 +7,7 @@ import { shellQuote } from "./shell-quote.js";
 import { codexPostureArg } from "./yolo-mode.js";
 import { observeCodexSandbox } from "../domain/permission-drift.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
+import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 
 const CODEX_TYPES = new Set(["codex_id", "codex_last"]);
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -21,6 +22,8 @@ interface CodexResumeOptions {
   exec?: (cmd: string) => Promise<string>;
   /** #69: whether the installed Codex supports --no-daemon; absent keeps the existing invocation. */
   detectDaemonSupport?: CodexDaemonSupportDetector;
+  /** #275: Codex's own answer on the plain floor's network default; absent keeps the existing invocation. */
+  readNetworkDefault?: CodexNetworkDefaultReader;
 }
 
 export class CodexResumeAdapter {
@@ -84,6 +87,7 @@ export class CodexResumeAdapter {
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
     const postureArg = codexPostureArg(profileArg, process.env, resolvedPosture);
     const appliedLaunch = observeCodexSandbox(postureArg);
+    const networkArg = await codexNetworkDefaultArg(this.options.readNetworkDefault, appliedLaunch, cwd, tmuxSessionName);
     const cmd = buildCodexResumeCore(
       resumeToken ?? "",
       codexConfigProfile,
@@ -91,7 +95,7 @@ export class CodexResumeAdapter {
       undefined,
       resolvedPosture,
       model,
-      postureArg,
+      `${postureArg}${networkArg}`,
       daemonSupport?.kind === "supported",
       effort,
     );

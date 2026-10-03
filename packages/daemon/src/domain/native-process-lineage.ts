@@ -106,6 +106,30 @@ function claudeSessionToken(args: string[]): string | null {
   return token;
 }
 
+// Delivery-only reading of a Claude argv, which also accepts --settings (the
+// strict selector above does not). null: the argv parsed and names no session.
+// "unparsed": an argument was not recognised, so the argv proves nothing.
+function claudeSessionIdentity(args: string[]): string | null | { unparsed: true } {
+  const unparsed = { unparsed: true } as const;
+  let token: string | null = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
+    if (["--permission-mode", "--model", "--name", "--settings"].includes(arg)) {
+      const value = args[++index];
+      if (!value || value.startsWith("-")) return unparsed;
+      continue;
+    }
+    if (/^--(?:permission-mode|model|name|settings)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
+    if (!identity) return unparsed; // Unknown argv is not positive identity proof.
+    const value = identity[1] ?? args[++index];
+    if (token !== null || !value || value.startsWith("-")) return unparsed;
+    token = value;
+  }
+  return token;
+}
+
 /** Require a live process in the pane's own lineage whose argv names both the
  * declared runtime and the exact native resume identity. */
 export function findExactNativeResumeProcess(
@@ -241,22 +265,54 @@ export async function verifyClaudePaneProcess(input: Parameters<typeof observeNa
   return second?.fingerprint === first.fingerprint ? second : null;
 }
 
-/** The `ps` start time (lstart, local time) of the one Claude process in the pane's foreground,
- * located as verifyClaudePaneProcess locates it but without an expected token. Two stable samples
- * are required; anything else (no pane, no process, several candidates) is unknown (null). */
-export async function observeClaudePaneStartedAt(input: Omit<Parameters<typeof observeNativePaneProcess>[0], "expectedToken" | "requireResume">): Promise<string | null> {
-  const sample = async (): Promise<NativeProcessObservation | null> => {
-    try {
-      const pid = await input.tmux.getPanePid(input.target);
-      if (!pid) return null;
-      const candidates = nativeProcessCandidates(await (input.listProcesses ?? listNativeProcesses)(), pid, "claude-code", input.selectedExecutable);
-      return candidates.length === 1 ? candidates[0]! : null;
-    } catch { return null; }
-  };
-  const first = await sample();
+/** One foreground-runtime observation, without a conversation identity claim.
+ * Sweep callers must compare two independent samples before using this as proof. */
+export async function observeClaudePaneRuntime(input: Omit<Parameters<typeof observeNativePaneProcess>[0], "expectedToken" | "requireResume">): Promise<NativeProcessObservation | null> {
+  try {
+    const pid = await input.tmux.getPanePid(input.target);
+    if (!pid) return null;
+    const candidates = nativeProcessCandidates(await (input.listProcesses ?? listNativeProcesses)(), pid, "claude-code", input.selectedExecutable);
+    return candidates.length === 1 ? candidates[0]! : null;
+  } catch { return null; }
+}
+
+/** Stable runtime occupancy only; never a substitute for exact resume proof. */
+export async function verifyClaudePaneRuntime(input: Parameters<typeof observeClaudePaneRuntime>[0]): Promise<NativeProcessObservation | null> {
+  const first = await observeClaudePaneRuntime(input);
   if (!first) return null;
-  const second = await sample();
-  return second?.fingerprint === first.fingerprint ? second.process.startedAt ?? null : null;
+  const second = await observeClaudePaneRuntime(input);
+  return second?.fingerprint === first.fingerprint ? second : null;
+}
+
+/** The `ps` start time (lstart, local time) of the one stable Claude foreground
+ * process. This makes no claim about its conversation token. */
+export async function observeClaudePaneStartedAt(input: Parameters<typeof observeClaudePaneRuntime>[0]): Promise<string | null> {
+  return (await verifyClaudePaneRuntime(input))?.process.startedAt ?? null;
+}
+
+/** A launcher shim that spawns (rather than execs) Claude leaves several Claude
+ * processes on one parent chain. That chain is one runtime: the deepest process
+ * receives input, and a shim's argv may carry the identity its child lacks.
+ * Returns the chain deepest-first, or null when candidates sit on separate
+ * branches, which stays ambiguous. */
+function claudeLauncherChain(candidates: NativeProcessObservation[], rows: NativeProcessRow[]): NativeProcessObservation[] | null {
+  if (candidates.length <= 1) return candidates;
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  const ancestors = (observation: NativeProcessObservation): Set<number> => {
+    const seen = new Set<number>();
+    let current = byPid.get(observation.process.ppid);
+    while (current && !seen.has(current.pid)) {
+      seen.add(current.pid);
+      if (current.pid === observation.panePid) break;
+      current = byPid.get(current.ppid);
+    }
+    return seen;
+  };
+  const deepest = candidates.find((candidate) => {
+    const above = ancestors(candidate);
+    return candidates.every((other) => other === candidate || above.has(other.process.pid));
+  });
+  return deepest ? [deepest, ...candidates.filter((candidate) => candidate !== deepest)] : null;
 }
 
 export interface ClaudeDeliveryObservation {
@@ -273,15 +329,27 @@ export async function observeClaudeDelivery(input: Parameters<typeof observeNati
       if (!pid) return unknown;
       const rows = await (input.listProcesses ?? listNativeProcesses)();
       const candidates = nativeProcessCandidates(rows, pid, "claude-code", input.selectedExecutable);
-      if (candidates.length > 1) return { state: "conflict", detail: "Multiple Claude processes occupy the bound foreground" };
-      const native = candidates[0];
+      const chain = claudeLauncherChain(candidates, rows);
+      if (!chain) return { state: "conflict", detail: "Multiple Claude processes occupy the bound foreground" };
+      const native = chain[0];
       if (native) {
-        const token = claudeSessionToken(tokens(native.process.command).slice(1));
         const fingerprint = native.fingerprint;
-        if (!token || !input.expectedToken) return { ...unknown, fingerprint };
-        return token === input.expectedToken
+        const identities = chain.map((link) => claudeSessionIdentity(tokens(link.process.command).slice(1)));
+        const named = new Set(identities.filter((value): value is string => typeof value === "string"));
+        if (named.size > 1) return { state: "conflict", detail: "Claude processes in the bound foreground name different conversations", fingerprint };
+        if (!input.expectedToken) return { ...unknown, fingerprint };
+        // argv records launch identity, not the current conversation: /clear can
+        // rotate the hook-persisted token without replacing this process. A sole
+        // launch-token mismatch cannot distinguish that from stale resume metadata.
+        // Do not promote either source over the other; ordinary delivery warns on
+        // uncertainty. Live lineage/binding conflicts and strict resume proof stay
+        // separate. A shim's token is never inherited by an opaque child.
+        if (named.size === 1 && !named.has(input.expectedToken)) {
+          return { state: "unknown", detail: "Claude launch identity differs from the stored conversation; current conversation is unverified", fingerprint };
+        }
+        return identities[0] === input.expectedToken
           ? { state: "verified", detail: "Expected Claude conversation in the bound foreground", fingerprint }
-          : { state: "conflict", detail: "The bound foreground names a different Claude conversation", fingerprint };
+          : { ...unknown, fingerprint };
       }
       const other = selectNativeProcess(rows, pid);
       if (other) return { state: "conflict", detail: "A different native runtime occupies the bound foreground", fingerprint: other.fingerprint };

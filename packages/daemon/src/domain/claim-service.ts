@@ -196,7 +196,7 @@ export class ClaimService {
     const hint = `--- OpenRig: You have been adopted into rig "${meta.rigName}" as ${meta.logicalId}. Run: rig whoami --json ---`;
     const write = async () => {
       const sent = await this.tmuxAdapter!.sendText(tmuxSession, hint);
-      if (sent.ok) await this.tmuxAdapter!.sendKeys(tmuxSession, ["C-m"]);
+      if (sent.ok) await this.tmuxAdapter!.sendKeys(tmuxSession, ["Enter"]);
     };
     const guard = this.tmuxAdapter.deliveryGuard;
     if (guard) await guard.operation(tmuxSession, write, async target => {

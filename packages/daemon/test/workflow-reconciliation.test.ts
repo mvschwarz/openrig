@@ -71,7 +71,7 @@ describe("one preserved running graph and recoverable revision decision", () => 
     expect(view.composition.executableSteps.map(s => s.id)).toEqual(["plan", "build", "finish"]);
     expect(view.composition.explanation).toContain("not automatic nested children");
     expect(inspectGraph(db, run.instanceId)).toBe(view);
-    const execution = buildExecutionView({ db, slicesRoot: () => join(root, "missions"), rigsRoot: () => join(root, "no-rigs"), buildInfo: { semver: null, commit: null, dirty: null, builtAt: null } }, { mission: "trial" }) as any;
+    const execution = await buildExecutionView({ db, slicesRoot: () => join(root, "missions"), rigsRoot: () => join(root, "no-rigs"), buildInfo: { semver: null, commit: null, dirty: null, builtAt: null } }, { mission: "trial" }) as any;
     expect(execution.lifecycle_instances[0].reconciliation).toEqual(view);
     expect(db.serialize()).toEqual(before);
     const receipt = reviseGraph(db, bus, apply(run.instanceId));

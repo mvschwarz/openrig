@@ -27,6 +27,7 @@ function mockTmux(overrides?: Partial<TmuxAdapter>): TmuxAdapter {
     listWindows: vi.fn(async () => []),
     listPanes: vi.fn(async () => []),
     sendKeys: vi.fn(async () => ({ ok: true as const })),
+    capturePaneContent: vi.fn(async () => "❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n"),
     ...overrides,
   } as unknown as TmuxAdapter;
 }
@@ -133,6 +134,16 @@ describe("StartupOrchestrator", () => {
     };
   }
 
+  it("keeps a challenge-only transport failure best-effort", async () => {
+    const seed = seedSession();
+    const tmux = mockTmux({ sendText: vi.fn(async () => ({ ok: false as const, message: "fixture transport failure" })) });
+    const result = await createOrchestrator(tmux).startNode(makeInput(seed, {
+      startupActions: [makeAction({ type: "startup_proof", value: "authenticated" })],
+    }));
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+  });
+
   it("deliberate fresh replacement appends the named durable obligation read without an extra message", async () => {
     const seed = seedSession();
     await createOrchestrator().startNode(makeInput(seed, { startupActions: [makeIdentityAction()], includeDurableObligations: true }));
@@ -152,6 +163,22 @@ describe("StartupOrchestrator", () => {
     expect(orch.canContinueFresh(seed.nodeId, "other-occupant")).toBe(false);
     eventBus.emit({ type: "node.startup_pending", rigId: seed.rigId, nodeId: seed.nodeId });
     expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+  });
+
+  it("records a role binding before launch succeeds and preserves it on exact resume", async () => {
+    const seed = seedSession();
+    const orch = createOrchestrator();
+    const role: ResolvedStartupFile = { path: "role.md", absolutePath: "/fixture/role.md", ownerRoot: "/fixture", orientation: "role", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] };
+    const read = () => db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { resolved_files_json: string; created_at: string };
+    const adapter = mockAdapter({ launchHarness: vi.fn(async () => {
+      expect(JSON.parse(read().resolved_files_json)).toEqual([role]);
+      return { ok: false, recovery: "attention_required", error: "Native gate" };
+    }) });
+    expect((await orch.startNode(makeInput(seed, { adapter, resolvedStartupFiles: [role] }))).ok).toBe(false);
+    const before = read();
+    expect(before.created_at).toBeTruthy();
+    await orch.startNode(makeInput(seed, { isRestore: true, resumeToken: "original", preserveStartupContext: true }));
+    expect(read()).toEqual(before);
   });
 
   it("exact resume retains configured fresh context while sending no replay", async () => {
@@ -495,7 +522,7 @@ describe("StartupOrchestrator", () => {
 
     expect(result.ok).toBe(true);
     expect(tmux.sendText).toHaveBeenCalledWith("r01-impl", "/rename impl");
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
   });
 
   // T8: operator debug append executes after resolved startup

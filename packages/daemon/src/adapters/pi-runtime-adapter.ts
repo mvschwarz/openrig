@@ -165,7 +165,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
               const textResult = await this.tmux.sendText(binding.tmuxSession, content);
               if (!textResult.ok) throw new Error(textResult.message);
               await this.sleep(200);
-              const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["C-m"]);
+              const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
               if (!submitResult.ok) throw new Error(submitResult.message);
             }
             break;

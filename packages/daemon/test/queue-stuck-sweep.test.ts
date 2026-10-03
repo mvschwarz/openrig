@@ -31,12 +31,14 @@ const sweepMod = () => import("../src/domain/queue-stuck-sweep.js");
 
 describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-observable", () => {
   let db: Database.Database;
+  let bus: EventBus;
   let repo: QueueRepository;
 
   beforeEach(() => {
     db = new Database(":memory:");
     migrate(db, ALL_MIGRATIONS);
-    repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    bus = new EventBus(db);
+    repo = new QueueRepository(db, bus, { validateRig: () => true });
   });
   afterEach(() => {
     db.close();
@@ -112,6 +114,108 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(f.body).toContain(row.qitemId); // row id
     expect(f.body).toMatch(/overdue|claimed/i);
     expect(f.body).toMatch(/\d+\s*min/i); // age
+  });
+
+  it("OVERDUE EVENT: standing sweep emits qitem.closure_overdue on first observation, deduplicates on subsequent sweeps, and re-emits on re-claim", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    makeOverdue(row.qitemId);
+
+    const emitted: Array<{ type: string; [k: string]: unknown }> = [];
+    bus.subscribe((e) => emitted.push(e));
+
+    // First sweep emits qitem.closure_overdue and records transition note
+    await runSweep();
+    const overdueEvents1 = emitted.filter((e) => e.type === "qitem.closure_overdue");
+    expect(overdueEvents1).toHaveLength(1);
+    expect(overdueEvents1[0]).toMatchObject({
+      type: "qitem.closure_overdue",
+      qitemId: row.qitemId,
+      destinationSession: "worker@r",
+    });
+
+    const transitions1 = db.prepare(
+      "SELECT * FROM queue_transitions WHERE qitem_id = ? AND transition_note = 'closure-overdue'",
+    ).all(row.qitemId);
+    expect(transitions1).toHaveLength(1);
+
+    // Second sweep deduplicates: no duplicate event or transition note
+    await runSweep();
+    const overdueEvents2 = emitted.filter((e) => e.type === "qitem.closure_overdue");
+    expect(overdueEvents2).toHaveLength(1);
+    const transitions2 = db.prepare(
+      "SELECT * FROM queue_transitions WHERE qitem_id = ? AND transition_note = 'closure-overdue'",
+    ).all(row.qitemId);
+    expect(transitions2).toHaveLength(1);
+
+    // Unclaim and re-claim: new claim episode allows a new closure_overdue when past deadline again
+    repo.unclaim(row.qitemId, "worker@r", "reassign");
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    makeOverdue(row.qitemId);
+
+    await runSweep();
+    const overdueEvents3 = emitted.filter((e) => e.type === "qitem.closure_overdue");
+    expect(overdueEvents3).toHaveLength(2);
+    expect(overdueEvents3[1]).toMatchObject({
+      type: "qitem.closure_overdue",
+      qitemId: row.qitemId,
+      destinationSession: "worker@r",
+    });
+
+    // If the transition is archived into queue_transitions_archive, deduplication still holds
+    db.prepare(`
+      INSERT INTO queue_transitions_archive (
+        transition_id, qitem_id, ts, state, transition_note,
+        actor_session, closure_reason, closure_target, archived_at
+      )
+      SELECT transition_id, qitem_id, ts, state, transition_note,
+             actor_session, closure_reason, closure_target, ?
+        FROM queue_transitions WHERE qitem_id = ?
+    `).run(new Date().toISOString(), row.qitemId);
+    db.prepare("DELETE FROM queue_transitions WHERE qitem_id = ? AND transition_note = 'closure-overdue'").run(row.qitemId);
+
+    await runSweep();
+    const overdueEvents4 = emitted.filter((e) => e.type === "qitem.closure_overdue");
+    expect(overdueEvents4).toHaveLength(2);
+  });
+
+  it("OVERDUE FINDING LAST TRANSITION: shows claimant's last transition, skipping daemon closure-overdue note", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    await repo.update({
+      qitemId: row.qitemId,
+      actorSession: "worker@r",
+      transitionNote: "investigating edge case",
+    });
+    makeOverdue(row.qitemId);
+
+    await runSweep();
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.body).toContain("last transition: investigating edge case at");
+    expect(findings[0]!.body).not.toContain("last transition: closure-overdue");
+  });
+
+  it("OVERDUE SWEEP ERROR RESILIENCE: recordClosureOverdue write failure does not crash sweep or drop findings", async () => {
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    makeOverdue(row.qitemId);
+
+    const logLines: string[] = [];
+    const origRecord = repo.recordClosureOverdue.bind(repo);
+    repo.recordClosureOverdue = () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    };
+
+    try {
+      const { result } = await runSweep({ log: (msg: string) => logLines.push(msg) });
+      expect(result.outcome).toBe("findings");
+      const findings = await findingsFor(row.qitemId);
+      expect(findings).toHaveLength(1);
+      expect(logLines.some((l) => l.includes("failed to record closure-overdue") && l.includes("SQLITE_BUSY"))).toBe(true);
+    } finally {
+      repo.recordClosureOverdue = origRecord;
+    }
   });
 
   it("S04 PICKUP SEAM: stalled-after-claim routes one finding to the claimant and later motion auto-closes it", async () => {

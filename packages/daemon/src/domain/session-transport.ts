@@ -463,7 +463,121 @@ export type ResolveResult =
   | { ok: true; sessions: Array<{ sessionName: string; rigName: string; nodeLogicalId: string }> }
   | { ok: false; code: "not_found" | "ambiguous"; error: string };
 
+/** Startup retries need the whole visible message, not the identity header shared by
+ * every startup. An echoed turn or a partial/opaque composer stays unverified. */
+export function inspectStartupStagedText(pane: string | null, expected: string): "staged" | "clear" | "unverified" {
+  const lines = (pane ?? "").split("\n");
+  let inputAt = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i]!.trimStart().startsWith("❯")) { inputAt = i; break; }
+  }
+  if (inputAt < 0) return "unverified";
+  // Prompt text can itself contain rules (the startup challenge does). A rule
+  // closes the composer only when followed by recognized composer chrome.
+  let end = -1;
+  for (let i = lines.length - 1; i > inputAt; i--) {
+    if (/^[─═-]{10,}$/.test(lines[i]!.trim())
+      && /(?:shift\+tab to cycle|\? for shortcuts)/i.test(lines.slice(i + 1).find((next) => next.trim()) ?? "")) {
+      end = i;
+      break;
+    }
+  }
+  if (end < 0 || /^❯\s*\d+\./.test(lines[inputAt]!.trimStart())) return "unverified";
+  const norm = (text: string) => text.replace(/\s+/g, "");
+  const body = norm(lines.slice(inputAt, end).join("\n").trimStart().slice(1));
+  if (!body) return "clear";
+  return body === norm(expected) ? "staged" : "unverified";
+}
+
+/** The existing submit-only identity check, also used to inspect startup's own paste.
+ * A false result is no matching staged evidence, not proof of model consumption. */
+export function hasExpectedStagedText(pane: string | null, expected: string): boolean {
+  const norm = (s: string) => s.replace(/\s+/g, "");
+  // Round-2 (r2 HIGH-1): the evidence must be the CURRENT ACTIVE INPUT and must identify
+  // THIS piece — stale scrollback can carry an old placeholder while a LATER interactive
+  // prompt owns the input, and an Enter there approves the prompt. So:
+  //   1. Only the pane's LAST input-marker line counts (the current input; everything above
+  //      is history).
+  //   2. A numbered-option line (`❯ 1. …`) is a PROMPT SELECTION, never staged input: refuse.
+  //   3. A pasted-text placeholder is identity-qualified: "[Pasted text #N +X lines]" counts
+  //      only when X matches the expected piece's own line count (±1 for a trailing newline).
+  //      More than one placeholder is COALESCED staging (several pieces, one Enter): refuse.
+  //   4. Otherwise the line must carry the content's own head (24 normalized chars — a short
+  //      paste renders inline, possibly truncated).
+  const paneLines = (pane ?? "").split("\n");
+  let currentInputAt = -1;
+  for (let i = paneLines.length - 1; i >= 0; i--) {
+    if (paneLines[i]!.trimStart().startsWith("❯")) { currentInputAt = i; break; }
+  }
+  let stagedEvidence = false;
+  if (currentInputAt >= 0) {
+    const inputLine = paneLines[currentInputAt]!.trimStart();
+    // The region is the last ❯-line through the input box's closing separator (a box-drawing
+    // line) or pane end — wrapped input continues below the marker; everything ABOVE the
+    // marker is history and everything below the separator is hint-bar chrome.
+    let regionEnd = paneLines.length;
+    for (let i = currentInputAt + 1; i < paneLines.length; i++) {
+      const t = paneLines[i]!.trim();
+      if (t.length >= 10 && /^[─═-]+$/.test(t)) { regionEnd = i; break; }
+    }
+    const region = paneLines.slice(currentInputAt, regionEnd).join("\n");
+    if (!/^❯\s*\d+\./.test(inputLine)) {
+      // Round-3 (r2 R2 HIGH-1, specimen-pinned): Claude renders ONE staged piece as MANY
+      // placeholders whose displayed counts are SEGMENT sizes (sum ≤ source lines), followed
+      // by the piece's own literal tail wrapped across pane lines — and the placeholder
+      // tokens themselves wrap. So: collapse wrapping, then
+      //   IDENTITY  — the literal residual (region minus tokens minus hint chrome) must be a
+      //               CONTIGUOUS substring of the piece: the visible words are the piece's
+      //               words. Foreign residual (another piece, stale content) refuses.
+      //   SANITY    — the segment-count sum must not exceed the piece's own line count
+      //               (small slack), and with NO residual anchor must reach at least 60% of
+      //               it — a bare unrelated placeholder cannot masquerade as this piece.
+      const placeholderRe = /\[Pasted text #\d+ \+(\d+) lines\]/g;
+      const regionFlat = region.replace(/\s+/g, " ");
+      const counts = [...regionFlat.matchAll(placeholderRe)].map((m) => Number(m[1]));
+      if (counts.length === 0) {
+        const head = norm(expected).slice(0, 24);
+        stagedEvidence = head.length > 0 && norm(region).includes(head);
+      } else {
+        // Round-4 (r2 R3 HIGH-1): identity is the rendering's own structure, specimen-proven —
+        // the placeholders are the piece's HEAD chunks and the literal residual is the piece's
+        // normalized SUFFIX (524 chars in the preserved capture). Size similarity and short
+        // shared phrases are NOT identity: with no residual, or one under 48 normalized chars,
+        // or one that is not the piece's own suffix, FAIL CLOSED — the TUI did not expose
+        // enough content to identify the staged state, and a bare Enter is never guessed.
+        const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
+        const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
+        const pieceNorm = norm(expected);
+        const sum = counts.reduce((a, b) => a + b, 0);
+        // Round-5 (r2 R4 HIGH-1): the suffix anchor is JOINED to the opaque prefix. The
+        // placeholder sum identifies the hidden SOURCE BOUNDARY immediately before the
+        // visible suffix (specimen: sum 130 = the residual begins after exactly 130 of the
+        // piece's 142 source newlines). Compute the boundary from the piece bytes — the
+        // number of leading source lines whose normalized text the residual does NOT cover —
+        // and require the sum to EQUAL it exactly (round-6, r2 R5: both separately staged
+        // preserved pieces are exact — 130=130 and 82=82; a tolerance was unsupported by the
+        // renderer evidence). A matched suffix with a non-matching sum is a truncated or
+        // wrong prefix: refuse.
+        let boundary = -1;
+        if (residual.length >= 48 && pieceNorm.endsWith(residual)) {
+          const srcLines = expected.split("\n");
+          let acc = 0;
+          boundary = 0;
+          for (let i = srcLines.length - 1; i >= 0; i--) {
+            acc += norm(srcLines[i]!).length;
+            if (acc >= residual.length) { boundary = i; break; }
+          }
+        }
+        stagedEvidence = boundary >= 0 && sum === boundary;
+      }
+    }
+  }
+  return stagedEvidence;
+}
+
 export interface SendOpts {
+  /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
+  beforeWrite?: () => void;
   /** Stable caller request ID, reused for readback after transport uncertainty. */
   deliveryId?: string;
   auditPointer?: string;
@@ -490,6 +604,10 @@ export interface SendOpts {
   // caller's `text` argument must be empty in this mode.
   submitOnly?: boolean;
   expectedStagedText?: string;
+  /** Internal startup caller needs a bounded view of an expanded multiline composer. */
+  submitOnlyCaptureLines?: 50 | 200;
+  /** Internal startup only: require complete visible composer identity before Enter. */
+  requireFullStagedText?: boolean;
   /** Round-2 (r2 HIGH-1): the walked piece's own line count — placeholder identity. A large paste
    *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
    *  as evidence of THIS piece. */
@@ -1116,91 +1234,14 @@ export class SessionTransport {
       if (expected.trim().length === 0) {
         return { ok: false, sessionName, reason: "invalid_submit_only", error: "submitOnly requires expectedStagedText — the Enter is only pressed onto the exact staged content." };
       }
-      const norm = (s: string) => s.replace(/\s+/g, "");
       const pane = await this.runStage(
         "session_transport.submit_only_precheck",
-        () => this.tmuxAdapter.capturePaneContent(sessionName, 50),
+        () => this.tmuxAdapter.capturePaneContent(sessionName, opts.submitOnlyCaptureLines ?? 50),
       );
-      // Round-2 (r2 HIGH-1): the evidence must be the CURRENT ACTIVE INPUT and must identify
-      // THIS piece — stale scrollback can carry an old placeholder while a LATER interactive
-      // prompt owns the input, and an Enter there approves the prompt. So:
-      //   1. Only the pane's LAST input-marker line counts (the current input; everything above
-      //      is history).
-      //   2. A numbered-option line (`❯ 1. …`) is a PROMPT SELECTION, never staged input: refuse.
-      //   3. A pasted-text placeholder is identity-qualified: "[Pasted text #N +X lines]" counts
-      //      only when X matches the expected piece's own line count (±1 for a trailing newline).
-      //      More than one placeholder is COALESCED staging (several pieces, one Enter): refuse.
-      //   4. Otherwise the line must carry the content's own head (24 normalized chars — a short
-      //      paste renders inline, possibly truncated).
-      const paneLines = (pane ?? "").split("\n");
-      let currentInputAt = -1;
-      for (let i = paneLines.length - 1; i >= 0; i--) {
-        if (paneLines[i]!.trimStart().startsWith("❯")) { currentInputAt = i; break; }
-      }
-      let stagedEvidence = false;
-      if (currentInputAt >= 0) {
-        const inputLine = paneLines[currentInputAt]!.trimStart();
-        // The region is the last ❯-line through the input box's closing separator (a box-drawing
-        // line) or pane end — wrapped input continues below the marker; everything ABOVE the
-        // marker is history and everything below the separator is hint-bar chrome.
-        let regionEnd = paneLines.length;
-        for (let i = currentInputAt + 1; i < paneLines.length; i++) {
-          const t = paneLines[i]!.trim();
-          if (t.length >= 10 && /^[─═-]+$/.test(t)) { regionEnd = i; break; }
-        }
-        const region = paneLines.slice(currentInputAt, regionEnd).join("\n");
-        if (!/^❯\s*\d+\./.test(inputLine)) {
-          // Round-3 (r2 R2 HIGH-1, specimen-pinned): Claude renders ONE staged piece as MANY
-          // placeholders whose displayed counts are SEGMENT sizes (sum ≤ source lines), followed
-          // by the piece's own literal tail wrapped across pane lines — and the placeholder
-          // tokens themselves wrap. So: collapse wrapping, then
-          //   IDENTITY  — the literal residual (region minus tokens minus hint chrome) must be a
-          //               CONTIGUOUS substring of the piece: the visible words are the piece's
-          //               words. Foreign residual (another piece, stale content) refuses.
-          //   SANITY    — the segment-count sum must not exceed the piece's own line count
-          //               (small slack), and with NO residual anchor must reach at least 60% of
-          //               it — a bare unrelated placeholder cannot masquerade as this piece.
-          const placeholderRe = /\[Pasted text #\d+ \+(\d+) lines\]/g;
-          const regionFlat = region.replace(/\s+/g, " ");
-          const counts = [...regionFlat.matchAll(placeholderRe)].map((m) => Number(m[1]));
-          if (counts.length === 0) {
-            const head = norm(expected).slice(0, 24);
-            stagedEvidence = head.length > 0 && norm(region).includes(head);
-          } else {
-            // Round-4 (r2 R3 HIGH-1): identity is the rendering's own structure, specimen-proven —
-            // the placeholders are the piece's HEAD chunks and the literal residual is the piece's
-            // normalized SUFFIX (524 chars in the preserved capture). Size similarity and short
-            // shared phrases are NOT identity: with no residual, or one under 48 normalized chars,
-            // or one that is not the piece's own suffix, FAIL CLOSED — the TUI did not expose
-            // enough content to identify the staged state, and a bare Enter is never guessed.
-            const chrome = /paste again to expand|ctrl\+g to edit( in Vim)?/gi;
-            const residual = norm(regionFlat.replace(placeholderRe, "").replace(chrome, "")).replace(/^❯/, "");
-            const pieceNorm = norm(expected);
-            const sum = counts.reduce((a, b) => a + b, 0);
-            // Round-5 (r2 R4 HIGH-1): the suffix anchor is JOINED to the opaque prefix. The
-            // placeholder sum identifies the hidden SOURCE BOUNDARY immediately before the
-            // visible suffix (specimen: sum 130 = the residual begins after exactly 130 of the
-            // piece's 142 source newlines). Compute the boundary from the piece bytes — the
-            // number of leading source lines whose normalized text the residual does NOT cover —
-            // and require the sum to EQUAL it exactly (round-6, r2 R5: both separately staged
-            // preserved pieces are exact — 130=130 and 82=82; a tolerance was unsupported by the
-            // renderer evidence). A matched suffix with a non-matching sum is a truncated or
-            // wrong prefix: refuse.
-            let boundary = -1;
-            if (residual.length >= 48 && pieceNorm.endsWith(residual)) {
-              const srcLines = expected.split("\n");
-              let acc = 0;
-              boundary = 0;
-              for (let i = srcLines.length - 1; i >= 0; i--) {
-                acc += norm(srcLines[i]!).length;
-                if (acc >= residual.length) { boundary = i; break; }
-              }
-            }
-            stagedEvidence = boundary >= 0 && sum === boundary;
-          }
-        }
-      }
-      if (!stagedEvidence) {
+      const staged = opts.requireFullStagedText
+        ? inspectStartupStagedText(pane, expected) === "staged"
+        : hasExpectedStagedText(pane, expected);
+      if (!staged) {
         return {
           ok: false,
           sessionName,
@@ -1212,7 +1253,7 @@ export class SessionTransport {
       if (targetFailure) return targetFailure;
       const submitResult = await this.runStage(
         "session_transport.submit",
-        () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
+        () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
         (result) => result.ok ? "ok" : "failed",
       );
       if (!submitResult.ok) {
@@ -1360,7 +1401,7 @@ export class SessionTransport {
     if (observed) observed.sentHash = hashSentText(text);
     const textResult = await this.runStage(
       "session_transport.send_text",
-      () => this.tmuxAdapter.sendText(sessionName, text),
+      () => { opts?.beforeWrite?.(); return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text); },
       (result) => result.ok ? "ok" : "failed",
     );
     if (!textResult.ok) {
@@ -1379,10 +1420,10 @@ export class SessionTransport {
 
     if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
 
-    // 5. Submit (C-m)
+    // 5. Submit (Enter)
     const submitResult = await this.runStage(
       "session_transport.submit",
-      () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
+      () => { opts?.beforeWrite?.(); return opts?.beforeWrite ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], opts.beforeWrite) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]); },
       (result) => result.ok ? "ok" : "failed",
     );
     if (!submitResult.ok) {
@@ -1435,23 +1476,76 @@ export class SessionTransport {
       : fn();
   }
 
+  /** Wait on the existing classifier without occupying the input/lifecycle lease. */
+  async waitUntilIdle(sessionName: string, timeoutMs: number, signal?: AbortSignal) {
+    const meta = this.getSessionMeta(sessionName);
+    return this.waitForIdle({ sessionName, runtime: meta.runtime, attachmentType: meta.attachmentType, timeoutMs, signal,
+      binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane } });
+  }
+
   private async waitForIdle(input: {
     sessionName: string;
     runtime: string | null;
     attachmentType: string | null;
     timeoutMs: number;
+    signal?: AbortSignal;
     binding?: ObservedBinding;
   }): Promise<
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
     | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
   > {
-    const startedAt = Date.now();
+    // ONE deadline. UNKNOWN is retried like busy and never authorizes the send. No observation
+    // starts after the deadline (one starting exactly at it races a 0 ms timer), each one is raced
+    // against the time left, and one that completes after the deadline is discarded, so a late idle
+    // can never lead to input. At expiry the result names the last observation that completed in
+    // time; waitedMs is the wait itself.
+    const deadline = Date.now() + input.timeoutMs;
     let attempts = 0;
+    let last: AgentActivity | null = null;
+    const expire = () => {
+      const count = `${attempts} observation${attempts === 1 ? "" : "s"}`;
+      const activity: AgentActivity = last ?? {
+        state: "unknown", reason: "no_observation_in_time", evidenceSource: "pane_heuristic",
+        sampledAt: this.now().toISOString(), evidence: null,
+      };
+      return activity.state === "unknown"
+        ? {
+          ok: false as const,
+          reason: "target_activity_unknown",
+          error: last
+            ? `Target activity could not be determined (${activity.reason}) when the ${input.timeoutMs}ms wait ended (${count}). No text was sent.`
+            : `Target activity could not be determined: no observation completed within the ${input.timeoutMs}ms wait. No text was sent.`,
+          activity, waitedMs: input.timeoutMs, attempts,
+        }
+        : {
+          ok: false as const,
+          reason: "wait_for_idle_timeout",
+          error: `Target was still busy (${activity.reason}) when the ${input.timeoutMs}ms wait ended (${count}). No text was sent.`,
+          activity, waitedMs: input.timeoutMs, attempts,
+        };
+    };
+
+    const cancelled = () => ({
+      ok: false as const,
+      reason: "preparation_cancelled",
+      error: "Managed preparation ended; no compact authorized.",
+      activity: last ?? {
+        state: "unknown" as const, reason: "preparation_cancelled", evidenceSource: "pane_heuristic" as const,
+        sampledAt: this.now().toISOString(), evidence: null,
+      },
+      waitedMs: Math.max(0, Math.min(input.timeoutMs, input.timeoutMs - (deadline - Date.now()))),
+      attempts,
+    });
 
     while (true) {
+      if (input.signal?.aborted) return cancelled();
+      if (attempts > 0 && Date.now() > deadline) return expire();
       attempts++;
-      const activity = await this.classifySendReadiness(input);
-      const waitedMs = Date.now() - startedAt;
+      const activity = await this.observeReadinessWithin(input, deadline - Date.now());
+      if (input.signal?.aborted) return cancelled();
+      if (activity === null || Date.now() > deadline) return expire();
+      last = activity;
+      const waitedMs = input.timeoutMs - (deadline - Date.now());
 
       if (activity.state === "idle") {
         return { ok: true, activity, waitedMs, attempts };
@@ -1468,30 +1562,28 @@ export class SessionTransport {
         };
       }
 
-      if (activity.state === "unknown") {
-        return {
-          ok: false,
-          reason: "target_activity_unknown",
-          error: `Target activity could not be determined (${activity.reason}). No text was sent.`,
-          activity,
-          waitedMs,
-          attempts,
-        };
-      }
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return expire();
+      await this.sleep(Math.min(this.waitForIdlePollMs, remainingMs));
+    }
+  }
 
-      if (waitedMs >= input.timeoutMs) {
-        return {
-          ok: false,
-          reason: "wait_for_idle_timeout",
-          error: `Target remained busy for ${waitedMs}ms. No text was sent.`,
-          activity,
-          waitedMs,
-          attempts,
-        };
-      }
-
-      const remainingMs = input.timeoutMs - waitedMs;
-      await this.sleep(Math.min(this.waitForIdlePollMs, Math.max(1, remainingMs)));
+  /** One readiness observation, raced against the time left before the wait's deadline. Null
+   *  when the deadline wins; the abandoned observation is ignored, never delivered on. */
+  private async observeReadinessWithin(
+    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding },
+    remainingMs: number,
+  ): Promise<AgentActivity | null> {
+    const observation = this.classifySendReadiness(input);
+    observation.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        observation,
+        new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, remainingMs)); }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -1631,12 +1723,15 @@ export class SessionTransport {
   // `no_activity_signal`. NEVER surfaces a token value — env checks are
   // presence-only, and the store carries no token.
   private async diagnoseProducerLink(sessionName: string): Promise<string> {
-    // Link 1 — the SEAT ENV: can the relay even reach the daemon?
+    // Link 1 — the relay's prerequisites: the daemon URL, the activity token, and the runtime
+    // (without OPENRIG_RUNTIME the relay builds no payload and posts nothing). Only the tmux SESSION
+    // environment is inspected; the agent process's own environment is not read, and an env-prefixed
+    // launch carries these without the session environment showing them. So a name absent from the
+    // session environment is reported as UNPROVEN absent from the agent: UNKNOWN, never DOWN.
     let hasUrl: boolean | null = null;
     let hasToken: boolean | null = null;
-    let inspectedEnv = false;
+    let hasRuntime: boolean | null = null;
     if (typeof this.tmuxAdapter?.hasSessionEnv === "function") {
-      inspectedEnv = true;
       const anyPresent = async (names: string[]): Promise<boolean | null> => {
         let unknown = false;
         for (const name of names) {
@@ -1652,53 +1747,73 @@ export class SessionTransport {
       };
       hasUrl = await anyPresent(["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT"]);
       hasToken = await anyPresent(["OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN"]);
+      hasRuntime = await anyPresent(["OPENRIG_RUNTIME", "RIGGED_RUNTIME"]);
     }
     let fileEndpoint: { baseUrl: string; token: string } | null = null;
     try {
       fileEndpoint = this.activityEndpointFile();
     } catch { /* unreadable fallback remains unavailable */ }
-    if (!fileEndpoint && (hasUrl === false || hasToken === false)) {
-      const label = (value: boolean | null) => value === true ? "present" : value === false ? "MISSING" : "UNKNOWN";
-      return `seat-env link DOWN — effective relay URL ${label(hasUrl)}, activity token ${label(hasToken)}, and no valid activity-endpoint.json fallback; the activity relay cannot reach the daemon. Relaunch the seat after confirming the effective endpoint is unavailable`;
-    }
-    if (!fileEndpoint && inspectedEnv && (hasUrl === null || hasToken === null)) {
-      return `seat-env link UNKNOWN — tmux session-environment lookup failed and no valid activity-endpoint.json fallback could be confirmed; URL/token absence is unproven`;
-    }
+    // The endpoint file covers the URL and token, never the runtime. Presence-only: no value is read out.
+    const prerequisites = [
+      { label: "relay URL", present: fileEndpoint ? true : hasUrl },
+      { label: "activity token", present: fileEndpoint ? true : hasToken },
+      { label: "OPENRIG_RUNTIME", present: hasRuntime },
+    ];
+    const absent = prerequisites.filter((p) => p.present === false).map((p) => p.label);
+    const unread = typeof this.tmuxAdapter?.hasSessionEnv === "function"
+      ? prerequisites.filter((p) => p.present === null).map((p) => p.label) : [];
+    const envNote = absent.length > 0 || unread.length > 0
+      ? `seat-env UNKNOWN — ${[
+        absent.length > 0 ? `${absent.join(", ")} absent from the tmux session environment` : null,
+        unread.length > 0 ? `session-environment lookup failed for ${unread.join(", ")}` : null,
+      ].filter(Boolean).join("; ")}; the agent process environment was not inspected and an env-prefixed launch can still carry them, so absence from the agent is unproven`
+      : null;
+    const withEnv = (verdict: string) => envNote ? `${verdict}. ${envNote}` : verdict;
 
-    // Link 2 — the DAEMON INGEST + store: did any hook actually land, and how stale?
+    // Link 2 — the DAEMON INGEST + store: did any hook land, and how old is it?
     const store = this.agentActivityStore;
     if (!store) {
-      return `daemon-ingest link DOWN — the activity store is not configured on this daemon (ingest returns 503)`;
+      return withEnv(`daemon-ingest link DOWN — the activity store is not configured on this daemon (ingest returns 503)`);
     }
     const latest = store.getLatestForNode({ sessionName, now: this.now() });
     if (!latest || latest.evidenceSource !== "runtime_hook") {
-      return `daemon-ingest link DOWN — no activity hook has ever been received for this seat; the ingest is rejecting posts (token mismatch → 401, or ingest unconfigured → 503) or Codex hook-trust is uncleared. Verify the seat was OpenRig-launched with hook-trust cleared`;
+      return withEnv(`no activity hook is stored for this seat — which link failed is not identified: the relay may never have posted (it needs OPENRIG_RUNTIME, the relay URL and the token in the agent process), Codex hook-trust may be uncleared, or ingest may have rejected posts (401 token mismatch, 503 unconfigured)`);
     }
-    // W2a-1 — a GENERATION verdict is stale:true but the hook is RECENT (age ~0); collapsing it to
-    // "beyond the store window / seat quiet" mislabels per-path missing carry / dead-tenure as a DARK
-    // seat and defeats the inert-visible differentiation. Distinguish the generation cause explicitly
-    // BEFORE the clock-stale fallback. generation_unverifiable is the per-hook no-generation signal
-    // (sound, not dark); the others name a real generation condition, not a quiet seat.
+    const ageMs = latest.eventAt ? this.now().getTime() - Date.parse(latest.eventAt) : NaN;
+    const ageText = Number.isFinite(ageMs) ? `${Math.round(ageMs / 1000)}s ago` : "at an unknown time";
+    const recent = Number.isFinite(ageMs) && ageMs <= store.freshnessMs;
+    // W2a-1 — a GENERATION verdict is stale:true even for a RECENT hook; collapsing a recent one to
+    // "seat quiet" mislabels per-path missing carry / dead-tenure as a DARK seat. Age is checked FIRST
+    // so an old hook is never called recent; its generation verdict is still reported, separately.
     if (latest.stale === true && typeof latest.reason === "string" && latest.reason.startsWith("generation_")) {
-      const ageS = latest.eventAt ? Math.round((this.now().getTime() - Date.parse(latest.eventAt)) / 1000) : null;
-      const age = ageS !== null ? `${ageS}s ago` : "recently";
+      if (!recent) {
+        const verdict: Record<string, string> = {
+          generation_unverifiable: "it carried NO occupant generation",
+          generation_unresolvable: "the LIVE occupant generation could not be resolved",
+          generation_mismatch: "it belongs to a PRIOR occupant generation (a dead tenure)",
+          generation_resolver_error: "the occupant-generation resolver errored",
+        };
+        return withEnv(`producer link STALE — the last activity hook arrived ${ageText}, beyond the ${Math.round(store.freshnessMs / 1000)}s store window, and ${verdict[latest.reason] ?? `its generation verdict is ${latest.reason}`}; no recent hook from this live occupant`);
+      }
+      // A recent hook not verified as the LIVE occupant's says nothing about this occupant's own
+      // producer prerequisites, so none of these is "producer link OK" and each keeps the env note.
+      const age = ageText;
       switch (latest.reason) {
         case "generation_unverifiable":
           // Carried generation was null on THIS hook. Managed launch and fresh-handover producers carry
           // it; legacy/excluded launch paths or an occupant with no tenure at fire time may not. Sound,
           // not dark; not a quiet seat.
-          return `producer link OK — a recent hook exists (${age}) but carried NO occupant generation; the emitting launch path supplied NO occupant generation (legacy/excluded path), or the emitting occupant had no tenure at fire time. Generation UNVERIFIABLE, not a quiet seat`;
+          return withEnv(`hook received, producer unverified — a recent hook exists (${age}) but carried NO occupant generation; the emitting launch path supplied NO occupant generation (legacy/excluded path), or the emitting occupant had no tenure at fire time. Generation UNVERIFIABLE, not a quiet seat`);
         case "generation_unresolvable":
-          return `producer link OK — a recent hook exists (${age}) but the LIVE occupant generation could not be resolved (no tenure row); generation UNRESOLVABLE, not a quiet seat`;
+          return withEnv(`hook received, producer unverified — a recent hook exists (${age}) but the LIVE occupant generation could not be resolved (no tenure row); generation UNRESOLVABLE, not a quiet seat`);
         case "generation_mismatch":
-          return `producer link OK — a recent hook exists (${age}) but it belongs to a PRIOR occupant generation (a dead tenure), not this live occupant; the seat is NOT quiet`;
+          return withEnv(`hook received from a prior occupant — a recent hook exists (${age}) but it belongs to a PRIOR occupant generation (a dead tenure), not this live occupant; it is no evidence for this occupant's producer`);
         case "generation_resolver_error":
-          return `producer link OK — a recent hook exists (${age}) but the occupant-generation resolver errored; generation verdict DEGRADED, not a quiet seat`;
+          return withEnv(`hook received, producer unverified — a recent hook exists (${age}) but the occupant-generation resolver errored; generation verdict DEGRADED, not a quiet seat`);
       }
     }
     if (latest.stale === true) {
-      const ageS = latest.eventAt ? Math.round((this.now().getTime() - Date.parse(latest.eventAt)) / 1000) : null;
-      return `producer link OK but STALE — the last activity hook arrived ${ageS !== null ? `${ageS}s ago` : "long ago"} (beyond the store window); the seat has gone quiet or its hooks stopped firing`;
+      return withEnv(`producer link STALE — the last activity hook arrived ${ageText} (beyond the store window); the seat has gone quiet or its hooks stopped firing`);
     }
     return `a recent activity hook exists but the live pane probe could not confirm idle (possible identity mismatch between the seat env, the DB, and the stored payload)`;
   }

@@ -190,6 +190,25 @@ describe("TmuxAdapter", () => {
       expect(await adapter.hasSession("target-session")).toBe(true);
     });
 
+    it("probes the exact session name so tmux cannot prefix-match (issue #423)", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      expect(await adapter.hasSession("worker@demo")).toBe(true);
+
+      expect(exec).toHaveBeenCalledOnce();
+      // tmux `=name` forces an exact match: with only `worker@demo2`
+      // present, `-t worker@demo` would wrongly succeed.
+      expect(exec.mock.calls[0]![0]).toContain("=worker@demo");
+    });
+
+    it("still reports absent when the exact probe misses", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "has-session": { error: new Error("can't find session: =worker@demo") },
+      }));
+      expect(await adapter.hasSession("worker@demo")).toBe(false);
+    });
+
     it("returns false when session not found", async () => {
       const adapter = new TmuxAdapter(mockExec({
         "has-session": { error: new Error("session not found: missing-session") },

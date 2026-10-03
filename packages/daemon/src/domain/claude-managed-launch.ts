@@ -43,13 +43,35 @@ export class ClaudeManagedLaunch {
     return row;
   }
 
+  /** Bootstrap shares prepare's stored-node cwd when the binding omits it. */
+  boundCwd(nodeId: string): string {
+    return this.target(nodeId).cwd!;
+  }
+
+  /** Bootstrap and the launched child must use the same native selection.
+   * Unset config uses HOME/.claude.json; even an explicit default-looking
+   * directory selects <configDir>/.claude.json instead (#154/#225).
+   */
+  configPaths(cwd: string): { configDir: string; statePath: string } {
+    const { HOME, CLAUDE_CONFIG_DIR } = this.sessionEnv;
+    if (!HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: absolute HOME is required.");
+    const configDir = path.resolve(cwd, CLAUDE_CONFIG_DIR ?? path.join(HOME, ".claude"));
+    return { configDir, statePath: path.join(CLAUDE_CONFIG_DIR === undefined ? HOME : configDir, ".claude.json") };
+  }
+
+  /** The state file under the daemon's own non-empty CLAUDE_CONFIG_DIR, or undefined when the daemon
+   * selects none. Classic bootstrap provisions it in addition to HOME/.claude.json. */
+  selectedStatePath(cwd: string): string | undefined {
+    return this.sessionEnv.CLAUDE_CONFIG_DIR ? this.configPaths(cwd).statePath : undefined;
+  }
+
   private context(cwd: string) {
     const { PATH, HOME, CLAUDE_CONFIG_DIR } = this.sessionEnv;
     if (!PATH || !HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: managed PATH and absolute HOME are required.");
     // Relative/empty PATH entries are interpreted at the intended seat cwd,
     // including for /usr/bin/env shebangs inside the selected executable.
     const search = PATH.split(path.delimiter).map(p => path.resolve(cwd, p));
-    const configDir = path.resolve(cwd, CLAUDE_CONFIG_DIR ?? path.join(HOME, ".claude"));
+    const { configDir } = this.configPaths(cwd);
     const env: Record<string, string> = { PATH: search.join(path.delimiter), HOME };
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.

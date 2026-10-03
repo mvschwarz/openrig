@@ -204,7 +204,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
               const textResult = await this.tmux.sendText(binding.tmuxSession, content);
               if (!textResult.ok) throw new Error(textResult.message);
               await this.sleep(200);
-              const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["C-m"]);
+              const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
               if (!submitResult.ok) throw new Error(submitResult.message);
             }
             break;
@@ -359,7 +359,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /** Best-effort public seam for user-scope Claude bootstrap used by managed sessions. */
-  ensureManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
+  ensureManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
     this.provisionManagedBootstrap(binding);
   }
 
@@ -675,11 +675,73 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return resolveConcreteHint(path, content);
   }
 
-  private provisionManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
+  private provisionManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
     // OPR.0.4.8.2 agnostic rip-out: provisionRigPermissions (C2) removed — OpenRig no longer
     // authors any config-file permission policy. Trust/onboarding (C3/C4) are neutral plumbing, kept.
-    this.provisionWorkspaceTrust(binding.cwd ?? null);
-    this.provisionOnboardingState();
+    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    // Match launchHarness: an explicit permission mode exports the selected home to the child, so
+    // only that home is provisioned.
+    const managed = binding.permissionMode !== undefined ? this.claudeManagedLaunch : undefined;
+    const cwd = binding.cwd === undefined && managed && binding.nodeId
+      ? managed.boundCwd(binding.nodeId) : binding.cwd;
+    const statePaths: string[] = [];
+    const failures: string[] = [];
+    if (managed) {
+      if (cwd) statePaths.push(managed.configPaths(cwd).statePath);
+    } else {
+      if (home) statePaths.push(nodePath.join(home, ".claude.json"));
+      // A classic seat types `claude` into its pane's shell, which inherits the tmux server's
+      // environment, not the daemon's, so the bootstrap cannot see which home that child reads.
+      // When the daemon selects CLAUDE_CONFIG_DIR, provision that home too. This deliberately
+      // replaces #565's rule that classic bootstrap writes exactly one file and leaves the
+      // selected home untouched: a child that inherits the daemon's selection read neither.
+      try {
+        const selectedCwd = cwd ?? (binding.nodeId ? this.claudeManagedLaunch?.boundCwd(binding.nodeId) : undefined);
+        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd) : undefined;
+        if (selected && !statePaths.includes(selected)) statePaths.push(selected);
+      } catch (err) {
+        failures.push((err as Error).message);
+      }
+    }
+    // Each file is merged on its own: unmergeable state in one is preserved and reported,
+    // and never stops the other from being provisioned.
+    for (const statePath of statePaths) {
+      try {
+        this.provisionClaudeState(statePath, cwd);
+      } catch (err) {
+        failures.push(`${statePath}: ${(err as Error).message}`);
+      }
+    }
+    if (failures.length > 0) throw new Error(failures.join("; "));
+  }
+
+  private provisionClaudeState(statePath: string, cwd: string | null | undefined): void {
+    // Preserve every existing field. Unreadable/malformed/non-object state is
+    // left untouched and reported through the caller's best-effort bootstrap boundary.
+    const state = this.fs.exists(statePath) ? this.readJsonObjectStrict(statePath) : {};
+    // Running Claude processes read and write this file, so it is rewritten only when a flag is
+    // missing: an already-provisioned file (every relaunch, resume and post-launch delivery) is left alone.
+    let changed = false;
+    if (cwd) {
+      const projects = this.readJsonObjectField(state, "projects");
+      if (Object.hasOwn(state, "projects") && projects !== state["projects"]) throw new Error("Claude bootstrap projects must be a JSON object; existing state preserved.");
+      for (const trustKey of this.workspaceTrustKeys(cwd)) {
+        const projectState = this.readJsonObjectField(projects, trustKey);
+        if (Object.hasOwn(projects, trustKey) && projectState !== projects[trustKey]) throw new Error("Claude bootstrap project state must be a JSON object; existing state preserved.");
+        if (projectState["hasTrustDialogAccepted"] === true) continue;
+        projectState["hasTrustDialogAccepted"] = true;
+        projects[trustKey] = projectState;
+        changed = true;
+      }
+      state["projects"] = projects;
+    }
+    if (state["hasCompletedOnboarding"] !== true) {
+      state["hasCompletedOnboarding"] = true;
+      changed = true;
+    }
+    if (!changed) return;
+    this.fs.mkdirp(nodePath.dirname(statePath));
+    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
   }
 
   // OPR.0.4.8.2 agnostic rip-out: the CONVENIENCE_BASELINE (global `Bash(rig:*)` allow) and its
@@ -687,35 +749,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   // `_openrig_provenance` marker) are DELETED. OpenRig no longer authors any config-file permission
   // policy; the harness-native permission surface is the control surface. Existing provenance-marked
   // user files are NOT retro-scrubbed — the new code simply never touches settings.json.
-
-  private provisionWorkspaceTrust(cwd: string | null): void {
-    if (!cwd) return;
-    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    if (!home) return;
-
-    const statePath = nodePath.join(home, ".claude.json");
-    const state = this.readJsonObject(statePath);
-    const projects = this.readJsonObjectField(state, "projects");
-
-    for (const trustKey of this.workspaceTrustKeys(cwd)) {
-      const projectState = this.readJsonObjectField(projects, trustKey);
-      projectState["hasTrustDialogAccepted"] = true;
-      projects[trustKey] = projectState;
-    }
-
-    state["projects"] = projects;
-    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
-  }
-
-  private provisionOnboardingState(): void {
-    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    if (!home) return;
-
-    const statePath = nodePath.join(home, ".claude.json");
-    const state = this.readJsonObject(statePath);
-    state["hasCompletedOnboarding"] = true;
-    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
-  }
 
   private workspaceTrustKeys(cwd: string): string[] {
     const keys = new Set<string>([nodePath.resolve(cwd)]);

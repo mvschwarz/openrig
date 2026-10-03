@@ -236,9 +236,17 @@ function minutesSince(iso: string | null | undefined, now: Date): number {
 
 function lastTransitionLine(db: Database.Database, qitemId: string): string {
   const row = db
-    .prepare("SELECT ts, transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY ts DESC LIMIT 1")
+    .prepare(
+      `SELECT ts, transition_note FROM queue_transitions
+        WHERE qitem_id = ? AND actor_session NOT IN ('watchdog@system', 'wake-ladder@system', 'daemon@kernel', 'daemon@system')
+        ORDER BY transition_id DESC LIMIT 1`,
+    )
     .get(qitemId) as { ts: string; transition_note: string | null } | undefined;
-  return row ? `${row.transition_note ?? "(no note)"} at ${row.ts}` : "(no transitions)";
+  if (row) return `${row.transition_note ?? "(no note)"} at ${row.ts}`;
+  const anyRow = db
+    .prepare("SELECT ts, transition_note FROM queue_transitions WHERE qitem_id = ? ORDER BY transition_id DESC LIMIT 1")
+    .get(qitemId) as { ts: string; transition_note: string | null } | undefined;
+  return anyRow ? `${anyRow.transition_note ?? "(no note)"} at ${anyRow.ts}` : "(no transitions)";
 }
 
 interface Candidate {
@@ -336,6 +344,11 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
         evidenceAt: latestIso(lastMeaningfulTransition(deps.db, row.qitemId)?.at, row.closureRequiredAt, row.claimedAt),
         why: "claimed and past closure_required_at with no closure",
       });
+      try {
+        deps.queueRepo.recordClosureOverdue(row.qitemId, { now: now.toISOString() });
+      } catch (err) {
+        log(`[stuck-sweep] failed to record closure-overdue for ${row.qitemId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     // S04 seam — a claimed row with no later motion past the pickup threshold. The

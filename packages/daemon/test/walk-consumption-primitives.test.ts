@@ -83,7 +83,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
 
   const STAGED_PIECE = "# World from primitives\n\nThe seat learns the world by composing…";
 
-  it("presses C-m exactly once, types NOTHING, when the pane shows the expected staged text", async () => {
+  it("presses Enter exactly once, types NOTHING, when the pane shows the expected staged text", async () => {
     const sendText = vi.fn(async () => ({ ok: true as const }));
     const sendKeys = vi.fn(async () => ({ ok: true as const }));
     const transport = makeTransport(mockTmux({
@@ -95,7 +95,7 @@ describe("SessionTransport submitOnly — the guarded bare-Enter retry", () => {
     expect(res.submitOnly).toBe(true);
     expect(sendText).not.toHaveBeenCalled();                       // nothing typed — ever
     expect(sendKeys).toHaveBeenCalledTimes(1);
-    expect(sendKeys).toHaveBeenCalledWith("dev-impl@my-rig", ["C-m"]);
+    expect(sendKeys).toHaveBeenCalledWith("dev-impl@my-rig", ["Enter"]);
   });
 
   it("REFUSES (staged_mismatch) when the pane shows something else — a bare Enter at a permission prompt would approve it", async () => {

@@ -180,7 +180,7 @@ describe("project-owned boundary profile", () => {
         view = runtime.inspect(instanceId);
       }
       expect(view.instance.status).toBe("completed");
-      const projected = buildExecutionView({ db, slicesRoot: () => join(root, "missions"), buildInfo: { semver: null, commit: null, dirty: null, builtAt: null } }, { mission: "release-0.5.11" }) as { lifecycle_instances: Array<{ boundary_obligations: unknown }> };
+      const projected = await buildExecutionView({ db, slicesRoot: () => join(root, "missions"), buildInfo: { semver: null, commit: null, dirty: null, builtAt: null } }, { mission: "release-0.5.11" }) as { lifecycle_instances: Array<{ boundary_obligations: unknown }> };
       expect(projected.lifecycle_instances[0]?.boundary_obligations).toEqual(view.boundaryObligations);
       const replay = await runtime.instantiateLifecycle({ missionPath, operationKey: "release", rootObjective: "Ship release", createdBySession: "orch@example" });
       expect(replay.replayed).toBe(true);

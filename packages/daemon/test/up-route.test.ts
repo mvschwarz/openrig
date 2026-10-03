@@ -74,6 +74,56 @@ describe("Up API route", () => {
     expect(body.error).toContain("not found");
   });
 
+  it("does not let an archived namesake make a live rig name ambiguous", async () => {
+    const archived = rigRepo.createRig("restore-name");
+    rigRepo.archiveRig(archived.id);
+    rigRepo.createRig("restore-name");
+
+    const res = await app.request("/api/up", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "restore-name" }),
+    });
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("no_snapshot");
+  });
+
+  it("restores the sole archived rig by name when no active rig has that name", async () => {
+    const rig = rigRepo.createRig("archived-restore");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "worker@archived-restore");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "tok-archived", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
+    rigRepo.archiveRig(rig.id);
+
+    const res = await app.request("/api/up", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "archived-restore" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "restored", rigId: rig.id });
+  });
+
+  it("keeps two active rigs with the same name ambiguous", async () => {
+    rigRepo.createRig("ambiguous-restore");
+    rigRepo.createRig("ambiguous-restore");
+
+    const res = await app.request("/api/up", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "ambiguous-restore" }),
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("ambiguous_name");
+  });
+
   // T6: Startup wiring
   it("createDaemon wires /api/up route", async () => {
     db.close();

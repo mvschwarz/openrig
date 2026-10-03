@@ -219,7 +219,8 @@ upRoutes.post("/", async (c) => {
     // Rig name: restore from latest auto-pre-down snapshot
     if (sourceKind === "rig_name") {
       const { rigRepo } = getDeps(c);
-      const rigs = rigRepo.findRigsByName(sourceRef);
+      const activeRigs = rigRepo.findUnarchivedRigsByName(sourceRef);
+      const rigs = activeRigs.length > 0 ? activeRigs : rigRepo.findRigsByName(sourceRef);
       if (rigs.length === 0) {
         return c.json({ error: `No rig found named "${sourceRef}". Provide a .yaml spec path to create a new rig.`, code: "rig_not_found" }, 404);
       }

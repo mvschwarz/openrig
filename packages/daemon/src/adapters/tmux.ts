@@ -576,17 +576,17 @@ export class TmuxAdapter {
    * A file keeps payload bytes out of shell/tmux argv and its size limits.
    *   `-p`  bracket the paste when the receiving application enables that mode.
    *   `-r`  preserve raw LF. tmux's default paste-buffer replaces every LF with
-   *         CR, and CR (= `C-m` = Enter) is SUBMIT in the Claude/Codex TUIs - a
+   *         CR, and CR is SUBMIT in the Claude/Codex TUIs - a
    *         default paste of a multi-line pack would submit on every newline.
    *   `-d`  drop the buffer after a successful paste.
-   * The single trailing submit stays the caller's separate `sendKeys(["C-m"])`.
+   * The single trailing submit stays the caller's separate `sendKeys(["Enter"])`.
    * Cleanup unlinks the temp file in `finally`; if the buffer was loaded but the
    * paste failed (e.g. missing target), an explicit `delete-buffer` runs so no
    * buffer leaks. Unique temp + buffer names per call keep parallel `rig up`
    * seats from colliding.
    */
-  async sendText(target: string, text: string): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, beforeWrite));
+  async sendText(target: string, text: string, beforeInput?: () => void): Promise<TmuxResult> {
+    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }));
   }
 
   private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void): Promise<TmuxResult> {
@@ -679,8 +679,8 @@ export class TmuxAdapter {
     }
   }
 
-  async sendKeys(target: string, keys: string[]): Promise<TmuxResult> {
-    return this.guardedInput(target, pane => this.sendKeysUnchecked(pane, keys));
+  async sendKeys(target: string, keys: string[], beforeInput?: () => void): Promise<TmuxResult> {
+    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); beforeInput?.(); return this.sendKeysUnchecked(pane, keys); });
   }
 
   private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {

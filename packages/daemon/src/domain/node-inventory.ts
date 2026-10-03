@@ -1285,10 +1285,12 @@ export async function attachAgentActivity(
 
     // No positive hook and no structural verdict. A stale/unknown hook, if one exists, is delivered
     // HONESTLY as-is (unknown/stale) — never upgraded to a quiet-seat verdict on arrival age alone.
-    // Live motion DOES upgrade it, and on this fleet that is the common case rather than the exotic
-    // one: every seat's hook currently arrives and is then demoted to unknown because the occupant
-    // generation cannot be resolved, so a demoted hook — not a positive idle one — is what stands
-    // between a working seat and a truthful label.
+    // Live motion DOES upgrade it. A demoted hook is not exotic: a seat whose agent process lacks the
+    // relay's launch environment (for example, relaunched outside the product launcher without
+    // OPENRIG_RUNTIME or an occupant generation) posts no new hooks, so its newest stored hook can be
+    // an old one from a prior tenure, read as generation_mismatch. Product-launched seats carry the
+    // generation and post resolvable hooks. Where a hook is demoted, it — not a positive idle one —
+    // is what stands between a working seat and a truthful label.
     if (hookActivity) {
       return {
         ...entry,

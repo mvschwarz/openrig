@@ -34,6 +34,20 @@ function validRaw() {
 }
 
 describe("PackageManifest", () => {
+  it("warns for a role hook absent from exports without rejecting the manifest", () => {
+    const raw = validRaw() as Record<string, unknown>;
+    const exports = raw.exports as Record<string, unknown>;
+    exports.hooks = [{ source: "hooks/checkpoint.yaml", supported_runtimes: ["claude-code"] }];
+    raw.roles = [{ name: "reviewer", hooks: ["hooks/missing.yaml"] }];
+    const result = validateManifest(raw);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toContain("Role 'reviewer' references hook 'hooks/missing.yaml' absent from exports.hooks; hooks in this package path are deferred, not installed");
+    raw.roles = [{ name: "reviewer", hooks: ["hooks/checkpoint.yaml"] }];
+    expect(validateManifest(raw).valid).toBe(true);
+    expect(validateManifest(raw).warnings).toEqual([]);
+  });
+
   // Test 1: Valid manifest passes validation
   it("valid manifest passes validation", () => {
     const result = validateManifest(validRaw());

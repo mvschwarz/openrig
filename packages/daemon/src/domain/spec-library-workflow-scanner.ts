@@ -477,7 +477,10 @@ export function scanWorkflowSpecFolder(
           // A same-second edit shares the timestamp bucket. Consult the
           // cache's existing content hash before treating it as unchanged.
           try {
-            unchanged = createHash("sha256").update(readFileSync(filePath)).digest("hex") === cachedAt.source_hash;
+            // Hash the UTF-8 text exactly the way the cache hashes it on
+            // write (not the raw bytes): for files that are not clean UTF-8
+            // the two digests differ and every scan would re-parse.
+            unchanged = createHash("sha256").update(readFileSync(filePath, "utf-8")).digest("hex") === cachedAt.source_hash;
           } catch { /* The existing readThrough path records the diagnostic. */ }
         }
         if (unchanged) {

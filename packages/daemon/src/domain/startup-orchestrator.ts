@@ -15,7 +15,11 @@ import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { RigRepository } from "./rig-repository.js";
+import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
+
+// Expanded startup text can put the current input marker above 50 scrollback lines.
+const STARTUP_SUBMIT_CAPTURE_LINES = 200;
 
 // -- Types --
 
@@ -65,8 +69,12 @@ export interface StartupInput {
   readinessTimeoutMs?: number;
 }
 
+type StartupSendFailure = { error: string };
+
+type StartupDeliveryInput = StartupInput & { submissionWarnings: string[]; stagedSubmissionWarning?: string };
+
 export type StartupResult =
-  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" }
+  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string } }
   // `evidence` carries the last-N pane lines for `attention_required`
   // outcomes so restore-orchestrator's per-node mapping can populate
   // `attentionEvidence` on the RestoreNodeResult. Internal type only;
@@ -111,6 +119,7 @@ export class StartupOrchestrator {
   private tmuxAdapter: TmuxAdapter;
   private sleep: (ms: number) => Promise<void>;
   private appliedLaunchStore: AppliedLaunchObservationStore;
+  private sessionTransport: SessionTransport;
 
   constructor(deps: StartupOrchestratorDeps) {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("StartupOrchestrator: sessionRegistry must share the same db handle");
@@ -122,6 +131,13 @@ export class StartupOrchestrator {
     this.readFile = deps.readFile ?? (() => "");
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
+    this.sessionTransport = new SessionTransport({
+      db: deps.db,
+      rigRepo: new RigRepository(deps.db),
+      sessionRegistry: deps.sessionRegistry,
+      tmuxAdapter: deps.tmuxAdapter,
+      eventBus: deps.eventBus,
+    });
   }
 
   private readFile: (path: string) => string;
@@ -142,6 +158,7 @@ export class StartupOrchestrator {
     // and reads the file already written in its cwd.
     const claudeManagedBlockFile = new RigRepository(this.db).getRigClaudeManagedBlockFile(input.rigId);
     if (claudeManagedBlockFile) input = { ...input, binding: { ...input.binding, claudeManagedBlockFile } };
+    const deliveryInput: StartupDeliveryInput = { ...input, submissionWarnings: [] };
     const errors: string[] = [];
     let continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" = input.resumeToken
       ? "resumed"
@@ -358,7 +375,7 @@ export class StartupOrchestrator {
     const consumedActions = new Set<StartupAction>();
     let challengeOnlyPrompt: string | null = null;
     if (continuityOutcome === "fresh" && identityAction) {
-      const initialPrompt = await this.deliverInitialSessionPrompt(input.binding, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
+      const initialPrompt = await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
       if (!initialPrompt.ok) {
         errors.push(initialPrompt.error);
         return this.fail(input, "failed", errors);
@@ -390,7 +407,7 @@ export class StartupOrchestrator {
           !(input.isRestore && !a.idempotent),
       );
       if (preloadActions.length > 0) {
-        const preload = await this.deliverRestorePreloadPrompt(input.binding, preloadActions, postLaunchFiles);
+        const preload = await this.deliverRestorePreloadPrompt(deliveryInput, preloadActions, postLaunchFiles);
         if (!preload.ok) {
           errors.push(preload.error);
           return this.fail(input, "failed", errors);
@@ -416,22 +433,21 @@ export class StartupOrchestrator {
       }
     }
 
-    // OPR.0.4.3.06 — deliver the synthesized challenge-only prompt after the
-    // contract files. Best-effort: a failed send leaves oriented `missing`
-    // (honest), it does NOT fail an otherwise-good startup.
+    // Challenge-only delivery remains best-effort. Staging is reported without
+    // turning a recoverable composer into a startup failure/occupant rollback.
     if (challengeOnlyPrompt && input.binding.tmuxSession) {
-      await this.sendInteractiveText(input.binding.tmuxSession, challengeOnlyPrompt);
+      await this.sendInteractiveText(deliveryInput, challengeOnlyPrompt);
     }
 
     // 8. Execute after_files actions
-    const afterFilesResult = await this.executeActions(input, "after_files");
+    const afterFilesResult = await this.executeActions(deliveryInput, "after_files");
     if (!afterFilesResult.ok) {
       return this.fail(input, "failed", afterFilesResult.errors);
     }
 
     // 9. Execute after_ready actions (skipping any preload actions already
     // delivered ahead of role.md by the restore-order bundling above).
-    const afterReadyResult = await this.executeActions(input, "after_ready", consumedActions);
+    const afterReadyResult = await this.executeActions(deliveryInput, "after_ready", consumedActions);
     if (!afterReadyResult.ok) {
       return this.fail(input, "failed", afterReadyResult.errors);
     }
@@ -465,9 +481,14 @@ export class StartupOrchestrator {
 
     // 8. Mark ready
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
-    this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId });
+    const submission = deliveryInput.submissionWarnings.length
+      ? { status: deliveryInput.stagedSubmissionWarning ? "staged" as const : "unverified" as const,
+          reasons: deliveryInput.submissionWarnings,
+          ...(deliveryInput.stagedSubmissionWarning ? { warning: deliveryInput.stagedSubmissionWarning } : {}) }
+      : undefined;
+    this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId, ...(submission ? { submission } : {}) });
 
-    return { ok: true, startupStatus: "ready", continuityOutcome };
+    return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}) };
   }
 
   /** A failed attempt can continue only when it stopped before sending context.
@@ -535,7 +556,7 @@ export class StartupOrchestrator {
   }
 
   private async executeActions(
-    input: StartupInput,
+    input: StartupDeliveryInput,
     phase: "after_files" | "after_ready",
     skip?: Set<StartupAction>,
   ): Promise<{ ok: true } | { ok: false; errors: string[] }> {
@@ -563,9 +584,9 @@ export class StartupOrchestrator {
           continue;
         }
 
-        const sendError = await this.sendInteractiveText(input.binding.tmuxSession, action.value);
+        const sendError = await this.sendInteractiveText(input, action.value);
         if (sendError) {
-          errors.push(`Action failed (${action.type}): ${sendError}`);
+          errors.push(`Action failed (${action.type}): ${sendError.error}`);
         }
       } catch (err) {
         errors.push(`Action error (${action.type}): ${(err as Error).message}`);
@@ -583,12 +604,13 @@ export class StartupOrchestrator {
   }
 
   private async deliverInitialSessionPrompt(
-    binding: NodeBinding,
+    input: StartupDeliveryInput,
     identityAction: StartupAction,
     postLaunchFiles: ResolvedStartupFile[],
     challengeBlock: string | null,
     includeDurableObligations = false,
   ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+    const { binding } = input;
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session for the initial session identity prompt" };
     }
@@ -619,9 +641,9 @@ export class StartupOrchestrator {
       prompt = `${prompt}\n\n${challengeBlock}`;
     }
 
-    const sendError = await this.sendInteractiveText(binding.tmuxSession, prompt);
+    const sendError = await this.sendInteractiveText(input, prompt);
     if (sendError) {
-      return { ok: false, error: `Initial session identity prompt failed: ${sendError}` };
+      return { ok: false, error: `Initial session identity prompt failed: ${sendError.error}` };
     }
 
     return { ok: true, remainingFiles };
@@ -636,10 +658,11 @@ export class StartupOrchestrator {
    * normally (role.md removed once bundled).
    */
   private async deliverRestorePreloadPrompt(
-    binding: NodeBinding,
+    input: StartupDeliveryInput,
     preloadActions: StartupAction[],
     postLaunchFiles: ResolvedStartupFile[],
   ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+    const { binding } = input;
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session for the restore preload prompt" };
     }
@@ -662,27 +685,65 @@ export class StartupOrchestrator {
       }
     }
 
-    const sendError = await this.sendInteractiveText(binding.tmuxSession, parts.join("\n\n"));
+    const sendError = await this.sendInteractiveText(input, parts.join("\n\n"));
     if (sendError) {
-      return { ok: false, error: `Restore preload prompt failed: ${sendError}` };
+      return { ok: false, error: `Restore preload prompt failed: ${sendError.error}` };
     }
 
     return { ok: true, remainingFiles };
   }
 
-  private async sendInteractiveText(tmuxSession: string, text: string): Promise<string | null> {
+  private async sendInteractiveText(input: StartupDeliveryInput, text: string): Promise<StartupSendFailure | null> {
+    const tmuxSession = input.binding.tmuxSession!;
     const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
     if (!textResult.ok) {
-      return (textResult as { message?: string }).message ?? "unknown";
+      return { error: (textResult as { message?: string }).message ?? "unknown" };
     }
 
     await this.sleep(200);
-    const submitResult = await this.tmuxAdapter.sendKeys(tmuxSession, ["C-m"]);
+    const submitResult = await this.tmuxAdapter.sendKeys(tmuxSession, ["Enter"]);
     if (!submitResult.ok) {
-      return (submitResult as { message?: string }).message ?? "unknown";
+      return { error: (submitResult as { message?: string }).message ?? "unknown" };
     }
 
-    return null;
+    if (input.adapter.runtime !== "claude-code") return null;
+
+    const unverified = (reason: string): null => {
+      input.submissionWarnings.push(reason);
+      return null; // An unavailable observation is not a failed delivery.
+    };
+    // tmux accepting Enter does not prove the TUI submitted a large bracketed paste.
+    // Reuse submitOnly's content check and guarded retry; never repaste or loop.
+    try {
+      await this.sleep(200);
+      const pane = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
+      if (!pane?.trim()) return unverified("Startup submission capture is unavailable after Enter.");
+      const before = inspectStartupStagedText(pane, text);
+      if (before === "clear") return null;
+      if (before === "unverified") return unverified("Startup submission is unverified: the current composer does not positively match the complete prompt.");
+      const retry = await this.sessionTransport.send(tmuxSession, "", {
+        submitOnly: true,
+        expectedStagedText: text,
+        submitOnlyCaptureLines: STARTUP_SUBMIT_CAPTURE_LINES,
+        requireFullStagedText: true,
+      });
+      await this.sleep(200);
+      const after = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
+      if (!after?.trim()) return unverified("Startup submission capture is unavailable after the guarded retry.");
+      const observed = inspectStartupStagedText(after, text);
+      if (observed === "staged") {
+        const warning = `Startup prompt still staged in ${tmuxSession}; press Enter in that pane.`;
+        input.stagedSubmissionWarning = warning;
+        input.submissionWarnings.push(warning);
+        if (!retry.ok) input.submissionWarnings.push(`Guarded retry did not submit: ${retry.error ?? retry.reason}`);
+        return null;
+      }
+      if (observed === "unverified") return unverified("Startup submission is unverified after the guarded retry: the current composer is ambiguous.");
+      if (!retry.ok) return unverified(`Guarded startup retry did not submit: ${retry.error ?? retry.reason}; matching staged text is no longer visible.`);
+      return null;
+    } catch (error) {
+      return unverified(`Startup submission observation is unavailable: ${(error as Error).message}`);
+    }
   }
 }
 

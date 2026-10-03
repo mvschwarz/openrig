@@ -15,8 +15,13 @@ supported; Node 26 and other versions are untested.
 Codex's `-s workspace-write`, with approval policy from your native configuration,
 or Claude Code's `acceptEdits`, which still leaves commands subject to native
 rules and prompts. Codex's sandbox normally blocks network access, including the
-local OpenRig daemon. A command allowance does not change general sandbox/network
-settings. The starter's `profile: default` selects OpenRig resources, not a native
+local OpenRig daemon, so before that plain launch OpenRig asks Codex for its own
+configuration and adds network access inside the sandbox unless a configuration
+layer sets `sandbox_workspace_write.network_access` or a managed requirement could
+restrict it. To keep it off, set `network_access = false` under
+`[sandbox_workspace_write]` in your Codex configuration. If Codex does not answer
+within a few seconds, the seat starts without it. A command allowance does not
+change general sandbox/network settings. The starter's `profile: default` selects OpenRig resources, not a native
 permission profile.
 Agent-guided setup [asks once](#have-your-agent-configure-permissions): “Allow
 your agents to run OpenRig commands without repeated permission prompts?”

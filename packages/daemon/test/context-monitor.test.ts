@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import BetterSqlite3, { type Database } from "better-sqlite3";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -152,9 +152,17 @@ describe("ContextMonitor", () => {
     const settings = new SettingsStore(join(tmpDir, "settings.json"));
     settings.set("policies.claude_compaction.enabled", "true");
     settings.set("policies.claude_compaction.threshold_percent", "80");
-    const send = vi.fn(async (_session: string, _text: string) => ({ ok: true }));
+    const send = vi.fn(async (_session: string, text: string) => {
+      const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
+      const target = text.match(/atomically rename it to ("(?:[^"\\]|\\.)*")/);
+      if (marker && target) {
+        const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file + ".tmp", "# Completed fixture map\n" + marker + "\n"); renameSync(file + ".tmp", file);
+      }
+      return { ok: true };
+    });
     const transport = { send } as unknown as SessionTransport;
-    const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: tmpDir });
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: tmpDir, resolveOccupantGeneration: () => "fixture-generation" });
     monitor = new ContextMonitor(db, store, undefined, enforcer);
     return send;
   }
