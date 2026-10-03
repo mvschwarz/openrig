@@ -44,7 +44,7 @@ describe("one browser boundary on the production API and terminal routes", () =>
       const req = http.request({
         hostname: "127.0.0.1", port, path: "/api/terminal/fixture", headers: {
           Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Version": "13",
-          "Sec-WebSocket-Key": Buffer.from("test-key-12345678").toString("base64"), ...headers,
+          "Sec-WebSocket-Key": Buffer.from("fixture-key-1234").toString("base64"), ...headers,
         },
       });
       req.on("response", (response) => { response.resume(); response.on("end", () => resolve(response.statusCode!)); });
