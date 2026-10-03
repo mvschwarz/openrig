@@ -253,7 +253,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(result.outcome).not.toBe("failed");
     expect(attemptWake).toHaveBeenCalledWith(created.qitemId, "other@fixture");
     expect(log).toHaveBeenCalledTimes(1);
-    expect(log.mock.calls[0]![0]).toContain("prompt refusal pass failed");
+    expect(log.mock.calls[0]![0]).toContain(`unreadable prompt row ${JSON.stringify(broken.qitemId)}`);
   });
 
   it("malformed unrelated tags do not hide a valid prompt alert", async () => {
@@ -269,8 +269,8 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
 
   it("an open prompt recovery owns the shared failed-class escalation", async () => {
     const row = await refusal();
-    // #623 maps retained:typing_guard to this existing failed class. Exercise
-    // the shared escalation seam without importing that PR's classifier change.
+    // Exercise the claimed failed-class escalation seam separately from the
+    // unclaimed retained-result composition below.
     repo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: "watchdog@system", transitionNote: "parked-owner wake delivery failed: fixture" });
     db.prepare("UPDATE queue_items SET last_nudge_result = 'failed:fixture' WHERE qitem_id = ?").run(row.qitemId);
     const posts: unknown[] = []; const port = engine(posts, false);
@@ -282,17 +282,17 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(posts).toEqual([]);
   });
 
-  it("a pending baton delegates retries and readback to its open prompt recovery", async () => {
+  it.each(["failed:fixture", "retained:typing_guard"])("a pending %s baton delegates retries and readback to its open prompt recovery", async lastNudgeResult => {
     const source = await repo.create({ sourceSession: "sender@fixture", destinationSession: "relay@fixture", body: "work", nudge: false });
     const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "relay@fixture", toSession: seat, nudge: false });
-    // Seed the durable overlap at the existing failed-class seam, without
-    // importing #623's retained-result classification or claiming policy execution.
+    // Both ordinary failure and #623's retained typing-guard result must leave
+    // continuation with the already-open prompt recovery.
     const key = `${seat}|fixture#1`;
     for (const transitionNote of [
       `parked-owner wake reserved: ${key}; obligations ${created.qitemId}`,
       `${REFUSED_PREFIX} ${key}; Refused: interactive prompt`,
     ]) repo.transitionLog.append({ qitemId: created.qitemId, state: "pending", actorSession: "watchdog@system", transitionNote });
-    repo.recordNudgeAttempt(created.qitemId, "failed:fixture");
+    repo.recordNudgeAttempt(created.qitemId, lastNudgeResult);
     const posts: unknown[] = []; const port = engine(posts, false);
     const dispatch = vi.spyOn(port, "dispatchEscalation");
     const attemptWake = vi.fn(async () => "failed:fixture");
