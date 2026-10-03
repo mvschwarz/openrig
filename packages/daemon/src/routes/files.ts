@@ -150,17 +150,15 @@ export function filesRoutes(): Hono {
       let contentType = inferContentType(resolved);
       // OPR.0.4.4.20 FR-11: .html renders as text/html ONLY under the explicit
       // ?render=1 opt-in (text/plain stays the default for every other read).
-      // First-party operator mockups open in a new tab; CSP here is a
-      // documented advisory posture, deliberately NOT a deny-by-default gate.
+      // First-party operator mockups open in a new tab. Rendered HTML is served
+      // with a script-free CSP (assetSecurityHeaders), under the web UI's
+      // fail-closed rule.
       if (c.req.query("render") === "1" && path.extname(resolved).toLowerCase() === ".html") {
         contentType = "text/html; charset=utf-8";
       }
 
-      // Security hardening: compute defense-in-depth headers for active content
-      // types (text/html, image/svg+xml). Without these, a file written by a
-      // compromised agent and previewed by the operator executes arbitrary JS
-      // in the daemon's origin — a stored XSS that crosses the agent→operator
-      // trust boundary. See CWE-79.
+      // Response headers for active content types (text/html, image/svg+xml):
+      // nosniff, a script-free CSP for rendered HTML, and attachment for SVG.
       const secHeaders = assetSecurityHeaders(contentType, resolved);
 
       // OPR.0.4.4.20 FR-5: byte-range support on THIS route only (iOS Safari
@@ -312,23 +310,15 @@ function inferContentType(absPath: string): string {
 export { resolveAllowedPath };
 
 /**
- * Defense-in-depth security headers for the /api/files/asset endpoint.
+ * Response headers for the /api/files/asset endpoint, which the web UI uses to open files.
  *
- * Active content types (text/html via ?render=1, image/svg+xml) can execute
- * arbitrary JavaScript when navigated to in a browser. Without these headers,
- * a file written by a compromised or prompt-injected AI agent and previewed
- * by the operator would execute in the daemon's origin — a stored XSS that
- * crosses the agent→operator trust boundary and grants the payload same-origin
- * access to every daemon API endpoint. See CWE-79.
- *
- * Policy:
- *   - text/html (render=1): strict CSP blocks inline scripts, external loads,
- *     and eval. Only same-origin images and inline styles are permitted so
- *     operator mockups still render visually.
- *   - image/svg+xml: Content-Disposition: attachment forces a download instead
- *     of inline rendering, neutralizing embedded <script> and event handlers.
- *   - All responses: X-Content-Type-Options: nosniff prevents the browser from
- *     MIME-sniffing a text/plain response into an executable type.
+ *   - All responses: X-Content-Type-Options: nosniff, so the browser never
+ *     sniffs a text/plain response into another type.
+ *   - text/html (render=1): a script-free CSP (no inline, external or eval
+ *     scripts). Same-origin images and inline styles are allowed so operator
+ *     mockups still render.
+ *   - image/svg+xml: Content-Disposition: attachment, so opening the file
+ *     directly downloads it; <img src="...svg"> embedding is unaffected.
  */
 export function assetSecurityHeaders(contentType: string, resolvedPath: string): Record<string, string> {
   const headers: Record<string, string> = {
@@ -342,10 +332,9 @@ export function assetSecurityHeaders(contentType: string, resolvedPath: string):
       "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'";
     headers["X-Frame-Options"] = "DENY";
   } else if (contentType === "image/svg+xml") {
-    // SVGs can embed <script> tags and event-handler attributes that execute
-    // when the browser navigates directly to the file. Force download to
-    // neutralize the vector while still allowing <img src="...svg"> embedding
-    // (browsers ignore Content-Disposition for <img> subrequests).
+    // An SVG opened directly runs any scripts it contains; as an attachment a
+    // direct open downloads it instead, while <img src="...svg"> embedding still
+    // works (browsers ignore Content-Disposition for <img> subrequests).
     // Use RFC 5987 UTF-8 encoding so filenames with unicode (CJK, emoji, etc.)
     // are transmitted safely instead of producing a malformed header.
     const basename = path.basename(resolvedPath);
