@@ -375,7 +375,7 @@ export function queueRecoveryOwnsWake(db: Database.Database, row: QueueItem | nu
   if (recovery) {
     const endedPrompt = !["pending", "in-progress", "blocked"].includes(recovery.state)
       && Boolean(db.prepare(`SELECT 1 FROM queue_items q WHERE q.qitem_id = ?
-        AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
+        AND json_valid(q.tags) AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
         AND EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = q.qitem_id
           AND t.actor_session = q.source_session AND t.transition_note = ?)`)
         .get(recovery.qitemId, PROMPT_ALERT_TAG, PROMPT_RETIRED_NOTE));
@@ -600,7 +600,11 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       });
 
     const actions: WakeLadderAction[] = [];
-    await advancePromptRefusals(deps, now, intervalS, graceS, resolveOrch, attemptWake, actions);
+    try {
+      await advancePromptRefusals(deps, now, intervalS, graceS, resolveOrch, attemptWake, actions);
+    } catch (err) {
+      log(`[wake-ladder] prompt refusal pass failed; continuing existing ladder: ${err instanceof Error ? err.message : String(err)}`);
+    }
     let exhaustedThisTick = 0;
     const usagePoolBySeat = new Map<string, UsageLimitPool>();
     if (deps.getProviderReadModel) {
@@ -760,7 +764,12 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       }
 
       const recovery = findQueueRecovery(deps.db, row.qitemId);
-      if (recovery && !deps.queueRepo.getById(recovery.qitemId)?.tags?.includes(WAKE_ESCALATION_TAG)) {
+      const recoveryRow = recovery ? deps.queueRepo.getById(recovery.qitemId) : null;
+      // The prompt pass already owns this episode. Do not create a second
+      // aggregate or exhaust the original (which would retire the prompt row).
+      if (recoveryRow?.tags?.includes(PROMPT_ALERT_TAG)
+        && ["pending", "in-progress", "blocked"].includes(recoveryRow.state)) continue;
+      if (recovery && !recoveryRow?.tags?.includes(WAKE_ESCALATION_TAG)) {
         appendExhausted(deps.queueRepo, row, `recovery disposition already held by ${recovery.qitemId} (${recovery.state})`);
         continue;
       }
@@ -878,11 +887,14 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
 /** An old idle observation cannot clear a newly observed transport refusal.
  * Keep uncertainty until the existing oracle supplies a newer clear state. */
 export function classifyPromptAfterRefusal(
-  state: Pick<ArbitratedSeatState, "activity" | "needsInput" | "changedAt"> | null | undefined,
+  state: Pick<ArbitratedSeatState, "activity" | "needsInput" | "changedAt" | "rungs"> | null | undefined,
   refusedAt: string,
 ): "blocked" | "clear" | "unknown" {
   if (!state || state.activity === "unknown") return "unknown";
   if (state.needsInput.count > 0) return "blocked";
+  const canObservePrompt = state.rungs.some(({ rung, trust }) => trust === "authoritative"
+    && (rung === "needs-input-chrome" || rung === "lifecycle-hooks" || rung === "self-report"));
+  if (!canObservePrompt) return "unknown";
   return Date.parse(state.changedAt) > Date.parse(refusedAt) ? "clear" : "unknown";
 }
 
@@ -907,11 +919,12 @@ async function advancePromptRefusals(
     JOIN queue_transitions t ON t.qitem_id = q.qitem_id
     WHERE t.transition_note LIKE ? AND (q.state IN ('pending','in-progress','blocked') OR EXISTS (
       SELECT 1 FROM queue_items a WHERE a.state IN ('pending','in-progress','blocked')
-      AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = ?)
+      AND json_valid(a.tags) AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = ?)
       AND EXISTS (SELECT 1 FROM json_each(a.tags) WHERE value = 'recovery-for:' || q.qitem_id)))`)
     .all(`${REFUSED_PREFIX}%`, PROMPT_ALERT_TAG) as Array<{ qitem_id: string }>;
   for (const { qitem_id } of candidates) {
-    const primary = deps.queueRepo.getById(qitem_id)!;
+    const primary = deps.queueRepo.getById(qitem_id);
+    if (!primary) continue;
     // The shared no-route change is prospective, never a revival of old ladders.
     if (readLadder(deps.db, qitem_id).exhausted) continue;
     for (const episode of openPromptRefusals(deps.queueRepo.listTransitions(qitem_id))) {
@@ -919,7 +932,7 @@ async function advancePromptRefusals(
       // A closed disposition for this exact episode is final, even while the
       // original work remains open. Only a new refusal key can start again.
       if (deps.db.prepare(`SELECT 1 FROM queue_items WHERE state NOT IN ('pending','in-progress','blocked')
-        AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
+        AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)
         AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?) LIMIT 1`)
         .get(PROMPT_ALERT_TAG, `${PROMPT_EPISODE_TAG}${episode.key}`)) continue;
       const rows = episode.ids.map(id => deps.queueRepo.getById(id)).filter((row): row is QueueItem =>
@@ -937,13 +950,17 @@ async function advancePromptRefusals(
     try { return deps.readPromptState?.(dest, groups.get(dest)?.refusedAt ?? now.toISOString()) ?? "unknown"; } catch { return "unknown"; }
   };
   const aggregates = deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE state IN ('pending','in-progress','blocked')
-    AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`)
+    AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`)
     .all(PROMPT_ALERT_TAG) as Array<{ qitem_id: string }>;
   for (const { qitem_id } of aggregates) {
-    const aggregate = deps.queueRepo.getById(qitem_id)!;
-    const dest = aggregate.tags!.find(t => t.startsWith("prompt-destination:"))!.slice("prompt-destination:".length);
+    const aggregate = deps.queueRepo.getById(qitem_id);
+    if (!aggregate || !Array.isArray(aggregate.tags)) continue;
+    const destinationTag = aggregate.tags.find(t => typeof t === "string" && t.startsWith("prompt-destination:"));
+    const dest = destinationTag?.slice("prompt-destination:".length);
+    if (!dest) continue;
     const group = groups.get(dest);
-    const sameEpisode = group?.keys.some(key => aggregate.tags!.includes(key));
+    const tags = aggregate.tags;
+    const sameEpisode = group?.keys.some(key => tags.includes(key));
     if (!sameEpisode || promptState(dest) === "clear") {
       await deps.queueRepo.update({ qitemId: qitem_id, actorSession: aggregate.sourceSession, state: "done",
         closureReason: "no-follow-on", transitionNote: PROMPT_RETIRED_NOTE });
@@ -969,7 +986,8 @@ async function advancePromptRefusals(
     const ownedElsewhere = members.some(({ row }) => {
       const recovery = findQueueRecovery(deps.db, row.qitemId);
       if (!recovery || !["pending", "in-progress", "blocked"].includes(recovery.state)) return false;
-      const held = deps.queueRepo.getById(recovery.qitemId)!;
+      const held = deps.queueRepo.getById(recovery.qitemId);
+      if (!held) return false;
       if (held.tags?.includes(PROMPT_ALERT_TAG)) return false;
       if (held.destinationSession !== dest) return true;
       selfRecoveries.set(held.qitemId, held);
@@ -985,7 +1003,8 @@ async function advancePromptRefusals(
     const aggregate = await ensureEscalationRow(deps, dest,
       toOperator ? resolveOperatorSeat() ?? members[0]!.row.sourceSession : orch!, members, reason,
       `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...group.keys]);
-    const row = deps.queueRepo.getById(aggregate.qitemId)!;
+    const row = deps.queueRepo.getById(aggregate.qitemId);
+    if (!row) continue;
     const addedKeys = group.keys.filter(key => !row.tags?.includes(key));
     if (addedKeys.length) {
       deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
