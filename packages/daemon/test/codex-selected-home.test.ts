@@ -140,3 +140,41 @@ it("seatless startup, disable and projection preserve the other home's bytes; st
   }
   finally { second.db.close(); }
 }, 60000);
+
+it.each([
+  { name: 'unset', selection: undefined },
+  { name: 'empty', selection: '' },
+])('$name home selection keeps seatless startup writes in the default home', async ({ selection }) => {
+  const f = fixture(), originalCwd = process.cwd();
+  vi.resetModules();
+  vi.spyOn(os, 'homedir').mockReturnValue(f.home);
+  for (const [k, v] of Object.entries(f.env)) vi.stubEnv(k, v);
+  vi.stubEnv('CODEX_HOME', selection);
+  vi.stubEnv('OPENRIG_DB', path.join(f.root, 'instance.sqlite'));
+  vi.stubEnv('OPENRIG_NO_KERNEL', '1');
+  vi.stubEnv('OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED', 'true');
+  vi.stubEnv('OPENRIG_URL', undefined); vi.stubEnv('OPENRIG_PORT', undefined);
+  process.chdir(f.cwd);
+  try {
+    const { createDaemon } = await import('../src/startup.js');
+    const daemon = await createDaemon({ dbPath: process.env.OPENRIG_DB!, tmuxExec: async () => '', cmuxFactory: async () => { throw Error('fixture: no cmux'); } });
+    try {
+      expect(daemon.db.prepare('SELECT count(*) AS n FROM nodes').get()).toEqual({ n: 0 });
+      expect(fs.existsSync(path.join(f.cwd, 'config.toml'))).toBe(false);
+      expect(fs.readFileSync(f.firstConfig, 'utf8')).toContain('trusted_hash');
+      expect(fs.readFileSync(f.firstConfig, 'utf8')).toContain('# BEGIN OPENRIG MANAGED ACTIVITY HOOKS');
+      expect(daemon.deps.sessionEnv!.CODEX_HOME).toBe(path.join(f.home, '.codex'));
+      expect((daemon.deps.pluginDiscoveryService as any).opts.codexCacheDir).toBe(path.join(f.home, '.codex/plugins/cache'));
+      expect(fs.readdirSync(f.selected)).toEqual([]);
+    } finally { daemon.db.close(); }
+  } finally { process.chdir(originalCwd); }
+}, 60000);
+
+it.each(['   ', 'relative-codex-home'])('keeps the startup refusal for non-absolute home %j', async selection => {
+  const f = fixture();
+  vi.stubEnv('CODEX_HOME', selection);
+  const { createDaemon } = await import('../src/startup.js');
+  await expect(createDaemon({ dbPath: path.join(f.root, 'must-not-exist.sqlite') }))
+    .rejects.toThrow('CODEX_HOME must be an absolute path');
+  expect(fs.existsSync(path.join(f.root, 'must-not-exist.sqlite'))).toBe(false);
+});
