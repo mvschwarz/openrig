@@ -159,12 +159,13 @@ function openKeysOnRow(transitions: RowTransitionView[]): string[] {
 }
 
 /** Open positive refusals and the exact obligation set reserved before delivery. */
-export function openPromptRefusals(transitions: RowTransitionView[]): Array<{ key: string; ids: string[] }> {
+export function openPromptRefusals(transitions: RowTransitionView[]): Array<{ key: string; ids: string[]; refusedAt: string }> {
   return openKeysOnRow(transitions).flatMap(key => {
-    if (!transitions.some(t => t.transitionNote?.startsWith(REFUSED_PREFIX) && keyOfNote(t.transitionNote) === key)) return [];
+    const refusal = transitions.find(t => t.transitionNote?.startsWith(REFUSED_PREFIX) && keyOfNote(t.transitionNote) === key);
+    if (!refusal) return [];
     const reserve = transitions.find(t => t.transitionNote?.startsWith(RESERVE_PREFIX) && keyOfNote(t.transitionNote) === key);
     const ids = reserve?.transitionNote?.split("; obligations ")[1]?.split(",") ?? [];
-    return [{ key, ids }];
+    return [{ key, ids, refusedAt: refusal.ts }];
   });
 }
 
@@ -229,17 +230,6 @@ export function makeParkedOwnerConsumerPolicy(deps: ParkedOwnerConsumerDeps): Po
             }
           }
           continue;
-        }
-
-        // A positive prompt clearing ends only the refused episode, even when
-        // the seat is still idle with work. Unknown diagnosis never reaches here.
-        if (seat.activity.needsInput.count === 0) {
-          for (const qitemId of knownRows) {
-            for (const { key } of openPromptRefusals(deps.rows.listTransitions(qitemId))) {
-              deps.rows.appendNote(qitemId, `${CLOSE_PREFIX} ${key} (interactive prompt cleared)`);
-              closures.push(key);
-            }
-          }
         }
 
         // Whole diagnosis inherited: open items PLUS unhealthy HELD rows.

@@ -16,6 +16,7 @@ import {
 } from "./domain/queue-stuck-sweep.js";
 import {
   createWakeLadderStatus,
+  classifyPromptAfterRefusal,
   resolveWakeRetryIntervalSeconds,
   runWakeLadderTick,
   WakeLadderScheduler,
@@ -212,11 +213,10 @@ export function startWakeLadderScheduler(deps: {
       queueRepo,
       status,
       ...(deliveryEngine ? { deliveryEngine } : {}),
-      readPromptState: (destination) => {
+      readPromptState: (destination, refusedAt) => {
         const nodeId = resolveSessionNodeId(db, destination);
         const state = nodeId ? deps.seatActivityService?.getSeatState(nodeId) : null;
-        if (!state || state.activity === "unknown") return "unknown";
-        return state.needsInput.count > 0 ? "blocked" : "clear";
+        return classifyPromptAfterRefusal(state, refusedAt);
       },
       ...(deps.providerService
         ? { getProviderReadModel: () => deps.providerService!.getReadModel() }

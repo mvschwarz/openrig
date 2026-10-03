@@ -10,7 +10,7 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME, REFUSED_PREFIX } from "../src/domain/policies/parked-owner-consumer.js";
 import type { PolicyJob } from "../src/domain/policies/types.js";
 import type { WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
-import { runWakeLadderTick, queueRecoveryOwnsWake } from "../src/domain/queue-wake-ladder.js";
+import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal } from "../src/domain/queue-wake-ladder.js";
 import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-delivery-engine.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
 import { DEFAULT_CONFIG, saveConfig } from "../src/domain/gateway/slack/config.js";
@@ -187,7 +187,9 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
   it("ordinary orchestrator receives one aggregate and no human post", async () => {
     await refusal(2); const posts: unknown[] = []; const port = engine(posts); const wakes: string[] = [];
     const opts = { resolveOrchestrator: () => "lead@fixture", attemptWake: async (_id: string, target: string) => { wakes.push(target); return "verified"; } };
-    await tick(port, opts); await tick(port, opts);
+    await tick(port, opts);
+    repo.claim({ qitemId: alerts()[0]!.qitemId, destinationSession: "lead@fixture" });
+    await tick(port, opts);
     expect(wakes).toEqual(["lead@fixture"]); expect(posts).toEqual([]);
     expect(alerts()).toHaveLength(1); expect(alerts()[0]?.destinationSession).toBe("lead@fixture");
   });
@@ -216,6 +218,17 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     reg = registry; await tick(port);
     await vi.waitFor(() => expect(posts).toHaveLength(1));
     await tick(port); expect(posts).toHaveLength(1);
+  });
+
+  it("only a newer arbitrated clear state can retire a positive refusal", () => {
+    const refusedAt = "2026-01-01T00:00:02.000Z";
+    const idle = { activity: "idle-at-prompt" as const, needsInput: { count: 0, reason: null }, changedAt: "2026-01-01T00:00:01.000Z" };
+    expect(classifyPromptAfterRefusal(idle, refusedAt)).toBe("unknown");
+    expect(classifyPromptAfterRefusal({ ...idle, changedAt: refusedAt }, refusedAt)).toBe("unknown");
+    expect(classifyPromptAfterRefusal({ ...idle, changedAt: "2026-01-01T00:00:03.000Z" }, refusedAt)).toBe("clear");
+    expect(classifyPromptAfterRefusal({ ...idle, needsInput: { count: 1, reason: "permission prompt" } }, refusedAt)).toBe("blocked");
+    expect(classifyPromptAfterRefusal({ ...idle, activity: "unknown", changedAt: "2026-01-01T00:00:03.000Z" }, refusedAt)).toBe("unknown");
+    expect(classifyPromptAfterRefusal(null, refusedAt)).toBe("unknown");
   });
 
   it.each(["clear", "unknown"] as const)("%s activity neither dispatches nor fabricates a refusal", async value => {
@@ -349,6 +362,16 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(notes(id).join("\n")).not.toContain("dispatched-to-engine");
   });
 
+  it("a manually closed alert does not reopen while its original refused episode remains", async () => {
+    await refusal(); const posts: unknown[] = []; const port = engine(posts, false);
+    await tick(port); const alert = alerts()[0]!;
+    repo.update({ qitemId: alert.qitemId, actorSession: alert.destinationSession, state: "done", closureReason: "no-follow-on" });
+    await tick(port); await tick(port);
+    expect(alerts()).toHaveLength(0); expect(posts).toEqual([]);
+    expect(repo.list({ limit: 1000 }).filter(row => row.tags?.includes("wake-prompt-refusal"))).toHaveLength(1);
+    expect(queueRecoveryOwnsWake(db, repo.getById(episodeRows[0]!))).toBe(true);
+  });
+
   it("a new refusal after positive clearing gets a new episode, without reopening the old alert", async () => {
     await refusal(); const posts: unknown[] = []; const port = engine(posts);
     await tick(port); await vi.waitFor(() => expect(posts).toHaveLength(1));
@@ -370,7 +393,7 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       capturePaneContent: async () => "› 1. Yes, continue\n  2. No, cancel", getPaneCommand: async () => null,
       sendText, sendKeys } as unknown as TmuxAdapter;
     const transport = new SessionTransport({ db, rigRepo, sessionRegistry: sessions, tmuxAdapter });
-    expect(await transport.send(seat, "wake")).toMatchObject({ ok: false, reason: "target_needs_input", sent: false });
+    expect(await transport.send(seat, "wake")).toMatchObject({ ok: false, reason: "target_needs_input" });
     expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled();
   });
 
