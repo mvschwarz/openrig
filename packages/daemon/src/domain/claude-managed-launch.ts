@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type Database from "better-sqlite3";
+import { publicSeatEnvironment } from "./seat-launch-environment.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { claudeClassicRendererEnvPrefix } from "../adapters/yolo-mode.js";
 import { parseClaudePermissionModes } from "./permission-drift.js";
@@ -131,8 +132,9 @@ export class ClaudeManagedLaunch {
     const identity: Record<string, string> = { OPENRIG_NODE_ID: target.nodeId, OPENRIG_RUNTIME: "claude-code",
       ...(before.session ? { OPENRIG_SESSION_NAME: before.session } : {}),
       ...(generation ? { OPENRIG_OCCUPANT_GENERATION: generation } : {}) };
-    const assignments = Object.entries({ ...context.env, ...identity }).map(([key, value]) => shellQuote(`${key}=${value}`));
-    const forwarded = inherited.filter(key => !(key in identity)).map(key => `"${key}=\${${key}-}"`);
+    const publicEnv = publicSeatEnvironment(this.sessionEnv);
+    const assignments = Object.entries({ ...context.env, ...publicEnv, ...identity }).map(([key, value]) => shellQuote(`${key}=${value}`));
+    const forwarded = inherited.filter(key => !(key in identity) && !(key in publicEnv)).map(key => `"${key}=\${${key}-}"`);
     // Expand in the target pane shell, whose terminal can differ from the daemon.
     // Empty and absent values remain absent after env -i.
     const terminal = ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",

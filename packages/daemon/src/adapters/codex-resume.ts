@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
+import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
 import { assessNativeResumeProbe, buildCodexResumeCore } from "../domain/native-resume-probe.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
@@ -15,6 +16,7 @@ const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 export { type ResumeResult };
 
 interface CodexResumeOptions {
+  seatLaunchEnvironment?: SeatLaunchEnvironment;
   launchPath?: string;
   pollMs?: number;
   maxWaitMs?: number;
@@ -100,8 +102,9 @@ export class CodexResumeAdapter {
       effort,
     );
 
-    const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.launchPath
-      ? `env PATH=${shellQuote(this.options.launchPath)} ${cmd}` : cmd);
+    const textResult = await this.tmux.sendShellCommand(tmuxSessionName, this.options.seatLaunchEnvironment
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, cwd)
+      : this.options.launchPath ? `env PATH=${shellQuote(this.options.launchPath)} ${cmd}` : cmd);
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };
     }
