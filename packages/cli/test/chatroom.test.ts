@@ -336,6 +336,38 @@ describe("Chatroom CLI", () => {
     expect(output).toContain("hello");
   });
 
+  it.each(["30s", "30", "0.5", "0.5s", "1.5s", "1e2", "0x10"])("chatroom wait accepts timeout form %s", async (timeout) => {
+    capturedUrls.length = 0;
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync([
+      "node", "rig", "chatroom", "wait", "my-rig", "--after", "000", "--timeout", timeout,
+    ]));
+    expect(exitCode).toBeUndefined();
+    expect(logs.join("\n")).toContain("[alice] hello");
+    expect(capturedUrls.filter(url => url.includes("/chat/history"))).toHaveLength(1);
+  });
+
+  it.each(["0.05", "0.05s"])("chatroom wait preserves the fractional deadline for %s", async (timeout) => {
+    capturedUrls.length = 0;
+    const started = Date.now();
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync([
+      "node", "rig", "chatroom", "wait", "my-rig", "--after", "ZZZ", "--timeout", timeout,
+    ]));
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("Timed out");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(50);
+    expect(capturedUrls.filter(url => url.includes("/chat/history"))).toHaveLength(1);
+  });
+
+  it.each(["abc", "NaN", "Infinity", "-Infinity", "", " ", "-1", "-1s", "1e309", "1e309s"])("chatroom wait rejects invalid timeout %s before requests", async (timeout) => {
+    capturedUrls.length = 0;
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync([
+      "node", "rig", "chatroom", "wait", "my-rig", "--timeout", timeout,
+    ]));
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("--timeout must be a non-negative number of seconds");
+    expect(capturedUrls).toEqual([]);
+  });
+
   it("chatroom wait without --after does not return existing room traffic", async () => {
     // No --after: bootstrap ULID is generated at wait-start time (> all existing fixture IDs).
     // Since no new messages arrive after that, wait should timeout.

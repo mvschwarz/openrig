@@ -427,14 +427,22 @@ rig seat handover, THEN retarget the view. Examples:
   cmd
     .command("clear-attention")
     .argument("<session>", "Canonical session name (e.g. dev-impl@my-rig)")
-    .option("--reason <text>", "Operator attestation override (skip evidence gate)")
+    .option("--reason <text>", "Attest startup or subset-restore attention; cannot bypass full-restore or pane-identity checks")
     .option("--json", "JSON output for agents")
-    .description("Clear stuck attention_required startup status with evidence or operator attestation")
+    .description("Reconcile seat attention using the checks for its attention class")
     .addHelpText("after", `
 Examples:
   rig seat clear-attention dev-impl@my-rig
   rig seat clear-attention dev-impl@my-rig --reason "founder re-authed, confirmed live"
   rig seat clear-attention dev-impl@my-rig --json
+
+--reason can acknowledge startup-status and subset-restore attention. It does
+not bypass full-restore continuity or pane-identity checks. Acknowledgment alone
+does not prove that the original conversation resumed.
+If the recorded native token needs correction and you know the actual token:
+  printf '%s' "$TOKEN" | rig seat set-resume-token dev-impl@my-rig --token-stdin --reason "verified native token"
+Then rerun clear-attention to check the live evidence. Setting the token alone,
+or stopping and relaunching the seat, does not prove continuity.
 `)
     .action(async (session: string, opts: { reason?: string; json?: boolean }) => {
       const deps = getDeps();
