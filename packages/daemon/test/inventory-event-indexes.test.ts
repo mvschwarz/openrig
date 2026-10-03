@@ -63,6 +63,8 @@ function expectIndexed(db: Database.Database) {
   const restore = plans.filter(p => p.sql.includes("restore.outcome_reconciled"));
   expect(restore.find(p => !p.args.length)?.detail).toContain("idx_events_restore_seq");
   expect(restore.find(p => p.args.length)?.detail).toContain("idx_events_restore_rig_seq");
+  // Attempt binding must not reintroduce a scan of unrelated activity events.
+  for (const plan of restore) expect(plan.detail).toContain("idx_events_node_type_seq");
   expect(plans.find(p => p.sql.includes("node.startup_challenged"))?.detail).toContain("idx_events_startup_node_seq");
 }
 

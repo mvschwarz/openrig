@@ -163,7 +163,7 @@ function printHuman(status: SeatStatusResponse): void {
   }
   console.log(`Startup: ${display(status.startup_status, "unknown")}`);
   console.log(`Occupant lifecycle: ${status.occupant_lifecycle}`);
-  console.log(`Continuity outcome: ${display(status.continuity_outcome, "unknown")}`);
+  console.log(`Continuity outcome: ${display(status.continuity_outcome, "unverified")}`);
   console.log(`Handover result: ${display(status.handover_result)}`);
   console.log(`Previous occupant: ${display(status.previous_occupant)}`);
   console.log(`Handover at: ${display(status.handover_at)}`);

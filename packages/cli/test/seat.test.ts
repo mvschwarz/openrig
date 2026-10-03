@@ -245,7 +245,7 @@ describe("rig seat status", () => {
     const output = logs.join("\n");
     expect(exitCode).toBeUndefined();
     expect(output).toContain("Occupant lifecycle: active");
-    expect(output).toContain("Continuity outcome: unknown");
+    expect(output).toContain("Continuity outcome: unverified");
     expect(output).toContain("Handover result: none");
     expect(output).toContain("Previous occupant: none");
   });
