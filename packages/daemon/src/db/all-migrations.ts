@@ -95,6 +95,7 @@ import { classificationIdentityProvenanceSchema } from "./migrations/089_classif
 import { humanReplyToSchema } from "./migrations/090_human_reply_to.js";
 import { humanQuestionsSchema } from "./migrations/091_human_questions.js";
 import { nodeEffortSchema } from "./migrations/092_node_effort.js";
+import { nodePermissionSelectionsCursorSchema } from "./migrations/093_node_permission_selections_cursor.js";
 import { usageSamplesLatestIndexesSchema } from "./migrations/094_usage_samples_latest_indexes.js";
 import type { Migration } from "./migrate.js";
 
@@ -192,5 +193,6 @@ export const ALL_MIGRATIONS: Migration[] = [
   humanReplyToSchema,
   humanQuestionsSchema,
   nodeEffortSchema,
+  nodePermissionSelectionsCursorSchema,
   usageSamplesLatestIndexesSchema,
 ];

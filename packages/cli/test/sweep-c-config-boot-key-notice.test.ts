@@ -32,4 +32,12 @@ describe("SWEEP-c — boot-only config keys warn while the daemon runs", () => {
     const out = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
     expect(out).not.toMatch(/restart/i);
   });
+
+  it("turning Cursor hooks off with a RUNNING daemon says the entries go at the next restart", async () => {
+    await runSet("runtime.cursor.hooks_enabled", "false", true);
+    await runSet("runtime.cursor.hooks_enabled", "true", true);
+    const out = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(out).toMatch(/hooks\.json are removed at the next daemon restart/);
+    expect(errSpy).toHaveBeenCalledTimes(1);
+  });
 });

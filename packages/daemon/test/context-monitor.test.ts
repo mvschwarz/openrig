@@ -509,4 +509,81 @@ describe("ContextMonitor", () => {
 
     expect(maybeAutoCompact).toHaveBeenCalledTimes(1);
   });
+
+  describe("cursor seats", () => {
+    const footerScreen = "  → Add a follow-up\n  Grok 4.7 256K High · 15.3%     Auto-review\n  ~/x · main\n";
+
+    function seedCursorNode(logicalId = "dev.cur", sessionName = "dev-cur@test") {
+      const rig = rigRepo.createRig(`rig-${logicalId}`);
+      const node = rigRepo.addNode(rig.id, logicalId, { runtime: "cursor" });
+      const session = sessionRegistry.registerSession(node.id, sessionName);
+      db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(session.id);
+      return { node, sessionName };
+    }
+
+    it("persists known usage from the pane footer", async () => {
+      const { node, sessionName } = seedCursorNode();
+      const reader = vi.fn(async () => footerScreen);
+      const m = new ContextMonitor(db, store, undefined, undefined, undefined, undefined, undefined, reader);
+      await m.pollOnce();
+      expect(reader).toHaveBeenCalledWith(sessionName);
+      const usage = store.getForNode(node.id, sessionName);
+      expect(usage).toMatchObject({ availability: "known", source: "cursor_tui_footer", usedPercentage: 15, contextWindowSize: 256000 });
+    });
+
+    it("persists unknown when the reader throws, and still polls other seats", async () => {
+      const cur = seedCursorNode();
+      const claude = seedClaudeNode();
+      writeSidecar(claude.sessionName, {
+        session_name: claude.sessionName, context_window: { context_window_size: 200000, used_percentage: 40,
+          current_usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+          total_input_tokens: 80000, total_output_tokens: 0 },
+        transcript_path: "/t", session_id: "s", sampled_at: new Date().toISOString(),
+      });
+      const reader = vi.fn(async () => { throw new Error("tmux gone"); });
+      const m = new ContextMonitor(db, store, { ensureContextCollector: ensureContextCollectorSpy }, undefined, undefined, undefined, undefined, reader);
+      await expect(m.pollOnce()).resolves.toBeUndefined();
+      expect(store.getForNode(cur.node.id, cur.sessionName).availability).toBe("unknown");
+      expect(store.getForNode(claude.node.id, claude.sessionName).availability).toBe("known");
+    });
+
+    it("persists nothing for a seat handed over during the pane read, and still polls others", async () => {
+      const cur = seedCursorNode();
+      const other = seedCursorNode("dev.cur2", "dev-cur2@test");
+      const reader = vi.fn(async (name: string) => {
+        if (name === cur.sessionName) {
+          const s = sessionRegistry.registerSession(cur.node.id, "dev-cur-new@test");
+          db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(s.id);
+        }
+        return footerScreen;
+      });
+      const m = new ContextMonitor(db, store, undefined, undefined, undefined, undefined, undefined, reader);
+      await m.pollOnce();
+      expect(db.prepare("SELECT 1 FROM context_usage WHERE node_id = ?").get(cur.node.id)).toBeUndefined();
+      expect(store.getForNode(other.node.id, other.sessionName).availability).toBe("known");
+    });
+
+    it("persists unknown when the reader returns null", async () => {
+      const { node, sessionName } = seedCursorNode();
+      const m = new ContextMonitor(db, store, undefined, undefined, undefined, undefined, undefined, async () => null);
+      await m.pollOnce();
+      const row = db.prepare("SELECT availability, reason FROM context_usage WHERE node_id = ?").get(node.id) as { availability: string; reason: string };
+      expect(row).toEqual({ availability: "unknown", reason: "no_data" });
+      expect(store.getForNode(node.id, sessionName).availability).toBe("unknown");
+    });
+
+    it("skips cursor seats when no reader is configured", async () => {
+      const { node } = seedCursorNode();
+      await monitor.pollOnce();
+      expect(db.prepare("SELECT 1 FROM context_usage WHERE node_id = ?").get(node.id)).toBeUndefined();
+    });
+
+    it("never invokes the compaction enforcer for a cursor seat", async () => {
+      seedCursorNode();
+      const maybeAutoCompact = vi.fn(async () => ({ triggered: true }));
+      const m = new ContextMonitor(db, store, undefined, { maybeAutoCompact } as never, undefined, undefined, undefined, async () => "  Grok 4.7 256K High · 99%\n");
+      await m.pollOnce();
+      expect(maybeAutoCompact).not.toHaveBeenCalled();
+    });
+  });
 });

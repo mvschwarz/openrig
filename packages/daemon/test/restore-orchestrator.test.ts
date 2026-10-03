@@ -28,6 +28,7 @@ import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../src/adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
+import type { CursorResumeAdapter } from "../src/adapters/cursor-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -35,6 +36,7 @@ import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-obse
 import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
 import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
+import { NativePermissionStore } from "../src/domain/native-permission-store.js";
 
 function setupDb(): Database.Database {
   return createFullTestDb();
@@ -116,6 +118,7 @@ describe("RestoreOrchestrator", () => {
     codex?: CodexResumeAdapter;
     pi?: PiResumeAdapter;
     omp?: OmpResumeAdapter;
+    cursor?: CursorResumeAdapter;
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
   }) {
     const tmux = opts?.tmux ?? mockTmux();
@@ -127,6 +130,7 @@ describe("RestoreOrchestrator", () => {
       codexResume: opts?.codex ?? mockCodexResume(),
       piResume: opts?.pi,
       ompResume: opts?.omp,
+      cursorResume: opts?.cursor,
       listProcesses: opts?.listProcesses,
     });
   }
@@ -940,6 +944,109 @@ describe("RestoreOrchestrator", () => {
     await orch.restore(snap.id);
 
     expect(codex.resume).toHaveBeenCalled();
+  });
+
+  it("restore_policy=resume_if_possible + cursor_chat_id -> Cursor resume called, Pi not", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "cursor" }],
+      edges: [],
+      resumeType: "cursor_chat_id",
+      resumeToken: "167733b3-080d-4eb0-a30a-7d22c40b5195",
+      restorePolicy: "resume_if_possible",
+    });
+    const cursor = { canResume: vi.fn((type: string | null, token: string | null) => type === "cursor_chat_id" && !!token), resume: vi.fn(async () => ({ ok: true as const })) } as unknown as CursorResumeAdapter;
+    const pi = { canResume: vi.fn(() => true), resume: vi.fn(async () => ({ ok: true as const })) } as unknown as PiResumeAdapter;
+    const orch = createOrchestrator({ cursor, pi });
+    await orch.restore(snap.id);
+
+    expect(cursor.resume).toHaveBeenCalledTimes(1);
+    const args = (cursor.resume as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]!;
+    expect(args[1]).toBe("cursor_chat_id");
+    expect(args[2]).toBe("167733b3-080d-4eb0-a30a-7d22c40b5195");
+    expect(args[4]).toBe(snap.data.nodes[0]!.id);
+    expect(pi.resume).not.toHaveBeenCalled();
+  });
+
+  it("passes a stored cursor auto_review selection to the Cursor resume as its permission mode", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "cursor" }],
+      edges: [],
+      resumeType: "cursor_chat_id",
+      resumeToken: "167733b3-080d-4eb0-a30a-7d22c40b5195",
+      restorePolicy: "resume_if_possible",
+    });
+    const nodeId = snap.data.nodes[0]!.id;
+    new NativePermissionStore(db).write(nodeId, { runtime: "cursor", mode: "auto_review" }, "zach", "reviewer runs unattended");
+    const cursor = { canResume: vi.fn((type: string | null, token: string | null) => type === "cursor_chat_id" && !!token), resume: vi.fn(async () => ({ ok: true as const })) } as unknown as CursorResumeAdapter;
+    const result = await createOrchestrator({ cursor }).restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    expect(cursor.resume).toHaveBeenCalledTimes(1);
+    const args = (cursor.resume as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]!;
+    expect(args[4]).toBe(nodeId);
+    expect(args[7]).toBe("auto_review");
+  });
+
+  it("fails a Cursor restore whose stored selection belongs to another runtime, saying so", async () => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "cursor" }],
+      edges: [],
+      resumeType: "cursor_chat_id",
+      resumeToken: "167733b3-080d-4eb0-a30a-7d22c40b5195",
+      restorePolicy: "resume_if_possible",
+    });
+    const nodeId = snap.data.nodes[0]!.id;
+    new NativePermissionStore(db).write(nodeId, { runtime: "codex", mode: "full_bypass" }, "zach", "was a codex seat");
+    const cursor = { canResume: vi.fn((type: string | null, token: string | null) => type === "cursor_chat_id" && !!token), resume: vi.fn(async () => ({ ok: true as const })) } as unknown as CursorResumeAdapter;
+    const result = await createOrchestrator({ cursor }).restore(snap.id);
+
+    expect(cursor.resume).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node = result.result.nodes.find((n) => n.logicalId === "worker")!;
+    expect(node.status).toBe("awaiting-decision");
+    expect(node.error).toContain("Seat runtime changed since permission selection");
+  });
+
+  it("says why when a Cursor resume needs a fresh chat, without the adapter's message or the token", async () => {
+    const token = "167733b3-080d-4eb0-a30a-7d22c40b5195";
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "cursor" }],
+      edges: [],
+      resumeType: "cursor_chat_id",
+      resumeToken: token,
+      restorePolicy: "resume_if_possible",
+    });
+    const cursor = { canResume: vi.fn((type: string | null, tok: string | null) => type === "cursor_chat_id" && !!tok), resume: vi.fn(async () => ({ ok: false as const, code: "retry_fresh" as const, message: `adapter text ${token}` })) } as unknown as CursorResumeAdapter;
+    const result = await createOrchestrator({ cursor }).restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node = result.result.nodes.find((n) => n.logicalId === "worker")!;
+    expect(node.status).toBe("awaiting-decision");
+    expect(node.error).toContain("Reason: Cursor's approval mode changed since this chat last ran, or OpenRig has no record of it");
+    expect(node.error).not.toContain(token);
+    expect(node.error).not.toContain("adapter text");
+  });
+
+  it("does not surface a non-permission Cursor resume failure's message (it may quote a token)", async () => {
+    const token = "167733b3-080d-4eb0-a30a-7d22c40b5195";
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "cursor" }],
+      edges: [],
+      resumeType: "cursor_chat_id",
+      resumeToken: token,
+      restorePolicy: "resume_if_possible",
+    });
+    const cursor = { canResume: vi.fn((type: string | null, tok: string | null) => type === "cursor_chat_id" && !!tok), resume: vi.fn(async () => ({ ok: false as const, code: "resume_failed" as const, message: `x ${token}` })) } as unknown as CursorResumeAdapter;
+    const result = await createOrchestrator({ cursor }).restore(snap.id);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const node = result.result.nodes.find((n) => n.logicalId === "worker")!;
+    expect(node.status).toBe("awaiting-decision");
+    expect(node.error).not.toContain(token);
+    expect(node.error).not.toContain("Reason:");
   });
 
   it("resume succeeds -> status 'resumed'", async () => {

@@ -189,6 +189,57 @@ describe("createDaemon startup composition", () => {
     }
   }, 30000); // harness budget (cold createDaemon compose), not product readiness
 
+  it("adds no Cursor hooks at daemon start, but refreshes OpenRig's existing entries in OPENRIG_CURSOR_HOME", async () => {
+    const cursorHome = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-cursor-home-"));
+    const openrigHome = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-home-"));
+    const hooksPath = path.join(cursorHome, "hooks.json");
+    const operatorOnly = JSON.stringify({ version: 1, hooks: { stop: [{ command: "echo operator" }] } });
+    fs.writeFileSync(hooksPath, operatorOnly);
+    const saved = saveEnv("OPENRIG_CURSOR_HOME", "OPENRIG_HOME", "OPENRIG_RUNTIME_CURSOR_HOOKS_ENABLED");
+    process.env.OPENRIG_CURSOR_HOME = cursorHome;
+    process.env.OPENRIG_HOME = openrigHome;
+    delete process.env.OPENRIG_RUNTIME_CURSOR_HOOKS_ENABLED;
+    const cmuxFactory: CmuxTransportFactory = async () => {
+      throw Object.assign(new Error(""), { code: "ENOENT" });
+    };
+    const tmuxExec: ExecFn = async () => "";
+    let db: ReturnType<typeof createDb> | undefined;
+    try {
+      // A machine that has never launched a Cursor seat (e.g. Cursor IDE only): nothing is added.
+      db = (await createDaemon({ cmuxFactory, tmuxExec })).db;
+      expect(fs.readFileSync(hooksPath, "utf-8")).toBe(operatorOnly);
+      db.close();
+      db = undefined;
+
+      // Entries from an earlier install (an old relay path) are kept current at the next start.
+      const stale = "node \"/old/openrig/daemon/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs\"";
+      fs.writeFileSync(hooksPath, JSON.stringify({ version: 1, hooks: { stop: [{ command: "echo operator" }, { command: stale }] } }));
+      db = (await createDaemon({ cmuxFactory, tmuxExec })).db;
+      const written = JSON.parse(fs.readFileSync(hooksPath, "utf-8")) as { hooks: Record<string, Array<{ command: string }>> };
+      expect(written.hooks.stop![0]).toEqual({ command: "echo operator" });
+      for (const event of ["beforeSubmitPrompt", "preToolUse", "stop"]) {
+        expect(written.hooks[event]!.some((e) => /activity-relay\.cjs/.test(e.command) && !e.command.includes("/old/"))).toBe(true);
+      }
+      // Nothing was created under the temp OpenRig home's .cursor either: only OPENRIG_CURSOR_HOME is used.
+      expect(fs.existsSync(path.join(openrigHome, ".cursor"))).toBe(false);
+    } finally {
+      restoreEnv(saved);
+      db?.close();
+      fs.rmSync(cursorHome, { recursive: true, force: true });
+      fs.rmSync(openrigHome, { recursive: true, force: true });
+    }
+  }, 60000);
+
+  it("refuses a relative OPENRIG_CURSOR_HOME, as for CODEX_HOME", async () => {
+    const saved = saveEnv("OPENRIG_CURSOR_HOME");
+    process.env.OPENRIG_CURSOR_HOME = "relative/cursor";
+    try {
+      await expect(createDaemon({ tmuxExec: async () => "" })).rejects.toThrow("OPENRIG_CURSOR_HOME must be an absolute path: relative/cursor");
+    } finally {
+      restoreEnv(saved);
+    }
+  });
+
   it("defaults terminal auth to local-trusted mode without minting a token file", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-terminal-auth-"));
     const priorHome = process.env.OPENRIG_HOME;

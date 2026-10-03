@@ -25,7 +25,7 @@ describe("AgentActivityStore", () => {
     db.close();
   });
 
-  function seedSession(runtime: "claude-code" | "codex" = "claude-code") {
+  function seedSession(runtime: "claude-code" | "codex" | "cursor" = "claude-code") {
     const rig = rigRepo.createRig("test-rig");
     const node = rigRepo.addNode(rig.id, runtime === "codex" ? "dev.qa" : "dev.impl", { runtime });
     const sessionName = runtime === "codex" ? "dev-qa@test-rig" : "dev-impl@test-rig";
@@ -210,6 +210,25 @@ describe("AgentActivityStore", () => {
       evidenceSource: "runtime_hook",
       rawEvent: "SessionStart",
     });
+  });
+
+  it.each([
+    ["beforeSubmitPrompt", "running"],
+    ["preToolUse", "running"],
+    ["stop", "idle"],
+    ["sessionEnd", "idle"],
+  ] as const)("normalizes Cursor %s to %s", (hookEvent, state) => {
+    const { node, sessionName } = seedSession("cursor");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    expect(store.recordHookEvent({ runtime: "cursor", sessionName, hookEvent, occurredAt: "2026-04-24T11:59:00.000Z" }).ok).toBe(true);
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW })).toMatchObject({ state, rawEvent: hookEvent, evidenceSource: "runtime_hook" });
+  });
+
+  it("records Cursor sessionStart as observed, not as a state", () => {
+    const { node, sessionName } = seedSession("cursor");
+    const store = new AgentActivityStore({ db, eventBus, now: () => NOW });
+    store.recordHookEvent({ runtime: "cursor", sessionName, hookEvent: "sessionStart", occurredAt: "2026-04-24T11:59:00.000Z" });
+    expect(store.getLatestForNode({ nodeId: node.id, sessionName, now: NOW })).toMatchObject({ state: "unknown", reason: "session_start_observed" });
   });
 
   it("returns unknown stale instead of green state for old hook evidence", () => {

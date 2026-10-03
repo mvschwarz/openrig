@@ -16,6 +16,12 @@ describe("graphics runtime package", () => {
     expect(runtimeBrand("codex").label).toBe("Codex");
   });
 
+  it("brands cursor as Cursor", () => {
+    expect(normalizeRuntimeBrandId("cursor")).toBe("cursor");
+    expect(runtimeBrand("cursor").label).toBe("Cursor");
+    expect(normalizeRuntimeBrandId("cursorish")).toBe("unknown");
+  });
+
   it("normalizes tool brands for CMUX, tmux, VS Code, and screenshots", () => {
     expect(normalizeToolBrandId("cmux")).toBe("cmux");
     expect(normalizeToolBrandId("tmux attach")).toBe("tmux");

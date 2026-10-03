@@ -373,22 +373,7 @@ export class ContextUsageStore {
 
   /** Create an unknown ContextUsage with an honest reason. */
   unknownUsage(reason: ContextUnknownReason): ContextUsage {
-    return {
-      availability: "unknown",
-      reason,
-      source: null,
-      usedPercentage: null,
-      remainingPercentage: null,
-      contextWindowSize: null,
-      totalInputTokens: null,
-      totalOutputTokens: null,
-      currentUsage: null,
-      transcriptPath: null,
-      sessionId: null,
-      sessionName: null,
-      sampledAt: null,
-      fresh: false,
-    };
+    return unknownContextUsage(reason);
   }
 
   /** Check if a sample timestamp is fresh. */
@@ -490,6 +475,80 @@ export class ContextUsageStore {
       closeSync(fd);
     }
   }
+}
+
+function unknownContextUsage(reason: ContextUnknownReason): ContextUsage {
+  return {
+    availability: "unknown",
+    reason,
+    source: null,
+    usedPercentage: null,
+    remainingPercentage: null,
+    contextWindowSize: null,
+    totalInputTokens: null,
+    totalOutputTokens: null,
+    currentUsage: null,
+    transcriptPath: null,
+    sessionId: null,
+    sessionName: null,
+    sampledAt: null,
+    fresh: false,
+  };
+}
+
+const CURSOR_FOOTER_SCAN_LINES = 8;
+// `<model> <size> <effort> · <pct>%`, then optional `· <status>` segments (e.g. "· 2 files edited")
+// and a capitalised mode badge. Text after the percent must start a new "·" segment, so prose such
+// as "256K tokens · 42% done" is not a footer.
+const CURSOR_FOOTER =
+  /\b(\d+(?:\.\d+)?)([KM])\b[^·]*·\s*(\d+(?:\.\d+)?)%(?:\s*·\s*[^·]+?)*\s*(?:[A-Z][\w-]*(?: [\w-]+)*)?$/;
+const CURSOR_BRANCH_ONLY = /^·\s*\S+$/;
+
+/**
+ * Cursor exposes no token file; its TUI footer (model line, below the prompt
+ * and above the cwd line) carries `<model> <size> <effort> · <pct>%`. Reads
+ * the first non-cwd line from the bottom (within the last few non-blank
+ * lines) and requires it to be footer-shaped, so a "· 42%" in conversation
+ * prose never wins. A fresh chat shows the
+ * footer without a percentage, which is unknown, not zero.
+ */
+export function cursorContextUsageFromPane(
+  paneContent: string,
+  sessionName: string,
+  sampledAt: string,
+): ContextUsage {
+  const tail = paneContent
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .slice(-CURSOR_FOOTER_SCAN_LINES);
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const line = tail[i]!;
+    // Only cwd-like lines (the cwd can wrap) may sit below the footer.
+    if (line.includes("/") || line.startsWith("~") || CURSOR_BRANCH_ONLY.test(line)) continue;
+    // The first other line must be the footer; anything else means no footer is in view.
+    if (line.startsWith("→") || line.startsWith("$")) return unknownContextUsage("no_data");
+    const m = CURSOR_FOOTER.exec(line);
+    if (!m) return unknownContextUsage("no_data");
+    const usedPercentage = clampPercentage(Math.round(Number(m[3])));
+    return {
+      availability: "known",
+      reason: null,
+      source: "cursor_tui_footer",
+      usedPercentage,
+      remainingPercentage: clampPercentage(100 - usedPercentage),
+      contextWindowSize: Math.round(Number(m[1]) * (m[2] === "M" ? 1_000_000 : 1_000)),
+      totalInputTokens: null,
+      totalOutputTokens: null,
+      currentUsage: null,
+      transcriptPath: null,
+      sessionId: null,
+      sessionName,
+      sampledAt,
+      fresh: true,
+    };
+  }
+  return unknownContextUsage("no_data");
 }
 
 function clampPercentage(value: number): number {

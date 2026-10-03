@@ -355,6 +355,17 @@ describe("RigSpec schema (pod-aware)", () => {
     expect(normalized.nodes).toHaveLength(2);
   });
 
+  it("legacy flat-node schema accepts a cursor node and still rejects an unknown runtime", () => {
+    const legacySpec = (runtime: string) => ({
+      schema_version: 1, name: "test", version: "1.0",
+      nodes: [{ id: "reviewer", runtime, role: "reviewer" }],
+      edges: [],
+    });
+    expect(LegacyRigSpecSchema.validate(legacySpec("cursor"))).toMatchObject({ valid: true, errors: [] });
+    expect(LegacyRigSpecSchema.normalize(legacySpec("cursor")).nodes[0]).toMatchObject({ id: "reviewer", runtime: "cursor" });
+    expect(LegacyRigSpecSchema.validate(legacySpec("cursor-cli")).errors).toContain("node reviewer: unknown runtime 'cursor-cli'");
+  });
+
   // -- Checkpoint 1 review fix regressions --
 
   // R2: startup action missing value rejected

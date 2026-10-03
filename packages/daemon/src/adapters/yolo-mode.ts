@@ -78,6 +78,22 @@ export function piTrust(
   return yoloEnabled(env, resolvedPosture) ? "approve" : configured ?? "no-approve";
 }
 
+/** Cursor approval flag segment (leading space included), applied on every managed Cursor launch.
+ *  The floor adds nothing: a seat's own config starts at Cursor's `allowlist` approval mode, which
+ *  asks before any command not on its allow list. `auto_review` is Cursor's server-side classifier
+ *  mode; full bypass (a resolved policy or global YOLO) runs everything. */
+export function cursorApprovalArg(
+  env: NodeJS.ProcessEnv = process.env,
+  resolvedPosture?: ResolvedLaunchPosture,
+  permissionMode?: string,
+): string {
+  if (permissionMode !== undefined) {
+    if (permissionMode === "auto_review") return " --auto-review";
+    throw new Error(`Invalid Cursor permission mode '${permissionMode}'`);
+  }
+  return yoloEnabled(env, resolvedPosture) ? " --force" : "";
+}
+
 /**
  * OPR.0.5.3.1 — Claude classic-renderer launch env prefix.
  *

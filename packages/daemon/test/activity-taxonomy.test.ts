@@ -7,6 +7,7 @@ import {
   SESSION_PRESENCE_VALUES,
   RESUMABILITY_VALUES,
   deriveDisplayActivity,
+  runtimeRungInventory,
   type NeedsInput,
 } from "../src/domain/activity-taxonomy.js";
 
@@ -96,5 +97,14 @@ describe("S19 A1 — the reference doc is canonical and pins the rejects", () =>
     expect(doc).toMatch(/PARKED/);
     expect(doc).toMatch(/HELD/);
     expect(doc).toMatch(/derived/i);
+  });
+});
+
+describe("S19 A4 — per-runtime rung inventories", () => {
+  it("gives cursor a trial hook rung above sampling", () => {
+    const inventory = runtimeRungInventory("cursor");
+    expect(inventory.runtime).toBe("cursor");
+    expect(inventory.rungs.map((r) => [r.rung, r.initialTrust]))
+      .toEqual([["lifecycle-hooks", "trial"], ["window-sampling", "authoritative"]]);
   });
 });

@@ -117,6 +117,7 @@ describe("managed skill catalog and composable loadouts", () => {
   it.each([
     ["claude-code", ".claude"],
     ["codex", ".agents"],
+    ["cursor", ".agents"],
   ] as const)("projects exact bytes idempotently for %s and removes only stale owned unchanged skills", (runtime, harnessDir) => {
     const f = fixture([]);
     writeSkill(f.catalog, "one");
@@ -158,6 +159,7 @@ describe("managed skill catalog and composable loadouts", () => {
   it.each([
     ["claude-code", ".claude"],
     ["codex", ".agents"],
+    ["cursor", ".agents"],
   ] as const)("keeps a successful %s projection clean in ordinary Git without hiding unrelated harness entries", (runtime, harnessDir) => {
     const f = fixture([]);
     writeSkill(f.catalog, "managed");
@@ -199,6 +201,35 @@ describe("managed skill catalog and composable loadouts", () => {
       .toMatchObject({ ok: true, removed: ["managed"] });
     expect(() => git(f.root, "check-ignore", "--no-index", join(f.project, harnessDir, "skills", "managed", "SKILL.md"))).toThrow();
     expect(readFileSync(excludePath, "utf8")).toBe(operatorExclude);
+    expect(git(f.root, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+  });
+
+  it("adds a codex block to a .agents/skills/.gitignore that holds only the cursor managed block", () => {
+    const f = fixture([]);
+    writeSkill(f.catalog, "cursor-only");
+    writeSkill(f.catalog, "codex-only");
+    commit(f.root);
+    const ignorePath = join(f.project, ".agents", "skills", ".gitignore");
+
+    const cursorLoadout = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["cursor-only"] });
+    expect(cursorLoadout.ok).toBe(true);
+    if (!cursorLoadout.ok) return;
+    expect(reconcileSkillLoadout({ loadout: cursorLoadout.loadout, runtime: "cursor", cwd: f.project, apply: true }))
+      .toMatchObject({ ok: true, applied: true });
+    const cursorOnly = readFileSync(ignorePath, "utf8");
+    expect(cursorOnly).toContain("# BEGIN OpenRig managed skill loadout cursor");
+    expect(cursorOnly).not.toContain("loadout codex");
+
+    const codexLoadout = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["codex-only"] });
+    expect(codexLoadout.ok).toBe(true);
+    if (!codexLoadout.ok) return;
+    const result = reconcileSkillLoadout({ loadout: codexLoadout.loadout, runtime: "codex", cwd: f.project, apply: true });
+    expect(result.errors).toEqual([]);
+    expect(result).toMatchObject({ ok: true, applied: true });
+    expect(JSON.stringify(result)).not.toContain("refusing to modify an existing unmanaged Git ignore file");
+    const both = readFileSync(ignorePath, "utf8");
+    expect(both).toContain("# BEGIN OpenRig managed skill loadout cursor");
+    expect(both).toContain("# BEGIN OpenRig managed skill loadout codex");
     expect(git(f.root, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
   });
 
@@ -292,6 +323,7 @@ describe("managed skill catalog and composable loadouts", () => {
   it.each([
     ["claude-code", ".claude"],
     ["codex", ".agents"],
+    ["cursor", ".agents"],
   ] as const)("preserves a %s projection after a mode-only local edit", (runtime, harnessDir) => {
     const f = fixture([]);
     writeSkill(f.catalog, "executable");

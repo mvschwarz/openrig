@@ -39,6 +39,10 @@ describe("row-scale mark family", () => {
     expect(runtimeMarkSegs(null)[0]!.token).toBe("dim"); // honest, never fabricated
   });
 
+  it("gives cursor its own mark, not the unknown token", () => {
+    expect(markText(runtimeMarkSegs("cursor"))).toBe("◆_");
+  });
+
   it("both downscale candidates are OUTPUTS of the grid downsample (provably derived — guard finding 4)", async () => {
     const { clawdDownsample } = await import("../src/topology/runtime-marks.js");
     expect(clawdMiniA()).toEqual(clawdDownsample(2, 1)[0]);

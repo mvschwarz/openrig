@@ -517,7 +517,7 @@ Examples:
   cmd
     .command("set-permissions")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .requiredOption("--mode <mode>", "floor, full_bypass, inherit, or a Claude mode supported by the bound managed launch context")
+    .requiredOption("--mode <mode>", "floor, full_bypass, inherit, auto_review (Cursor seats), or a Claude mode supported by the bound managed launch context")
     .requiredOption("--reason <text>", "Reason for the audited future-launch selection")
     .option("--json", "JSON output for agents")
     .description("Select native permissions for future managed launches; no relaunch or work-posture change")

@@ -81,6 +81,7 @@ Keys:
   agents.*               advisor_session, operator_session
   feed.subscriptions.*   action_required, approvals, shipped, progress, audit_log
   runtime.codex.*        hooks_enabled
+  runtime.cursor.*       hooks_enabled
   workflow.*             exception_routing (orchestrator | human_only — the maturity-dial host default)
   policies.claude_compaction.*
                          enabled, threshold_percent, compact_instruction,
@@ -163,6 +164,11 @@ Precedence: CLI flag > environment variable > config file > default`)
         // SWEEP-c: boot-only key + running daemon = stale-until-restart; say so loudly.
         if (isBootOnlyKey(key) && (await probeDaemonRunning())) {
           console.error(`note: '${key}' is read at daemon BOOT — the running daemon keeps its current value; this takes effect on the next daemon restart (rig daemon stop && rig daemon start).`);
+        }
+        // Cursor seat launches read this key live, but OpenRig's entries in ~/.cursor/hooks.json are
+        // only removed at daemon start.
+        if (key === "runtime.cursor.hooks_enabled" && store.get(key) === false && (await probeDaemonRunning())) {
+          console.error("note: new Cursor seat launches stop adding hooks now; OpenRig's entries already in ~/.cursor/hooks.json are removed at the next daemon restart (rig daemon stop && rig daemon start).");
         }
       } catch (err) {
         console.error((err as Error).message);

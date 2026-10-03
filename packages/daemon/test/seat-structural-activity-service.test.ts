@@ -141,3 +141,25 @@ describe("SeatStructuralActivityService — MF2: single-flight, held until settl
     db.close();
   });
 });
+
+describe("SeatStructuralActivityService — runtime-specific pane rules", () => {
+  it("passes the seat's runtime, so a Cursor seat at its approval panel reads as needing input", async () => {
+    const db = createFullTestDb();
+    const rigRepo = new RigRepository(db);
+    const reg = new SessionRegistry(db);
+    const rig = rigRepo.createRig("r");
+    const node = rigRepo.addNode(rig.id, "qa.cursor", { runtime: "cursor" });
+    const sess = reg.registerSession(node.id, "cursor@r");
+    reg.updateStatus(sess.id, "running");
+    reg.updateBinding(node.id, { tmuxSession: "cursor@r", attachmentType: "tmux" });
+    const approval = [
+      "  $ touch x Waiting for approval...",
+      " Run this command?",
+      "  → Run (once) (y)",
+      "    Skip & tell the agent what to do instead (esc or n)",
+    ].join("\n");
+    const svc = new SeatStructuralActivityService(mkTmux(approval));
+    await svc.pollAllRunningTmuxSeats(db);
+    expect(svc.getStructuralActivity("cursor@r")).toMatchObject({ state: "attention", reason: "permission_prompt" });
+  });
+});
