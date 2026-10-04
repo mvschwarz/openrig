@@ -26,7 +26,12 @@ data:{sessionFile:${JSON.stringify(session)},sessionId:'offline'}}));});
         const shim = path.join(temp, kind === "mise" ? "mise" : "multiplexer");
         fs.writeFileSync(shim, `#!/bin/sh
 ${kind === "mise" ? `if [ "$1" = which ]; then printf '%s\\n' ${quote(good)}; exit 0; fi` : ""}
-[ "\${0##*/}" = pi ] || exit 7
+if [ "\${0##*/}" != pi ]; then
+  # Consume the first request so an EPIPE cannot mask the dispatch failure.
+  IFS= read -r request || :
+  printf '%s\\n' 'SHIM_DISPATCH_NAME_MISMATCH' >&2
+  exit 7
+fi
 [ "$PWD" = ${quote(temp)} ] || exit 8
 exec ${quote(process.execPath)} ${quote(good)}
 `, { mode: 0o700 });
