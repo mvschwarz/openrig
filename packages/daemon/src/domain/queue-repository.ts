@@ -2600,7 +2600,7 @@ export class QueueRepository {
         if (!blocker) {
           throw new QueueRepositoryError(
             "blocker_not_found",
-            `blocked_on names a qitem that does not exist: ${effectiveBlockedOn}. A park must name a real, live blocker — a nonexistent blocker can never complete, so the row could never unpark.`,
+            `blocked_on names a qitem that does not exist on this daemon: ${effectiveBlockedOn}. A qitem absent from this daemon cannot be a live blocker here. If it is stored on another host, use a typed gate such as external:<host>/<id> with --wake-watchdog or --wake-after.`,
             // F1 (error-honesty): the rejected value is named rejectedBlocker — an error payload
             // never carries the success-shaped blockedOn field (the field-filtered-misread class).
             { rejectedBlocker: effectiveBlockedOn },

@@ -218,7 +218,8 @@ observation; explicit production configuration supplies each value.
 
 `rig project shadow-status` only inspects configuration/counters.
 `rig project shadow-drain` asks the existing HTTP service to drain up to 64 rows;
-it requires an actor and never enables capture. No background drain timer is added.
+it requires an actor (outside a managed seat, name one with `--actor <name>`)
+and never enables capture. No background drain timer is added.
 `rig project shadow-stop` disables new enqueueing immediately, finishes any active
 drain and the finite retained queue, then closes the sink. Repeated stop is
 idempotent; it cannot enable capture or delete the existing archive. Existing

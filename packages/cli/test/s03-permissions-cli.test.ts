@@ -38,7 +38,7 @@ describe("S03 policy permissions compatibility", () => {
     expect(policy.commands.some(c => c.name() === "work")).toBe(false);
     const select = seatCommand().commands.find(c => c.name() === "set-permissions")!;
     expect(select.description()).toContain("future managed launches");
-    expect(select.options.map(o => o.long)).toEqual(["--mode", "--reason", "--json"]);
+    expect(select.options.map(o => o.long)).toEqual(["--mode", "--reason", "--operator", "--json"]);
     expect(select.options.find(o => o.long === "--mode")!.description)
       .toBe("floor, full_bypass, inherit, auto_review (Cursor seats), or a Claude mode supported by the bound managed launch context");
   });

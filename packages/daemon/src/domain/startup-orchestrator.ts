@@ -464,15 +464,17 @@ export class StartupOrchestrator {
     }
 
     // Delivering the first native prompt can reveal a provider refusal or
-    // interactive gate. A positive attention requirement is not ready.
-    if (postLaunchFiles.length > 0) {
+    // interactive gate. Bundled identity/preload prompts consume their files,
+    // so the remaining file list alone does not tell us whether context was sent.
+    if (postLaunchFiles.length > 0 || deliveryInput.sendOrder > 0) {
       try {
         const readiness = await input.adapter.checkReady(input.binding);
         if (!readiness.ready && isAttentionRequiredReadinessCode(readiness.code)) {
           return this.fail(deliveryInput, "attention_required", [readiness.reason ?? "The native provider prerequisite failed after context delivery."]);
         }
       } catch (error) {
-        return this.fail(deliveryInput, "attention_required", [`Post-delivery runtime state is unavailable: ${(error as Error).message}`]);
+        // An unavailable observation is not a positive provider prerequisite.
+        deliveryInput.submissionWarnings.push(`Post-delivery runtime state is unverified: ${(error as Error).message}`);
       }
     }
 

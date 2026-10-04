@@ -1,4 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { shellQuote } from "../src/adapters/shell-quote.js";
 import { TmuxAdapter, type TmuxFileOps } from "../src/adapters/tmux.js";
 
 function fixture(fail?: string, scriptPath = "/tmp/launch 'quoted'.sh") {
@@ -21,7 +26,83 @@ function fixture(fail?: string, scriptPath = "/tmp/launch 'quoted'.sh") {
 }
 
 describe("shell launch transport", () => {
-  it.each(["fish", "nu", "unknown", "pwsh", null])("retains /bin/sh staging when the pane reports %s", async shell => {
+  it.each(["fish", "-fish"])("selects fish sourcing or the older-fish sh fallback before launching (%s)", async shell => {
+    const f = fixture();
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
+    const command = `OPENRIG_HOME='/instance' PATH='/rig/bin':"$PATH" claude --model '${"m".repeat(4096)}'`;
+    expect(await f.adapter.sendShellCommand("pane", command, undefined, { sourceInPane: true })).toEqual({ ok: true });
+    const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
+    const quotedPath = shellQuote(f.scriptPath);
+    expect(invocation).toBe(`if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`);
+    expect(Buffer.byteLength(invocation)).toBeLessThan(512);
+    expect(f.files.get(f.scriptPath)).toBe(`/bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh'\n${command}\n`);
+    expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
+  });
+
+  it("uses only the existing sh dependency for the fish capability probe", async () => {
+    const f = fixture();
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
+    const probe = invocation.match(/^if eval '([^']+)';/)?.[1];
+    expect(probe).toBe("OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :");
+    expect(execFileSync("/bin/sh", ["-c", probe!], { encoding: "utf8" })).toBe("");
+  });
+
+  it.each([214, 215])("respects the input bound at a %i-byte quoted fish staging path", async quotedBytes => {
+    const f = fixture(undefined, "/tmp/" + "p".repeat(quotedBytes - 7));
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
+    expect(Buffer.byteLength(shellQuote(f.scriptPath))).toBe(quotedBytes);
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
+    if (quotedBytes === 214) {
+      expect(invocation).toContain("OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :");
+      expect(Buffer.byteLength(invocation)).toBe(512);
+    } else {
+      expect(invocation).toBe(`/bin/sh ${shellQuote(f.scriptPath)}`);
+      expect(Buffer.byteLength(invocation)).toBeLessThan(512);
+    }
+  });
+
+  it.each(["pair\\\\backslashes", "trailing\\", "quote\\'backslash"])("keeps a backslash payload on sh without changing its value (%s)", async value => {
+    const root = mkdtempSync(join(tmpdir(), "fish-staging-"));
+    try {
+      const f = fixture(undefined, join(root, "launch.sh"));
+      vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
+      const command = `VALUE=${shellQuote(value)} /bin/sh -c 'printf %s "$VALUE"'`;
+      expect(await f.adapter.sendShellCommand("pane", command, undefined, { sourceInPane: true })).toEqual({ ok: true });
+      expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh ${shellQuote(f.scriptPath)}`);
+      // Execute the selected POSIX payload with a real shell, not a quoting model.
+      expect(execFileSync("/bin/sh", ["-c", f.files.get(f.scriptPath)!], { encoding: "utf8" })).toBe(value);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("keeps the existing sh invocation for a backslash staging path", async () => {
+    const f = fixture(undefined, "/tmp/launch\\\\tail\\");
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh ${shellQuote(f.scriptPath)}`);
+    expect(f.files.get(f.scriptPath)).toBe(`/bin/rm -f -- ${shellQuote(f.scriptPath)}\nclaude\n`);
+  });
+
+  it("keeps the short sh invocation when fish fallback syntax would exceed the input bound", async () => {
+    const f = fixture(undefined, "/tmp/" + "p".repeat(240));
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
+    expect(invocation).toBe(`/bin/sh ${shellQuote(f.scriptPath)}`);
+    expect(Buffer.byteLength(invocation)).toBeLessThan(512);
+  });
+
+  it("keeps ordinary staging unchanged in fish without sourceInPane", async () => {
+    const f = fixture();
+    const paneCommand = vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
+    expect(await f.adapter.sendShellCommand("pane", "codex")).toEqual({ ok: true });
+    expect(paneCommand).not.toHaveBeenCalled();
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
+  });
+
+  it.each(["nu", "unknown", "pwsh", null])("retains /bin/sh staging when the pane reports %s", async shell => {
     const f = fixture();
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
@@ -34,7 +115,7 @@ describe("shell launch transport", () => {
     expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
   });
 
-  it.each(["bash", "zsh", "sh", "dash", "ksh", "-bash"])("sources in the pane only for a reported POSIX shell (%s)", async shell => {
+  it.each(["bash", "zsh", "sh", "dash", "ksh", "-bash"])("retains subshell sourcing for a reported POSIX shell (%s)", async shell => {
     const f = fixture();
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });

@@ -90,16 +90,24 @@ describe("runtime version preflight cwd", () => {
     expect(result.bootstrap).toMatchObject({ status: 200, result: { status: "planned", errors: [] } });
   });
 
-  it.skipIf(process.platform === "win32")("still refuses a genuinely absent executable, with bounded detail", () => {
+  it.skipIf(process.platform === "win32")("lets the pane resolve Pi when the daemon cannot find it", () => {
     const result = probe("missing");
     for (const value of [result.core, result.route, result.legacy]) {
+      expect(value.ready).toBe(true);
+      expect(value.errors).toEqual([]);
+      expect(value.warnings.join("\n")).toContain("daemon's PATH");
+      expect(value.warnings.join("\n")).toContain("pane's shell");
+    }
+    expect(result.bootstrap).toMatchObject({ status: 200, result: { status: "planned", errors: [] } });
+  });
+
+  it.skipIf(process.platform === "win32")("keeps the existing absent-OMP refusal", () => {
+    const result = probe("missing", "omp");
+    for (const value of [result.core, result.route, result.legacy]) {
       expect(value.ready).toBe(false);
-      expect(value.errors).toHaveLength(1);
-      expect(value.errors[0]).toContain("exit status 127");
-      expect(value.errors[0]).toContain("executable not found on PATH");
+      expect(value.errors.join("\n")).toContain("executable not found on PATH");
     }
     expect(result.bootstrap).toMatchObject({ status: 409, result: { status: "failed" } });
-    expect(result.bootstrap.result.errors.join("\n")).toContain("executable not found on PATH");
   });
 
   it("distinguishes cwd lookup failure without echoing arbitrary process output", async () => {

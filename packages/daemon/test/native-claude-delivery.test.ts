@@ -24,6 +24,7 @@ const modes = [
   "launcher-shim-match", "launcher-shim-match-after", "launcher-shim-child-differs",
   "launcher-shim-child-differs-after", "launcher-shim-child-unparsed",
   "launcher-shim-shims-differ", "launcher-shim-child-two-sessions", "settings-single",
+  "effort-separated", "effort-equals", "unknown-value-flag",
 ];
 // The real process behind a spawning shim carries its own argv.
 const shimChild: Record<string, string> = {
@@ -60,6 +61,12 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
           command: `${executable} --permission-mode auto ${mode === "settings-single" ? "--settings /fixture/settings.json " : ""}${mode === "missing-token" ? "" : `--session-id ${mode.startsWith("wrong-token") || mode === "launcher-shim-shims-differ" ? "different" : token}`} --name ${name}`, startedAt },
       ]),
     ];
+    const extraFlag: Record<string, string> = {
+      "effort-separated": "--effort high",
+      "effort-equals": "--effort=high",
+      "unknown-value-flag": "--unrecognised-flag high",
+    };
+    if (extraFlag[mode]) rows[2]!.command += ` ${extraFlag[mode]}`;
     // The shell still owns the terminal; these children are in background groups.
     if (mode === "bare-shell-helper" || mode === "bare-shell-job") {
       rows.push({ pid: 103, ppid: 100, pgid: 103, tpgid: 100,
@@ -123,6 +130,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
       "launcher-shim-match", "launcher-shim-match-after", "launcher-shim-child-unparsed",
       "launcher-shim-child-two-sessions", "settings-single",
       "wrong-token", "wrong-token-post-read-error", "wrong-token-post-read-empty", "launcher-shim-shims-differ",
+      "effort-separated", "effort-equals", "unknown-value-flag",
     ].includes(mode);
     if (bare) expect({ ok: sent.ok, calls }).toEqual({ ok: false, calls: [] });
     expect(sent.ok).toBe(expectedSend);
@@ -131,8 +139,9 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     expect(observation !== null).toBe([
       "npm-name", "versioned", "pane-command-unavailable", "versioned-direct-pane", "missing-metadata",
       "ambiguous-pane", "changed-binding", "onboarding", "changed-after-paste",
+      "effort-separated", "effort-equals",
     ].includes(mode));
-    if (expectedSend && ["unavailable", "unknown-both", "missing-token", "missing-metadata", "background", "other-semver", "versioned-argv-only", "versioned-comm-only", "launcher-shim", "launcher-shim-child-unparsed", "launcher-shim-child-two-sessions"].includes(mode)) {
+    if (expectedSend && ["unavailable", "unknown-both", "missing-token", "missing-metadata", "background", "other-semver", "versioned-argv-only", "versioned-comm-only", "launcher-shim", "launcher-shim-child-unparsed", "launcher-shim-child-two-sessions", "unknown-value-flag"].includes(mode)) {
       expect(sent.warning).toContain("without verified native identity");
     }
     // Static launch tokens alone cannot prove a different current recipient after
@@ -142,6 +151,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     }
     // --settings is delivery-only: the strict selector above still rejects it (observation === null).
     if (mode.startsWith("launcher-shim-match") || mode === "settings-single") expect(sent.warning ?? "").not.toContain("without verified native identity");
+    if (mode.startsWith("effort-")) expect(sent.warning ?? "").not.toContain("without verified native identity");
     if (mode.startsWith("launcher-shim-child-differs")) expect(sent.error).toContain("name different conversations");
     if (mode === "launcher-shim-mixed-token") expect(sent.error).toContain("name different conversations");
     // Two children of one shim are two runtimes, not a chain.

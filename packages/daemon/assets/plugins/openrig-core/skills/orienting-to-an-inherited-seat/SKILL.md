@@ -228,7 +228,10 @@ pre-release is a real failure. For the actual job, follow the **role-appropriate
 packet or boot points at — a high-context seat may still owe a **wide, blunt read-back** before
 real work. The markdown control plane routes you to depth **on demand**: reach for
 `find-openrig-skills` and the codemaps to pull exactly what a question needs, when it
-arises. Wide-angle first, then depth by need.
+arises. Wide-angle first, then depth by need. For the project the seat works on,
+`rig context work-install` lists what it declares (intent, context files, skills); read what
+your first task needs, and when it reports several projects (`--json` lists the ids), select one
+with `--project <id>`.
 
 ## See also
 

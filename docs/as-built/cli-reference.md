@@ -412,8 +412,8 @@ Root: `rig`; declared option: `-V, --version`.
 | `rig project candidates` | — | `--project <id>` **required**<br>`--taxonomy <file>` **required**<br>`--classifier-version <version>` **required**<br>`--evidence-epoch <epoch>` **required**<br>`--decisions <file>`<br>`--experiment <file>`<br>`--limit <count>`<br>`--json` |
 | `rig project wake` | — | `--project <id>` **required**<br>`--taxonomy <file>` **required**<br>`--classifier-version <version>` **required**<br>`--evidence-epoch <epoch>` **required**<br>`--decisions <file>`<br>`--experiment <file>`<br>`--limit <count>`<br>`--json` |
 | `rig project shadow-status` | — | — |
-| `rig project shadow-drain` | — | — |
-| `rig project shadow-stop` | — | — |
+| `rig project shadow-drain` | — | `--actor <name>` |
+| `rig project shadow-stop` | — | `--actor <name>` |
 | `rig project lease-acquire` | — | `--session <session>` **required**<br>`--evaluate-deadness-first`<br>`--json` |
 | `rig project lease-heartbeat` | — | `--lease-id <id>` **required**<br>`--session <session>` **required**<br>`--json` |
 | `rig project lease-show` | — | `--json` |

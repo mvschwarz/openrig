@@ -596,9 +596,11 @@ the restore reconciler's exact native-token and usable-pane checks; `--reason`
 cannot replace them. Subset-restore attention can reach the attestation path
 when no active pane-identity class takes precedence. That path records
 `operator_recovered` with `runtimeCwdVerified:false`; it is an acknowledgment,
-not proof of resumed lineage. Current inventory can still derive `resumed` from
-that outcome when no explicit continuity outcome exists, so do not use that
-label alone as continuity evidence.
+not proof of resumed lineage. Without an explicit stored continuity outcome,
+inventory leaves continuity null (`unverified` in `rig seat status`) unless the
+same restore attempt has a matching receipt and reconciliation with strict
+native-token and usable-pane proof. Explicit stored outcomes remain historical
+facts; acknowledgment or responsiveness alone cannot infer `resumed`.
 
 ### Native Codex session id capture
 

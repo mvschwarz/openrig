@@ -163,6 +163,33 @@ function printResult(json: boolean, body: unknown, status: number): void {
   if (status >= 400) process.exitCode = status >= 500 ? 2 : 1;
 }
 
+// Recovery belongs to the selected daemon's reply; never infer a host from an ID.
+async function printQueueItemResult(
+  client: DaemonClient,
+  qitemId: string,
+  json: boolean,
+  body: unknown,
+  status: number,
+): Promise<void> {
+  if (status >= 400 && body && typeof body === "object"
+    && (body as { error?: unknown }).error === "qitem_not_found") {
+    let selfHostId: string | undefined;
+    try {
+      const health = await client.get<{ selfHostId?: unknown }>("/healthz", { timeoutMs: 1_000 });
+      if (health.status === 200 && typeof health.data?.selfHostId === "string" && health.data.selfHostId.trim()) {
+        selfHostId = health.data.selfHostId;
+      }
+    } catch { /* Identity enrichment must not replace the original queue failure. */ }
+    const daemon = selfHostId ? `daemon ${JSON.stringify(selfHostId)}` : "the selected daemon (host ID unavailable)";
+    body = {
+      ...body,
+      hint: `Queue item ${JSON.stringify(qitemId)} was not found on ${daemon}.\n`
+        + `If it came from another host, run rig host list; replace <daemon-url> with its registered daemon URL and run: OPENRIG_URL='<daemon-url>' rig queue show ${shellQuote(qitemId)} --full --json`,
+    };
+  }
+  printResult(json, body, status);
+}
+
 // OPR.0.4.3.03 — `rig queue show` body preview.
 //
 // Default `show` renders a BOUNDED body preview instead of dumping the whole
@@ -656,7 +683,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/claim`, {});
-        printResult(opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });
 
@@ -675,7 +702,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/unclaim`, {
           reason: opts.reason,
         });
-        printResult(opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });
 
@@ -726,7 +753,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
         });
-        printResult(opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });
 
@@ -739,7 +766,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   // potato and no closure_reason is involved.
   cmd
     .command("block <qitemId>")
-    .description("Park a qitem as HELD with a continuation and wake. Choose a watchdog id, timer, or live blocker.")
+    .description("Park a qitem as HELD with a continuation and wake. Requires --on <blocker>. Choose --wake-watchdog, --wake-after, or a live blocker qitem for the wake.")
     .requiredOption("--on <blocker>", "The blocker: a live blocker qitem, typed gate, or human-seat session")
     .option("--actor <session>", "(deprecated, ignored) the actor is derived from the seat env (X-OpenRig-Session); the park writes via the same P21 I3 header-deriving update route")
     .option("--summary <text>", "Plain-language summary of the decision owed (required for human-seat parks unless already on the item)")
@@ -750,10 +777,12 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--wake-after <duration>", "Atomically arm a timer with the park (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
+--on <blocker> is always required; a wake option does not replace it.
 Every deliberate HELD row should name its continuation and one live wake:
   --wake-watchdog <jobId>  attach a live watchdog id
   --wake-after <duration>  arm a timer atomically with the park
-  --on qitem-…             a live blocker resolution is the wake
+
+A live blocker qitem supplied with --on also wakes the row when resolved.
 
 HELD is only for a row that must stay on the queue while waiting. Work with a
 workspace home that is deferred/not-imminent belongs in its mission/slice.`)
@@ -782,7 +811,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           wakeAfterSeconds: opts.wakeAfter,
           transitionNote: opts.continuation ? `continuation: ${opts.continuation}` : (opts.note ?? `parked on ${opts.on}`),
         });
-        printResult(opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });
 
@@ -825,7 +854,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           },
           bearer ? { headers: { Authorization: `Bearer ${bearer}` } } : undefined,
         );
-        printResult(opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });
 
@@ -918,7 +947,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
-        printResult(opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });
 
@@ -1011,7 +1040,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           nudge: opts.nudge,
           ...(hostResolved.hostId !== undefined ? { hostId: hostResolved.hostId } : {}),
         });
-        printResult(opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });
 
@@ -1048,7 +1077,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
           fallbackDestination: opts.destination,
           reason: opts.reason,
         });
-        printResult(opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });
 
@@ -1068,7 +1097,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         // passthrough on error responses / non-object payloads, where there is
         // no string body to preview.
         if (opts.full || res.status >= 400 || !isRecordWithStringBody(item)) {
-          printResult(json, item, res.status);
+          await printQueueItemResult(client, qitemId, json, item, res.status);
           return;
         }
         const { preview, bodyBytes, bodyTruncated } = previewBody(item.body);
@@ -1092,7 +1121,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/transitions`);
-        printResult(opts.json ?? false, res.data, res.status);
+        await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });
 

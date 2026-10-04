@@ -11,7 +11,7 @@ interface TmuxShellCommandOptions {
   stageIfLong?: boolean;
   /** A staged single-executable runner must replace the staging shell. */
   execInScript?: boolean;
-  /** Preserve rc aliases/functions in a POSIX pane shell; other shells use /bin/sh. */
+  /** Preserve rc aliases/functions in POSIX or fish panes; other shells use /bin/sh. */
   sourceInPane?: boolean;
 }
 
@@ -585,7 +585,7 @@ export class TmuxAdapter {
   }
 
   /**
-   * Paste text at every size. Unbracketed input can be consumed as individual
+   * Bracketed paste by default, at every size. Unbracketed input can be consumed as individual
    * keystrokes by agent TUIs, losing text even below the old 8 KiB cutoff.
    * A file keeps payload bytes out of shell/tmux argv and its size limits.
    *   `-p`  bracket the paste when the receiving application enables that mode.
@@ -593,17 +593,19 @@ export class TmuxAdapter {
    *         CR, and CR is SUBMIT in the Claude/Codex TUIs - a
    *         default paste of a multi-line pack would submit on every newline.
    *   `-d`  drop the buffer after a successful paste.
-   * The single trailing submit stays the caller's separate `sendKeys(["Enter"])`.
+   * `options.bracketed: false` omits `-p` for explicit prompt answers: bytes
+   * then act as keystrokes, including menu shortcuts and control keys.
+   * Any trailing submit stays the caller's separate `sendKeys(["Enter"])`.
    * Cleanup unlinks the temp file in `finally`; if the buffer was loaded but the
    * paste failed (e.g. missing target), an explicit `delete-buffer` runs so no
    * buffer leaks. Unique temp + buffer names per call keep parallel `rig up`
    * seats from colliding.
    */
-  async sendText(target: string, text: string, beforeInput?: () => void): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }));
+  async sendText(target: string, text: string, beforeInput?: () => void, options?: { bracketed?: boolean }): Promise<TmuxResult> {
+    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }, options?.bracketed));
   }
 
-  private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void): Promise<TmuxResult> {
+  private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void, bracketed = true): Promise<TmuxResult> {
     const path = this.fileOps.tmpName();
     const buffer = this.fileOps.bufferName();
     let bufferLoaded = false;
@@ -615,8 +617,11 @@ export class TmuxAdapter {
         `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
       bufferLoaded = true;
       beforeWrite();
-      await this.run(["tmux", "paste-buffer", "-t", target, "-b", buffer, "-d", "-r", "-p"],
-        `tmux paste-buffer -t ${shellQuote(target)} -b ${shellQuote(buffer)} -d -r -p`);
+      // Explicit prompt answers need key input, not bracketed-paste framing.
+      // Keep their bytes in the file: tmux command parsing and argv limits must
+      // not alter semicolons or reject long answers (#519, #602).
+      await this.run(["tmux", "paste-buffer", "-t", target, "-b", buffer, "-d", "-r", ...(bracketed ? ["-p"] : [])],
+        `tmux paste-buffer -t ${shellQuote(target)} -b ${shellQuote(buffer)} -d -r${bracketed ? " -p" : ""}`);
       return { ok: true };
     } catch (err) {
       if (bufferLoaded) {
@@ -655,12 +660,24 @@ export class TmuxAdapter {
 
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
     const commandBytes = Buffer.byteLength(command, "utf8");
-    // The subshell/source syntax is not valid in fish or nu. Unknown/unreadable
-    // panes retain the portable /bin/sh invocation used by ordinary staging.
+    // POSIX shells retain subshell isolation; unknown/unreadable panes use sh.
     const paneShell = options.sourceInPane ? (await this.getPaneCommand(target) ?? "").replace(/^-/, "") : "";
     const sourceInPane = ["bash", "zsh", "sh", "dash", "ksh"].includes(paneShell);
     let path = options.stageIfLong && commandBytes <= 512 ? undefined : this.fileOps.tmpName();
     let invocation = path ? sourceInPane ? `( . ${shellQuote(path)} )` : `/bin/sh ${shellQuote(path)}` : command;
+    if (path && paneShell === "fish") {
+      const quotedPath = shellQuote(path);
+      invocation = `/bin/sh ${quotedPath}`;
+      // Fish single quotes reinterpret POSIX backslashes. Keep those payloads
+      // (and paths) on sh, preserving existing executable launches byte-for-byte.
+      if (!command.includes("\\") && !path.includes("\\")) {
+        // Probe fixed syntax in the pane before sourcing, not the launch's exit
+        // status: even failed cleanup must not turn a later exit into a retry.
+        const sourced = `if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`;
+        // Repeating the path must not add a refusal for previously valid TMPDIRs.
+        if (Buffer.byteLength(sourced, "utf8") <= 512) invocation = sourced;
+      }
+    }
     if (Buffer.byteLength(invocation, "utf8") > 512) {
       // Pi commands below the canonical tty limit still fit when staging cannot.
       if (options.stageIfLong && commandBytes < 1024) {

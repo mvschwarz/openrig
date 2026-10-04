@@ -46,6 +46,24 @@ install:
     - repository-maintenance
 ```
 
+A project can also name world packs to read after the System World, in order:
+
+```yaml
+install:
+  worlds:
+    - ref: openrig-world
+    - ref: project-world
+      profiles: { claude: guided }
+```
+
+Each `install.worlds` entry has the same `{ ref, profiles }` shape as a System
+World `context` entry. `work-install` lists them as `context world <ref>` lines
+and `worlds` in `--json`; it never delivers their content, so read each with
+`rig context get <ref>`. An invalid entry, or a ref the System World or an
+earlier entry already lists, is ignored with a warning. Without the key, the
+output is unchanged. The list holds pack names only, resolved from the local
+library when read, so naming a world copies none of its content.
+
 `install.context` contains project-relative Markdown addresses. `install.skills`
 contains stable skill identities only. Skill source bytes live in the single
 configured managed catalog (`skills.root`, default `$OPENRIG_HOME/skills`),
@@ -72,6 +90,37 @@ An installed project selection is also retained in that working directory's
 ownership receipt. A later seat start with no project-world input preserves it;
 an explicit install whose `install.skills` is empty clears it. This keeps
 "project not supplied" distinct from "project deliberately selects no skills."
+
+## Work-install project selection
+
+`rig context work-install` picks one project from `workspace.yaml`, in this
+order:
+
+1. `--project <id>`;
+2. the only declared project;
+3. the project whose entry lists the calling seat's rig under `rigs`;
+4. the deepest declared project root that contains the working directory
+   (`--cwd`, else the current directory);
+5. the only project whose entry lists no `rigs`, so a rig that isn't listed
+   anywhere keeps its project after a claimed project is added beside it;
+6. otherwise it stops with `project_required` and prints each candidate's exact
+   command.
+
+```yaml
+schema: openrig.workspace/v0alpha1
+projects:
+  - id: default
+    root: .
+  - id: contributor
+    root: projects/contributor
+    rigs: [openrig-dev]
+```
+
+`rigs` is optional. An entry whose `rigs` isn't a list of rig names is ignored
+with a warning. A rig listed under two projects, or two projects sharing the
+deepest root, leave the choice to `--project`. Step 3 reads the seat's
+`OPENRIG_SESSION_NAME`, so a plain shell skips it. `--json` reports the step
+that chose the project as `position.selectedBy`.
 
 ## TUI project selection
 

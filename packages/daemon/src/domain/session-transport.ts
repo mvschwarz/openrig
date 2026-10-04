@@ -583,6 +583,24 @@ export function hasExpectedStagedText(pane: string | null, expected: string): bo
   return stagedEvidence;
 }
 
+/** An interaction may consume its answer immediately. Only add Enter when the
+ * complete answer is still visible in a bounded current text input, never a
+ * numbered choice or a partial prefix. Unknown rendering is not consumption. */
+function promptAnswerStaged(pane: string | null, answer: string, runtime: string | null): boolean {
+  if (!pane || !answer.trim() || /[\r\n\x1b]/.test(answer)) return false;
+  const lines = pane.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const input = lines[i]!.trimStart();
+    if (!/^[❯›]/.test(input)) continue;
+    if (/^[❯›]\s*\d+[.)]/.test(input)) return false;
+    if (runtime === "codex" ? !input.startsWith("›") : runtime !== "claude-code" || !input.startsWith("❯")) return false;
+    const end = lines.findIndex((line, index) => index > i && (runtime === "codex"
+      ? line.trim() === "" : /^[─═-]{10,}$/.test(line.trim())));
+    return end > i && lines.slice(i, end).join("\n").trimStart().slice(1).trim() === answer.trim();
+  }
+  return false;
+}
+
 export interface SendOpts {
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
@@ -639,6 +657,9 @@ export interface SendResult {
   ok: boolean;
   sessionName: string;
   verified?: boolean;
+  /** Audited prompt answer: consumers must never automatically retry Enter.
+   * Neither value establishes model consumption. Absent for ordinary sends. */
+  promptInteraction?: "enter-sent" | "unverified";
   /**
    * OPR.99.0.6.3 — honest delivery-outcome vocabulary (additive; `verified`
    * keeps its exact semantics for existing parsers). Three distinguishable
@@ -649,6 +670,8 @@ export interface SendResult {
    *   but the post-send capture raced a TUI redraw and could not re-confirm
    *   the snippet. Landed-but-unconfirmable, NOT a failure — confirm with
    *   `rig capture` if it matters. (Was collapsed into `Verified: no`.)
+   *   For a prompt answer, `promptInteraction: "unverified"` means input was
+   *   sent without added Enter; the prompt may already have consumed it.
    * - `failed`: the transport itself failed (paste or Enter did not land) —
    *   set on the send_failed / submit_failed returns for vocabulary symmetry;
    *   their `ok:false` + HTTP mapping is unchanged.
@@ -1323,6 +1346,7 @@ export class SessionTransport {
     // the positive-picker guard (FR-4 — the footgun separation). The advisory is carried on the
     // success result via `warning` so the honest telemetry is surfaced.
     let sendAdvisory: string | undefined;
+    let promptOverride = false;
     if (waitForIdleMs === undefined) {
       const readiness = await this.classifySendReadiness({
         sessionName,
@@ -1363,7 +1387,8 @@ export class SessionTransport {
               error: `Refused: --dangerously-interact requires an auditable override record, which could not be persisted (${audit.reason}). No text was sent.`,
             };
           }
-          // audited → proceed to the send.
+          // Audited answers use unbracketed input; a choice may submit itself.
+          promptOverride = true;
         } else {
           return {
             ok: false,
@@ -1421,11 +1446,15 @@ export class SessionTransport {
     const targetFailure = await checkClaudeTarget();
     if (targetFailure) return observe(targetFailure);
 
-    // 3. Send text (paste)
+    // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);
     const textResult = await this.runStage(
       "session_transport.send_text",
-      () => { opts?.beforeWrite?.(); return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text); },
+      () => {
+        opts?.beforeWrite?.();
+        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, opts?.beforeWrite, { bracketed: false });
+        return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text);
+      },
       (result) => result.ok ? "ok" : "failed",
     );
     if (!textResult.ok) {
@@ -1444,6 +1473,17 @@ export class SessionTransport {
 
     if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
 
+    if (promptOverride) {
+      const pane = await this.runStage("session_transport.prompt_override_pre_submit_capture",
+        () => this.tmuxAdapter.capturePaneContent(sessionName, 50)).catch(() => null);
+      if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
+      if (!promptAnswerStaged(pane, text, runtime)) {
+        return observe({ ok: true, sessionName, sent: true, verified: false, outcome: "rendered-unconfirmed", promptInteraction: "unverified",
+          warning: "prompt-override: answer sent as unbracketed input; submission unverified. No trailing Enter: the complete answer is not visibly staged (it may have been consumed, the prompt changed, or observation is unavailable)." });
+      }
+      sendAdvisory = "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer.";
+    }
+
     // 5. Submit (Enter)
     const submitResult = await this.runStage(
       "session_transport.submit",
@@ -1460,6 +1500,8 @@ export class SessionTransport {
         ...(waitMode ? { sent: true, ...waitEvidence } : {}),
       });
     }
+
+    const interaction = promptOverride ? { promptInteraction: "enter-sent" as const } : {};
 
     // 6. Verify if requested. At this point text + Enter BOTH succeeded, so the
     // message LANDED; the capture only re-confirms the render. Not re-confirming
@@ -1478,16 +1520,16 @@ export class SessionTransport {
         const preCount = countOccurrences(preVerifyContent ?? "", snippet);
         const postCount = countOccurrences(content ?? "", snippet);
         const verified = postCount > preCount;
-        return observe({ ok: true, sessionName, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
+        return observe({ ok: true, sessionName, ...interaction, verified, outcome: verified ? "delivered" : "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       } catch {
         if (observed && observed.post.state === "not_reached") {
           observed.post = { state: "unavailable", cause: "capture_error", capturedAt: this.now().toISOString(), captureSeq };
         }
-        return observe({ ok: true, sessionName, verified: false, outcome: "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
+        return observe({ ok: true, sessionName, ...interaction, verified: false, outcome: "rendered-unconfirmed", ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
       }
     }
 
-    return observe({ ok: true, sessionName, ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
+    return observe({ ok: true, sessionName, ...interaction, ...(sendAdvisory ? { warning: sendAdvisory } : {}), ...(waitMode ? { sent: true, ...waitEvidence } : {}) });
   }
 
   private runStage<T>(

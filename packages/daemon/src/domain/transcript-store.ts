@@ -291,8 +291,9 @@ export class TranscriptStore {
       // Shell redraws often emit char + backspace before replaying the line.
       .replace(/\r/g, "\n")
       .replace(/\u00a0/g, " ")
-      .replace(/[^\n]\x08/g, (match) => applyBackspaces(match))
-      .replace(/\x08+/g, "")
+      .split("\n")
+      .map(applyBackspaces)
+      .join("\n")
       // Treat carriage-return redraws as separate transcript lines.
       .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "")
       .replace(/[ \t]+\n/g, "\n")
