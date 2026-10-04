@@ -33,10 +33,35 @@ describe("shell launch transport", () => {
     expect(await f.adapter.sendShellCommand("pane", command, undefined, { sourceInPane: true })).toEqual({ ok: true });
     const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
     const quotedPath = shellQuote(f.scriptPath);
-    expect(invocation).toBe(`if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/true'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`);
+    expect(invocation).toBe(`if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`);
     expect(Buffer.byteLength(invocation)).toBeLessThan(512);
     expect(f.files.get(f.scriptPath)).toBe(`/bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh'\n${command}\n`);
     expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
+  });
+
+  it("uses only the existing sh dependency for the fish capability probe", async () => {
+    const f = fixture();
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
+    const probe = invocation.match(/^if eval '([^']+)';/)?.[1];
+    expect(probe).toBe("OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :");
+    expect(execFileSync("/bin/sh", ["-c", probe!], { encoding: "utf8" })).toBe("");
+  });
+
+  it.each([214, 215])("respects the input bound at a %i-byte quoted fish staging path", async quotedBytes => {
+    const f = fixture(undefined, "/tmp/" + "p".repeat(quotedBytes - 7));
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
+    expect(Buffer.byteLength(shellQuote(f.scriptPath))).toBe(quotedBytes);
+    expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
+    const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
+    if (quotedBytes === 214) {
+      expect(invocation).toContain("OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :");
+      expect(Buffer.byteLength(invocation)).toBe(512);
+    } else {
+      expect(invocation).toBe(`/bin/sh ${shellQuote(f.scriptPath)}`);
+      expect(Buffer.byteLength(invocation)).toBeLessThan(512);
+    }
   });
 
   it.each(["pair\\\\backslashes", "trailing\\", "quote\\'backslash"])("keeps a backslash payload on sh without changing its value (%s)", async value => {

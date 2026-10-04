@@ -668,7 +668,7 @@ export class TmuxAdapter {
       if (!command.includes("\\") && !path.includes("\\")) {
         // Probe fixed syntax in the pane before sourcing, not the launch's exit
         // status: even failed cleanup must not turn a later exit into a retry.
-        const sourced = `if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/true'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`;
+        const sourced = `if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`;
         // Repeating the path must not add a refusal for previously valid TMPDIRs.
         if (Buffer.byteLength(sourced, "utf8") <= 512) invocation = sourced;
       }
