@@ -23,7 +23,7 @@ import nodePath from "node:path";
 import readline from "node:readline";
 import { PassThrough } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
@@ -728,7 +728,7 @@ export function resolveRuntimeExecutable(
     .filter((dir) => cwd !== undefined || nodePath.isAbsolute(dir))
     .map((dir) => cwd === undefined ? nodePath.join(dir, name) : nodePath.resolve(cwd, dir, name))
     .find((candidate) => ops.isExecutable(candidate));
-  if (!onPath) return { ok: false, error: `'${name}' was not found on PATH (${env.PATH ?? ""})` };
+  if (!onPath) return { ok: false, error: `'${name}' was not found on PATH (${searchPath})` };
   let real: string;
   try {
     real = ops.realpath(onPath);
@@ -765,7 +765,7 @@ export function piLaunchCapabilityError(
   if (!/unknown options?:/i.test(diagnostic) || !/--(?:name|approve|no-approve)(?=[\s,.:]|$)/.test(diagnostic)) return;
   let version = "unknown version";
   try {
-    const value = readVersion().trim();
+    const value = stripVTControlCharacters(readVersion()).trim();
     if (/^[0-9][A-Za-z0-9.+_-]{0,63}$/.test(value)) version = `version ${value}`;
   } catch { /* diagnostics only; never changes the child's outcome */ }
   return `Pi at ${command} (${version}) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
@@ -909,9 +909,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
     if (line.trim()) process.stdout.write(`[${runtime}:err] ${line}\n`);
     if (runtime === "pi" && !reportedPiCapability) {
-      const detail = piLaunchCapabilityError(command, args.trust, line, () =>
-        execFileSync(command, ["--version"], { cwd: args.cwd, env: childEnv, encoding: "utf8",
-          timeout: 3000, maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] }));
+      const detail = piLaunchCapabilityError(command, args.trust, line, () => {
+        const version = spawnSync(command, ["--version"], { cwd: args.cwd, env: childEnv, encoding: "utf8",
+          timeout: 3000, maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] });
+        if (version.error || version.status !== 0) return "";
+        // Older Pi redirects even --version to stderr when stdout is a pipe.
+        return version.stdout.trim() || version.stderr.trim();
+      });
       if (detail) {
         reportedPiCapability = true;
         process.stdout.write(`[pi-runner] ${detail}\n`);

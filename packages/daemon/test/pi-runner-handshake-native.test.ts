@@ -13,7 +13,7 @@ describe.skipIf(process.platform === "win32")("Pi startup RPC handshake", () => 
     const bin = path.join(temp, "bin");
     fs.mkdirSync(bin);
     if (kind === "old") fs.writeFileSync(path.join(bin, "pi"), `#!${process.execPath}
-if(process.argv.includes('--version')) { console.log('0.73.1'); process.exit(0); }
+if(process.argv.includes('--version')) { console.error('0.73.1'); process.exit(0); }
 if(process.argv.includes('--help')) { console.log('old Pi help'); process.exit(0); }
 console.error('Error: Unknown options: --name, --no-approve'); process.exit(1);
 `, { mode: 0o700 });
