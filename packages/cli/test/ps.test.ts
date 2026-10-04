@@ -327,6 +327,24 @@ describe("Ps CLI", () => {
     }
   });
 
+  it.each([false, true])("ps cleanup opt-out=%s preserves ordinary housekeeping by default", async (noCleanup) => {
+    const state = { pid: 555, port, db: "test.sqlite", startedAt: "2026-01-01T00:00:00Z" };
+    const receipt = { schema: "openrig.daemon-shutdown/v1", pid: 555,
+      startedAt: "2026-01-01T00:01:00Z", completedAt: "2026-01-01T00:02:00Z",
+      phase: "complete", outcome: "clean", failures: [] };
+    const deps = mockLifecycleDeps({
+      exists: vi.fn((p: string) => p === STATE_FILE || p.endsWith("daemon-shutdown.json")),
+      readFile: vi.fn((p: string) => p === STATE_FILE ? JSON.stringify(state)
+        : p.endsWith("daemon-shutdown.json") ? JSON.stringify(receipt) : null),
+      isProcessAlive: vi.fn(() => false),
+    });
+    const prog = new Command().exitOverride().addCommand(psCommand({ lifecycleDeps: deps,
+      clientFactory: (url) => new DaemonClient(url) }));
+    await captureLogs(() => prog.parseAsync(["node", "rig", "ps", ...(noCleanup ? ["--no-cleanup"] : [])]).then(() => {}));
+    if (noCleanup) expect(deps.removeFile).not.toHaveBeenCalled();
+    else expect(deps.removeFile).toHaveBeenCalledWith(STATE_FILE);
+  });
+
   // NS-T08: ps --nodes tests
 
   it("ps --nodes --full formats table with rig context and restore columns", async () => {

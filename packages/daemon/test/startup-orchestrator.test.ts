@@ -10,11 +10,12 @@ import { resolveConcreteHint } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { StartupAction } from "../src/domain/types.js";
-import { deriveOriented, issueStartupChallenge, verifyStartupProof } from "../src/domain/startup-proof.js";
+import { deriveOriented, issueStartupChallenge, verifyStartupProof, STARTUP_PROOF_INSTRUCTION_LINE } from "../src/domain/startup-proof.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission } from "../src/domain/permission-drift.js";
 import type { SettingsStore } from "../src/domain/user-settings/settings-store.js";
+import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
 
 // -- Mocks --
 
@@ -307,6 +308,52 @@ describe("StartupOrchestrator", () => {
     expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
     expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(seed.sessionId)).toEqual({ startup_status: "attention_required" });
     expect(db.prepare("SELECT COUNT(*) AS n FROM node_startup_context WHERE node_id = ?").get(seed.nodeId)).toEqual({ n: 1 });
+  });
+
+  it.each(["initial_identity", "restore_preload", "after_ready"])("reports a trust dialog after %s instead of startup ready", async (source) => {
+    const seed = seedSession();
+    let delivered = false;
+    // Claude 2.1.220's observed trust panel, with the project path replaced.
+    const trust = "Accessing workspace:\n/fixture/project\nQuick safety check: Is this a project you created or one you trust?\n❯ 1. Yes, I trust this folder\n  2. No, exit\nEnter to confirm · Esc to cancel";
+    const t = mockTmux({ sendText: vi.fn(async () => { delivered = true; return { ok: true as const }; }),
+      capturePaneContent: vi.fn(async () => trust) });
+    const adapter = mockAdapter({ checkReady: vi.fn(async () => {
+      const probe = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+        paneContent: delivered ? trust : "Claude Code v2.1.220\n❯ \n? for shortcuts" });
+      return { ready: probe.status === "resumed", code: probe.code, reason: probe.detail };
+    }) });
+    const result = await createOrchestrator({ tmux: t, readFile: () => "Read the project instructions." }).startNode(makeInput(seed, {
+      adapter, isRestore: source === "restore_preload",
+      ...(source === "restore_preload" ? { resumeToken: "native-original", resumeType: "claude_id" } : {}),
+      resolvedStartupFiles: source === "after_ready" ? [] : [{ path: "role.md", absolutePath: "/fixture/role.md",
+        ownerRoot: "/fixture", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start", "restore"] }],
+      startupActions: [source === "initial_identity" ? makeIdentityAction() : makeAction({ type: "send_text", value: "Read the project instructions." })],
+    }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required",
+      errors: [expect.stringContaining("workspace trust approval")] });
+    expect(adapter.checkReady).toHaveBeenCalledTimes(2);
+    expect(t.sendText).toHaveBeenCalledTimes(1);
+    expect(t.sendKeys).toHaveBeenCalledTimes(1); // no extra Enter into the trust menu
+    expect(t.killSession).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(seed.sessionId)).toEqual({ startup_status: "attention_required" });
+    expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(seed.nodeId)).toEqual([]);
+  });
+
+  it.each(["bundled", "file"])("keeps an unavailable post-%s observation unverified without failing startup", async (delivery) => {
+    const seed = seedSession();
+    const adapter = mockAdapter({ checkReady: vi.fn().mockResolvedValueOnce({ ready: true })
+      .mockRejectedValueOnce(new Error("fixture capture unavailable")) });
+    const result = await createOrchestrator({ readFile: () => "Read the project instructions." }).startNode(makeInput(seed, {
+      adapter, resolvedStartupFiles: [{ path: "role.md", absolutePath: "/fixture/role.md", ownerRoot: "/fixture",
+        deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }],
+      startupActions: delivery === "bundled" ? [makeIdentityAction()] : [],
+    }));
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified",
+      reasons: ["Post-delivery runtime state is unverified: fixture capture unavailable"] } });
+    expect(adapter.checkReady).toHaveBeenCalledTimes(2);
+    const event = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_ready'").get(seed.nodeId) as { payload: string };
+    expect(JSON.parse(event.payload).submission).toMatchObject({ status: "unverified" });
+    expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
   it("records the exact adapter-returned launch effect only after successful managed launch", async () => {
@@ -783,6 +830,49 @@ describe("StartupOrchestrator", () => {
     expect(sendText.mock.calls[0]?.[1]).toContain("startup orientation challenge");
   });
 
+  // Claude shows the long startup paste as pasted content and won't act on an instruction found only
+  // there; one short line in the person's turn asks it to run the challenge's own command.
+  describe("the Claude startup-proof line", () => {
+    const challengeAndIdentity = () => [makeAction({ type: "startup_proof", value: "authenticated" }), makeIdentityAction()];
+
+    it("follows a Claude seat's challenged prompt with the short line, as its own submission", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, { startupActions: challengeAndIdentity() }));
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(sendText.mock.calls.map((c) => c[1])).toHaveLength(2);
+      expect(sendText.mock.calls[0]![1]).toContain("startup orientation challenge");
+      expect(sendText.mock.calls[1]![1]).toBe(STARTUP_PROOF_INSTRUCTION_LINE);
+      expect(deriveOriented(db, seed.nodeId)).toBe("missing");
+    });
+
+    it("sends no line to a Codex seat, which already acts on the pasted challenge", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, {
+        adapter: mockAdapter({ runtime: "codex" }), startupActions: challengeAndIdentity(),
+      }));
+      expect(sendText.mock.calls.map((c) => c[1])).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+
+    it("sends no line when no challenge was issued", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, { startupActions: [makeIdentityAction()] }));
+      expect(sendText.mock.calls.map((c) => c[1])).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+
+    it("a line that fails to send is a submission warning; the seat is still ready", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, text: string) => text === STARTUP_PROOF_INSTRUCTION_LINE
+        ? { ok: false as const, message: "fixture send failure" }
+        : { ok: true as const });
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText } as unknown as Partial<TmuxAdapter>) }).startNode(makeInput(seed, { startupActions: challengeAndIdentity() }));
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(result.ok && result.submission?.reasons).toContain("Startup proof instruction was not delivered: fixture send failure");
+    });
+  });
+
   // OPR.0.4.3.06 — a resumed restore is NOT re-challenged (oriented stays n-a).
   it("runs a terminal startup command without sending agent-orientation prose to its shell", async () => {
     const seed = seedSession();
@@ -820,7 +910,7 @@ describe("StartupOrchestrator", () => {
     }));
     expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
     expect(adapter.project).toHaveBeenCalledOnce();
-    expect(adapter.checkReady).toHaveBeenCalledOnce();
+    expect(adapter.checkReady).toHaveBeenCalledTimes(2);
     expect(tmux.sendText).toHaveBeenCalledExactlyOnceWith("r01-impl", makeIdentityAction().value);
     expect(deriveOriented(db, seed.nodeId)).toBe("n-a");
     const row = db.prepare("SELECT payload FROM events WHERE type='node.startup_pending'").get() as { payload: string };

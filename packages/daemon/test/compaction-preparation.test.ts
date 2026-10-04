@@ -1,7 +1,8 @@
 import {afterEach, expect, it, vi} from 'vitest';
 import {Hono} from 'hono';
+import {execFileSync} from 'node:child_process';
 import {compactionRoutes} from '../src/routes/compaction.js';
-import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
@@ -153,7 +154,8 @@ it('late completion of cancelled manual request cannot overwrite an explicit ret
  const oldId=f.e.getPreparationState(seat)!.attemptId;
  f.e.cancelPreparation(seat);
  expect((await f.e.triggerManualCompact(input,{operatorInitiated:true,skipMap:true})).triggered).toBe(true);
- release({ok:true});expect((await old).triggered).toBe(false);
+ release({ok:true});const oldResult=await old;expect(oldResult.triggered).toBe(false);
+ if(!oldResult.triggered)expect(oldResult.preparation).toMatchObject({attemptId:oldId,delivery:'delivered'});
  expect(f.e.getPreparationState(seat)).toMatchObject({status:'compact-sent'});
  expect(f.e.getPreparationState(seat)!.attemptId).not.toBe(oldId);
  expect(f.e.getManualCompactionState(seat)?.stage).toBe('compact-sent');
@@ -267,4 +269,137 @@ for(const expiry of ['missing map','idle after completed map'])it(`route reports
  expect(body.error).toContain('managed compaction is disarmed');
  expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
  expect(compacts(f)).toHaveLength(0);
+});
+
+function routeFixture(f:ReturnType<typeof fixture>, cwd?:string){
+ vi.spyOn(f.transport,'resolveSessions').mockResolvedValue({ok:true,sessions:[seat]} as any);
+ const app=new Hono();
+ app.use('*',async(c,next)=>{
+  c.set('compactionEnforcer' as never,f.e);
+  c.set('sessionTransport' as never,f.transport);
+  c.set('contextUsageStore' as never,{getForNode:()=>({availability:'known',usedPercentage:4})});
+  c.set('db' as never,{prepare:()=>({get:()=>({node_id:'node-one',runtime:'claude-code',cwd})})});
+  await next();
+ });
+ app.route('/api/compaction',compactionRoutes());
+ return ()=>app.request('/api/compaction/trigger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:seat})});
+}
+
+it('preparation receipt: later permission refusal discloses the delivered prep and its exact attempt',async()=>{
+ const f=fixture();f.onSleep(async()=>{publish(f);f.activity('needs_input');});
+ const res=await routeFixture(f)();const body=await res.json();
+ expect(res.status).toBe(409);expect(body.reason).toBe('target_needs_input');
+ expect(body.preparation).toMatchObject({attemptId:f.e.getPreparationState(seat)!.attemptId,delivery:'delivered'});
+ expect(body.error).toContain('Preparation was sent');expect(body.error).not.toContain('could not be sent');
+ expect(body.error).toContain('disarmed');expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
+});
+it('preparation receipt: lost send reply is uncertainty, not an unsent refusal',async()=>{
+ const f=fixture();vi.spyOn(f.transport,'send').mockRejectedValueOnce(new Error('receipt lost'));
+ const body=await (await routeFixture(f)()).json();
+ expect(body.preparation.delivery).toBe('uncertain');expect(body.error).toContain('may have reached');
+ expect(body.error).not.toContain('Preparation was sent');expect(compacts(f)).toHaveLength(0);
+});
+it('preparation receipt: positive permission prompt before prep is an unsent refusal',async()=>{
+ const f=fixture();f.activity('needs_input');
+ const body=await (await routeFixture(f)()).json();
+ expect(body.preparation.delivery).toBe('not_sent');expect(body.error).toContain('could not be sent');
+ expect(f.writes).toHaveLength(0);
+});
+it('registered cwd: manual route selects a self-ignoring map inside the launch workspace',async()=>{
+ const f=fixture();const cwd=join(f.home,'code repo');mkdirSync(cwd);
+ execFileSync('git',['-c','init.templateDir=','init','--quiet',cwd]);
+ f.onSleep(async()=>{publish(f);});
+ expect((await routeFixture(f,cwd)()).status).toBe(200);
+ const a=f.e.getPreparationState(seat)!;
+ expect(a.mapPath).toBe(join(cwd,'.openrig','compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ expect(readFileSync(join(cwd,'.openrig','compaction','.gitignore'),'utf8')).toBe('*\n');
+ expect(f.writes[0]).toContain(JSON.stringify(a.mapPath));expect(compacts(f)).toHaveLength(1);
+ // The map and the ignore file itself stay out of an ordinary git add -A.
+ execFileSync('git',['-C',cwd,'add','-A']);
+ expect(execFileSync('git',['-C',cwd,'ls-files'],{encoding:'utf8'})).toBe('');
+});
+it('registered cwd: automatic monitor forwards the launch workspace and isolates sibling maps',async()=>{
+ const f=fixture();const cwd=join(f.home,'code repo');mkdirSync(cwd);
+ const usage={availability:'known',fresh:true,usedPercentage:90};
+ const db={prepare:()=>({all:()=>[{node_id:'node-one',session_id:1,session_name:seat,runtime:'claude-code',cwd,startup_status:'ready'}]})};
+ const store={readAndNormalize:()=>usage,persist:()=>{}};
+ const monitor=new ContextMonitor(db as any,store as any,undefined,f.e);
+ await monitor.pollOnce();
+ const a=f.e.getPreparationState(seat)!;
+ expect(a.mapPath).toBe(join(cwd,'.openrig','compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ await f.e.maybeAutoCompact({...input,sessionName:'sibling@demo',cwd} as any);
+ const b=f.e.getPreparationState('sibling@demo')!;
+ expect(b.mapPath).not.toBe(a.mapPath);expect(compacts(f)).toHaveLength(0);
+});
+it('registered cwd: absent, relative or unwritable cwd preserves the legacy map location',async()=>{
+ for(const cwd of [undefined,'relative',join('/dev/null','unwritable')]){
+  const f=fixture();await f.e.maybeAutoCompact({...input,cwd} as any);
+  expect(f.e.getPreparationState(seat)!.mapPath).toBe(join(f.home,'compaction','preparation',seat,f.e.getPreparationState(seat)!.attemptId,'RESTORE-MAP.md'));
+  expect(f.writes).toHaveLength(1);
+ }
+});
+
+it('preparation contract: prompt qualifies later refusal and the shipped skill follows its named map',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);
+ expect(f.writes[0]).toContain('This preparation turn does not guarantee /compact');
+ const skill=readFileSync(new URL('../assets/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md',import.meta.url),'utf8');
+ expect(skill).toContain('exact path named in OpenRig');
+ expect(skill).toContain('Do not substitute the seat folder');
+ expect(skill).toContain('Only when none names a path');
+});
+
+it('preparation receipt: unknown activity at the final short send is not an unsent refusal',async()=>{
+ const f=fixture(10_000);f.onSleep(async()=>{publish(f);});
+ const wait=f.transport.waitUntilIdle.bind(f.transport);
+ vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async(...args)=>{
+  const result=await wait(...args);f.activity('unknown');return result;
+ });
+ const body=await (await routeFixture(f)()).json();
+ expect(body.reason).toBe('target_activity_unknown');
+ expect(body.preparation.delivery).toBe('delivered');expect(body.error).toContain('Preparation was sent');
+ expect(body.error).not.toContain('Refused:');expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
+});
+
+for(const kind of ['regular','symlink'])it(`workspace setup: preserves an existing ${kind} ignore file and falls back`,async()=>{
+ const f=fixture(),cwd=join(f.home,'repo'),root=join(cwd,'.openrig','compaction');mkdirSync(root,{recursive:true});
+ const ignore=join(root,'.gitignore'),outside=join(f.home,'unrelated.txt'),original='# user policy\nlogs/\n!shared.txt\n';
+ if(kind==='symlink'){writeFileSync(outside,original);symlinkSync(outside,ignore);}else writeFileSync(ignore,original);
+ await f.e.maybeAutoCompact({...input,cwd});
+ expect(readFileSync(ignore,'utf8')).toBe(original);
+ if(kind==='symlink'){expect(lstatSync(ignore).isSymbolicLink()).toBe(true);expect(readFileSync(outside,'utf8')).toBe(original);}
+ const a=f.e.getPreparationState(seat)!;
+ expect(a.mapPath).toBe(join(f.home,'compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ expect(f.writes[0]).toContain(JSON.stringify(a.mapPath));
+});
+it('workspace setup: reuses an owned equivalent regular ignore without rewriting it',async()=>{
+ const f=fixture(),cwd=join(f.home,'repo'),root=join(cwd,'.openrig','compaction');mkdirSync(root,{recursive:true});
+ const ignore=join(root,'.gitignore');writeFileSync(ignore,'*\n');utimesSync(ignore,100,100);
+ const before=statSync(ignore);
+ await f.e.maybeAutoCompact({...input,cwd});
+ const after=statSync(ignore),a=f.e.getPreparationState(seat)!;
+ expect(after.ino).toBe(before.ino);expect(after.mtimeMs).toBe(before.mtimeMs);expect(readFileSync(ignore,'utf8')).toBe('*\n');
+ expect(a.mapPath).toBe(join(root,'preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+});
+it('workspace setup: a preparation file preserves its bytes and selects the home fallback',async()=>{
+ const f=fixture(),cwd=join(f.home,'repo'),root=join(cwd,'.openrig','compaction');mkdirSync(root,{recursive:true});
+ const blocker=join(root,'preparation');writeFileSync(blocker,'keep descendant');
+ await f.e.maybeAutoCompact({...input,cwd});
+ const a=f.e.getPreparationState(seat)!;
+ expect(a.mapPath).toBe(join(f.home,'compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ expect(readFileSync(blocker,'utf8')).toBe('keep descendant');expect(f.writes[0]).toContain(JSON.stringify(a.mapPath));
+});
+it('workspace setup: publishes only after creating the actual attempt parent',async()=>{
+ const f=fixture(),cwd=join(f.home,'repo');mkdirSync(cwd);
+ await f.e.maybeAutoCompact({...input,cwd});
+ const a=f.e.getPreparationState(seat)!;
+ expect(statSync(dirname(a.mapPath)).isDirectory()).toBe(true);
+ expect(a.mapPath).toBe(join(cwd,'.openrig','compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ publish(f);await f.e.maybeAutoCompact({...input,cwd});expect(compacts(f)).toHaveLength(1);
+});
+it.skipIf(process.getuid?.()===0)('workspace setup: an unwritable descendant selects the home fallback',async()=>{
+ const f=fixture(),cwd=join(f.home,'repo'),parent=join(cwd,'.openrig','compaction','preparation');mkdirSync(parent,{recursive:true});chmodSync(parent,0o500);
+ try{
+  await f.e.maybeAutoCompact({...input,cwd});const a=f.e.getPreparationState(seat)!;
+  expect(a.mapPath).toBe(join(f.home,'compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ }finally{chmodSync(parent,0o700);}
 });

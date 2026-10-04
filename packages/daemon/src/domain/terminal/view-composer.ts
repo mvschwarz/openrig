@@ -5,7 +5,8 @@
 // partition rules live here, in one testable pure function, so no provider
 // re-implements them:
 //
-//   local live       → `tmux attach -t <session>`
+//   local live       → `tmux attach -t <session>` (tmux = the daemon-resolved
+//                      absolute path when the context carries one)
 //   view-only / cross-rig (read-only)
 //                    → `tmux attach -r -t <session>`
 //   ssh host         → `ssh <dest> tmux attach [-r] -t <session>`
@@ -61,6 +62,12 @@ export interface ComposeContext {
   resolveHost(id: string): HostEntry | null;
   /** Panes per page for the target provider; defaults to PANES_PER_PAGE. */
   panesPerPage?: number;
+  /**
+   * Absolute path of the tmux executable the daemon resolves. Used only for LOCAL panes, so a
+   * provider started with a narrower PATH can still run the attach (#707). Absent → the bare
+   * `tmux` token, unchanged. Never put into an ssh remote command: that host resolves its own.
+   */
+  localTmux?: string;
 }
 
 /** POSIX single-quote a string so session names / targets are shell-inert in the composed command. */
@@ -99,6 +106,7 @@ export function composeView(
   const opened: ComposedPane[] = [];
   const absent: AbsentSeat[] = [];
   const degraded: DegradedSeat[] = [];
+  const localTmux = ctx.localTmux ? shellQuote(ctx.localTmux) : "tmux";
 
   for (const m of members) {
     const attachFlag = m.readOnly ? "-r " : "";
@@ -183,7 +191,7 @@ export function composeView(
       seat: m.seat,
       ...(m.runtime ? { runtime: m.runtime } : {}),
       label: m.label,
-      paneCommand: `tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
+      paneCommand: `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
       readOnly: m.readOnly,
     });
   }

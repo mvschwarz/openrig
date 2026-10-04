@@ -10,6 +10,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { startupSubmissionEvidence } from "../src/domain/startup-submission-evidence.js";
 import { StartupOrchestrator, type StartupInput } from "../src/domain/startup-orchestrator.js";
+import { STARTUP_PROOF_INSTRUCTION_LINE } from "../src/domain/startup-proof.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -171,6 +172,53 @@ describe("startup prompt submission", () => {
     f.tmux.capturePaneContent.mockImplementation(async () => `❯ ${f.submitted[0]}\n────────────────────\nWorking… Esc to interrupt\n`);
     expect(await f.start()).toMatchObject({ ok: true, submission: { status: "unverified" } });
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  // The Claude proof line follows only a startup prompt observed as submitted; it is never typed onto
+  // pending input (controls from review50-r2's review of #719).
+  const proofActions = (identity: boolean): StartupInput["startupActions"] => [
+    ...(identity ? [{ type: "send_text" as const, builtin: "session_identity" as const, value: "OpenRig session identity: fixture", phase: "after_ready" as const, appliesOn: ["fresh_start" as const], idempotent: true }] : []),
+    { type: "startup_proof", value: "authenticated", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true },
+  ];
+  for (const identity of [false, true]) {
+    const path = identity ? "identity" : "challenge-only";
+    for (const observation of ["unavailable", "mismatch"] as const) {
+      it(`leaves an unconfirmed ${path} prompt pending and sends no proof line (${observation} capture)`, async () => {
+        const f = fixture(1, "claude-code", !identity);
+        f.tmux.capturePaneContent.mockResolvedValue(observation === "unavailable" ? null : "❯ [Pasted text #1]\n────────────────────\n? for shortcuts");
+        const result = await f.start({ startupActions: proofActions(identity) });
+        expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified" } });
+        expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+        expect(f.submitted).toHaveLength(0);
+        expect(f.composer()).toBe(f.tmux.sendText.mock.calls[0]![1]);
+        expect(result.ok && result.submission?.reasons).toContain("Startup proof instruction was not sent: the startup prompt was not confirmed submitted.");
+      });
+    }
+    it(`sends the proof line as its own submission after a confirmed ${path} prompt`, async () => {
+      const f = fixture(0, "claude-code", !identity);
+      expect(await f.start({ startupActions: proofActions(identity) })).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(f.submitted).toHaveLength(2);
+      expect(f.submitted[0]).toContain("startup orientation challenge");
+      expect(f.submitted[1]).toBe(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+    it(`keeps a staged ${path} prompt pending and sends no proof line`, async () => {
+      const f = fixture(Infinity, "claude-code", !identity);
+      expect(await f.start({ startupActions: proofActions(identity) })).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "staged" } });
+      expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+      expect(f.submitted).toHaveLength(0);
+    });
+  }
+  it("a Codex challenge stays one submission with no proof line", async () => {
+    const f = fixture(0, "codex", true);
+    expect(await f.start()).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(f.submitted).toHaveLength(1);
+    expect(f.submitted[0]).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+  });
+  it("without a challenge there is one submission and no proof line", async () => {
+    const f = fixture(0);
+    expect(await f.start()).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(f.submitted).toHaveLength(1);
+    expect(f.submitted[0]).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
   });
 
   it("keeps a staged challenge-only prompt best-effort", async () => {

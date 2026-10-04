@@ -268,6 +268,26 @@ other ten scenarios are authored but not yet runnable as meaningful checks:
 In most of these files, `seed_regression` steps that come *after* the assertions are
 historical markers, not executable fault injections.
 
+### Ordinary CLI journeys with stub seats
+
+`packages/daemon/test/stub-cli-journeys.integration.test.ts` reuses the scenario
+helpers with one private daemon and two stub rigs. It checks three contracts
+through the real CLI: verified send appears in the addressed pane but not its
+sibling; current-rig and explicit rig listings contain exactly the expected seats;
+and a filtered stream item survives daemon restart and an idempotent emit retry.
+
+After building, run the focused file with:
+
+```sh
+npm test -w @openrig/daemon -- test/stub-cli-journeys.integration.test.ts
+```
+
+The file also runs in the daemon package-test job. It covers these command
+contracts without extending the YAML grammar. The corresponding library scenarios
+above remain pending: pane rendering does not prove input consumption, durable
+stream replay does not prove live subscription, and this test does not exercise
+native providers, restore or policy changes.
+
 ## If your change touches an artery, add or extend a scenario (or say why not)
 
 [arteries.md](arteries.md) lists the behaviours that everything else depends on. If your

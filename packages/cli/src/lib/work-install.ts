@@ -1,10 +1,11 @@
-import { selectCatalogProject, ProjectReadError } from "@openrig/daemon/project-catalog";
+import { selectCatalogProject, inferCatalogProject, rigFromSession, ProjectReadError } from "@openrig/daemon/project-catalog";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { readFrontmatter, resolveNodeFile } from "./scope/scope-fs.js";
 import { readProjectSkillSelection } from "@openrig/daemon/skill-loadout";
 import {
+  parseContextSelection,
   resolveSystemWorld,
   type SystemWorldContextSelection,
   type SystemWorldSource,
@@ -18,6 +19,10 @@ const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export type WorkInstallSource = "explicit" | "manifest" | "default";
 export type WorkInstallAltitude = "project" | "mission" | "slice";
+/** How the project was chosen: --project, the only catalog entry, the calling
+ *  rig's catalog association, the deepest catalog root containing the working
+ *  directory, the only entry no rig claims, or the uncatalogued workspace itself. */
+export type WorkInstallSelectedBy = "explicit" | "single" | "rig" | "cwd" | "unclaimed" | "workspace";
 
 export interface WorkInstallPiece {
   altitude: WorkInstallAltitude;
@@ -32,6 +37,7 @@ export interface WorkInstallPlan {
     workspaceRoot: string;
     projectId: string | null;
     projectRoot: string;
+    selectedBy: WorkInstallSelectedBy;
     missionRoot: string | null;
     sliceRoot: string | null;
     mission: string | null;
@@ -49,6 +55,9 @@ export interface WorkInstallPlan {
     context: SystemWorldContextSelection[];
     skills: string[];
   };
+  /** Ordered world packs from project.yaml install.worlds, after the System World.
+   *  Present only when the project declares the key; listed, never delivered. */
+  worlds?: SystemWorldContextSelection[];
   /** Project-world skill identities from project.yaml install.skills. */
   skills: string[];
   derive: [];
@@ -129,6 +138,32 @@ function piece(
   return { altitude, address, path: nominalPath, exists: existsSync(nominalPath), source };
 }
 
+/** install.worlds: each entry uses the System World selection shape. An invalid
+ *  entry, or a ref already listed (by the System World or earlier in the list), is
+ *  ignored with a warning; this never refuses the install. */
+function readProjectWorlds(entries: unknown[], systemRefs: Set<string>, warnings: string[]): SystemWorldContextSelection[] {
+  const worlds: SystemWorldContextSelection[] = [];
+  const listed = new Set(systemRefs);
+  entries.forEach((entry, index) => {
+    const label = `project.yaml install.worlds[${index}]`;
+    let selection: SystemWorldContextSelection;
+    try {
+      selection = parseContextSelection(entry, label);
+    } catch (err) {
+      warnings.push(`${(err as Error).message}; ignored that entry`);
+      return;
+    }
+    if (listed.has(selection.ref)) {
+      const where = systemRefs.has(selection.ref) ? "the System World" : "an earlier entry";
+      warnings.push(`${label} repeats '${selection.ref}', already listed by ${where}; ignored that entry`);
+      return;
+    }
+    listed.add(selection.ref);
+    worlds.push(selection);
+  });
+  return worlds;
+}
+
 function manifestProjectId(manifest: Record<string, unknown> | null): string | null {
   if (!manifest) return null;
   if (typeof manifest["id"] === "string") return manifest["id"];
@@ -189,6 +224,10 @@ export function resolveWorkPosition(opts: {
   project?: string;
   mission?: string;
   slice?: string;
+  /** Working directory for selection step 4 (the CLI passes --cwd or the process cwd). */
+  cwd?: string;
+  /** Calling seat's canonical session, for selection step 3; absent in a plain shell. */
+  sessionName?: string;
 }): WorkInstallResult {
   if (opts.project !== undefined && !SEGMENT.test(opts.project)) {
     return failure("invalid_project", "project must be a single bounded segment");
@@ -218,12 +257,24 @@ export function resolveWorkPosition(opts: {
   const catalogPath = resolve(opts.catalogPath ?? join(workspaceRoot, "workspace.yaml"));
   let projectId: string | null = null;
   let projectRoot = workspaceRoot;
+  let selectedBy: WorkInstallSelectedBy = opts.project !== undefined ? "explicit" : "workspace";
   try {
     const selected = selectCatalogProject(catalogPath, opts.project);
-    if (selected) { projectId = selected.id; projectRoot = selected.root; }
+    if (selected) {
+      projectId = selected.id;
+      projectRoot = selected.root;
+      if (opts.project === undefined) selectedBy = "single";
+    }
   } catch (err) {
-    if (err instanceof ProjectReadError) return failure(err.code, err.message, err.candidates);
-    throw err;
+    if (!(err instanceof ProjectReadError)) throw err;
+    if (err.code !== "project_required") return failure(err.code, err.message, err.candidates);
+    try {
+      ({ id: projectId, root: projectRoot, selectedBy } = inferCatalogProject(
+        catalogPath, err, { rigName: rigFromSession(opts.sessionName), cwd: opts.cwd }, warnings));
+    } catch (inferErr) {
+      if (!(inferErr instanceof ProjectReadError)) throw inferErr;
+      return failure(inferErr.code, inferErr.message, inferErr.candidates);
+    }
   }
 
   const projectManifestPath = join(projectRoot, "project.yaml");
@@ -264,6 +315,7 @@ export function resolveWorkPosition(opts: {
   let projectIntent = "SPEC.md";
   let projectIntentSource: WorkInstallSource = "default";
   let projectContext: string[] = [];
+  let projectWorlds: SystemWorldContextSelection[] | undefined;
   const install = projectManifest?.["install"];
   let projectSkills: string[] = [];
   if (isRecord(install)) {
@@ -280,6 +332,15 @@ export function resolveWorkPosition(opts: {
         projectContext = install["context"] as string[];
       } else {
         warnings.push("project.yaml: optional install.context must be a list of relative Markdown addresses; ignored it");
+      }
+    }
+    if (install["worlds"] !== undefined) {
+      if (Array.isArray(install["worlds"])) {
+        const systemRefs = new Set((systemWorld.manifest?.context ?? []).map((selection) => selection.ref));
+        projectWorlds = readProjectWorlds(install["worlds"], systemRefs, warnings);
+      } else {
+        projectWorlds = [];
+        warnings.push("project.yaml: optional install.worlds must be an ordered list of { ref, profiles } entries; ignored it");
       }
     }
   }
@@ -387,6 +448,7 @@ export function resolveWorkPosition(opts: {
       workspaceRoot,
       projectId,
       projectRoot,
+      selectedBy,
       missionRoot,
       sliceRoot,
       mission: opts.mission ?? null,
@@ -404,6 +466,7 @@ export function resolveWorkPosition(opts: {
       context: systemWorld.manifest?.context ?? [],
       skills: systemWorld.manifest?.skills ?? [],
     },
+    ...(projectWorlds !== undefined ? { worlds: projectWorlds } : {}),
     skills: projectSkills,
     derive: [],
     warnings,

@@ -71,6 +71,25 @@ function boundedId(value: unknown, label: string): string {
   return value;
 }
 
+/** One ordered context selection, `{ ref, profiles? }`. Shared by the System World
+ *  manifest and a project's `install.worlds`; throws with `label` in the message. */
+export function parseContextSelection(entry: unknown, label: string): SystemWorldContextSelection {
+  if (!isRecord(entry)) throw new Error(`${label} must be an object`);
+  assertOnlyKeys(entry, ["ref", "profiles"], label);
+  const ref = entry["ref"];
+  if (typeof ref !== "string" || !REF.test(ref) || ref.split("/").includes("..")) {
+    throw new Error(`${label}.ref must be a safe context-pack ref`);
+  }
+  const profiles = entry["profiles"];
+  if (profiles === undefined) return { ref };
+  if (!isRecord(profiles)) throw new Error(`${label}.profiles must be an object`);
+  assertOnlyKeys(profiles, ["claude", "codex"], `${label}.profiles`);
+  const parsed: { claude?: string; codex?: string } = {};
+  if (profiles["claude"] !== undefined) parsed.claude = boundedId(profiles["claude"], `${label}.profiles.claude`);
+  if (profiles["codex"] !== undefined) parsed.codex = boundedId(profiles["codex"], `${label}.profiles.codex`);
+  return { ref, profiles: parsed };
+}
+
 export function parseSystemWorldManifest(text: string, sourcePath = "System World manifest"): SystemWorldManifest {
   let raw: unknown;
   try {
@@ -88,22 +107,7 @@ export function parseSystemWorldManifest(text: string, sourcePath = "System Worl
   if (!Array.isArray(raw["context"]) || raw["context"].length === 0) {
     throw new Error(`${sourcePath} context must be a non-empty ordered list`);
   }
-  const context = raw["context"].map((entry, index): SystemWorldContextSelection => {
-    if (!isRecord(entry)) throw new Error(`${sourcePath} context[${index}] must be an object`);
-    assertOnlyKeys(entry, ["ref", "profiles"], `${sourcePath} context[${index}]`);
-    const ref = entry["ref"];
-    if (typeof ref !== "string" || !REF.test(ref) || ref.split("/").includes("..")) {
-      throw new Error(`${sourcePath} context[${index}].ref must be a safe context-pack ref`);
-    }
-    const profiles = entry["profiles"];
-    if (profiles === undefined) return { ref };
-    if (!isRecord(profiles)) throw new Error(`${sourcePath} context[${index}].profiles must be an object`);
-    assertOnlyKeys(profiles, ["claude", "codex"], `${sourcePath} context[${index}].profiles`);
-    const parsed: { claude?: string; codex?: string } = {};
-    if (profiles["claude"] !== undefined) parsed.claude = boundedId(profiles["claude"], `${sourcePath} context[${index}].profiles.claude`);
-    if (profiles["codex"] !== undefined) parsed.codex = boundedId(profiles["codex"], `${sourcePath} context[${index}].profiles.codex`);
-    return { ref, profiles: parsed };
-  });
+  const context = raw["context"].map((entry, index) => parseContextSelection(entry, `${sourcePath} context[${index}]`));
   const skills = raw["skills"];
   if (!Array.isArray(skills) || !skills.every((skill) => typeof skill === "string" && ID.test(skill))) {
     throw new Error(`${sourcePath} skills must be a list of bounded skill identities`);

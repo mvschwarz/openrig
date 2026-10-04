@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openrig.dev/schemas/bundle-configurations.v1.json",
+  "title": "Declared configurations (configurations.yaml beside rig.yaml)",
+  "type": "object",
+  "required": [
+    "schema",
+    "recommended",
+    "seats",
+    "presets"
+  ],
+  "properties": {
+    "schema": {
+      "const": "openrig.bundle-configurations/v1"
+    },
+    "recommended": {
+      "type": "string",
+      "description": "The preset name of the recommended configuration."
+    },
+    "seats": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "pod.member -> the runtimes that seat may use, each with the profile it uses.",
+      "propertyNames": {
+        "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "runtimes"
+        ],
+        "properties": {
+          "runtimes": {
+            "type": "object",
+            "minProperties": 1,
+            "propertyNames": {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/runtime"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      }
+    },
+    "presets": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Preset name -> a runtime for every member. Names are aliases; the configuration ID is computed from the mapping.",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "minProperties": 1,
+        "propertyNames": {
+          "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+        },
+        "additionalProperties": {
+          "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/runtime"
+        }
+      }
+    }
+  }
+}

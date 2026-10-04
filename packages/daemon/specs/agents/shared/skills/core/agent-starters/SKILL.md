@@ -6,15 +6,10 @@ metadata:
     stage: factory-approved
     sibling_skills:
       - claude-compaction-restore
-      - mental-model-ha
-      - scope-recovery
       - session-compaction-and-restore
       - agent-startup-and-context-ingestion
-      - composable-priming-packs
       - session-source-fork
       - seat-continuity-and-handover
-      - claude-compact-in-place
-      - pre-maintenance-agent-preservation
 ---
 
 # Agent Starters
@@ -131,4 +126,3 @@ included, and is that starter still recommended?"
 ## See also
 
 - `session-source-fork` skill — low-level fork primitive that makes native session-based starters possible
-- `composable-priming-packs` skill — manifest-driven layer for producing primed sessions starters reference

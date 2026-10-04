@@ -38,7 +38,7 @@ describe("S03 policy permissions compatibility", () => {
     expect(policy.commands.some(c => c.name() === "work")).toBe(false);
     const select = seatCommand().commands.find(c => c.name() === "set-permissions")!;
     expect(select.description()).toContain("future managed launches");
-    expect(select.options.map(o => o.long)).toEqual(["--mode", "--reason", "--json"]);
+    expect(select.options.map(o => o.long)).toEqual(["--mode", "--reason", "--operator", "--json"]);
   });
   it("seat command posts one explicit selection and preserves refusal JSON/exit", async () => {
     const posts: unknown[] = []; const response = { ok: false, code: "permission_selection_refused", message: "native options unavailable" };

@@ -32,7 +32,7 @@ const SENSITIVE_PATTERNS = [
   /^node_modules\//,
 ];
 
-function isSensitivePath(relativePath: string): boolean {
+export function isSensitivePath(relativePath: string): boolean {
   const name = nodePath.basename(relativePath);
   return SENSITIVE_PATTERNS.some((p) => p.test(name) || p.test(relativePath));
 }

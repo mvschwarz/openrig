@@ -11,7 +11,7 @@ import type {
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
-import { issueStartupChallenge } from "./startup-proof.js";
+import { issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup-proof.js";
 import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -78,6 +78,8 @@ type StartupSendFailure = { error: string };
 type StartupDeliveryInput = StartupInput & {
   submissionWarnings: string[]; stagedSubmissionWarning?: string;
   startupAttemptId: string; sendOrder: number; submissionDiagnostics: StartupSubmissionDiagnostic[];
+  /** Claude only: whether the latest interactive send was observed submitted (a clear composer). */
+  lastSubmissionConfirmed?: boolean;
 };
 
 export type StartupResult =
@@ -392,6 +394,7 @@ export class StartupOrchestrator {
         return this.fail(input, "failed", errors);
       }
       postLaunchFiles = initialPrompt.remainingFiles;
+      if (challenge) await this.sendProofInstruction(deliveryInput);
     } else if (challenge) {
       challengeOnlyPrompt = challenge.promptBlock;
     }
@@ -447,7 +450,8 @@ export class StartupOrchestrator {
     // Challenge-only delivery remains best-effort. Staging is reported without
     // turning a recoverable composer into a startup failure/occupant rollback.
     if (challengeOnlyPrompt && input.binding.tmuxSession) {
-      await this.sendInteractiveText(deliveryInput, challengeOnlyPrompt, "challenge");
+      const challengeFailure = await this.sendInteractiveText(deliveryInput, challengeOnlyPrompt, "challenge");
+      if (!challengeFailure) await this.sendProofInstruction(deliveryInput);
     }
 
     // 8. Execute after_files actions
@@ -464,15 +468,17 @@ export class StartupOrchestrator {
     }
 
     // Delivering the first native prompt can reveal a provider refusal or
-    // interactive gate. A positive attention requirement is not ready.
-    if (postLaunchFiles.length > 0) {
+    // interactive gate. Bundled identity/preload prompts consume their files,
+    // so the remaining file list alone does not tell us whether context was sent.
+    if (postLaunchFiles.length > 0 || deliveryInput.sendOrder > 0) {
       try {
         const readiness = await input.adapter.checkReady(input.binding);
         if (!readiness.ready && isAttentionRequiredReadinessCode(readiness.code)) {
           return this.fail(deliveryInput, "attention_required", [readiness.reason ?? "The native provider prerequisite failed after context delivery."]);
         }
       } catch (error) {
-        return this.fail(deliveryInput, "attention_required", [`Post-delivery runtime state is unavailable: ${(error as Error).message}`]);
+        // An unavailable observation is not a positive provider prerequisite.
+        deliveryInput.submissionWarnings.push(`Post-delivery runtime state is unverified: ${(error as Error).message}`);
       }
     }
 
@@ -706,9 +712,27 @@ export class StartupOrchestrator {
     return { ok: true, remainingFiles };
   }
 
+  /**
+   * Claude only: the challenge reached the seat inside a paste, which Claude won't act on alone.
+   * One short line in the person's turn asks it to run the challenge's own command. Best-effort: a
+   * failed send is a submission warning, never a startup failure. It is sent only after the startup
+   * prompt was observed submitted: staged, unverified or unobservable input stays in the composer
+   * for the operator, and nothing is typed on top of it.
+   */
+  private async sendProofInstruction(input: StartupDeliveryInput): Promise<void> {
+    if (input.adapter.runtime !== "claude-code" || !input.binding.tmuxSession) return;
+    if (!input.lastSubmissionConfirmed) {
+      input.submissionWarnings.push("Startup proof instruction was not sent: the startup prompt was not confirmed submitted.");
+      return;
+    }
+    const failure = await this.sendInteractiveText(input, STARTUP_PROOF_INSTRUCTION_LINE, "startup_proof_instruction");
+    if (failure) input.submissionWarnings.push(`Startup proof instruction was not delivered: ${failure.error}`);
+  }
+
   private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {
     const sendOrder = ++input.sendOrder;
     const tmuxSession = input.binding.tmuxSession!;
+    input.lastSubmissionConfirmed = false;
     const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
     if (!textResult.ok) {
       return { error: (textResult as { message?: string }).message ?? "unknown" };
@@ -741,7 +765,7 @@ export class StartupOrchestrator {
       const pane = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
       if (!pane?.trim()) { record(pane); return unverified("Startup submission capture is unavailable after Enter."); }
       const before = inspectStartupStagedText(pane, text);
-      if (before === "clear") return null;
+      if (before === "clear") { input.lastSubmissionConfirmed = true; return null; }
       if (before === "unverified") {
         const evidence = record(pane);
         return unverified(evidence?.reason === "unrecognized_composer_boundary"
@@ -777,6 +801,7 @@ export class StartupOrchestrator {
           : "Startup submission is unverified after the guarded retry: the current composer is ambiguous.");
       }
       if (!retry.ok) return unverified(`Guarded startup retry did not submit: ${retry.error ?? retry.reason}; matching staged text is no longer visible.`);
+      input.lastSubmissionConfirmed = true;
       return null;
     } catch (error) {
       if (!diagnostic.observations.some(observation => observation.phase === phase)) record(null);

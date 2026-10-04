@@ -23,6 +23,7 @@ import fs from "node:fs";
 import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
 import { runSyncSite } from "./sync-site-wrap.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
+import { routeBundleContents, routingFailureWarnings, thrownMessage, type BundleContentRouting } from "./bundle-content-routing.js";
 
 /** Bootstrap mode */
 export type BootstrapMode = "plan" | "apply";
@@ -58,6 +59,8 @@ export interface BootstrapResult {
   warnings: string[];
   /** Plan-mode action keys for reviewed approval */
   actionKeys?: string[];
+  /** What a pod-aware bundle's pre-launch routing did, when it ran */
+  bundleRouting?: BundleContentRouting;
 }
 
 import type { PodRigInstantiator } from "./rigspec-instantiator.js";
@@ -77,6 +80,8 @@ interface BootstrapOrchestratorDeps {
   podBundleSourceResolver?: PodBundleSourceResolver;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   rigRepo?: import("./rig-repository.js").RigRepository;
+  /** Routes a bundle's declared contents; startup wires it to rescan the live context-pack library. */
+  routeBundleContents?: (bundlePath: string) => Promise<BundleContentRouting>;
 }
 
 /** Generates a deterministic action key for plan->apply identity */
@@ -112,6 +117,15 @@ export class BootstrapOrchestrator {
     if (deps.installExecutor.db !== deps.db) throw new Error("BootstrapOrchestrator: installExecutor must share the same db handle");
     if (deps.packageInstallService.db !== deps.db) throw new Error("BootstrapOrchestrator: packageInstallService must share the same db handle");
     this.deps = deps;
+  }
+
+  /** Route a bundle's declared skills, plugins, workflow specs, context packs and agent images. Never throws. */
+  async routeBundleContents(bundlePath: string): Promise<BundleContentRouting> {
+    try {
+      return await (this.deps.routeBundleContents ? this.deps.routeBundleContents(bundlePath) : routeBundleContents(bundlePath));
+    } catch (err) {
+      return { routingFailures: [{ kind: "bundle", error: thrownMessage(err) }] };
+    }
   }
 
   async bootstrap(opts: BootstrapOptions): Promise<BootstrapResult> {
@@ -651,9 +665,32 @@ export class BootstrapOrchestrator {
     }
 
     // Apply mode: full instantiation via PodRigInstantiator
-    // If services exist, the prelaunch hook boots them between topology creation and node launch
-    const prelaunchHook = await this.buildServicePrelaunchHook(rigSpecYaml, rigRoot, stages, errors);
+    // If services exist, the prelaunch hook boots them between topology creation and node launch.
+    // A bundle's declared contents are routed in the same hook, so every seat's first turn can see them.
+    const serviceHook = await this.buildServicePrelaunchHook(rigSpecYaml, rigRoot, stages, errors);
+    let bundleRouting: BundleContentRouting | undefined;
+    const bundleHook = opts.sourceKind === "rig_bundle"
+      ? async (): Promise<{ ok: true }> => {
+          // Routing never blocks the launch: a failed hook, or a throw, would roll the rig back.
+          try {
+            bundleRouting = await this.routeBundleContents(opts.sourceRef);
+          } catch (err) {
+            bundleRouting = { routingFailures: [{ kind: "bundle", error: thrownMessage(err) }] };
+          }
+          const failureWarnings = routingFailureWarnings(bundleRouting);
+          stages.push({ stage: "route_bundle_contents", status: failureWarnings.length > 0 ? "failed" : "ok", detail: bundleRouting });
+          warnings.push(...failureWarnings);
+          return { ok: true };
+        }
+      : undefined;
+    const prelaunchHook = serviceHook && bundleHook
+      ? async (rigId: string) => {
+          const serviceResult = await serviceHook(rigId);
+          return serviceResult.ok ? bundleHook() : serviceResult;
+        }
+      : serviceHook ?? bundleHook;
     const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { cwdOverride: opts.cwdOverride, prelaunchHook });
+    const withRouting = (r: BootstrapResult): BootstrapResult => (bundleRouting ? { ...r, bundleRouting } : r);
 
     if (!outcome.ok) {
       // OPR.0.3.2.CT — attention_required is a recoverable outcome
@@ -675,14 +712,14 @@ export class BootstrapOrchestrator {
           },
         });
         this.deps.bootstrapRepo.updateRunStatus(run.id, "partial", { rigId: (outcome as { rigId: string }).rigId });
-        return {
+        return withRouting({
           runId: run.id,
           status: "partial",
           stages,
           rigId: (outcome as { rigId: string }).rigId,
           errors: [attentionMsg],
           warnings: [...warnings, ...((outcome as { warnings?: string[] }).warnings ?? [])],
-        };
+        });
       }
       const outErrors = outcome.code === "validation_failed" || outcome.code === "preflight_failed"
         ? (outcome as { errors: string[] }).errors
@@ -690,7 +727,7 @@ export class BootstrapOrchestrator {
       const outWarnings = (outcome as { warnings?: string[] }).warnings ?? [];
       stages.push({ stage: "import_rig", status: "failed", detail: { code: outcome.code } });
       this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
-      return { runId: run.id, status: "failed", stages, errors: outErrors, warnings: outWarnings };
+      return withRouting({ runId: run.id, status: "failed", stages, errors: outErrors, warnings: outWarnings });
     }
 
     const result = outcome.result;
@@ -743,14 +780,14 @@ export class BootstrapOrchestrator {
     }
 
     this.deps.bootstrapRepo.updateRunStatus(run.id, finalStatus, { rigId: result.rigId });
-    return {
+    return withRouting({
       runId: run.id,
       status: finalStatus,
       stages,
       rigId: result.rigId,
       errors: result.nodes.filter((n) => n.error).map((n) => n.error!),
       warnings,
-    };
+    });
   }
 
   /**

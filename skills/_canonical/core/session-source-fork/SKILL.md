@@ -7,15 +7,10 @@ metadata:
     stage: factory-approved
     sibling_skills:
       - claude-compaction-restore
-      - mental-model-ha
-      - scope-recovery
       - session-compaction-and-restore
       - agent-startup-and-context-ingestion
       - agent-starters
-      - composable-priming-packs
       - seat-continuity-and-handover
-      - claude-compact-in-place
-      - pre-maintenance-agent-preservation
 ---
 
 # session_source Fork

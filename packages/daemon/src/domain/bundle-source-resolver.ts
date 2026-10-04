@@ -5,6 +5,7 @@ import { unpack } from "./bundle-archive.js";
 // TODO: AS-T12 — migrate to pod-aware bundle types
 import { parseLegacyBundleManifest as parseBundleManifest, validateLegacyBundleManifest as validateBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, type LegacyBundleManifest as BundleManifest } from "./bundle-types.js";
 import { resolvePackage } from "./package-resolve-helper.js";
+import { isPathInsideRoot } from "./cwd-resolution.js";
 import type { ResolvedPackage, FsOps } from "./package-resolver.js";
 
 /** Result of resolving a bundle for bootstrap consumption */
@@ -58,7 +59,7 @@ export class LegacyBundleSourceResolver {
 
       // Locate rig spec — ensure resolved path stays within tempDir
       const specPath = nodePath.resolve(tempDir, manifest.rigSpec);
-      if (!specPath.startsWith(nodePath.resolve(tempDir))) {
+      if (!isPathInsideRoot(specPath, tempDir)) {
         throw new Error(`Rig spec path '${manifest.rigSpec}' escapes bundle workspace`);
       }
       if (!fs.existsSync(specPath)) {
@@ -72,7 +73,7 @@ export class LegacyBundleSourceResolver {
       for (const entry of manifest.packages) {
         // Ensure package path stays within tempDir
         const vendoredDir = nodePath.resolve(tempDir, entry.path);
-        if (!vendoredDir.startsWith(nodePath.resolve(tempDir))) {
+        if (!isPathInsideRoot(vendoredDir, tempDir)) {
           throw new Error(`Package path '${entry.path}' escapes bundle workspace`);
         }
         const result = resolvePackage(vendoredDir, undefined, this.fsOps);

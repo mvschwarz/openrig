@@ -306,8 +306,10 @@ export function validateAgentSpec(raw: unknown): ValidationResult {
                   }
                   // Otherwise accepted — import resolution in AS-T03
                 } else if (typeof ref === "string") {
-                  // Unqualified ref must exist in local declarations
-                  if (!allLocalIds[category]?.has(ref) && !hasImports) {
+                  // Skills can come from runtime/spec-directory discovery or the
+                  // managed catalog. Resolve them with that context before launch;
+                  // the syntax validator cannot decide their absence here.
+                  if (category !== "skills" && !allLocalIds[category]?.has(ref) && !hasImports) {
                     errors.push(`profiles.${profileName}.uses.${category}: resource "${ref}" not found in declared resources`);
                   }
                 }
