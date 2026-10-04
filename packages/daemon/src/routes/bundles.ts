@@ -27,6 +27,7 @@ import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { routingFailureWarnings, type BundleContentRouting } from "../domain/bundle-content-routing.js";
 import { configurationId, packageDigest } from "../domain/bundle-identity.js";
 import { vendorContextPackDir } from "../domain/bundle-carried-context-pack.js";
+import { vendorProjectDir } from "../domain/bundle-carried-project.js";
 import { getDaemonVersion } from "../domain/daemon-version.js";
 import { assertShippableSubstance } from "../domain/agent-resolver.js";
 
@@ -718,6 +719,8 @@ bundleRoutes.post("/create", async (c) => {
   const contextPackDirs = Array.isArray(body["contextPackDirs"])
     ? (body["contextPackDirs"] as unknown[]).filter((d): d is string => typeof d === "string" && d.length > 0)
     : [];
+  // `rig bundle create --project-dir <dir>`: the project this rig works in (project.yaml and its files)
+  const projectDir = typeof body["projectDir"] === "string" && body["projectDir"] ? body["projectDir"] : undefined;
 
   const allowDrift = body["allowDrift"] === true;
 
@@ -811,6 +814,7 @@ bundleRoutes.post("/create", async (c) => {
         result.manifest.assembler = { openrigVersion: getDaemonVersion() };
         const carriedPacks = contextPackDirs.map((dir) => vendorContextPackDir(nodePath.resolve(dir), tmpStaging));
         if (carriedPacks.length > 0) result.manifest.contextPacks = [...(result.manifest.contextPacks ?? []), ...carriedPacks];
+        if (projectDir) result.manifest.project = vendorProjectDir(nodePath.resolve(projectDir), tmpStaging);
 
         const integrity = computeIntegrity(tmpStaging, integrityFsOps());
         result.manifest.integrity = integrity;
@@ -830,6 +834,9 @@ bundleRoutes.post("/create", async (c) => {
     // Validated above, before the drift guard ran.
     if (contextPackDirs.length > 0) {
       return c.json({ error: "--context-pack needs a pod-aware rig spec (one with pods:)" }, 400);
+    }
+    if (projectDir) {
+      return c.json({ error: "--project-dir needs a pod-aware rig spec (one with pods:)" }, 400);
     }
     const spec = LegacyRigSpecSchema.normalize(rawParsed);
 
@@ -1006,6 +1013,9 @@ bundleRoutes.post("/inspect", async (c) => {
           : undefined,
         agentImages: Array.isArray(rawParsed["agent_images"])
           ? (rawParsed["agent_images"] as unknown[]).filter((s): s is string => typeof s === "string")
+          : undefined,
+        project: rawParsed["project"] && typeof rawParsed["project"] === "object" && !Array.isArray(rawParsed["project"])
+          ? rawParsed["project"] as { id: string; path: string }
           : undefined,
       };
       const integrityCompat = integritySection ? {

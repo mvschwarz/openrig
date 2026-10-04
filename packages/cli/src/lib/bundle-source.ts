@@ -178,6 +178,7 @@ export interface BundleLinkOptions {
   minCliVersion?: string;
   includePackages?: string[];
   contextPack?: string[];
+  projectDir?: string;
   allowDrift?: boolean;
   provenance?: Record<string, unknown>;
 }
@@ -211,6 +212,7 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
       specPath, rigRoot: folder, outputPath: bundlePath,
       bundleName: opts.name ?? "github-bundle", bundleVersion: opts.bundleVersion ?? "0.1.0",
       includePackages: opts.includePackages,
+      ...(opts.projectDir ? { projectDir: path.resolve(opts.projectDir) } : {}),
       ...(opts.contextPack?.length ? { contextPackDirs: opts.contextPack.map(dir => path.resolve(dir)) } : {}),
       provenance: { ...opts.provenance, source: prepared.source },
       ...(configuration ? { configuration } : {}),

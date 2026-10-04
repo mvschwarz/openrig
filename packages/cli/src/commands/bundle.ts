@@ -65,12 +65,13 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--preset <name>", "Build one of the configurations the bundle declares in configurations.yaml (for example all-claude)")
     .option("--seat <member=runtime>", "Use this runtime for one seat, within what configurations.yaml allows (pod.member=runtime); repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--context-pack <dir>", "Carry the context pack in <dir> (its manifest.yaml and declared files), which may sit outside the rig folder; repeatable", (dir: string, dirs: string[]) => [...dirs, dir], [] as string[])
+    .option("--project-dir <dir>", "Carry the project this rig works in: the folder holding its project.yaml (with an id) and files such as SPEC.md. Install registers it in the workspace catalog and associates the rig with it")
     .option("--notes <text>", "Operator notes captured in bundle provenance metadata")
     .option("--min-daemon-version <ver>", "Minimum daemon version required to install this bundle (Item 2 compatibility)")
     .option("--min-cli-version <ver>", "Minimum CLI version required to install this bundle (Item 2 compatibility)")
     .option("--allow-drift", "Bundle a spec that disagrees with the running rig of the same name; the divergence is stamped into bundle provenance")
     .option("--json", "JSON output")
-    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; contextPack?: string[]; preset?: string; seat?: string[]; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
+    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; contextPack?: string[]; projectDir?: string; preset?: string; seat?: string[]; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
       const deps = getDepsF();
       if (isGitHubBundleLink(spec)) {
         try {
@@ -135,6 +136,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         rigRoot,
         ...(chosen ? { configuration: { id: chosen.configurationId, ...(chosen.preset ? { preset: chosen.preset } : {}) } } : {}),
         ...(opts.contextPack?.length ? { contextPackDirs: opts.contextPack.map((dir) => nodePath.resolve(dir)) } : {}),
+        ...(opts.projectDir ? { projectDir: nodePath.resolve(opts.projectDir) } : {}),
         provenance: buildClientProvenance(opts.notes),
         ...(hasCompatibility ? { compatibility } : {}),
         ...(opts.allowDrift ? { allowDrift: true } : {}),
@@ -224,6 +226,11 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       console.log(`Digest valid: ${res.data["digestValid"]}`);
       const ir = res.data["integrityResult"] as Record<string, unknown>;
       console.log(`Integrity: ${ir["passed"] ? "PASS" : "FAIL"}`);
+      // What install will add before any seat launches
+      const packs = m["contextPacks"] as string[] | undefined;
+      if (packs?.length) console.log(`Context packs: ${packs.join(", ")}`);
+      const project = m["project"] as { id?: string; path?: string } | undefined;
+      if (project?.id) console.log(`Project: ${project.id} (registered in the workspace catalog on install, with this rig associated)`);
       if (!digestValid || !integrityPassed) process.exitCode = 2;
     });
 
@@ -384,6 +391,11 @@ export function bundleRoutingSummary(data: Record<string, unknown>): string[] {
     lines.push(`${label}: ${routing.routedCount} routed${detail}`);
     // Each entry's own explanation, which can carry the command that resolves it
     for (const r of rejected) if (r.detail) lines.push(`  ${r.declaredPath ?? r.id ?? "?"}: ${r.detail}`);
+  }
+  const project = data["projectRegistration"] as { status?: string; projectId?: string; projectRoot?: string; rigName?: string; catalogPath?: string; projectFolderKept?: boolean } | undefined;
+  if (project && project.status !== "conflict") {
+    lines.push(`Project: ${project.projectId} (${project.status}) at ${project.projectRoot}; rig ${project.rigName} is associated with it in ${project.catalogPath}`);
+    if (project.projectFolderKept) lines.push(`Project: kept the existing folder at ${project.projectRoot}, which differs from the bundle's copy`);
   }
   return lines;
 }

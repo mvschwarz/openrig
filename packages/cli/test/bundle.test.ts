@@ -133,6 +133,7 @@ describe("Bundle CLI", () => {
               ],
             },
             routingFailures: [{ kind: "skills", error: "boom" }],
+            projectRegistration: { status: "registered", projectId: "openrig", projectRoot: "/ws/projects/openrig", rigName: "openrig-dev", catalogPath: "/ws/workspace.yaml" },
             warnings: ["Bundle skills routing failed: boom"],
           }));
         } else {
@@ -336,6 +337,14 @@ describe("Bundle CLI", () => {
     expect(capturedCreateBodies.at(-1)?.["contextPackDirs"]).toBeUndefined();
   });
 
+  it("bundle create --project-dir sends a client-absolute project directory", async () => {
+    capturedCreateBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "rigs/dev/rig.yaml", "-o", "out.rigbundle", "--project-dir", "project"]);
+    });
+    expect(capturedCreateBodies.at(-1)?.["projectDir"]).toBe(nodePath.resolve("project"));
+  });
+
   it("bundle install --cwd sends a client-absolute cwdOverride", async () => {
     capturedInstallBodies = [];
     await captureLogs(async () => {
@@ -351,6 +360,7 @@ describe("Bundle CLI", () => {
     expect(logs).toContain("Context packs: 1 routed; not routed: context-packs/gone/manifest.yaml (missing), context-packs/openrig-world/manifest.yaml (kept_existing)");
     expect(logs).toContain("  context-packs/openrig-world/manifest.yaml: a different 'openrig-world' pack is already installed; kept it unchanged. To use the bundle's copy instead, run 'rig context rm openrig-world' and install the bundle again");
     expect(logs).toContain("Warning: Bundle skills routing failed: boom");
+    expect(logs).toContain("Project: openrig (registered) at /ws/projects/openrig; rig openrig-dev is associated with it in /ws/workspace.yaml");
   });
 
   it("bundle create --preset builds a staged copy and sends the configuration; the author's folder is unchanged", async () => {

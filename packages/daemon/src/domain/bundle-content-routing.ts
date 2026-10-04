@@ -10,6 +10,8 @@ import { routeWorkflowSpecs, type WorkflowSpecsRouterFsOps, type RouteWorkflowSp
 import { routeContextPacks, type ContextPacksRouterFsOps, type RouteContextPacksResult } from "./bundle-context-packs-router.js";
 import { routeAgentImages, type AgentImagesRouterFsOps, type RouteAgentImagesResult } from "./bundle-agent-images-router.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { parse as parseYaml } from "yaml";
+import { registerBundleProject, type ProjectRegistrationResult } from "./workspace/project-registration.js";
 
 /**
  * Routes the primitives a .rigbundle declares (skills, plugins, workflow
@@ -21,7 +23,7 @@ import { SettingsStore } from "./user-settings/settings-store.js";
  * failure is recorded in `routingFailures` rather than hidden.
  */
 
-export type BundleContentKind = "bundle" | "skills" | "plugins" | "workflowSpecs" | "contextPacks" | "agentImages";
+export type BundleContentKind = "bundle" | "skills" | "plugins" | "workflowSpecs" | "contextPacks" | "agentImages" | "project";
 
 export interface BundleContentRouting {
   skillsRouting?: RouteSkillsResult;
@@ -29,6 +31,8 @@ export interface BundleContentRouting {
   workflowSpecsRouting?: RouteWorkflowSpecsResult;
   contextPacksRouting?: RouteContextPacksResult;
   agentImagesRouting?: RouteAgentImagesResult;
+  /** The bundle's project in the workspace catalog, and this rig's association with it. */
+  projectRegistration?: ProjectRegistrationResult;
   routingFailures?: Array<{ kind: BundleContentKind; error: string }>;
 }
 
@@ -165,6 +169,29 @@ export async function routeBundleContents(
             }
           }
         }
+      }
+
+      // The project this rig works in: registered in the workspace catalog with
+      // this rig associated, so work-install resolves it at the first turn.
+      const project = manifest["project"];
+      if (project && typeof project === "object" && !Array.isArray(project)) {
+        const { id, path: projectPath } = project as { id?: unknown; path?: unknown };
+        attempt("project", () => {
+          if (typeof id !== "string" || typeof projectPath !== "string") throw new Error("bundle project entry needs an id and a path");
+          const rigSpec = parseYaml(fs.readFileSync(nodePath.join(bundleRoot, String(manifest!["rig_spec"])), "utf-8")) as { name?: unknown };
+          if (typeof rigSpec?.name !== "string") throw new Error("bundle rig spec has no name");
+          const settings = new SettingsStore();
+          const result = registerBundleProject({
+            bundleProjectDir: nodePath.join(bundleRoot, projectPath),
+            projectId: id,
+            rigName: rigSpec.name,
+            projectsRoot: settings.resolveOne("workspace.projects_root").value as string,
+            workspaceRoot: settings.resolveOne("workspace.root").value as string,
+            catalogPath: settings.resolveOne("workspace.catalog_path").value as string,
+          });
+          routing.projectRegistration = result;
+          if (result.status === "conflict") failures.push({ kind: "project", error: result.detail ?? "project registration conflict" });
+        });
       }
 
       // Agent images are image DIRECTORIES under <openrigHome>/agent-images,
