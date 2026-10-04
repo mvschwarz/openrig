@@ -56,7 +56,9 @@ describe("startup guidance through background selection refresh", () => {
   });
 
   it("keeps the warning when the selected row disappears and refresh clamps the index", () => {
-    const before = snapshot(["other", "target"]), after = snapshot([]);
+    const after = snapshot([]);
+    const remainingRows = computeExplorerRows(createViewState({ instanceId: "empty" }).get(), after).length;
+    const before = snapshot([...Array.from({ length: remainingRows }, (_, i) => `other-${i}`), "target"]);
     const view = selected(before), previousIndex = view.get().selection;
     redraw(view, before, after);
     expect(view.get().selection).toBeLessThan(previousIndex);
