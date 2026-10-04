@@ -30,6 +30,7 @@ import { vendorContextPackDir } from "../domain/bundle-carried-context-pack.js";
 import { vendorProjectDir } from "../domain/bundle-carried-project.js";
 import { getDaemonVersion } from "../domain/daemon-version.js";
 import { inspectBundleBehaviour } from "../domain/bundle-behaviour-inspect.js";
+import type { BundleBehaviour } from "../domain/bundle-behaviour.js";
 import { assertShippableSubstance } from "../domain/agent-resolver.js";
 
 /**
@@ -968,6 +969,19 @@ bundleRoutes.post("/inspect", async (c) => {
     }
     const manifestYaml = fs.readFileSync(manifestPath, "utf-8");
     const rawParsed = parsePodBundleManifest(manifestYaml) as Record<string, unknown>;
+    const describeBehaviour = (identity: ReturnType<typeof bundleBuildIdentity>, filesVerified: boolean): BundleBehaviour => {
+      const generator = { openrigVersion: getDaemonVersion() };
+      const source = identity.source ? { ...identity.source } : null;
+      try {
+        return inspectBundleBehaviour(tmpDir, { manifest: rawParsed, ...identity, source, generator, digestValid, filesVerified });
+      } catch {
+        return {
+          schema: "openrig.bundle-behaviour/v1", state: "not_generated",
+          identity: { source, configurationId: identity.configurationId, packageDigest: identity.packageDigest, assembler: identity.assembler, generator, integrity: { digestValid, filesVerified } },
+          reason: "The archive's behaviour could not be described.", localInspectCommand: "rig bundle inspect <archive> --json",
+        };
+      }
+    };
 
     // Detect v2 (pod-aware) vs v1 (legacy)
     if (rawParsed && rawParsed["schema_version"] === 2) {
@@ -1043,10 +1057,7 @@ bundleRoutes.post("/inspect", async (c) => {
         ? verifyIntegrity(tmpDir, integrityCompat, integrityFsOps())
         : { passed: false, mismatches: [], missing: [], extra: [], errors: ["no integrity section"] };
       const identity = bundleBuildIdentity(podManifest, archiveHash);
-      const behaviour = inspectBundleBehaviour(tmpDir, {
-        manifest: rawParsed, ...identity, source: identity.source ? { ...identity.source } : null, generator: { openrigVersion: getDaemonVersion() },
-        digestValid, filesVerified: integrityResult.passed,
-      });
+      const behaviour = describeBehaviour(identity, integrityResult.passed);
       return c.json({ ...identity, manifest: podManifest, digestValid, integrityResult, behaviour }, 200);
     }
 
@@ -1055,10 +1066,7 @@ bundleRoutes.post("/inspect", async (c) => {
       ? verifyIntegrity(tmpDir, manifest, integrityFsOps())
       : { passed: false, mismatches: [], missing: [], extra: [], errors: ["no integrity section"] };
     const identity = bundleBuildIdentity(manifest, archiveHash);
-    const behaviour = inspectBundleBehaviour(tmpDir, {
-      manifest: rawParsed, ...identity, source: identity.source ? { ...identity.source } : null, generator: { openrigVersion: getDaemonVersion() },
-      digestValid, filesVerified: integrityResult.passed,
-    });
+    const behaviour = describeBehaviour(identity, integrityResult.passed);
     return c.json({ ...identity, manifest, digestValid, integrityResult, behaviour }, 200);
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500);

@@ -47,6 +47,45 @@ describe("archive-only bundle behaviour", () => {
     if (runtime === "pi") expect(view.state === "generated" && view.posture[0]?.selection).toContain("resource trust");
   });
 
+  const policyCases: Array<[string, string | undefined, "off" | "on" | "default" | undefined]> = [];
+  for (const runtime of ["claude-code", "codex", "pi"]) {
+    for (const policy of [undefined, "builtin:yolo", "builtin:locked", "builtin:standard", "builtin:open", "config.md", "floor.md", "bypass.md"]) {
+      const expected = policy === "builtin:yolo" || policy === "bypass.md" ? "off"
+        : runtime === "pi" ? undefined : policy === "floor.md" ? "on" : policy === undefined ? "default" : undefined;
+      policyCases.push([runtime, policy, expected]);
+    }
+  }
+  function policyFixture(runtime: string, policy?: string) {
+    const files = fixture(runtime);
+    files.set("rig.yaml", files.get("rig.yaml")!.replace("permission_policy: builtin:yolo\n", policy ? `permission_policy: ${policy}\n` : ""));
+    const frontmatter = "policy_schema_version: 1\nname: custom\nsource: custom\ndescription: Declared policy.\n";
+    files.set("config.md", `---\n${frontmatter}surface: config\ndefault_posture: ask\nallow: []\nask: []\ndeny: []\ndestructive_class: []\n---\n`);
+    files.set("floor.md", `---\n${frontmatter}surface: flag\nlaunch_posture: floor\n---\n`);
+    files.set("bypass.md", `---\n${frontmatter}surface: flag\nlaunch_posture: full_bypass\n---\n`);
+    return files;
+  }
+
+  it.each(policyCases)("keeps permission-prompt declarations truthful for %s with %s", (runtime, policy, expected) => {
+    const view = inspect(policyFixture(runtime, policy));
+    expect(view.state).toBe("generated");
+    if (view.state !== "generated") throw new Error(view.reason);
+    expect(view.posture[0]?.permissionPrompts).toBe(expected);
+    if (expected === undefined) expect(view.posture[0]).not.toHaveProperty("permissionPrompts");
+    if (policy) expect(view.posture[0]?.selection).toContain(policy);
+    expect(view.posture[0]?.nativeEffect).toBe("unknown");
+  });
+
+  it.each([undefined, "floor.md", "config.md", "builtin:yolo"])("does not infer prompts from a host Codex profile with %s", policy => {
+    const files = policyFixture("codex", policy);
+    files.set("rig.yaml", files.get("rig.yaml")!.replace("    runtime: codex\n", "    runtime: codex\n    codex_config_profile: host-profile\n"));
+    const view = inspect(files);
+    expect(view.state).toBe("generated");
+    if (view.state !== "generated") throw new Error(view.reason);
+    if (policy === "builtin:yolo") expect(view.posture[0]?.permissionPrompts).toBe("off");
+    else expect(view.posture[0]).not.toHaveProperty("permissionPrompts");
+    expect(view.posture[0]?.nativeEffect).toBe("unknown");
+  });
+
   it("distinguishes unsupported legacy archives from an empty team", () => {
     const view = inspect(new Map(), { manifest: { schema_version: 1 } });
     expect(view).toMatchObject({ state: "not_generated", reason: expect.stringContaining("schema-1"), localInspectCommand: expect.stringContaining("rig bundle inspect") });

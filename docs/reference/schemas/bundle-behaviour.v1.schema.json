@@ -213,7 +213,7 @@
           },
           "permissionPrompts": {
             "enum": ["off", "on", "default"],
-            "description": "Archive declaration per seat: off for full_bypass (including builtin:yolo); on for an explicit floor policy; default when no policy is declared (prompts on unless host settings turn them off). Absent means not stated, never on. nativeEffect remains unknown."
+            "description": "Archive declaration per seat: off for full_bypass (including builtin:yolo) on any runtime; on for a Claude/Codex flag-surface floor policy; default for Claude/Codex with no declared policy. Omitted for config-surface policies, host-resolved Codex profiles, and Pi except declared full bypass. Absent means not stated, never on. Host settings may differ; nativeEffect remains unknown."
           },
           "sourceRefs": {
             "type": "array",

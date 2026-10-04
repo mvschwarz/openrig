@@ -93,7 +93,7 @@ describe("before-action bundle view", () => {
 
   it("does not label a member override, a default or an unresolved policy as prompts off", () => {
     for (const [rigPolicy, memberPolicy, basis, permissionPrompts] of [
-      ["builtin:yolo", "builtin:standard", "explicit", "on"],
+      ["builtin:yolo", "builtin:standard", "explicit", undefined],
       [undefined, undefined, "product_default", "default"],
       ["missing-policy.md", undefined, "unresolved", undefined],
     ] as const) {
@@ -149,7 +149,7 @@ describe("before-action bundle view", () => {
       expect(actual.toldFiles).toEqual(expect.arrayContaining([expect.objectContaining({ seat: member.seat, pathOrRef: `agents/${member.member}/role.md`, resolution: "archive" })]));
       expect(actual.alsoRuns).toEqual(expect.arrayContaining([expect.objectContaining({ seat: member.seat, pathOrRef: "openrig-home:plugins/core", resolution: "host_at_launch" })]));
       expect(actual.posture.find(p => p.seat === member.seat)?.nativeEffect).toBe("unknown");
-      expect(actual.posture.find(p => p.seat === member.seat)?.permissionPrompts).toBe("default");
+      expect(actual.posture.find(p => p.seat === member.seat)?.permissionPrompts).toBe(member.runtime === "pi" ? undefined : "default");
       if (member.runtime !== "pi") {
         expect(actual.writes).toEqual(expect.arrayContaining([expect.objectContaining({ seat: member.seat, path: member.runtime === "codex" ? "AGENTS.md" : "CLAUDE.local.md" })]));
       } else {

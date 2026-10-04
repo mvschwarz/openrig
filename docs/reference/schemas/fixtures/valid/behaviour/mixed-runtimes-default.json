@@ -77,7 +77,6 @@
       "shellAccess": "Can run shell commands as the launching user, subject to runtime and host policy.",
       "selection": "resource trust resolved at launch; not a native permission policy",
       "basis": "product_default",
-      "permissionPrompts": "default",
       "nativeEffect": "unknown",
       "sourceRefs": [
         {
