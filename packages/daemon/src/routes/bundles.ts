@@ -694,6 +694,11 @@ bundleRoutes.post("/create", async (c) => {
   const outputPath = typeof body["outputPath"] === "string" ? body["outputPath"] : "";
   const rigRoot = typeof body["rigRoot"] === "string" ? body["rigRoot"] : undefined;
   const includePackages = Array.isArray(body["includePackages"]) ? body["includePackages"] as string[] : undefined;
+  // `rig bundle create --preset/--seat`: the configuration the CLI staged, recorded in the manifest (outside the package digest)
+  const rawConfiguration = body["configuration"] as { id?: unknown; preset?: unknown } | undefined;
+  const configuration = rawConfiguration && typeof rawConfiguration.id === "string"
+    ? { id: rawConfiguration.id, ...(typeof rawConfiguration.preset === "string" ? { preset: rawConfiguration.preset } : {}) }
+    : undefined;
 
   const allowDrift = body["allowDrift"] === true;
 
@@ -775,6 +780,7 @@ bundleRoutes.post("/create", async (c) => {
         if (authorPrimitives.workflowSpecs) result.manifest.workflowSpecs = authorPrimitives.workflowSpecs;
         if (authorPrimitives.contextPacks) result.manifest.contextPacks = authorPrimitives.contextPacks;
         if (authorPrimitives.agentImages) result.manifest.agentImages = authorPrimitives.agentImages;
+        if (configuration) result.manifest.configuration = configuration;
 
         const integrity = computeIntegrity(tmpStaging, integrityFsOps());
         result.manifest.integrity = integrity;
