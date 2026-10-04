@@ -126,7 +126,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     const failed: Array<{ effectiveId: string; error: string }> = [];
 
     for (const entry of plan.entries) {
-      if (entry.classification === "no_op") {
+      // The planner compares only SKILL.md for directory skills. Helpers can
+      // change independently, so still copy the selected directory on reapply.
+      const directorySkill = entry.category === "skill"
+        && this.fs.exists(nodePath.join(entry.absolutePath, "SKILL.md"));
+      if (entry.classification === "no_op" && !directorySkill) {
         skipped.push(entry.effectiveId);
         continue;
       }

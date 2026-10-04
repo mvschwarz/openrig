@@ -164,6 +164,48 @@ describe("bundle-local skills", () => {
     expect(execFileSync("git", ["-C", catalog, "status", "--porcelain"], { encoding: "utf8" })).toBe("");
   });
 
+  it.each(["changed", "missing", "added", "mode-only"] as const)(
+    "reapplies a Pi skill with an unchanged SKILL.md and a %s helper",
+    async (change) => {
+      seed();
+      const specRoot = path.join(root, "source");
+      const resolved = resolveAgentRef("local:agents/worker", specRoot, fsOps);
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) throw new Error(JSON.stringify(resolved));
+      const rig = RigSpecSchema.normalize(RigSpecCodec.parse(rigYaml) as Record<string, unknown>);
+      const result = resolveNodeConfig({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+        profileName: "default", member: rig.pods[0]!.members[0]!, pod: rig.pods[0]!, rig, specRoot, homedir: path.join(root, "home") });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      if (!result.ok) throw new Error(result.errors.join("; "));
+      const pi = new PiRuntimeAdapter({ tmux: {} as TmuxAdapter, fsOps, stateRoot: path.join(root, "pi"), runnerEntryPath: "unused" });
+      const binding = { tmuxSession: "worker@portable", cwd: path.join(root, "work") } as NodeBinding;
+      const target = path.dirname(pi.skillTargetPath(binding.tmuxSession, "portable")!);
+      const project = async (classification: string) => {
+        const planned = planProjection({ config: result.config, collisions: resolved.collisions, fsOps,
+          resolveTargetPath: (_category, id) => pi.skillTargetPath(binding.tmuxSession, id) });
+        expect(planned.ok).toBe(true);
+        if (!planned.ok) throw new Error(planned.errors.join("; "));
+        expect(planned.plan.entries.map(e => e.classification)).toEqual([classification]);
+        expect((await pi.project(planned.plan, binding)).failed).toEqual([]);
+      };
+      await project("safe_projection");
+      const sourceHelper = path.join(specRoot, "skills/portable/scripts/helper.sh");
+      const targetHelper = path.join(target, "scripts/helper.sh");
+      if (change === "changed") fs.writeFileSync(sourceHelper, "#!/bin/sh\nprintf 'updated\\n'\n");
+      if (change === "missing") fs.unlinkSync(targetHelper);
+      if (change === "added") write("source/skills/portable/references/added.md", "New helper reference\n");
+      if (change === "mode-only") fs.chmodSync(sourceHelper, 0o700);
+
+      await project("no_op"); // unchanged Markdown must not hide helper changes
+      for (const rel of walk(path.join(specRoot, "skills/portable"))) {
+        const source = path.join(specRoot, "skills/portable", rel);
+        const delivered = path.join(target, rel);
+        expect(fs.readFileSync(delivered)).toEqual(fs.readFileSync(source));
+        expect(fs.statSync(delivered).mode & 0o777).toBe(fs.statSync(source).mode & 0o777);
+      }
+    },
+  );
+
   it("discovers Pi bundle skills without importing Claude/Codex home or workspace pools", () => {
     for (const prefix of ["home/.agents", "home/.claude", "work/.agents", "work/.claude"]) {
       write(`${prefix}/skills/sibling/SKILL.md`, skill("sibling"));
