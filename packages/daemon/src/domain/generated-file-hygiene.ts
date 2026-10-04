@@ -26,7 +26,7 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
   };
   const git = (dir: string, args: string[], input?: string, allowAbsent = false): string => {
     try {
-      return execFileSync("git", ["-C", dir, "--literal-pathspecs", ...args], {
+      return execFileSync("git", ["-C", dir, ...args], {
         encoding: "utf8", timeout: remaining(), killSignal: "SIGKILL", maxBuffer: 2 * 1024 * 1024,
         input, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       });
