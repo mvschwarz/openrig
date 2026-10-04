@@ -268,7 +268,7 @@ async function probeDaemonCmuxStatus(doctorDeps?: DoctorDeps): Promise<"availabl
 //   deliberate-none  -> permission_policy: none             (origin deliberate_none; floor==absent)
 // P3: the record runs ONLY on an explicit --policy selection, NEVER on skip/quit/timeout (no flag =>
 // no step => bare setup byte-unchanged). P1: no path here upgrades an absent spec to deliberate_none.
-export const POLICY_CHOICES = ["locked", "standard", "open", "yolo", "none"] as const;
+export const POLICY_CHOICES = ["locked", "standard", "open", "yolo", "auto", "none"] as const;
 export type PolicyChoice = (typeof POLICY_CHOICES)[number];
 
 // Root-spec filenames, matching the CLI's established file-or-directory spec convention

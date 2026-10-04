@@ -49,8 +49,9 @@ describe("archive-only bundle behaviour", () => {
 
   const policyCases: Array<[string, string | undefined, "off" | "on" | "default" | undefined]> = [];
   for (const runtime of ["claude-code", "codex", "pi"]) {
-    for (const policy of [undefined, "builtin:yolo", "builtin:locked", "builtin:standard", "builtin:open", "config.md", "floor.md", "bypass.md"]) {
+    for (const policy of [undefined, "builtin:yolo", "builtin:auto", "builtin:locked", "builtin:standard", "builtin:open", "config.md", "floor.md", "bypass.md", "auto.md"]) {
       const expected = policy === "builtin:yolo" || policy === "bypass.md" ? "off"
+        : policy === "builtin:auto" || policy === "auto.md" ? (runtime === "codex" ? "on" : undefined)
         : runtime === "pi" ? undefined : policy === "floor.md" ? "on" : policy === undefined ? "default" : undefined;
       policyCases.push([runtime, policy, expected]);
     }
@@ -62,6 +63,7 @@ describe("archive-only bundle behaviour", () => {
     files.set("config.md", `---\n${frontmatter}surface: config\ndefault_posture: ask\nallow: []\nask: []\ndeny: []\ndestructive_class: []\n---\n`);
     files.set("floor.md", `---\n${frontmatter}surface: flag\nlaunch_posture: floor\n---\n`);
     files.set("bypass.md", `---\n${frontmatter}surface: flag\nlaunch_posture: full_bypass\n---\n`);
+    files.set("auto.md", `---\n${frontmatter}surface: flag\nlaunch_posture: auto\n---\n`);
     return files;
   }
 
@@ -72,10 +74,13 @@ describe("archive-only bundle behaviour", () => {
     expect(view.posture[0]?.permissionPrompts).toBe(expected);
     if (expected === undefined) expect(view.posture[0]).not.toHaveProperty("permissionPrompts");
     if (policy) expect(view.posture[0]?.selection).toContain(policy);
+    if (runtime === "claude-code" && (policy === "builtin:auto" || policy === "auto.md")) {
+      expect(view.posture[0]?.selection).toContain("auto mode");
+    }
     expect(view.posture[0]?.nativeEffect).toBe("unknown");
   });
 
-  it.each([undefined, "floor.md", "config.md", "builtin:yolo"])("does not infer prompts from a host Codex profile with %s", policy => {
+  it.each([undefined, "floor.md", "config.md", "builtin:yolo", "builtin:auto", "auto.md"])("does not infer prompts from a host Codex profile with %s", policy => {
     const files = policyFixture("codex", policy);
     files.set("rig.yaml", files.get("rig.yaml")!.replace("    runtime: codex\n", "    runtime: codex\n    codex_config_profile: host-profile\n"));
     const view = inspect(files);

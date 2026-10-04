@@ -43,13 +43,22 @@ describe("rig policy — the permission-policy verb", () => {
     expect(desc).toContain("rig mode");
   });
 
-  it("list --json names all five choices with their ref forms and the pin", async () => {
+  it("list --json names all six choices with their ref forms and the pin", async () => {
     const { logs } = await runCapture(["policy", "list", "--json"]);
     const out = JSON.parse(logs.join("")) as { policies: Array<{ name: string; ref: string }>; note: string };
-    expect(out.policies.map((p) => p.name)).toEqual(["locked", "standard", "open", "yolo", "none"]);
+    expect(out.policies.map((p) => p.name)).toEqual(["locked", "standard", "open", "yolo", "auto", "none"]);
     expect(out.policies.find((p) => p.name === "standard")?.ref).toBe("builtin:standard");
+    expect(out.policies.find((p) => p.name === "auto")?.ref).toBe("builtin:auto");
     expect(out.policies.find((p) => p.name === "none")?.ref).toBe("none");
     expect(out.note).toContain(PIN);
+  });
+
+  it("show auto displays auto with its real posture", async () => {
+    const { logs } = await runCapture(["policy", "show", "auto", "--json"]);
+    const out = JSON.parse(logs.join("")) as { name: string; ref: string; launchPosture: string };
+    expect(out.name).toBe("auto");
+    expect(out.ref).toBe("builtin:auto");
+    expect(out.launchPosture).toBe("auto");
   });
 
   it("show on an unknown bare name treats it as a custom ref and refuses loudly when it does not resolve", async () => {

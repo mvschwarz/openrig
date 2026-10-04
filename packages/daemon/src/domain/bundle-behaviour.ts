@@ -177,11 +177,12 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         view.team.push({ seat, pod: String(pod.id), member: String(member.id), agentRef, profile: profileName, runtime, ...(model ? { model } : {}), cwd: text(member.cwd) ?? "." });
         view.needs.push({ seat, kind: "runtime", name: runtime, status: "not_checked", sourceRefs });
         if (runtime !== "terminal") view.needs.push({ seat, kind: "login", name: `${runtime}: the user's own runtime account or provider configuration`, status: "not_checked", sourceRefs });
-        let posture: "floor" | "full_bypass" | undefined;
+        let posture: "floor" | "full_bypass" | "auto" | undefined;
         let policySurface: "flag" | "config" | undefined;
         const policy = text(member.permission_policy) ?? text(rig.permission_policy);
         let basis: "explicit" | "product_default" | "unresolved" = policy ? "explicit" : "product_default";
         if (policy === "builtin:yolo") { posture = "full_bypass"; policySurface = "flag"; }
+        else if (policy === "builtin:auto") { posture = "auto"; policySurface = "flag"; }
         else if (["builtin:locked", "builtin:standard", "builtin:open"].includes(policy ?? "")) policySurface = "config";
         else if (policy === "none") posture = "floor";
         else if (policy) {
@@ -190,7 +191,7 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
           const parsed = raw === undefined ? undefined : parsePolicySpec(raw);
           if (parsed && !("error" in parsed) && validatePolicySpec(parsed.frontmatter).ok) {
             policySurface = parsed.frontmatter.surface as "flag" | "config";
-            if (policySurface === "flag") posture = parsed.frontmatter.launch_posture as "floor" | "full_bypass";
+            if (policySurface === "flag") posture = parsed.frontmatter.launch_posture as "floor" | "full_bypass" | "auto";
           } else { basis = "unresolved"; unknown(policy, "Permission policy could not be resolved from the archive.", sourceRefs, seat); }
         }
         const access = runtime === "terminal" ? "Terminal shell; no native agent permission flag"
@@ -199,6 +200,9 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
           : posture === "full_bypass" ? runtime === "claude-code" ? "Permission prompts: off; Claude bypasses permissions (full_bypass)"
             : runtime === "codex" ? "Permission prompts: off; Codex runs with full access and never asks (full_bypass)"
             : "full_bypass: native permission bypass / unrestricted sandbox requested"
+          : posture === "auto" ? runtime === "claude-code" ? "auto mode (--permission-mode auto)"
+            : runtime === "codex" ? (text(member.codex_config_profile) ? `native profile ${member.codex_config_profile}; sandbox and approvals resolved at launch` : "workspace-write (conditional launch floor); approval policy resolved at launch")
+            : "runtime-specific access; resolved at launch"
           : policySurface === "config" ? "Action-specific permission configuration; prompt behavior resolved at launch"
           : runtime === "claude-code" ? "acceptEdits (conditional launch floor)"
           : runtime === "codex" ? (text(member.codex_config_profile) ? `native profile ${member.codex_config_profile}; sandbox and approvals resolved at launch` : "workspace-write (conditional launch floor); approval policy resolved at launch")
@@ -208,6 +212,7 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         const nativePermissionSurface = runtime === "claude-code" || runtime === "codex";
         const permissionPrompts = posture === "full_bypass" ? "off"
           : !nativePermissionSurface || hostCodexProfile || policySurface === "config" ? undefined
+          : posture === "auto" ? (runtime === "codex" ? "on" : undefined)
           : policySurface === "flag" && posture === "floor" ? "on"
           : basis === "product_default" ? "default" : undefined;
         view.posture.push({ seat, shellAccess: "Can run shell commands as the launching user, subject to runtime and host policy.", selection, basis, ...(permissionPrompts ? { permissionPrompts } : {}), nativeEffect: "unknown", sourceRefs });

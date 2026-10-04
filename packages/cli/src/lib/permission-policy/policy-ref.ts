@@ -158,6 +158,17 @@ export function builtinPackageTarget(name: BuiltinPolicyName): string {
  *     its launch_posture; config → floor (config-surface CONTENT application is deferred to the
  *     skill; no config write here). Unreadable/invalid → advisory floor, provenance still preserved.
  */
+/**
+ * The single mapping point for built-in policy launch posture:
+ * yolo -> full_bypass, auto -> auto, everything else -> floor.
+ */
+export function builtinLaunchPosture(nameOrRef: string): LaunchPosture {
+  const name = nameOrRef.startsWith(BUILTIN_PREFIX) ? nameOrRef.slice(BUILTIN_PREFIX.length) : nameOrRef;
+  if (name === "yolo") return "full_bypass";
+  if (name === "auto") return "auto";
+  return "floor";
+}
+
 export function resolvePermissionPolicyAttachment(
   ref: string,
   declaringDir: string,
@@ -183,7 +194,7 @@ export function resolvePermissionPolicyAttachment(
       builtinName,
       resolvedTarget: builtinPackageTarget(builtinName),
       surface: builtinName === "yolo" || builtinName === "auto" ? "flag" : undefined,
-      launchPosture: builtinName === "yolo" ? "full_bypass" : builtinName === "auto" ? "auto" : "floor",
+      launchPosture: builtinLaunchPosture(builtinName),
       contentResolved: true,
     };
   }

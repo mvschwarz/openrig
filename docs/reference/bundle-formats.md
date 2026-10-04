@@ -95,9 +95,10 @@ carries no tested status.
     because host settings decide it.
     Optional `posture[].permissionPrompts` is `off` for declared `full_bypass` (including rig- or member-level
     `builtin:yolo`) on any runtime; for Claude/Codex, `on` for a declared flag-surface floor policy or `default` when
-    no policy is declared (prompts on unless the installing machine's settings turn them off). Omit it for
-    config-surface policies (`builtin:locked`, `builtin:standard`, `builtin:open` or an archived `surface: config`
-    policy), host-resolved Codex profiles, and Pi except declared full bypass. `selection` names the declared policy.
+    no policy is declared (prompts on unless the installing machine's settings turn them off); for Codex, `on` for
+    declared `auto`. Omit it for Claude under auto (naming auto mode in `selection`), config-surface policies
+    (`builtin:locked`, `builtin:standard`, `builtin:open` or an archived `surface: config` policy), host-resolved
+    Codex profiles, and Pi except declared full bypass. `selection` names the declared policy.
     An absent field means not stated, never `on`. For `off`, Claude
     bypasses permissions, Codex runs with full access and never asks, and Pi gets full resource trust (`--approve`,
     not a permission mode). These are archive facts; `nativeEffect` remains `unknown`.

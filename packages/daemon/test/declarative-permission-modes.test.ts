@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Database from "better-sqlite3";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
@@ -234,6 +237,7 @@ describe("Issue #611 Declarative Permission Policy Precedence & Cascade", () => 
       effectiveMode: "floor",
       source: "rig_spec",
       launchPosture: "floor",
+      fallbackReason: "Codex has no auto mode and launches at the floor",
     });
 
     // Even if Codex member declared builtin:auto, it safely falls back to floor
@@ -241,6 +245,39 @@ describe("Issue #611 Declarative Permission Policy Precedence & Cascade", () => 
       effectiveMode: "floor",
       source: "member_spec",
       launchPosture: "floor",
+      fallbackReason: "Codex has no auto mode and launches at the floor",
+    });
+  });
+
+  it("Heterogeneous rig safety: Pi seats safely fall back to floor on a builtin:auto rig", () => {
+    const db = createTestDb();
+    const rigRepo = new RigRepository(db);
+    const rig = rigRepo.createRig("pi-hetero-rig");
+    rigRepo.setRigPermissionPolicy(rig.id, "builtin:auto");
+    rigRepo.setRigPolicyProvenance(rig.id, {
+      origin: "builtin",
+      resolvedTarget: "policies/builtin/auto.policy.md",
+      declaringDir: null,
+      launchPosture: "auto",
+    });
+
+    const piNode = rigRepo.addNode(rig.id, "pi-dev", { runtime: "pi" });
+    const piExplicitAuto = rigRepo.addNode(rig.id, "pi-auto", { runtime: "pi", permissionPolicy: "builtin:auto" });
+
+    const store = new NativePermissionStore(db);
+
+    expect(store.resolve(piNode.id, "pi")).toEqual({
+      effectiveMode: "floor",
+      source: "rig_spec",
+      launchPosture: "floor",
+      fallbackReason: "Pi has no auto mode and launches at the floor",
+    });
+
+    expect(store.resolve(piExplicitAuto.id, "pi")).toEqual({
+      effectiveMode: "floor",
+      source: "member_spec",
+      launchPosture: "floor",
+      fallbackReason: "Pi has no auto mode and launches at the floor",
     });
   });
 
@@ -448,11 +485,19 @@ describe("Restore & Handover Continuity", () => {
     const resume = vi.fn(async () => ({ ok: false, code: "offline", message: "stop" }));
     const ctx = {
       db,
+      rigRepo,
       sessionRegistry: registry,
       appliedLaunchStore: new AppliedLaunchObservationStore(db),
       claudeResume: { canResume: () => true, resume },
       codexResume: { canResume: () => false, resume },
     };
+
+    const resolvedPosture = (RestoreOrchestrator.prototype as any).resolveRestorePosture.call(
+      ctx,
+      node.id,
+      rig.id,
+    );
+    expect(resolvedPosture).toBe("auto");
 
     await (RestoreOrchestrator.prototype as any).attemptResume.call(
       ctx,
@@ -463,7 +508,7 @@ describe("Restore & Handover Continuity", () => {
       "/inert",
       null,
       "model",
-      "floor",
+      resolvedPosture,
     );
 
     expect(resume).toHaveBeenCalledWith(
@@ -476,6 +521,262 @@ describe("Restore & Handover Continuity", () => {
       "auto",
       node.id,
     );
+  });
+
+  describe("Restore custom policy re-reading", () => {
+    it("restore re-reads custom member policy changes: floor -> full_bypass", () => {
+      const db = createTestDb();
+      const rigRepo = new RigRepository(db);
+      const registry = new SessionRegistry(db);
+      const rig = rigRepo.createRig("restore-custom-rig");
+
+      const dir = mkdtempSync(join(tmpdir(), "openrig-policy-test-"));
+      try {
+        const policyPath = join(dir, "member.policy.md");
+        writeFileSync(policyPath, `---
+source: custom
+name: member-policy
+surface: flag
+launch_posture: floor
+policy_schema_version: 1
+description: Custom member policy
+---
+`);
+
+        const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", permissionPolicy: "member.policy.md" });
+        rigRepo.setNodePolicyProvenance(node.id, {
+          origin: "custom",
+          resolvedTarget: policyPath,
+          declaringDir: dir,
+          launchPosture: "floor",
+        });
+
+        const resume = vi.fn(async () => ({ ok: false, code: "offline", message: "stop" }));
+        const ctx = {
+          db,
+          rigRepo,
+          sessionRegistry: registry,
+          appliedLaunchStore: new AppliedLaunchObservationStore(db),
+          claudeResume: { canResume: () => true, resume },
+          codexResume: { canResume: () => false, resume },
+        };
+
+        // Before edit: resolves floor
+        const initialPosture = (RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id);
+        expect(initialPosture).toBe("floor");
+
+        // Edit on disk: floor -> full_bypass
+        writeFileSync(policyPath, `---
+source: custom
+name: member-policy
+surface: flag
+launch_posture: full_bypass
+policy_schema_version: 1
+description: Custom member policy
+---
+`);
+
+        // Re-read during restore resolves full_bypass
+        const updatedPosture = (RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id);
+        expect(updatedPosture).toBe("full_bypass");
+
+        // attemptResume uses the re-read posture instead of launch DB columns
+        (RestoreOrchestrator.prototype as any).attemptResume.call(
+          ctx,
+          node.id,
+          "seat",
+          "claude_id",
+          "original",
+          "/inert",
+          null,
+          "model",
+          updatedPosture,
+        );
+
+        expect(resume).toHaveBeenCalledWith(
+          "seat",
+          "claude_id",
+          "original",
+          "/inert",
+          "full_bypass",
+          "model",
+          undefined,
+          node.id,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("restore re-reads custom member policy changes: full_bypass -> floor", () => {
+      const db = createTestDb();
+      const rigRepo = new RigRepository(db);
+      const registry = new SessionRegistry(db);
+      const rig = rigRepo.createRig("restore-custom-rig");
+
+      const dir = mkdtempSync(join(tmpdir(), "openrig-policy-test-"));
+      try {
+        const policyPath = join(dir, "member.policy.md");
+        writeFileSync(policyPath, `---
+source: custom
+name: member-policy
+surface: flag
+launch_posture: full_bypass
+policy_schema_version: 1
+description: Custom member policy
+---
+`);
+
+        const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", permissionPolicy: "member.policy.md" });
+        rigRepo.setNodePolicyProvenance(node.id, {
+          origin: "custom",
+          resolvedTarget: policyPath,
+          declaringDir: dir,
+          launchPosture: "full_bypass",
+        });
+
+        const resume = vi.fn(async () => ({ ok: false, code: "offline", message: "stop" }));
+        const ctx = {
+          db,
+          rigRepo,
+          sessionRegistry: registry,
+          appliedLaunchStore: new AppliedLaunchObservationStore(db),
+          claudeResume: { canResume: () => true, resume },
+          codexResume: { canResume: () => false, resume },
+        };
+
+        // Before edit: resolves full_bypass
+        const initialPosture = (RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id);
+        expect(initialPosture).toBe("full_bypass");
+
+        // Edit on disk: full_bypass -> floor
+        writeFileSync(policyPath, `---
+source: custom
+name: member-policy
+surface: flag
+launch_posture: floor
+policy_schema_version: 1
+description: Custom member policy
+---
+`);
+
+        // Re-read during restore resolves floor
+        const updatedPosture = (RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id);
+        expect(updatedPosture).toBe("floor");
+
+        // attemptResume uses the re-read posture instead of launch DB columns
+        (RestoreOrchestrator.prototype as any).attemptResume.call(
+          ctx,
+          node.id,
+          "seat",
+          "claude_id",
+          "original",
+          "/inert",
+          null,
+          "model",
+          updatedPosture,
+        );
+
+        expect(resume).toHaveBeenCalledWith(
+          "seat",
+          "claude_id",
+          "original",
+          "/inert",
+          "floor",
+          "model",
+          undefined,
+          node.id,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("restore re-reads rig-level custom policy changes", () => {
+      const db = createTestDb();
+      const rigRepo = new RigRepository(db);
+      const registry = new SessionRegistry(db);
+      const rig = rigRepo.createRig("restore-rig-policy");
+
+      const dir = mkdtempSync(join(tmpdir(), "openrig-policy-test-"));
+      try {
+        const policyPath = join(dir, "rig.policy.md");
+        writeFileSync(policyPath, `---
+source: custom
+name: rig-policy
+surface: flag
+launch_posture: floor
+policy_schema_version: 1
+description: Custom rig policy
+---
+`);
+
+        rigRepo.setRigPermissionPolicy(rig.id, "rig.policy.md");
+        rigRepo.setRigPolicyProvenance(rig.id, {
+          origin: "custom",
+          resolvedTarget: policyPath,
+          declaringDir: dir,
+          launchPosture: "floor",
+        });
+
+        // Member without its own policy inherits from rig
+        const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+
+        const resume = vi.fn(async () => ({ ok: false, code: "offline", message: "stop" }));
+        const ctx = {
+          db,
+          rigRepo,
+          sessionRegistry: registry,
+          appliedLaunchStore: new AppliedLaunchObservationStore(db),
+          claudeResume: { canResume: () => true, resume },
+          codexResume: { canResume: () => false, resume },
+        };
+
+        // Before edit: resolves floor
+        const initialPosture = (RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id);
+        expect(initialPosture).toBe("floor");
+
+        // Edit on disk: floor -> full_bypass
+        writeFileSync(policyPath, `---
+source: custom
+name: rig-policy
+surface: flag
+launch_posture: full_bypass
+policy_schema_version: 1
+description: Custom rig policy
+---
+`);
+
+        // Re-read during restore resolves full_bypass
+        const updatedPosture = (RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id);
+        expect(updatedPosture).toBe("full_bypass");
+
+        (RestoreOrchestrator.prototype as any).attemptResume.call(
+          ctx,
+          node.id,
+          "seat",
+          "claude_id",
+          "original",
+          "/inert",
+          null,
+          "model",
+          updatedPosture,
+        );
+
+        expect(resume).toHaveBeenCalledWith(
+          "seat",
+          "claude_id",
+          "original",
+          "/inert",
+          "full_bypass",
+          "model",
+          undefined,
+          node.id,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   it("SeatHandoverService passes declarative auto mode to successor launcher", async () => {
@@ -611,6 +912,60 @@ describe("SeatStatusService Provenance Reporting", () => {
             effectiveMode: "full_bypass",
             source: "explicit",
             launchPosture: "full_bypass",
+          },
+        },
+      },
+    });
+  });
+
+  it("reports fallbackReason for Codex and Pi seats inheriting or declaring builtin:auto", () => {
+    const db = createTestDb();
+    const rigRepo = new RigRepository(db);
+    const registry = new SessionRegistry(db);
+
+    const rig = rigRepo.createRig("fallback-rig");
+    rigRepo.setRigPermissionPolicy(rig.id, "builtin:auto");
+    rigRepo.setRigPolicyProvenance(rig.id, {
+      origin: "builtin",
+      resolvedTarget: "policies/builtin/auto.policy.md",
+      declaringDir: null,
+      launchPosture: "auto",
+    });
+
+    const codexNode = rigRepo.addNode(rig.id, "codex-seat", { runtime: "codex" });
+    const piNode = rigRepo.addNode(rig.id, "pi-seat", { runtime: "pi" });
+    registry.registerSession(codexNode.id, "codex-seat@fallback-rig");
+    registry.registerSession(piNode.id, "pi-seat@fallback-rig");
+
+    const statusService = new SeatStatusService({ rigRepo });
+
+    const codexStatus = statusService.getStatus("codex-seat@fallback-rig");
+    expect(codexStatus).toMatchObject({
+      ok: true,
+      status: {
+        permissions: {
+          selectionState: "inherit",
+          effective: {
+            effectiveMode: "floor",
+            source: "rig_spec",
+            launchPosture: "floor",
+            fallbackReason: "Codex has no auto mode and launches at the floor",
+          },
+        },
+      },
+    });
+
+    const piStatus = statusService.getStatus("pi-seat@fallback-rig");
+    expect(piStatus).toMatchObject({
+      ok: true,
+      status: {
+        permissions: {
+          selectionState: "inherit",
+          effective: {
+            effectiveMode: "floor",
+            source: "rig_spec",
+            launchPosture: "floor",
+            fallbackReason: "Pi has no auto mode and launches at the floor",
           },
         },
       },

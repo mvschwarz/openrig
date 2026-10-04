@@ -4,7 +4,7 @@
 // copy-to-customize) them without spelunking the install tree.
 //
 // Contract (guard ruling):
-//   - EXACTLY the known four built-ins — locked|standard|open|yolo — are ever
+//   - EXACTLY the known five built-ins — locked|standard|open|yolo|auto — are ever
 //     materialized; stranger files in the bundled dir are never copied.
 //   - Copies are byte-identical, mode 0444 read-only INSPECTION copies. The
 //     mode is a copy-to-customize affordance, not a security boundary; it is
@@ -17,7 +17,7 @@
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
 
-export const BUILTIN_POLICY_NAMES = ["locked", "standard", "open", "yolo"] as const;
+export const BUILTIN_POLICY_NAMES = ["locked", "standard", "open", "yolo", "auto"] as const;
 
 export interface MaterializeBuiltinPolicyReferenceDeps {
   /** the packaged source dir (…/policies/builtin next to the daemon dist) */

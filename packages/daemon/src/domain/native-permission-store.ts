@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type { NodeBinding } from "./runtime-adapter.js";
 import type { NativePermissionSelection } from "./native-permission-selection.js";
+import { builtinLaunchPosture } from "./permission-policy/policy-ref.js";
 
 export interface StoredNativePermissionSelection extends NativePermissionSelection {
   actor: string;
@@ -15,6 +16,7 @@ export interface ResolvedSeatPermission {
   source: PermissionModeSource;
   launchPosture?: "floor" | "full_bypass" | "auto";
   permissionMode?: string;
+  fallbackReason?: string;
 }
 
 /** The stable node owns the desired setting. Native history and current processes are untouched. */
@@ -106,19 +108,16 @@ export class NativePermissionStore {
     // Level 2: Member-level declaration in rig.yaml
     // Precedence: member's own declaration must never be silently outranked by a rig-wide default.
     if (memberPolicy !== null) {
-      const effectivePosture = nodePosture ?? (
-        memberPolicy === "builtin:auto" ? "auto"
-        : memberPolicy === "builtin:yolo" ? "full_bypass"
-        : "floor"
-      );
+      const effectivePosture = nodePosture ?? builtinLaunchPosture(memberPolicy);
 
       if (effectivePosture === "auto") {
-        if (runtime === "codex") {
-          // Heterogeneous rig: Codex does not have --permission-mode auto; falls back to floor
+        if (runtime !== "claude-code") {
+          const runtimeName = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : runtime;
           return {
             effectiveMode: "floor",
             source: "member_spec",
             launchPosture: "floor",
+            fallbackReason: `${runtimeName} has no auto mode and launches at the floor`,
           };
         }
         return {
@@ -148,9 +147,7 @@ export class NativePermissionStore {
     // Level 3: Rig-level declaration in rig.yaml
     // Applied when the member did not declare its own policy.
     const effectiveRigPosture = rigPosture ?? (
-      rigPolicy === "builtin:auto" ? "auto"
-      : rigPolicy === "builtin:yolo" ? "full_bypass"
-      : rigPolicy ? "floor"
+      rigPolicy !== null ? builtinLaunchPosture(rigPolicy)
       : (nodePosture && nodePosture !== "floor" ? nodePosture : null)
     );
 
@@ -158,12 +155,13 @@ export class NativePermissionStore {
       const posture = effectiveRigPosture ?? "floor";
 
       if (posture === "auto") {
-        if (runtime === "codex") {
-          // Heterogeneous rig: Codex does not have --permission-mode auto; falls back to floor
+        if (runtime !== "claude-code") {
+          const runtimeName = runtime === "codex" ? "Codex" : runtime === "pi" ? "Pi" : runtime;
           return {
             effectiveMode: "floor",
             source: "rig_spec",
             launchPosture: "floor",
+            fallbackReason: `${runtimeName} has no auto mode and launches at the floor`,
           };
         }
         return {
