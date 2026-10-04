@@ -126,12 +126,14 @@ function checkGitHubBundleSymlinks(checkoutDir: string): void {
 }
 
 /** Match the assembler: member refs use the rig directory; imports use their agent directory. */
-function checkGitHubBundleAgentRefs(folder: string, checkoutDir: string): void {
-  const root = realpathSync(checkoutDir);
+function checkGitHubBundleAgentRefs(folder: string, checkoutDir: string, retainedCheckoutDir?: string): void {
+  const roots = [checkoutDir, ...(retainedCheckoutDir ? [retainedCheckoutDir] : [])].map(dir => realpathSync(dir));
   const contained = (file: string): string => {
     const real = realpathSync(file);
-    const relative = path.relative(root, real);
-    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error();
+    if (!roots.some(root => {
+      const relative = path.relative(root, real);
+      return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+    })) throw new Error();
     return real;
   };
   const agent = (ref: unknown, from: string, ancestors = new Set<string>()): void => {
@@ -266,7 +268,8 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
       configurationStaging = staged.stagingDir;
       specPath = staged.rigSpecPath;
       folder = path.dirname(specPath);
-      checkGitHubBundleAgentRefs(folder, staged.stagingDir);
+      // An absolute in-checkout ref still names the retained original; both owned trees stay until create settles.
+      checkGitHubBundleAgentRefs(folder, staged.stagingDir, prepared.checkoutDir);
       configuration = { id: chosen.configurationId, ...(chosen.preset ? { preset: chosen.preset } : {}) };
     }
   } catch (error) {

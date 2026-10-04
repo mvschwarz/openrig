@@ -134,9 +134,9 @@ describe("GitHub bundle source", () => {
     expect(fs.readFileSync(path.join(outside, "notes.txt"), "utf8")).toBe("host-fixture repository fixture\n");
   });
 
-  it.each([false, true])("assembles shared agents and imports outside the selected folder (preset=%s)", async preset => {
+  it.each([[false, "local"], [true, "local"], [false, "path"], [true, "path"]] as const)("assembles shared agents and imports outside the selected folder (preset=%s, ref=%s)", async (preset, refKind) => {
     const git = checkoutWith((checkout, folder) => {
-      rigWithAgent(folder, "local:../../agents/helper");
+      rigWithAgent(folder, refKind === "local" ? "local:../../agents/helper" : `path:${path.join(checkout, "agents/helper")}`);
       writeAgent(path.join(checkout, "agents/helper"), "helper", ["local:../library"]);
       writeAgent(path.join(checkout, "agents/library"), "library");
       fs.writeFileSync(path.join(folder, "configurations.yaml"), 'schema: openrig.bundle-configurations/v1\nrecommended: authored\nseats:\n  dev.helper:\n    runtimes: { codex: default, claude-code: default }\npresets:\n  authored: { dev.helper: codex }\n  alternate: { dev.helper: claude-code }\n');
