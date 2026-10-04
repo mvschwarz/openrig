@@ -857,12 +857,14 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect((unresolvableSlice.folded as Record<string, unknown>).value).toBe("INDETERMINATE");
     expect(String((unresolvableSlice.folded as Record<string, unknown>).basis)).toContain("unresolvable-branch");
 
-    // 4. Invalid ref name: rejects ref starting with '-' and marks arrangement malformed
-    fs.writeFileSync(missionYamlPath, originalYaml + "\n  source:\n    integration_ref: -invalid-branch\n");
-    const invalidDoc = await show();
-    const sources = invalidDoc.sources as Record<string, Record<string, unknown>>;
-    expect(sources.arrangement.value).toBe("INDETERMINATE");
-    expect(String(sources.arrangement.basis)).toMatch(/arrangement\.source\.integration_ref must be a valid Git ref name/);
+    // 4. Invalid ref name: rejects ref starting with '-', '@', components starting with '.', or ending with '.lock'
+    for (const badRef of ["-invalid-branch", "@", "refs/heads/.bad", "refs/bad.lock/foo"]) {
+      fs.writeFileSync(missionYamlPath, originalYaml + `\n  source:\n    integration_ref: "${badRef}"\n`);
+      const invalidDoc = await show();
+      const sources = invalidDoc.sources as Record<string, Record<string, unknown>>;
+      expect(sources.arrangement.value).toBe("INDETERMINATE");
+      expect(String(sources.arrangement.basis)).toMatch(/arrangement\.source\.integration_ref must be a valid Git ref name/);
+    }
   });
 
   it("stays a registered-name error at base and a clean not-found for unknown names either way", () => {

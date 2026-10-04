@@ -269,10 +269,14 @@ interface ArrangementSlice {
 }
 
 function isValidGitRef(ref: string): boolean {
-  if (typeof ref !== "string" || !ref || ref.startsWith("-")) return false;
+  if (typeof ref !== "string" || !ref || ref.startsWith("-") || ref === "@") return false;
   if (ref.startsWith("/") || ref.endsWith("/") || ref.includes("//")) return false;
-  if (ref.includes("..") || ref.includes("@{") || ref.endsWith(".lock") || ref.endsWith(".")) return false;
+  if (ref.includes("..") || ref.includes("@{") || ref.endsWith(".")) return false;
   if (/[\s\x00-\x1f\x7f~^:?*\[\\]/.test(ref)) return false;
+  const parts = ref.split("/");
+  for (const part of parts) {
+    if (part.startsWith(".") || part.endsWith(".lock") || part === "") return false;
+  }
   return true;
 }
 
