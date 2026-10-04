@@ -50,8 +50,8 @@ interface GeneratedBehaviour {
   alsoRuns: FileFact[];
   writes: WriteFact[];
   outsideAddresses: Array<{ domain: string; sourceRefs: SourceRef[] }>;
-  needs: Array<{ kind: string; name: string; commands?: string[]; versionConstraint?: string; status: "not_checked"; sourceRefs: SourceRef[] }>;
-  unknownBeforeLaunch: Array<{ subject: string; reason: string; sourceRefs: SourceRef[] }>;
+  needs: Array<{ seat?: string; kind: string; name: string; commands?: string[]; versionConstraint?: string; status: "not_checked"; sourceRefs: SourceRef[] }>;
+  unknownBeforeLaunch: Array<{ seat?: string; subject: string; reason: string; sourceRefs: SourceRef[] }>;
 }
 export type BundleBehaviour = GeneratedBehaviour | {
   schema: "openrig.bundle-behaviour/v1";
@@ -118,14 +118,14 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
       schema: "openrig.bundle-behaviour/v1", state: "generated", identity,
       team: [], posture: [], toldFiles: [], alsoRuns: [], writes: [], outsideAddresses: [], needs: [], unknownBeforeLaunch: [],
     };
-    const unknown = (subject: string, reason: string, sourceRefs: SourceRef[] = []) => {
-      view.unknownBeforeLaunch.push({ subject, reason, sourceRefs });
+    const unknown = (subject: string, reason: string, sourceRefs: SourceRef[] = [], seat?: string) => {
+      view.unknownBeforeLaunch.push({ ...(seat ? { seat } : {}), subject, reason, sourceRefs });
     };
     const fileFact = (seat: string | undefined, kind: string, ref: string, base: string, sourceRefs: SourceRef[]): FileFact => {
       const resolved = memberPath(base, ref);
       const present = resolved !== undefined && (files.has(resolved) || [...files.keys()].some(p => p.startsWith(resolved + "/")));
       const resolution: Resolution = present ? "archive" : resolved === undefined ? "host_at_launch" : "unresolved";
-      if (!present) unknown(ref, resolution === "host_at_launch" ? "Resolved on the installing host at launch; contents were not read." : "Not present in the inspected archive.", sourceRefs);
+      if (!present) unknown(ref, resolution === "host_at_launch" ? "Resolved on the installing host at launch; contents were not read." : "Not present in the inspected archive.", sourceRefs, seat);
       return { ...(seat ? { seat } : {}), kind, pathOrRef: resolved ?? ref, resolution, sourceRefs };
     };
     const write = (seat: string | undefined, kind: string, destinationBase: string, target: string, sourceRefs: SourceRef[], operation = "project", phase = "before_launch") => {
@@ -146,7 +146,7 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         }
       };
       for (const [p, content] of candidates) {
-        try { visit(parseYaml(content), p, ""); } catch { unknown(p, "Hook declarations could not be parsed; no code was executed.", [{ path: p }]); }
+        try { visit(parseYaml(content), p, ""); } catch { unknown(p, "Hook declarations could not be parsed; no code was executed.", [{ path: p }], fact.seat); }
       }
     };
     const loadAgent = (ref: string, base: string): { spec: AgentSpec; dir: string; file: string } | undefined => {
@@ -175,8 +175,8 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         const runtime = text(member.runtime) ?? profile?.preferences?.runtime ?? agent?.spec.defaults?.runtime ?? (agentRef === "builtin:terminal" ? "terminal" : "claude-code");
         const model = text(member.model) ?? profile?.preferences?.model ?? agent?.spec.defaults?.model;
         view.team.push({ seat, pod: String(pod.id), member: String(member.id), agentRef, profile: profileName, runtime, ...(model ? { model } : {}), cwd: text(member.cwd) ?? "." });
-        view.needs.push({ kind: "runtime", name: runtime, status: "not_checked", sourceRefs });
-        if (runtime !== "terminal") view.needs.push({ kind: "login", name: `${runtime}: the user's own runtime account or provider configuration`, status: "not_checked", sourceRefs });
+        view.needs.push({ seat, kind: "runtime", name: runtime, status: "not_checked", sourceRefs });
+        if (runtime !== "terminal") view.needs.push({ seat, kind: "login", name: `${runtime}: the user's own runtime account or provider configuration`, status: "not_checked", sourceRefs });
         let posture: "floor" | "full_bypass" | undefined;
         let policySurface: "flag" | "config" | undefined;
         const policy = text(member.permission_policy) ?? text(rig.permission_policy);
@@ -191,7 +191,7 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
           if (parsed && !("error" in parsed) && validatePolicySpec(parsed.frontmatter).ok) {
             policySurface = parsed.frontmatter.surface as "flag" | "config";
             if (policySurface === "flag") posture = parsed.frontmatter.launch_posture as "floor" | "full_bypass";
-          } else { basis = "unresolved"; unknown(policy, "Permission policy could not be resolved from the archive.", sourceRefs); }
+          } else { basis = "unresolved"; unknown(policy, "Permission policy could not be resolved from the archive.", sourceRefs, seat); }
         }
         const access = runtime === "terminal" ? "Terminal shell; no native agent permission flag"
           : basis === "unresolved" ? `unresolved policy: ${policy}`
@@ -231,13 +231,13 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         if (agent) {
           startup(agent.spec.startup, agent.dir, [{ path: agent.file, field: "startup" }]);
           startup(profile?.startup, agent.dir, [{ path: agent.file, field: `profiles.${profileName}.startup` }]);
-          if (!profile) unknown(seat, `Profile ${profileName} is not in the packaged AgentSpec.`, [{ path: agent.file }]);
+          if (!profile) unknown(seat, `Profile ${profileName} is not in the packaged AgentSpec.`, [{ path: agent.file }], seat);
           const imports: NonNullable<typeof agent>[] = [];
           const visited = new Set([agent.file]);
           const walk = (current: NonNullable<typeof agent>) => {
             for (const imp of current.spec.imports) {
               const child = loadAgent(imp.ref, current.dir);
-              if (!child) { unknown(imp.ref, "Imported AgentSpec is not readable in this archive.", [{ path: current.file, field: "imports" }]); continue; }
+              if (!child) { unknown(imp.ref, "Imported AgentSpec is not readable in this archive.", [{ path: current.file, field: "imports" }], seat); continue; }
               if (visited.has(child.file)) continue;
               visited.add(child.file); imports.push(child); walk(child);
             }
@@ -255,7 +255,7 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
                 (category === "plugins" || category === "runtimeResources" ? view.alsoRuns : view.toldFiles).push(fact);
                 unknown(selected, candidates.length ? "Ambiguous packaged resource selection." : discoveredSkill
                   ? "Selected skill may come from the host catalog; not resolved before launch."
-                  : "Selected resource is not declared in the packaged AgentSpecs.", selectedRefs);
+                  : "Selected resource is not declared in the packaged AgentSpecs.", selectedRefs, seat);
                 continue;
               }
               const { owner, resource } = candidates[0]!;
@@ -284,10 +284,10 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
                   write(seat, category, "seat_cwd", ".mcp.json", fact.sourceRefs, "merge MCP configuration fragment");
                 } else write(seat, category, "seat_cwd", `${root}/extensions/${selected}`, fact.sourceRefs);
               }
-              else unknown(selected, "Projection destination depends on the installed runtime adapter.", fact.sourceRefs);
+              else unknown(selected, "Projection destination depends on the installed runtime adapter.", fact.sourceRefs, seat);
             }
           }
-        } else if (agentRef !== "builtin:terminal") unknown(agentRef, "AgentSpec is not readable in this archive; its selected resources are unknown.", sourceRefs);
+        } else if (agentRef !== "builtin:terminal") unknown(agentRef, "AgentSpec is not readable in this archive; its selected resources are unknown.", sourceRefs, seat);
         if (text(rig.culture_file)) {
           const fact = fileFact(seat, "culture", String(rig.culture_file), rigRoot, [{ path: rigPath, field: "culture_file" }]);
           const content = fact.resolution === "archive" ? files.get(fact.pathOrRef) : undefined;
@@ -297,7 +297,7 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         for (const [raw, field] of [[rig.startup, "startup"], [pod.startup, `pods.${pod.id}.startup`], [member.startup, `pods.${pod.id}.members.${member.id}.startup`]] as const) {
           if (raw) startup(normalizeAgentSpec({ name: "overlay", version: "1", startup: raw }).startup, rigRoot, [{ path: rigPath, field }]);
         }
-        if (member.session_source || member.starter_ref) unknown(seat, "Prior conversation, starter and rebuild inputs are resolved at launch.", sourceRefs);
+        if (member.session_source || member.starter_ref) unknown(seat, "Prior conversation, starter and rebuild inputs are resolved at launch.", sourceRefs, seat);
       }
     }
     if (rig.services) {

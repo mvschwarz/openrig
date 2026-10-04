@@ -23,18 +23,18 @@ export function formatBundleBehaviour(view: BundleBehaviour): string[] {
     for (const item of view.posture) lines.push(`  ${plain(item.seat)}: ${plain(item.selection)} (${item.basis}); effective native settings unknown.`);
     lines.push("Access: agents can run shell commands using your account, subject to runtime and host policy.");
     lines.push("Told files:", ...view.toldFiles.map(f => `  ${f.seat ? plain(f.seat) + ": " : ""}${plain(f.pathOrRef)} [${f.resolution}${f.delivery ? `; ${plain(f.delivery)}` : ""}]`));
-    lines.push("Also declared to run:", ...view.alsoRuns.map(f => `  ${plain(f.kind)}: ${plain(f.pathOrRef)} [${f.resolution}${f.trigger ? `; ${plain(f.trigger)}` : ""}]`));
+    lines.push("Also declared to run:", ...view.alsoRuns.map(f => `  ${f.seat ? plain(f.seat) + ": " : ""}${plain(f.kind)}: ${plain(f.pathOrRef)} [${f.resolution}${f.trigger ? `; ${plain(f.trigger)}` : ""}]`));
     lines.push("Writes and library additions (destinations, runtime support and conflicts resolved at launch):", ...view.writes.map(w => `  ${w.seat ? plain(w.seat) + ": " : ""}${plain(w.destinationBase)}/${plain(w.path)} — ${plain(w.operation)}, ${plain(w.phase)}`));
     lines.push(`Outside domains found in files (not predicted traffic): ${view.outsideAddresses.map(a => plain(a.domain)).join(", ") || "none found"}`);
     lines.push("Needs (not checked):");
     for (const need of view.needs) {
-      lines.push(`  ${plain(need.name)}${need.versionConstraint ? ` ${plain(need.versionConstraint)}` : ""}`);
+      lines.push(`  ${need.seat ? plain(need.seat) + ": " : ""}${plain(need.name)}${need.versionConstraint ? ` ${plain(need.versionConstraint)}` : ""}`);
       if (need.commands?.length) {
         lines.push("    Author setup commands (not run; one shell, in order):");
         for (const command of need.commands) lines.push(`      ${plain(command)}`);
       }
     }
-    lines.push("Unknown before launch:", ...view.unknownBeforeLaunch.map(u => `  ${plain(u.subject)}: ${plain(u.reason)}`));
+    lines.push("Unknown before launch:", ...view.unknownBeforeLaunch.map(u => `  ${u.seat && u.seat !== u.subject ? plain(u.seat) + ": " : ""}${plain(u.subject)}: ${plain(u.reason)}`));
   }
   if (view.identity.packageDigest) lines.push(`Package digest: ${plain(view.identity.packageDigest.value)} (${plain(view.identity.packageDigest.coverage)}). Coverage: packaged content bytes; excludes bundle.yaml, .DS_Store, Thumbs.db, .gitkeep, file modes and host-resolved resources.`);
   lines.push("Integrity means the archive is self-consistent, not who made it.", "Provenance is stated by the bundle and not verified.");

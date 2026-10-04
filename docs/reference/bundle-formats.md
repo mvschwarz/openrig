@@ -102,6 +102,8 @@ carries no tested status.
     bypasses permissions, Codex runs with full access and never asks, and Pi gets full resource trust (`--approve`,
     not a permission mode). These are archive facts; `nativeEffect` remains `unknown`.
   - An empty list means none are known. Something unknown goes in `unknownBeforeLaunch`.
+  - Per-seat facts carry `seat` (`pod.member`) and human output labels them with that identity. On `needs` and
+    `unknownBeforeLaunch`, it is optional: bundle-wide facts omit it, and older generators may not have stated it.
 - **`not_generated`:** a combination without a generated view. It carries a reason and the local command that shows it,
   and no sections.
 

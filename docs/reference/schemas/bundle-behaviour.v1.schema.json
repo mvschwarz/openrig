@@ -383,6 +383,9 @@
           "status"
         ],
         "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
           "kind": {
             "type": "string",
             "minLength": 1
@@ -420,6 +423,9 @@
           "reason"
         ],
         "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
           "subject": {
             "type": "string",
             "minLength": 1

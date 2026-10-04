@@ -77,6 +77,54 @@ describe("before-action bundle view", () => {
     expect(lines[start + commands.length]).toBe("Unknown before launch:");
   });
 
+  it("labels repeated per-seat facts in inspect and previews while preserving global and older entries", async () => {
+    const seats = ["build.lead", "build.impl"];
+    const files = new Map([
+      ["rig.yaml", stringifyYaml({ name: "team", version: "1", pods: [{ id: "build", members: ["lead", "impl"].map(id => ({ id, runtime: "codex", agent_ref: "local:agent", profile: "default", cwd: ".", starter_ref: "previous" })) }], services: { kind: "compose", compose_file: "compose.yaml" } })],
+      ["agent/agent.yaml", "name: worker\nversion: '1'\nprofiles: {default: {uses: {plugins: [core]}}}\nresources:\n  plugins:\n  - {id: core, source: {kind: local, path: 'openrig-home:plugins/core'}}\n"],
+      ["compose.yaml", "services: {}\n"],
+    ]);
+    const generated = describeBundleBehaviour({ files, manifest: { schema_version: 2, rig_spec: "rig.yaml", preconditions: [{ name: "Prepare the source clone" }], compatibility: { min_cli_version: "0.6.6" } }, generator: { openrigVersion: "test" }, digestValid: true, filesVerified: true });
+    expect(generated.state).toBe("generated");
+    if (generated.state !== "generated") throw new Error(generated.reason);
+    expect(generated.needs.filter(n => n.kind === "runtime" || n.kind === "login").map(n => n.seat)).toEqual([seats[0], seats[0], seats[1], seats[1]]);
+    expect(generated.alsoRuns.filter(f => f.kind === "plugins").map(f => f.seat)).toEqual(seats);
+    const hostUnknowns = generated.unknownBeforeLaunch.filter(u => u.subject === "openrig-home:plugins/core");
+    expect(hostUnknowns.map(u => u.seat)).toEqual(seats);
+    for (const need of generated.needs.filter(n => ["precondition", "tool", "version"].includes(n.kind))) expect(need).not.toHaveProperty("seat");
+    const before = structuredClone(generated);
+    const lines = formatBundleBehaviour(generated);
+    for (const seat of seats) {
+      expect(lines).toContain(`  ${seat}: codex`);
+      expect(lines).toContain(`  ${seat}: codex: the user's own runtime account or provider configuration`);
+      expect(lines.some(line => line.startsWith(`  ${seat}: plugins: openrig-home:plugins/core [`))).toBe(true);
+      expect(lines.some(line => line.startsWith(`  ${seat}: openrig-home:plugins/core: Resolved on the installing host`))).toBe(true);
+      expect(lines).toContain(`  ${seat}: Prior conversation, starter and rebuild inputs are resolved at launch.`);
+      expect(lines.join("\n")).not.toContain(`${seat}: ${seat}:`);
+    }
+    expect(lines).toContain("  Prepare the source clone");
+    expect(lines).toContain("  Docker Compose and the declared services");
+    expect(lines).toContain("  OpenRig CLI >=0.6.6");
+    const preview: string[] = [];
+    expect(await showBundleBehaviourBeforeAction(async () => ({ status: 200, data: { behaviour: generated } }), line => preview.push(line))).toEqual(generated);
+    expect(preview).toEqual(lines);
+    expect(generated).toEqual(before);
+
+    const schemas = new URL("../../../docs/reference/schemas/", import.meta.url);
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
+    for (const file of ["bundle-common.v1.schema.json", "bundle-behaviour.v1.schema.json"]) ajv.addSchema(JSON.parse(fs.readFileSync(new URL(file, schemas), "utf8")));
+    const validate = ajv.getSchema("https://openrig.dev/schemas/bundle-behaviour.v1.json")!;
+    expect(validate(generated), JSON.stringify(validate.errors)).toBe(true);
+    const older = structuredClone(generated);
+    for (const item of [...older.needs, ...older.unknownBeforeLaunch, ...older.alsoRuns]) delete item.seat;
+    expect(validate(older), JSON.stringify(validate.errors)).toBe(true);
+    const olderLines = formatBundleBehaviour(older);
+    expect(olderLines).toContain("  codex");
+    expect(olderLines.some(line => line.startsWith("  plugins: openrig-home:plugins/core ["))).toBe(true);
+    expect(olderLines.some(line => line.startsWith("  openrig-home:plugins/core: Resolved on the installing host"))).toBe(true);
+    expect(olderLines.join("\n")).not.toContain("undefined:");
+  });
+
   it.each(["rig", "member"])("states declared %s-level yolo plainly for Claude, Codex and Pi", location => {
     const members = ["claude-code", "codex", "pi"].map(runtime => ({
       id: runtime, runtime, agent_ref: "local:agent", profile: "default", cwd: ".",
