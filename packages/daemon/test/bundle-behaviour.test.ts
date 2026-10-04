@@ -106,6 +106,22 @@ describe("archive-only bundle behaviour", () => {
     ]));
   });
 
+  it("does not invent a runtime when an external AgentSpec supplies its defaults", () => {
+    const files = new Map([["rig.yaml", "name: demo\nversion: '1'\npods:\n- id: team\n  members:\n  - {id: worker, agent_ref: 'catalog:unavailable', profile: default, cwd: .}\n"]]);
+    expect(inspect(files).state).toBe("not_generated");
+    files.set("rig.yaml", files.get("rig.yaml")!.replace("catalog:unavailable", "builtin:terminal"));
+    const terminal = inspect(files);
+    expect(terminal.state === "generated" && terminal.team[0]?.runtime).toBe("terminal");
+  });
+
+  it("names both project content and catalog writes without reading configured host roots", () => {
+    const view = inspect(fixture(), { manifest: { ...manifest, project: { id: "example", path: "project" } } });
+    expect(view.state === "generated" && view.writes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "project_files", destinationBase: "workspace.projects_root", path: "example" }),
+      expect.objectContaining({ kind: "project_registration", destinationBase: "workspace.catalog_path" }),
+    ]));
+  });
+
   it("is deterministic and does not borrow a configuration's identity from another view", () => {
     expect(inspect()).toEqual(inspect());
     const view = inspect();

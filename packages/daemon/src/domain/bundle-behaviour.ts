@@ -166,9 +166,12 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         const sourceRefs = [{ path: rigPath, field: `pods.${pod.id}.members.${member.id}` }];
         const agentRef = String(member.agent_ref);
         const agent = loadAgent(agentRef, rigRoot);
+        if (!agent && agentRef !== "builtin:terminal" && !text(member.runtime)) {
+          return unavailable(`Runtime for ${seat} depends on an AgentSpec that is not readable in this archive.`);
+        }
         const profileName = text(member.profile) ?? "default";
         const profile = agent?.spec.profiles[profileName];
-        const runtime = text(member.runtime) ?? profile?.preferences?.runtime ?? agent?.spec.defaults?.runtime ?? "claude-code";
+        const runtime = text(member.runtime) ?? profile?.preferences?.runtime ?? agent?.spec.defaults?.runtime ?? (agentRef === "builtin:terminal" ? "terminal" : "claude-code");
         const model = text(member.model) ?? profile?.preferences?.model ?? agent?.spec.defaults?.model;
         view.team.push({ seat, pod: String(pod.id), member: String(member.id), agentRef, profile: profileName, runtime, ...(model ? { model } : {}), cwd: text(member.cwd) ?? "." });
         view.needs.push({ kind: "runtime", name: runtime, status: "not_checked", sourceRefs });
@@ -312,8 +315,9 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
       }
     }
     if (text(object(manifest.project).id)) {
-      write(undefined, "project_registration", "workspace_catalog", String(object(manifest.project).id),
-        [{ path: "bundle.yaml", field: "project" }], "register carried project and associate installed rig");
+      const refs = [{ path: "bundle.yaml", field: "project" }];
+      write(undefined, "project_files", "workspace.projects_root", String(object(manifest.project).id), refs, "materialize carried project if absent");
+      write(undefined, "project_registration", "workspace.catalog_path", ".", refs, "register carried project and associate installed rig");
     }
     const domains = new Map<string, SourceRef[]>();
     for (const [p, content] of [...files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
