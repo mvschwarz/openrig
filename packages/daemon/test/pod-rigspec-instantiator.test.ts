@@ -307,11 +307,11 @@ profiles:
       const catalog = nodePath.join(root, "catalog");
       const project = nodePath.join(root, "project");
       const skill = (body: string) => `---\nname: shared\ndescription: Skill fixture\n---\n${body}\n`;
-      for (const dir of ["installed/agents/impl", "installed/skills/shared", "catalog/shared", "project"]) fs.mkdirSync(nodePath.join(root, dir), { recursive: true });
+      for (const dir of ["installed/agents/impl", "installed/agents/impl/skills/shared", "catalog/shared", "project"]) fs.mkdirSync(nodePath.join(root, dir), { recursive: true });
       fs.writeFileSync(nodePath.join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
       fs.writeFileSync(nodePath.join(catalog, "shared/SKILL.md"), skill("Catalog"));
-      fs.writeFileSync(nodePath.join(installed, "skills/shared/SKILL.md"), skill("Bundle"));
-      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nresources:\n  skills:\n    - id: shared\n      path: ../../skills/shared\nprofiles:\n  default:\n    uses:\n      skills: [shared]\n');
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/skills/shared/SKILL.md"), skill("Bundle"));
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nresources:\n  skills:\n    - id: shared\n      path: skills/shared\nprofiles:\n  default:\n    uses:\n      skills: [shared]\n');
       execFileSync("git", ["init", "-q", catalog]);
       execFileSync("git", ["-C", catalog, "add", "."]);
       execFileSync("git", ["-C", catalog, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "catalog"]);
@@ -330,11 +330,11 @@ profiles:
       expect(reconciler.mock.results[0]?.value.ok).toBe(true);
       expect(JSON.stringify(result)).toContain("skill_bundle_precedence");
       const selected = reconciler.mock.calls[0]![0].loadout.entries.find(e => e.id === "shared")!;
-      expect(selected.sourceDir).toBe(nodePath.join(installed, "skills/shared"));
+      expect(selected.sourceDir).toBe(nodePath.join(installed, "agents/impl/skills/shared"));
       expect(fs.readFileSync(nodePath.join(project, runtime === "codex" ? ".agents" : ".claude", "skills/shared/SKILL.md"), "utf8")).toBe(skill("Bundle"));
       const adapter = runtime === "codex" ? fixture.codexAdapter : fixture.adapter;
       const plan = vi.mocked(adapter.project).mock.calls[0]![0];
-      expect(plan.entries.find(e => e.effectiveId === "shared")?.absolutePath).toContain("installed/skills/shared");
+      expect(plan.entries.find(e => e.effectiveId === "shared")?.absolutePath).toContain("installed/agents/impl/skills/shared");
     } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 

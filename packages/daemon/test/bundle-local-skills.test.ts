@@ -168,7 +168,8 @@ describe("bundle-local skills", () => {
   it.each(["different-bytes", "different-mode", "same-bytes", "no-catalog"] as const)(
     "keeps selected bundle bytes through managed reconciliation and all adapters: %s", async (kind) => {
       seed();
-      write("source/agents/worker/agent.yaml", `name: worker\nversion: "1.0"\nresources:\n  skills:\n    - id: portable\n      path: ../../skills/portable\nprofiles:\n  default:\n    uses:\n      skills: [portable]\n`);
+      write("source/agents/worker/agent.yaml", `name: worker\nversion: "1.0"\nresources:\n  skills:\n    - id: portable\n      path: skills/portable\nprofiles:\n  default:\n    uses:\n      skills: [portable]\n`);
+      fs.cpSync(path.join(root, "source/skills/portable"), path.join(root, "source/agents/worker/skills/portable"), { recursive: true });
       const { response, outputPath } = await create();
       expect(response.status, await response.text()).toBe(201);
       const resolver = new PodBundleSourceResolver();
@@ -179,7 +180,7 @@ describe("bundle-local skills", () => {
       fs.rmSync(path.join(root, "source"), { recursive: true });
       const catalog = path.join(root, "catalog");
       if (kind !== "no-catalog") {
-        fs.cpSync(path.join(installed, "skills/portable"), path.join(catalog, "portable"), { recursive: true });
+        fs.cpSync(path.join(installed, "agents/worker/skills/portable"), path.join(catalog, "portable"), { recursive: true });
         if (kind === "different-bytes") write("catalog/portable/references/example.md", "Catalog reference\n");
         if (kind === "different-mode") fs.chmodSync(path.join(catalog, "portable/scripts/helper.sh"), 0o644);
         write("catalog/catalog.yaml", "schema: openrig.skill-catalog/v1\nsystem: [system-only]\n");
@@ -225,7 +226,7 @@ describe("bundle-local skills", () => {
           if (!plan.ok) throw new Error(plan.errors.join(";"));
           expect((await adapter.project(plan.plan, { tmuxSession: session, cwd } as NodeBinding)).failed).toEqual([]);
           expect(inspectSkillDirectory(path.dirname(targetPath("portable"))))
-            .toEqual(inspectSkillDirectory(path.join(installed, "skills/portable")));
+            .toEqual(inspectSkillDirectory(path.join(installed, "agents/worker/skills/portable")));
           if (kind !== "no-catalog") for (const id of ["system-only", "project-only"]) {
             expect(fs.readFileSync(targetPath(id), "utf8")).toBe(skill(id));
           }
