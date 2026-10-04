@@ -37,13 +37,6 @@ export function buildNativeResumeCommand(
 ): string | null {
   if (!resumeToken) return null;
   if (runtime === "claude-code") {
-    if (looksLikeClaudeBypassConsentPrompt(paneContent)) {
-      return {
-        status: "attention_required",
-        code: "bypass_consent_gate",
-        detail: "Claude is waiting for you to review its bypass-permissions warning and choose whether to accept. Startup context has not been sent.",
-      };
-    }
     const nameSuffix = sessionName ? ` --name ${shellQuote(sessionName)}` : "";
     return `claude --resume ${shellQuote(resumeToken)}${nameSuffix}`;
   }
@@ -96,6 +89,13 @@ export function assessNativeResumeProbe(
   const paneContent = input.paneContent ?? "";
 
   if (runtime === "claude-code") {
+    if (looksLikeClaudeBypassConsentPrompt(paneContent)) {
+      return {
+        status: "attention_required",
+        code: "bypass_consent_gate",
+        detail: "Claude is waiting for you to review its bypass-permissions warning and choose whether to accept. Startup context has not been sent.",
+      };
+    }
     if (paneContent.includes("No conversation found")) {
       return {
         status: "failed",
