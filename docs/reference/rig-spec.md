@@ -194,7 +194,7 @@ permission_policy: builtin:standard
 permission_policy: policies/my-cautious-dev.policy.md
 ```
 
-Built-in policies (`locked` / `standard` / `open` / `yolo`) are read-only and are
+Built-in policies (`locked` / `standard` / `open` / `yolo` / `auto`) are read-only and are
 referenced as `builtin:<name>`. A custom policy lives in your own project and is
 referenced by a safe relative path (no `..`, no absolute). A shipped example of the
 custom shape is `packages/daemon/policies/examples/my-cautious-dev.policy.md` — copy it
