@@ -168,6 +168,20 @@ describe("env routes", () => {
     expect(receipt["capturedAt"]).toBe("2026-04-09T11:00:00Z");
   });
 
+  it.each(["false", "true", 1, [], {}, null])("refuses non-boolean volume deletion consent %j without teardown", async (volumes) => {
+    let calls = 0;
+    const app = createApp({ getServicesRecord: () => SERVICE_RECORD, teardown: () => { calls++; return { ok: true }; } });
+    const res = await app.request("/api/rigs/rig-1/env/down", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ volumes }) });
+    expect({ status: res.status, calls }).toEqual({ status: 400, calls: 0 });
+  });
+
+  it.each(["null", "[]", "{", "false"])("refuses invalid teardown envelopes %s", async (body) => {
+    let calls = 0;
+    const app = createApp({ getServicesRecord: () => SERVICE_RECORD, teardown: () => { calls++; return { ok: true }; } });
+    const res = await app.request("/api/rigs/rig-1/env/down", { method: "POST", headers: { "content-type": "application/json" }, body });
+    expect({ status: res.status, calls }).toEqual({ status: 400, calls: 0 });
+  });
+
   it("POST /env/down with volumes=true passes policyOverride=down_and_volumes to teardown", async () => {
     let capturedOpts: unknown = undefined;
     const app = createApp({
