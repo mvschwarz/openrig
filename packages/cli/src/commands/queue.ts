@@ -766,7 +766,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
   // potato and no closure_reason is involved.
   cmd
     .command("block <qitemId>")
-    .description("Park a qitem as HELD with a continuation and wake. Choose a watchdog id, timer, or live blocker.")
+    .description("Park a qitem as HELD with a continuation and wake. Requires --on <blocker>. Choose --wake-watchdog, --wake-after, or a live blocker qitem for the wake.")
     .requiredOption("--on <blocker>", "The blocker: a live blocker qitem, typed gate, or human-seat session")
     .option("--actor <session>", "(deprecated, ignored) the actor is derived from the seat env (X-OpenRig-Session); the park writes via the same P21 I3 header-deriving update route")
     .option("--summary <text>", "Plain-language summary of the decision owed (required for human-seat parks unless already on the item)")
@@ -777,10 +777,12 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--wake-after <duration>", "Atomically arm a timer with the park (for example 90s, 15m, 2h)", wakeDurationSeconds)
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
+--on <blocker> is always required; a wake option does not replace it.
 Every deliberate HELD row should name its continuation and one live wake:
   --wake-watchdog <jobId>  attach a live watchdog id
   --wake-after <duration>  arm a timer atomically with the park
-  --on qitem-…             a live blocker resolution is the wake
+
+A live blocker qitem supplied with --on also wakes the row when resolved.
 
 HELD is only for a row that must stay on the queue while waiting. Work with a
 workspace home that is deferred/not-imminent belongs in its mission/slice.`)

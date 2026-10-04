@@ -891,7 +891,11 @@ describe("rig queue CLI", () => {
     const { deps } = makeDeps();
     const program = createProgram({ queueDeps: deps });
     const block = program.commands.find((c) => c.name() === "queue")?.commands.find((c) => c.name() === "block");
-    const help = block?.helpInformation() ?? "";
+    let help = "";
+    block?.configureOutput({ writeOut: (text) => { help += text; } });
+    block?.outputHelp();
+    expect(block?.description()).toContain("Requires --on <blocker>");
+    expect(help).toContain("--on <blocker> is always required; a wake option does not replace it.");
     expect(help).toMatch(/watchdog id/i);
     expect(help).toMatch(/timer/i);
     expect(help).toMatch(/live blocker/i);
