@@ -10,7 +10,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 export type PolicySurface = "flag" | "config";
 export type PolicySource = "builtin" | "custom";
-export type LaunchPosture = "floor" | "full_bypass";
+export type LaunchPosture = "floor" | "full_bypass" | "auto";
 export type DefaultPosture = "allow" | "ask" | "deny";
 
 /** A parsed policy spec: the raw frontmatter object + the preserved Markdown body. */
@@ -51,7 +51,7 @@ export interface ValidationResult {
 
 const SOURCES = new Set(["builtin", "custom"]);
 const SURFACES = new Set(["flag", "config"]);
-const LAUNCH_POSTURES = new Set(["floor", "full_bypass"]);
+const LAUNCH_POSTURES = new Set(["floor", "full_bypass", "auto"]);
 const DEFAULT_POSTURES = new Set(["allow", "ask", "deny"]);
 const ACTION_LIST_FIELDS = ["allow", "ask", "deny", "destructive_class"] as const;
 
@@ -80,7 +80,7 @@ export function validatePolicySpec(fm: Record<string, unknown>): ValidationResul
   }
 
   if (surface === "flag") {
-    if (!LAUNCH_POSTURES.has(fm["launch_posture"] as string)) errors.push("flag-surface policy requires launch_posture ('floor' or 'full_bypass')");
+    if (!LAUNCH_POSTURES.has(fm["launch_posture"] as string)) errors.push("flag-surface policy requires launch_posture ('floor', 'full_bypass' or 'auto')");
     if (fm["default_posture"] !== undefined) errors.push("flag-surface policy must NOT carry default_posture (config-surface field)");
     for (const f of ACTION_LIST_FIELDS) if (fm[f] !== undefined) errors.push(`flag-surface policy must NOT carry '${f}' (config-surface field)`);
   } else {

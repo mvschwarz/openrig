@@ -30,6 +30,10 @@ interface SeatStatusResponse {
     lastLaunchArguments: { value: string | null; approvalPolicy?: string } | null;
     nativeEffect: "unverified";
     error?: string;
+    effective?: {
+      effectiveMode: string;
+      source: string;
+    };
   };
   session_status: string | null;
   startup_status: string | null;
@@ -156,7 +160,12 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Session: ${display(status.session_status, "unknown")}`);
   if (status.permissions) {
     const p = status.permissions;
-    console.log(`Permission mode for future launches: ${p.desired?.mode ?? p.selectionState}`);
+    const modeStr = p.desired?.mode
+      ? `${p.desired.mode} (explicit)`
+      : p.effective
+      ? `${p.effective.effectiveMode} (effective via ${p.effective.source})`
+      : p.selectionState;
+    console.log(`Permission mode for future launches: ${modeStr}`);
     console.log(`Last launch arguments: ${p.lastLaunchArguments?.value ?? "unknown"}${p.lastLaunchArguments?.approvalPolicy ? `; approval=${p.lastLaunchArguments.approvalPolicy}` : ""}`);
     console.log("Native permission effect: unverified by this status read");
     if (p.error) console.log(`Permission selection unavailable: ${p.error}`);

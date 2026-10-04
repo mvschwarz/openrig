@@ -232,7 +232,7 @@ export class RigRepository {
       origin: "builtin" | "custom" | "deliberate_none";
       resolvedTarget: string | null;
       declaringDir: string | null;
-      launchPosture: "floor" | "full_bypass";
+      launchPosture: "floor" | "full_bypass" | "auto";
     },
   ): void {
     if (!this.hasRigColumn("rig_policy_launch_posture")) return;
@@ -246,7 +246,7 @@ export class RigRepository {
     origin: "builtin" | "custom" | "deliberate_none";
     resolvedTarget: string | null;
     declaringDir: string | null;
-    launchPosture: "floor" | "full_bypass";
+    launchPosture: "floor" | "full_bypass" | "auto";
     /** the raw rig ref (056) alongside, for re-validation */
     rigRef: string | null;
   } | null {
@@ -265,7 +265,7 @@ export class RigRepository {
       origin: row.rig_policy_origin as "builtin" | "custom" | "deliberate_none",
       resolvedTarget: row.rig_policy_resolved_target,
       declaringDir: row.rig_policy_declaring_dir,
-      launchPosture: row.rig_policy_launch_posture as "floor" | "full_bypass",
+      launchPosture: row.rig_policy_launch_posture as "floor" | "full_bypass" | "auto",
       rigRef: row.permission_policy,
     };
   }
@@ -280,7 +280,7 @@ export class RigRepository {
       origin: "builtin" | "custom" | "deliberate_none";
       resolvedTarget: string | null;
       declaringDir: string | null;
-      launchPosture: "floor" | "full_bypass";
+      launchPosture: "floor" | "full_bypass" | "auto";
     },
   ): void {
     if (!this.hasNodeColumn("policy_launch_posture")) return;
@@ -295,7 +295,7 @@ export class RigRepository {
     origin: "builtin" | "custom" | "deliberate_none";
     resolvedTarget: string | null;
     declaringDir: string | null;
-    launchPosture: "floor" | "full_bypass";
+    launchPosture: "floor" | "full_bypass" | "auto";
     /** The node's own raw ref (member-level; null when the attachment came from the rig). */
     nodeRef: string | null;
   } | null {
@@ -314,7 +314,7 @@ export class RigRepository {
       origin: row.policy_origin as "builtin" | "custom" | "deliberate_none",
       resolvedTarget: row.policy_resolved_target,
       declaringDir: row.policy_declaring_dir,
-      launchPosture: row.policy_launch_posture as "floor" | "full_bypass",
+      launchPosture: row.policy_launch_posture as "floor" | "full_bypass" | "auto",
       nodeRef: row.permission_policy,
     };
   }

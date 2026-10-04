@@ -1,6 +1,5 @@
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
-import { permissionBindingOverride } from "./native-permission-selection.js";
 import { ulid } from "ulid";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
@@ -125,6 +124,7 @@ interface SeatHandoverServiceDeps {
   discoveryRepo: DiscoveryRepository;
   eventBus: EventBus;
   tmuxAdapter: TmuxAdapter;
+  successorLauncher?: SuccessorSessionLauncher;
   now?: () => Date;
   /** OpenRig identity/activity env stamped onto a created successor session,
    *  mirroring the launch identity env. Defaults to {} (the three core identity
@@ -245,7 +245,7 @@ export class SeatHandoverService {
     this.now = deps.now ?? (() => new Date());
     this.statusService = new SeatStatusService({ rigRepo: deps.rigRepo });
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
-    this.successorLauncher = new SuccessorSessionLauncher(deps.tmuxAdapter, deps.discoveryRepo, {
+    this.successorLauncher = deps.successorLauncher ?? new SuccessorSessionLauncher(deps.tmuxAdapter, deps.discoveryRepo, {
       sessionEnv: deps.sessionEnv,
       runtimeSessionEnv: deps.runtimeSessionEnv,
       newId: deps.newSuccessorId,
@@ -442,13 +442,17 @@ export class SeatHandoverService {
     const successorPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
       ?? this.rigRepo.getRigPolicyProvenance(statusResult.status.rig_id)?.launchPosture
       ?? "floor"; // R2 terminal: absence = the locked floor on the continuity edge too
-    let permissionOverride: ReturnType<typeof permissionBindingOverride>;
-    try {
-      const selection = new NativePermissionStore(this.db).read(node.id);
-      if (selection && selection.runtime !== node.runtime) throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
-      permissionOverride = permissionBindingOverride(selection);
-    } catch (error) { return { ok: false, code: "successor_create_failed", message: `Permission selection: ${(error as Error).message}`,
-      guidance: "No successor was created. Inspect the seat permission selection before a separately authorized retry." }; }
+    let permissionOverride: { launchPosture?: "floor" | "full_bypass" | "auto"; permissionMode?: string } = {};
+    if (node.runtime) {
+      try {
+        const resolved = new NativePermissionStore(this.db).resolve(node.id, node.runtime);
+        permissionOverride = {
+          ...(resolved.source !== "system_default" && resolved.launchPosture ? { launchPosture: resolved.launchPosture } : {}),
+          ...(resolved.permissionMode ? { permissionMode: resolved.permissionMode } : {}),
+        };
+      } catch (error) { return { ok: false, code: "successor_create_failed", message: `Permission selection: ${(error as Error).message}`,
+        guidance: "No successor was created. Inspect the seat permission selection before a separately authorized retry." }; }
+    }
     // The successor must carry its own generation from its first byte. This reservation writes no
     // ledger row; commit consumes it, while every failed pre-commit branch remains unregistered.
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();

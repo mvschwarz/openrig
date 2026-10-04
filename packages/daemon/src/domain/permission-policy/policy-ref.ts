@@ -20,7 +20,7 @@ import { parsePolicySpec, validatePolicySpec } from "./policy-spec.js";
 import type { LaunchPosture, PolicySurface } from "./policy-spec.js";
 
 /** The packaged read-only built-in policy set (README v4: 3 Policy-Mode specs + Operator/YOLO). */
-export const BUILTIN_POLICY_NAMES = ["locked", "standard", "open", "yolo"] as const;
+export const BUILTIN_POLICY_NAMES = ["locked", "standard", "open", "yolo", "auto"] as const;
 export type BuiltinPolicyName = (typeof BUILTIN_POLICY_NAMES)[number];
 /** deliberate_none: the ruled amendment 5f37e40f — the recorded choice; never file-backed. */
 export type PolicyRefOrigin = "builtin" | "custom" | "deliberate_none";
@@ -182,8 +182,8 @@ export function resolvePermissionPolicyAttachment(
       origin: "builtin",
       builtinName,
       resolvedTarget: builtinPackageTarget(builtinName),
-      surface: builtinName === "yolo" ? "flag" : undefined,
-      launchPosture: builtinName === "yolo" ? "full_bypass" : "floor",
+      surface: builtinName === "yolo" || builtinName === "auto" ? "flag" : undefined,
+      launchPosture: builtinName === "yolo" ? "full_bypass" : builtinName === "auto" ? "auto" : "floor",
       contentResolved: true,
     };
   }
@@ -204,7 +204,7 @@ export function resolvePermissionPolicyAttachment(
       const contract = validatePolicySpec(parsed.frontmatter);
       if (contract.ok && surface === "flag") {
         const lp = parsed.frontmatter["launch_posture"];
-        if (lp === "floor" || lp === "full_bypass") {
+        if (lp === "floor" || lp === "full_bypass" || lp === "auto") {
           launchPosture = lp;
           contentResolved = true;
         }

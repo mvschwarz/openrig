@@ -95,7 +95,7 @@ export interface StubRunnerLaunchOpts {
   launchId: string;
   /** The seat's RESOLVED launch posture — byte-observable in the command on
    *  BOTH fresh and resume paths (floor is the usability default). */
-  posture: "floor" | "full_bypass";
+  posture: "floor" | "full_bypass" | "auto";
   /** Exact resume token (a prior session marker) for the restore path. */
   resumeToken?: string;
 }
