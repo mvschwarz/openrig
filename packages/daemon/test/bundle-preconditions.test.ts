@@ -21,6 +21,29 @@ pods:
     edges: []
 edges: []
 `;
+const legacySpec = `schema_version: 1
+name: setup-fixture
+version: "1.0"
+nodes:
+  - {id: shell, runtime: terminal}
+edges: []
+`;
+
+function createFixture(rigSpec: string, author: unknown) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-preconditions-")); roots.push(root);
+  fs.writeFileSync(path.join(root, "rig.yaml"), rigSpec);
+  fs.writeFileSync(path.join(root, "README.md"), "# Fixture\n");
+  fs.writeFileSync(path.join(root, "bundle.yaml"), stringify(author));
+  const app = new Hono();
+  app.use("*", async (c, next) => { c.set("eventBus" as never, { emit() {} } as never); await next(); });
+  app.route("/api/bundles", bundleRoutes);
+  const post = (route: string, body: unknown) => app.request(`/api/bundles/${route}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const bundlePath = path.join(root, "fixture.rigbundle");
+  return {
+    create: () => post("create", { specPath: path.join(root, "rig.yaml"), rigRoot: root, bundleName: "fixture", bundleVersion: "1.0.0", outputPath: bundlePath }),
+    inspect: () => post("inspect", { bundlePath }),
+  };
+}
 
 describe("authored bundle setup preconditions", () => {
   it.each([false, true])("carries declarations through create and inspect (link source=%s), without executing them", async linked => {
@@ -61,5 +84,45 @@ describe("authored bundle setup preconditions", () => {
     if (view.state !== "generated") throw new Error(view.reason);
     expect(view.needs.filter(n => n.kind === "precondition")).toEqual([]);
     expect(view.unknownBeforeLaunch).toContainEqual(expect.objectContaining({ subject: "Bundle preconditions" }));
+  });
+
+  describe.each([{ branch: "pod", rigSpec: spec }, { branch: "legacy", rigSpec: legacySpec }])("$branch creation", ({ rigSpec }) => {
+    it.each([
+      { preconditions: null, reason: "preconditions must be an array" },
+      { preconditions: "run setup", reason: "preconditions must be an array" },
+      { preconditions: [{ name: "" }], reason: "preconditions[0].name" },
+      { preconditions: [{ name: "Setup", commands: [42] }], reason: "preconditions[0].commands" },
+      { preconditions: [{ name: "Setup", commands: ["cd clone\nnpm ci"] }], reason: "preconditions[0].commands" },
+      { preconditions: [{ name: "Valid first entry" }, null], reason: "preconditions[1].name" },
+    ])("warns and omits the whole malformed block: $reason", async ({ preconditions, reason }) => {
+      const fixture = createFixture(rigSpec, { preconditions });
+      const created = await fixture.create();
+      expect(created.status, await created.clone().text()).toBe(201);
+      expect((await created.json()).warning).toContain(`${reason}`);
+      const response = await fixture.inspect();
+      expect(response.status, await response.clone().text()).toBe(200);
+      const inspected = await response.json();
+      expect(inspected.manifest).not.toHaveProperty("preconditions");
+      expect(inspected.integrityResult.passed).toBe(true);
+    });
+
+    it("warns about shell operators but retains the declarations as data", async () => {
+      const preconditions = [{ name: "Author setup", commands: ["echo one; echo two", "echo one && echo two", "echo one | cat", "echo $(pwd)", "echo `pwd`", "echo one > output", "cat < input"] }];
+      const fixture = createFixture(rigSpec, { preconditions });
+      const created = await fixture.create();
+      expect(created.status, await created.clone().text()).toBe(201);
+      expect((await created.json()).warning).toContain("preconditions[0].commands contains shell operators; retained as data");
+      const response = await fixture.inspect();
+      expect(response.status, await response.clone().text()).toBe(200);
+      const inspected = await response.json();
+      expect(inspected.manifest.preconditions).toEqual(preconditions);
+      expect(inspected.integrityResult.passed).toBe(true);
+    });
+
+    it("still refuses a missing declared skill even when preconditions are malformed", async () => {
+      const created = await createFixture(rigSpec, { preconditions: null, skills: ["skills/absent/SKILL.md"] }).create();
+      expect(created.status).toBe(500);
+      expect((await created.json()).error).toContain("does not exist in source");
+    });
   });
 });

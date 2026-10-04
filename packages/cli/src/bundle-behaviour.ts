@@ -29,7 +29,10 @@ export function formatBundleBehaviour(view: BundleBehaviour): string[] {
     lines.push("Needs (not checked):");
     for (const need of view.needs) {
       lines.push(`  ${plain(need.name)}${need.versionConstraint ? ` ${plain(need.versionConstraint)}` : ""}`);
-      if (need.commands?.length) lines.push("    Author setup commands (not run; one shell, in order):", ...need.commands.map(command => `      ${plain(command)}`));
+      if (need.commands?.length) {
+        lines.push("    Author setup commands (not run; one shell, in order):");
+        for (const command of need.commands) lines.push(`      ${plain(command)}`);
+      }
     }
     lines.push("Unknown before launch:", ...view.unknownBeforeLaunch.map(u => `  ${plain(u.subject)}: ${plain(u.reason)}`));
   }

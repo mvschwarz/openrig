@@ -477,6 +477,7 @@ function writeInstallAudit(opts: {
  * for the install side to route from.
  */
 interface AuthorBundleCrossPrimitives {
+  warnings?: string[];
   preconditions?: BundlePrecondition[];
   skills?: string[];
   plugins?: BundlePluginReference[];
@@ -557,9 +558,13 @@ function consumeAuthorBundleYaml(sourceRoot: string, staging: string): AuthorBun
   const authorYaml = fs.readFileSync(authorBundlePath, "utf-8");
   const authorParsed = parsePodBundleManifest(authorYaml) as Record<string, unknown>;
   const result: AuthorBundleCrossPrimitives = {};
-  result.preconditions = normalizePreconditionsBlock(authorParsed["preconditions"]);
-  if (authorParsed["preconditions"] !== undefined && !result.preconditions) {
-    throw new Error("author bundle preconditions must be an array of objects with non-empty name text and optional commands (non-empty, single-line strings)");
+  result.preconditions = normalizePreconditionsBlock(authorParsed["preconditions"], reason => {
+    (result.warnings ??= []).push(`Ignored author bundle preconditions: ${reason}; the whole block was omitted.`);
+  });
+  for (const [index, precondition] of (result.preconditions ?? []).entries()) {
+    if (precondition.commands?.some(command => /[;|`<>]|&&|\$\(/.test(command))) {
+      (result.warnings ??= []).push(`preconditions[${index}].commands contains shell operators; retained as data, but a site may omit setup commands that fail its plain-command rule.`);
+    }
   }
 
   const vendorFile = (declared: string, kindLabel: string): void => {
@@ -837,7 +842,7 @@ bundleRoutes.post("/create", async (c) => {
         assertShippableStagingTree(tmpStaging);
         const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
         eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
-        const warning = [driftWarning, ...(result.warnings ?? [])].filter(Boolean).join("; ");
+        const warning = [driftWarning, ...(result.warnings ?? []), ...(authorPrimitives.warnings ?? [])].filter(Boolean).join("; ");
         return c.json({ ...bundleBuildIdentity(result.manifest, archiveHash), bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length, ...(warning ? { warning } : {}) }, 201);
       } finally {
         fs.rmSync(tmpStaging, { recursive: true, force: true });
@@ -921,7 +926,8 @@ bundleRoutes.post("/create", async (c) => {
       assertShippableStagingTree(tmpStaging);
       const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
       eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
-      return c.json({ ...bundleBuildIdentity(manifest, archiveHash), bundleName, bundleVersion, archiveHash, packages: manifest.packages.length, ...(driftWarning ? { warning: driftWarning } : {}) }, 201);
+      const warning = [driftWarning, ...(legacyAuthorPrimitives.warnings ?? [])].filter(Boolean).join("; ");
+      return c.json({ ...bundleBuildIdentity(manifest, archiveHash), bundleName, bundleVersion, archiveHash, packages: manifest.packages.length, ...(warning ? { warning } : {}) }, 201);
     } finally {
       fs.rmSync(tmpStaging, { recursive: true, force: true });
     }

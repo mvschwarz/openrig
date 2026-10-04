@@ -134,6 +134,10 @@ if any fails its plain-command rule. OpenRig displays these declarations; it doe
 was done, or add a prerequisite gate. The archive hash covers the manifest; `packageDigest` excludes `bundle.yaml`
 and therefore does not cover these declarations.
 
+At creation, malformed preconditions produce a warning and the whole block is omitted; other author-field validation
+is unchanged. Shell operators in otherwise valid command lines produce a warning, but the declarations are retained
+as data. An already-built archive with malformed preconditions reports them as unknown before launch.
+
 ### Run records and status
 
 **A run record's subject** is either a team (source, configuration ID, package digest, assembler) or a harness check (a

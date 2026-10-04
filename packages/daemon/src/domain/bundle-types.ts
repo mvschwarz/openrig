@@ -8,17 +8,19 @@ export interface BundlePrecondition {
   commands?: string[];
 }
 
-export function normalizePreconditionsBlock(raw: unknown): BundlePrecondition[] | undefined {
-  if (!Array.isArray(raw)) return undefined;
+export function normalizePreconditionsBlock(raw: unknown, onMalformed?: (reason: string) => void): BundlePrecondition[] | undefined {
+  const invalid = (reason: string) => { onMalformed?.(reason); return undefined; };
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return invalid("preconditions must be an array");
   const result: BundlePrecondition[] = [];
-  for (const entry of raw as unknown[]) {
+  for (const [index, entry] of (raw as unknown[]).entries()) {
     const p = entry as Partial<BundlePrecondition> | null;
     if (!p || typeof p !== "object" || Array.isArray(p) || typeof p.name !== "string" || !p.name.trim()) {
-      return undefined;
+      return invalid(`preconditions[${index}].name must be non-empty text`);
     }
     if (p.commands !== undefined && (!Array.isArray(p.commands) || p.commands.some(command =>
       typeof command !== "string" || !command.trim() || /[\r\n]/.test(command)))) {
-      return undefined;
+      return invalid(`preconditions[${index}].commands must be an array of non-empty, single-line strings`);
     }
     result.push({ name: p.name, ...(p.commands !== undefined ? { commands: [...p.commands] } : {}) });
   }
