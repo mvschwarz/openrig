@@ -1,0 +1,32 @@
+[
+  {
+    "name": "empty-paste-hint-effort",
+    "pane": "❯ \n────────────────────────────────────────────────────────────────────────────────\n  paste again to expand                                     ◐ medium · /effort\n",
+    "expected": "clear"
+  },
+  {
+    "name": "empty-paste-hint",
+    "pane": "❯ \n────────────────────────────────────────────────────────────────────────────────\n  paste again to expand\n",
+    "expected": "clear"
+  },
+  {
+    "name": "queued-paste-hint",
+    "pane": "❯ Press up to edit queued messages\n────────────────────────────────────────────────────────────────────────────────\n  paste again to expand                                     ◐ medium · /effort\n",
+    "expected": "clear"
+  },
+  {
+    "name": "queued-mode-bar",
+    "pane": "❯ Press up to edit queued messages\n────────────────────────────────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n",
+    "expected": "clear"
+  },
+  {
+    "name": "collapsed-paste-hint",
+    "pane": "❯ [Pasted text #2 +29 lines]\n────────────────────────────────────────────────────────────────────────────────\n  paste again to expand                                     ◐ medium · /effort\n",
+    "expected": "unverified"
+  },
+  {
+    "name": "ghost-mode-bar",
+    "pane": "❯ Try \"fix typecheck errors\"\n────────────────────────────────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n",
+    "expected": "unverified"
+  }
+]
