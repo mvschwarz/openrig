@@ -124,8 +124,8 @@ describe("Claude composer below noninteractive status warnings", () => {
     }
   });
 
-  it("recognizes a live timer on the existing unframed prompt path", () => {
-    expect(classifyPaneActivity(`${workingRows[0]}\n❯ \n? for shortcuts`).state).toBe("agent_active");
+  it.each([...otherBars, bar])("recognizes a live timer on the unframed prompt path: %s", (hint) => {
+    expect(classifyPaneActivity(`${workingRows[0]}\n❯ \n${hint}`).state).toBe("agent_active");
   });
 
   it.each([
