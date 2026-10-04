@@ -425,8 +425,6 @@ export interface PodBundleManifest {
   configuration?: { id: string; preset?: string };
   /** The project this rig works in: its id and the bundle folder holding project.yaml. Install registers it in the workspace catalog and associates the rig with it. */
   project?: BundleProjectReference;
-  /** The configuration this archive was built in (configuration ID, and the preset when it matches one). Outside the package digest. */
-  configuration?: { id: string; preset?: string };
 }
 
 export interface BundleProjectReference {
@@ -515,7 +513,6 @@ export function serializePodBundleManifest(manifest: PodBundleManifest): string 
   if (manifest.agentImages && manifest.agentImages.length > 0) doc["agent_images"] = manifest.agentImages;
   if (manifest.configuration) doc["configuration"] = manifest.configuration.preset ? { id: manifest.configuration.id, preset: manifest.configuration.preset } : { id: manifest.configuration.id };
   if (manifest.project) doc["project"] = { id: manifest.project.id, path: manifest.project.path };
-  if (manifest.configuration) doc["configuration"] = manifest.configuration.preset ? { id: manifest.configuration.id, preset: manifest.configuration.preset } : { id: manifest.configuration.id };
   return stringifyYaml(doc);
 }
 
