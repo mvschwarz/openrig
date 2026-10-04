@@ -141,16 +141,26 @@ function findClaudeComposer(paneContent: string) {
   let bar = lines.length - 1;
   while (bar >= 0 && CLAUDE_STATUS_WARNINGS.some((pattern) => pattern.test(lines[bar]!.trim()))) bar--;
   const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
-  const indent = /^([ \t]*)─{3,}$/.exec(lines[bar - 1] ?? "")?.[1];
-  if (indent === undefined) return null;
-  const upper = lines[bar - 3] ?? "";
-  const prompt = lines[bar - 2] ?? "";
-  if (!upper.startsWith(indent) || !/^─{3,}(?: .+ ─+)?$/.test(upper.slice(indent.length)) ||
-      !prompt.startsWith(`${indent}❯`) || !/^❯(?:\s|$)/.test(prompt.slice(indent.length))) return null;
+  let indent = /^([ \t]*)─{3,}$/.exec(lines[bar - 1] ?? "")?.[1];
+  let prompt = lines[bar - 2] ?? "";
+  let statusStart = bar - 4;
+  if (indent === undefined) {
+    // The unframed Claude prompt has the same current status/task block.
+    // Keep Codex footers and a bare prompt with no visible block on their old path.
+    if (bar < 2 || !/^(?:⏵⏵ (?:accept edits|bypass permissions) on\b|⏸ plan mode on\b|\? for shortcuts$)/.test(lines[bar]!.trim())) return null;
+    prompt = lines[bar - 1] ?? "";
+    indent = /^([ \t]*)❯\s*$/.exec(prompt)?.[1];
+    if (indent === undefined) return null;
+    statusStart = bar - 2;
+  } else {
+    const upper = lines[bar - 3] ?? "";
+    if (!upper.startsWith(indent) || !/^─{3,}(?: .+ ─+)?$/.test(upper.slice(indent.length)) ||
+        !prompt.startsWith(`${indent}❯`) || !/^❯(?:\s|$)/.test(prompt.slice(indent.length))) return null;
+  }
 
   let liveStatus: string | null = null;
   let headSeen = false;
-  for (let i = bar - 4; i >= 0; i--) {
+  for (let i = statusStart; i >= 0; i--) {
     if (!lines[i]!.startsWith(indent)) break;
     const line = lines[i]!.slice(indent.length);
     if ([CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS].some((pattern) => pattern.test(line))) {

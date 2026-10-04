@@ -128,6 +128,17 @@ describe("Claude composer below noninteractive status warnings", () => {
     expect(classifyPaneActivity(`${workingRows[0]}\n❯ \n${hint}`).state).toBe("agent_active");
   });
 
+  it.each([otherBars[0]!, otherBars[1]!, otherBars[2]!, bar])("keeps the unframed current block ahead of %s", (hint) => {
+    for (const tasks of [0, 7, 13, 17, 18, 21]) {
+      const content = [workingRows[0], ...Array.from({ length: tasks }, (_, i) => `  □ Pending task ${i}`), "❯ ", hint].join("\n");
+      expect(classifyPaneActivity(content).state).toBe(tasks <= 17 ? "agent_active" : "unknown");
+    }
+    // A completed/newer output ends the block; a bare prompt has no task block.
+    for (const before of ["", "● Ready.\n", "✻ Crunched for 2s\n", `${workingRows[0]}\n● Completed response.\n`]) {
+      expect(classifyPaneActivity(`${before}❯ \n${hint}`).state).toBe("agent_idle");
+    }
+  });
+
   it.each([
     ["draft", pane([update, focus], "❯ unfinished message")],
     ["permission", pane([update, focus], "❯\u00a0", "Do you want to proceed?\n❯ 1. Yes\n  2. No")],
