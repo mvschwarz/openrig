@@ -8,6 +8,20 @@ This guide teaches you how to think about what goes into an agent's startup expe
 
 ---
 
+## Continue after a native consent prompt
+
+If a fresh Claude seat is waiting at its bypass-permissions warning, review and
+answer that warning in the seat's native pane. OpenRig does not accept it for you
+or send configured startup context into the active dialog. The seat reports
+`attention_required` and retains that context for the same occupant.
+
+After accepting, run `rig seat continue <seat>` (or use **continue** in the
+TUI's startup actions). This delivers the pending context without relaunching
+Claude. It does not replay a delivery that already started. A timeout reports
+an unknown outcome; inspect `rig seat status <seat>` before taking another action.
+Runtime readiness, startup delivery, and orientation proof remain separate;
+a missing proof does not block this continuation.
+
 ## Two Categories of Startup
 
 Everything an agent receives at boot time falls into one of two categories:

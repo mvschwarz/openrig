@@ -92,6 +92,27 @@ describe("#729 startup warnings", () => {
   });
 });
 
+describe("default-path rig seat continue", () => {
+  it.each([[200, false], [200, true], [409, false], [409, true]] as const)("preserves response and warnings (HTTP %s, json=%s)", async (status, json) => {
+    const data = { ok: status === 200, message: "Configured context delivered to the existing fresh conversation.", warnings: ["Submission unverified"] };
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { logs, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status, data }, calls)).parseAsync([
+      "node", "rig", "seat", "continue", "dev@fixture", ...(json ? ["--json"] : []),
+    ]).then(() => {}));
+    expect(calls).toEqual([{ path: "/api/seat/continue/dev%40fixture", body: {} }]);
+    expect(exitCode).toBe(status === 200 ? undefined : 1);
+    if (json) {
+      expect(logs).toHaveLength(1);
+      expect(JSON.parse(logs[0]!)).toEqual(data);
+      expect(warn).not.toHaveBeenCalled();
+    } else {
+      expect(warn).toHaveBeenCalledWith("Warning: Submission unverified");
+      if (status === 200) expect(logs).toEqual([data.message]);
+    }
+  });
+});
+
 describe("rig seat set-permissions", () => {
   it("posts the explicit operator with the existing mode and reason", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
