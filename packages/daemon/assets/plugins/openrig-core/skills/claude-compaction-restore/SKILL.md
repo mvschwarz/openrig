@@ -160,7 +160,8 @@ You have facts without connections. Rebuild the connections before you act on an
    run `rig context profile world-public --situation post-compaction` and `rig context get onboarding-width`. This restores how the system works before you
    restore what you were doing in it. If your work belongs to a project, re-enter its declared context too:
    `rig context work-install` lists what the project declares (intent, context files, skills), so read the pieces
-   your task needs. `--deliver` prints them all; when several projects are declared, name one with `--project <id>`.
+   your task needs. `--deliver` prints them all; when several projects are declared (`--json` lists the ids), name
+   one with `--project <id>`.
 4. **Read your own restore map in full**: the newest `RESTORE-MAP-*.md` in your seat folder, which the
    compaction summary should name. If it points to an earlier map for context you need, read that too.
 5. **Read down the map's ranked list** to your class's tier line, reading exactly the parts each entry names.

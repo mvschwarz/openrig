@@ -58,7 +58,7 @@
       "agent-operated-software/SKILL.md": "9159d26e7884bc5205f8b06adaa65625c7d9c6bef41dc2f307d91da4cc1b424b",
       "agent-operated-workflows/SKILL.md": "24e54cbfa979999f523516112670618b2926ae5d42c7aa0846c94db214857ea5",
       "applying-a-permission-policy/SKILL.md": "e8dbd8eec75847bfd382fb06de408c63807171d584237d1b1d7e1104c7ed4acc",
-      "claude-compaction-restore/SKILL.md": "68f63e6d86e3cf936e5c4202deeb662be327397af5f9248e45f8df5bb1087ac8",
+      "claude-compaction-restore/SKILL.md": "a5148027d1b07cbcbb860a468191b8dbaee4d19469f76091c7306561667493f7",
       "claude-compaction-restore/reference/SKILL-v1.md": "6af2a889c9c38227fb186897c6e29185f81b215822070b469a6ceeb47734e133",
       "claude-compaction-restore/scripts/precompact-hook.mjs": "8eb4cccdaec654fca9eacba3676b0418d2bac383649ce31544434c73af8b8772",
       "claude-compaction-restore/scripts/restore-from-jsonl.mjs": "5584cff4ab36cd843e14c81bd201e4a2f8e498e995abacc4f81ec6c1fc556b10",
@@ -84,7 +84,7 @@
       "openrig-skills/SKILL.md": "e5f47e24a4c3cb1afceb1a3a93647313e9c30830aff58faabb5fa57838d1206c",
       "openrig-user/SKILL.md": "b866b2f7fbff98089aeeac33868566b9c8a49f0de0a1d414a8cc73222085a6fd",
       "orienting-to-an-inherited-seat/CHANGELOG.md": "4d0970e75e5c15b00a48d6a7150376d646257777264fd1b9a191165a8d5a6e84",
-      "orienting-to-an-inherited-seat/SKILL.md": "73c835b1e759dd3b0289dcc47ee147f081e13489f1b29063eb2a2b9a8478e345",
+      "orienting-to-an-inherited-seat/SKILL.md": "65300ce0e299cce0148a8bacd51b0475ac1b59cd77a51a9bb2db9d43bda6e208",
       "queue-handoff/SKILL.md": "d4d7e3e8772886b3771daffd60523b5f79040309b892c8be1afd47d1f7287f7b",
       "refocusing/SKILL.md": "9f5b903b26430f60334b6dcaf66009df195c67ecf825437d1883d2a06a90d790",
       "refocusing/references/refocus.md": "6e71513e82bd815e1506b0be4f9a972eecd3053a8deb06340c10b1d1792489bc",
@@ -95,7 +95,7 @@
       "seat-continuity-and-handover/references/apprentice-evidence-toolkit.md": "a50bd7a3107762dbb6accd5d2fb7e058b408b85b09067ac79a7a8af6212234fd",
       "seat-continuity-and-handover/references/apprentice-successor-seat-cutover.md": "0c865b76c9b0908373d3cf17439ef31b08e20a769c1cef1bea2403d963887840",
       "seat-continuity-and-handover/references/orchestrator-role.md": "2ddf05125e0bf22e2dc64cb328fcc4bd94fa62eb2fcfd21d75f21c488c72ecaa",
-      "session-compaction-and-restore/SKILL.md": "f2366219fa8b19c08a451491ac56a8763d56a815e586d28e44d1fdb7b28612b6",
+      "session-compaction-and-restore/SKILL.md": "6218ebe601901fc19c3b40a6c29d57c304c82984825595f74b19120754839b63",
       "software-for-agents/SKILL.md": "c36c6d3ae7484f477f1bd24e8ff72846f6dfbff685aef1e780f6011072a51ac7"
     },
     "spec": {

@@ -105,8 +105,8 @@ stay durable-substrate-first (the packet/artifacts are the truth; the CLI is the
 
 **Re-entering project context, on any runtime.** A restore packet carries the work in flight, not the project's
 declared intent and context files. `rig context work-install` lists what the project declares; read the pieces the
-restored task needs. `--deliver` prints them all, and when several projects are declared, select one with
-`--project <id>` instead of guessing.
+restored task needs. `--deliver` prints them all, and when several projects are declared (`--json` lists the
+ids), select one with `--project <id>` instead of guessing.
 
 ## Proof standard
 

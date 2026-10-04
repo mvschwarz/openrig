@@ -230,7 +230,8 @@ real work. The markdown control plane routes you to depth **on demand**: reach f
 `find-openrig-skills` and the codemaps to pull exactly what a question needs, when it
 arises. Wide-angle first, then depth by need. For the project the seat works on,
 `rig context work-install` lists what it declares (intent, context files, skills); read what
-your first task needs, and select with `--project <id>` when it reports several projects.
+your first task needs, and when it reports several projects (`--json` lists the ids), select one
+with `--project <id>`.
 
 ## See also
 

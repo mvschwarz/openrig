@@ -50,7 +50,8 @@ any one command, `rig <command> --help` on the installed binary is the most curr
 
 When your work belongs to a project, `rig context work-install` lists what this project declares (intent, context
 files, skills). Read the ones your task needs; `--deliver` prints them all. If several projects are declared, it
-says so and names them: pick one with `--project <id>` rather than guessing.
+stops with `project_required`; `rig context work-install --json` lists their ids. Pick one with `--project <id>`
+rather than guessing.
 
 If you plan or route work, a project's world pack is worth loading in full. If you build, stay with the outcome you
 were handed and what counts as done. If you are setting up a world pack for your own project,
