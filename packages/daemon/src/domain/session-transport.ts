@@ -551,6 +551,22 @@ export function hasExpectedStagedText(pane: string | null, expected: string): bo
   return stagedEvidence;
 }
 
+/** An interaction may consume its answer immediately. Only add Enter when the
+ * complete answer is still visible in a bounded current text input, never a
+ * numbered choice or a partial prefix. Unknown rendering is not consumption. */
+function promptAnswerStaged(pane: string | null, answer: string): boolean {
+  if (!pane || !answer.trim() || /[\r\n\x1b]/.test(answer)) return false;
+  const lines = pane.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const input = lines[i]!.trimStart();
+    if (!/^[❯›]/.test(input)) continue;
+    if (/^[❯›]\s*\d+[.)]/.test(input)) return false;
+    const end = lines.findIndex((line, index) => index > i && /^[─═-]{10,}$/.test(line.trim()));
+    return end > i && lines.slice(i, end).join("\n").trimStart().slice(1).trim() === answer.trim();
+  }
+  return false;
+}
+
 export interface SendOpts {
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
@@ -1291,6 +1307,7 @@ export class SessionTransport {
     // the positive-picker guard (FR-4 — the footgun separation). The advisory is carried on the
     // success result via `warning` so the honest telemetry is surfaced.
     let sendAdvisory: string | undefined;
+    let promptOverride = false;
     if (waitForIdleMs === undefined) {
       const readiness = await this.classifySendReadiness({
         sessionName,
@@ -1331,7 +1348,8 @@ export class SessionTransport {
               error: `Refused: --dangerously-interact requires an auditable override record, which could not be persisted (${audit.reason}). No text was sent.`,
             };
           }
-          // audited → proceed to the send.
+          // Audited answers use unbracketed input; a choice may submit itself.
+          promptOverride = true;
         } else {
           return {
             ok: false,
@@ -1389,11 +1407,15 @@ export class SessionTransport {
     const targetFailure = await checkClaudeTarget();
     if (targetFailure) return observe(targetFailure);
 
-    // 3. Send text (paste)
+    // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);
     const textResult = await this.runStage(
       "session_transport.send_text",
-      () => { opts?.beforeWrite?.(); return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text); },
+      () => {
+        opts?.beforeWrite?.();
+        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, opts?.beforeWrite, { bracketed: false });
+        return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text);
+      },
       (result) => result.ok ? "ok" : "failed",
     );
     if (!textResult.ok) {
@@ -1411,6 +1433,17 @@ export class SessionTransport {
     await this.sleep(200);
 
     if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
+
+    if (promptOverride) {
+      const pane = await this.runStage("session_transport.prompt_override_pre_submit_capture",
+        () => this.tmuxAdapter.capturePaneContent(sessionName, 50)).catch(() => null);
+      if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
+      if (!promptAnswerStaged(pane, text)) {
+        return observe({ ok: true, sessionName, sent: true, verified: false, outcome: "rendered-unconfirmed",
+          warning: "prompt-override: answer sent as unbracketed input; submission unverified. No trailing Enter: the complete answer is not visibly staged (it may have been consumed, the prompt changed, or observation is unavailable)." });
+      }
+      sendAdvisory = "prompt-override: answer sent as unbracketed input; Enter submitted the complete still-staged answer.";
+    }
 
     // 5. Submit (Enter)
     const submitResult = await this.runStage(

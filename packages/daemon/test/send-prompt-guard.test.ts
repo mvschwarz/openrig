@@ -168,8 +168,8 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       dangerouslyInteract: true, reason: "unblock stuck release prompt", actorSession: "orch-lead@my-rig",
     });
     expect(r.ok).toBe(true);
-    expect(sendText).toHaveBeenCalledWith("dev-impl@my-rig", "1");
-    expect(sendKeys).toHaveBeenCalledWith("dev-impl@my-rig", ["Enter"]);
+    expect(sendText).toHaveBeenCalledWith("dev-impl@my-rig", "1", undefined, { bracketed: false });
+    expect(sendKeys).not.toHaveBeenCalled(); // A numbered choice may already have submitted.
     const events = overrideEvents();
     expect(events.length).toBe(1);
     expect(events[0]).toMatchObject({
@@ -226,7 +226,7 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
 
     const drive = await t.send(seat, "1", { dangerouslyInteract: true, reason: "approve the blocked command", actorSession: "orch-lead@my-rig" });
     expect(drive.ok).toBe(true);
-    expect(sendText).toHaveBeenCalledWith(seat, "1");
+    expect(sendText).toHaveBeenCalledWith(seat, "1", undefined, { bracketed: false });
     const ev = overrideEvents();
     expect(ev.length).toBe(1);
     expect(ev[0]).toMatchObject({ detectedState: "needs_input", detectedReason: "permission_request", overrideReason: "approve the blocked command" });

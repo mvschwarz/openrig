@@ -393,6 +393,22 @@ describe("TmuxAdapter", () => {
   });
 
   describe("sendText", () => {
+    it.each([";", "answer;", "answer\\;", "x".repeat(163840)])("preserves unbracketed answer bytes with the legacy executor (%#)", async (text) => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const writeFile = vi.fn(async () => {});
+      const unlink = vi.fn(async () => {});
+      const adapter = new TmuxAdapter(exec, {
+        writeFile, unlink, tmpName: () => "/tmp/text.txt", bufferName: () => "fixture",
+      });
+      expect(await adapter.sendText("worker@rig", text, undefined, { bracketed: false })).toEqual({ ok: true });
+      expect(writeFile).toHaveBeenCalledWith("/tmp/text.txt", text, { mode: 0o600, flag: "wx" });
+      expect(exec.mock.calls.map(([cmd]) => cmd)).toEqual([
+        "tmux load-buffer -b 'fixture' '/tmp/text.txt'",
+        "tmux paste-buffer -t 'worker@rig' -b 'fixture' -d -r",
+      ]);
+      expect(unlink).toHaveBeenCalledWith("/tmp/text.txt");
+    });
+
     it.each([
       "hello world",
       "echo \"hello\" && $HOME's dir; `literal` $(literal)",
