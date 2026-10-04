@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { readdirSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
@@ -57,8 +57,15 @@ export function readRosters(folder: string): { rosters: Roster[]; warnings: stri
   try { names = readdirSync(folder).filter(n => n.endsWith(".json")).sort(); }
   catch (error) { return { rosters, warnings: [`Cannot read roster folder ${folder}: ${(error as Error).message}`] }; }
   for (const name of names) {
-    try { rosters.push(parseRoster(JSON.parse(readFileSync(join(folder, name), "utf8")))); }
-    catch (error) { warnings.push(`${name}: ${(error as Error).message}`); }
+    let fd: number | undefined;
+    try {
+      // Inspect the opened target before reading; NONBLOCK also handles a FIFO
+      // without waiting for a writer. Regular-file symlinks remain readable.
+      fd = openSync(join(folder, name), constants.O_RDONLY | constants.O_NONBLOCK);
+      if (!fstatSync(fd).isFile()) throw new Error("Not a regular file; skipped");
+      rosters.push(parseRoster(JSON.parse(readFileSync(fd, "utf8"))));
+    } catch (error) { warnings.push(`${name}: ${(error as Error).message}`); }
+    finally { if (fd !== undefined) closeSync(fd); }
   }
   return { rosters, warnings };
 }
@@ -69,7 +76,7 @@ const fields = "rigId,logicalId,canonicalSessionName,hostSelfId,runtime,model,se
 export async function readRosterInventory(): Promise<RosterInventory> {
   const nodes: Row[] = [], sources: Row[] = [];
   for (const remote of [false, true]) {
-    const argv = [fileURLToPath(new URL("../index.js", import.meta.url)), "ps", "--nodes", "-A", "--json", "--fields", fields,
+    const argv = [fileURLToPath(new URL("../index.js", import.meta.url)), "ps", "--no-cleanup", "--nodes", "-A", "--json", "--fields", fields,
       ...(remote ? ["--all-hosts"] : [])];
     const result = await new Promise<{ stdout: string; stderr: string; error: Error | null }>(done => {
       execFile(process.execPath, argv, { env: { ...process.env, OPENRIG_HOST_SELECTED: "local" },

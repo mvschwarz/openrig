@@ -3,6 +3,8 @@ import { Command } from "commander";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { enrichRosterMember, parseRoster, readRosters, rosterCommand, type RosterInventory } from "../src/commands/roster.js";
 
 const member = { seat: "editor@studio", host: "host-a", capabilities: ["colour grading"], engagement: ["consult"], use_when: "Choose a look", why: "Knows the footage", caveat: "Advice only" };
@@ -52,4 +54,16 @@ it("preserves fan-out gaps in JSON and text, without claiming availability", asy
   const result = JSON.parse(logs.mock.calls[0]![0]); expect(result.roster.members[0].live.status).toBe("unknown"); expect(result.observations.sources).toEqual(unavailable.sources);
   await new Command().addCommand(rosterCommand({ folder: () => p, inventory: async () => unavailable })).parseAsync(["roster", "find", "colour"], { from: "user" });
   expect(logs.mock.calls.flat().join("\n")).toContain("observed model unknown"); expect(errors.mock.calls.flat().join("\n")).toContain("one host unavailable");
+});
+
+it.skipIf(process.platform === "win32")("skips a FIFO without blocking or losing regular rosters", async () => {
+  const p = folder(); execFileSync("mkfifo", [join(p, "waiting.json")]);
+  const source = new URL("../src/commands/roster.ts", import.meta.url).href;
+  const script = `import { readRosters } from ${JSON.stringify(source)}; console.log(JSON.stringify(readRosters(process.argv[1])));`;
+  // A broken synchronous reader fails within the child bound instead of hanging Vitest.
+  const { stdout } = await promisify(execFile)(process.execPath,
+    ["--import", "tsx", "--input-type=module", "-e", script, p], { timeout: 10_000 });
+  const result = JSON.parse(stdout);
+  expect(result.rosters.map((r: { id: string }) => r.id)).toEqual(["production"]);
+  expect(result.warnings).toEqual(["waiting.json: Not a regular file; skipped"]);
 });

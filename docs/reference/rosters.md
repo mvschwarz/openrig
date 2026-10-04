@@ -55,3 +55,6 @@ activity and running status do not promise that someone is available for new wor
 The JSON `observations.readAt` is when the inventory read completed, not a native observation
 timestamp. Rosters are never rewritten by these commands. Malformed files produce warnings while
 valid rosters remain usable; duplicate IDs make `show` report ambiguity instead of selecting one.
+Non-regular file targets, such as FIFOs and directories, are skipped with a warning; links to
+regular files remain readable. Inventory uses `ps --no-cleanup` to preserve even stale local
+daemon state files. Ordinary `rig ps` keeps its existing cleanup behavior unless given that flag.
