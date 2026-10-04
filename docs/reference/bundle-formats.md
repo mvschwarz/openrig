@@ -102,6 +102,9 @@ carries no tested status.
 **A run record's subject** is either a team (source, configuration ID, package digest, assembler) or a harness check (a
 runtime). A harness check never upgrades a team label.
 
+**A run record's `environment.platform` and `arch`** are Node's `process.platform` (`linux`, `darwin` or `win32`) and
+`process.arch` (`x64` or `arm64`): the values a status platform key can carry, so every valid record can be labelled.
+
 **Records are private.** Only `outcome.publicNote` (a short public cause) reaches the status file.
 
 **Relations:** `supersedes`, `withdraws` and `resolves`. Reusing earlier evidence for a changed package is a reviewer's

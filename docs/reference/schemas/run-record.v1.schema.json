@@ -120,10 +120,19 @@
           }
         },
         "platform": {
-          "type": "string"
+          "enum": [
+            "linux",
+            "darwin",
+            "win32"
+          ],
+          "description": "Node's process.platform; with arch, it forms the status file's <os>-<arch> platform key."
         },
         "arch": {
-          "type": "string"
+          "enum": [
+            "x64",
+            "arm64"
+          ],
+          "description": "Node's process.arch."
         },
         "harnesses": {
           "type": "array",
