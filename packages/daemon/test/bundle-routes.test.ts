@@ -3158,3 +3158,73 @@ files: []
     setup.bootstrapOrchestrator.release("/tmp/locked.rigbundle");
   });
 });
+
+describe("POST /api/bundles/install: pre-launch routing report", () => {
+  let db: Database.Database;
+  let setup: ReturnType<typeof createTestApp>;
+  let home: string;
+  let origHome: string | undefined;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-install-routing-"));
+    origHome = process.env.OPENRIG_HOME;
+    process.env.OPENRIG_HOME = home;
+    setup = createTestApp(db);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (origHome === undefined) delete process.env.OPENRIG_HOME;
+    else process.env.OPENRIG_HOME = origHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  function install(body: Record<string, unknown>) {
+    return setup.app.request("/api/bundles/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // skipVersionCheck + force: no pre-check extraction, so the stubbed bootstrap is the whole install
+      body: JSON.stringify({ bundlePath: path.join(home, "b.rigbundle"), targetRoot: home, autoApprove: true, skipVersionCheck: true, force: true, ...body }),
+    });
+  }
+
+  it("passes --cwd to bootstrap and returns the hook's routing without routing again", async () => {
+    const bootstrap = vi.fn().mockResolvedValue({
+      status: "completed", runId: "run-cwd", rigId: "rig-cwd", stages: [], errors: [], warnings: [],
+      bundleRouting: { contextPacksRouting: { records: [], routedCount: 1, rejectedCount: 0 } },
+    });
+    const orchestrator = setup.bootstrapOrchestrator as unknown as { bootstrap: typeof bootstrap; routeBundleContents: (p: string) => unknown };
+    orchestrator.bootstrap = bootstrap;
+    const reroute = vi.spyOn(orchestrator, "routeBundleContents");
+
+    const res = await install({ cwdOverride: "/work/openrig" });
+    const body = await res.json();
+
+    expect(res.status).toBe(201);
+    expect(bootstrap).toHaveBeenCalledWith(expect.objectContaining({ cwdOverride: "/work/openrig" }));
+    expect(reroute).not.toHaveBeenCalled();
+    expect(body.contextPacksRouting.routedCount).toBe(1);
+    expect(body.bundleRouting).toBeUndefined();
+  });
+
+  it("a partial install reports its routing failures in the response and the audit", async () => {
+    const failure = { kind: "contextPacks", error: "no space left on device" };
+    (setup.bootstrapOrchestrator as unknown as { bootstrap: unknown }).bootstrap = vi.fn().mockResolvedValue({
+      status: "partial", runId: "run-partial", rigId: "rig-partial",
+      stages: [{ stage: "route_bundle_contents", status: "failed" }],
+      errors: [], warnings: ["Bundle contextPacks routing failed: no space left on device"],
+      bundleRouting: { routingFailures: [failure] },
+    });
+
+    const res = await install({});
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.routingFailures).toEqual([failure]);
+    expect(body.warnings).toEqual(["Bundle contextPacks routing failed: no space left on device"]);
+    const audit = fs.readFileSync(path.join(home, "bundle-audit.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(audit.at(-1)).toMatchObject({ outcome: "partial", routingFailures: [failure] });
+  });
+});

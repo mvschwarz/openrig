@@ -223,7 +223,7 @@ Shows the manifest, digest validity, and integrity verification result. Inspect 
 ### Install a bundle
 
 ```bash
-rig bundle install <bundle-path> [--plan] [--yes] [--target <root>] [--json]
+rig bundle install <bundle-path> [--plan] [--yes] [--target <root>] [--cwd <dir>] [--json]
 ```
 
 | Flag | Required | Default | Description |
@@ -232,6 +232,7 @@ rig bundle install <bundle-path> [--plan] [--yes] [--target <root>] [--json]
 | `--plan` | no | `false` | Preview without installing or launching. Not side-effect free: it runs the preflight, which executes the members' runtime `--version` probes, and it records a bootstrap run. It writes nothing to the target. |
 | `--yes` | no | `false` | Auto-approve trusted actions during apply mode. |
 | `--target <root>` | yes in apply mode | — | Directory the bundle is installed into and launched from. Required unless `--plan` is used. |
+| `--cwd <dir>` | no | — | Working directory for every launched member, for this install only (for example, the repository the rig works on). Does not change the install target. |
 | `--json` | no | `false` | Emit machine-readable JSON. |
 
 Install **launches the rig**; it does not just unpack it. It extracts the bundle to a temporary directory, validates integrity, and bootstraps the rig. In apply mode, the daemon requires `targetRoot`, so `rig bundle install` must be given `--target <root>` unless you are running with `--plan`.
@@ -239,10 +240,12 @@ Install **launches the rig**; it does not just unpack it. It extracts the bundle
 For a pod-aware (schema version 2) bundle, apply copies the extracted contents (`bundle.yaml`, `rig.yaml`, `agents/`, culture and docs files) into the target and launches from there, then removes the temporary extraction. So:
 
 - the target becomes the rig root: `agent_ref` paths resolve inside it, and a member with `cwd: "."` (or no `cwd`) starts in the target;
-- an absolute member `cwd` stays as authored, and `rig up --cwd <dir>` still overrides every member's cwd;
+- an absolute member `cwd` stays as authored, and `--cwd <dir>` (on `rig bundle install` or `rig up`) still overrides every member's cwd;
 - if the target already has a file with **different** content at any bundle path (for example its own `rig.yaml`), install refuses with `target_conflict` and writes nothing. Identical files are accepted, so reinstalling the same bundle into the same target works. Use an empty or dedicated directory as the target.
 
-Legacy (schema version 1) bundles keep their old behavior: `--target` is only where packages are installed.
+The bundle's declared skills, plugins, workflow specs, context packs and agent images are routed into your libraries **before any member launches**, and the context-pack library is rescanned, so a member's first turn can already read a pack the bundle carried. A routing failure does not stop the install: it is printed as a warning, returned in `routingFailures`, and recorded in the install audit. The human output lists what each declared kind routed and any entry that was not routed.
+
+Legacy (schema version 1) bundles keep their old behavior: `--target` is only where packages are installed, and their declared contents are routed after a completed install.
 
 ### Launch directly
 
@@ -256,6 +259,7 @@ rig up <bundle-path> [--target <root>] [--cwd <dir>]
 - if `--target` is omitted for a `.rigbundle`, the CLI defaults the install target to the current working directory, so the bundle's files are written there
 - `rig up` resolves a relative `--target` against your current directory before sending it, like `rig bundle install`; with `--host`, `--target` is sent as given and must be a path that exists on that host
 - `--cwd <dir>` does **not** change the install target; it only overrides the launched members' working directory for that run
+- a schema-version-2 bundle's declared contents are routed before any member launches, as with `rig bundle install`
 
 ---
 

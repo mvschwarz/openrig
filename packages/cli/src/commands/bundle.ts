@@ -153,10 +153,11 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--plan", "Plan mode")
     .option("--yes", "Auto-approve")
     .option("--target <root>", "Target root directory")
+    .option("--cwd <path>", "Launch working directory for every member, for this install (for example, the repository the rig works on)")
     .option("--skip-version-check", "Operator-explicit override of the Item-2 install-time compatibility check (NOT recommended for routine use)")
     .option("--force", "Operator-explicit override of the Item-3 install-time conflict check (NOT recommended; conflicts may produce partial install state)")
     .option("--json", "JSON output")
-    .action(async (bundlePath: string, opts: { plan?: boolean; yes?: boolean; target?: string; skipVersionCheck?: boolean; force?: boolean; json?: boolean }) => {
+    .action(async (bundlePath: string, opts: { plan?: boolean; yes?: boolean; target?: string; cwd?: string; skipVersionCheck?: boolean; force?: boolean; json?: boolean }) => {
       const deps = getDepsF();
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
@@ -170,6 +171,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       const res = await client.post<Record<string, unknown>>("/api/bundles/install", {
         bundlePath: nodePath.resolve(bundlePath), plan: opts.plan ?? false, autoApprove: opts.yes ?? false,
         targetRoot: opts.target ? nodePath.resolve(opts.target) : undefined,
+        cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
         // Item 2 / slice-05 Checkpoint 3.3: send CLI version + skip flag for the
         // daemon-side install-time compatibility check. CLI version read at call
         // time (no module-level constant) via the existing getCliVersion helper.
@@ -194,6 +196,8 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       const status = res.data["status"] as string;
       console.log(`Status: ${status}`);
       if (res.data["rigId"]) console.log(`Rig: ${res.data["rigId"]}`);
+      for (const line of bundleRoutingSummary(res.data)) console.log(line);
+      for (const w of (res.data["warnings"] as string[] | undefined) ?? []) console.log(`Warning: ${w}`);
     });
 
   // rig bundle history — Item 4 / slice-05 Checkpoint 5.2
@@ -240,4 +244,25 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     });
 
   return cmd;
+}
+
+const ROUTING_LABELS: Array<[string, string]> = [
+  ["contextPacksRouting", "Context packs"],
+  ["skillsRouting", "Skills"],
+  ["pluginsRouting", "Plugins"],
+  ["workflowSpecsRouting", "Workflow specs"],
+  ["agentImagesRouting", "Agent images"],
+];
+
+/** One line per routed kind: what landed, and each declared entry that did not. */
+export function bundleRoutingSummary(data: Record<string, unknown>): string[] {
+  const lines: string[] = [];
+  for (const [key, label] of ROUTING_LABELS) {
+    const routing = data[key] as { routedCount?: number; records?: Array<{ declaredPath?: string; id?: string; status?: string }> } | undefined;
+    if (!routing || typeof routing.routedCount !== "number") continue;
+    const rejected = (routing.records ?? []).filter((r) => r.status !== "routed");
+    const detail = rejected.length > 0 ? `; not routed: ${rejected.map((r) => `${r.declaredPath ?? r.id ?? "?"} (${r.status ?? "?"})`).join(", ")}` : "";
+    lines.push(`${label}: ${routing.routedCount} routed${detail}`);
+  }
+  return lines;
 }

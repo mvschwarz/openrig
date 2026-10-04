@@ -118,6 +118,20 @@ describe("Bundle CLI", () => {
         if (parsed.plan) {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "planned", runId: "run-1", stages: [] }));
+        } else if (String(parsed.bundlePath ?? "").includes("routed")) {
+          res.writeHead(201, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            status: "completed", runId: "run-3", rigId: "rig-3",
+            contextPacksRouting: {
+              routedCount: 1, rejectedCount: 1,
+              records: [
+                { declaredPath: "context-packs/world/manifest.yaml", status: "routed" },
+                { declaredPath: "context-packs/gone/manifest.yaml", status: "missing" },
+              ],
+            },
+            routingFailures: [{ kind: "skills", error: "boom" }],
+            warnings: ["Bundle skills routing failed: boom"],
+          }));
         } else {
           res.writeHead(201, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "completed", runId: "run-2", rigId: "rig-1" }));
@@ -301,6 +315,22 @@ describe("Bundle CLI", () => {
       installBundlePath: nodePath.resolve("out/rel.rigbundle"),
       targetRoot: nodePath.resolve("proj"),
     });
+  });
+
+  it("bundle install --cwd sends a client-absolute cwdOverride", async () => {
+    capturedInstallBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "install", "/tmp/test.rigbundle", "--yes", "--target", "/tmp/t", "--cwd", "rel/repo"]);
+    });
+    expect(capturedInstallBodies.at(-1)?.["cwdOverride"]).toBe(nodePath.resolve("rel/repo"));
+  });
+
+  it("bundle install prints what each declared kind routed, and the routing warnings", async () => {
+    const { logs } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "install", "/tmp/routed.rigbundle", "--yes", "--target", "/tmp/t"]);
+    });
+    expect(logs).toContain("Context packs: 1 routed; not routed: context-packs/gone/manifest.yaml (missing)");
+    expect(logs).toContain("Warning: Bundle skills routing failed: boom");
   });
 
   it("control: bundle install --plan without --target still sends no targetRoot", async () => {

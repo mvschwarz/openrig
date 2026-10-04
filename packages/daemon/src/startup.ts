@@ -58,6 +58,7 @@ import { ExternalInstallPlanner } from "./domain/external-install-planner.js";
 import { ExternalInstallExecutor } from "./domain/external-install-executor.js";
 import { PackageInstallService } from "./domain/package-install-service.js";
 import { BootstrapOrchestrator } from "./domain/bootstrap-orchestrator.js";
+import { routeBundleContents } from "./domain/bundle-content-routing.js";
 import { TmuxDiscoveryScanner } from "./domain/tmux-discovery-scanner.js";
 import { SessionFingerprinter } from "./domain/session-fingerprinter.js";
 import { SessionEnricher } from "./domain/session-enricher.js";
@@ -985,6 +986,11 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     packageInstallService, rigInstantiator, fsOps: resolverFsOps,
     bundleSourceResolver, podInstantiator, podBundleSourceResolver,
     serviceOrchestrator, rigRepo,
+    // A bundle's packs land in context.root before its seats launch; rescan
+    // so the live library serves them on the first turn.
+    routeBundleContents: (bundlePath) => routeBundleContents(bundlePath, {
+      onContextPacksRouted: () => { contextPackLibrary.scan(); },
+    }),
   });
 
   // V0.3.1 slice 05 kernel-rig-as-default — auto-boot the kernel rig

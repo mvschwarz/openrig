@@ -38,6 +38,8 @@ export interface BundleAuditRecord {
   cliVersion?: string;
   /** Install outcome — keep honest (partial = some stages ok, some not). */
   outcome: "success" | "failed" | "partial";
+  /** Declared bundle contents that failed to route; the install itself still ran. */
+  routingFailures?: Array<{ kind: string; error: string }>;
 }
 
 /** Filesystem injection point — real impl wraps node:fs. Tests substitute in-memory. */

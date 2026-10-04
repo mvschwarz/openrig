@@ -266,7 +266,7 @@ Root: `rig`; declared option: `-V, --version`.
 | `rig bundle` | — | — |
 | `rig bundle create <spec>` | — | `-o, --output <path>` **required**<br>`--name <name>`<br>`--bundle-version <ver>`<br>`--include-packages <refs...>`<br>`--rig-root <root>`<br>`--notes <text>`<br>`--min-daemon-version <ver>`<br>`--min-cli-version <ver>`<br>`--allow-drift`<br>`--json` |
 | `rig bundle inspect <path>` | — | `--json` |
-| `rig bundle install <path>` | — | `--plan`<br>`--yes`<br>`--target <root>`<br>`--skip-version-check`<br>`--force`<br>`--json` |
+| `rig bundle install <path>` | — | `--plan`<br>`--yes`<br>`--target <root>`<br>`--cwd <path>`<br>`--skip-version-check`<br>`--force`<br>`--json` |
 | `rig bundle history` | — | `--rig <name>`<br>`--since <iso>`<br>`--json` |
 
 ### up
