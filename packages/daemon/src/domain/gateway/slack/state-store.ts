@@ -29,7 +29,10 @@ export interface StateFsOps {
 
 export const nodeStateFs: StateFsOps = {
   readFileSync: (p) => fs.readFileSync(p, "utf8"),
-  appendFileSync: (p, d) => fs.appendFileSync(p, d),
+  // A crash can leave the previous append without its final newline. Separate
+  // the next record unconditionally so it cannot become part of that torn JSON.
+  // Blank lines are already ignored by parseLines; avoid rereading a growing log.
+  appendFileSync: (p, d) => fs.appendFileSync(p, "\n" + d),
   writeFileSync: (p, d) => fs.writeFileSync(p, d),
   rename: (from, to) => fs.renameSync(from, to),
   mkdirp: (dir) => {
