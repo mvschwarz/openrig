@@ -7,7 +7,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
-import { readDeclaredConfigurations, authoredMapping, resolveConfiguration, listConfigurations, stageConfiguration, ConfigurationError, type ChosenConfiguration } from "../lib/bundle-configuration.js";
+import { readDeclaredConfigurations, authoredMapping, resolveConfiguration, listConfigurations, checkDeclaredConfigurations, stageConfiguration, ConfigurationError, type ChosenConfiguration } from "../lib/bundle-configuration.js";
 
 /**
  * Read the CLI's own package.json version at call time (Item 1 / slice-05).
@@ -147,9 +147,22 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output")
     .action((spec: string, opts: { json?: boolean }) => {
       const specPath = nodePath.resolve(spec);
-      const declared = readDeclaredConfigurations(nodePath.dirname(specPath));
-      const authored = authoredMapping(specPath);
-      const configurations = declared ? listConfigurations(declared, authored) : [];
+      let declared: ReturnType<typeof readDeclaredConfigurations>;
+      let configurations: ReturnType<typeof listConfigurations> = [];
+      try {
+        declared = readDeclaredConfigurations(nodePath.dirname(specPath));
+        const authored = authoredMapping(specPath);
+        if (declared) {
+          checkDeclaredConfigurations(declared, authored);
+          configurations = listConfigurations(declared, authored);
+        }
+      } catch (err) {
+        if (!(err instanceof ConfigurationError)) throw err;
+        if (opts.json) console.log(JSON.stringify({ declared: true, error: err.message }));
+        else console.error(err.message);
+        process.exitCode = 2;
+        return;
+      }
       if (opts.json) {
         console.log(JSON.stringify({ declared: Boolean(declared), configurations }));
         return;
@@ -159,7 +172,6 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         const notes = [c.recommended ? "recommended" : "", c.authored ? "as rig.yaml is written" : ""].filter(Boolean).join(", ");
         console.log(`${c.preset}: ${c.configurationId}${notes ? `  (${notes})` : ""}`);
       }
-      if (!configurations.some((c) => c.authored)) console.log("Note: no preset matches rig.yaml as written.");
     });
 
   // rig bundle inspect <path>
