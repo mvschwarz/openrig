@@ -58,9 +58,16 @@ describe("Claude composer below noninteractive status warnings", () => {
       .toMatchObject({ state: "attention", reason: "prompt_draft" });
   });
 
-  it("shares recognition with the structural-activity consumer", async () => {
-    const service = new SeatStructuralActivityService({ capturePaneContent: async () => captures[0][1] });
+  it.each(captures)("shares recognition with the structural-activity consumer: %s", async (_name, content) => {
+    const service = new SeatStructuralActivityService({ capturePaneContent: async () => content });
     expect(await service.pollSeat("seat@rig")).toMatchObject({ state: "agent_idle", reason: "idle_prompt" });
+  });
+
+  it("keeps structural draft and warning-only observations unsendable", async () => {
+    for (const content of [pane([update, focus], "❯ unfinished message"), focus]) {
+      const service = new SeatStructuralActivityService({ capturePaneContent: async () => content });
+      expect((await service.pollSeat("seat@rig"))?.state).not.toBe("agent_idle");
+    }
   });
 });
 
