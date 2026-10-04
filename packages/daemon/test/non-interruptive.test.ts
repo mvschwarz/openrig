@@ -114,6 +114,24 @@ describe("non-interruptive launch choice", () => {
     expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]![1]).toBe(command.replace(/ '-c' '[^']*'/g, ""));
   });
 
+  it.each(["fresh", "resume", "fork"] as const)("managed Claude %s keeps explicit native mode precedence", async mode => {
+    const { tmux, fsOps, binding } = fixture("claude-code");
+    const command = vi.fn((args: string[]) => JSON.stringify(args));
+    const managed = { prepare: async () => ({ configDir: "/inert/claude", assertCurrent: () => {}, command }) };
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps, sleep: async () => {},
+      claudeManagedLaunch: managed as unknown as import("../src/domain/claude-managed-launch.js").ClaudeManagedLaunch });
+    const opts = { name: "dev@test", ...(mode === "resume" ? { resumeToken: "old-id" } : {}),
+      ...(mode === "fork" ? { forkSource: { kind: "native_id" as const, value: "old-id" } } : {}) };
+    for (const permissionMode of ["bypassPermissions", "acceptEdits", "auto"]) {
+      command.mockClear();
+      await adapter.launchHarness({ ...binding, permissionMode }, opts);
+      const args = command.mock.calls[0]![0];
+      expect(args.slice(0, 2)).toEqual(["--permission-mode", permissionMode]);
+      expect(args.includes("--settings")).toBe(permissionMode === "bypassPermissions");
+      if (permissionMode === "bypassPermissions") expect(JSON.parse(args[args.indexOf("--settings") + 1]!)).toEqual({ skipDangerousModePermissionPrompt: true });
+    }
+  });
+
   it("legacy restore adapters also receive the launch-only override", async () => {
     const claude = fixture("claude-code"); const codex = fixture("codex");
     await new ClaudeResumeAdapter(claude.tmux, { sleep: async () => {}, maxWaitMs: 1 }).resume("dev@test", "claude_id", "old-id", "/work", "full_bypass", null, undefined, undefined, undefined, true);
