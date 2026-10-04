@@ -46,6 +46,24 @@ install:
     - repository-maintenance
 ```
 
+A project can also name world packs to read after the System World, in order:
+
+```yaml
+install:
+  worlds:
+    - ref: openrig-world
+    - ref: project-world
+      profiles: { claude: guided }
+```
+
+Each `install.worlds` entry has the same `{ ref, profiles }` shape as a System
+World `context` entry. `work-install` lists them as `context world <ref>` lines
+and `worlds` in `--json`; it never delivers their content, so read each with
+`rig context get <ref>`. An invalid entry, or a ref the System World or an
+earlier entry already lists, is ignored with a warning. Without the key, the
+output is unchanged. The list holds pack names only, resolved from the local
+library when read, so naming a world copies none of its content.
+
 `install.context` contains project-relative Markdown addresses. `install.skills`
 contains stable skill identities only. Skill source bytes live in the single
 configured managed catalog (`skills.root`, default `$OPENRIG_HOME/skills`),

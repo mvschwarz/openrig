@@ -76,12 +76,12 @@ function printWorkInstallSelectors(result: WorkInstallPlan, topologySkills: stri
   const identity = world.id ? ` ${world.id}@${world.version}` : "";
   const path = world.manifestPath ? ` ${world.manifestPath}` : "";
   console.log(`system  ${world.state} [${world.source}]${identity}${path}`);
-  for (const selection of world.context) {
-    const profiles = selection.profiles
-      ? ` (${Object.entries(selection.profiles).map(([runtime, profile]) => `${runtime}=${profile}`).join(", ")})`
-      : "";
-    console.log(`context system ${selection.ref}${profiles}`);
-  }
+  const profiles = (selection: { profiles?: Record<string, string | undefined> }) => selection.profiles
+    ? ` (${Object.entries(selection.profiles).map(([runtime, profile]) => `${runtime}=${profile}`).join(", ")})`
+    : "";
+  for (const selection of world.context) console.log(`context system ${selection.ref}${profiles(selection)}`);
+  for (const selection of result.worlds ?? []) console.log(`context world ${selection.ref}${profiles(selection)}`);
+  if ((result.worlds ?? []).length > 0) console.log("worlds  read each with: rig context get <ref>");
   console.log(`skills  system=${selectedIds(world.skills, "(none)")}`);
   console.log(`skills  topology=${selectedIds(topologySkills, "(none)")}`);
   console.log(`skills  project=${selectedIds(result.skills, "(none)")}`);

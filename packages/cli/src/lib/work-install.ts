@@ -5,6 +5,7 @@ import { parse as parseYaml } from "yaml";
 import { readFrontmatter, resolveNodeFile } from "./scope/scope-fs.js";
 import { readProjectSkillSelection } from "@openrig/daemon/skill-loadout";
 import {
+  parseContextSelection,
   resolveSystemWorld,
   type SystemWorldContextSelection,
   type SystemWorldSource,
@@ -49,6 +50,9 @@ export interface WorkInstallPlan {
     context: SystemWorldContextSelection[];
     skills: string[];
   };
+  /** Ordered world packs from project.yaml install.worlds, after the System World.
+   *  Present only when the project declares the key; listed, never delivered. */
+  worlds?: SystemWorldContextSelection[];
   /** Project-world skill identities from project.yaml install.skills. */
   skills: string[];
   derive: [];
@@ -127,6 +131,32 @@ function piece(
     }
   }
   return { altitude, address, path: nominalPath, exists: existsSync(nominalPath), source };
+}
+
+/** install.worlds: each entry uses the System World selection shape. An invalid
+ *  entry, or a ref already listed (by the System World or earlier in the list), is
+ *  ignored with a warning; this never refuses the install. */
+function readProjectWorlds(entries: unknown[], systemRefs: Set<string>, warnings: string[]): SystemWorldContextSelection[] {
+  const worlds: SystemWorldContextSelection[] = [];
+  const listed = new Set(systemRefs);
+  entries.forEach((entry, index) => {
+    const label = `project.yaml install.worlds[${index}]`;
+    let selection: SystemWorldContextSelection;
+    try {
+      selection = parseContextSelection(entry, label);
+    } catch (err) {
+      warnings.push(`${(err as Error).message}; ignored that entry`);
+      return;
+    }
+    if (listed.has(selection.ref)) {
+      const where = systemRefs.has(selection.ref) ? "the System World" : "an earlier entry";
+      warnings.push(`${label} repeats '${selection.ref}', already listed by ${where}; ignored that entry`);
+      return;
+    }
+    listed.add(selection.ref);
+    worlds.push(selection);
+  });
+  return worlds;
 }
 
 function manifestProjectId(manifest: Record<string, unknown> | null): string | null {
@@ -264,6 +294,7 @@ export function resolveWorkPosition(opts: {
   let projectIntent = "SPEC.md";
   let projectIntentSource: WorkInstallSource = "default";
   let projectContext: string[] = [];
+  let projectWorlds: SystemWorldContextSelection[] | undefined;
   const install = projectManifest?.["install"];
   let projectSkills: string[] = [];
   if (isRecord(install)) {
@@ -280,6 +311,15 @@ export function resolveWorkPosition(opts: {
         projectContext = install["context"] as string[];
       } else {
         warnings.push("project.yaml: optional install.context must be a list of relative Markdown addresses; ignored it");
+      }
+    }
+    if (install["worlds"] !== undefined) {
+      if (Array.isArray(install["worlds"])) {
+        const systemRefs = new Set((systemWorld.manifest?.context ?? []).map((selection) => selection.ref));
+        projectWorlds = readProjectWorlds(install["worlds"], systemRefs, warnings);
+      } else {
+        projectWorlds = [];
+        warnings.push("project.yaml: optional install.worlds must be an ordered list of { ref, profiles } entries; ignored it");
       }
     }
   }
@@ -404,6 +444,7 @@ export function resolveWorkPosition(opts: {
       context: systemWorld.manifest?.context ?? [],
       skills: systemWorld.manifest?.skills ?? [],
     },
+    ...(projectWorlds !== undefined ? { worlds: projectWorlds } : {}),
     skills: projectSkills,
     derive: [],
     warnings,

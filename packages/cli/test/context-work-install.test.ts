@@ -218,6 +218,71 @@ skills: []
     });
   });
 
+  describe("install.worlds", () => {
+    const writeAlphaInstall = (worlds: string) => writeFileSync(join(alphaRoot, "project.yaml"), `schema: openrig.project/v0alpha1
+kind: project
+id: alpha
+install:
+  intent: SPEC.md
+  skills: [project-skill]
+${worlds}`);
+    const run = (...args: string[]) => captureLogs(async () => {
+      await makeCommand().parseAsync(["node", "rig", "context", "work-install", "--project", "alpha", ...args]);
+    });
+
+    it("lists declared worlds in order after the System World, ignoring repeats and invalid entries with warnings", async () => {
+      writeAlphaInstall(`  worlds:
+    - ref: openrig-world
+    - ref: world-public
+    - ref: private-overlay
+      profiles: { claude: guided }
+    - ref: openrig-world
+    - ref: ../escape
+`);
+      const json = await run("--json");
+      expect(json.exitCode).toBeUndefined();
+      const plan = JSON.parse(json.logs.join("")) as { worlds: unknown; skills: string[]; warnings: string[] };
+      expect(plan.worlds).toEqual([{ ref: "openrig-world" }, { ref: "private-overlay", profiles: { claude: "guided" } }]);
+      expect(plan.skills).toEqual(["project-skill"]);
+      expect(plan.warnings).toEqual([
+        "project.yaml install.worlds[1] repeats 'world-public', already listed by the System World; ignored that entry",
+        "project.yaml install.worlds[3] repeats 'openrig-world', already listed by an earlier entry; ignored that entry",
+        "project.yaml install.worlds[4].ref must be a safe context-pack ref; ignored that entry",
+      ]);
+
+      const text = await run();
+      expect(text.logs.slice(1, 8)).toEqual([
+        `system  default [default] test-default@0.5.9 ${join(contextRoot, "system", "system-world.yaml")}`,
+        "context system onboarding-width",
+        "context system world-public (claude=guided, codex=codex-coverage)",
+        "context world openrig-world",
+        "context world private-overlay (claude=guided)",
+        "worlds  read each with: rig context get <ref>",
+        "skills  system=system-skill",
+      ]);
+    });
+
+    it("ignores a non-list install.worlds with a warning and keeps the rest of the install", async () => {
+      writeAlphaInstall("  worlds: openrig-world\n");
+      const result = await run("--json");
+      expect(result.exitCode).toBeUndefined();
+      const plan = JSON.parse(result.logs.join("")) as { worlds: unknown; skills: string[]; warnings: string[] };
+      expect(plan.worlds).toEqual([]);
+      expect(plan.skills).toEqual(["project-skill"]);
+      expect(plan.warnings).toEqual([
+        "project.yaml: optional install.worlds must be an ordered list of { ref, profiles } entries; ignored it",
+      ]);
+      expect((await run()).logs.some((line) => line.startsWith("worlds  "))).toBe(false);
+    });
+
+    it("adds nothing to the output when install.worlds is absent", async () => {
+      const json = await run("--json");
+      expect(Object.hasOwn(JSON.parse(json.logs.join("")) as object, "worlds")).toBe(false);
+      const text = await run();
+      expect(text.logs.some((line) => line.startsWith("context world") || line.startsWith("worlds  "))).toBe(false);
+    });
+  });
+
   it("selects two declared roots and returns stable intent with current progress", async () => {
     const alpha = await captureLogs(async () => {
       await makeCommand().parseAsync([
