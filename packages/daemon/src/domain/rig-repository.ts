@@ -514,12 +514,18 @@ export class RigRepository {
     };
   }
 
-  listRigs(filter?: RigArchiveFilter): Rig[] {
+  listRigs(filter?: RigArchiveFilter, observe?: import("./request-phase-observer.js").QueryObservation): Rig[] {
     const cond = archiveWhereClause("archived_at", filter);
     const where = cond ? `WHERE ${cond}` : "";
-    const rows = this.db
-      .prepare(`SELECT * FROM rigs ${where} ORDER BY created_at`)
-      .all() as RigRow[];
+    let rows: RigRow[];
+    try { observe?.("begin"); } catch { /* Best-effort measurement only. */ }
+    try {
+      rows = this.db.prepare(`SELECT * FROM rigs ${where} ORDER BY created_at`).all() as RigRow[];
+    } catch (error) {
+      try { observe?.("end", true); } catch { /* Preserve the actual query error. */ }
+      throw error;
+    }
+    try { observe?.("end", false); } catch { /* Preserve the query result. */ }
     return rows.map((r) => this.rowToRig(r));
   }
 
