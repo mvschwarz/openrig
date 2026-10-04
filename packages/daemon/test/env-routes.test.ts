@@ -204,7 +204,7 @@ describe("env routes", () => {
     expect((capturedOpts as Record<string, unknown>)["policyOverride"]).toBe("down_and_volumes");
   });
 
-  it("POST /env/down without volumes does not pass policyOverride", async () => {
+  it.each([{}, { volumes: false }])("POST /env/down with %j does not pass policyOverride", async (input) => {
     let capturedOpts: unknown = undefined;
     const app = createApp({
       getServicesRecord: () => SERVICE_RECORD,
@@ -217,7 +217,7 @@ describe("env routes", () => {
     const res = await app.request("/api/rigs/rig-1/env/down", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify(input),
     });
     expect(res.status).toBe(200);
     expect(capturedOpts).toBeUndefined();
