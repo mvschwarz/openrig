@@ -120,7 +120,10 @@ Restore behavior, each point checked in `restore-orchestrator.ts`:
   that will consume replay is missing a required startup file
   (`required_startup_file_missing`, `:729`; outcome
   `pre_restore_validation_failed`, `:290`). A node that resumes its exact
-  native session replays nothing (`replayContained`, `:1288`).
+  native session replays no startup files, actions, guidance or skills
+  (`replayContained`, `:1288`); its saved Claude activity-hook selection is
+  reapplied before native resume. A skipped hook reapply adds a warning without
+  changing the restore outcome.
 - Writes a **transcript boundary marker before re-launch**
   (`writeBoundaryMarker`, `:1100`, called before `launchNode`).
 - Refuses to restore over live sessions (`:258–261` — `rig_not_stopped`: "Rig …

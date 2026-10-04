@@ -31,6 +31,7 @@ describe("contained Claude restore activity resources", () => {
   let cwd: string;
   let settingsPath: string;
   let writes: Array<{ file: string; text: string }>;
+  let fsOps: ClaudeAdapterFsOps;
   let adapter: ClaudeCodeAdapter;
   let tmux: TmuxAdapter;
   let rigs: RigRepository;
@@ -52,7 +53,7 @@ describe("contained Claude restore activity resources", () => {
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
     fs.writeFileSync(settingsPath, JSON.stringify(originalSettings));
     writes = [];
-    const fsOps: ClaudeAdapterFsOps = {
+    fsOps = {
       exists: fs.existsSync, readFile: p => fs.readFileSync(p, "utf8"),
       writeFile: (p, text) => { writes.push({ file: p, text }); fs.writeFileSync(p, text); },
       mkdirp: p => { fs.mkdirSync(p, { recursive: true }); },
@@ -195,6 +196,32 @@ describe("contained Claude restore activity resources", () => {
     const result = await restore(seed(true, false));
     expect(result.ok).toBe(true);
     expect(settings().hooks).toEqual(before);
+  });
+
+  it.each(["relay", "manifest", "settings"] as const)("warns when restore activity hooks are skipped: %s", async unavailable => {
+    const f = seed(true);
+    if (unavailable === "settings") fs.writeFileSync(settingsPath, "{invalid settings");
+    else {
+      const missing = path.join(shipped, unavailable === "relay" ? "scripts/activity-relay.cjs" : "claude.json");
+      fsOps.exists = p => p !== missing && fs.existsSync(p);
+    }
+    const before = fs.readFileSync(settingsPath, "utf8");
+    const project = vi.spyOn(adapter, "project");
+    const result = await restore(f);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({
+      status: "attention_required", error: expect.stringContaining("joined restore proof is incomplete"),
+    });
+    expect(await project.mock.results[0]!.value).toMatchObject({ projected: [], skipped: ["activity"], failed: [] });
+    expect(result.result.warnings).toContain("Restore activity hooks: skipped activity; saved hooks could not be reapplied.");
+    // Startup may still provision its existing context collector in valid settings.
+    if (unavailable === "settings") expect(fs.readFileSync(settingsPath, "utf8")).toBe(before);
+    else {
+      expect(settings().hooks).toEqual(JSON.parse(before).hooks);
+      expect(settings().env).toEqual(JSON.parse(before).env);
+    }
+    expect(tmux.sendText).not.toHaveBeenCalled();
   });
 
   it("retains real fresh projection and deliberate resource removal", async () => {

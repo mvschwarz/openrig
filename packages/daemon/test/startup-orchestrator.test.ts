@@ -210,6 +210,27 @@ describe("StartupOrchestrator", () => {
     expect(adapter.deliverStartup).toHaveBeenCalledWith([], expect.anything());
   });
 
+  it.each([
+    { preserve: true, populated: false, calls: 0 },
+    { preserve: true, populated: true, calls: 1 },
+    { preserve: false, populated: false, calls: 1 },
+  ])("projects resources only outside an empty preserved Claude plan: %j", async ({ preserve, populated, calls }) => {
+    const adapter = mockAdapter();
+    const plan = emptyPlan();
+    if (populated) plan.entries.push({
+      category: "runtime_resource", resourceType: "claude_activity_hooks", effectiveId: "activity",
+      sourceSpec: "saved", sourcePath: "/fixture", resourcePath: "activity", absolutePath: "/fixture/activity",
+      classification: "safe_projection",
+    });
+    const result = await createOrchestrator().startNode(makeInput(seedSession(), {
+      adapter, plan, preserveStartupContext: preserve, isRestore: true, resumeToken: "native-original",
+    }));
+    expect(result.ok).toBe(true);
+    expect(adapter.project).toHaveBeenCalledTimes(calls);
+    if (calls) expect(adapter.project).toHaveBeenCalledWith(plan, expect.anything());
+    expect(tmux.sendText).not.toHaveBeenCalled();
+  });
+
   it.each([undefined, "claude_id", "claude_name", "codex_id"])("managed Claude resume agrees with the requested type: %s", async (resumeType) => {
     const seed = seedSession();
     const adapter = mockAdapter();

@@ -1008,6 +1008,7 @@ export class RestoreOrchestrator {
           startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
         }, { ...launchResult.binding, cwd: node.cwd ?? "." });
         warnings?.push(...(result.warnings ?? []));
+        for (const skipped of result.skipped) warnings?.push(`Restore activity hooks: skipped ${skipped}; saved hooks could not be reapplied.`);
         for (const failure of result.failed) warnings?.push(`Restore activity hooks: ${failure.error}`);
       } catch (error) {
         // Activity delivery remains best-effort, as on an ordinary fresh launch.

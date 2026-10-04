@@ -208,7 +208,7 @@ export class StartupOrchestrator {
     // RestoreOrchestrator already reconciled the saved activity selection before
     // native resume. Fresh launches still project empty plans to support removal.
     let projectionResult: ProjectionResult;
-    if (!(input.preserveStartupContext && input.adapter.runtime === "claude-code")) try {
+    if (!(input.preserveStartupContext && input.adapter.runtime === "claude-code" && input.plan.entries.length === 0)) try {
       projectionResult = await input.adapter.project(input.plan, input.binding);
       warnings.push(...(projectionResult.warnings ?? []));
       if (projectionResult.failed.length > 0) {
