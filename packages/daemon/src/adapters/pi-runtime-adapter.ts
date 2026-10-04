@@ -122,6 +122,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
     const projected: string[] = [];
+    const warnings: string[] = [];
     const skipped: string[] = [];
     const failed: Array<{ effectiveId: string; error: string }> = [];
 
@@ -135,7 +136,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
         continue;
       }
       try {
-        if (this.projectEntry(entry, binding)) {
+        if (this.projectEntry(entry, binding, warnings)) {
           projected.push(entry.effectiveId);
         } else {
           skipped.push(entry.effectiveId);
@@ -145,10 +146,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       }
     }
 
-    return { projected, skipped, failed };
+    return { projected, skipped, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
   async deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult> {
+    const warnings: string[] = [];
     let delivered = 0;
     const failed: Array<{ path: string; error: string }> = [];
 
@@ -163,7 +165,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
             // replace Pi's default system prompt). Pi reads AGENTS.md from
             // the managed cwd as a project context file.
             const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
-            const merged = this.mergeGuidance(targetPath, file.path, content);
+            const merged = this.mergeGuidance(targetPath, file.path, content, warnings);
             if (!merged) continue; // rig-role skip: do not count as delivered
             break;
           }
@@ -195,7 +197,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       }
     }
 
-    return { delivered, failed };
+    return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
   async launchHarness(
@@ -414,11 +416,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     };
   }
 
-  private projectEntry(entry: ProjectionEntry, binding: NodeBinding): boolean {
+  private projectEntry(entry: ProjectionEntry, binding: NodeBinding, warnings: string[]): boolean {
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
       const content = this.fs.readFile(entry.absolutePath);
-      return this.mergeGuidance(targetPath, entry.effectiveId, content);
+      return this.mergeGuidance(targetPath, entry.effectiveId, content, warnings);
     }
 
     if (entry.category === "skill") {
@@ -462,7 +464,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     if (this.fs.statMode && this.fs.chmod) this.fs.chmod(target, this.fs.statMode(source) & 0o777);
   }
 
-  private mergeGuidance(targetPath: string, blockId: string, content: string): boolean {
+  private mergeGuidance(targetPath: string, blockId: string, content: string, warnings: string[]): boolean {
     // Mirrors the Claude/Codex adapters: per-seat `rig-role` content collides
     // across pod-mates when merged into a shared cwd file; it is delivered via
     // send_text instead. See ADR-0006.
@@ -473,6 +475,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       return false;
     }
     mergeManagedBlock(this.fs, targetPath, blockId, content, {
+      warnings,
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });
     return true;

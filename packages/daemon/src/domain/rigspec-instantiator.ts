@@ -2291,7 +2291,7 @@ export class PodRigInstantiator {
       return {
         status: "launched",
         sessionName: canonicalSessionName,
-        warnings: launchResult.warnings,
+        warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
       };
     }
     return {
@@ -2299,7 +2299,7 @@ export class PodRigInstantiator {
       error: startupResult.errors.join("; "),
       evidence: startupResult.evidence,
       sessionName: canonicalSessionName,
-      warnings: launchResult.warnings,
+      warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
     };
   }
 
@@ -2399,7 +2399,7 @@ export class PodRigInstantiator {
       status: startupResult.ok ? "launched" : "failed",
       error: startupResult.ok ? undefined : startupResult.errors.join("; "),
       sessionName: canonicalSessionName,
-      warnings: launchResult.warnings,
+      warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
     };
   }
 

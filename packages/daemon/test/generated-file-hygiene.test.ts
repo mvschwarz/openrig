@@ -38,7 +38,7 @@ describe("generated file Git hygiene", () => {
   }
   const excludePath = (cwd: string) => git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").trim();
   function entry(category: "guidance" | "plugin", absolutePath: string): ProjectionEntry {
-    return { category, effectiveId: "core", sourceSpec: "base", sourcePath: root, resourcePath: "source",
+    return { category, effectiveId: "openrig-core", sourceSpec: "base", sourcePath: root, resourcePath: "source",
       absolutePath, classification: "safe_projection", ...(category === "guidance" ? { mergeStrategy: "managed_block" as const } : { pluginType: "codex" as const }) };
   }
   async function project(entries: ProjectionEntry[], cwd = repo, runtime: "codex" | "claude" = "codex", local = false) {
@@ -50,21 +50,23 @@ describe("generated file Git hygiene", () => {
     return result;
   }
 
-  it("keeps newly generated guidance out of git add while preserving adjacent user files", async () => {
+  it("warns about newly generated guidance without hiding it", async () => {
     const source = write("guidance.md", "Managed guidance", root);
     for (const [runtime, local] of [["codex", false], ["claude", false], ["claude", true]] as const) {
-      await project([entry("guidance", source)], repo, runtime, local);
+      const result = await project([entry("guidance", source)], repo, runtime, local);
+      const file = runtime === "codex" ? "AGENTS.md" : local ? "CLAUDE.local.md" : "CLAUDE.md";
+      expect(result.warnings).toEqual([expect.stringContaining(`untracked. If you do not want to commit it, add this line to ${excludePath(repo)}: /${file}`)]);
     }
     write("notes.md");
     git(repo, "add", ".");
-    expect(git(repo, "diff", "--cached", "--name-only").trim()).toBe("notes.md");
+    expect(git(repo, "diff", "--cached", "--name-only").trim().split("\n").sort()).toEqual(["AGENTS.md", "CLAUDE.local.md", "CLAUDE.md", "notes.md"].sort());
     for (const file of ["AGENTS.md", "CLAUDE.md", "CLAUDE.local.md"]) expect(fs.readFileSync(path.join(repo, file), "utf8")).toContain("Managed guidance");
   });
 
   it("keeps only newly generated plugin files out of git add", async () => {
     write("source/.codex-plugin/plugin.json", '{"name":"core"}', root);
     write("source/scripts/a [literal]*?.sh", "echo core", root);
-    const userPlugin = write(".codex/plugins/core/user.txt");
+    const userPlugin = write(".codex/plugins/openrig-core/user.txt");
     write(".codex/user-file"); write(".codex/plugins/unselected/plugin.json");
     const selected = entry("plugin", path.join(root, "source"));
     await project([selected]);
@@ -74,12 +76,12 @@ describe("generated file Git hygiene", () => {
     expect(fs.readFileSync(userPlugin, "utf8")).toBe("User file\n");
     git(repo, "add", ".");
     expect(git(repo, "diff", "--cached", "--name-only").trim().split("\n").sort()).toEqual([
-      ".codex/plugins/core/user.txt", ".codex/plugins/unselected/plugin.json", ".codex/user-file",
+      ".codex/plugins/openrig-core/user.txt", ".codex/plugins/unselected/plugin.json", ".codex/user-file",
     ]);
   });
 
   it.each([false, true])("preserves pre-existing guidance and plugin visibility (tracked=%s)", async tracked => {
-    const names = ["AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", ".codex/plugins/core/payload.txt"];
+    const names = ["AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", ".codex/plugins/openrig-core/payload.txt"];
     names.forEach(name => write(name));
     if (tracked) { git(repo, "add", "."); git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "user files"); }
     const before = fs.readFileSync(excludePath(repo));
@@ -95,29 +97,62 @@ describe("generated file Git hygiene", () => {
   it("preserves arbitrary exclude bytes and escapes exact paths from a subdirectory", () => {
     const original = Buffer.from([35, 255, 13, 10, ...Buffer.from("/custom\r\n# no final newline")]);
     fs.writeFileSync(excludePath(repo), original);
-    const generated = write("sub/a [literal]*?!#.md");
-    excludeNewGeneratedFiles(path.dirname(generated), [generated]);
+    const generated = write("sub/.codex/plugins/openrig-core/a [literal]*?!#.md");
+    excludeNewGeneratedFiles(path.join(repo, "sub"), [generated]);
     const after = fs.readFileSync(excludePath(repo));
     expect(after.subarray(0, original.length)).toEqual(original);
     expect(git(repo, "check-ignore", "--", generated).trim()).toBe(generated);
-    write("sub/a lOTHERx!#.md");
-    expect(git(repo, "status", "--porcelain", "-uall")).toContain("sub/a lOTHERx!#.md");
-    excludeNewGeneratedFiles(repo, [generated]);
+    write("sub/.codex/plugins/openrig-core/a lOTHERx!#.md");
+    expect(git(repo, "status", "--porcelain", "-uall")).toContain("sub/.codex/plugins/openrig-core/a lOTHERx!#.md");
+    excludeNewGeneratedFiles(path.join(repo, "sub"), [generated]);
     expect(fs.readFileSync(excludePath(repo))).toEqual(after);
   });
 
-  it("resolves linked Git metadata and refuses a shared exclusion that hides a sibling user file", () => {
+  it("keeps later sibling user guidance visible (review F1)", () => {
     const linked = path.join(root, "linked"); git(repo, "worktree", "add", "-q", "-b", "linked", linked);
     expect(fs.statSync(path.join(linked, ".git")).isFile()).toBe(true);
-    write("AGENTS.md");
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-    mergeManagedBlock(fsOps, path.join(linked, "AGENTS.md"), "core", "Managed");
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining("sibling worktree"));
-    expect(git(repo, "status", "--porcelain", "-uall")).toContain("AGENTS.md");
-    expect(git(linked, "status", "--porcelain", "-uall")).toContain("AGENTS.md");
-    mergeManagedBlock(fsOps, path.join(linked, "CLAUDE.local.md"), "core", "Managed");
-    expect(git(linked, "status", "--porcelain", "-uall")).not.toContain("CLAUDE.local.md");
-    expect(fs.readFileSync(excludePath(repo), "utf8")).toContain("/CLAUDE.local.md");
+    mergeManagedBlock(fsOps, path.join(repo, "AGENTS.md"), "core", "Managed");
+    write("AGENTS.md", "Later user file", linked);
+    git(linked, "add", "-A");
+    expect(git(linked, "ls-files", "-z")).toBe("AGENTS.md\0");
+  });
+
+  it("keeps an existing case-variant sibling guidance visible (review F2)", () => {
+    git(repo, "config", "core.ignorecase", "true");
+    const linked = path.join(root, "linked"); git(repo, "worktree", "add", "-q", "-b", "linked", linked);
+    write("agents.md", "User lower-case", linked);
+    mergeManagedBlock(fsOps, path.join(repo, "AGENTS.md"), "core", "Managed");
+    git(linked, "add", "-A");
+    expect(git(linked, "ls-files", "-z")).toBe("agents.md\0");
+  });
+
+  it.each([false, true])("preserves current sibling plugin conflicts with Git case matching (ignorecase=%s)", ignoreCase => {
+    git(repo, "config", "core.ignorecase", String(ignoreCase));
+    const linked = path.join(root, "linked"); git(repo, "worktree", "add", "-q", "-b", "linked", linked);
+    const name = ".codex/plugins/openrig-core/payload.txt";
+    write(name, "User", linked);
+    const generated = write(ignoreCase ? name.replace("payload", "PAYLOAD") : name);
+    const warnings = excludeNewGeneratedFiles(repo, [generated]);
+    expect(warnings).toEqual([expect.stringContaining("already exists in worktree")]);
+    git(linked, "add", "-A");
+    expect(git(linked, "ls-files", "-z")).toBe(name + "\0");
+  });
+
+  it("excludes core plugin files in bare-clone linked worktrees", () => {
+    const bare = path.join(root, "bare.git"); git(root, "clone", "--bare", "-q", repo, bare);
+    const linked = path.join(root, "linked"); git(bare, "worktree", "add", "-q", "-b", "linked", linked);
+    const file = write(".codex/plugins/openrig-core/payload.txt", "Managed", linked);
+    expect(excludeNewGeneratedFiles(linked, [file])).toEqual([]);
+    expect(git(linked, "check-ignore", "--", file).trim()).toBe(file);
+  });
+
+  it("does not automatically exclude another plugin namespace", async () => {
+    write("source/payload.txt", "Managed", root);
+    const other = { ...entry("plugin", path.join(root, "source")), effectiveId: "other" };
+    const result = await project([other]);
+    expect(result.warnings?.join(" ")).toContain("untracked");
+    git(repo, "add", "-A");
+    expect(git(repo, "ls-files", "-z")).toBe(".codex/plugins/other/payload.txt\0");
   });
 
   it("leaves a recreated tracked path visible and supports non-Git workspaces", () => {
@@ -138,9 +173,66 @@ describe("generated file Git hygiene", () => {
     fs.renameSync(linked, path.join(root, "moved"));
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const before = fs.readFileSync(excludePath(repo));
-    mergeManagedBlock(fsOps, path.join(repo, "AGENTS.md"), "core", "Managed");
-    expect(fs.readFileSync(path.join(repo, "AGENTS.md"), "utf8")).toContain("Managed");
+    const file = write(".codex/plugins/openrig-core/payload.txt", "Managed");
+    const reasons = excludeNewGeneratedFiles(repo, [file]);
+    expect(reasons.join(" ")).toContain("generated_file_exclude_skipped");
+    expect(fs.readFileSync(file, "utf8")).toContain("Managed");
     expect(fs.readFileSync(excludePath(repo))).toEqual(before);
     expect(warning).toHaveBeenCalledWith(expect.stringContaining("generated_file_exclude_skipped"));
   });
+  it("returns an append failure as a projection warning without failing the projection", async () => {
+    fs.unlinkSync(excludePath(repo)); fs.mkdirSync(excludePath(repo));
+    write("source/payload.txt", "Managed", root);
+    const result = await project([entry("plugin", path.join(root, "source"))]);
+    expect(result.projected).toEqual(["openrig-core"]);
+    expect(result.warnings?.join(" ")).toContain("generated_file_exclude_skipped");
+    expect(fs.readFileSync(path.join(repo, ".codex/plugins/openrig-core/payload.txt"), "utf8")).toBe("Managed");
+  });
+
+  it("batches index and metadata reads regardless of plugin file count", () => {
+    const linked = path.join(root, "linked"); git(repo, "worktree", "add", "-q", "-b", "linked", linked);
+    const files = Array.from({ length: 24 }, (_, i) => write(`.codex/plugins/openrig-core/file${i}`));
+    const beforePath = process.env.PATH;
+    const realGit = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const bin = path.join(root, "bin"), log = path.join(root, "git-calls"); fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const fs = require('node:fs'), cp = require('node:child_process');
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2))+'\\n');
+try { process.stdout.write(cp.execFileSync(${JSON.stringify(realGit)},process.argv.slice(2), {input:fs.readFileSync(0)})); }
+catch(e) { process.stderr.write(e.stderr||''); process.exit(e.status||1); }
+`, { mode: 0o755 });
+    try {
+      process.env.PATH = bin + path.delimiter + beforePath;
+      expect(excludeNewGeneratedFiles(repo, files)).toEqual([]);
+    } finally { process.env.PATH = beforePath; }
+    const calls: string[][] = fs.readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    for (const cwd of [repo, linked]) {
+      expect(calls.filter(args => args[1] === cwd && args.includes("ls-files"))).toHaveLength(1);
+      expect(calls.filter(args => args[1] === cwd && args.includes("info/exclude"))).toHaveLength(1);
+    }
+  });
+
+  it("uses one overall Git deadline and leaves excludes unchanged when it expires", () => {
+    const beforePath = process.env.PATH;
+    const realGit = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const bin = path.join(root, "slow-bin"); fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "git"), `#!${process.execPath}
+const cp = require('node:child_process');
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1800);
+try { process.stdout.write(cp.execFileSync(${JSON.stringify(realGit)},process.argv.slice(2), {input:require('node:fs').readFileSync(0)})); }
+catch(e) { process.stderr.write(e.stderr||''); process.exit(e.status||1); }
+`, { mode: 0o755 });
+    const before = fs.readFileSync(excludePath(repo));
+    const file = write(".codex/plugins/openrig-core/file");
+    const start = performance.now();
+    let warnings: string[] = [];
+    try {
+      process.env.PATH = bin + path.delimiter + beforePath;
+      warnings = excludeNewGeneratedFiles(repo, [file]);
+    } finally { process.env.PATH = beforePath; }
+    expect(performance.now() - start).toBeLessThan(6500);
+    expect(warnings.join(" ")).toContain("generated_file_exclude_skipped");
+    expect(fs.readFileSync(excludePath(repo))).toEqual(before);
+  }, 10000);
+
 });

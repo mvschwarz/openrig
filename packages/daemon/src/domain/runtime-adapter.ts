@@ -47,12 +47,14 @@ export interface InstalledResource {
 }
 
 export interface ProjectionResult {
+  warnings?: string[];
   projected: string[];
   skipped: string[];
   failed: Array<{ effectiveId: string; error: string }>;
 }
 
 export interface StartupDeliveryResult {
+  warnings?: string[];
   delivered: number;
   failed: Array<{ path: string; error: string }>;
 }

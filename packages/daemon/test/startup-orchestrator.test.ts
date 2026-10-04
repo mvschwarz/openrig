@@ -139,6 +139,18 @@ describe("StartupOrchestrator", () => {
     };
   }
 
+  it.each([false, true])("returns projection and delivery warnings on launch outcomes (fails=%s)", async fails => {
+    const seed = seedSession();
+    const adapter = mockAdapter({
+      project: vi.fn(async () => ({ projected: ["core"], skipped: [], failed: [], warnings: ["AGENTS.md is untracked"] })),
+      deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [], warnings: ["plugin exclude skipped"] })),
+      launchHarness: vi.fn(async () => fails ? { ok: false, error: "controlled launch failure" } : { ok: true }),
+    });
+    const result = await createOrchestrator().startNode(makeInput(seed, { adapter }));
+    expect(result.ok).toBe(!fails);
+    expect(result.warnings).toEqual(["AGENTS.md is untracked", "plugin exclude skipped"]);
+  });
+
   it("keeps a challenge-only transport failure best-effort", async () => {
     const seed = seedSession();
     const tmux = mockTmux({ sendText: vi.fn(async () => ({ ok: false as const, message: "fixture transport failure" })) });

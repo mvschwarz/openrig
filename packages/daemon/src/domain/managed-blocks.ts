@@ -30,6 +30,7 @@ export interface ManagedBlockCleanupFsOps extends ManagedBlockMergeFsOps {
 
 export interface MergeManagedBlockOptions {
   replaceBlockIds?: string[];
+  warnings?: string[];
 }
 
 export function mergeManagedBlock(
@@ -46,7 +47,8 @@ export function mergeManagedBlock(
   if (!fs.exists(targetPath)) {
     fs.mkdirp?.(nodePath.dirname(targetPath));
     fs.writeFile(targetPath, block);
-    excludeNewGeneratedFiles(nodePath.dirname(targetPath), [targetPath]);
+    const warnings = excludeNewGeneratedFiles(nodePath.dirname(targetPath), [targetPath]);
+    options?.warnings?.push(...warnings);
     return;
   }
 
