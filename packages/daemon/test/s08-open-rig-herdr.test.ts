@@ -100,9 +100,11 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const { transport, requests } = herdrTransport();
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "layout.apply", "tab.focus", "tab.close"]);
-    expect(requests[3]!.params).toEqual({ tab_id: "w1:t1" });
-    expect(requests[4]!.params).toEqual({ tab_id: "w1:t0" });
+    // #707: each applied page is followed by one pane.list read (this fake's reply has no panes, so nothing changes).
+    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "pane.list", "layout.apply", "pane.list", "tab.focus", "tab.close"]);
+    expect(requests[2]!.params).toEqual({ workspace_id: "w1" });
+    expect(requests[5]!.params).toEqual({ tab_id: "w1:t1" });
+    expect(requests[6]!.params).toEqual({ tab_id: "w1:t0" });
     expect(res.notes).toBeUndefined();
   });
 

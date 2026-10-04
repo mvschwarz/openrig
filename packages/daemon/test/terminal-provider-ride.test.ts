@@ -481,9 +481,11 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     expect(res.pages).toBe(1);
     // OPR.0.6.0.8: after the page is applied, its tab is focused (no blank-tab close here:
     // this create reply carries no default tab id).
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "tab.focus"]);
+    // #707: the applied page is followed by one pane.list read (this fake's reply has no panes, so nothing changes).
+    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "pane.list", "tab.focus"]);
     expect(requests[0]!.params).toEqual({ focus: false, label: "v" });
-    expect(requests[2]!.params).toEqual({ tab_id: "wG:t2" });
+    expect(requests[2]!.params).toEqual({ workspace_id: "wG" });
+    expect(requests[3]!.params).toEqual({ tab_id: "wG:t2" });
     expect(requests[1]!.params).toEqual({
       workspace_id: "wG",
       tab_label: "openrig:v#tok",
@@ -505,7 +507,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
       expect(r.method).not.toContain("--help");
       expect(r.method).not.toContain(" ");
     }
-    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "tab.focus"]);
+    expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "pane.list", "tab.focus"]);
   });
 
   it("a labeled workspace.create failure falls back ONCE to a bare create (uncaptured-param defense)", async () => {

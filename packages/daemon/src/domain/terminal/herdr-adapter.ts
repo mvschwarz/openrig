@@ -75,6 +75,63 @@ import { autoGridCols } from "../cmux-layout-service.js";
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
 const HERDR_SURFACE_HOST = "herdr";
 
+/** The degrade reason for a seat whose pane was already gone right after its page applied (#707). */
+export const HERDR_PANE_EXITED_REASON = "the pane had already exited when OpenRig checked right after herdr opened it";
+
+/**
+ * #707 — `layout.apply` acknowledges the tab, not that each pane's command stayed alive. One read of
+ * the workspace's panes right after a page applies finds seats whose pane is already gone. There is
+ * no wait, so only a pane that exited before this read is seen. An unreadable listing, or a reply
+ * without a `panes` array, changes nothing.
+ */
+export async function exitedSeats(
+  transport: HerdrTransport,
+  workspaceId: string,
+  tabId: string,
+  pagePanes: ComposedPane[],
+  blanks: number,
+  notes: string[],
+): Promise<Set<string>> {
+  const gone = new Set<string>();
+  let listed: unknown;
+  try {
+    listed = (await transport.request("pane.list", { workspace_id: workspaceId }))["panes"];
+  } catch {
+    return gone;
+  }
+  if (!Array.isArray(listed)) return gone;
+  const live = listed.filter((p): p is Record<string, unknown> =>
+    p !== null && typeof p === "object" && (p as Record<string, unknown>)["tab_id"] === tabId);
+  // Blank filler panes run `sh` and stay; nothing beyond them means every seat pane is gone.
+  if (live.length <= blanks) {
+    for (const pane of pagePanes) gone.add(pane.seat);
+    return gone;
+  }
+  if (live.every((p) => typeof p["label"] === "string")) {
+    const liveLabels = live.map((p) => p["label"] as string);
+    const perLabel = new Map<string, number>();
+    for (const pane of pagePanes) perLabel.set(pane.label, (perLabel.get(pane.label) ?? 0) + 1);
+    const shared: string[] = [];
+    for (const [label, count] of perLabel) {
+      const alive = liveLabels.filter((l) => l === label).length;
+      if (count === 1) {
+        if (alive === 0) gone.add(pagePanes.find((p) => p.label === label)!.seat);
+      } else if (alive < count) {
+        shared.push(label);
+      }
+    }
+    if (shared.length > 0) {
+      notes.push(`A pane labelled ${shared.map((l) => `"${l}"`).join(", ")} exited right after opening. Several seats share that label, so they stay listed as opened.`);
+    }
+    return gone;
+  }
+  const missing = pagePanes.length + blanks - live.length;
+  if (missing > 0) {
+    notes.push(`${missing} pane(s) exited right after opening. herdr's pane list doesn't say which, so those seats stay listed as opened.`);
+  }
+  return gone;
+}
+
 /** A herdr layout-tree pane leaf — `command` is an ARGV array (capture-verified). */
 export interface HerdrPaneNode {
   type: "pane";
@@ -423,8 +480,18 @@ export class HerdrAdapter implements TerminalProvider {
           root: pagePlan.root,
         });
         const tabId = extractTabId(applied);
-        if (tabId) { appliedTabIds.push(tabId); firstPopulatedTabId ??= tabId; } else everyPageKnown = false;
-        for (const pane of pagePanes) opened.push(pane.seat);
+        // Without a tab id the page's panes can't be told apart from other tabs, so no check runs.
+        const gone = tabId
+          ? await exitedSeats(this.transport, workspaceId, tabId, pagePanes, pagePlan.blanks, notes)
+          : new Set<string>();
+        if (tabId) {
+          appliedTabIds.push(tabId);
+          if (pagePanes.some((pane) => !gone.has(pane.seat))) firstPopulatedTabId ??= tabId;
+        } else everyPageKnown = false;
+        for (const pane of pagePanes) {
+          if (gone.has(pane.seat)) degraded.push({ seat: pane.seat, host: HERDR_SURFACE_HOST, reason: HERDR_PANE_EXITED_REASON });
+          else opened.push(pane.seat);
+        }
       } catch (err) {
         everyPageKnown = false;
         // The whole page failed to apply — degrade its seats honestly.

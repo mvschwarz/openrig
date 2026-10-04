@@ -1848,6 +1848,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         return r.ok ? r.host : null;
       },
       hasSession: (session) => tmuxAdapter.hasSession(session),
+      // #707: local tiles run the tmux the daemon resolves, not whatever the provider's PATH finds.
+      resolveLocalTmux: async () => (await probeRegistry.probeCli("tmux")).detectedPath,
     });
   }
 
