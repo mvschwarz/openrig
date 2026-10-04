@@ -150,7 +150,7 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     expect(res.notes).toBeUndefined();
   });
 
-  it("the reporter's case: the tab holds only blank filler, so every seat is degraded and the open is not ok", async () => {
+  it("three seats plus one filler: when only the filler pane is left, every seat is degraded and the open is not ok", async () => {
     const { adapter } = herdrOpening(() => listed(""));
     const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
     expect(res.ok).toBe(false);
