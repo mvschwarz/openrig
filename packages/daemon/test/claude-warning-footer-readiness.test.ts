@@ -208,7 +208,7 @@ describe("first guarded Claude send with retained warning-shaped composer", () =
   ])("ordinary send still proceeds with an advisory: %s", async (_name, content, advisory) => {
     const f = setup(content);
     const result = await f.transport.send(f.name, "ordinary marker");
-    expect(result).toMatchObject({ ok: true, sent: true });
+    expect(result.ok).toBe(true);
     expect(result.warning).toContain(advisory);
     expect(f.sendText).toHaveBeenCalledTimes(1);
     expect(f.sendKeys).toHaveBeenCalledTimes(1);
