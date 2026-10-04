@@ -1,0 +1,36 @@
+{
+  "configurationId": [
+    {
+      "mapping": {
+        "check.review": "codex",
+        "build.lead": "claude-code",
+        "check.qa": "codex",
+        "build.impl": "claude-code"
+      },
+      "expected": "build.impl=claude-code,build.lead=claude-code,check.qa=codex,check.review=codex"
+    },
+    {
+      "mapping": {
+        "b.x": "pi",
+        "B.y": "codex",
+        "a.z": "claude-code"
+      },
+      "expected": "B.y=codex,a.z=claude-code,b.x=pi"
+    }
+  ],
+  "packageDigest": [
+    {
+      "integrityFiles": {
+        "rig.yaml": "1111111111111111111111111111111111111111111111111111111111111111",
+        "agents/openrig-dev/agent.yaml": "2222222222222222222222222222222222222222222222222222222222222222",
+        "README.md": "3333333333333333333333333333333333333333333333333333333333333333",
+        "agents/openrig-dev/guidance/lead.md": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "expected": {
+        "algorithm": "sha256",
+        "value": "951fb72568d9b0e715d338ff2765da5945923323d095bc934c651a1ed94e3010",
+        "coverage": "openrig.package-digest/v1"
+      }
+    }
+  ]
+}

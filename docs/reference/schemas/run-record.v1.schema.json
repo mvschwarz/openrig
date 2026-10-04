@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openrig.dev/schemas/run-record.v1.json",
+  "title": "Run record v1 (private; kept beside its receipt)",
+  "type": "object",
+  "required": [
+    "schema",
+    "id",
+    "subject",
+    "execution",
+    "environment",
+    "evidence",
+    "journey",
+    "outcome",
+    "relations"
+  ],
+  "properties": {
+    "schema": {
+      "const": "openrig.run-record/v1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "subject": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "source",
+            "configurationId",
+            "packageDigest",
+            "assembler"
+          ],
+          "properties": {
+            "kind": {
+              "const": "team"
+            },
+            "source": {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/source"
+            },
+            "configurationId": {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/configurationId"
+            },
+            "packageDigest": {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/packageDigest"
+            },
+            "assembler": {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/assembler"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "harness"
+          ],
+          "properties": {
+            "kind": {
+              "const": "harness_check"
+            },
+            "harness": {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/runtime"
+            }
+          },
+          "additionalProperties": false,
+          "description": "A harness check never upgrades a team label."
+        }
+      ]
+    },
+    "execution": {
+      "type": "object",
+      "required": [
+        "resources",
+        "settings",
+        "unknowns"
+      ],
+      "properties": {
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "settings": {
+          "type": "object"
+        },
+        "unknowns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": [
+        "openrig",
+        "platform",
+        "arch",
+        "harnesses"
+      ],
+      "properties": {
+        "openrig": {
+          "type": "object",
+          "required": [
+            "version"
+          ],
+          "properties": {
+            "version": {
+              "type": "string"
+            },
+            "commit": {
+              "type": "string"
+            }
+          }
+        },
+        "platform": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "harnesses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "version",
+              "knownBy"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              },
+              "knownBy": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": [
+        "kind",
+        "receipt"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "native-workflow",
+            "daemon-adoption",
+            "running-seat",
+            "installed-only",
+            "synthetic",
+            "community-reported"
+          ]
+        },
+        "receipt": {
+          "type": "object",
+          "required": [
+            "ref",
+            "sha256"
+          ],
+          "properties": {
+            "ref": {
+              "type": "string"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
+    },
+    "journey": {
+      "type": "object",
+      "required": [
+        "id",
+        "version"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "required": [
+        "steps",
+        "assistance",
+        "recordedBy",
+        "at"
+      ],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "result"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "result": {
+                "enum": [
+                  "PASS",
+                  "FAIL",
+                  "BLOCKED",
+                  "NOT_RUN"
+                ]
+              }
+            }
+          }
+        },
+        "assistance": {
+          "type": "object",
+          "required": [
+            "count"
+          ],
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": {
+              "type": "string"
+            }
+          }
+        },
+        "recordedBy": {
+          "type": "string"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "publicNote": {
+          "type": "string",
+          "maxLength": 280,
+          "description": "A short public cause for a BLOCKED or FAIL result; the only record text that reaches status.json."
+        }
+      }
+    },
+    "relations": {
+      "type": "object",
+      "required": [
+        "supersedes",
+        "withdraws",
+        "resolves"
+      ],
+      "properties": {
+        "supersedes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "withdraws": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resolves": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "record",
+              "step"
+            ],
+            "properties": {
+              "record": {
+                "type": "string"
+              },
+              "step": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
