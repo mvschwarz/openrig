@@ -26,9 +26,66 @@ const captures = [
   ["fresh post-refusal update warning", pane([update])],
 ] as const;
 
+// Observed Claude 2.1.282 live status rows; an empty composer remains visible mid-turn.
+const workingRows = [
+  "✻ Onioning… (2m 38s · ↓ 10.9k tokens · thought for 8s)",
+  "· Onioning… (1m 44s · ↓ 6.6k tokens)",
+];
+const workingCaptures = workingRows.flatMap((row, i) => [
+  [`timed work ${i} / no warning`, pane([], "❯\u00a0", row)],
+  [`timed work ${i} / weekly`, pane([weekly], "❯\u00a0", row)],
+  [`timed work ${i} / focus`, pane([update, focus], "❯\u00a0", row)],
+  [`timed work ${i} / update`, pane([update], "❯\u00a0", row)],
+]);
+workingCaptures.push(["live status above a task list", pane([update, focus], "❯\u00a0", [
+  workingRows[0], ...Array.from({ length: 7 }, (_, i) => `  □ Pending task ${i + 1}`),
+].join("\n"))]);
+
+// Constructed multiline drafts, not native captures. Indentation distinguishes
+// continuation text from the actual input box's border and first prompt column.
+const nestedDrafts = [
+  ["indented separator and literal prompt", pane([update, focus], `❯ unfinished review draft\n  ${border}\n  ❯\u00a0`)],
+  ["short indented separator and literal prompt", pane([update, weekly], "❯ unfinished review draft\n  ───\n  ❯\u00a0")],
+];
+
 describe("Claude composer below noninteractive status warnings", () => {
   it.each(captures)("recognizes the empty composer: %s", (_name, content) => {
     expect(classifyPaneActivity(content)).toMatchObject({ state: "agent_idle", reason: "idle_prompt", evidence: "❯" });
+  });
+
+  it.each(nestedDrafts)("does not read draft continuations as a new empty input: %s", async (_name, content) => {
+    expect(classifyPaneActivity(content).state).not.toBe("agent_idle");
+    const service = new SeatStructuralActivityService({ capturePaneContent: async () => content });
+    expect((await service.pollSeat("seat@rig"))?.state).not.toBe("agent_idle");
+  });
+
+  it("does not confuse completed prompt history with a current draft", () => {
+    expect(classifyPaneActivity(pane([update, focus], "❯\u00a0", "❯ previous user request\n● Completed response.")))
+      .toMatchObject({ state: "agent_idle", reason: "idle_prompt" });
+  });
+
+  it.each(workingCaptures)("keeps current work ahead of the empty composer: %s", async (_name, content) => {
+    expect(classifyPaneActivity(content)).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+    const service = new SeatStructuralActivityService({ capturePaneContent: async () => content });
+    expect(await service.pollSeat("seat@rig")).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+  });
+
+  it.each([[], [update], [update, focus], [update, weekly]])("keeps completed work idle with suffix %j", (...trailers) => {
+    const suffix = trailers as string[];
+    for (const before of ["● Ready.", "✻ Crunched for 2s", `${workingRows[0]}\n● Completed response.\n✻ Crunched for 2s`]) {
+      expect(classifyPaneActivity(pane(suffix, "❯\u00a0", before)).state).toBe("agent_idle");
+    }
+  });
+
+  it("ignores a historical timer outside the normal activity capture", () => {
+    const content = pane([update], "❯\u00a0", [workingRows[0], ...Array.from({ length: 21 }, () => "  prior output")].join("\n"));
+    expect(classifyPaneActivity(content).state).toBe("agent_idle");
+  });
+
+  it("preserves a uniformly indented input block without mistaking its columns", () => {
+    const indent = (content: string) => content.split("\n").map(line => `  ${line}`).join("\n");
+    expect(classifyPaneActivity(indent(pane([update]))).state).toBe("agent_idle");
+    expect(classifyPaneActivity(indent(pane([], "❯\u00a0", workingRows[0]))).state).toBe("agent_active");
   });
 
   it.each([
@@ -126,6 +183,42 @@ describe("first guarded Claude send with retained warning-shaped composer", () =
     expect(f.sendKeys).toHaveBeenCalledWith(f.name, ["Enter"]);
     // No synthetic Stop or state rewrite is needed to admit the current pane.
     expect(f.store.getLatestForNode({ sessionName: f.name })).toMatchObject({ state: "unknown", rawEvent: "SessionStart", stale: false });
+  });
+
+  it.each(nestedDrafts)("leaves multiline draft untouched: %s", async (_name, content) => {
+    const f = setup(content);
+    const result = await f.transport.send(f.name, "ordinary marker", { waitForIdleMs: 20 });
+    expect(result).toMatchObject({ ok: false, sent: false });
+    expect(f.sendText).not.toHaveBeenCalled();
+    expect(f.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.each(workingCaptures)("explicit wait does not send into current work: %s", async (_name, content) => {
+    const f = setup(content);
+    const result = await f.transport.send(f.name, "ordinary marker", { waitForIdleMs: 20 });
+    expect(result).toMatchObject({ ok: false, sent: false, activity: { state: "running", reason: "mid_work_pattern" } });
+    expect(f.sendText).not.toHaveBeenCalled();
+    expect(f.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["working without warnings", pane([], "❯\u00a0", workingRows[0]), "mid-task"],
+    ["working with warnings", pane([update, focus], "❯\u00a0", workingRows[1]), "mid-task"],
+    ["unknown activity", "unrecognized output", "activity could not be determined"],
+  ])("ordinary send still proceeds with an advisory: %s", async (_name, content, advisory) => {
+    const f = setup(content);
+    const result = await f.transport.send(f.name, "ordinary marker");
+    expect(result).toMatchObject({ ok: true, sent: true });
+    expect(result.warning).toContain(advisory);
+    expect(f.sendText).toHaveBeenCalledTimes(1);
+    expect(f.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reinterpret the existing display-fresh idle hook branch", async () => {
+    const f = setup(pane([], "❯\u00a0", workingRows[0]), "Stop", 16_000);
+    const result = await f.transport.send(f.name, "ordinary marker", { waitForIdleMs: 20 });
+    expect(result).toMatchObject({ ok: true, sent: true, activity: { state: "idle", evidenceSource: "runtime_hook" } });
+    expect(f.sendText).toHaveBeenCalledTimes(1);
   });
 
   it.each([

@@ -62,9 +62,8 @@ const PROMPT_DRAFT_PATTERNS = [
   /^[❯›]\s+\S/,
 ];
 
-// Status-bar patterns that ONLY appear when the harness is at its idle
-// prompt. These are more reliable than the prompt char alone because they
-// are never rendered during active tool execution.
+// Footer hints, not proof of inactivity: Claude also renders its mode bar
+// during a turn. Current live-status evidence must take precedence below.
 const IDLE_STATUS_BAR_PATTERNS = [
   /gpt-\d[\d.]* .+ · Context \[/,  // Codex model/context footer
   /⏵⏵ accept edits/,              // Claude Code edit-accept bar
@@ -129,17 +128,37 @@ const CLAUDE_STATUS_WARNINGS = [
   /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
   /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
 ];
+// Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
+// Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
+const CLAUDE_LIVE_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S[^(]*(?:…|\.{3})\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/;
 
-function findClaudeComposerBeforeWarnings(lines: string[]): string | null {
+function findClaudeComposer(paneContent: string) {
+  // Preserve columns: a multiline draft may contain indented border/prompt text.
+  // Limit status evidence to the normal 20-line capture, not arbitrary scrollback.
+  const lines = paneContent.split("\n").slice(-20)
+    .map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
   let bar = lines.length - 1;
-  while (bar >= 0 && CLAUDE_STATUS_WARNINGS.some((pattern) => pattern.test(lines[bar]!))) bar--;
-  // No warning suffix: leave all previously supported shapes on their existing paths.
-  if (bar === lines.length - 1 || lines[bar] !== "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents") return null;
-  const composer = lines[bar - 2] ?? "";
-  if (!/^─{3,}$/.test(lines[bar - 1] ?? "") ||
-      !/^─{3,}(?: .+ ─+)?$/.test(lines[bar - 3] ?? "") ||
-      !/^❯(?:\s|$)/.test(composer)) return null;
-  return composer;
+  while (bar >= 0 && CLAUDE_STATUS_WARNINGS.some((pattern) => pattern.test(lines[bar]!.trim()))) bar--;
+  if (lines[bar]?.trim() !== "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents") return null;
+  const indent = /^([ \t]*)─{3,}$/.exec(lines[bar - 1] ?? "")?.[1];
+  if (indent === undefined) return null;
+  const upper = lines[bar - 3] ?? "";
+  const prompt = lines[bar - 2] ?? "";
+  if (!upper.startsWith(indent) || !/^─{3,}(?: .+ ─+)?$/.test(upper.slice(indent.length)) ||
+      !prompt.startsWith(`${indent}❯`) || !/^❯(?:\s|$)/.test(prompt.slice(indent.length))) return null;
+
+  let liveStatus: string | null = null;
+  for (let i = bar - 4; i >= 0; i--) {
+    const line = lines[i]!.slice(indent.length);
+    if (CLAUDE_LIVE_STATUS_PATTERN.test(line)) {
+      liveStatus = truncateEvidence(line);
+      break;
+    }
+    // Indented task rows can follow the live status. A newer unindented output
+    // or completed status ends this block; do not revive an older work row.
+    if (!/^\s/.test(line)) break;
+  }
+  return { text: prompt.slice(indent.length), hasWarnings: bar < lines.length - 1, liveStatus };
 }
 
 function findPromptDraftBeforeFooter(paneContent: string): string | null {
@@ -205,16 +224,18 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     };
   }
 
-  const claudeComposer = findClaudeComposerBeforeWarnings(promptScanLines);
-  if (claudeComposer) {
-    if (PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(claudeComposer))) {
-      return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(claudeComposer) };
-    }
-    // Check the original bounded tail: discarding the warnings must not hide work
-    // or make an empty composer (also displayed during a turn) sufficient by itself.
+  const claudeComposer = findClaudeComposer(paneContent);
+  if (claudeComposer?.hasWarnings && PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
+    return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(claudeComposer.text) };
+  }
+  if (claudeComposer?.liveStatus) {
+    return { state: "agent_active", reason: "mid_work_pattern", evidence: claudeComposer.liveStatus };
+  }
+  if (claudeComposer?.hasWarnings) {
+    // Discarding warnings must not hide work above the empty composer.
     const working = findPatternEvidence(promptScanLines, MID_WORK_PATTERNS);
     if (working) return { state: "agent_active", reason: "mid_work_pattern", evidence: working };
-    return { state: "agent_idle", reason: "idle_prompt", evidence: truncateEvidence(claudeComposer) };
+    return { state: "agent_idle", reason: "idle_prompt", evidence: truncateEvidence(claudeComposer.text) };
   }
 
   const promptDraftEvidence = findPromptDraftBeforeFooter(paneContent);
