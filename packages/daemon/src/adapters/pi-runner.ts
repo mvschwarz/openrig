@@ -908,9 +908,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // Re-deliver OMP identity until the daemon confirms the resume token.
   const identityRetry = runtime === "omp" ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
   identityRetry?.unref();
+  // The last few stderr lines, so an OMP that exits during startup is
+  // reported with its own words in the error, not only above it.
+  const stderrTail: string[] = [];
   let reportedPiCapability = false;
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
-    if (line.trim()) process.stdout.write(`[${runtime}:err] ${line}\n`);
+    if (!line.trim()) return;
+    process.stdout.write(`[${runtime}:err] ${line}\n`);
+    stderrTail.push(line.length > OMP_STDERR_TAIL_CHARS ? `${line.slice(0, OMP_STDERR_TAIL_CHARS)}...` : line);
+    if (stderrTail.length > OMP_STDERR_TAIL_LINES) stderrTail.shift();
     if (runtime === "pi" && !core.isReady() && !reportedPiCapability) {
       const detail = piLaunchCapabilityError(command, args.trust, line, () => {
         const version = spawnSync(command, ["--version"], { cwd: args.cwd, env: childEnv, encoding: "utf8",
@@ -944,17 +950,20 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     return;
   }
 
-  // OMP: one exit record per launch, with a launch-vs-credential diagnosis
-  // when the RPC session never became resumable.
+  // OMP: one exit record per launch. When the RPC session never became
+  // resumable, say which startup phase OMP reached and how it exited, and
+  // show its own last output; the runner does not know why OMP stopped.
   let exited = false;
-  const recordExit = (code: number | null): void => {
+  const recordExit = (code: number | null, signal?: NodeJS.Signals | null): void => {
     if (exited) return;
     exited = true;
     clearInterval(identityRetry);
     if (!core.isReady()) {
+      const how = signal ? `signal ${signal}` : `exit code ${code ?? "unknown"}`;
+      const output = stderrTail.length > 0 ? ` Its last output: ${stderrTail.join(" | ")}` : " It printed nothing on stderr.";
       console.error(transportUp
         ? "[omp-runner] ERROR OMP did not establish a resumable RPC session. Authenticate this isolated seat using HOME=<seat-root> PI_CODING_AGENT_DIR=<seat-root>/agent omp and /login, or provide its declared model provider key in the OpenRig daemon environment. Default OMP credentials are not shared."
-        : `[omp-runner] ERROR OMP exited before its RPC transport started (${command}, code ${code ?? "unknown"}). This is a launch failure, not a credential problem; see the output above.`);
+        : `[omp-runner] ERROR OMP exited during startup, before its RPC transport started (${command}, ${how}).${output}`);
     }
     core.handlePiExit(code);
     input.close();
@@ -964,8 +973,19 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     console.error(`[omp-runner] ERROR failed to spawn omp: ${err.message}`);
     recordExit(null);
   });
-  child.on("exit", recordExit);
+  // "close" fires once OMP's stdio is drained, so its stderr is in the tail
+  // before the exit is reported. A child that inherited OMP's stdio (an LSP
+  // or MCP server) can hold "close" open, so "exit" also records the exit
+  // after a short grace period; recordExit runs once, whichever comes first.
+  child.on("close", (code, signal) => recordExit(code, signal));
+  child.on("exit", (code, signal) => { setTimeout(() => recordExit(code, signal), OMP_EXIT_GRACE_MS).unref(); });
 }
+
+/** Stderr lines kept for an OMP startup failure report, and their length cap. */
+const OMP_STDERR_TAIL_LINES = 5;
+const OMP_STDERR_TAIL_CHARS = 300;
+/** How long after OMP's own exit to wait for its stderr to drain. */
+const OMP_EXIT_GRACE_MS = 1_000;
 
 // Compiled-entry guard: run main() only when executed directly (not imported
 // by tests). import.meta.url === file URL of process.argv[1] when direct.
