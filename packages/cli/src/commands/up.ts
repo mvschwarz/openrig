@@ -1,6 +1,6 @@
 import nodePath from "node:path";
 import { isGitHubBundleLink, importGitHubBundle, bundleIdentityLines, printBundleLinkError } from "../lib/bundle-source.js";
-import { getCliVersion, bundleRoutingSummary } from "./bundle.js";
+import { getCliVersion, bundleRoutingSummary, bundleInstallError } from "./bundle.js";
 import { showBundleBehaviourBeforeAction } from "../bundle-behaviour.js";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { existsSync, readFileSync } from "node:fs";
@@ -79,7 +79,7 @@ Examples:
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
-    .argument("<source>", "Path to a .yaml rig spec or .rigbundle, or a library name such as secrets-manager")
+    .argument("<source>", "GitHub bundle link, path to a .yaml rig spec or .rigbundle, or a library name such as secrets-manager")
     .option("--plan", "Plan mode — preview without executing")
     .option("--yes", "Auto-approve trusted actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")
@@ -132,7 +132,7 @@ Examples:
             if (installed.data.rigId) console.log(`Rig: ${installed.data.rigId}`);
             for (const line of bundleRoutingSummary(installed.data)) console.log(line);
             for (const warning of (installed.data.warnings as string[] | undefined) ?? []) console.warn(warning);
-            if (installed.status >= 400) console.error(installed.data.error ?? installed.data.errors ?? "Install failed");
+            if (installed.status >= 400) console.error(bundleInstallError(installed.data));
           }
           if (installed.status >= 400 || ["failed", "partial", "partially_restored", "not_attempted"].includes(String(installed.data.status ?? installed.data.rigResult))) process.exitCode = installed.status === 409 ? 1 : 2;
         } catch (err) { printBundleLinkError(err, opts.json); }

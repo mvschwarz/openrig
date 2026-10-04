@@ -1,4 +1,4 @@
-import { beforeEach, afterEach, describe, expect, it } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,11 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { createTestApp } from "./helpers/test-app.js";
 import { packageDigest } from "../src/domain/bundle-identity.js";
+
+vi.mock("../src/build-info.js", async original => ({
+  ...await original<object>(),
+  BUILD_INFO: { semver: "9.8.7", commit: "a".repeat(40), dirty: false, builtAt: "2026-01-01T00:00:00Z" },
+}));
 
 const SHA = "a".repeat(40);
 const source = { repository: "https://github.com/example/team", folder: "rig", requestedRef: "main", resolvedCommit: SHA, canonicalUrl: `https://github.com/example/team/tree/${SHA}/rig` };
@@ -46,7 +51,7 @@ describe("bundle source and artifact identity", () => {
   it("create and inspect name the same source/configuration/package/assembler; manifest changes do not change file digest", async () => {
     const first = await post("create", body("one"));
     expect(first.status, JSON.stringify(first.data)).toBe(201);
-    expect(first.data).toMatchObject({ source, configurationId: "infra.shell=terminal", assembler: { openrigVersion: expect.any(String) } });
+    expect(first.data).toMatchObject({ source, configurationId: "infra.shell=terminal", assembler: { openrigVersion: "9.8.7" } });
     const second = await post("create", body("two", { provenance: { source: { ...source, requestedRef: "v1" }, notes: "second metadata" } }));
     expect(second.status).toBe(201);
     expect(second.data.packageDigest).toEqual(first.data.packageDigest);
@@ -55,6 +60,7 @@ describe("bundle source and artifact identity", () => {
     expect(inspected.status).toBe(200);
     for (const key of ["source", "configurationId", "packageDigest", "archiveHash", "assembler"]) expect(inspected.data[key]).toEqual(first.data[key]);
     expect(inspected.data.manifest.provenance.source).toEqual(source);
+    expect(inspected.data.manifest.provenance.daemonVersion).toBe("9.8.7");
     expect(inspected.data.packageDigest).toEqual(packageDigest(inspected.data.manifest.integrity.files));
     expect(inspected.data.integrityResult.passed).toBe(true);
   });

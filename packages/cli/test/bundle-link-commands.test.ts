@@ -51,6 +51,28 @@ describe("bundle link command dispatch", () => {
     expect(f.post).not.toHaveBeenCalled(); expect(process.exitCode).toBe(2);
   });
 
+  it.each(["up", "install"])("%s prints target conflicts as readable lines and keeps JSON structured", async verb => {
+    const errors = ["Install target already has different content at README.md.", "Nothing was written. Choose an empty --target directory."];
+    f.post.mockImplementation(async (url: string) => url === "/api/bundles/install"
+      ? { status: 400, data: { status: "failed", code: "target_conflict", errors } }
+      : { status: 200, data: { manifest: { name: "fixture", version: "1.0" } } });
+    const argv = verb === "up" ? ["up", link] : ["bundle", "install", link];
+    const command = () => new Command().addCommand(verb === "up" ? upCommand(deps) : bundleCommand(deps));
+    await command().parseAsync(argv, { from: "user" });
+    expect(console.error).toHaveBeenCalledWith(errors.join("\n"));
+    expect(process.exitCode).toBe(2);
+    log.mockClear();
+    await command().parseAsync([...argv, "--json"], { from: "user" });
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(log.mock.calls[0]![0]))).toMatchObject({ code: "target_conflict", errors });
+    expect(f.imported).toHaveBeenCalledTimes(2);
+  });
+
+  it("names GitHub links in the up source argument help", () => {
+    const help = upCommand(deps).helpInformation();
+    expect(help).toMatch(/source\s+[^\n]*GitHub/);
+  });
+
   it("reports unknown install outcome, retains the path, and never retries", async () => {
     f.post.mockImplementation(async (url: string) => {
       if (url === "/api/bundles/inspect") return { status: 500, data: { error: "view unavailable" } };

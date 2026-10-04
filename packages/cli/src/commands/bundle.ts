@@ -28,6 +28,12 @@ export function getCliVersion(): string {
   }
 }
 
+/** Keep the daemon's messages readable in human output; JSON retains the original body. */
+export function bundleInstallError(data: Record<string, unknown>): unknown {
+  const error = data.error ?? data.errors ?? "Install failed";
+  return Array.isArray(error) ? error.join("\n") : error;
+}
+
 /**
  * Build the provenance block the CLI sends to /api/bundles/create. Reads
  * hostname, session name (from canonical OPENRIG_SESSION_NAME env), and
@@ -319,7 +325,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         return;
       }
       if (res.status >= 400) {
-        console.error(res.data["error"] ?? res.data["errors"] ?? "Install failed");
+        console.error(bundleInstallError(res.data));
         process.exitCode = res.status === 409 ? 1 : 2;
         return;
       }
