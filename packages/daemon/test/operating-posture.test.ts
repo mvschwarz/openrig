@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -8,7 +8,8 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { RigModeStore } from "../src/domain/rig-mode/rig-mode-store.js";
-import { OperatingPostureService } from "../src/domain/rig-mode/operating-posture.js";
+import { OperatingPostureService, configuredCatalogPath } from "../src/domain/rig-mode/operating-posture.js";
+import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { RECOMMENDED_MODE_DEFAULTS } from "../src/domain/rig-mode/rig-mode-defaults.js";
 import type { OperatorContextScope } from "../src/domain/rig-mode/rig-mode-types.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -228,4 +229,49 @@ it("rechecks posture after notification readiness I/O and refuses an intervening
   await expect(service.notify(id, "owner@demo")).rejects.toThrow("posture_changed_or_unknown");
   expect(readiness).toHaveBeenCalledOnce();
   expect(t.queue.list({ tag: "health-human", limit: 100 })).toEqual([]);
+});
+
+it("reads the project catalog from the configured workspace.catalog_path, not only <workspace>/workspace.yaml", () => {
+  const home = mkdtempSync(join(tmpdir(), "operating-posture-catalog-")); cleanup.push(() => rmSync(home, { recursive: true, force: true }));
+  const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
+  const workspace = join(home, "workspace"), catalog = join(home, "catalogs", "projects.yaml");
+  mkdirSync(join(workspace, "gamma"), { recursive: true }); mkdirSync(join(home, "catalogs"), { recursive: true });
+  writeFileSync(join(workspace, "gamma", "project.yaml"), "metadata: {id: gamma}\n");
+  // Only the configured catalog declares gamma; its root is relative to the catalog's folder,
+  // and the entry carries the optional rigs key other catalog readers accept.
+  writeFileSync(catalog, "projects: [{id: gamma, root: ../workspace/gamma, rigs: [openrig-dev]}]\n");
+  const service = new OperatingPostureService(db, new RigModeStore(db), () => workspace, () => catalog);
+  expect(service.resolve({ projectId: "gamma" })).toMatchObject({
+    posture: "human-led",
+    source: "product-default",
+    context: { projectId: "gamma", paths: { project: realpathSync(join(workspace, "gamma")) } },
+  });
+});
+
+it("keeps the default catalog beside the real workspace when workspace.root is a symlink, and honours an explicit catalog", () => {
+  vi.stubEnv("OPENRIG_WORKSPACE_ROOT", undefined); vi.stubEnv("OPENRIG_WORKSPACE_CATALOG_PATH", undefined); cleanup.push(() => vi.unstubAllEnvs());
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "operating-posture-link-"))); cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+  const workspace = join(root, "physical", "workspace"), gamma = join(root, "physical", "gamma"), alias = join(root, "logical", "workspace");
+  mkdirSync(workspace, { recursive: true }); mkdirSync(gamma); mkdirSync(join(root, "logical")); mkdirSync(join(root, "catalogs"));
+  symlinkSync(workspace, alias, "dir");
+  writeFileSync(join(workspace, "workspace.yaml"), "projects: [{id: gamma, root: ../gamma}]\n");
+  writeFileSync(join(gamma, "project.yaml"), "metadata: {id: gamma}\n");
+  const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
+  const configPath = join(root, "config.json");
+  const resolveWith = (workspaceConfig: Record<string, string>, projectId: string) => {
+    writeFileSync(configPath, JSON.stringify({ workspace: workspaceConfig }));
+    const settings = new SettingsStore(configPath);
+    const service = new OperatingPostureService(db, new RigModeStore(db), () => settings.resolveOne("workspace.root").value as string, configuredCatalogPath(settings));
+    return service.resolve({ projectId });
+  };
+
+  // Default catalog through the symlink: ../gamma resolves beside the real workspace, as before.
+  expect(resolveWith({ root: alias }, "gamma")).toMatchObject({ posture: "human-led", context: { projectId: "gamma", paths: { project: gamma } } });
+
+  // An explicitly configured catalog still wins; only it declares delta.
+  const delta = join(root, "physical", "delta");
+  mkdirSync(delta); writeFileSync(join(delta, "project.yaml"), "metadata: {id: delta}\n");
+  writeFileSync(join(root, "catalogs", "projects.yaml"), "projects: [{id: delta, root: ../physical/delta}]\n");
+  expect(resolveWith({ root: alias, catalogPath: join(root, "catalogs", "projects.yaml") }, "delta"))
+    .toMatchObject({ posture: "human-led", context: { projectId: "delta", paths: { project: delta } } });
 });

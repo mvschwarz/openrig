@@ -86,8 +86,13 @@ export interface RoutedContextPackRecord {
    * the consumer-visible boundary (banked 16ebb8af lesson).
    * "lore_refused" = the pack declares taxonomy: lore.
    * "substance_refused" = the pack contains structurally internal
-   * content. Both refusal states happen before any copy. */
-  status: "routed" | "missing" | "unsafe" | "not_manifest" | "not_directory" | "conflict" | "lore_refused" | "substance_refused";
+   * content. Both refusal states happen before any copy.
+   * "already_installed" = a pack of the same name is installed with every
+   * one of the bundle's files byte-identical; nothing was written.
+   * "kept_existing" = a different pack of the same name is installed (for
+   * example a `rig context add --git` install at another revision); it was
+   * left untouched. Routing never merges into an installed pack. */
+  status: "routed" | "missing" | "unsafe" | "not_manifest" | "not_directory" | "conflict" | "lore_refused" | "substance_refused" | "already_installed" | "kept_existing";
   /** Where the pack landed in the target library (absolute pack dir
    *  path), if routed. */
   installedAt?: string;
@@ -223,6 +228,25 @@ export function routeContextPacks(
         status: "conflict",
         detail: `context_pack parent-dir basename '${dirName}' collides with an earlier declared path; only the first is routed (banked collision-detection lesson)`,
       });
+      continue;
+    }
+    if (fs.exists(targetAbs)) {
+      // Never merge into an installed pack: a merge would change a
+      // `rig context add --git` install's content digest, and its
+      // `rig context source update` would then refuse it as locally edited.
+      routedDirNames.add(dirName);
+      const identical = fs.listFiles(sourcePackDir).every((relativePath) => {
+        const installed = nodePath.join(targetAbs, relativePath);
+        return fs.exists(installed) && fs.readFile(installed) === fs.readFile(nodePath.join(sourcePackDir, relativePath));
+      });
+      records.push(identical
+        ? { declaredPath: declared, status: "already_installed", installedAt: targetAbs }
+        : {
+            declaredPath: declared,
+            status: "kept_existing",
+            installedAt: targetAbs,
+            detail: `a different '${dirName}' pack is already installed at ${targetAbs}; kept it unchanged. To use the bundle's copy instead, run 'rig context rm ${dirName}' and install the bundle again`,
+          });
       continue;
     }
     fs.copyDir(sourcePackDir, targetAbs);

@@ -8,6 +8,20 @@ import type { HealthRecord } from "../health-projection.js";
 import type { RigModeStore } from "./rig-mode-store.js";
 import { missionModeQualifier, type OperatorContextReadContext, type OperatorContextScope } from "./rig-mode-types.js";
 import { validateModeName, validateRecord } from "./rig-mode-validator.js";
+import { selectCatalogProject } from "../workspace/project-catalog.js";
+import type { SettingsStore } from "../user-settings/settings-store.js";
+
+/** Production wiring for the catalogPath callback: an explicitly configured
+ *  workspace.catalog_path (env or config file). When it's only the derived
+ *  default, return undefined so the service keeps its own default,
+ *  <real workspace>/workspace.yaml: a relative project root such as ../gamma then
+ *  resolves beside the real workspace folder even when workspace.root is a symlink. */
+export function configuredCatalogPath(settings: Pick<SettingsStore, "resolveOne">): () => string | undefined {
+  return () => {
+    const setting = settings.resolveOne("workspace.catalog_path");
+    return setting.source !== "default" && typeof setting.value === "string" && setting.value ? setting.value : undefined;
+  };
+}
 
 export interface OperatingContext extends OperatorContextReadContext {
   phase: { value: string | null; source: string | null };
@@ -51,7 +65,9 @@ function unknown(reason: string, context: OperatingContext | null = null): Opera
  * Preferences never create authorization, rewrite phase, or modify health policy. */
 export class OperatingPostureService {
   constructor(private readonly db: Database.Database, private readonly modes: RigModeStore,
-    private readonly workspaceRoot: () => string) {}
+    private readonly workspaceRoot: () => string,
+    /** Configured workspace.catalog_path; <workspace>/workspace.yaml when unset. */
+    private readonly catalogPath?: () => string | undefined) {}
 
   context(input: OperatorContextReadContext): OperatingContext {
     const ctx: OperatingContext = { ...input, phase: { value: null, source: null }, sources: [] };
@@ -102,17 +118,13 @@ export class OperatingPostureService {
     }
     if (ctx.projectId || ctx.missionId || ctx.workstreamId) {
       const workspace = realpathSync(this.workspaceRoot());
-      const catalogPath = join(workspace, "workspace.yaml");
-      const catalog = yamlFile(catalogPath, true);
+      // The same catalog and reader as work-install and the project reads.
+      const catalogPath = this.catalogPath?.() || join(workspace, "workspace.yaml");
       let projectRoot = workspace;
-      if (catalog) {
-        if (!Array.isArray(catalog.projects) || catalog.projects.some((p: any) => !p || typeof p.id !== "string" || typeof p.root !== "string")) throw new Error("invalid workspace project catalog");
-        const projects = catalog.projects as Array<{ id: string; root: string }>;
-        if (new Set(projects.map(p => p.id)).size !== projects.length) throw new Error("ambiguous project catalog identity");
-        if (!ctx.projectId && projects.length === 1) ctx.projectId = projects[0]!.id;
-        const selected = projects.filter(p => p.id === ctx.projectId);
-        if (selected.length !== 1) throw new Error("select one declared project");
-        projectRoot = realpathSync(resolve(dirname(catalogPath), selected[0]!.root));
+      const selected = selectCatalogProject(catalogPath, ctx.projectId);
+      if (selected) {
+        if (!ctx.projectId) ctx.projectId = selected.id;
+        projectRoot = selected.root;
         ctx.sources.push(catalogPath);
       }
       const projectPath = join(projectRoot, "project.yaml");

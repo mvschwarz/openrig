@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openrig.dev/schemas/bundle-common.v1.json",
+  "title": "Shared bundle identity definitions (v1)",
+  "description": "Source identity, configuration ID, package digest and assembler, shared by every bundle format. See docs/reference/bundle-formats.md.",
+  "$defs": {
+    "source": {
+      "type": "object",
+      "description": "Source identity: repository + resolvedCommit + folder. requestedRef and canonicalUrl explain it and are not part of it.",
+      "required": [
+        "repository",
+        "folder",
+        "resolvedCommit"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "folder": {
+          "type": "string",
+          "pattern": "^(\\.|(?!/)(?!.*(^|/)\\.\\.(/|$))[^\\\\]+)$",
+          "description": "Repo-relative POSIX path of the folder holding rig.yaml; '.' is the repository root."
+        },
+        "resolvedCommit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "requestedRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonicalUrl": {
+          "type": "string",
+          "pattern": "^https://github\\.com/.+/tree/[0-9a-f]{40}(/.*)?$"
+        }
+      }
+    },
+    "member": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+      "description": "pod.member"
+    },
+    "runtime": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "A runtime as rig.yaml spells it, for example claude-code, codex, pi."
+    },
+    "configurationId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+=[a-z0-9][a-z0-9-]*(,[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+=[a-z0-9][a-z0-9-]*)*$",
+      "description": "Every member's pod.member=runtime, sorted by pod.member in code-unit order, joined with ','."
+    },
+    "packageDigest": {
+      "type": "object",
+      "description": "SHA-256 over UTF-8 lines JSON.stringify(path) + '\\t' + sha256 + '\\n', one per integrity.files entry, sorted by path in code-unit order. See docs/reference/bundle-formats.md.",
+      "required": [
+        "algorithm",
+        "value",
+        "coverage"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "coverage": {
+          "const": "openrig.package-digest/v1"
+        }
+      },
+      "additionalProperties": false
+    },
+    "assembler": {
+      "type": "object",
+      "required": [
+        "openrigVersion"
+      ],
+      "properties": {
+        "openrigVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{7,40}$"
+        }
+      }
+    },
+    "sha256": {
+      "type": "object",
+      "required": [
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "name": "@openrig/cli",
-  "version": "0.6.3",
+  "version": "0.6.5",
   "type": "module",
   "description": "Build your own network of agents from Claude Code, Codex and Pi: persistent teams with roles, shared context and owned work.",
   "keywords": [

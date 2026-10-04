@@ -8,7 +8,7 @@ import type { BootstrapRepository } from "../domain/bootstrap-repository.js";
 import { LegacyBundleAssembler as BundleAssembler, type AssemblerFsOps } from "../domain/bundle-assembler.js";
 import { PodBundleAssembler, type PodAssemblerFsOps } from "../domain/pod-bundle-assembler.js";
 import { computeIntegrity, writeIntegrity, verifyIntegrity, type IntegrityFsOps } from "../domain/bundle-integrity.js";
-import { pack, unpack, verifyArchiveDigest } from "../domain/bundle-archive.js";
+import { pack, unpack, verifyArchiveDigest, collectUnsafeArchiveEntries, unsafeArchiveEntryReason } from "../domain/bundle-archive.js";
 import { resolvePackage } from "../domain/package-resolve-helper.js";
 import {
   compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds, bundleExportWarning,
@@ -24,12 +24,9 @@ import { detectBundleConflicts, type BundleConflict } from "../domain/bundle-con
 import type { RigRepository } from "../domain/rig-repository.js";
 import { BundleAuditReader, BundleAuditWriter, type BundleAuditFsOps, type BundleAuditRecord } from "../domain/bundle-audit.js";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
-import { routeSkills, type SkillsRouterFsOps, type RouteSkillsResult } from "../domain/bundle-skills-router.js";
-import { routePlugins, type PluginsRouterFsOps, type RoutePluginsResult, type PluginRoutingInput } from "../domain/bundle-plugins-router.js";
-import { routeWorkflowSpecs, type WorkflowSpecsRouterFsOps, type RouteWorkflowSpecsResult } from "../domain/bundle-workflow-specs-router.js";
-import { routeContextPacks, type ContextPacksRouterFsOps, type RouteContextPacksResult } from "../domain/bundle-context-packs-router.js";
-import { routeAgentImages, type AgentImagesRouterFsOps, type RouteAgentImagesResult } from "../domain/bundle-agent-images-router.js";
-import { SettingsStore as ContextPackSettingsStore } from "../domain/user-settings/settings-store.js";
+import { routingFailureWarnings, type BundleContentRouting } from "../domain/bundle-content-routing.js";
+import { vendorContextPackDir } from "../domain/bundle-carried-context-pack.js";
+import { vendorProjectDir } from "../domain/bundle-carried-project.js";
 import { getDaemonVersion } from "../domain/daemon-version.js";
 import { assertShippableSubstance } from "../domain/agent-resolver.js";
 
@@ -372,297 +369,6 @@ function podAssemblerFsOps(): PodAssemblerFsOps {
   };
 }
 
-/** Item 6 / slice-05 Checkpoint 7.3d: real PluginsRouterFsOps backed by node:fs. */
-function pluginsRouterFsOps(): PluginsRouterFsOps {
-  return {
-    exists: (p) => fs.existsSync(p),
-    isDirectory: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
-    mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
-    copyDir: (s, d) => fs.cpSync(s, d, { recursive: true }),
-  };
-}
-
-/** Item 6 / slice-05 Checkpoint 7.3e step 3: real WorkflowSpecsRouterFsOps backed by node:fs. */
-function workflowSpecsRouterFsOps(): WorkflowSpecsRouterFsOps {
-  return {
-    exists: (p) => fs.existsSync(p),
-    copyFile: (s, d) => fs.copyFileSync(s, d),
-    mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
-  };
-}
-
-/** Item 6 / slice-05 Checkpoint 7.3f step 3: real ContextPacksRouterFsOps backed by node:fs. */
-function contextPacksRouterFsOps(): ContextPacksRouterFsOps {
-  return {
-    exists: (p) => fs.existsSync(p),
-    isDirectory: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
-    readFile: (p) => fs.readFileSync(p, "utf8"),
-    listFiles: (dir) => {
-      const files: string[] = [];
-      const walk = (current: string, prefix: string): void => {
-        for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-          const child = nodePath.join(current, entry.name);
-          const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
-          if (entry.isDirectory()) walk(child, relativePath);
-          else if (entry.isFile()) files.push(relativePath);
-        }
-      };
-      walk(dir, "");
-      return files;
-    },
-    mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
-    copyDir: (s, d) => fs.cpSync(s, d, { recursive: true }),
-  };
-}
-
-/** Item 6 / slice-05 Checkpoint 7.3g step 3: real AgentImagesRouterFsOps backed by node:fs. */
-function agentImagesRouterFsOps(): AgentImagesRouterFsOps {
-  return {
-    exists: (p) => fs.existsSync(p),
-    isDirectory: (p) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } },
-    mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
-    copyDir: (s, d) => fs.cpSync(s, d, { recursive: true }),
-  };
-}
-
-/**
- * Item 6 / slice-05 Checkpoint 7.3g step 3: extract the bundle safely
- * (banked unpack trust boundary) and route any declared agent_images to
- * the operator agent-images library. Returns null when bundle has no
- * agent_images[] (no-op).
- *
- * Target resolution: <openrigHome>/agent-images — per startup.ts:523
- * (the user-file root the live AgentImageLibraryService is constructed
- * against). No SettingsStore complexity; canonical path is OPENRIG_HOME-
- * rooted per agent-image-types.ts:9-10.
- *
- * Per the e7a0b253 PRD-coherent contract: agent_images entries are paths
- * to image DIRECTORIES (not manifest paths — distinct shape from
- * context_packs). The router enforces sourceAbs isDirectory + manifest.yaml
- * inside the dir is a file before copying the whole image dir.
- *
- * Mirror of routeContextPacksAfterBootstrap pattern with the dir-path
- * contract adaptation. bundlePath-only signature per 5f410eee B1 lesson.
- */
-async function routeAgentImagesAfterBootstrap(bundlePath: string): Promise<RouteAgentImagesResult | null> {
-  const targetAgentImagesDir = getDefaultOpenRigPath("agent-images");
-  const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-agent-images-route-"));
-  try {
-    await unpack(bundlePath, tmpDir);
-    const manifestPath = nodePath.join(tmpDir, "bundle.yaml");
-    if (!fs.existsSync(manifestPath)) return null;
-    const manifestYaml = fs.readFileSync(manifestPath, "utf-8");
-    const manifest = parsePodBundleManifest(manifestYaml) as Record<string, unknown>;
-    const rawAgentImages = manifest["agent_images"];
-    if (!Array.isArray(rawAgentImages) || rawAgentImages.length === 0) return null;
-    const declaredAgentImages = rawAgentImages.filter((s): s is string => typeof s === "string" && s.length > 0);
-    if (declaredAgentImages.length === 0) return null;
-    return routeAgentImages(
-      {
-        bundleRoot: tmpDir,
-        declaredAgentImages,
-        targetAgentImagesDir,
-      },
-      agentImagesRouterFsOps(),
-    );
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-}
-
-/**
- * Item 6 / slice-05 Checkpoint 7.3f step 3: extract the bundle safely
- * (banked unpack trust boundary) and route any declared context_packs to
- * the operator context-packs library. Returns null when bundle has no
- * context_packs[] (no-op).
- *
- * Target resolution uses context.root, exactly like the live
- * ContextPackLibraryService. A configured root replaces the default; bundle
- * routing must not silently create a second writable library.
- *
- * Mirror of routeSkillsAfterBootstrap / routePluginsAfterBootstrap /
- * routeWorkflowSpecsAfterBootstrap pattern: takes bundlePath only
- * (decoupled from installMeta per the 5f410eee B1 lesson; routing must
- * fire on the dual-override path too).
- */
-async function routeContextPacksAfterBootstrap(bundlePath: string): Promise<RouteContextPacksResult | null> {
-  const targetContextPacksDir = new ContextPackSettingsStore().resolveOne("context.root").value as string;
-  const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-context-packs-route-"));
-  try {
-    await unpack(bundlePath, tmpDir);
-    const manifestPath = nodePath.join(tmpDir, "bundle.yaml");
-    if (!fs.existsSync(manifestPath)) return null;
-    const manifestYaml = fs.readFileSync(manifestPath, "utf-8");
-    const manifest = parsePodBundleManifest(manifestYaml) as Record<string, unknown>;
-    const rawContextPacks = manifest["context_packs"];
-    if (!Array.isArray(rawContextPacks) || rawContextPacks.length === 0) return null;
-    const declaredContextPacks = rawContextPacks.filter((s): s is string => typeof s === "string" && s.length > 0);
-    if (declaredContextPacks.length === 0) return null;
-    return routeContextPacks(
-      {
-        bundleRoot: tmpDir,
-        declaredContextPacks,
-        targetContextPacksDir,
-      },
-      contextPacksRouterFsOps(),
-    );
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-}
-
-/**
- * Item 6 / slice-05 Checkpoint 7.3e step 3: extract the bundle safely
- * (banked unpack trust boundary) and route any declared workflow_specs to
- * the operator workflow-specs library. Returns null when bundle has no
- * workflow_specs[] (no-op), no manifest, or workspaceSpecsRoot unresolved.
- *
- * Target resolution per the CALLER CONTRACT in
- * bundle-workflow-specs-router.ts: SettingsStore is the sole authority.
- * Resolved as nodePath.join(workspaceSpecsRoot, "workflows") — the path
- * that spec-library-workflow-scanner actually reads (startup.ts:903-916).
- * If SettingsStore cannot resolve workspaceSpecsRoot (settings not yet
- * initialized / config error), we return null and the install lifecycle
- * proceeds without workflow_specs routing — mirror of startup.ts:910-916
- * try/catch posture.
- *
- * Mirror of routeSkillsAfterBootstrap / routePluginsAfterBootstrap pattern:
- * takes bundlePath only (decoupled from installMeta per the 5f410eee B1
- * lesson; routing must fire on the dual-override path too).
- */
-async function routeWorkflowSpecsAfterBootstrap(bundlePath: string): Promise<RouteWorkflowSpecsResult | null> {
-  let workspaceSpecsRoot: string | undefined;
-  try {
-    const settingsStore = new ContextPackSettingsStore();
-    workspaceSpecsRoot = settingsStore.resolveConfig().workspaceSpecsRoot;
-  } catch {
-    return null; // settings unresolvable; no-op routing
-  }
-  if (!workspaceSpecsRoot) return null;
-  const targetWorkflowSpecsDir = nodePath.join(workspaceSpecsRoot, "workflows");
-
-  const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-workflow-specs-route-"));
-  try {
-    await unpack(bundlePath, tmpDir);
-    const manifestPath = nodePath.join(tmpDir, "bundle.yaml");
-    if (!fs.existsSync(manifestPath)) return null;
-    const manifestYaml = fs.readFileSync(manifestPath, "utf-8");
-    const manifest = parsePodBundleManifest(manifestYaml) as Record<string, unknown>;
-    const rawWorkflowSpecs = manifest["workflow_specs"];
-    if (!Array.isArray(rawWorkflowSpecs) || rawWorkflowSpecs.length === 0) return null;
-    const declaredWorkflowSpecs = rawWorkflowSpecs.filter((s): s is string => typeof s === "string" && s.length > 0);
-    if (declaredWorkflowSpecs.length === 0) return null;
-    return routeWorkflowSpecs(
-      {
-        bundleRoot: tmpDir,
-        declaredWorkflowSpecs,
-        targetWorkflowSpecsDir,
-      },
-      workflowSpecsRouterFsOps(),
-    );
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-}
-
-/**
- * Item 6 / slice-05 Checkpoint 7.3d: extract the bundle safely (banked unpack
- * trust boundary) and route any declared plugin references to the operator
- * plugins library (<OPENRIG_HOME>/plugins/<id>/). Returns null when bundle
- * has no plugins[] (no-op). Mirror of routeSkillsAfterBootstrap pattern —
- * takes bundlePath only (decoupled from installMeta per the 5f410eee B1
- * lesson; routing must fire on the dual-override path too).
- */
-async function routePluginsAfterBootstrap(bundlePath: string): Promise<RoutePluginsResult | null> {
-  const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-plugins-route-"));
-  try {
-    await unpack(bundlePath, tmpDir);
-    const manifestPath = nodePath.join(tmpDir, "bundle.yaml");
-    if (!fs.existsSync(manifestPath)) return null;
-    const manifestYaml = fs.readFileSync(manifestPath, "utf-8");
-    const manifest = parsePodBundleManifest(manifestYaml) as Record<string, unknown>;
-    const rawPlugins = manifest["plugins"];
-    if (!Array.isArray(rawPlugins) || rawPlugins.length === 0) return null;
-    const declaredPlugins: PluginRoutingInput[] = [];
-    for (const entry of rawPlugins) {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-      const p = entry as Record<string, unknown>;
-      const s = p["source"];
-      if (typeof p["id"] !== "string" || !p["id"]) continue;
-      if (!s || typeof s !== "object" || Array.isArray(s)) continue;
-      const src = s as Record<string, unknown>;
-      if (src["kind"] !== "local" || typeof src["path"] !== "string" || !src["path"]) continue;
-      declaredPlugins.push({ id: p["id"], source: { kind: "local", path: src["path"] } });
-    }
-    if (declaredPlugins.length === 0) return null;
-    return routePlugins(
-      {
-        bundleRoot: tmpDir,
-        declaredPlugins,
-        targetPluginsDir: getDefaultOpenRigPath("plugins"),
-      },
-      pluginsRouterFsOps(),
-    );
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-}
-
-/** Item 6 / slice-05 Checkpoint 7.3: real SkillsRouterFsOps backed by node:fs. */
-function skillsRouterFsOps(): SkillsRouterFsOps {
-  return {
-    exists: (p) => fs.existsSync(p),
-    copyFile: (s, d) => fs.copyFileSync(s, d),
-    mkdirp: (p) => fs.mkdirSync(p, { recursive: true }),
-  };
-}
-
-/**
- * Item 6 / slice-05 Checkpoint 7.3: extract the bundle safely (banked unpack
- * trust boundary) and route legacy declared skill files to the package cache.
- * S04 keeps this package-shaped payload out of the managed skill catalog;
- * importing a complete harness skill into the catalog is a separate action.
- * Returns null when bundle has no skills[] (no-op).
- *
- * B1 repair (qitem-20260518220247-22f5257a): takes bundlePath only and does
- * its own safe unpack + parse. Previously coupled to installMeta from the
- * pre-check extraction, which is null when operator passes --skip-version-
- * check AND --force together; that incorrectly suppressed post-install
- * skills routing on the dual-override path. Skills routing is independent
- * of the pre-check decisions and should fire whenever an install completes
- * successfully with a bundle that declares skills.
- *
- * Best-effort: returns null on any extract/parse failure (caller has the
- * outer try/catch). Single unpack call per invocation; the manifest re-parse
- * is cheap vs. the unpack cost which is required either way to access the
- * skill source files for routing.
- */
-async function routeSkillsAfterBootstrap(bundlePath: string): Promise<RouteSkillsResult | null> {
-  const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-skills-route-"));
-  try {
-    await unpack(bundlePath, tmpDir);
-    const manifestPath = nodePath.join(tmpDir, "bundle.yaml");
-    if (!fs.existsSync(manifestPath)) return null;
-    const manifestYaml = fs.readFileSync(manifestPath, "utf-8");
-    const manifest = parsePodBundleManifest(manifestYaml) as Record<string, unknown>;
-    const rawSkills = manifest["skills"];
-    if (!Array.isArray(rawSkills) || rawSkills.length === 0) return null;
-    const declaredSkills = rawSkills.filter((s): s is string => typeof s === "string" && s.length > 0);
-    if (declaredSkills.length === 0) return null;
-    return routeSkills(
-      {
-        bundleRoot: tmpDir,
-        declaredSkills,
-        targetSkillsDir: getDefaultOpenRigPath("packages"),
-        targetPrefixToStrip: "packages/",
-      },
-      skillsRouterFsOps(),
-    );
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-}
-
 /** Item 4 / slice-05 Checkpoint 5.2: real BundleAuditFsOps backed by node:fs. */
 function auditFsOps(): BundleAuditFsOps {
   return {
@@ -696,6 +402,7 @@ function writeInstallAudit(opts: {
   targetRigName?: string;
   cliVersion?: string;
   bundleManifest?: Record<string, unknown>;
+  routingFailures?: Array<{ kind: string; error: string }>;
 }): void {
   try {
     const writer = new BundleAuditWriter({
@@ -713,6 +420,7 @@ function writeInstallAudit(opts: {
     if (opts.cliVersion) record.cliVersion = opts.cliVersion;
     record.daemonVersion = getDaemonVersion();
     if (provenance?.sourceHost) record.sourceHost = provenance.sourceHost;
+    if (opts.routingFailures?.length) record.routingFailures = opts.routingFailures;
     writer.append(record);
   } catch {
     // Audit-write failure is side-channel; never fail the install response.
@@ -744,8 +452,9 @@ function writeInstallAudit(opts: {
  * - Symlinks are FOLLOWED at create time and written as regular files
  *   to the staging tree (tar safety; banked pre-existing-trust-
  *   boundary lesson — never include a symlink entry in an archive).
- * - Per-kind shape: skills + workflow_specs are file paths (single
- *   file copy); plugins + context_packs (manifest.yaml path → parent
+ * - Skills at skills/<name>/SKILL.md carry their whole skill directory;
+ *   other skill entries and workflow_specs keep their single-file shape.
+ *   Plugins + context_packs (manifest.yaml path → parent
  *   dir) + agent_images are dir paths (recursive copy with symlink
  *   dereference).
  * - Throws on missing source path / path-containment violation /
@@ -899,11 +608,15 @@ function consumeAuthorBundleYaml(sourceRoot: string, staging: string): AuthorBun
     fs.cpSync(sourceAbs, targetAbs, { recursive: true, dereference: true });
   };
 
-  // skills[] — file paths
+  // A portable skill includes its helpers/references. Retain the legacy
+  // single-file payload contract outside the discovered skills/<name> tree.
   const rawSkills = authorParsed["skills"];
   if (Array.isArray(rawSkills) && rawSkills.length > 0) {
     const skills = rawSkills.filter((s): s is string => typeof s === "string" && s.length > 0);
-    for (const declared of skills) vendorFile(declared, "skill");
+    for (const declared of skills) {
+      vendorFile(declared, "skill");
+      if (/^skills\/[^/]+\/SKILL\.md$/.test(declared)) vendorDir(nodePath.dirname(declared), "skill");
+    }
     if (skills.length > 0) result.skills = skills;
   }
 
@@ -988,6 +701,17 @@ bundleRoutes.post("/create", async (c) => {
   const outputPath = typeof body["outputPath"] === "string" ? body["outputPath"] : "";
   const rigRoot = typeof body["rigRoot"] === "string" ? body["rigRoot"] : undefined;
   const includePackages = Array.isArray(body["includePackages"]) ? body["includePackages"] as string[] : undefined;
+  // `rig bundle create --context-pack <dir>`: packs to carry from anywhere the author names, by manifest name
+  const contextPackDirs = Array.isArray(body["contextPackDirs"])
+    ? (body["contextPackDirs"] as unknown[]).filter((d): d is string => typeof d === "string" && d.length > 0)
+    : [];
+  // `rig bundle create --project-dir <dir>`: the project this rig works in (project.yaml and its files)
+  const projectDir = typeof body["projectDir"] === "string" && body["projectDir"] ? body["projectDir"] : undefined;
+  // `rig bundle create --preset/--seat`: the configuration the CLI staged, recorded in the manifest (outside the package digest)
+  const rawConfiguration = body["configuration"] as { id?: unknown; preset?: unknown } | undefined;
+  const configuration = rawConfiguration && typeof rawConfiguration.id === "string"
+    ? { id: rawConfiguration.id, ...(typeof rawConfiguration.preset === "string" ? { preset: rawConfiguration.preset } : {}) }
+    : undefined;
 
   const allowDrift = body["allowDrift"] === true;
 
@@ -1069,6 +793,10 @@ bundleRoutes.post("/create", async (c) => {
         if (authorPrimitives.workflowSpecs) result.manifest.workflowSpecs = authorPrimitives.workflowSpecs;
         if (authorPrimitives.contextPacks) result.manifest.contextPacks = authorPrimitives.contextPacks;
         if (authorPrimitives.agentImages) result.manifest.agentImages = authorPrimitives.agentImages;
+        const carriedPacks = contextPackDirs.map((dir) => vendorContextPackDir(nodePath.resolve(dir), tmpStaging));
+        if (carriedPacks.length > 0) result.manifest.contextPacks = [...(result.manifest.contextPacks ?? []), ...carriedPacks];
+        if (projectDir) result.manifest.project = vendorProjectDir(nodePath.resolve(projectDir), tmpStaging);
+        if (configuration) result.manifest.configuration = configuration;
 
         const integrity = computeIntegrity(tmpStaging, integrityFsOps());
         result.manifest.integrity = integrity;
@@ -1086,6 +814,12 @@ bundleRoutes.post("/create", async (c) => {
 
     // Legacy bundle creation
     // Validated above, before the drift guard ran.
+    if (contextPackDirs.length > 0) {
+      return c.json({ error: "--context-pack needs a pod-aware rig spec (one with pods:)" }, 400);
+    }
+    if (projectDir) {
+      return c.json({ error: "--project-dir needs a pod-aware rig spec (one with pods:)" }, 400);
+    }
     const spec = LegacyRigSpecSchema.normalize(rawParsed);
 
     const specDir = nodePath.dirname(nodePath.resolve(specPath));
@@ -1176,23 +910,29 @@ bundleRoutes.post("/inspect", async (c) => {
 
   const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-inspect-"));
   try {
-    // Extract with safety pre-scan (same as unpack) but without content integrity verification
-    const tar = await import("tar");
-    const unsafeEntries: string[] = [];
-    await tar.list({
-      file: bundlePath,
-      onReadEntry: (entry) => {
-        const p = entry.path;
-        const t = entry.type;
-        if (t === "SymbolicLink" || t === "Link") unsafeEntries.push(`${t}: ${p}`);
-        if (p.startsWith("/")) unsafeEntries.push(`absolute: ${p}`);
-        if (p.split("/").some((s: string) => s === "..")) unsafeEntries.push(`traversal: ${p}`);
-      },
-    });
+    // Extract with the SAME shared safety pre-scan that unpack() uses, but without
+    // content integrity verification (inspect must be able to REPORT a broken
+    // bundle rather than refuse it). One source of truth: collectUnsafeArchiveEntries
+    // rejects symlinks/hardlinks, POSIX-absolute and Windows drive-absolute paths,
+    // and dot-dot traversal (POSIX or backslash). Previously this route hand-rolled a
+    // weaker scan that missed drive-letter and backslash-traversal entries, so an
+    // archive unpack() refuses could be reported safe by inspect.
+    const unsafeEntries = await collectUnsafeArchiveEntries(bundlePath);
     if (unsafeEntries.length > 0) {
       return c.json({ error: `Unsafe archive entries: ${unsafeEntries.join("; ")}`, digestValid }, 200);
     }
-    await tar.extract({ file: bundlePath, cwd: tmpDir });
+    const tar = await import("tar");
+    await tar.extract({
+      file: bundlePath,
+      cwd: tmpDir,
+      // Same defensive filter unpack() applies: even if the pre-scan above were
+      // bypassed, no unsafe entry is written.
+      filter: (p, entry) => {
+        if ("isSymbolicLink" in entry && typeof entry.isSymbolicLink === "function" && entry.isSymbolicLink()) return false;
+        const type = "type" in entry ? (entry as { type?: string }).type : undefined;
+        return unsafeArchiveEntryReason(p, type) === null;
+      },
+    });
 
     const manifestPath = nodePath.join(tmpDir, "bundle.yaml");
     if (!fs.existsSync(manifestPath)) {
@@ -1254,6 +994,9 @@ bundleRoutes.post("/inspect", async (c) => {
         agentImages: Array.isArray(rawParsed["agent_images"])
           ? (rawParsed["agent_images"] as unknown[]).filter((s): s is string => typeof s === "string")
           : undefined,
+        project: rawParsed["project"] && typeof rawParsed["project"] === "object" && !Array.isArray(rawParsed["project"])
+          ? rawParsed["project"] as { id: string; path: string }
+          : undefined,
       };
       const integrityCompat = integritySection ? {
         schemaVersion: 2,
@@ -1309,6 +1052,7 @@ bundleRoutes.post("/install", async (c) => {
   const plan = body["plan"] === true;
   const autoApprove = body["autoApprove"] === true;
   const targetRoot = typeof body["targetRoot"] === "string" ? body["targetRoot"] : undefined;
+  const cwdOverride = typeof body["cwdOverride"] === "string" ? body["cwdOverride"] : undefined;
   // Item 2 / slice-05 Checkpoint 3.3: install-time compatibility check inputs
   const skipVersionCheck = body["skipVersionCheck"] === true;
   const clientCliVersion = typeof body["cliVersion"] === "string" ? body["cliVersion"] : undefined;
@@ -1394,7 +1138,7 @@ bundleRoutes.post("/install", async (c) => {
     // Plan mode: no run lifecycle
     try {
       const result = await bootstrapOrchestrator.bootstrap({
-        mode: "plan", sourceRef: bundlePath, sourceKind: "rig_bundle",
+        mode: "plan", sourceRef: bundlePath, sourceKind: "rig_bundle", cwdOverride,
       });
       if (result.status === "planned") {
         eventBus.emit({ type: "bootstrap.planned", runId: result.runId, sourceRef: bundlePath, stages: result.stages.length });
@@ -1425,75 +1169,44 @@ bundleRoutes.post("/install", async (c) => {
   try {
     const result = await bootstrapOrchestrator.bootstrap({
       mode: "apply", sourceRef: bundlePath, sourceKind: "rig_bundle",
-      autoApprove, targetRoot, runId: run.id,
+      autoApprove, targetRoot, cwdOverride, runId: run.id,
     });
 
-    if (result.status === "completed") {
-      eventBus.emit({ type: "bootstrap.completed", runId: result.runId, rigId: result.rigId!, sourceRef: bundlePath });
+    if (result.status === "completed" || result.status === "partial") {
+      // A pod-aware (v2) bundle routes its declared skills, plugins, workflow
+      // specs, context packs and agent images in bootstrap's pre-launch hook,
+      // before any seat launches, and reports the outcome on the result. A
+      // legacy v1 bundle has no hook, so it keeps routing after a completed
+      // install. Routing never fails the install; failures are reported in
+      // routingFailures and the audit.
+      const { bundleRouting, ...bootstrapResult } = result;
+      const routing: BundleContentRouting | undefined = bundleRouting
+        ?? (result.status === "completed" ? await bootstrapOrchestrator.routeBundleContents(bundlePath) : undefined);
+      // The hook already put its failures in warnings; the legacy fallback adds its own here.
+      const warnings = bundleRouting ? (result.warnings ?? []) : [...(result.warnings ?? []), ...routingFailureWarnings(routing)];
+      const responseBody = routing ? { ...bootstrapResult, ...routing, warnings } : { ...bootstrapResult, warnings };
+      if (result.status === "completed") {
+        eventBus.emit({ type: "bootstrap.completed", runId: result.runId, rigId: result.rigId!, sourceRef: bundlePath });
+      } else {
+        const ok = result.stages.filter((s: { status: string }) => s.status === "ok").length;
+        const fail = result.stages.filter((s: { status: string }) => s.status === "failed" || s.status === "blocked").length;
+        eventBus.emit({ type: "bootstrap.partial", runId: result.runId, sourceRef: bundlePath, rigId: result.rigId, completed: ok, failed: fail });
+      }
       writeInstallAudit({
-        bundlePath, outcome: "success", targetRigId: result.rigId,
+        bundlePath, outcome: result.status === "completed" ? "success" : "partial", targetRigId: result.rigId,
         targetRigName: installMeta?.rigName, cliVersion: clientCliVersion,
         bundleManifest: installMeta?.bundleManifest,
+        routingFailures: routing?.routingFailures,
       });
-      // Item 6 / Checkpoint 7.3: route any declared skills after successful
-      // install. Best-effort: a routing failure does NOT fail the install
-      // response (the install already succeeded; skills routing is a side-
-      // channel post-install step). Routing result included in response body
-      // so operators see what landed.
-      let skillsRouting: RouteSkillsResult | null = null;
-      let pluginsRouting: RoutePluginsResult | null = null;
-      let workflowSpecsRouting: RouteWorkflowSpecsResult | null = null;
-      let contextPacksRouting: RouteContextPacksResult | null = null;
-      let agentImagesRouting: RouteAgentImagesResult | null = null;
-      try {
-        skillsRouting = await routeSkillsAfterBootstrap(bundlePath);
-      } catch {
-        // Side-channel failure; install already succeeded
-      }
-      try {
-        pluginsRouting = await routePluginsAfterBootstrap(bundlePath);
-      } catch {
-        // Side-channel failure; install already succeeded
-      }
-      try {
-        workflowSpecsRouting = await routeWorkflowSpecsAfterBootstrap(bundlePath);
-      } catch {
-        // Side-channel failure; install already succeeded
-      }
-      try {
-        contextPacksRouting = await routeContextPacksAfterBootstrap(bundlePath);
-      } catch {
-        // Side-channel failure; install already succeeded
-      }
-      try {
-        agentImagesRouting = await routeAgentImagesAfterBootstrap(bundlePath);
-      } catch {
-        // Side-channel failure; install already succeeded
-      }
-      const extras: Record<string, unknown> = {};
-      if (skillsRouting) extras.skillsRouting = skillsRouting;
-      if (pluginsRouting) extras.pluginsRouting = pluginsRouting;
-      if (workflowSpecsRouting) extras.workflowSpecsRouting = workflowSpecsRouting;
-      if (contextPacksRouting) extras.contextPacksRouting = contextPacksRouting;
-      if (agentImagesRouting) extras.agentImagesRouting = agentImagesRouting;
-      return c.json(Object.keys(extras).length > 0 ? { ...result, ...extras } : result, 201);
-    }
-    if (result.status === "partial") {
-      const ok = result.stages.filter((s: { status: string }) => s.status === "ok").length;
-      const fail = result.stages.filter((s: { status: string }) => s.status === "failed" || s.status === "blocked").length;
-      eventBus.emit({ type: "bootstrap.partial", runId: result.runId, sourceRef: bundlePath, rigId: result.rigId, completed: ok, failed: fail });
-      writeInstallAudit({
-        bundlePath, outcome: "partial", targetRigId: result.rigId,
-        targetRigName: installMeta?.rigName, cliVersion: clientCliVersion,
-        bundleManifest: installMeta?.bundleManifest,
-      });
-      return c.json(result, 200);
+      return c.json(responseBody, result.status === "completed" ? 201 : 200);
     }
     eventBus.emit({ type: "bootstrap.failed", runId: result.runId, sourceRef: bundlePath, error: result.errors[0] ?? "failed" });
+    // The pre-launch hook may have routed contents before a later failure; the result carries what it did.
     writeInstallAudit({
       bundlePath, outcome: "failed",
       targetRigName: installMeta?.rigName, cliVersion: clientCliVersion,
       bundleManifest: installMeta?.bundleManifest,
+      routingFailures: result.bundleRouting?.routingFailures,
     });
     const hasBlocked = result.stages.some((s: { status: string }) => s.status === "blocked");
     return c.json(result, hasBlocked ? 409 : 500);
