@@ -989,7 +989,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // A bundle's packs land in context.root before its seats launch; rescan
     // so the live library serves them on the first turn.
     routeBundleContents: (bundlePath) => routeBundleContents(bundlePath, {
-      onContextPacksRouted: () => { contextPackLibrary.scan(); },
+      onContextPacksRouted: () => contextPackLibrary.scan(),
     }),
   });
 

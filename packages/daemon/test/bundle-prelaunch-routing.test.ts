@@ -28,6 +28,7 @@ import { PodBundleSourceResolver, LegacyBundleSourceResolver } from "../src/doma
 import { pack } from "../src/domain/bundle-archive.js";
 import { computeIntegrity } from "../src/domain/bundle-integrity.js";
 import { routeBundleContents, routingFailureWarnings, type BundleContentRouting } from "../src/domain/bundle-content-routing.js";
+import { ContextPackLibraryService } from "../src/domain/context-packs/context-pack-library-service.js";
 import type { ExecFn } from "../src/adapters/tmux.js";
 import type { FsOps } from "../src/domain/package-resolver.js";
 
@@ -76,13 +77,13 @@ function realFsOps(): FsOps {
   } as FsOps;
 }
 
-async function buildBundleWithPack(workDir: string): Promise<string> {
+async function buildBundleWithPack(workDir: string, packManifest = PACK_MANIFEST): Promise<string> {
   const staging = path.join(workDir, "staging");
   fs.mkdirSync(path.join(staging, "agents", "impl"), { recursive: true });
   fs.mkdirSync(path.join(staging, "context-packs", "demo"), { recursive: true });
   fs.writeFileSync(path.join(staging, "rig.yaml"), RIG_YAML);
   fs.writeFileSync(path.join(staging, "agents", "impl", "agent.yaml"), `name: impl\nversion: "1.0"\n`);
-  fs.writeFileSync(path.join(staging, "context-packs", "demo", "manifest.yaml"), PACK_MANIFEST);
+  fs.writeFileSync(path.join(staging, "context-packs", "demo", "manifest.yaml"), packManifest);
   fs.writeFileSync(path.join(staging, "context-packs", "demo", "intro.md"), "# Demo world\n");
   const integrity = computeIntegrity(staging, {
     readFile: (p: string) => fs.readFileSync(p, "utf-8"),
@@ -218,6 +219,33 @@ describe("bundle contents are routed before any seat launches", () => {
     expect(result.bundleRouting?.routingFailures).toHaveLength(1);
   });
 
+  it("a router that throws still lets the rig launch, with a warning and a failed stage", async () => {
+    const route = vi.fn(async (): Promise<BundleContentRouting> => { throw new Error("EACCES: permission denied, mkdtemp"); });
+
+    const result = await orchestrator(route).bootstrap({
+      mode: "apply", sourceRef: bundlePath, sourceKind: "rig_bundle", targetRoot: path.join(workDir, "target"),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(seenAtLaunch).not.toBeNull();
+    expect(result.warnings).toContain("Bundle bundle routing failed: EACCES: permission denied, mkdtemp");
+    expect(result.stages.find((s) => s.stage === "route_bundle_contents")?.status).toBe("failed");
+  });
+
+  it("a pack the live library rejects is reported, not counted as usable", async () => {
+    const badBundle = await buildBundleWithPack(fs.mkdtempSync(path.join(workDir, "bad-")), "name: demo\ntaxonomy: world\nfiles:\n  - path: intro.md\n    role: overview\n");
+    const library = new ContextPackLibraryService({ roots: [{ path: contextRoot, sourceType: "user_file" }] });
+
+    const result = await orchestrator((p) => routeBundleContents(p, { onContextPacksRouted: () => library.scan() })).bootstrap({
+      mode: "apply", sourceRef: badBundle, sourceKind: "rig_bundle", targetRoot: path.join(workDir, "target-bad"),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.bundleRouting?.routingFailures?.[0]).toMatchObject({ kind: "contextPacks" });
+    expect(result.bundleRouting?.routingFailures?.[0]?.error).toMatch(/could not load .*demo/);
+    expect(result.warnings.some((w) => /Bundle contextPacks routing failed: the context-pack library could not load/.test(w))).toBe(true);
+  });
+
   it("does not route for a rig spec source", async () => {
     const specDir = path.join(workDir, "spec");
     fs.mkdirSync(path.join(specDir, "agents", "impl"), { recursive: true });
@@ -241,6 +269,17 @@ describe("routeBundleContents", () => {
     expect(routing.routingFailures).toHaveLength(1);
     expect(routing.routingFailures?.[0]?.kind).toBe("bundle");
     expect(routingFailureWarnings(routing)[0]).toMatch(/^Bundle bundle routing failed: /);
+  });
+
+  it("never throws when its temporary directory cannot be created", async () => {
+    const savedTmp = process.env["TMPDIR"];
+    process.env["TMPDIR"] = path.join(os.tmpdir(), "no-such-dir-20261004", "nested");
+    try {
+      const routing = await routeBundleContents("/nonexistent.rigbundle");
+      expect(routing.routingFailures?.[0]?.kind).toBe("bundle");
+    } finally {
+      if (savedTmp === undefined) delete process.env["TMPDIR"]; else process.env["TMPDIR"] = savedTmp;
+    }
   });
 
   it("has no warnings when nothing failed", () => {

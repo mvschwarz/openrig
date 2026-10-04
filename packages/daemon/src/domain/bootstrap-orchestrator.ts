@@ -120,8 +120,12 @@ export class BootstrapOrchestrator {
   }
 
   /** Route a bundle's declared skills, plugins, workflow specs, context packs and agent images. Never throws. */
-  routeBundleContents(bundlePath: string): Promise<BundleContentRouting> {
-    return this.deps.routeBundleContents ? this.deps.routeBundleContents(bundlePath) : routeBundleContents(bundlePath);
+  async routeBundleContents(bundlePath: string): Promise<BundleContentRouting> {
+    try {
+      return await (this.deps.routeBundleContents ? this.deps.routeBundleContents(bundlePath) : routeBundleContents(bundlePath));
+    } catch (err) {
+      return { routingFailures: [{ kind: "bundle", error: (err as Error).message }] };
+    }
   }
 
   async bootstrap(opts: BootstrapOptions): Promise<BootstrapResult> {
@@ -667,11 +671,15 @@ export class BootstrapOrchestrator {
     let bundleRouting: BundleContentRouting | undefined;
     const bundleHook = opts.sourceKind === "rig_bundle"
       ? async (): Promise<{ ok: true }> => {
-          bundleRouting = await this.routeBundleContents(opts.sourceRef);
+          // Routing never blocks the launch: a failed hook, or a throw, would roll the rig back.
+          try {
+            bundleRouting = await this.routeBundleContents(opts.sourceRef);
+          } catch (err) {
+            bundleRouting = { routingFailures: [{ kind: "bundle", error: (err as Error).message }] };
+          }
           const failureWarnings = routingFailureWarnings(bundleRouting);
           stages.push({ stage: "route_bundle_contents", status: failureWarnings.length > 0 ? "failed" : "ok", detail: bundleRouting });
           warnings.push(...failureWarnings);
-          // Routing never blocks the launch: a failed hook would roll the rig back.
           return { ok: true };
         }
       : undefined;

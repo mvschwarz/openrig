@@ -1101,7 +1101,7 @@ bundleRoutes.post("/install", async (c) => {
     // Plan mode: no run lifecycle
     try {
       const result = await bootstrapOrchestrator.bootstrap({
-        mode: "plan", sourceRef: bundlePath, sourceKind: "rig_bundle",
+        mode: "plan", sourceRef: bundlePath, sourceKind: "rig_bundle", cwdOverride,
       });
       if (result.status === "planned") {
         eventBus.emit({ type: "bootstrap.planned", runId: result.runId, sourceRef: bundlePath, stages: result.stages.length });
@@ -1164,10 +1164,12 @@ bundleRoutes.post("/install", async (c) => {
       return c.json(responseBody, result.status === "completed" ? 201 : 200);
     }
     eventBus.emit({ type: "bootstrap.failed", runId: result.runId, sourceRef: bundlePath, error: result.errors[0] ?? "failed" });
+    // The pre-launch hook may have routed contents before a later failure; the result carries what it did.
     writeInstallAudit({
       bundlePath, outcome: "failed",
       targetRigName: installMeta?.rigName, cliVersion: clientCliVersion,
       bundleManifest: installMeta?.bundleManifest,
+      routingFailures: result.bundleRouting?.routingFailures,
     });
     const hasBlocked = result.stages.some((s: { status: string }) => s.status === "blocked");
     return c.json(result, hasBlocked ? 409 : 500);

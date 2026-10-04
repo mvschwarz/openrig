@@ -3209,6 +3209,16 @@ describe("POST /api/bundles/install: pre-launch routing report", () => {
     expect(body.bundleRouting).toBeUndefined();
   });
 
+  it("--plan forwards --cwd to the preflight", async () => {
+    const bootstrap = vi.fn().mockResolvedValue({ status: "planned", runId: "run-plan", stages: [], errors: [], warnings: [] });
+    (setup.bootstrapOrchestrator as unknown as { bootstrap: typeof bootstrap }).bootstrap = bootstrap;
+
+    const res = await install({ plan: true, cwdOverride: "/work/openrig" });
+
+    expect(res.status).toBe(200);
+    expect(bootstrap).toHaveBeenCalledWith(expect.objectContaining({ mode: "plan", cwdOverride: "/work/openrig" }));
+  });
+
   it("a partial install reports its routing failures in the response and the audit", async () => {
     const failure = { kind: "contextPacks", error: "no space left on device" };
     (setup.bootstrapOrchestrator as unknown as { bootstrap: unknown }).bootstrap = vi.fn().mockResolvedValue({

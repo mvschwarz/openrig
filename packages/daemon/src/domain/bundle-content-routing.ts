@@ -33,8 +33,8 @@ export interface BundleContentRouting {
 }
 
 export interface BundleContentRoutingOptions {
-  /** Called after context packs were routed, so the live library can rescan them. */
-  onContextPacksRouted?: () => void;
+  /** Called after context packs were routed, so the live library can rescan them. Returns the scan's per-pack errors. */
+  onContextPacksRouted?: () => { errors?: Array<{ source: string; error: string }> } | void;
 }
 
 /** One human-readable warning per routing failure, for the result's warnings list. */
@@ -83,12 +83,14 @@ export async function routeBundleContents(
     }
   };
 
-  const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-content-route-"));
+  let tmpDir: string | null = null;
   try {
+    const bundleRoot = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-content-route-"));
+    tmpDir = bundleRoot;
     let manifest: Record<string, unknown> | null = null;
     try {
-      await unpack(bundlePath, tmpDir);
-      const manifestPath = nodePath.join(tmpDir, "bundle.yaml");
+      await unpack(bundlePath, bundleRoot);
+      const manifestPath = nodePath.join(bundleRoot, "bundle.yaml");
       if (fs.existsSync(manifestPath)) {
         manifest = parsePodBundleManifest(fs.readFileSync(manifestPath, "utf-8")) as Record<string, unknown>;
       }
@@ -103,7 +105,7 @@ export async function routeBundleContents(
       const declaredSkills = stringEntries(manifest["skills"]);
       if (declaredSkills.length > 0) {
         routing.skillsRouting = attempt("skills", () => routeSkills(
-          { bundleRoot: tmpDir, declaredSkills, targetSkillsDir: getDefaultOpenRigPath("packages"), targetPrefixToStrip: "packages/" },
+          { bundleRoot, declaredSkills, targetSkillsDir: getDefaultOpenRigPath("packages"), targetPrefixToStrip: "packages/" },
           skillsRouterFsOps(),
         ));
       }
@@ -111,7 +113,7 @@ export async function routeBundleContents(
       const declaredPlugins = pluginEntries(manifest["plugins"]);
       if (declaredPlugins.length > 0) {
         routing.pluginsRouting = attempt("plugins", () => routePlugins(
-          { bundleRoot: tmpDir, declaredPlugins, targetPluginsDir: getDefaultOpenRigPath("plugins") },
+          { bundleRoot, declaredPlugins, targetPluginsDir: getDefaultOpenRigPath("plugins") },
           pluginsRouterFsOps(),
         ));
       }
@@ -125,7 +127,7 @@ export async function routeBundleContents(
           const workspaceSpecsRoot = new SettingsStore().resolveConfig().workspaceSpecsRoot;
           if (!workspaceSpecsRoot) throw new Error("workspace specs root is not configured");
           return routeWorkflowSpecs(
-            { bundleRoot: tmpDir, declaredWorkflowSpecs, targetWorkflowSpecsDir: nodePath.join(workspaceSpecsRoot, "workflows") },
+            { bundleRoot, declaredWorkflowSpecs, targetWorkflowSpecsDir: nodePath.join(workspaceSpecsRoot, "workflows") },
             workflowSpecsRouterFsOps(),
           );
         });
@@ -138,7 +140,7 @@ export async function routeBundleContents(
       if (declaredContextPacks.length > 0) {
         routing.contextPacksRouting = attempt("contextPacks", () => routeContextPacks(
           {
-            bundleRoot: tmpDir,
+            bundleRoot,
             declaredContextPacks,
             targetContextPacksDir: new SettingsStore().resolveOne("context.root").value as string,
           },
@@ -146,7 +148,17 @@ export async function routeBundleContents(
         ));
         if (routing.contextPacksRouting && opts.onContextPacksRouted) {
           const rescan = opts.onContextPacksRouted;
-          attempt("contextPacks", () => rescan());
+          const scan = attempt("contextPacks", () => rescan()) as { errors?: Array<{ source: string; error: string }> } | undefined;
+          // A pack the live library rejects (for example a manifest without a version) is not usable,
+          // whatever the copy said: report the library's diagnostic for each pack routed here.
+          const routedDirs = routing.contextPacksRouting.records
+            .filter((r) => r.status === "routed" && r.installedAt)
+            .map((r) => r.installedAt!);
+          for (const scanError of scan?.errors ?? []) {
+            if (routedDirs.some((dir) => scanError.source === dir || scanError.source.startsWith(dir + nodePath.sep))) {
+              failures.push({ kind: "contextPacks", error: `the context-pack library could not load ${scanError.source}: ${scanError.error}` });
+            }
+          }
         }
       }
 
@@ -155,13 +167,17 @@ export async function routeBundleContents(
       const declaredAgentImages = stringEntries(manifest["agent_images"]);
       if (declaredAgentImages.length > 0) {
         routing.agentImagesRouting = attempt("agentImages", () => routeAgentImages(
-          { bundleRoot: tmpDir, declaredAgentImages, targetAgentImagesDir: getDefaultOpenRigPath("agent-images") },
+          { bundleRoot, declaredAgentImages, targetAgentImagesDir: getDefaultOpenRigPath("agent-images") },
           agentImagesRouterFsOps(),
         ));
       }
     }
+  } catch (err) {
+    failures.push({ kind: "bundle", error: (err as Error).message });
   } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (tmpDir) {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* a leftover temp directory is not a routing failure */ }
+    }
   }
 
   if (failures.length > 0) routing.routingFailures = failures;
