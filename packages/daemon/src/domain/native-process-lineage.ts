@@ -95,8 +95,8 @@ function claudeSessionToken(args: string[]): string | null {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
-    if (["--permission-mode", "--model", "--name"].includes(arg)) { index += 1; continue; }
-    if (/^--(?:permission-mode|model|name)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
+    if (/^--(?:permission-mode|model|name|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
     const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
     const value = identity[1] ?? args[++index];
@@ -115,12 +115,12 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
-    if (["--permission-mode", "--model", "--name", "--settings"].includes(arg)) {
+    if (["--permission-mode", "--model", "--name", "--settings", "--effort"].includes(arg)) {
       const value = args[++index];
       if (!value || value.startsWith("-")) return unparsed;
       continue;
     }
-    if (/^--(?:permission-mode|model|name|settings)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
     const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
     if (!identity) return unparsed; // Unknown argv is not positive identity proof.
     const value = identity[1] ?? args[++index];
