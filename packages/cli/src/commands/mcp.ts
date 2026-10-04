@@ -39,15 +39,23 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
       const client = deps.clientFactory(`http://127.0.0.1:${daemonPort}`);
       const server = createMcpServer(client);
       const transport = new StdioServerTransport();
-      await server.connect(transport);
-
-      // Stay alive until transport closes
-      await new Promise<void>((resolve) => {
-        process.on("SIGINT", () => resolve());
-        process.on("SIGTERM", () => resolve());
-      });
-
-      await server.close();
+      let finish!: () => void;
+      const closed = new Promise<void>((resolve) => { finish = resolve; });
+      server.onclose = finish;
+      process.stdin.once("end", finish);
+      process.once("SIGINT", finish);
+      process.once("SIGTERM", finish);
+      try {
+        // EOF is a normal stdio disconnect, not an unresolved top-level await.
+        await server.connect(transport);
+        if (process.stdin.readableEnded) finish();
+        await closed;
+      } finally {
+        process.stdin.removeListener("end", finish);
+        process.removeListener("SIGINT", finish);
+        process.removeListener("SIGTERM", finish);
+        await server.close();
+      }
     });
 
   return cmd;
