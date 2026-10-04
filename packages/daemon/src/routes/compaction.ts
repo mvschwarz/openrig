@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { shellQuote } from "../adapters/shell-quote.js";
 import type Database from "better-sqlite3";
 import type { ClaudeCompactionEnforcer } from "../domain/claude-compaction-enforcer.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
@@ -132,7 +133,11 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!session) {
       return c.json({ ok: false, error: "Missing required query param: session" }, 400);
     }
-    return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation: enforcer.getPreparationState(session) });
+    const preparation = enforcer.getPreparationState(session);
+    return c.json({ ok: true, session, state: enforcer.getManualCompactionState(session), preparation,
+      ...(preparation?.reason === "occupant_generation_unavailable"
+        ? { guidance: manualReasonMessage(session, preparation.reason) } : {}),
+    });
   });
 
   return router;
@@ -140,6 +145,8 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
 
 function manualReasonMessage(sessionName: string, reason: string): string {
   switch (reason) {
+    case "occupant_generation_unavailable":
+      return `The occupant generation could not be resolved for '${sessionName}'; no preparation or compact was sent. For the confirmed live seat, run rig reconcile-session ${shellQuote(sessionName)} --no-launch, then explicitly retry rig compact ${shellQuote(sessionName)}. Reconciliation does not restart this attempt.`;
     case "preparation_incomplete":
       return `Preparation (restore map and idle wait) did not finish in time for '${sessionName}'; managed compaction is disarmed. Inspect rig compact ${sessionName} --state, retry explicitly, or use --skip-map once.`;
     case "preparation_cancelled":

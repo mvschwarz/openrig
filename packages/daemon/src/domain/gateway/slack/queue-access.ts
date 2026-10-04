@@ -141,12 +141,21 @@ export function makeQueuePorts(
     async listHumanAlerts(filter: AlertFilterOpts): Promise<QueueItem[]> {
       const registry = (opts.loadHumanRegistry ?? (() => loadHumanRegistry()))();
       if (!registry.ok) return [];
-      const rows = queueRepo.list({ activeOnly: true, limit: 1000000 });
-      const projected = rows.flatMap((row) => {
-        const transition = queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId);
+      // Avoid building waiting/recovery views for rows with no unposted owner notification.
+      // Keep list(activeOnly)'s selection, ordering and cap; this remains an O(N) ID scan.
+      const ids = queueRepo.db.prepare(
+        `SELECT qitem_id FROM queue_items
+         WHERE state IN ('pending', 'in-progress', 'blocked')
+         ORDER BY CASE WHEN state IN ('pending', 'in-progress', 'blocked') THEN 0 ELSE 1 END, ts_created DESC
+         LIMIT ?`,
+      ).all(1000000) as Array<{ qitem_id: string }>;
+      const projected = ids.flatMap(({ qitem_id: qitemId }) => {
+        const transition = queueRepo.transitionLog.latestOwnerNotificationForQitem(qitemId);
         if (!transition) return [];
-        const notificationKey = `${row.qitemId}:${transition.transitionId}`;
-        if (queueRepo.transitionLog.hasOwnerNotificationReceipt(row.qitemId, notificationKey)) return [];
+        const notificationKey = `${qitemId}:${transition.transitionId}`;
+        if (queueRepo.transitionLog.hasOwnerNotificationReceipt(qitemId, notificationKey)) return [];
+        const row = queueRepo.getById(qitemId);
+        if (!row) return [];
         const item = project(row, transition, registry.entities);
         return item ? [item] : [];
       });

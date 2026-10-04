@@ -19,6 +19,8 @@ import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
 import { startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
+import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
+import { SettingsStore } from "./user-settings/settings-store.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
 const STARTUP_SUBMIT_CAPTURE_LINES = 200;
@@ -67,7 +69,7 @@ export interface StartupInput {
   continueFreshStartup?: boolean;
   /** Deliberate fresh replacement retains the seat’s durable destination obligations. */
   includeDurableObligations?: boolean;
-  /** Readiness timeout in ms (default 30000). */
+  /** Readiness timeout in ms (defaults to runtime.readiness_timeout_seconds). */
   readinessTimeoutMs?: number;
 }
 
@@ -95,6 +97,7 @@ interface StartupOrchestratorDeps {
   readFile?: (path: string) => string;
   /** Sleep between paste and submit for tmux-driven TUIs. */
   sleep?: (ms: number) => Promise<void>;
+  readinessSettings?: Pick<SettingsStore, "resolveOne">;
 }
 
 /**
@@ -105,7 +108,7 @@ interface StartupOrchestratorDeps {
  * 2. Project resources (filesystem)
  * 3. Deliver pre-launch files (guidance_merge, skill_install → filesystem)
  * 4. Launch harness via adapter.launchHarness()
- * 5. Wait for harness ready (retry with exponential backoff, 30s timeout)
+ * 5. Wait for harness ready (retry with exponential backoff, configurable timeout)
  * 6. For fresh sessions, inject the built-in identity anchor as the first prompt
  *    and deliver remaining post-launch files (send_text → TUI)
  * 7. Execute after_files actions
@@ -125,6 +128,7 @@ export class StartupOrchestrator {
   private sleep: (ms: number) => Promise<void>;
   private appliedLaunchStore: AppliedLaunchObservationStore;
   private sessionTransport: SessionTransport;
+  private readinessSettings: Pick<SettingsStore, "resolveOne">;
 
   constructor(deps: StartupOrchestratorDeps) {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("StartupOrchestrator: sessionRegistry must share the same db handle");
@@ -135,6 +139,7 @@ export class StartupOrchestrator {
     this.tmuxAdapter = deps.tmuxAdapter;
     this.readFile = deps.readFile ?? (() => "");
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.readinessSettings = deps.readinessSettings ?? new SettingsStore();
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
     this.sessionTransport = new SessionTransport({
       db: deps.db,
@@ -341,15 +346,16 @@ export class StartupOrchestrator {
       });
     }
 
-    // 6. Wait for harness readiness (retry with exponential backoff, 30s timeout)
+    // 6. Wait for harness readiness within the configured launch window.
     try {
-      const readiness = await this.waitForReady(input.adapter, input.binding, input.readinessTimeoutMs ?? 30_000);
+      const readinessTimeoutMs = resolveReadinessTimeoutMs(input.readinessTimeoutMs, this.readinessSettings);
+      const readiness = await this.waitForReady(input.adapter, input.binding, readinessTimeoutMs);
       if (!readiness.ready) {
         if (isAttentionRequiredReadinessCode(readiness.code)) {
           errors.push(`Startup requires attention: ${readiness.reason ?? "unknown"}`);
           return this.fail(input, "attention_required", errors, undefined, isFreshLaunch);
         }
-        errors.push(`Readiness timeout after 30s — harness did not become interactive: ${readiness.reason ?? "unknown"}`);
+        errors.push(`Readiness timeout after ${readinessTimeoutMs / 1000}s — harness did not become interactive: ${readiness.reason ?? "unknown"}`);
         return this.fail(input, "failed", errors);
       }
     } catch (err) {
@@ -510,7 +516,7 @@ export class StartupOrchestrator {
 
   /**
    * Wait for harness readiness with exponential backoff.
-   * Backoff: 1s → 2s → 4s → 8s → 16s (capped), total timeout default 30s.
+   * Backoff: 1s → 2s → 4s → 8s → 16s (capped); the caller supplies the deadline.
    */
   private async waitForReady(
     adapter: RuntimeAdapter,

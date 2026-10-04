@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync, lstatSync, readlinkSync, statSync, chmodSync, chownSync, openSync, closeSync, renameSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { readFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs";
+import { writeTextAtomically } from "./atomic-text-write.js";
 import { join, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -110,10 +110,9 @@ export interface RiggedConfig {
       auditLog: boolean;
     };
   };
-  // plugin-primitive Phase 3a slice 3.5 — runtime feature flags. Currently
-  // single-flag for Codex; extracts to its own primitive workspace if/when
-  // 3+ flags accumulate (per DESIGN.md §5.8).
+  // Runtime launch settings and the Codex hooks feature flag.
   runtime: {
+    readinessTimeoutSeconds: number;
     codex: {
       hooksEnabled: boolean;
     };
@@ -277,8 +276,9 @@ const DEFAULTS = {
       auditLog: false,
     },
   },
-  // plugin-primitive Phase 3a slice 3.5 — Codex feature flag default ON.
+  // Runtime readiness keeps the existing 30-second default; Codex hooks stay on.
   runtime: {
+    readinessTimeoutSeconds: 30,
     codex: {
       hooksEnabled: true,
     },
@@ -404,6 +404,7 @@ export const VALID_KEYS = [
   // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
   "runtime.codex.hooks_enabled",
   "runtime.cursor.hooks_enabled",
+  "runtime.readiness_timeout_seconds",
   // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
   // 7 ConfigStore keys (lockstep with daemon SETTINGS_VALID_KEYS).
   "policies.claude_compaction.enabled",
@@ -499,6 +500,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // boundary doctrine (no RIGGED_X legacy on net-new keys).
   "runtime.codex.hooks_enabled": { primary: "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED" },
   "runtime.cursor.hooks_enabled": { primary: "OPENRIG_RUNTIME_CURSOR_HOOKS_ENABLED" },
+  "runtime.readiness_timeout_seconds": { primary: "OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS" },
   // Slice 27 — Claude auto-compaction policy. OPENRIG_X primary only
   // (net-new keys, no legacy).
   "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
@@ -579,6 +581,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
   "runtime.cursor.hooks_enabled": ["runtime", "cursor", "hooksEnabled"],
+  "runtime.readiness_timeout_seconds": ["runtime", "readinessTimeoutSeconds"],
   "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
   "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
   "policies.claude_compaction.pre_compact_instruction": ["policies", "claudeCompaction", "preCompactInstruction"],
@@ -790,6 +793,11 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
       throw new Error("Invalid transcripts.poll_interval_seconds: must be an integer in [1, 3600]");
     }
   },
+  "runtime.readiness_timeout_seconds": (raw, coerced) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1 || coerced > 600) {
+      throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
+    }
+  },
   "ui.timezone": (_raw, value) => {
     try {
       if (typeof value !== "string" || !value || /^[+-]/.test(value)) throw new Error();
@@ -943,56 +951,7 @@ export class ConfigStore {
   // a phantom success (the accept-and-drop / config-set-success-without-persist class).
   /** Publish a complete config without truncating the previous usable file. */
   private writeConfig(content: string): void {
-    let target = this.configPath;
-    // Follow config-file links just as writeFileSync did; rename the target,
-    // never the link. A dangling final target is still created normally.
-    for (let depth = 0; ; depth++) {
-      const entry = lstatSync(target, { throwIfNoEntry: false });
-      if (!entry?.isSymbolicLink()) break;
-      if (depth >= 40) throw Object.assign(new Error("Too many config symlinks"), { code: "ELOOP" });
-      target = resolve(dirname(target), readlinkSync(target));
-    }
-    const existing = statSync(target, { throwIfNoEntry: false });
-    // Match direct writes: a writable directory must not bypass a read-only
-    // target. Opening without truncation also checks native ACL permissions.
-    if (existing) closeSync(openSync(target, "r+"));
-    const temporary = `${target}.tmp-${randomUUID()}`;
-    let owned = false;
-    let canFallBack = true;
-    try {
-      // Atomic replacement requires directory create/rename permission. Keep
-      // staged bytes private until the original ownership and mode are restored.
-      const fd = openSync(temporary, "wx", 0o600);
-      owned = true;
-      // A failed data write must never retry against the original file.
-      canFallBack = false;
-      try { writeFileSync(fd, content, "utf-8"); } finally { closeSync(fd); }
-      canFallBack = true;
-      if (existing && process.platform !== "win32") {
-        const staged = statSync(temporary);
-        if (staged.uid !== existing.uid || staged.gid !== existing.gid) {
-          try { chownSync(temporary, existing.uid, existing.gid); }
-          catch (error) {
-            throw Object.assign(new Error(`Cannot preserve config ownership at ${target}: ${(error as Error).message}`),
-              { code: (error as NodeJS.ErrnoException).code });
-          }
-        }
-      }
-      // chown may clear permission bits, so apply the final mode afterward.
-      chmodSync(temporary, existing ? existing.mode & 0o777 : 0o666 & ~process.umask());
-      renameSync(temporary, target);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (canFallBack && (code === "EACCES" || code === "EPERM" || code === "EBUSY")) {
-        // Preserve setups that permit writing the file but not replacing it,
-        // such as an unwritable parent or a single-file bind mount.
-        writeFileSync(target, content, "utf-8");
-        return;
-      }
-      throw error;
-    } finally {
-      if (owned) try { unlinkSync(temporary); } catch { /* Renamed or already removed. */ }
-    }
+    writeTextAtomically(this.configPath, content, "config");
   }
 
   private verifyPersisted(keyPath: string[], expected: unknown): void {
@@ -1105,6 +1064,7 @@ export class ConfigStore {
         },
       },
       runtime: {
+        readinessTimeoutSeconds: v("runtime.readiness_timeout_seconds") as number,
         codex: {
           hooksEnabled: v("runtime.codex.hooks_enabled") as boolean,
         },

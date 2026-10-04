@@ -82,6 +82,8 @@ Keys:
   feed.subscriptions.*   action_required, approvals, shipped, progress, audit_log
   runtime.codex.*        hooks_enabled
   runtime.cursor.*       hooks_enabled
+  runtime.readiness_timeout_seconds
+                         harness readiness window for new seats and handover successors (1–600; default 30)
   workflow.*             exception_routing (orchestrator | human_only — the maturity-dial host default)
   policies.claude_compaction.*
                          enabled, threshold_percent, compact_instruction,

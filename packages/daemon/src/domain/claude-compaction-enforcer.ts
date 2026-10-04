@@ -118,7 +118,8 @@ export type EnforcerSkipReason =
   | "stale_generation"
   | "preparation_pending"
   | "preparation_incomplete"
-  | "preparation_stopped";
+  | "preparation_stopped"
+  | "occupant_generation_unavailable";
 
 function buildCompactCommand(compactInstruction: string): string {
   const normalized = compactInstruction.trim().replace(/\s+/g, " ");
@@ -576,7 +577,10 @@ export class ClaudeCompactionEnforcer {
     let attempt = this.pendingPreCompactPrep.get(input.sessionName);
     if (attempt?.mode === "manual") return { triggered: false, reason: "preparation_pending" };
     if (attempt?.status === "stopped") return { triggered: false, reason: "preparation_stopped" };
-    if (!attempt) attempt = this.beginPreparation(input, "automatic");
+    if (!attempt) {
+      attempt = this.beginPreparation(input, "automatic");
+      if (attempt.status === "stopped") return { triggered: false, reason: "occupant_generation_unavailable" };
+    }
     if (attempt.status === "sending") {
       await this.deliverPreparation(input, attempt);
       const current = this.pendingPreCompactPrep.get(input.sessionName);
@@ -627,7 +631,8 @@ export class ClaudeCompactionEnforcer {
     }
     if (input.runtime !== "claude-code") return this.recordManualFailure(input.sessionName, "runtime_filter");
     if (input.usedPercentage == null) return this.recordManualFailure(input.sessionName, "no_usage_data");
-    const attempt = this.beginPreparation(input, "manual");
+    const attempt = this.beginPreparation(input, "manual", opts.skipMap === true);
+    if (attempt.status === "stopped") return this.recordManualFailure(input.sessionName, "occupant_generation_unavailable");
     const failed = (reason: string): ManualCompactionOutcome => {
       // A cancelled request may settle after an explicit retry. Its receipt must
       // not stop or overwrite the successor attempt's state.
@@ -666,7 +671,7 @@ export class ClaudeCompactionEnforcer {
     return { triggered: true, stage: "compact-sent" };
   }
 
-  private beginPreparation(input: EnforcerInput, mode: "automatic" | "manual"): PreparationAttempt {
+  private beginPreparation(input: EnforcerInput, mode: "automatic" | "manual", skipMap = false): PreparationAttempt {
     const attemptId = randomUUID();
     const occupantGeneration = this.resolveOccupantGeneration?.(input.sessionName)
       ?? this.sessionTransport.deliveryGuard?.maybeTarget(input.sessionName)?.occupant ?? null;
@@ -679,6 +684,9 @@ export class ClaudeCompactionEnforcer {
       controller: new AbortController(),
     };
     this.pendingPreCompactPrep.set(input.sessionName, attempt);
+    // A map cannot satisfy an unknown occupant. Keep the failed attempt visible and
+    // disarmed; explicit skip-map still bypasses only the artifact prerequisite.
+    if (occupantGeneration === null && !skipMap) this.stopPreparation(input.sessionName, "occupant_generation_unavailable");
     return attempt;
   }
 

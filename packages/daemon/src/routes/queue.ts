@@ -825,6 +825,10 @@ export function queueRoutes(): Hono {
     const recentLimit = c.req.query("recentLimit")
       ? Number.parseInt(c.req.query("recentLimit")!, 10)
       : undefined;
+    // whoami clamps any number to 1..200, but NaN passes the clamp and reaches SQL.
+    if (Number.isNaN(recentLimit)) {
+      return c.json({ error: "recentLimit must be a number" }, 400);
+    }
     const repo = getRepo(c);
     const position = repo.whoami(session, { recentLimit });
     // OPR.0.5.8.14: the derived work node rides the verb that already answers "what does

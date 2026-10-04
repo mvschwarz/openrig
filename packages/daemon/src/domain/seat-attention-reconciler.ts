@@ -219,6 +219,8 @@ interface ClearAttentionDeps {
   >;
 }
 
+const IDENTITY_RECOVERY_GUIDANCE = "--reason cannot bypass this attention class. If the recorded native token needs correction and you know the actual token, use rig seat set-resume-token <session> --token-stdin --reason <explanation>, then rerun rig seat clear-attention <session> to check the live evidence. Setting a token or stopping/relaunching the seat alone does not prove continuity.";
+
 const POSITIVE_STATES = new Set(["running", "idle"]);
 type DerivedAttentionOutcome = {
   status: "failed" | "attention_required";
@@ -265,7 +267,7 @@ export class SeatAttentionReconciler {
         return {
           ok: false,
           code: "not_demonstrably_responsive",
-          detail: "Uncleared attention class restore_outcome: strict restore reconciler is unavailable",
+          detail: `Uncleared attention class restore_outcome (full restore): strict restore reconciler is unavailable. ${IDENTITY_RECOVERY_GUIDANCE}`,
         };
       }
       const restored = await reconcile(session.rigId, session.nodeId);
@@ -273,7 +275,7 @@ export class SeatAttentionReconciler {
         return {
           ok: false,
           code: "not_demonstrably_responsive",
-          detail: `Uncleared attention class restore_outcome: ${restored.code}: ${restored.detail}`,
+          detail: `Uncleared attention class restore_outcome (full restore): ${restored.code}: ${restored.detail}. ${IDENTITY_RECOVERY_GUIDANCE}`,
         };
       }
 
@@ -320,7 +322,7 @@ export class SeatAttentionReconciler {
         return {
           ok: false,
           code: "not_demonstrably_responsive",
-          detail: "Uncleared attention class pane_identity: tmux identity verifier is unavailable",
+          detail: `Uncleared attention class pane_identity: tmux identity verifier is unavailable. ${IDENTITY_RECOVERY_GUIDANCE}`,
         };
       }
       const identity = await rebindAndVerifyPaneIdentity({
@@ -337,7 +339,7 @@ export class SeatAttentionReconciler {
         return {
           ok: false,
           code: "not_demonstrably_responsive",
-          detail: `Uncleared attention class pane_identity: ${identity.detail}`,
+          detail: `Uncleared attention class pane_identity: ${identity.detail}. ${IDENTITY_RECOVERY_GUIDANCE}`,
         };
       }
       return this.performEvidenceClear(
@@ -453,9 +455,12 @@ export class SeatAttentionReconciler {
     return {
       ok: false,
       code: "not_demonstrably_responsive",
-      detail: activity
+      detail: `Uncleared attention class ${[
+        ...(startupClassActive ? ["startup_status"] : []),
+        ...(derivedOutcome ? ["restore_outcome (subset restore)"] : []),
+      ].join(" and ")}: ${activity
         ? `Latest activity: state='${activity.state}', stale=${activity.stale ?? false}, reason='${activity.reason}' -- not positive evidence; send-verify also not confirmed`
-        : "No recent agent activity found; send-verify also not confirmed",
+        : "No recent agent activity found; send-verify also not confirmed"}. --reason can acknowledge this attention; acknowledgment does not prove resumed continuity.`,
     };
   }
 

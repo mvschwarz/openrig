@@ -466,6 +466,13 @@ the current proof; resume/adoption also preserves existing proof history.
 The effective selection is recorded on `node.startup_pending`; actions are
 persisted in startup context for restore and fresh relaunch.
 
+The harness readiness window defaults to 30 seconds. On a loaded machine, set
+`rig config set runtime.readiness_timeout_seconds 60` to give new seats and
+handover successors longer to become interactive. The setting accepts 1–600
+seconds, applies to the next launch without a daemon restart, and can also be
+set with `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`. It does not change the
+time spent by the runtime adapter before readiness polling starts.
+
 ---
 
 ## Services Block

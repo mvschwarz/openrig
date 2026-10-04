@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import fs from "node:fs";
+import { writeTextAtomically } from "../atomic-text-write.js";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -14,7 +14,7 @@ export function exportCommand(depsOverride?: ExportDeps): Command {
   const getDeps = (): ExportDeps => depsOverride ?? {
     lifecycleDeps: realDeps(),
     clientFactory: (url: string) => new DaemonClient(url),
-    writeFile: (p, content) => fs.writeFileSync(p, content, "utf-8"),
+    writeFile: (p, content) => writeTextAtomically(p, content, "export"),
   };
 
   cmd

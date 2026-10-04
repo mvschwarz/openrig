@@ -366,21 +366,26 @@ function unclaimedWakeMode(row: Pick<QueueItem, "state" | "claimedAt" | "handedO
   return mode;
 }
 
+/** A producer-retired prompt alert no longer owns wake continuation. Keep this
+ * exception identical for the consumer, executing ladder and waiting readback;
+ * other terminal dispositions (including manual closure) retain ownership. */
+function findWakeRecovery(db: Database.Database, qitemId: string) {
+  const recovery = findQueueRecovery(db, qitemId);
+  if (!recovery || ["pending", "in-progress", "blocked"].includes(recovery.state)) return recovery;
+  const endedPrompt = Boolean(db.prepare(`SELECT 1 FROM queue_items q WHERE q.qitem_id = ?
+        AND json_valid(q.tags) AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
+        AND EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = q.qitem_id
+          AND t.actor_session = q.source_session AND t.transition_note = ?)`)
+        .get(recovery.qitemId, PROMPT_ALERT_TAG, PROMPT_RETIRED_NOTE));
+  return endedPrompt ? null : recovery;
+}
+
 /** Another consumer may diagnose the same parked seat, but the existing
  * delivery ladder/disposition already owns these obligations' next wake.
  * Diagnosis remains visible; only duplicate delivery is suppressed. */
 export function queueRecoveryOwnsWake(db: Database.Database, row: QueueItem | null): boolean {
   if (!row || !["pending", "in-progress", "blocked"].includes(row.state)) return false;
-  const recovery = findQueueRecovery(db, row.qitemId);
-  if (recovery) {
-    const endedPrompt = !["pending", "in-progress", "blocked"].includes(recovery.state)
-      && Boolean(db.prepare(`SELECT 1 FROM queue_items q WHERE q.qitem_id = ?
-        AND json_valid(q.tags) AND EXISTS (SELECT 1 FROM json_each(q.tags) WHERE value = ?)
-        AND EXISTS (SELECT 1 FROM queue_transitions t WHERE t.qitem_id = q.qitem_id
-          AND t.actor_session = q.source_session AND t.transition_note = ?)`)
-        .get(recovery.qitemId, PROMPT_ALERT_TAG, PROMPT_RETIRED_NOTE));
-    if (!endedPrompt) return true;
-  }
+  if (findWakeRecovery(db, row.qitemId)) return true;
   const mode = unclaimedWakeMode(row);
   if (!mode) return false;
   if (row.state === "pending" && !row.claimedAt && row.handedOffFrom) {
@@ -445,7 +450,7 @@ export function readWakeLadderBackstop(db: Database.Database, qitemId: string): 
     last_nudge_attempt AS lastNudgeAttempt, ts_created AS tsCreated FROM queue_items WHERE qitem_id = ?`)
     .get(qitemId) as Pick<QueueItem, "qitemId" | "state" | "sourceSession" | "destinationSession" | "claimedAt" | "handedOffFrom" | "lastHeartbeat" | "lastNudgeResult" | "lastNudgeAttempt" | "tsCreated"> | undefined;
   if (!row || !["pending", "in-progress"].includes(row.state)) return null;
-  const recovery = findQueueRecovery(db, qitemId);
+  const recovery = findWakeRecovery(db, qitemId);
   const disposition = recovery ? db.prepare("SELECT destination_session, tags FROM queue_items WHERE qitem_id = ?")
     .get(recovery.qitemId) as { destination_session: string; tags: string | null } : null;
   const recoveryBackstop = (): WaitingView["nextBackstop"] => ({
@@ -715,7 +720,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       }
       const mode = unclaimedWakeMode(row);
       if (!mode) continue;
-      const disposition = findQueueRecovery(deps.db, row.qitemId);
+      const disposition = findWakeRecovery(deps.db, row.qitemId);
       if (disposition && !["pending", "in-progress", "blocked"].includes(disposition.state)) continue;
       const view = readLadder(deps.db, row.qitemId);
       if (view.exhausted) continue; // finite: an exhausted ladder never re-fires
@@ -737,7 +742,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         lastActivity === null || Number.isNaN(lastActivity) || now.getTime() - lastActivity >= intervalS * 1000;
       const suspended = due ? suspensionReason(deps.db, row.destinationSession, graceS, now) : null;
 
-      const recovery = findQueueRecovery(deps.db, row.qitemId);
+      const recovery = disposition;
       const recoveryRow = recovery ? deps.queueRepo.getById(recovery.qitemId) : null;
       // The open prompt recovery owns continuation before the retry cap too.
       // Do not retry the blocked original, duplicate its aggregate, or exhaust
