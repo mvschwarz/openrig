@@ -51,6 +51,15 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     });
   }
 
+  it.each([true, false])("default-path continue delegates the existing occupant operation (ok=%s)", async ok => {
+    const result = { ok, code: "fixture", message: "Existing continuation result", warnings: ["Submission unverified"] };
+    const spy = vi.spyOn(SeatLifecycleService.prototype, "continueFreshStartup").mockResolvedValue(result as never);
+    const res = await post("continue", "dev@fixture");
+    expect(res.status).toBe(ok ? 200 : 409);
+    expect(await res.json()).toEqual(result);
+    expect(spy).toHaveBeenCalledExactlyOnceWith("dev@fixture");
+  });
+
   it("set-model 200: persists, echoes from/to/changed", async () => {
     const { sessionName } = seedSeat();
     const res = await post("set-model", sessionName, { model: "claude-fable-5", reason: "alias migration", operator: "op@rig" });

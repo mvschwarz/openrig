@@ -31,6 +31,7 @@ export interface SocketInboundDeps {
   /** Dead-letter retry cadence WHILE the socket stays connected (default 5min). */
   retryIntervalMs?: number;
   receipts?: InboundReceiptStore;
+  recovery?: { run(): Promise<void>; stop(): void };
   log?: (msg: string) => void;
 }
 
@@ -62,6 +63,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
   let stopped = false;
   let liveWs: WsLike | undefined;
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryTimer: ReturnType<typeof setInterval> | undefined;
   let finish: () => void = () => {};
   const status: SocketInboundStatus = { generation: 0, reconnects: 0, state: "disconnected" };
   const stamp = () => new Date().toISOString();
@@ -75,6 +77,8 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
   };
 
   const retryDeadLetters = (): void => {
+    if (stopped) return;
+    void deps.recovery?.run().catch(() => log("channel recovery failed; checkpoint retained"));
     void router.retryDeadLetters().catch((error) => {
       log(`dead-letter retry failed: ${(error as Error).message}`);
     });
@@ -103,8 +107,8 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
       }
       const ws = wsFactory(open.url);
       liveWs = ws;
-      let retryTimer: ReturnType<typeof setInterval> | undefined;
       ws.onopen = () => {
+        if (stopped) return;
         backoff = 1000;
         log("socket connected");
         status.state = "connected";
@@ -119,6 +123,7 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
         }
       };
       ws.onmessage = (m) => {
+        if (stopped) return;
         let env: SocketEnvelope;
         try {
           env = JSON.parse(String(m.data)) as SocketEnvelope;
@@ -192,6 +197,8 @@ export function startSocketInbound(appToken: string, router: InboundRouter, deps
     done,
     stop: () => {
       stopped = true;
+      deps.recovery?.stop();
+      if (retryTimer) clearInterval(retryTimer);
       status.state = "stopped";
       if (pendingTimer) clearTimeout(pendingTimer);
       try { liveWs?.close(); } catch { /* best-effort */ }
