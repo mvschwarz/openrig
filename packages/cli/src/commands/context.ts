@@ -67,6 +67,18 @@ interface ContextPackEntryWire {
   }>;
 }
 
+/** Exact retry commands for a failed project selection, one per candidate id. */
+function projectRetryCommands(
+  code: string,
+  candidates: string[] | undefined,
+  opts: { mission?: string; slice?: string },
+): string[] | undefined {
+  if (!candidates || (code !== "project_required" && code !== "project_not_found")) return undefined;
+  const word = (value: string) => /^[A-Za-z0-9._\/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+  const narrowing = `${opts.mission !== undefined ? ` --mission ${word(opts.mission)}` : ""}${opts.slice !== undefined ? ` --slice ${word(opts.slice)}` : ""}`;
+  return candidates.map((id) => `rig context work-install --project ${word(id)}${narrowing}`);
+}
+
 function selectedIds(ids: string[], none: string): string {
   return ids.length > 0 ? ids.join(", ") : none;
 }
@@ -279,8 +291,17 @@ Examples:
         ...(opts.slice !== undefined ? { slice: opts.slice } : {}),
       });
       if ("error" in result) {
-        if (opts.json) console.log(JSON.stringify({ ok: false, ...result }));
-        else console.error(`${result.error.code}: ${result.error.message}`);
+        const commands = projectRetryCommands(result.error.code, result.error.candidates, opts);
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, error: { ...result.error, ...(commands ? { commands } : {}) } }));
+        } else {
+          console.error(`${result.error.code}: ${result.error.message}`);
+          const choices = commands ?? result.error.candidates ?? [];
+          if (choices.length > 0) {
+            console.error(commands ? "Run one of:" : "Candidates:");
+            for (const choice of choices) console.error(`  ${choice}`);
+          }
+        }
         process.exitCode = 1;
         return;
       }

@@ -558,4 +558,58 @@ projects:
     expect(body).toMatchObject({ ok: false, error: { code: "project_identity_ambiguous" } });
     expect(body.position?.projectRoot).toBeUndefined();
   });
+
+  it("lists each project candidate with its exact command in text and JSON when selection is required", async () => {
+    const text = await captureLogs(async () => {
+      await makeCommand().parseAsync(["node", "rig", "context", "work-install", "--mission", "alpha-active"]);
+    });
+    expect(text.exitCode).toBe(1);
+    expect(text.logs).toEqual([]);
+    expect(text.errLogs).toEqual([
+      "project_required: multiple projects are declared; select one with --project",
+      "Run one of:",
+      "  rig context work-install --project alpha --mission alpha-active",
+      "  rig context work-install --project beta --mission alpha-active",
+    ]);
+
+    const json = await captureLogs(async () => {
+      await makeCommand().parseAsync(["node", "rig", "context", "work-install", "--json"]);
+    });
+    expect(json.exitCode).toBe(1);
+    expect(JSON.parse(json.logs.join(""))).toEqual({
+      ok: false,
+      error: {
+        code: "project_required",
+        message: "multiple projects are declared; select one with --project",
+        candidates: ["alpha", "beta"],
+        commands: ["rig context work-install --project alpha", "rig context work-install --project beta"],
+      },
+    });
+  });
+
+  it("lists exact commands for an undeclared project and plain candidates for an unknown slice", async () => {
+    const project = await captureLogs(async () => {
+      await makeCommand().parseAsync(["node", "rig", "context", "work-install", "--project", "gamma"]);
+    });
+    expect(project.exitCode).toBe(1);
+    expect(project.errLogs).toEqual([
+      `project_not_found: project 'gamma' is not declared in ${join(catalogRoot, "workspace.yaml")}`,
+      "Run one of:",
+      "  rig context work-install --project alpha",
+      "  rig context work-install --project beta",
+    ]);
+
+    const slice = await captureLogs(async () => {
+      await makeCommand().parseAsync([
+        "node", "rig", "context", "work-install",
+        "--project", "alpha", "--mission", "alpha-active", "--slice", "OPR.0.5.8.99",
+      ]);
+    });
+    expect(slice.exitCode).toBe(1);
+    expect(slice.errLogs).toEqual([
+      "slice_not_found: slice 'OPR.0.5.8.99' is not a child of the selected mission",
+      "Candidates:",
+      "  01-live-work",
+    ]);
+  });
 });
