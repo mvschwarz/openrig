@@ -113,7 +113,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
 }
 
 function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewState {
-  const readingNotice = state.notice?.includes("\n") && ["layout", "content-scroll", "content-select", "focus", "copy-mode"].includes(action.type);
+  const readingNotice = state.notice?.includes("\n") && (["layout", "content-scroll", "content-select", "focus", "copy-mode"].includes(action.type) || (action.type === "select" && action.origin === "refresh"));
   const next: ViewState = { ...state, lastError: null, notice: action.type === "notice" || action.type === "act" || readingNotice ? state.notice : null };
   switch (action.type) {
     case "terminal-result":
