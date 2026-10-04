@@ -70,6 +70,25 @@ describe("registerBundleProject", () => {
     expect(fs.readdirSync(workspace).filter((name) => name.startsWith("workspace.yaml"))).toEqual(["workspace.yaml"]);
   });
 
+  it("with no catalog, the workspace's entry keeps the id its own project.yaml declares", () => {
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(path.join(workspace, "project.yaml"), "schema: openrig.project/v0alpha1\nid: myapp\n");
+
+    expect(register().status).toBe("registered");
+    expect(entries()[0]).toEqual({ id: "myapp", root: "." });
+  });
+
+  it("with no catalog, a workspace project.yaml already using the bundle's id is a conflict and writes nothing", () => {
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(path.join(workspace, "project.yaml"), "schema: openrig.project/v0alpha1\nid: openrig\n");
+
+    const result = register();
+
+    expect(result.status).toBe("conflict");
+    expect(result.detail).toMatch(/already uses the id 'openrig'/);
+    expect(fs.existsSync(catalogPath)).toBe(false);
+  });
+
   it("keeps the existing catalog's permission bits", () => {
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(catalogPath, USER_CATALOG);

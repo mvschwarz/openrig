@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import { Document, isMap, isScalar, isSeq, parse as parseYaml, parseDocument, type YAMLMap, type YAMLSeq } from "yaml";
+import { projectManifestId } from "../bundle-carried-project.js";
 
 /**
  * Registers a bundle's project in the workspace catalog and records which rig
@@ -192,8 +193,21 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
     // A workspace with no catalog resolves every rig to the workspace root. Keep that for the user's
     // own rigs: a default entry for the workspace root stays the one unclaimed entry beside the
     // bundle's project. Its root is relative to the catalog, which need not sit in the workspace root.
+    // Its id is the one the workspace's own project.yaml declares, which work-install already uses
+    // for an uncatalogued workspace; "default" when it declares none.
     const defaultRoot = nodePath.relative(catalogDir, input.workspaceRoot).split(nodePath.sep).join("/") || ".";
-    doc = parseDocument(`${CATALOG_HEADER}projects:\n  - id: default\n    root: ${scalar(defaultRoot)}\n`);
+    let defaultId = "default";
+    const workspaceManifest = nodePath.join(input.workspaceRoot, "project.yaml");
+    if (fs.existsSync(workspaceManifest)) {
+      try { defaultId = projectManifestId(parseYaml(fs.readFileSync(workspaceManifest, "utf-8"))) ?? "default"; } catch { /* work-install ignores an unreadable project.yaml too */ }
+    }
+    if (defaultId === input.projectId) {
+      return {
+        ...base, status: "conflict",
+        detail: `this workspace's own project.yaml (${workspaceManifest}) already uses the id '${input.projectId}'; no catalog was written. Give one of the two projects another id, then install the bundle again`,
+      };
+    }
+    doc = parseDocument(`${CATALOG_HEADER}projects:\n  - id: ${scalar(defaultId)}\n    root: ${scalar(defaultRoot)}\n`);
   }
 
   let projects = doc.get("projects");
