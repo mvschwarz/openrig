@@ -527,11 +527,12 @@ or stopping and relaunching the seat, does not prove continuity.
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--mode <mode>", "floor, full_bypass, inherit, or a Claude mode supported by the bound managed launch context")
     .requiredOption("--reason <text>", "Reason for the audited future-launch selection")
+    .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")
     .description("Select native permissions for future managed launches; no relaunch or work-posture change")
     .addHelpText("after", "\nUse inherit to clear this seat's explicit selection. Current native processes, history, rules and hooks remain unchanged. A later lifecycle action needs its own authorization.")
-    .action(async (seat: string, opts: { mode: string; reason: string; json?: boolean }) => {
-      await runLifecycleVerb("set-permissions", seat, { mode: opts.mode, reason: opts.reason }, opts, data => {
+    .action(async (seat: string, opts: { mode: string; reason: string; operator?: string; json?: boolean }) => {
+      await runLifecycleVerb("set-permissions", seat, { mode: opts.mode, reason: opts.reason, operator: opts.operator }, opts, data => {
         const selection = data["to"] as { mode: string } | null;
         console.log(`Permission mode: ${selection?.mode ?? "inherit"}${data["changed"] === false ? " (unchanged)" : " (audited)"}`);
         console.log(String(data["effect"]));

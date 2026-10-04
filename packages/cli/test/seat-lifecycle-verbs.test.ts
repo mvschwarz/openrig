@@ -73,6 +73,21 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("rig seat set-permissions", () => {
+  it("posts the explicit operator with the existing mode and reason", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, changed: true, to: { mode: "floor" }, effect: "Future managed launches only." } }, calls);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-permissions", "dev-impl@seat-rig",
+        "--mode", "floor", "--reason", "future launch choice", "--operator", "human@example.test"]);
+    });
+    expect(calls).toEqual([{ path: "/api/seat/set-permissions/dev-impl%40seat-rig",
+      body: { mode: "floor", reason: "future launch choice", operator: "human@example.test" } }]);
+    expect(logs.join("\n")).toContain("Permission mode: floor");
+    expect(exitCode).toBeUndefined();
+  });
+});
+
 describe("rig seat set-model", () => {
   it("posts model/reason/operator to /api/seat/set-model/<seat> and prints the from->to summary", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];
