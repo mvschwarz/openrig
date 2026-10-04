@@ -81,12 +81,12 @@ describe("non-interruptive launch choice", () => {
       ...(mode === "fork" ? { forkSource: { kind: "native_id" as const, value: "old-id" } } : {}) };
     await adapter.launchHarness(binding, opts);
     const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
-    expect(command).toContain('--settings \'{"skipDangerousModePermissionPrompt":true}\'');
+    expect(command).toContain("'--settings' '{\"skipDangerousModePermissionPrompt\":true}'");
     expect(command).toContain("--dangerously-skip-permissions");
     expect(fsOps.writeFile).not.toHaveBeenCalled();
     vi.mocked(tmux.sendText).mockClear();
     await adapter.launchHarness({ ...binding, nonInterruptive: false }, opts);
-    expect(vi.mocked(tmux.sendText).mock.calls[0]![1]).toBe(command.replace(' --settings \'{"skipDangerousModePermissionPrompt":true}\'', ""));
+    expect(vi.mocked(tmux.sendText).mock.calls[0]![1]).toBe(command.replace(" '--settings' '{\"skipDangerousModePermissionPrompt\":true}'", ""));
   });
 
   it.each(["fresh", "resume", "fork"] as const)("Codex %s uses the same notices without changing model, sandbox or profile", async mode => {
@@ -103,7 +103,7 @@ describe("non-interruptive launch choice", () => {
     expect(fsOps.writeFile).not.toHaveBeenCalled();
     vi.mocked(tmux.sendText).mockClear();
     await adapter.launchHarness({ ...binding, nonInterruptive: false }, opts);
-    expect(vi.mocked(tmux.sendText).mock.calls[0]![1]).toBe(command.replace(/ -c (?:'[^']*'|notice\.\S+)/g, ""));
+    expect(vi.mocked(tmux.sendText).mock.calls[0]![1]).toBe(command.replace(/ '-c' '[^']*'/g, ""));
   });
 
   it("legacy restore adapters also receive the launch-only override", async () => {
