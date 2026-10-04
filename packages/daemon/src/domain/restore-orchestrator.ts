@@ -984,6 +984,30 @@ export class RestoreOrchestrator {
     // Legacy nodes: resume via old claude-resume/codex-resume helpers
     const isPodAware = !!node.podId;
 
+    const startupCtx = data.nodeStartupContext?.[node.id] ?? null;
+    // Restore only the saved activity selection before either native resume path.
+    // This also heals settings stripped by older restores. The entry is a marker:
+    // the adapter uses its current relay/manifest, not the old install's path.
+    // No current profile resolution, guidance, skills or startup replay belongs here.
+    const activityAdapter = opts?.adapters?.["claude-code"];
+    if (resumeRequested && resumeToken && launchResult && startupCtx?.runtime === "claude-code" && activityAdapter) {
+      const entries = startupCtx.projectionEntries.filter(e =>
+        e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks");
+      if (entries.length > 0) try {
+        const result = await activityAdapter.project({
+          runtime: "claude-code", cwd: node.cwd ?? ".",
+          entries: entries.map(e => ({ ...e, category: "runtime_resource" as const, classification: "safe_projection" as const,
+            mergeStrategy: e.mergeStrategy as import("./projection-planner.js").ProjectionEntry["mergeStrategy"] })),
+          startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+        }, { ...launchResult.binding, cwd: node.cwd ?? "." });
+        warnings?.push(...(result.warnings ?? []));
+        for (const failure of result.failed) warnings?.push(`Restore activity hooks: ${failure.error}`);
+      } catch (error) {
+        // Activity delivery remains best-effort, as on an ordinary fresh launch.
+        warnings?.push(`Restore activity hooks: ${(error as Error).message}`);
+      }
+    }
+
     if (resumeRequested && !isPodAware) {
       // Legacy resume path
       if (!resumeToken) {
@@ -1066,14 +1090,14 @@ export class RestoreOrchestrator {
     // returns to an EXISTING history: replaying startup/onboarding content
     // into it is the ghost-prompt source (the incident's live specimen:
     // managed CLAUDE.md blocks rewritten mid-"resume"). A resumed history
-    // replays NOTHING — the launch leg survives untouched (the D2
+    // replays no startup content — the saved activity resource was reconciled
+    // above before native resume. The launch leg survives untouched (the D2
     // discriminator proved an empty runtime-correct plan resumes fine).
     // There is deliberately NO replay opt-in surface here: D6b restores the
     // explicit+versioned+durable+idempotent contract in the D4 operation-id
     // phase, where its durability primitives live. Deliberate fresh-primed
     // launches are new histories and keep their replay.
     const replayContained = resumeRequested && !!resumeToken;
-    const startupCtx = data.nodeStartupContext?.[node.id] ?? null;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = startupRuntime ? opts?.adapters?.[startupRuntime] : undefined;
 

@@ -63,7 +63,7 @@ export interface StartupInput {
   skipHarnessLaunch?: boolean;
   /** Allow runtime adapter retry_fresh fallback when native resume data is stale. */
   allowFreshFallback?: boolean;
-  /** Exact resume must not overwrite the authored fresh-start context with its empty replay plan. */
+  /** Exact resume preserves saved context; its empty Claude plan must not disable activity hooks. */
   preserveStartupContext?: boolean;
   /** Continue the same fresh occupant after a prerequisite, without another harness launch. */
   continueFreshStartup?: boolean;
@@ -199,9 +199,12 @@ export class StartupOrchestrator {
     }
     this.eventBus.emit({ type: "node.startup_pending", rigId: input.rigId, nodeId: input.nodeId, startupProof });
 
-    // 2. Project resources
+    // 2. Project resources. A contained Claude resume has an intentionally empty
+    // replay plan, not a newly selected profile with activity hooks removed.
+    // RestoreOrchestrator already reconciled the saved activity selection before
+    // native resume. Fresh launches still project empty plans to support removal.
     let projectionResult: ProjectionResult;
-    try {
+    if (!(input.preserveStartupContext && input.adapter.runtime === "claude-code")) try {
       projectionResult = await input.adapter.project(input.plan, input.binding);
       warnings.push(...(projectionResult.warnings ?? []));
       if (projectionResult.failed.length > 0) {
