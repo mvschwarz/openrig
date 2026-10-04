@@ -89,7 +89,10 @@ you should know which pillar you're operating in:
 OpenRig manages topology and exposes public context through `rig context`.
 Project-authored sources supply project-specific knowledge; transcripts retain
 recorded work. These sources already coexist. Discover the configured library
-and selected task context rather than assuming a particular private corpus.
+and selected task context rather than assuming a particular private corpus:
+`rig context list` shows the configured packs, and `rig context work-install`
+lists what the current project declares (intent, context files, skills), so you
+read only the pieces a task needs.
 
 ---
 
