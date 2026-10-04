@@ -9,6 +9,19 @@ import type { RigModeStore } from "./rig-mode-store.js";
 import { missionModeQualifier, type OperatorContextReadContext, type OperatorContextScope } from "./rig-mode-types.js";
 import { validateModeName, validateRecord } from "./rig-mode-validator.js";
 import { selectCatalogProject } from "../workspace/project-catalog.js";
+import type { SettingsStore } from "../user-settings/settings-store.js";
+
+/** Production wiring for the catalogPath callback: an explicitly configured
+ *  workspace.catalog_path (env or config file). When it's only the derived
+ *  default, return undefined so the service keeps its own default,
+ *  <real workspace>/workspace.yaml: a relative project root such as ../gamma then
+ *  resolves beside the real workspace folder even when workspace.root is a symlink. */
+export function configuredCatalogPath(settings: Pick<SettingsStore, "resolveOne">): () => string | undefined {
+  return () => {
+    const setting = settings.resolveOne("workspace.catalog_path");
+    return setting.source !== "default" && typeof setting.value === "string" && setting.value ? setting.value : undefined;
+  };
+}
 
 export interface OperatingContext extends OperatorContextReadContext {
   phase: { value: string | null; source: string | null };

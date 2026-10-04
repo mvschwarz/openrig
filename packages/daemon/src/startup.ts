@@ -150,7 +150,7 @@ import nodePath from "node:path";
 // status + error_message columns to workflow_specs so the scanner
 // can record diagnostic rows. SC-29 #10 declared verbatim in commit body.
 import { RigModeStore } from "./domain/rig-mode/rig-mode-store.js";
-import { OperatingPostureService } from "./domain/rig-mode/operating-posture.js";
+import { OperatingPostureService, configuredCatalogPath } from "./domain/rig-mode/operating-posture.js";
 import { MissionControlActionLog } from "./domain/mission-control/mission-control-action-log.js";
 import { MissionControlWriteContract } from "./domain/mission-control/mission-control-write-contract.js";
 import { MissionControlReadLayer } from "./domain/mission-control/mission-control-read-layer.js";
@@ -1074,7 +1074,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const rigModeStore = new RigModeStore(db);
   const operatingPosture = new OperatingPostureService(db, rigModeStore,
     () => healthSettingsStore.resolveOne("workspace.root").value as string,
-    () => healthSettingsStore.resolveOne("workspace.catalog_path").value as string);
+    configuredCatalogPath(healthSettingsStore));
   const passiveCeremony = new PassiveCeremonySource(healthSettingsStore.resolveOne("workspace.root").value as string, queueRepoInstance, healthPolicy, undefined, healthCheckpoints, { reader: operatingPosture, instanceId: OPENRIG_HOME });
   const healthProjection = new HealthProjectionService([contextHealthSource, healthCheckpoints, passiveCeremony], () => healthPolicy.read(), (record) => operatingPosture.forHealth(record));
   const healthDiagnosis = new HealthDiagnosisService({ queue: queueRepoInstance, projection: healthProjection, policy: healthPolicy,
