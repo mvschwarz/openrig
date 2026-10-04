@@ -1,3 +1,4 @@
+import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
@@ -63,7 +64,7 @@ export interface StartupInput {
   skipHarnessLaunch?: boolean;
   /** Allow runtime adapter retry_fresh fallback when native resume data is stale. */
   allowFreshFallback?: boolean;
-  /** Exact resume must not overwrite the authored fresh-start context with its empty replay plan. */
+  /** Exact resume preserves saved context; its empty Claude plan must not disable activity hooks. */
   preserveStartupContext?: boolean;
   /** Continue the same fresh occupant after a prerequisite, without another harness launch. */
   continueFreshStartup?: boolean;
@@ -174,7 +175,9 @@ export class StartupOrchestrator {
     // guidance through here, so the rig's managed-block destination is bound once
     // for the adapter. Handover does not come here: the successor launches directly
     // and reads the file already written in its cwd.
-    const claudeManagedBlockFile = new RigRepository(this.db).getRigClaudeManagedBlockFile(input.rigId);
+    const rigRepo = new RigRepository(this.db);
+    input = { ...input, binding: { ...input.binding, nonInterruptive: rigRepo.getRigNonInterruptive(input.rigId) } };
+    const claudeManagedBlockFile = rigRepo.getRigClaudeManagedBlockFile(input.rigId);
     if (claudeManagedBlockFile) input = { ...input, binding: { ...input.binding, claudeManagedBlockFile } };
     const deliveryInput: StartupDeliveryInput = { ...input, submissionWarnings: [], startupAttemptId: randomUUID(), sendOrder: 0, submissionDiagnostics: [] };
     const errors: string[] = [];
@@ -199,9 +202,12 @@ export class StartupOrchestrator {
     }
     this.eventBus.emit({ type: "node.startup_pending", rigId: input.rigId, nodeId: input.nodeId, startupProof });
 
-    // 2. Project resources
+    // 2. Project resources. A contained Claude resume has an intentionally empty
+    // replay plan, not a newly selected profile with activity hooks removed.
+    // RestoreOrchestrator already reconciled the saved activity selection before
+    // native resume. Fresh launches still project empty plans to support removal.
     let projectionResult: ProjectionResult;
-    try {
+    if (!(input.preserveStartupContext && input.adapter.runtime === "claude-code")) try {
       projectionResult = await input.adapter.project(input.plan, input.binding);
       warnings.push(...(projectionResult.warnings ?? []));
       if (projectionResult.failed.length > 0) {
@@ -285,6 +291,8 @@ export class StartupOrchestrator {
           });
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
+            const notice = nonInterruptiveNotice(input.adapter.runtime, input.binding);
+            if (notice) warnings.push(`${input.sessionName ?? input.nodeId}: ${notice}`);
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {
               try {

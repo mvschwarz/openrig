@@ -106,6 +106,7 @@ describe("BootstrapOrchestrator", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -197,6 +198,20 @@ describe("BootstrapOrchestrator", () => {
       podInstantiator: opts?.podInstantiator as any,
     });
   }
+
+  it.each([
+    ["false", undefined, false], ["true", undefined, true],
+    ["true", false, false], ["false", true, true],
+  ] as const)("non-interruptive default %s / override %s reaches instantiation", async (operatorDefault, choice, expected) => {
+    vi.stubEnv("OPENRIG_LAUNCH_NON_INTERRUPTIVE", operatorDefault);
+    const instantiator = createMockInstantiator(db);
+    const spy = vi.spyOn(instantiator, "instantiate");
+    const orch = buildOrchestrator({ instantiator });
+    const result = await orch.bootstrap({ mode: "apply", sourceRef: writeSpec(SIMPLE_SPEC_YAML), nonInterruptive: choice });
+    expect(result.status).toBe("completed");
+    expect(spy).toHaveBeenCalledWith(expect.anything(), { nonInterruptive: expected });
+    if (expected) expect(result.warnings.join("\n")).toContain("saved for this rig");
+  });
 
   // T1: Plan mode returns plan, 0 bootstrap_actions rows
   it("plan mode returns plan with zero bootstrap_actions rows", async () => {

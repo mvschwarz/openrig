@@ -191,6 +191,19 @@ export class RigRepository {
     }
   }
 
+  setRigNonInterruptive(rigId: string, enabled: boolean): void {
+    if (!this.hasRigColumn("non_interruptive")) return;
+    this.db.prepare("UPDATE rigs SET non_interruptive = ?, updated_at = ? WHERE id = ?")
+      .run(enabled ? 1 : 0, new Date().toISOString(), rigId);
+  }
+
+  getRigNonInterruptive(rigId: string): boolean {
+    if (!this.hasRigColumn("non_interruptive")) return false;
+    const row = this.db.prepare("SELECT non_interruptive FROM rigs WHERE id = ?")
+      .get(rigId) as { non_interruptive: number } | undefined;
+    return row?.non_interruptive === 1;
+  }
+
   /** OPR.0.4.8.3 Seam B — persist a rig's attached permission_policy REF (builtin:<name> or a
    *  spec-relative custom path), or null to clear. Mirrors setRigWorkspace (migration 056). */
   setRigPermissionPolicy(rigId: string, permissionPolicy: string | null): void {

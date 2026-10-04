@@ -129,6 +129,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "context.system_world",
       "skills.root",
       "onboarding.default_pack.enabled",
+      "launch.non_interruptive",
       "health.context_pressure.warning_percent",
       "health.context_pressure.critical_percent",
       "files.allowlist", "progress.scan_roots",

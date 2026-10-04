@@ -97,6 +97,7 @@ Keys:
                          wake_swap_grace_seconds (S01 wake-or-escalate ladder)
   retention.*            enabled, transitions_days, watchdog_days,
                          watchdog_keep_per_job, batch_size
+  launch.non_interruptive  accept harness first-launch warnings at full bypass for new rigs (default off)
   terminal.status_bar    show the inner tmux status bar on launch (default off)
 
 Precedence: CLI flag > environment variable > config file > default`)

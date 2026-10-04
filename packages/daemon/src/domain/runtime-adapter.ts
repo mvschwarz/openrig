@@ -17,6 +17,8 @@ export interface NodeBinding extends Binding {
   launchPosture?: "floor" | "full_bypass" | "auto";
   /** Explicit Claude native mode; checked against the bound managed executable. */
   permissionMode?: string;
+  /** Persisted rig opt-in to per-launch warning acceptance, only at full_bypass. */
+  nonInterruptive?: boolean;
   /** Reserved successor generation; current tenure remains the input fence until commit. */
   launchGeneration?: string;
   /** #25: the rig's `managed_blocks.claude-code` file. Absent = CLAUDE.md. Only the Claude adapter reads it. */

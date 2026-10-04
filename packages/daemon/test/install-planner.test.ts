@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
+import path from "node:path";
 import { InstallPlanner } from "../src/domain/install-planner.js";
 import { PackageResolver, type FsOps } from "../src/domain/package-resolver.js";
+import { parseManifest, normalizeManifest } from "../src/domain/package-manifest.js";
 
 const BASIC_MANIFEST = `
 schema_version: 1
@@ -664,3 +666,97 @@ exports:
     expect(entry!.deferReason).toContain("does not support project_shared scope");
   });
 });
+
+// --- Export-name containment (planner-boundary) ---
+//
+// These use the real filesystem and the real path module, so they exercise the
+// same path.join the planner uses and stay portable across POSIX and Windows.
+// Each kind has its own base — skills under `.claude/skills/` / `.agents/skills/`,
+// agents at `.claude/agents/` / `.agents/` — so an agent escapes with fewer `..`
+// than a skill.
+
+import fs from "node:fs";
+import os from "node:os";
+
+function realFs(): { fsOps: FsOps; pkgRoot: string } {
+  const pkgRoot = fs.mkdtempSync(path.join(os.tmpdir(), "planner-name-"));
+  fs.mkdirSync(path.join(pkgRoot, "skills", "x"), { recursive: true });
+  fs.mkdirSync(path.join(pkgRoot, "agents"), { recursive: true });
+  fs.writeFileSync(path.join(pkgRoot, "skills", "x", "SKILL.md"), "hi");
+  fs.writeFileSync(path.join(pkgRoot, "agents", "a.yaml"), "name: a\n");
+  const fsOps: FsOps = {
+    readFile: (p) => fs.readFileSync(p, "utf-8"),
+    exists: (p) => fs.existsSync(p),
+    listFiles: () => ["SKILL.md"],
+  };
+  return { fsOps, pkgRoot };
+}
+
+function manifestFor(kind: "skill" | "agent", name: string) {
+  const yaml = kind === "skill"
+    ? `schema_version: 1\nname: p\nversion: 1.0.0\nsummary: s\ncompatibility: { runtimes: [claude-code, codex] }\nexports:\n  skills:\n    - source: skills/x\n      name: ${JSON.stringify(name)}\n`
+    : `schema_version: 1\nname: p\nversion: 1.0.0\nsummary: s\ncompatibility: { runtimes: [claude-code, codex] }\nexports:\n  agents:\n    - source: agents/a.yaml\n      name: ${JSON.stringify(name)}\n`;
+  return normalizeManifest(parseManifest(yaml));
+}
+
+function planTarget(kind: "skill" | "agent", name: string, runtime: "claude-code" | "codex") {
+  const { fsOps, pkgRoot } = realFs();
+  const targetRoot = fs.mkdtempSync(path.join(os.tmpdir(), "planner-target-"));
+  try {
+    const resolved = {
+      sourceKind: "local_path" as const,
+      sourceRef: pkgRoot,
+      manifest: manifestFor(kind, name),
+      manifestHash: "x",
+      rawManifestYaml: "",
+    };
+    const plan = new InstallPlanner(fsOps).plan(resolved, targetRoot, runtime);
+    const entry = plan.entries.find((e) => e.targetPath.length > 0);
+    const targetPath = entry?.targetPath ?? "";
+    const rel = path.relative(targetRoot, targetPath);
+    const escaped = rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+    return { threw: false, plan, targetPath, escaped, error: "" };
+  } catch (err) {
+    return { threw: true, plan: null, targetPath: "", escaped: false, error: (err as Error).message };
+  } finally {
+    fs.rmSync(pkgRoot, { recursive: true, force: true });
+    fs.rmSync(targetRoot, { recursive: true, force: true });
+  }
+}
+
+describe("InstallPlanner export-name containment", () => {
+  it("refuses an escaping name at every kind/runtime boundary", () => {
+    // `../../../x` climbs above the target for all four bases; the Codex agent
+    // base (`.agents`) is shallower, so `../../x` escapes for it alone.
+    const cases: Array<["skill" | "agent", string, "claude-code" | "codex"]> = [
+      ["skill", "../../../x", "claude-code"],
+      ["skill", "../../../x", "codex"],
+      ["agent", "../../../x", "claude-code"],
+      ["agent", "../../../x", "codex"],
+      ["agent", "../../x", "codex"],
+    ];
+    for (const [kind, name, runtime] of cases) {
+      const { threw, error } = planTarget(kind, name, runtime);
+      expect(threw, `${kind} '${name}' (${runtime}) should be refused`).toBe(true);
+      expect(error).toContain("outside the install target");
+    }
+  });
+
+  it("accepts names that stay inside the target", () => {
+    const cases: Array<["skill" | "agent", string, "claude-code" | "codex"]> = [
+      ["skill", "nested/helper", "claude-code"],
+      ["skill", "nested/helper", "codex"],
+      ["agent", "../x", "claude-code"],
+      ["agent", "../x", "codex"],
+      ["agent", "", "codex"],
+      ["skill", "_helper", "claude-code"],
+      ["skill", ".helper", "codex"],
+    ];
+    for (const [kind, name, runtime] of cases) {
+      const { threw, escaped } = planTarget(kind, name, runtime);
+      expect(threw, `${kind} '${name}' (${runtime}) should not be refused`).toBe(false);
+      expect(escaped, `${kind} '${name}' (${runtime}) should stay inside`).toBe(false);
+    }
+  });
+});
+

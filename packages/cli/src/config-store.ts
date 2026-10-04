@@ -13,6 +13,7 @@ import {
 // truth at ~/.openrig/config.json. Resolution stays env > file > default.
 
 export interface RiggedConfig {
+  launch: { nonInterruptive: boolean };
   daemon: { port: number; host: string };
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer.
   // OPR.0.4.6.MH1 FR-4 — the own-host display name (default "localhost").
@@ -218,6 +219,7 @@ const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigP
 );
 
 const DEFAULTS = {
+  launch: { nonInterruptive: false },
   daemon: { port: 7433, host: "127.0.0.1" },
   // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID).
   // FR-4 — own-host display name; default "localhost" (PRD-named).
@@ -379,6 +381,7 @@ export const VALID_KEYS = [
   "context.system_world",
   "skills.root",
   "onboarding.default_pack.enabled",
+  "launch.non_interruptive",
   "health.context_pressure.warning_percent",
   "health.context_pressure.critical_percent",
   "files.allowlist",
@@ -474,6 +477,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
+  "launch.non_interruptive": { primary: "OPENRIG_LAUNCH_NON_INTERRUPTIVE" },
   "health.context_pressure.warning_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT" },
   "health.context_pressure.critical_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_CRITICAL_PERCENT" },
   // UEP env-var graduation: existing OPENRIG_FILES_ALLOWLIST /
@@ -560,6 +564,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "context.system_world": ["context", "systemWorld"],
   "skills.root": ["skills", "root"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
+  "launch.non_interruptive": ["launch", "nonInterruptive"],
   "health.context_pressure.warning_percent": ["health", "contextPressure", "warningPercent"],
   "health.context_pressure.critical_percent": ["health", "contextPressure", "criticalPercent"],
   "files.allowlist": ["files", "allowlist"],
@@ -1063,6 +1068,7 @@ export class ConfigStore {
           auditLog: v("feed.subscriptions.audit_log") as boolean,
         },
       },
+      launch: { nonInterruptive: v("launch.non_interruptive") as boolean },
       runtime: {
         readinessTimeoutSeconds: v("runtime.readiness_timeout_seconds") as number,
         codex: {

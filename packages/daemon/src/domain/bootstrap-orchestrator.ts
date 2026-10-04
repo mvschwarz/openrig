@@ -1,3 +1,5 @@
+import { SettingsStore } from "./user-settings/settings-store.js";
+import { nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import nodePath from "node:path";
 import type Database from "better-sqlite3";
 import type { LegacyRigSpec as RigSpec } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
@@ -35,6 +37,7 @@ export interface BootstrapOptions {
   sourceKind?: string;
   cwdOverride?: string;
   autoApprove?: boolean;
+  nonInterruptive?: boolean;
   approvedActionKeys?: string[];
   /** Pre-created run ID (route creates run for real-time started event) */
   runId?: string;
@@ -565,7 +568,9 @@ export class BootstrapOrchestrator {
       return { runId: run.id, status: "failed", stages, errors, warnings };
     }
 
-    const instantiateOutcome = await this.deps.rigInstantiator.instantiate(spec);
+    const nonInterruptive = opts.nonInterruptive ?? (new SettingsStore().resolveOne("launch.non_interruptive").value === true);
+    const instantiateOutcome = await this.deps.rigInstantiator.instantiate(spec, { nonInterruptive });
+    if ((instantiateOutcome.ok || "rigId" in instantiateOutcome) && (nonInterruptive || opts.nonInterruptive === false)) warnings.push(nonInterruptiveSummary(nonInterruptive));
 
     this.deps.bootstrapRepo.journalAction(run.id, seqCounter++, "rig_import", null, spec.name, instantiateOutcome.ok ? "completed" : "failed", {
       detailJson: JSON.stringify(instantiateOutcome),
@@ -689,7 +694,9 @@ export class BootstrapOrchestrator {
           return serviceResult.ok ? bundleHook() : serviceResult;
         }
       : serviceHook ?? bundleHook;
-    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { cwdOverride: opts.cwdOverride, prelaunchHook });
+    const nonInterruptive = opts.nonInterruptive ?? (new SettingsStore().resolveOne("launch.non_interruptive").value === true);
+    const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { nonInterruptive, cwdOverride: opts.cwdOverride, prelaunchHook });
+    if ((outcome.ok || "rigId" in outcome) && (nonInterruptive || opts.nonInterruptive === false)) warnings.push(nonInterruptiveSummary(nonInterruptive));
     const withRouting = (r: BootstrapResult): BootstrapResult => (bundleRouting ? { ...r, bundleRouting } : r);
 
     if (!outcome.ok) {

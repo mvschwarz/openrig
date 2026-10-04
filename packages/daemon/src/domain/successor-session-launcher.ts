@@ -46,6 +46,7 @@ export interface SuccessorNode {
    *  the successor is a CONTINUITY edge of the same seat, so its policy posture
    *  carries (populated by the caller from node provenance; absent = env decision). */
   launchPosture?: "floor" | "full_bypass" | "auto";
+  nonInterruptive?: boolean;
   permissionMode?: string;
   /** 0.5.2-07 model fidelity: the seat's SPEC-pinned model (nodes.model). The successor is a continuity
    *  edge of the same seat, so its launch must READ THE SPEC — a launch path that drops it makes the
@@ -328,6 +329,7 @@ export class SuccessorSessionLauncher {
       updatedAt: "",
       cwd: cwd ?? "",
       launchGeneration: launchGeneration ?? undefined,
+      nonInterruptive: node.nonInterruptive,
       // Seam B: continuity — the successor launches at the departing seat's posture.
       ...(node.launchPosture ? { launchPosture: node.launchPosture } : {}),
       ...(node.permissionMode ? { permissionMode: node.permissionMode } : {}),

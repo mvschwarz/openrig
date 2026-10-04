@@ -1116,6 +1116,7 @@ bundleRoutes.post("/install", async (c) => {
   const bundlePath = typeof body["bundlePath"] === "string" ? body["bundlePath"] : "";
   const plan = body["plan"] === true;
   const autoApprove = body["autoApprove"] === true;
+  const nonInterruptive = typeof body["nonInterruptive"] === "boolean" ? body["nonInterruptive"] : undefined;
   const targetRoot = typeof body["targetRoot"] === "string" ? body["targetRoot"] : undefined;
   const cwdOverride = typeof body["cwdOverride"] === "string" ? body["cwdOverride"] : undefined;
   // Item 2 / slice-05 Checkpoint 3.3: install-time compatibility check inputs
@@ -1234,7 +1235,7 @@ bundleRoutes.post("/install", async (c) => {
   try {
     const result = await bootstrapOrchestrator.bootstrap({
       mode: "apply", sourceRef: bundlePath, sourceKind: "rig_bundle",
-      autoApprove, targetRoot, cwdOverride, runId: run.id,
+      autoApprove, nonInterruptive, targetRoot, cwdOverride, runId: run.id,
     });
 
     if (result.status === "completed" || result.status === "partial") {

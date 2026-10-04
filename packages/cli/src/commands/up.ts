@@ -80,6 +80,8 @@ Examples:
 
   cmd
     .argument("<source>", "GitHub bundle link, path to a .yaml rig spec or .rigbundle, or a library name such as secrets-manager")
+    .option("--non-interruptive", "Accept harness first-launch warnings for this rig at full bypass; saved for later launches")
+    .option("--no-non-interruptive", "Turn off this rig's saved warning-acceptance choice")
     .option("--plan", "Plan mode — preview without executing")
     .option("--yes", "Auto-approve trusted actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")
@@ -90,7 +92,7 @@ Examples:
     .option("--fresh <seats...>", "Deliberately fresh-prime the named seats (logical ids) instead of resuming their original sessions (operation B; reported as fresh-primed)")
     .option("--json", "JSON output for agents")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
-    .action(async (source: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string; preset?: string; seat?: string[] }) => {
+    .action(async (source: string, opts: { nonInterruptive?: boolean; plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string; preset?: string; seat?: string[] }) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly. Topology
@@ -115,7 +117,7 @@ Examples:
           let installed: { status: number; data: Record<string, unknown> };
           try {
             installed = await imported.client.post<Record<string, unknown>>("/api/bundles/install", {
-              bundlePath: imported.bundlePath, plan: opts.plan ?? false, autoApprove: opts.yes ?? false,
+              bundlePath: imported.bundlePath, plan: opts.plan ?? false, autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
               targetRoot: opts.target ? nodePath.resolve(opts.target) : process.cwd(),
               cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
               cliVersion: getCliVersion(),
@@ -157,7 +159,7 @@ Examples:
         const body = {
           sourceRef: source,
           plan: opts.plan,
-          autoApprove: opts.yes,
+          autoApprove: opts.yes, nonInterruptive: opts.nonInterruptive,
           cwdOverride: opts.cwd,
           targetRoot: opts.target,
           existing: opts.existing,
@@ -451,7 +453,7 @@ Examples:
         res = await client.post<Record<string, unknown>>("/api/up", {
           sourceRef,
           plan: opts.plan ?? false,
-          autoApprove: opts.yes ?? false,
+          autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
           cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : defaultLibraryCwdOverride,
           targetRoot,
           // OPR.0.3.4.2 — operation B opt-in seats (deliberate fresh-prime).
@@ -634,7 +636,7 @@ Examples:
                 freshRes = await client.post<Record<string, unknown>>("/api/up", {
                   sourceRef,
                   plan: false,
-                  autoApprove: opts.yes ?? false,
+                  autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
                   cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : defaultLibraryCwdOverride,
                   targetRoot,
                   freshLogicalIds: accepted,
