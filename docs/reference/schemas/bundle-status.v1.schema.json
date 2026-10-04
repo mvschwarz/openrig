@@ -1,0 +1,281 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openrig.dev/schemas/bundle-status.v1.json",
+  "title": "Public status file (generated; do not edit)",
+  "description": "Built from run records by rule openrig.status-rule/v1, from an allowlist of output fields: no private paths, host names, row IDs, account names or receipt text. Regenerating gives identical bytes. An empty platforms object means Not tested. Closed on purpose: no property outside this schema may appear, so a private field can't leak in.",
+  "type": "object",
+  "required": [
+    "generated",
+    "listings",
+    "harnessChecks",
+    "bodyDigest"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "generated": {
+      "type": "object",
+      "required": [
+        "by",
+        "notice",
+        "rule",
+        "generatorVersion"
+      ],
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "notice": {
+          "const": "Generated file. Do not edit by hand; regenerate it."
+        },
+        "rule": {
+          "const": "openrig.status-rule/v1"
+        },
+        "generatorVersion": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "listings": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "state",
+          "configurations"
+        ],
+        "properties": {
+          "state": {
+            "enum": [
+              "ok",
+              "status_unavailable"
+            ]
+          },
+          "configurations": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/configurationId"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "required": [
+                "platforms",
+                "communityReports"
+              ],
+              "properties": {
+                "platforms": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "required": [
+                      "label",
+                      "date",
+                      "openrigVersion",
+                      "recordIds",
+                      "packageDigests"
+                    ],
+                    "properties": {
+                      "label": {
+                        "enum": [
+                          "known_problem",
+                          "tested",
+                          "tested_with_help",
+                          "partly_tested",
+                          "not_tested",
+                          "status_unavailable"
+                        ]
+                      },
+                      "assistanceCount": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "date": {
+                        "type": "string",
+                        "format": "date"
+                      },
+                      "openrigVersion": {
+                        "type": "string"
+                      },
+                      "recordIds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "packageDigests": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/packageDigest"
+                        }
+                      },
+                      "note": {
+                        "type": "string"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "allOf": [
+                      {
+                        "if": {
+                          "properties": {
+                            "label": {
+                              "enum": [
+                                "tested",
+                                "tested_with_help",
+                                "partly_tested",
+                                "known_problem"
+                              ]
+                            }
+                          }
+                        },
+                        "then": {
+                          "properties": {
+                            "recordIds": {
+                              "minItems": 1
+                            },
+                            "packageDigests": {
+                              "minItems": 1
+                            }
+                          }
+                        }
+                      },
+                      {
+                        "if": {
+                          "properties": {
+                            "label": {
+                              "const": "tested_with_help"
+                            }
+                          }
+                        },
+                        "then": {
+                          "required": [
+                            "assistanceCount"
+                          ],
+                          "properties": {
+                            "assistanceCount": {
+                              "minimum": 1
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                },
+                "communityReports": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "status_unavailable"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "configurations": {
+                  "additionalProperties": {
+                    "properties": {
+                      "platforms": {
+                        "additionalProperties": {
+                          "properties": {
+                            "label": {
+                              "const": "status_unavailable"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "harnessChecks": {
+      "type": "object",
+      "required": [
+        "state",
+        "harnesses"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "status_unavailable"
+          ],
+          "description": "status_unavailable: some harness-check record could not be read."
+        },
+        "harnesses": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/runtime"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": [
+                "result",
+                "date",
+                "openrigVersion",
+                "harnessVersion",
+                "recordIds"
+              ],
+              "properties": {
+                "result": {
+                  "enum": [
+                    "PASS",
+                    "FAIL",
+                    "BLOCKED",
+                    "NOT_RUN"
+                  ]
+                },
+                "date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "openrigVersion": {
+                  "type": "string"
+                },
+                "harnessVersion": {
+                  "type": "string"
+                },
+                "recordIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "note": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        }
+      }
+    },
+    "bodyDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256, lowercase hex, over the RFC 8785 (JCS) canonical JSON, as UTF-8, of an object holding every other top-level field."
+    }
+  }
+}

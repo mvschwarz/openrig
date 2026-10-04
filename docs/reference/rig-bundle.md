@@ -198,6 +198,8 @@ rig bundle create <spec-path> -o <output.rigbundle> [--rig-root <dir>] [--name <
 | `<spec-path>` | yes | — | Path to the rig spec YAML file. |
 | `-o, --output` | yes | — | Output path. Must end with `.rigbundle`. |
 | `--rig-root` | no | spec directory | Root directory for resolving `agent_ref` and other relative paths. |
+| `--preset <name>` | no | — | Build one of the configurations the bundle declares in `configurations.yaml` beside `rig.yaml` (see [bundle-formats.md](bundle-formats.md)). The chosen runtimes and profiles are applied to an owned copy of the rig folder, never to yours. |
+| `--seat <pod.member=runtime>` | no | — | Use this runtime for one seat, within what `configurations.yaml` allows. Repeatable; applied after `--preset`. An undeclared choice is refused with the allowed set, and nothing is built. |
 | `--name` | no | `my-bundle` | Bundle name in the manifest. |
 | `--bundle-version` | no | `0.1.0` | Bundle version in the manifest. |
 
@@ -211,6 +213,14 @@ The create command:
 7. Writes the manifest (`bundle.yaml`)
 8. Packs into a deterministic `.tar.gz`
 9. Writes the sibling `.sha256` digest
+
+### List a bundle's configurations
+
+```bash
+rig bundle configurations <spec-path> [--json]
+```
+
+Lists the presets that `configurations.yaml` declares, each with its configuration ID, which one is recommended, and which one matches `rig.yaml` as written.
 
 ### Inspect a bundle
 

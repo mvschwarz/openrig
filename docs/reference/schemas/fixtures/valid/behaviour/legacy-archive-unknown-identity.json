@@ -1,0 +1,53 @@
+{
+  "schema": "openrig.bundle-behaviour/v1",
+  "state": "generated",
+  "identity": {
+    "source": null,
+    "configurationId": null,
+    "packageDigest": {
+      "algorithm": "sha256",
+      "value": "5f2c0a1e9b8d7c6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a29",
+      "coverage": "openrig.package-digest/v1"
+    },
+    "assembler": null,
+    "generator": {
+      "openrigVersion": "0.6.6",
+      "commit": "910bf9f1"
+    },
+    "integrity": {
+      "digestValid": true,
+      "filesVerified": true
+    }
+  },
+  "team": [
+    {
+      "seat": "build.lead",
+      "pod": "build",
+      "member": "lead",
+      "agentRef": "local:agents/openrig-dev",
+      "profile": "lead",
+      "runtime": "claude-code",
+      "cwd": "--cwd (the user's openrig clone)"
+    }
+  ],
+  "posture": [
+    {
+      "seat": "build.lead",
+      "shellAccess": "runs shell commands in its working folder under your logged-in account",
+      "selection": "set by a host setting",
+      "basis": "unresolved",
+      "nativeEffect": "unknown"
+    }
+  ],
+  "toldFiles": [],
+  "alsoRuns": [],
+  "writes": [],
+  "outsideAddresses": [],
+  "needs": [],
+  "unknownBeforeLaunch": [
+    {
+      "subject": "source and configuration",
+      "reason": "the archive does not state them"
+    }
+  ]
+}

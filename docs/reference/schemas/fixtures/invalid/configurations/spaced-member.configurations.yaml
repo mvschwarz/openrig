@@ -1,0 +1,6 @@
+schema: openrig.bundle-configurations/v1
+recommended: r
+seats:
+  'build lead': { runtimes: { codex: lead } }
+presets:
+  r: { 'build lead': codex }

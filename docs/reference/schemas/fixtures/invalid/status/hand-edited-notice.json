@@ -1,0 +1,61 @@
+{
+  "generated": {
+    "by": "openrig-world tools/status.mjs",
+    "notice": "edited by hand",
+    "rule": "openrig.status-rule/v1",
+    "generatorVersion": 1
+  },
+  "listings": {
+    "openrig-dev": {
+      "state": "ok",
+      "configurations": {
+        "build.impl=claude-code,build.lead=claude-code,check.qa=codex,check.review=codex": {
+          "platforms": {
+            "linux": {
+              "label": "tested",
+              "date": "2026-10-04",
+              "openrigVersion": "0.6.6",
+              "recordIds": [
+                "rr-20261004-002"
+              ],
+              "packageDigests": [
+                {
+                  "algorithm": "sha256",
+                  "value": "5f2c0a1e9b8d7c6f5e4d3c2b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a29",
+                  "coverage": "openrig.package-digest/v1"
+                }
+              ]
+            }
+          },
+          "communityReports": 0
+        },
+        "build.impl=pi,build.lead=pi,check.qa=pi,check.review=pi": {
+          "platforms": {},
+          "communityReports": 0
+        }
+      }
+    },
+    "unreadable-example": {
+      "state": "status_unavailable",
+      "configurations": {}
+    }
+  },
+  "harnessChecks": {
+    "state": "ok",
+    "harnesses": {
+      "pi": {
+        "linux": {
+          "result": "BLOCKED",
+          "date": "2026-10-04",
+          "openrigVersion": "0.6.6",
+          "harnessVersion": "unknown",
+          "recordIds": [
+            "rr-20261004-004"
+          ],
+          "note": "Pi was not signed in on the test machine."
+        }
+      }
+    }
+  },
+  "bodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

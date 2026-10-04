@@ -394,6 +394,8 @@ export interface PodBundleManifest {
   contextPacks?: string[];
   /** Item 6 cross-primitive bundling: paths to agent-image DIRECTORIES (per PRD §Item 6 line 197); router copies the declared directory to the operator agent-images library on install. Consumer requires manifest.yaml inside each image dir. (Checkpoint 7.3g) */
   agentImages?: string[];
+  /** The configuration this archive was built in (configuration ID, and the preset when it matches one). Outside the package digest. */
+  configuration?: { id: string; preset?: string };
 }
 
 export function validatePodBundleManifest(raw: unknown): { valid: boolean; errors: string[] } {
@@ -462,6 +464,7 @@ export function serializePodBundleManifest(manifest: PodBundleManifest): string 
   if (manifest.workflowSpecs && manifest.workflowSpecs.length > 0) doc["workflow_specs"] = manifest.workflowSpecs;
   if (manifest.contextPacks && manifest.contextPacks.length > 0) doc["context_packs"] = manifest.contextPacks;
   if (manifest.agentImages && manifest.agentImages.length > 0) doc["agent_images"] = manifest.agentImages;
+  if (manifest.configuration) doc["configuration"] = manifest.configuration.preset ? { id: manifest.configuration.id, preset: manifest.configuration.preset } : { id: manifest.configuration.id };
   return stringifyYaml(doc);
 }
 
