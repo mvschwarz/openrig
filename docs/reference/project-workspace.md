@@ -34,12 +34,15 @@ System World belongs in this tree.
 Installing a bundle that carries a project (`rig bundle create --project-dir`)
 copies the project folder to `<workspace.projects_root>/<id>/`, adds its catalog
 entry, and lists the bundle's rig under that entry's `rigs` (see "Work-install
-project selection"), before any seat launches. The edit is additive and keeps
-the file's comments. Reinstalling changes nothing, and an entry that already
-points at the same folder is reused under its own id. If the id is already taken
-by another root, or the rig is already listed under another project, install
-writes nothing to the catalog and prints the fix. Without a catalog, the one it
-writes keeps the workspace's `default` entry beside the bundle's.
+project selection"), before any seat launches. Every byte already in the
+catalog stays: the entry is appended in the file's own indentation and line
+endings, and a later rig joins it by a one-line edit of its `rigs: [...]`.
+Reinstalling changes nothing. If the file's shape doesn't allow that (for
+example a flow-style list), if the id is already taken by another root, if the
+folder is registered under a different id, or if the rig is already listed
+under another project, install writes nothing to the catalog and prints what to
+change. Without a catalog, the one it writes keeps a `default` entry for the
+workspace root beside the bundle's.
 
 ## Project-world install
 

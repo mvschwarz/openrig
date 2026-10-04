@@ -3405,5 +3405,10 @@ describe("bundle create --project-dir: install registers the project and associa
       { id: "openrig", root: "projects/openrig" },
     ]);
     expect(fs.readFileSync(path.join(work, "workspace", "projects", "openrig", "SPEC.md"), "utf-8")).toBe("# Contributing to OpenRig\n");
+
+    const inspect = await setup.app.request("/api/bundles/inspect", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundlePath: outputPath }),
+    });
+    expect((await inspect.json()).manifest.project).toEqual({ id: "openrig", path: "project" });
   });
 });

@@ -186,6 +186,7 @@ export async function routeBundleContents(
             projectId: id,
             rigName: rigSpec.name,
             projectsRoot: settings.resolveOne("workspace.projects_root").value as string,
+            workspaceRoot: settings.resolveOne("workspace.root").value as string,
             catalogPath: settings.resolveOne("workspace.catalog_path").value as string,
           });
           routing.projectRegistration = result;

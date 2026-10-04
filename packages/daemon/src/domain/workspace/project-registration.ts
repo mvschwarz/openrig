@@ -13,12 +13,18 @@ import { Document, isMap, isScalar, isSeq, parseDocument, type YAMLMap, type YAM
  *
  * Rules (agreed with the work-install selection order):
  * 1. The catalog is found through workspace.catalog_path, never a literal.
- * 2. The edit is additive and keeps the file's comments and layout.
- * 3. An entry with the same canonical root is the same project: its id is
- *    reused and the rig name is added once, so reinstalling changes nothing.
- * 4. If the id is taken by another root, or the rig is already listed under
- *    another project, nothing is written for that part. The result says so,
- *    with the fix; it is reported, never thrown.
+ * 2. An existing catalog is never rewritten: every byte already there stays.
+ *    A new entry is appended as text in the file's own indentation and line
+ *    endings, and a rig joins an entry by a one-line edit of its `rigs: [...]`.
+ *    Each edit is checked by re-parsing. When neither applies (for example a
+ *    flow-style list), nothing is written and the result gives the exact line
+ *    to add. Only a catalog created from scratch is written whole.
+ * 3. An entry with the same id and the same canonical root is the same
+ *    project: the rig name is added once, so reinstalling changes nothing.
+ * 4. If the id is taken by another root, the root is registered under another
+ *    id, or the rig is already listed under another project, nothing is
+ *    written for that part. The result says so, with the fix; it is reported,
+ *    never thrown.
  */
 
 export interface ProjectRegistrationInput {
@@ -28,6 +34,8 @@ export interface ProjectRegistrationInput {
   rigName: string;
   /** workspace.projects_root: the project folder is materialized at <projectsRoot>/<id>. */
   projectsRoot: string;
+  /** workspace.root: a catalog written from scratch keeps it as the default project. */
+  workspaceRoot: string;
   /** workspace.catalog_path. */
   catalogPath: string;
 }
@@ -74,6 +82,69 @@ function materializeProjectFolder(source: string, target: string): boolean {
   return !identical;
 }
 
+/** A YAML scalar for a simple value: plain when it is a plain-safe name or path, else double-quoted. */
+function scalar(value: string): string {
+  return /^[A-Za-z0-9_/][A-Za-z0-9._/-]*$|^\.{1,2}(\/[A-Za-z0-9._/-]*)?$/.test(value) ? value : JSON.stringify(value);
+}
+
+/**
+ * Append one entry to a block-style `projects:` list as text, matching the
+ * file's indentation and line endings, so nothing already there changes.
+ * Returns null when `projects:` is not the last top-level key in block style,
+ * or when re-parsing does not give exactly the old list plus the new entry.
+ */
+function appendEntryText(source: string, entry: { id: string; root: string; rigs: string[] }): string | null {
+  const eol = source.includes("\r\n") ? "\r\n" : "\n";
+  const lines = source.split(/\r?\n/);
+  const start = lines.findIndex((line) => /^projects:\s*(#.*)?$/.test(line));
+  if (start < 0) return null;
+  const rest = lines.slice(start + 1);
+  if (rest.some((line) => /^[^\s#]/.test(line))) return null;
+  const firstItem = rest.map((line) => /^(\s*)-(\s+)\S/.exec(line)).find((m): m is RegExpExecArray => m !== null);
+  if (!firstItem) return null;
+  const dash = firstItem[1]!;
+  const gap = firstItem[2]!;
+  const inner = " ".repeat(dash.length + 1 + gap.length);
+  const text = [
+    `${dash}-${gap}id: ${scalar(entry.id)}`,
+    `${inner}root: ${scalar(entry.root)}`,
+    `${inner}rigs: [${entry.rigs.map(scalar).join(", ")}]`,
+  ].join(eol) + eol;
+  const appended = (/\r?\n$/.test(source) ? source : source + eol) + text;
+  const before = (parseDocument(source).toJS() as { projects?: unknown[] } | null)?.projects;
+  const after = parseDocument(appended);
+  if (!Array.isArray(before) || after.errors.length > 0) return null;
+  const afterProjects = (after.toJS() as { projects?: unknown[] } | null)?.projects;
+  return JSON.stringify(afterProjects) === JSON.stringify([...before, entry]) ? appended : null;
+}
+
+/**
+ * Add a rig to an entry's one-line `rigs: [...]` list as a text edit. Returns
+ * null when the entry has no such line, or when re-parsing does not give the
+ * old catalog with only that rig added.
+ */
+function addRigText(source: string, projectId: string, rigName: string): string | null {
+  const lines = source.split(/(?<=\n)/);
+  const escaped = projectId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const idLine = lines.findIndex((line) => new RegExp(`^\\s*(-\\s+)?id:\\s*["']?${escaped}["']?\\s*(#.*)?\\r?\\n?$`).test(line));
+  if (idLine < 0) return null;
+  const itemColumn = lines[idLine]!.search(/\S/);
+  let rigsLine = -1;
+  for (let i = idLine + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (/^\S/.test(line) || (/^\s*-\s/.test(line) && line.search(/\S/) <= itemColumn)) break;
+    if (/^\s*rigs:\s*\[[^\]]*\]\s*(#.*)?\r?\n?$/.test(line)) { rigsLine = i; break; }
+  }
+  if (rigsLine < 0) return null;
+  lines[rigsLine] = lines[rigsLine]!.replace(/\[([^\]]*)\]/, (_m, inside: string) => `[${inside.trim() ? `${inside.trimEnd()}, ` : ""}${scalar(rigName)}]`);
+  const edited = lines.join("");
+  const before = (parseDocument(source).toJS() as { projects?: Array<Record<string, unknown>> } | null)?.projects;
+  const after = parseDocument(edited);
+  if (!Array.isArray(before) || after.errors.length > 0) return null;
+  const expected = before.map((p) => (p["id"] === projectId ? { ...p, rigs: [...((p["rigs"] as unknown[]) ?? []), rigName] } : p));
+  return JSON.stringify((after.toJS() as { projects?: unknown[] }).projects) === JSON.stringify(expected) ? edited : null;
+}
+
 function entryString(entry: YAMLMap, key: string): string | undefined {
   const value = entry.get(key);
   return typeof value === "string" ? value : undefined;
@@ -92,15 +163,19 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
   const base = { projectId: input.projectId, projectRoot, catalogPath: input.catalogPath, rigName: input.rigName, ...(projectFolderKept ? { projectFolderKept } : {}) };
 
   let doc: Document;
+  let existingText: string | undefined;
   if (fs.existsSync(input.catalogPath)) {
-    doc = parseDocument(fs.readFileSync(input.catalogPath, "utf-8"));
+    existingText = fs.readFileSync(input.catalogPath, "utf-8");
+    doc = parseDocument(existingText);
     if (doc.errors.length > 0) {
       return { ...base, status: "conflict", detail: `${input.catalogPath} does not parse (${doc.errors[0]!.message}); nothing was changed. Fix the file, then install the bundle again` };
     }
   } else {
     // A workspace with no catalog resolves every rig to the workspace root. Keep that for the user's
-    // own rigs: the scaffold's default entry stays the one unclaimed entry beside the bundle's project.
-    doc = parseDocument(`${CATALOG_HEADER}projects:\n  - id: default\n    root: .\n`);
+    // own rigs: a default entry for the workspace root stays the one unclaimed entry beside the
+    // bundle's project. Its root is relative to the catalog, which need not sit in the workspace root.
+    const defaultRoot = nodePath.relative(catalogDir, input.workspaceRoot).split(nodePath.sep).join("/") || ".";
+    doc = parseDocument(`${CATALOG_HEADER}projects:\n  - id: default\n    root: ${scalar(defaultRoot)}\n`);
   }
 
   let projects = doc.get("projects");
@@ -119,6 +194,12 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
   const target = sameRoot ?? sameId;
   const targetId = target ? entryString(target, "id") : input.projectId;
 
+  if (sameRoot && entryString(sameRoot, "id") !== input.projectId) {
+    return {
+      ...base, status: "conflict",
+      detail: `${projectRoot} is already registered in ${input.catalogPath} as project '${entryString(sameRoot, "id")}', but its project.yaml says '${input.projectId}'; nothing was changed. Make the two ids agree, then install the bundle again`,
+    };
+  }
   if (!sameRoot && sameId) {
     return {
       ...base, status: "conflict",
@@ -135,14 +216,30 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
 
   if (target) {
     if (entryRigs(target).includes(input.rigName)) return { ...base, projectId: targetId!, status: "already_registered" };
-    const rigs = target.get("rigs");
-    if (isSeq(rigs)) rigs.add(doc.createNode(input.rigName));
-    else target.set("rigs", doc.createNode([input.rigName]));
-    fs.writeFileSync(input.catalogPath, doc.toString());
+    const edited = existingText !== undefined ? addRigText(existingText, targetId!, input.rigName) : null;
+    if (edited === null) {
+      return {
+        ...base, projectId: targetId!, status: "conflict",
+        detail: `could not add rig '${input.rigName}' to project '${targetId}' in ${input.catalogPath} without rewriting the file; nothing was changed. Add '${input.rigName}' to that entry's rigs list (rigs: [${input.rigName}]) by hand`,
+      };
+    }
+    fs.writeFileSync(input.catalogPath, edited);
     return { ...base, projectId: targetId!, status: "associated" };
   }
 
-  (projects as YAMLSeq).add(doc.createNode({ id: input.projectId, root: relativeRoot, rigs: [input.rigName] }));
+  const entry = { id: input.projectId, root: relativeRoot, rigs: [input.rigName] };
+  if (existingText !== undefined) {
+    const appended = appendEntryText(existingText, entry);
+    if (appended === null) {
+      return {
+        ...base, status: "conflict",
+        detail: `could not append project '${input.projectId}' to ${input.catalogPath} without rewriting the file; nothing was changed. Add this entry under projects by hand: { id: ${input.projectId}, root: ${relativeRoot}, rigs: [${input.rigName}] }`,
+      };
+    }
+    fs.writeFileSync(input.catalogPath, appended);
+    return { ...base, status: "registered" };
+  }
+  (projects as YAMLSeq).add(doc.createNode(entry));
   fs.mkdirSync(catalogDir, { recursive: true });
   fs.writeFileSync(input.catalogPath, doc.toString());
   return { ...base, status: "registered" };

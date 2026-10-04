@@ -977,6 +977,9 @@ bundleRoutes.post("/inspect", async (c) => {
         agentImages: Array.isArray(rawParsed["agent_images"])
           ? (rawParsed["agent_images"] as unknown[]).filter((s): s is string => typeof s === "string")
           : undefined,
+        project: rawParsed["project"] && typeof rawParsed["project"] === "object" && !Array.isArray(rawParsed["project"])
+          ? rawParsed["project"] as { id: string; path: string }
+          : undefined,
       };
       const integrityCompat = integritySection ? {
         schemaVersion: 2,

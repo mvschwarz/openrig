@@ -148,6 +148,11 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       console.log(`Digest valid: ${res.data["digestValid"]}`);
       const ir = res.data["integrityResult"] as Record<string, unknown>;
       console.log(`Integrity: ${ir["passed"] ? "PASS" : "FAIL"}`);
+      // What install will add before any seat launches
+      const packs = m["contextPacks"] as string[] | undefined;
+      if (packs?.length) console.log(`Context packs: ${packs.join(", ")}`);
+      const project = m["project"] as { id?: string; path?: string } | undefined;
+      if (project?.id) console.log(`Project: ${project.id} (registered in the workspace catalog on install, with this rig associated)`);
       if (!digestValid || !integrityPassed) process.exitCode = 2;
     });
 
