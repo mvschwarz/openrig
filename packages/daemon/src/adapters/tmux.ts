@@ -666,9 +666,9 @@ export class TmuxAdapter {
       // Fish single quotes reinterpret POSIX backslashes. Keep those payloads
       // (and paths) on sh, preserving existing executable launches byte-for-byte.
       if (!command.includes("\\") && !path.includes("\\")) {
-        // Older fish rejects prefix assignments before executing any script line.
-        // Only an unconsumed script may fall back; a completed launch removed it.
-        const sourced = `source ${quotedPath}; or begin; test -f ${quotedPath}; and /bin/sh ${quotedPath}; end`;
+        // Probe fixed syntax in the pane before sourcing, not the launch's exit
+        // status: even failed cleanup must not turn a later exit into a retry.
+        const sourced = `if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/true'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`;
         // Repeating the path must not add a refusal for previously valid TMPDIRs.
         if (Buffer.byteLength(sourced, "utf8") <= 512) invocation = sourced;
       }

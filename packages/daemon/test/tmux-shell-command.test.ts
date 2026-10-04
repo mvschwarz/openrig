@@ -26,14 +26,14 @@ function fixture(fail?: string, scriptPath = "/tmp/launch 'quoted'.sh") {
 }
 
 describe("shell launch transport", () => {
-  it.each(["fish", "-fish"])("sources in fish with an unconsumed-script fallback for older fish (%s)", async shell => {
+  it.each(["fish", "-fish"])("selects fish sourcing or the older-fish sh fallback before launching (%s)", async shell => {
     const f = fixture();
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
     const command = `OPENRIG_HOME='/instance' PATH='/rig/bin':"$PATH" claude --model '${"m".repeat(4096)}'`;
     expect(await f.adapter.sendShellCommand("pane", command, undefined, { sourceInPane: true })).toEqual({ ok: true });
     const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
     const quotedPath = shellQuote(f.scriptPath);
-    expect(invocation).toBe(`source ${quotedPath}; or begin; test -f ${quotedPath}; and /bin/sh ${quotedPath}; end`);
+    expect(invocation).toBe(`if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/true'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`);
     expect(Buffer.byteLength(invocation)).toBeLessThan(512);
     expect(f.files.get(f.scriptPath)).toBe(`/bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh'\n${command}\n`);
     expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
@@ -61,7 +61,7 @@ describe("shell launch transport", () => {
   });
 
   it("keeps the short sh invocation when fish fallback syntax would exceed the input bound", async () => {
-    const f = fixture(undefined, "/tmp/" + "p".repeat(180));
+    const f = fixture(undefined, "/tmp/" + "p".repeat(240));
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
     const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
