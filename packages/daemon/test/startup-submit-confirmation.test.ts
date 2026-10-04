@@ -78,6 +78,16 @@ describe("startup prompt submission", () => {
   });
 
   describe("remaining Claude startup files (#729)", () => {
+    it.each(["claude-code", "codex", "pi"])("#736 labels an unavailable post-delivery readiness observation independently (%s)", async runtime => {
+      const f = fixture(0, runtime);
+      f.adapter.checkReady = vi.fn().mockResolvedValueOnce({ ready: true }).mockRejectedValueOnce(new Error("fixture observation unavailable"));
+      const result = await f.start();
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready", warnings: [
+        "Post-delivery runtime state is unverified in worker@startup-submit: fixture observation unavailable",
+      ] });
+      expect(f.adapter.checkReady).toHaveBeenCalledTimes(2);
+      expect(f.submitted).toHaveLength(1);
+    });
     it("checks a lost Enter on each later file, with one paste per body and preserved order", async () => {
       // The actual Claude adapter delivers these files on the parent; a no-op mock would hide the gap.
       const f = fixture(new Set([2, 4]), "claude-code", false, true);
