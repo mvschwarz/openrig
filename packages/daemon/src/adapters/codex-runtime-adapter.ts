@@ -1,3 +1,4 @@
+import { nonInterruptiveArg } from "./non-interruptive.js";
 import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
@@ -354,7 +355,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
-    const postureArg = codexPostureArg(profileArg, process.env, binding.launchPosture);
+    const postureArg = codexPostureArg(profileArg, process.env, binding.launchPosture) + nonInterruptiveArg(this.runtime, binding);
     const appliedLaunch = observeCodexSandbox(postureArg);
 
     // OPR.0.3.4.7 — profile-LOAD probe before launch/resume. A legacy

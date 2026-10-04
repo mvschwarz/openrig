@@ -45,6 +45,15 @@ describe("bundle link command dispatch", () => {
     expect(f.post.mock.calls.find(c => c[0] === "/api/bundles/install")![1]).toMatchObject({ targetRoot: path.resolve("project"), cwdOverride: path.resolve("work"), plan: true });
   });
 
+  it.each(["up", "install"])("%s forwards opt-in, explicit opt-out and omission distinctly", async verb => {
+    for (const [flag, expected] of [["--non-interruptive", true], ["--no-non-interruptive", false], [undefined, undefined]] as const) {
+      f.post.mockClear();
+      const program = new Command().addCommand(verb === "up" ? upCommand(deps) : bundleCommand(deps));
+      await program.parseAsync([...(verb === "up" ? ["up", link] : ["bundle", "install", link]), ...(flag ? [flag] : []), "--json"], { from: "user" });
+      expect(f.post.mock.calls.find(c => c[0] === "/api/bundles/install")![1].nonInterruptive).toBe(expected);
+    }
+  });
+
   it("does not call install after create returns an error", async () => {
     f.imported.mockResolvedValueOnce({ res: { status: 400, data: { error: "invalid bundle" } } });
     await new Command().addCommand(upCommand(deps)).parseAsync(["up", link, "--json"], { from: "user" });

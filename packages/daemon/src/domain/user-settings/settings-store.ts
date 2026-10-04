@@ -107,6 +107,7 @@ export const SETTINGS_VALID_KEYS = [
   "context.system_world",
   "skills.root",
   "onboarding.default_pack.enabled",
+  "launch.non_interruptive",
   "health.context_pressure.warning_percent",
   "health.context_pressure.critical_percent",
   "files.allowlist",
@@ -232,6 +233,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
+  "launch.non_interruptive": { primary: "OPENRIG_LAUNCH_NON_INTERRUPTIVE" },
   "health.context_pressure.warning_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT" },
   "health.context_pressure.critical_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_CRITICAL_PERCENT" },
   "files.allowlist": { primary: "OPENRIG_FILES_ALLOWLIST" },
@@ -315,6 +317,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "context.system_world": ["context", "systemWorld"],
   "skills.root": ["skills", "root"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
+  "launch.non_interruptive": ["launch", "nonInterruptive"],
   "health.context_pressure.warning_percent": ["health", "contextPressure", "warningPercent"],
   "health.context_pressure.critical_percent": ["health", "contextPressure", "criticalPercent"],
   "files.allowlist": ["files", "allowlist"],
@@ -573,6 +576,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "context.system_world": return "default";
     case "skills.root": return DEFAULT_SKILLS_ROOT;
     case "onboarding.default_pack.enabled": return true;
+    case "launch.non_interruptive": return false;
     case "health.context_pressure.warning_percent": return 95;
     case "health.context_pressure.critical_percent": return 99;
     // Preview Terminal v0 (PL-018) defaults — match cli/src/config-store.ts.

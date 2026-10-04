@@ -259,6 +259,8 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .description("Install a .rigbundle or GitHub folder link (bootstrap from bundle)")
     .option("--preset <name>", "For a GitHub link, choose a declared configuration")
     .option("--seat <member=runtime>", "For a GitHub link, choose a declared seat runtime; repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
+    .option("--non-interruptive", "Accept harness first-launch warnings for this rig at full bypass; saved for later launches")
+    .option("--no-non-interruptive", "Turn off this rig's saved warning-acceptance choice")
     .option("--plan", "Plan mode")
     .option("--yes", "Auto-approve")
     .option("--target <root>", "Target root directory")
@@ -266,7 +268,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--skip-version-check", "Operator-explicit override of the Item-2 install-time compatibility check (NOT recommended for routine use)")
     .option("--force", "Operator-explicit override of the Item-3 install-time conflict check (NOT recommended; conflicts may produce partial install state)")
     .option("--json", "JSON output")
-    .action(async (bundlePath: string, opts: { plan?: boolean; yes?: boolean; target?: string; cwd?: string; skipVersionCheck?: boolean; force?: boolean; json?: boolean; preset?: string; seat?: string[] }) => {
+    .action(async (bundlePath: string, opts: { nonInterruptive?: boolean; plan?: boolean; yes?: boolean; target?: string; cwd?: string; skipVersionCheck?: boolean; force?: boolean; json?: boolean; preset?: string; seat?: string[] }) => {
       const deps = getDepsF();
       let imported: Awaited<ReturnType<typeof importGitHubBundle>> | undefined;
       if (isGitHubBundleLink(bundlePath)) {
@@ -294,7 +296,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       let res: { status: number; data: Record<string, unknown> };
       try {
       res = await client.post<Record<string, unknown>>("/api/bundles/install", {
-        bundlePath: nodePath.resolve(bundlePath), plan: opts.plan ?? false, autoApprove: opts.yes ?? false,
+        bundlePath: nodePath.resolve(bundlePath), plan: opts.plan ?? false, autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
         targetRoot: opts.target ? nodePath.resolve(opts.target) : (imported ? process.cwd() : undefined),
         cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
         // Item 2 / slice-05 Checkpoint 3.3: send CLI version + skip flag for the

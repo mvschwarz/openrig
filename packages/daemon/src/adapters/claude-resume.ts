@@ -1,3 +1,4 @@
+import { nonInterruptiveArgs, nonInterruptiveArg } from "./non-interruptive.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
@@ -59,6 +60,7 @@ export class ClaudeResumeAdapter {
     selectedPermissionMode?: string,
     nodeId?: string,
     effort?: string | null,
+    nonInterruptive?: boolean,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Claude resume not available" };
@@ -76,9 +78,10 @@ export class ClaudeResumeAdapter {
         managed = await this.options.claudeManagedLaunch!.prepare({ nodeId: nodeId!, cwd, session: tmuxSessionName }, selectedPermissionMode);
       } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
     }
-    const permissionMode = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
+    const choice = { nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
+    const permissionMode = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode) + nonInterruptiveArg("claude-code", choice);
     const appliedLaunch = observeClaudePermission(permissionMode);
-    const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), "--resume", resumeToken!])
+    const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...nonInterruptiveArgs("claude-code", choice), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), "--resume", resumeToken!])
       : `${claudeClassicRendererEnvPrefix(process.env)}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(tmuxSessionName, cmd, managed.assertCurrent)

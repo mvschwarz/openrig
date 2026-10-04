@@ -1,3 +1,4 @@
+import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
@@ -174,7 +175,9 @@ export class StartupOrchestrator {
     // guidance through here, so the rig's managed-block destination is bound once
     // for the adapter. Handover does not come here: the successor launches directly
     // and reads the file already written in its cwd.
-    const claudeManagedBlockFile = new RigRepository(this.db).getRigClaudeManagedBlockFile(input.rigId);
+    const rigRepo = new RigRepository(this.db);
+    input = { ...input, binding: { ...input.binding, nonInterruptive: rigRepo.getRigNonInterruptive(input.rigId) } };
+    const claudeManagedBlockFile = rigRepo.getRigClaudeManagedBlockFile(input.rigId);
     if (claudeManagedBlockFile) input = { ...input, binding: { ...input.binding, claudeManagedBlockFile } };
     const deliveryInput: StartupDeliveryInput = { ...input, submissionWarnings: [], startupAttemptId: randomUUID(), sendOrder: 0, submissionDiagnostics: [] };
     const errors: string[] = [];
@@ -288,6 +291,8 @@ export class StartupOrchestrator {
           });
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
+            const notice = nonInterruptiveNotice(input.adapter.runtime, input.binding);
+            if (notice) warnings.push(`${input.sessionName ?? input.nodeId}: ${notice}`);
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {
               try {

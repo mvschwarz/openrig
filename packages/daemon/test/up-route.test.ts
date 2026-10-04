@@ -164,6 +164,32 @@ describe("Up API route", () => {
     expect(body.nodes[0].status).toBe("fresh-primed");
   });
 
+  it("non-interruptive omission preserves a rig choice, explicit false clears, and plan never writes it", async () => {
+    const rig = rigRepo.createRig("saved-choice");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "worker@saved-choice");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "retained", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
+    const seen: boolean[] = [];
+    vi.spyOn(restoreOrchestrator, "restore").mockImplementation(async () => {
+      seen.push(rigRepo.getRigNonInterruptive(rig.id));
+      return { ok: true, result: { rigId: rig.id, nodes: [], warnings: [], rigResult: "fully_restored" } } as never;
+    });
+    const request = (extra: object) => app.request("/api/up", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceRef: "saved-choice", ...extra }) });
+    await request({ nonInterruptive: true, plan: true });
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(false);
+    await request({ nonInterruptive: true });
+    await request({});
+    await request({ nonInterruptive: false, plan: true });
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(true);
+    await request({ nonInterruptive: false });
+    expect(seen).toEqual([true, true, false]);
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(false);
+  });
+
   it("POST /api/up restoring an existing rig name returns validation blockers", async () => {
     const rig = rigRepo.createRig("restore-blocked");
     const fixtureNode = rigRepo.addNode(rig.id, "worker", { role: "worker" });

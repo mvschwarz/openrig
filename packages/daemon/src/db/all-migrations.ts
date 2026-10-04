@@ -99,6 +99,8 @@ import { usageSamplesLatestIndexesSchema } from "./migrations/094_usage_samples_
 import type { Migration } from "./migrate.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
+import { rigNonInterruptiveSchema } from "./migrations/095_rig_non_interruptive.js";
+
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -193,4 +195,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   humanQuestionsSchema,
   nodeEffortSchema,
   usageSamplesLatestIndexesSchema,
+  rigNonInterruptiveSchema,
 ];

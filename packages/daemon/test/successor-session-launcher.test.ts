@@ -78,6 +78,16 @@ describe("SuccessorSessionLauncher", () => {
     expect(binding.model).toBe("gpt-5.4-cheap");
   });
 
+  it("the successor keeps the saved non-interruptive rig choice", async () => {
+    listPanes.mockResolvedValue([{ id: "%42", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
+    const res = await launcher().createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", nonInterruptive: true, launchPosture: "full_bypass" },
+      departingSessionName: "dev-impl@rig",
+    });
+    expect(res.ok).toBe(true);
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nonInterruptive: true, launchPosture: "full_bypass" });
+  });
+
   it("#75: the successor's launch binding carries the configured effort", async () => {
     listPanes.mockResolvedValue([{ id: "%42", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
     const res = await launcher().createSuccessor({

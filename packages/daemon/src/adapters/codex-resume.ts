@@ -1,3 +1,4 @@
+import { nonInterruptiveArg } from "./non-interruptive.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
 import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
@@ -58,6 +59,7 @@ export class CodexResumeAdapter {
     model?: string | null,
     // #75: optional reasoning effort for the seat.
     effort?: string | null,
+    nonInterruptive?: boolean,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
@@ -90,7 +92,7 @@ export class CodexResumeAdapter {
     }
 
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
-    const postureArg = codexPostureArg(profileArg, process.env, resolvedPosture);
+    const postureArg = codexPostureArg(profileArg, process.env, resolvedPosture) + nonInterruptiveArg("codex", { nonInterruptive, launchPosture: resolvedPosture });
     const appliedLaunch = observeCodexSandbox(postureArg);
     const networkArg = await codexNetworkDefaultArg(this.options.readNetworkDefault, appliedLaunch, cwd, tmuxSessionName);
     const cmd = buildCodexResumeCore(
