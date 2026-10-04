@@ -16,7 +16,7 @@
               "date": "2026-10-04",
               "openrigVersion": "0.6.6",
               "recordIds": [
-                "rr-20261004-003"
+                "rr-20261004-002"
               ],
               "packageDigests": [
                 {
@@ -41,7 +41,7 @@
     }
   },
   "harnessChecks": {
-    "state": "ok",
+    "state": "status_unavailable",
     "harnesses": {
       "pi": {
         "linux-x64": {
@@ -57,5 +57,5 @@
       }
     }
   },
-  "bodyDigest": "548f7ce51c9cf66f34fd0b613dd3754240350cd856ac51f7f98140300766dd57"
+  "bodyDigest": "c23b3fae312e39667da2ec9fbb0a44c9d68048e0ca4c392301bf884ca30a44e8"
 }

@@ -26,4 +26,9 @@ describe("bundle identity", () => {
     const reversed = Object.fromEntries(Object.entries(files).reverse());
     expect(packageDigest(reversed)).toEqual(packageDigest(files));
   });
+
+  it("a file name holding a tab and a newline cannot pass for two files", () => {
+    const [h1, h2] = ["1".repeat(64), "2".repeat(64)];
+    expect(packageDigest({ [`x\t${h1}\ny`]: h2 }).value).not.toBe(packageDigest({ x: h1, y: h2 }).value);
+  });
 });

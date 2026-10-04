@@ -11,7 +11,7 @@
       "configurations": {
         "build.impl=claude-code,build.lead=claude-code,check.qa=codex,check.review=codex": {
           "platforms": {
-            "linux": {
+            "linux-x64": {
               "label": "tested",
               "date": "2026-10-04",
               "openrigVersion": "0.6.6",
@@ -44,7 +44,7 @@
     "state": "ok",
     "harnesses": {
       "pi": {
-        "linux": {
+        "linux-x64": {
           "result": "BLOCKED",
           "date": "2026-10-04",
           "openrigVersion": "0.6.6",

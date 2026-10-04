@@ -2,6 +2,7 @@
 // every invalid fixture fails it. web-studio, the registry check and the status generator build
 // against these files.
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,4 +68,71 @@ describe("bundle formats v1", () => {
       expect(validate(fixture.schema, fixture.data).ok).toBe(false);
     });
   }
+
+  it("v1 grows: open formats accept an unknown property; the status file, a package digest and a harness check's subject don't", () => {
+    const valid = (dir: string) => fixtures("valid").find((f) => f.name.startsWith(`valid/${dir}/`))!;
+    const withExtra = (data: unknown, at: (copy: Record<string, any>) => Record<string, unknown>) => {
+      const copy = structuredClone(data) as Record<string, any>;
+      at(copy)["futureOptional"] = "x";
+      return copy;
+    };
+    for (const dir of ["configurations", "behaviour", "run-record", "registry"]) {
+      const f = valid(dir);
+      expect(validate(f.schema, withExtra(f.data, (c) => c)).ok, `${f.name} top level`).toBe(true);
+    }
+    const registry = valid("registry");
+    expect(validate(registry.schema, withExtra(registry.data, (c) => c["source"])).ok, "registry source").toBe(true);
+
+    const status = valid("status");
+    expect(validate(status.schema, withExtra(status.data, (c) => c)).ok, "status top level").toBe(false);
+    const team = fixtures("valid").find((f) => f.name === "valid/run-record/team-pass.json")!;
+    expect(validate(team.schema, withExtra(team.data, (c) => c["subject"]["packageDigest"])).ok, "package digest").toBe(false);
+    const harness = fixtures("valid").find((f) => f.name === "valid/run-record/pi-harness-check-blocked.json")!;
+    expect(validate(harness.schema, withExtra(harness.data, (c) => c["subject"])).ok, "harness-check subject").toBe(false);
+  });
+
+  it("the status fixture agrees with the run-record fixtures it cites, and its bodyDigest matches its body", () => {
+    const records = new Map(fixtures("valid").filter((f) => f.schema === "run-record.v1")
+      .map((f) => [(f.data as { id: string }).id, f.data as Record<string, any>]));
+    const withdrawn = new Set([...records.values()].flatMap((r) => r["relations"]["withdraws"] as string[]));
+    const passed = (r: Record<string, any>) => (r["outcome"]["steps"] as Array<{ result: string }>).every((s) => s.result === "PASS");
+    const status = fixtures("valid").find((f) => f.schema === "bundle-status.v1")!.data as Record<string, any>;
+
+    for (const listing of Object.values(status["listings"]) as Array<Record<string, any>>) {
+      for (const [configurationId, config] of Object.entries(listing["configurations"]) as Array<[string, Record<string, any>]>) {
+        for (const [platform, result] of Object.entries(config["platforms"]) as Array<[string, Record<string, any>]>) {
+          for (const id of result["recordIds"] as string[]) {
+            const record = records.get(id);
+            expect(record, id).toBeDefined();
+            expect(withdrawn.has(id), `${id} is withdrawn`).toBe(false);
+            expect(record!["subject"]["kind"]).toBe("team");
+            expect(record!["subject"]["configurationId"]).toBe(configurationId);
+            expect(`${record!["environment"]["platform"]}-${record!["environment"]["arch"]}`).toBe(platform);
+            expect(result["packageDigests"]).toContainEqual(record!["subject"]["packageDigest"]);
+            if (result["label"] === "tested") {
+              expect(passed(record!), `${id} passed`).toBe(true);
+              expect(record!["outcome"]["assistance"]["count"], `${id} needed no help`).toBe(0);
+            }
+          }
+        }
+      }
+    }
+    for (const [harness, platforms] of Object.entries(status["harnessChecks"]["harnesses"]) as Array<[string, Record<string, any>]>) {
+      for (const [platform, result] of Object.entries(platforms) as Array<[string, Record<string, any>]>) {
+        for (const id of result["recordIds"] as string[]) {
+          const record = records.get(id)!;
+          expect(record["subject"]).toEqual({ kind: "harness_check", harness });
+          expect(`${record["environment"]["platform"]}-${record["environment"]["arch"]}`).toBe(platform);
+          expect((record["outcome"]["steps"] as Array<{ result: string }>).map((s) => s.result)).toContain(result["result"]);
+        }
+      }
+    }
+
+    // RFC 8785 for this fixture's value types (ASCII strings, integers): keys sorted, no whitespace
+    const canonical = (v: unknown): string => Array.isArray(v) ? `[${v.map(canonical).join(",")}]`
+      : v !== null && typeof v === "object" ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`).join(",")}}`
+      : JSON.stringify(v);
+    const { bodyDigest, ...body } = status;
+    expect(createHash("sha256").update(canonical(body), "utf8").digest("hex")).toBe(bodyDigest);
+  });
 });

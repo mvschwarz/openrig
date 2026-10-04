@@ -103,7 +103,8 @@
                       "recordIds": {
                         "type": "array",
                         "items": {
-                          "type": "string"
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
                         }
                       },
                       "packageDigests": {
@@ -160,8 +161,27 @@
                             }
                           }
                         }
+                      },
+                      {
+                        "if": {
+                          "properties": {
+                            "label": {
+                              "const": "tested"
+                            }
+                          }
+                        },
+                        "then": {
+                          "properties": {
+                            "assistanceCount": {
+                              "const": 0
+                            }
+                          }
+                        }
                       }
                     ]
+                  },
+                  "propertyNames": {
+                    "pattern": "^(linux|darwin|win32)-(x64|arm64)$"
                   }
                 },
                 "communityReports": {
@@ -259,7 +279,8 @@
                 "recordIds": {
                   "type": "array",
                   "items": {
-                    "type": "string"
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
                   }
                 },
                 "note": {
@@ -267,10 +288,31 @@
                 }
               },
               "additionalProperties": false
+            },
+            "propertyNames": {
+              "pattern": "^(linux|darwin|win32)-(x64|arm64)$"
             }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "status_unavailable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "harnesses": {
+                "maxProperties": 0
+              }
+            }
+          }
+        }
+      ]
     },
     "bodyDigest": {
       "type": "string",
