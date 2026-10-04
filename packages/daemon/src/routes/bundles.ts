@@ -26,6 +26,7 @@ import { BundleAuditReader, BundleAuditWriter, type BundleAuditFsOps, type Bundl
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { routingFailureWarnings, type BundleContentRouting } from "../domain/bundle-content-routing.js";
 import { vendorContextPackDir } from "../domain/bundle-carried-context-pack.js";
+import { vendorProjectDir } from "../domain/bundle-carried-project.js";
 import { getDaemonVersion } from "../domain/daemon-version.js";
 import { assertShippableSubstance } from "../domain/agent-resolver.js";
 
@@ -699,6 +700,8 @@ bundleRoutes.post("/create", async (c) => {
   const contextPackDirs = Array.isArray(body["contextPackDirs"])
     ? (body["contextPackDirs"] as unknown[]).filter((d): d is string => typeof d === "string" && d.length > 0)
     : [];
+  // `rig bundle create --project-dir <dir>`: the project this rig works in (project.yaml and its files)
+  const projectDir = typeof body["projectDir"] === "string" && body["projectDir"] ? body["projectDir"] : undefined;
 
   const allowDrift = body["allowDrift"] === true;
 
@@ -782,6 +785,7 @@ bundleRoutes.post("/create", async (c) => {
         if (authorPrimitives.agentImages) result.manifest.agentImages = authorPrimitives.agentImages;
         const carriedPacks = contextPackDirs.map((dir) => vendorContextPackDir(nodePath.resolve(dir), tmpStaging));
         if (carriedPacks.length > 0) result.manifest.contextPacks = [...(result.manifest.contextPacks ?? []), ...carriedPacks];
+        if (projectDir) result.manifest.project = vendorProjectDir(nodePath.resolve(projectDir), tmpStaging);
 
         const integrity = computeIntegrity(tmpStaging, integrityFsOps());
         result.manifest.integrity = integrity;
@@ -801,6 +805,9 @@ bundleRoutes.post("/create", async (c) => {
     // Validated above, before the drift guard ran.
     if (contextPackDirs.length > 0) {
       return c.json({ error: "--context-pack needs a pod-aware rig spec (one with pods:)" }, 400);
+    }
+    if (projectDir) {
+      return c.json({ error: "--project-dir needs a pod-aware rig spec (one with pods:)" }, 400);
     }
     const spec = LegacyRigSpecSchema.normalize(rawParsed);
 

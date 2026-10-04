@@ -394,6 +394,24 @@ export interface PodBundleManifest {
   contextPacks?: string[];
   /** Item 6 cross-primitive bundling: paths to agent-image DIRECTORIES (per PRD §Item 6 line 197); router copies the declared directory to the operator agent-images library on install. Consumer requires manifest.yaml inside each image dir. (Checkpoint 7.3g) */
   agentImages?: string[];
+  /** The project this rig works in: its id and the bundle folder holding project.yaml. Install registers it in the workspace catalog and associates the rig with it. */
+  project?: BundleProjectReference;
+}
+
+export interface BundleProjectReference {
+  id: string;
+  path: string;
+}
+
+function validateProjectBlock(raw: unknown, errors: string[]): void {
+  if (raw === undefined) return;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    errors.push("project must be an object with id and path");
+    return;
+  }
+  const p = raw as Record<string, unknown>;
+  if (typeof p["id"] !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p["id"])) errors.push("project.id must be a simple name (letters, digits, '.', '_', '-')");
+  if (typeof p["path"] !== "string" || !isRelativeSafePath(p["path"])) errors.push("project.path must be a safe relative path");
 }
 
 export function validatePodBundleManifest(raw: unknown): { valid: boolean; errors: string[] } {
@@ -427,6 +445,7 @@ export function validatePodBundleManifest(raw: unknown): { valid: boolean; error
   validateWorkflowSpecsBlock(m["workflow_specs"], errors);
   validateContextPacksBlock(m["context_packs"], errors);
   validateAgentImagesBlock(m["agent_images"], errors);
+  validateProjectBlock(m["project"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -462,6 +481,7 @@ export function serializePodBundleManifest(manifest: PodBundleManifest): string 
   if (manifest.workflowSpecs && manifest.workflowSpecs.length > 0) doc["workflow_specs"] = manifest.workflowSpecs;
   if (manifest.contextPacks && manifest.contextPacks.length > 0) doc["context_packs"] = manifest.contextPacks;
   if (manifest.agentImages && manifest.agentImages.length > 0) doc["agent_images"] = manifest.agentImages;
+  if (manifest.project) doc["project"] = { id: manifest.project.id, path: manifest.project.path };
   return stringifyYaml(doc);
 }
 

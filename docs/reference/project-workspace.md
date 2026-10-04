@@ -31,6 +31,26 @@ is the project-location catalog. The project manifest exposes empty
 addresses and stable managed-catalog skill IDs, but neither skill source nor a
 System World belongs in this tree.
 
+A catalog entry may also list the rigs that work in that project:
+
+```yaml
+projects:
+  - id: default
+    root: .
+  - id: openrig
+    root: projects/openrig
+    rigs: [openrig-dev]
+```
+
+Installing a bundle that carries a project (`rig bundle create --project-dir`)
+copies the project folder to `<workspace.projects_root>/<id>/`, adds its entry,
+and adds the bundle's rig to `rigs`, before any seat launches. The edit is
+additive and keeps the file's comments. Reinstalling changes nothing, and an
+entry that already points at the same folder is reused under its own id. If the
+id is already taken by another root, or the rig is already listed under another
+project, install writes nothing to the catalog and prints the fix. Readers that
+only know `id` and `root` ignore `rigs`.
+
 ## Project-world install
 
 `project.yaml` may select project context and managed skills together:

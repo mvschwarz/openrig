@@ -3346,3 +3346,64 @@ describe("bundle create --context-pack: a world pack outside the rig folder", ()
     expect((await res.json()).error).toMatch(/--context-pack needs a pod-aware rig spec/);
   });
 });
+
+describe("bundle create --project-dir: install registers the project and associates the rig", () => {
+  let db: Database.Database;
+  let setup: ReturnType<typeof createTestApp>;
+  let work: string;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    setup = createTestApp(db);
+    work = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-project-"));
+    for (const key of ["OPENRIG_WORKSPACE_PROJECTS_ROOT", "OPENRIG_WORKSPACE_CATALOG_PATH"]) saved[key] = process.env[key];
+    process.env["OPENRIG_WORKSPACE_PROJECTS_ROOT"] = path.join(work, "workspace", "projects");
+    process.env["OPENRIG_WORKSPACE_CATALOG_PATH"] = path.join(work, "workspace", "workspace.yaml");
+    const rigDir = path.join(work, "src", "rigs", "dev");
+    fs.mkdirSync(path.join(rigDir, "agents", "impl"), { recursive: true });
+    fs.mkdirSync(path.join(work, "src", "project"), { recursive: true });
+    fs.writeFileSync(path.join(work, "src", "project", "project.yaml"), "schema: openrig.project/v0alpha1\nid: openrig\n");
+    fs.writeFileSync(path.join(work, "src", "project", "SPEC.md"), "# Contributing to OpenRig\n");
+    fs.writeFileSync(path.join(rigDir, "agents", "impl", "agent.yaml"),
+      ['name: impl-agent', 'version: "1.0.0"', 'resources:', '  skills: []', 'profiles:', '  default:', '    uses:', '      skills: []'].join("\n"));
+    fs.writeFileSync(path.join(rigDir, "rig.yaml"), [
+      'version: "0.2"', 'name: openrig-dev', 'pods:', '  - id: dev', '    label: Dev', '    members:',
+      '      - id: impl', '        agent_ref: "local:agents/impl"', '        profile: default', '        runtime: claude-code', '        cwd: .',
+      '    edges: []', 'edges: []',
+    ].join("\n"));
+    fs.mkdirSync(path.join(work, "workspace"), { recursive: true });
+    fs.writeFileSync(path.join(work, "workspace", "workspace.yaml"), "schema: openrig.workspace/v0alpha1\nprojects:\n  - id: default\n    root: .\n");
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    fs.rmSync(work, { recursive: true, force: true });
+  });
+
+  it("carries the project, and install registers it with the rig associated, beside the workspace's own project", async () => {
+    const outputPath = path.join(work, "dev.rigbundle");
+    const res = await setup.app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath: path.join(work, "src", "rigs", "dev", "rig.yaml"), bundleName: "dev", bundleVersion: "0.1.0", outputPath, projectDir: path.join(work, "src", "project") }),
+    });
+    expect(res.status).toBe(201);
+
+    const { routeBundleContents } = await import("../src/domain/bundle-content-routing.js");
+    const routing = await routeBundleContents(outputPath);
+
+    expect(routing.routingFailures).toBeUndefined();
+    expect(routing.projectRegistration).toMatchObject({ status: "registered", projectId: "openrig", rigName: "openrig-dev" });
+    const { readProjectCatalog } = await import("../src/domain/workspace/project-catalog.js");
+    expect(readProjectCatalog(path.join(work, "workspace", "workspace.yaml"))).toEqual([
+      { id: "default", root: "." },
+      { id: "openrig", root: "projects/openrig" },
+    ]);
+    expect(fs.readFileSync(path.join(work, "workspace", "projects", "openrig", "SPEC.md"), "utf-8")).toBe("# Contributing to OpenRig\n");
+  });
+});
