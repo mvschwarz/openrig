@@ -29,7 +29,7 @@ import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
-  PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER,
+  PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
   type PiRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
 
@@ -163,12 +163,24 @@ export interface MirrorAndActivity {
   errorNotice?: string;
 }
 
+// Pi reports missing credentials through RPC errors and terminal model failures.
+// Add only fixed setting/variable names; never inspect or repeat credential values.
+function piCredentialHint(message: string): string {
+  const match = /^No API key found for ([a-z0-9-]+)\b/i.exec(message.trim());
+  if (!match) return "";
+  const provider = match[1]!.toLowerCase();
+  const key = Object.hasOwn(PI_PROVIDER_ENV_VARS, provider) ? PI_PROVIDER_ENV_VARS[provider] : undefined;
+  return key
+    ? ` For managed Pi, set ${key} in the daemon environment and add ${key} to recovery.provider_auth_env_allowlist. Use model ${provider}/<id>, then restart the daemon and relaunch the seat. Default Pi logins are not automatically shared.`
+    : " For managed Pi, configure this provider in the seat's PI_CODING_AGENT_DIR (auth.json or models.json). Its key is not in OpenRig's Pi environment passthrough map; default Pi logins are not automatically shared.";
+}
+
 function errorNotice(detail: unknown, runtime: RunnerRuntime): string {
   const text = typeof detail === "string"
     ? stripVTControlCharacters(detail).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").replace(/\s+/g, " ").trim()
     : "";
   const marker = runtime === "omp" ? "[omp-runner] ERROR" : PI_RUNNER_ERROR_MARKER;
-  return `${marker} ${text.slice(0, 400) || "request failed"}`;
+  return `${marker} ${text.slice(0, 400) || "request failed"}${runtime === "pi" ? piCredentialHint(text) : ""}`;
 }
 
 /** The one model-failure detector for both runtimes. Pi and OMP report a
@@ -390,7 +402,8 @@ export class RunnerCore {
 
   private handleResponse(record: Record<string, unknown>): void {
     if (record.success === false || record.error != null) {
-      const message = typeof record.error === "string" ? record.error : "request failed";
+      const detail = typeof record.error === "string" ? record.error : "request failed";
+      const message = detail + (this.runtime === "pi" ? piCredentialHint(detail) : "");
       if (record.id === GET_STATE_ID) {
         this.ready = false;
         this.writeSidecar({});
