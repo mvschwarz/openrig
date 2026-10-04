@@ -1397,7 +1397,7 @@ describe("StartupOrchestrator", () => {
       expect(await pending).toMatchObject({
         ok: false,
         startupStatus: "attention_required",
-        errors: ["Startup requires attention: workspace trust required"],
+        errors: ["Startup requires attention: workspace trust required", expect.stringContaining("rig seat continue")],
       });
     });
   });

@@ -381,9 +381,6 @@ export class StartupOrchestrator {
       if (!readiness.ready) {
         if (isAttentionRequiredReadinessCode(readiness.code)) {
           errors.push(`Startup requires attention: ${readiness.reason ?? "unknown"}`);
-          if (readiness.code === "bypass_consent_gate" && isFreshLaunch && input.binding.tmuxSession) {
-            errors.push(`After accepting in ${input.binding.tmuxSession}, run: rig seat continue ${shellQuote(input.binding.tmuxSession)}`);
-          }
           return this.fail(input, "attention_required", errors, undefined, isFreshLaunch);
         }
         errors.push(`Readiness timeout after ${readinessTimeoutMs / 1000}s — harness did not become interactive: ${readiness.reason ?? "unknown"}`);
@@ -595,6 +592,9 @@ export class StartupOrchestrator {
     evidence?: string,
     freshContextPending = false,
   ): StartupResult {
+    if (status === "attention_required" && freshContextPending && input.binding.tmuxSession) {
+      errors.push(`After resolving it in ${input.binding.tmuxSession}, run: rig seat continue ${shellQuote(input.binding.tmuxSession)}`);
+    }
     this.sessionRegistry.updateStartupStatus(input.sessionId, status);
     this.eventBus.emit({
       type: "node.startup_failed",

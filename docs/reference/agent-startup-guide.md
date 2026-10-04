@@ -22,6 +22,10 @@ an unknown outcome; inspect `rig seat status <seat>` before taking another actio
 Runtime readiness, startup delivery, and orientation proof remain separate;
 a missing proof does not block this continuation.
 
+Other fresh-launch prerequisites, such as login or workspace trust, use the same
+continuation: resolve the prerequisite in the native pane, then run the displayed
+`rig seat continue <seat>` command to deliver its pending startup context.
+
 ## Two Categories of Startup
 
 Everything an agent receives at boot time falls into one of two categories:

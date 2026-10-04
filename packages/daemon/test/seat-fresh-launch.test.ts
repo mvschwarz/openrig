@@ -225,6 +225,8 @@ describe("SeatLifecycleService.launchFresh", () => {
     else adapter.checkReady = async () => ({ ready: false, code: "hook_trust_gate", reason: "native gate" });
     const first = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
     expect(first.ok).toBe(false);
+    if (first.ok) throw new Error("expected pending startup context");
+    expect(first.message).toContain(`After resolving it in ${seat.sessionName}, run: rig seat continue`);
     adapter.checkReady = async () => ({ ready: true });
     const rows = sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.id);
     const launch = vi.spyOn(adapter, "launchHarness");
