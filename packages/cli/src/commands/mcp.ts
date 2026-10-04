@@ -41,7 +41,7 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
       const transport = new StdioServerTransport();
       let finish!: () => void;
       const closed = new Promise<void>((resolve) => { finish = resolve; });
-      server.onclose = finish;
+      server.server.onclose = finish;
       process.stdin.once("end", finish);
       process.once("SIGINT", finish);
       process.once("SIGTERM", finish);
