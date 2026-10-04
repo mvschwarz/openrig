@@ -15,6 +15,7 @@ import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission } from "../src/domain/permission-drift.js";
 import type { SettingsStore } from "../src/domain/user-settings/settings-store.js";
+import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
 
 // -- Mocks --
 
@@ -307,6 +308,52 @@ describe("StartupOrchestrator", () => {
     expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
     expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(seed.sessionId)).toEqual({ startup_status: "attention_required" });
     expect(db.prepare("SELECT COUNT(*) AS n FROM node_startup_context WHERE node_id = ?").get(seed.nodeId)).toEqual({ n: 1 });
+  });
+
+  it.each(["initial_identity", "restore_preload", "after_ready"])("reports a trust dialog after %s instead of startup ready", async (source) => {
+    const seed = seedSession();
+    let delivered = false;
+    // Claude 2.1.220's observed trust panel, with the project path replaced.
+    const trust = "Accessing workspace:\n/fixture/project\nQuick safety check: Is this a project you created or one you trust?\n❯ 1. Yes, I trust this folder\n  2. No, exit\nEnter to confirm · Esc to cancel";
+    const t = mockTmux({ sendText: vi.fn(async () => { delivered = true; return { ok: true as const }; }),
+      capturePaneContent: vi.fn(async () => trust) });
+    const adapter = mockAdapter({ checkReady: vi.fn(async () => {
+      const probe = assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude",
+        paneContent: delivered ? trust : "Claude Code v2.1.220\n❯ \n? for shortcuts" });
+      return { ready: probe.status === "resumed", code: probe.code, reason: probe.detail };
+    }) });
+    const result = await createOrchestrator({ tmux: t, readFile: () => "Read the project instructions." }).startNode(makeInput(seed, {
+      adapter, isRestore: source === "restore_preload",
+      ...(source === "restore_preload" ? { resumeToken: "native-original", resumeType: "claude_id" } : {}),
+      resolvedStartupFiles: source === "after_ready" ? [] : [{ path: "role.md", absolutePath: "/fixture/role.md",
+        ownerRoot: "/fixture", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start", "restore"] }],
+      startupActions: [source === "initial_identity" ? makeIdentityAction() : makeAction({ type: "send_text", value: "Read the project instructions." })],
+    }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required",
+      errors: [expect.stringContaining("workspace trust approval")] });
+    expect(adapter.checkReady).toHaveBeenCalledTimes(2);
+    expect(t.sendText).toHaveBeenCalledTimes(1);
+    expect(t.sendKeys).toHaveBeenCalledTimes(1); // no extra Enter into the trust menu
+    expect(t.killSession).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT startup_status FROM sessions WHERE id = ?").get(seed.sessionId)).toEqual({ startup_status: "attention_required" });
+    expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(seed.nodeId)).toEqual([]);
+  });
+
+  it.each(["bundled", "file"])("keeps an unavailable post-%s observation unverified without failing startup", async (delivery) => {
+    const seed = seedSession();
+    const adapter = mockAdapter({ checkReady: vi.fn().mockResolvedValueOnce({ ready: true })
+      .mockRejectedValueOnce(new Error("fixture capture unavailable")) });
+    const result = await createOrchestrator({ readFile: () => "Read the project instructions." }).startNode(makeInput(seed, {
+      adapter, resolvedStartupFiles: [{ path: "role.md", absolutePath: "/fixture/role.md", ownerRoot: "/fixture",
+        deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }],
+      startupActions: delivery === "bundled" ? [makeIdentityAction()] : [],
+    }));
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified",
+      reasons: ["Post-delivery runtime state is unverified: fixture capture unavailable"] } });
+    expect(adapter.checkReady).toHaveBeenCalledTimes(2);
+    const event = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type = 'node.startup_ready'").get(seed.nodeId) as { payload: string };
+    expect(JSON.parse(event.payload).submission).toMatchObject({ status: "unverified" });
+    expect(tmux.killSession).not.toHaveBeenCalled();
   });
 
   it("records the exact adapter-returned launch effect only after successful managed launch", async () => {
@@ -820,7 +867,7 @@ describe("StartupOrchestrator", () => {
     }));
     expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
     expect(adapter.project).toHaveBeenCalledOnce();
-    expect(adapter.checkReady).toHaveBeenCalledOnce();
+    expect(adapter.checkReady).toHaveBeenCalledTimes(2);
     expect(tmux.sendText).toHaveBeenCalledExactlyOnceWith("r01-impl", makeIdentityAction().value);
     expect(deriveOriented(db, seed.nodeId)).toBe("n-a");
     const row = db.prepare("SELECT payload FROM events WHERE type='node.startup_pending'").get() as { payload: string };
