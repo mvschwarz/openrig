@@ -73,6 +73,35 @@ ownership receipt. A later seat start with no project-world input preserves it;
 an explicit install whose `install.skills` is empty clears it. This keeps
 "project not supplied" distinct from "project deliberately selects no skills."
 
+## Work-install project selection
+
+`rig context work-install` picks one project from `workspace.yaml`, in this
+order:
+
+1. `--project <id>`;
+2. the only declared project;
+3. the project whose entry lists the calling seat's rig under `rigs`;
+4. the deepest declared project root that contains the working directory
+   (`--cwd`, else the current directory);
+5. otherwise it stops with `project_required` and prints each candidate's exact
+   command.
+
+```yaml
+schema: openrig.workspace/v0alpha1
+projects:
+  - id: default
+    root: .
+  - id: contributor
+    root: projects/contributor
+    rigs: [openrig-dev]
+```
+
+`rigs` is optional. An entry whose `rigs` isn't a list of rig names is ignored
+with a warning. A rig listed under two projects, or two projects sharing the
+deepest root, leave the choice to `--project`. Step 3 reads the seat's
+`OPENRIG_SESSION_NAME`, so a plain shell skips it. `--json` reports the step
+that chose the project as `position.selectedBy`.
+
 ## TUI project selection
 
 Open **PROJECTS** (or enter `projects`) to choose an ID and root from the

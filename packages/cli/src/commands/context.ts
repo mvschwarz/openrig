@@ -274,6 +274,8 @@ Examples:
         contextRoot,
         systemWorldSelection: String(systemWorldSetting.value),
         systemWorldSource: systemWorldSetting.source,
+        cwd: resolve(opts.cwd ?? process.cwd()),
+        ...(process.env["OPENRIG_SESSION_NAME"] ? { sessionName: process.env["OPENRIG_SESSION_NAME"] } : {}),
         ...(opts.project !== undefined ? { project: opts.project } : {}),
         ...(opts.mission !== undefined ? { mission: opts.mission } : {}),
         ...(opts.slice !== undefined ? { slice: opts.slice } : {}),
@@ -344,7 +346,10 @@ Examples:
         for (const warning of result.warnings) console.error(`Warning: ${warning}`);
         return;
       }
-      console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}`);
+      const selectedBy = result.position.selectedBy === "rig"
+        ? " (selected by this rig's catalog entry)"
+        : result.position.selectedBy === "cwd" ? " (selected by the working directory)" : "";
+      console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}${selectedBy}`);
       printWorkInstallSelectors(result, (opts.topology ?? "").split(",").map((id) => id.trim()).filter(Boolean));
       for (const planned of result.pieces) {
         console.log(`${planned.altitude.padEnd(7)} ${planned.address} [${planned.source}] ${planned.exists ? planned.path : `(absent: ${planned.path})`}`);

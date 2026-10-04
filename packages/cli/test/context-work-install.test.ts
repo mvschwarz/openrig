@@ -47,6 +47,7 @@ describe("rig context work-install", () => {
   let savedSkillsRoot: string | undefined;
   let savedContextRoot: string | undefined;
   let savedSystemWorld: string | undefined;
+  let savedSessionName: string | undefined;
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "openrig-context-work-install-"));
@@ -144,6 +145,8 @@ skills: [system-skill]
     savedSkillsRoot = process.env["OPENRIG_SKILLS_ROOT"];
     savedContextRoot = process.env["OPENRIG_CONTEXT_ROOT"];
     savedSystemWorld = process.env["OPENRIG_CONTEXT_SYSTEM_WORLD"];
+    savedSessionName = process.env["OPENRIG_SESSION_NAME"];
+    delete process.env["OPENRIG_SESSION_NAME"];
     process.env["OPENRIG_WORKSPACE_ROOT"] = catalogRoot;
     delete process.env["OPENRIG_WORKSPACE_CATALOG_PATH"];
     process.env["OPENRIG_SKILLS_ROOT"] = skillsRoot;
@@ -162,6 +165,8 @@ skills: [system-skill]
     else process.env["OPENRIG_CONTEXT_ROOT"] = savedContextRoot;
     if (savedSystemWorld === undefined) delete process.env["OPENRIG_CONTEXT_SYSTEM_WORLD"];
     else process.env["OPENRIG_CONTEXT_SYSTEM_WORLD"] = savedSystemWorld;
+    if (savedSessionName === undefined) delete process.env["OPENRIG_SESSION_NAME"];
+    else process.env["OPENRIG_SESSION_NAME"] = savedSessionName;
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -180,6 +185,96 @@ skills: [system-skill]
     expect(result.exitCode).toBeUndefined();
     const plan = JSON.parse(result.logs.join("")) as { position: { projectId: string; projectRoot: string } };
     expect(plan.position).toMatchObject({ projectId: "alpha", projectRoot: alphaRoot });
+  });
+
+  describe("selection without --project", () => {
+    type Plan = { position: { projectId: string; projectRoot: string; selectedBy: string }; warnings: string[] };
+    type Failure = { ok: false; error: { code: string; message: string; candidates?: string[] } };
+    const run = (...args: string[]) => captureLogs(async () => {
+      await makeCommand().parseAsync(["node", "rig", "context", "work-install", ...args]);
+    });
+    const catalog = (projects: string) => writeFileSync(
+      join(catalogRoot, "workspace.yaml"),
+      `schema: openrig.workspace/v0alpha1\nprojects:\n${projects}`,
+    );
+    const alphaRel = () => relative(catalogRoot, alphaRoot);
+    const betaRel = () => relative(catalogRoot, betaRoot);
+
+    it("picks the project whose catalog entry lists the calling rig, ahead of the working directory", async () => {
+      catalog(`  - id: alpha\n    root: ${alphaRel()}\n    rigs: [other-rig]\n  - id: beta\n    root: ${betaRel()}\n    rigs: [dev-rig]\n`);
+      process.env["OPENRIG_SESSION_NAME"] = "driver@dev-rig";
+
+      const json = await run("--cwd", join(alphaRoot, "missions"), "--json");
+      expect(json.exitCode).toBeUndefined();
+      expect((JSON.parse(json.logs.join("")) as Plan).position).toMatchObject({ projectId: "beta", projectRoot: betaRoot, selectedBy: "rig" });
+
+      const text = await run("--cwd", workingRoot);
+      expect(text.logs[0]).toBe(`project beta: ${betaRoot} (selected by this rig's catalog entry)`);
+    });
+
+    it("keeps project_required when two projects list the calling rig", async () => {
+      catalog(`  - id: alpha\n    root: ${alphaRel()}\n    rigs: [dev-rig]\n  - id: beta\n    root: ${betaRel()}\n    rigs: [dev-rig]\n`);
+      process.env["OPENRIG_SESSION_NAME"] = "driver@dev-rig";
+
+      const result = await run("--cwd", join(alphaRoot, "missions"), "--json");
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.logs.join("")) as Failure).toMatchObject({
+        ok: false,
+        error: { code: "project_required", candidates: ["alpha", "beta"], message: expect.stringContaining("rig 'dev-rig'") },
+      });
+    });
+
+    it("ignores a malformed rigs value with a warning and falls through to the working directory", async () => {
+      catalog(`  - id: alpha\n    root: ${alphaRel()}\n  - id: beta\n    root: ${betaRel()}\n    rigs: dev-rig\n`);
+      process.env["OPENRIG_SESSION_NAME"] = "driver@dev-rig";
+
+      const result = await run("--cwd", join(alphaRoot, "missions", "alpha-active"), "--json");
+      expect(result.exitCode).toBeUndefined();
+      const plan = JSON.parse(result.logs.join("")) as Plan;
+      expect(plan.position).toMatchObject({ projectId: "alpha", selectedBy: "cwd" });
+      expect(plan.warnings).toEqual([expect.stringContaining("project 'beta' rigs must be a list of rig names")]);
+    });
+
+    it("picks the deepest catalog root containing the working directory", async () => {
+      const bundleRoot = join(catalogRoot, "projects", "bundle");
+      mkdirSync(join(bundleRoot, "src"), { recursive: true });
+      mkdirSync(join(catalogRoot, "notes"), { recursive: true });
+      catalog(`  - id: default\n    root: .\n  - id: bundle\n    root: projects/bundle\n`);
+
+      const inBundle = await run("--cwd", join(bundleRoot, "src"), "--json");
+      expect(inBundle.exitCode).toBeUndefined();
+      expect((JSON.parse(inBundle.logs.join("")) as Plan).position).toMatchObject({ projectId: "bundle", projectRoot: bundleRoot, selectedBy: "cwd" });
+
+      const outside = await run("--cwd", join(catalogRoot, "notes"));
+      expect(outside.logs[0]).toBe(`project default: ${catalogRoot} (selected by the working directory)`);
+
+      const unrelated = await run("--cwd", workingRoot, "--json");
+      expect(unrelated.exitCode).toBe(1);
+      expect(JSON.parse(unrelated.logs.join("")) as Failure).toMatchObject({
+        error: { code: "project_required", candidates: ["default", "bundle"] },
+      });
+    });
+
+    it("keeps project_required when two ids share the deepest root", async () => {
+      catalog(`  - id: alpha\n    root: ${alphaRel()}\n  - id: alpha-copy\n    root: ${alphaRel()}\n  - id: beta\n    root: ${betaRel()}\n`);
+
+      const result = await run("--cwd", join(alphaRoot, "missions"), "--json");
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.logs.join("")) as Failure).toMatchObject({
+        error: { code: "project_required", candidates: ["alpha", "alpha-copy"] },
+      });
+    });
+
+    it("lets an explicit --project override the rig and the working directory, and reports a single entry", async () => {
+      catalog(`  - id: alpha\n    root: ${alphaRel()}\n  - id: beta\n    root: ${betaRel()}\n    rigs: [dev-rig]\n`);
+      process.env["OPENRIG_SESSION_NAME"] = "driver@dev-rig";
+      const explicit = await run("--project", "alpha", "--cwd", join(betaRoot, "missions"), "--json");
+      expect((JSON.parse(explicit.logs.join("")) as Plan).position).toMatchObject({ projectId: "alpha", selectedBy: "explicit" });
+
+      catalog(`  - id: alpha\n    root: ${alphaRel()}\n`);
+      const single = await run("--cwd", workingRoot, "--json");
+      expect((JSON.parse(single.logs.join("")) as Plan).position).toMatchObject({ projectId: "alpha", selectedBy: "single" });
+    });
   });
 
   it("reports replacement and disabled System World states without missing-file inference", async () => {
