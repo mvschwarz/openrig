@@ -130,21 +130,29 @@ export async function exitedSeats(
     return gone;
   }
   const liveLabels = live.map((p) => p["label"] as string);
+  // A seat whose label is blank can't be matched, and can't be told apart from a filler pane.
+  const blankSeats = pagePanes.filter((pane) => normalLabel(pane.label) === "");
   // Blank filler panes run `sh` and stay. A tab holding exactly the fillers, all blank-labelled, has
-  // lost every seat pane. Labels are read first: a seat label anywhere means this rule doesn't apply.
-  if (live.length === blanks && liveLabels.every((l) => normalLabel(l) === "")) {
+  // lost every seat pane. Labels are read first: a seat label anywhere means this rule doesn't apply,
+  // and neither does a blank-labelled seat, which would look like a filler.
+  if (blankSeats.length === 0 && live.length === blanks && liveLabels.every((l) => normalLabel(l) === "")) {
     for (const pane of pagePanes) gone.add(pane.seat);
     return gone;
   }
+  if (blankSeats.length > 0) unconfirmed();
   if (!pagePanes.some((pane) => liveLabels.some((l) => labelMatches(l, pane.label)))) return unconfirmed();
-  const perLabel = new Map<string, number>();
-  for (const pane of pagePanes) perLabel.set(pane.label, (perLabel.get(pane.label) ?? 0) + 1);
+  const perLabel = new Map<string, ComposedPane[]>();
+  for (const pane of pagePanes) {
+    const key = normalLabel(pane.label);
+    if (key === "") continue; // never attributed; the note above says so
+    perLabel.set(key, [...(perLabel.get(key) ?? []), pane]);
+  }
   const shared: string[] = [];
-  for (const [label, count] of perLabel) {
+  for (const [label, seats] of perLabel) {
     const alive = liveLabels.filter((l) => labelMatches(l, label)).length;
-    if (count === 1) {
-      if (alive === 0) gone.add(pagePanes.find((p) => p.label === label)!.seat);
-    } else if (alive < count) {
+    if (seats.length === 1) {
+      if (alive === 0) gone.add(seats[0]!.seat);
+    } else if (alive < seats.length) {
       shared.push(label);
     }
   }

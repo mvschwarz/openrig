@@ -175,6 +175,24 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     expect(res.notes?.join(" ")).toContain("3 pane(s) exited right after opening");
   });
 
+  it("a seat whose label is blank is never attributed: with every pane alive it stays opened, with the note", async () => {
+    // A saved view may give a member a whitespace-only label.
+    const { adapter } = herdrOpening(() => listed(" ", "b", "c", ""));
+    const res = await adapter.openView(viewOf(pane("a", " "), pane("b"), pane("c")));
+    expect(res.ok).toBe(true);
+    expect(res.opened).toEqual(["a", "b", "c"]);
+    expect(res.degraded).toEqual([]);
+    expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
+  });
+
+  it("a blank-labelled seat keeps the filler-only rule from applying: nothing is degraded, with the note", async () => {
+    const { adapter } = herdrOpening(() => listed(""));
+    const res = await adapter.openView(viewOf(pane("a", " "), pane("b"), pane("c")));
+    expect(res.opened).toEqual(["a", "b", "c"]);
+    expect(res.degraded).toEqual([]);
+    expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
+  });
+
   it("the tab isn't in the listing (another id form) or the listing is empty: seats stay opened, with a note", async () => {
     const otherTab: HerdrResult = { type: "pane_list", panes: [{ pane_id: "p0", tab_id: "1", label: "a" }] };
     for (const reply of [otherTab, { type: "pane_list", panes: [] }]) {
