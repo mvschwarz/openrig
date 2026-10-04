@@ -91,11 +91,16 @@ You are about to lose every connection you have built. Spend this turn making th
 1. **Think back before writing.** Walk the session and, through your previous map, the windows before it.
    What were the threads? What did you work out about how the pieces fit? What is unfinished? What did you
    decide, and why? What were you about to be wrong about?
-2. **Write the restore map** in your seat folder, not in scratch (scratch can be cleaned while you are
-   compacted): `<topology root>/rigs/<rig>/seats/<seat>/RESTORE-MAP-<UTC yyyymmdd-hhmm>.md`. Derive the
-   folder from `rig whoami --json` and `rig config get topology.root`. **Run `date -u` for the timestamp and
-   every time you write in the map. Do not estimate times**: an estimated time can land before events it
-   describes, as one did in an early run.
+2. **Write the restore map at the exact path named in OpenRig's preparation request.** Follow that
+   request's completion marker and atomic publication instructions: the daemon waits for that specific
+   file. Do not substitute the seat folder or another map. Managed preparation normally uses
+   `<launch cwd>/.openrig/compaction/preparation/<session>/<attempt>/RESTORE-MAP.md`; its parent
+   compaction folder ignores itself in Git because maps hold private working context. Unknown or
+   unwritable launch directories retain the instance-home fallback named in the request; it may need
+   permission if outside your working directories. When there is **no named path**, use your durable seat
+   folder instead: `<topology root>/rigs/<rig>/seats/<seat>/RESTORE-MAP-<UTC yyyymmdd-hhmm>.md`, derived
+   from `rig whoami --json` and `rig config get topology.root`. **Run `date -u` for the timestamp and every
+   time you write in the map. Do not estimate times**: an estimated time can land before events it describes.
 3. **Open the map with a summary** of 10 to 20 lines: who you are, what you hold, what mattered in this
    window, what is next and who authorizes it, and any hold in force. **Publish that summary as your seat
    recap** too: save it, plus a line naming the map's path, to a file and run
@@ -162,8 +167,9 @@ You have facts without connections. Rebuild the connections before you act on an
    `rig context work-install` lists what the project declares (intent, context files, skills), so read the pieces
    your task needs. `--deliver` prints them all; when several projects are declared (`--json` lists the ids), name
    one with `--project <id>`.
-4. **Read your own restore map in full**: the newest `RESTORE-MAP-*.md` in your seat folder, which the
-   compaction summary should name. If it points to an earlier map for context you need, read that too.
+4. **Read your own restore map in full** at the exact path named by the preparation request, restore
+   request or compaction summary. Only when none names a path, look for the newest `RESTORE-MAP-*.md`
+   in your seat folder. If the selected map points to an earlier map for context you need, read that too.
 5. **Read down the map's ranked list** to your class's tier line, reading exactly the parts each entry names.
    Then check every row you hold (`rig queue show <id> --full --json`) and anything that may have changed since
    the map was written: merged PRs, new rows, a new hold. The map records what was true when it was written;

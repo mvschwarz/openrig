@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { shellQuote } from "../adapters/shell-quote.js";
 import type Database from "better-sqlite3";
-import type { ClaudeCompactionEnforcer } from "../domain/claude-compaction-enforcer.js";
+import type { ClaudeCompactionEnforcer, ManualCompactionOutcome } from "../domain/claude-compaction-enforcer.js";
 import type { ContextUsageStore } from "../domain/context-usage-store.js";
 import type { SessionTransport } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
@@ -52,13 +52,13 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
 
     // Resolve the DB node id + runtime for the latest session row.
     const row = db.prepare(`
-      SELECT n.id AS node_id, n.runtime AS runtime
+      SELECT n.id AS node_id, n.runtime AS runtime, n.cwd AS cwd
       FROM sessions s
       JOIN nodes n ON s.node_id = n.id
       WHERE s.session_name = ?
       ORDER BY s.id DESC
       LIMIT 1
-    `).get(sessionName) as { node_id: string; runtime: string | null } | undefined;
+    `).get(sessionName) as { node_id: string; runtime: string | null; cwd: string | null } | undefined;
     if (!row) {
       return c.json({
         ok: false,
@@ -75,6 +75,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       {
         sessionName,
         runtime: row.runtime,
+        cwd: row.cwd,
         usedPercentage: usage.availability === "known" ? usage.usedPercentage : null,
         transcriptPath: usage.transcriptPath,
         sessionId: usage.sessionId,
@@ -109,7 +110,8 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       session: sessionName,
       stage: outcome.stage,
       reason: outcome.reason,
-      error: manualReasonMessage(sessionName, outcome.reason),
+      ...(outcome.preparation ? { preparation: outcome.preparation } : {}),
+      error: manualOutcomeMessage(sessionName, outcome),
     }, status);
   });
 
@@ -141,6 +143,13 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
   });
 
   return router;
+}
+
+function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompactionOutcome, { triggered: false }>): string {
+  const prep = outcome.preparation;
+  if (!prep || prep.delivery === "not_sent") return manualReasonMessage(sessionName, outcome.reason);
+  const effect = prep.delivery === "delivered" ? "Preparation was sent" : "Preparation may have reached the seat (delivery is unconfirmed)";
+  return `${effect} for '${sessionName}' (attempt ${prep.attemptId}), but /compact was not confirmed (${outcome.reason}). This attempt is disarmed; its map remains at ${prep.mapPath} if written. Inspect rig compact ${shellQuote(sessionName)} --state before an explicit retry.`;
 }
 
 function manualReasonMessage(sessionName: string, reason: string): string {

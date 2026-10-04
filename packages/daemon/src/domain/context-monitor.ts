@@ -157,6 +157,7 @@ export class ContextMonitor {
     try {
       await this.compactionEnforcer.maybeAutoCompact({
         sessionName: session.session_name,
+        cwd: session.cwd,
         runtime: session.runtime,
         usedPercentage: usage.usedPercentage,
         transcriptPath: usage.transcriptPath,

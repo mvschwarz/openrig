@@ -1,5 +1,6 @@
 import {afterEach, expect, it, vi} from 'vitest';
 import {Hono} from 'hono';
+import {execFileSync} from 'node:child_process';
 import {compactionRoutes} from '../src/routes/compaction.js';
 import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -153,7 +154,8 @@ it('late completion of cancelled manual request cannot overwrite an explicit ret
  const oldId=f.e.getPreparationState(seat)!.attemptId;
  f.e.cancelPreparation(seat);
  expect((await f.e.triggerManualCompact(input,{operatorInitiated:true,skipMap:true})).triggered).toBe(true);
- release({ok:true});expect((await old).triggered).toBe(false);
+ release({ok:true});const oldResult=await old;expect(oldResult.triggered).toBe(false);
+ if(!oldResult.triggered)expect(oldResult.preparation).toMatchObject({attemptId:oldId,delivery:'delivered'});
  expect(f.e.getPreparationState(seat)).toMatchObject({status:'compact-sent'});
  expect(f.e.getPreparationState(seat)!.attemptId).not.toBe(oldId);
  expect(f.e.getManualCompactionState(seat)?.stage).toBe('compact-sent');
@@ -305,12 +307,16 @@ it('preparation receipt: positive permission prompt before prep is an unsent ref
 });
 it('registered cwd: manual route selects a self-ignoring map inside the launch workspace',async()=>{
  const f=fixture();const cwd=join(f.home,'code repo');mkdirSync(cwd);
+ execFileSync('git',['-c','init.templateDir=','init','--quiet',cwd]);
  f.onSleep(async()=>{publish(f);});
  expect((await routeFixture(f,cwd)()).status).toBe(200);
  const a=f.e.getPreparationState(seat)!;
  expect(a.mapPath).toBe(join(cwd,'.openrig','compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
  expect(readFileSync(join(cwd,'.openrig','compaction','.gitignore'),'utf8')).toBe('*\n');
  expect(f.writes[0]).toContain(JSON.stringify(a.mapPath));expect(compacts(f)).toHaveLength(1);
+ // The map and the ignore file itself stay out of an ordinary git add -A.
+ execFileSync('git',['-C',cwd,'add','-A']);
+ expect(execFileSync('git',['-C',cwd,'ls-files'],{encoding:'utf8'})).toBe('');
 });
 it('registered cwd: automatic monitor forwards the launch workspace and isolates sibling maps',async()=>{
  const f=fixture();const cwd=join(f.home,'code repo');mkdirSync(cwd);
@@ -331,4 +337,13 @@ it('registered cwd: absent, relative or unwritable cwd preserves the legacy map 
   expect(f.e.getPreparationState(seat)!.mapPath).toBe(join(f.home,'compaction','preparation',seat,f.e.getPreparationState(seat)!.attemptId,'RESTORE-MAP.md'));
   expect(f.writes).toHaveLength(1);
  }
+});
+
+it('preparation contract: prompt qualifies later refusal and the shipped skill follows its named map',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);
+ expect(f.writes[0]).toContain('This preparation turn does not guarantee /compact');
+ const skill=readFileSync(new URL('../assets/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md',import.meta.url),'utf8');
+ expect(skill).toContain('exact path named in OpenRig');
+ expect(skill).toContain('Do not substitute the seat folder');
+ expect(skill).toContain('Only when none names a path');
 });

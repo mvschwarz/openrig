@@ -64,6 +64,8 @@ export const POST_COMPACT_SEND_WAIT_MS_DEFAULT = 10_000;
 
 export interface EnforcerInput {
   sessionName: string;
+  /** Registered launch workspace, shared by the manual route and context monitor. */
+  cwd?: string | null;
   runtime: string | null;
   usedPercentage: number | null;
   transcriptPath?: string | null;
@@ -100,7 +102,7 @@ export interface ManualCompactionStatus {
 
 export type ManualCompactionOutcome =
   | { triggered: true; stage: "compact-sent" }
-  | { triggered: false; stage: "skipped-or-failed"; reason: string };
+  | { triggered: false; stage: "skipped-or-failed"; reason: string; preparation?: Pick<PreparationState, "attemptId" | "mapPath" | "delivery"> };
 
 export type EnforcerSkipReason =
   | "typing_guard_enabled"
@@ -148,7 +150,7 @@ function buildPreCompactPrepPrompt(input: {
     ];
   pieces.push(
     "This is an operator-authorized normal user-channel preparation request before OpenRig sends /compact.",
-    "You are about to compact.",
+    "This preparation turn does not guarantee /compact: an incomplete map, deadline, cancellation or later target check can stop the attempt. The completed map remains useful if that happens.",
   );
   const instruction = input.preCompactInstruction?.trim();
   if (instruction) {
@@ -316,7 +318,7 @@ export interface PreparationState {
   marker: string;
   mode: "automatic" | "manual";
   status: "sending" | "waiting" | "stopped" | "compact-sent";
-  delivery: "pending" | "delivered" | "uncertain";
+  delivery: "pending" | "not_sent" | "delivered" | "uncertain";
   deadlineAt: number | null;
   reason?: string;
 }
@@ -638,9 +640,10 @@ export class ClaudeCompactionEnforcer {
       // not stop or overwrite the successor attempt's state.
       if (this.pendingPreCompactPrep.get(input.sessionName) === attempt) {
         this.stopPreparation(input.sessionName, reason, attempt);
-        return this.recordManualFailure(input.sessionName, reason);
+        this.recordManualFailure(input.sessionName, reason);
       }
-      return { triggered: false, stage: "skipped-or-failed", reason };
+      return { triggered: false, stage: "skipped-or-failed", reason,
+        preparation: { attemptId: attempt.attemptId, mapPath: attempt.mapPath, delivery: attempt.delivery } };
     };
     this.setManualStage(input.sessionName, "preparing", undefined, opts.operatorInitiated === true);
     await this.deliverPreparation(input, attempt);
@@ -687,6 +690,16 @@ export class ClaudeCompactionEnforcer {
     // A map cannot satisfy an unknown occupant. Keep the failed attempt visible and
     // disarmed; explicit skip-map still bypasses only the artifact prerequisite.
     if (occupantGeneration === null && !skipMap) this.stopPreparation(input.sessionName, "occupant_generation_unavailable");
+    if (attempt.status !== "stopped" && input.cwd && path.isAbsolute(input.cwd)) {
+      // Keep writes inside Claude's existing edit workspace, without adding permissions.
+      // This folder holds private working context; ignore its entire contents in Git.
+      const root = path.join(input.cwd, ".openrig", "compaction");
+      try {
+        fs.mkdirSync(root, { recursive: true });
+        fs.writeFileSync(path.join(root, ".gitignore"), "*\n");
+        attempt.mapPath = path.join(root, "preparation", sanitizeSessionKey(input.sessionName), attemptId, "RESTORE-MAP.md");
+      } catch { /* Preserve the existing instance-home path for legacy or unwritable workspaces. */ }
+    }
     return attempt;
   }
 
@@ -709,15 +722,18 @@ export class ClaudeCompactionEnforcer {
         preCompactInstruction: policy.preCompactInstruction, preparation: attempt, constructedAt: this.now(),
       }));
     } catch { prep = null; }
-    if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted) return;
-    if (prep?.ok && prep.outcome !== "retained") attempt.delivery = "delivered";
-    else if (prep?.outcome === "retained"
+    const notSent = prep?.outcome === "retained"
       || ["target_needs_input", "session_missing", "typing_guard_enabled", "mid_work", "tmux_unavailable"].includes(prep?.reason ?? "")
-      || (prep?.sent === false && ["target_runtime_not_running", "target_runtime_unverified", "target_runtime_conflict", "transport_unavailable"].includes(prep.reason ?? ""))) {
+      || (prep?.sent === false && ["target_runtime_not_running", "target_runtime_unverified", "target_runtime_conflict", "transport_unavailable"].includes(prep.reason ?? ""));
+    // Record this attempt's effect even if cancellation/retry happened during the await.
+    // Neither a failed response nor its loss proves no paste/Enter. Never replay uncertainty.
+    attempt.delivery = prep?.ok && prep.outcome !== "retained" ? "delivered" : notSent ? "not_sent" : "uncertain";
+    if (this.pendingPreCompactPrep.get(input.sessionName) !== attempt || attempt.controller.signal.aborted) return;
+    if (notSent) {
       attempt.status = "sending";
       if (attempt.sends >= PREP_SEND_ATTEMPTS_MAX || attempt.mode === "manual") this.stopPreparation(input.sessionName, prep?.reason ?? "send_failed");
       return;
-    } else attempt.delivery = "uncertain"; // Neither failure nor response loss proves no paste/Enter. Never replay it.
+    }
     if (attempt.mode === "automatic") attempt.deadlineAt = this.now() + AUTO_PREP_WAIT_MS_DEFAULT;
     this.reconcilePreparations();
   }
