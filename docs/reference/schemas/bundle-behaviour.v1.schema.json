@@ -202,9 +202,10 @@
           "basis": {
             "enum": [
               "explicit",
-              "product_default"
+              "product_default",
+              "unresolved"
             ],
-            "description": "Declared in the archive, or the product's conditional default."
+            "description": "Declared in the archive, the product's conditional default, or not resolvable before launch."
           },
           "nativeEffect": {
             "const": "unknown",

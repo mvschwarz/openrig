@@ -30,7 +30,15 @@
       "cwd": "--cwd (the user's openrig clone)"
     }
   ],
-  "posture": [],
+  "posture": [
+    {
+      "seat": "build.lead",
+      "shellAccess": "runs shell commands in its working folder under your logged-in account",
+      "selection": "set by a host setting",
+      "basis": "unresolved",
+      "nativeEffect": "unknown"
+    }
+  ],
   "toldFiles": [],
   "alsoRuns": [],
   "writes": [],
