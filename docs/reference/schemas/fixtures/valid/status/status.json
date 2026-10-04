@@ -41,18 +41,21 @@
     }
   },
   "harnessChecks": {
-    "pi": {
-      "linux": {
-        "result": "BLOCKED",
-        "date": "2026-10-04",
-        "openrigVersion": "0.6.6",
-        "harnessVersion": "unknown",
-        "recordIds": [
-          "rr-20261004-004"
-        ],
-        "note": "Pi was not signed in on the test machine."
+    "state": "ok",
+    "harnesses": {
+      "pi": {
+        "linux": {
+          "result": "BLOCKED",
+          "date": "2026-10-04",
+          "openrigVersion": "0.6.6",
+          "harnessVersion": "unknown",
+          "recordIds": [
+            "rr-20261004-004"
+          ],
+          "note": "Pi was not signed in on the test machine."
+        }
       }
     }
   },
-  "bodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  "bodyDigest": "c6ceabe8326538cc3c662c923085f403888a7a06c8c4cf4823fda5e159bc99c1"
 }

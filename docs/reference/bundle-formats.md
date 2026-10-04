@@ -107,6 +107,9 @@ decision, recorded in the registry entry's `evidenceReuse`.
 - **A listing whose records can't be read** is `status_unavailable`, never Not tested.
 - **The file holds no private paths, host names, row IDs, account names or receipt text,** and regenerating it gives
   identical bytes.
+- **`bodyDigest`** is SHA-256 over the canonical JSON of every other top-level field: object keys sorted by code unit at
+  every depth, no whitespace, numbers and strings in `JSON.stringify` form, UTF-8. `harnessChecks` has its own
+  `state`, so an unreadable harness-check record reads Status unavailable too.
 
 ### Registry entries
 

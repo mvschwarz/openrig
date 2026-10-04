@@ -112,7 +112,7 @@
                           "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/packageDigest"
                         }
                       },
-                      "publicNote": {
+                      "note": {
                         "type": "string"
                       }
                     },
@@ -133,57 +133,74 @@
     },
     "harnessChecks": {
       "type": "object",
-      "propertyNames": {
-        "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/runtime"
-      },
-      "additionalProperties": {
-        "type": "object",
-        "additionalProperties": {
-          "type": "object",
-          "required": [
-            "result",
-            "date",
-            "openrigVersion",
-            "harnessVersion",
-            "recordIds"
+      "required": [
+        "state",
+        "harnesses"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "status_unavailable"
           ],
-          "properties": {
-            "result": {
-              "enum": [
-                "PASS",
-                "FAIL",
-                "BLOCKED",
-                "NOT_RUN"
-              ]
-            },
-            "date": {
-              "type": "string",
-              "format": "date"
-            },
-            "openrigVersion": {
-              "type": "string"
-            },
-            "harnessVersion": {
-              "type": "string"
-            },
-            "recordIds": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "note": {
-              "type": "string"
-            }
+          "description": "status_unavailable: some harness-check record could not be read."
+        },
+        "harnesses": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/runtime"
           },
-          "additionalProperties": false
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": [
+                "result",
+                "date",
+                "openrigVersion",
+                "harnessVersion",
+                "recordIds"
+              ],
+              "properties": {
+                "result": {
+                  "enum": [
+                    "PASS",
+                    "FAIL",
+                    "BLOCKED",
+                    "NOT_RUN"
+                  ]
+                },
+                "date": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "openrigVersion": {
+                  "type": "string"
+                },
+                "harnessVersion": {
+                  "type": "string"
+                },
+                "recordIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "note": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
         }
       }
     },
     "bodyDigest": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "description": "SHA-256 hex over the canonical JSON of every other top-level field."
+      "description": "SHA-256 hex over the canonical JSON of every other top-level field: object keys sorted by code unit at every depth, no whitespace, numbers and strings in JSON.stringify form, UTF-8."
     }
   }
 }
