@@ -14,7 +14,7 @@ afterEach(() => {
   }
 });
 
-it.skipIf(process.platform === "win32").each([0, 25, undefined])("preserves explicit zero log tail in native argument dispatch: %s", async (tail) => {
+it.skipIf(process.platform === "win32").each([0, 25, undefined, NaN])("preserves explicit zero log tail in native argument dispatch: %s", async (tail) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compose-tail-argv-"));
   dirs.push(dir);
   // Controlled executable records real shell arguments; it never contacts Docker.
@@ -31,7 +31,7 @@ it.skipIf(process.platform === "win32").each([0, 25, undefined])("preserves expl
   });
   expect(result.ok).toBe(true);
   const args = result.output.trim().split("\n");
-  if (tail === undefined) {
+  if (tail === undefined || Number.isNaN(tail)) {
     expect(args).not.toContain("--tail");
   } else {
     const tailIndex = args.indexOf("--tail");
