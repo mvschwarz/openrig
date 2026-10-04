@@ -260,11 +260,13 @@ const ROUTING_LABELS: Array<[string, string]> = [
 export function bundleRoutingSummary(data: Record<string, unknown>): string[] {
   const lines: string[] = [];
   for (const [key, label] of ROUTING_LABELS) {
-    const routing = data[key] as { routedCount?: number; records?: Array<{ declaredPath?: string; id?: string; status?: string }> } | undefined;
+    const routing = data[key] as { routedCount?: number; records?: Array<{ declaredPath?: string; id?: string; status?: string; detail?: string }> } | undefined;
     if (!routing || typeof routing.routedCount !== "number") continue;
     const rejected = (routing.records ?? []).filter((r) => r.status !== "routed");
     const detail = rejected.length > 0 ? `; not routed: ${rejected.map((r) => `${r.declaredPath ?? r.id ?? "?"} (${r.status ?? "?"})`).join(", ")}` : "";
     lines.push(`${label}: ${routing.routedCount} routed${detail}`);
+    // Each entry's own explanation, which can carry the command that resolves it
+    for (const r of rejected) if (r.detail) lines.push(`  ${r.declaredPath ?? r.id ?? "?"}: ${r.detail}`);
   }
   return lines;
 }

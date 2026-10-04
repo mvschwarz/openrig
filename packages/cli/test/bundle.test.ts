@@ -127,6 +127,7 @@ describe("Bundle CLI", () => {
               records: [
                 { declaredPath: "context-packs/world/manifest.yaml", status: "routed" },
                 { declaredPath: "context-packs/gone/manifest.yaml", status: "missing" },
+                { declaredPath: "context-packs/openrig-world/manifest.yaml", status: "kept_existing", detail: "a different 'openrig-world' pack is already installed; kept it unchanged. To use the bundle's copy instead, run 'rig context rm openrig-world' and install the bundle again" },
               ],
             },
             routingFailures: [{ kind: "skills", error: "boom" }],
@@ -345,7 +346,8 @@ describe("Bundle CLI", () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "bundle", "install", "/tmp/routed.rigbundle", "--yes", "--target", "/tmp/t"]);
     });
-    expect(logs).toContain("Context packs: 1 routed; not routed: context-packs/gone/manifest.yaml (missing)");
+    expect(logs).toContain("Context packs: 1 routed; not routed: context-packs/gone/manifest.yaml (missing), context-packs/openrig-world/manifest.yaml (kept_existing)");
+    expect(logs).toContain("  context-packs/openrig-world/manifest.yaml: a different 'openrig-world' pack is already installed; kept it unchanged. To use the bundle's copy instead, run 'rig context rm openrig-world' and install the bundle again");
     expect(logs).toContain("Warning: Bundle skills routing failed: boom");
   });
 
