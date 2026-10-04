@@ -196,6 +196,14 @@ describe("registerBundleProject", () => {
     expect(fs.readFileSync(catalogPath, "utf-8")).toBe(flow);
   });
 
+  it("the entry it asks you to add by hand reads back as strings", () => {
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(catalogPath, "schema: openrig.workspace/v0alpha1\nprojects: [{id: myapp, root: ../code/myapp}]\n");
+    const result = registerBundleProject({ bundleProjectDir: bundleProject, projectId: "true", rigName: "123", projectsRoot, catalogPath, workspaceRoot: workspace });
+    const shown = /by hand: (\{.*\})$/.exec(result.detail ?? "")?.[1];
+    expect(parseYaml(shown!)).toEqual({ id: "true", root: "projects/true", rigs: ["123"] });
+  });
+
   it("the same folder registered under another id is a conflict, and the catalog is untouched", () => {
     fs.mkdirSync(path.join(projectsRoot, "openrig"), { recursive: true });
     const catalog = `${USER_CATALOG}  - id: oss\n    root: projects/openrig\n`;

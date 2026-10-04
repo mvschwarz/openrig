@@ -258,7 +258,7 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
     if (edited === null) {
       return {
         ...base, projectId: targetId!, status: "conflict",
-        detail: `could not add rig '${input.rigName}' to project '${targetId}' in ${input.catalogPath} without rewriting the file; nothing was changed. Add '${input.rigName}' to that entry's rigs list (rigs: [${input.rigName}]) by hand`,
+        detail: `could not add rig '${input.rigName}' to project '${targetId}' in ${input.catalogPath} without rewriting the file; nothing was changed. Add ${scalar(input.rigName)} to that entry's rigs list by hand`,
       };
     }
     const placed = placeFolder();
@@ -272,7 +272,7 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
     if (appended === null) {
       return {
         ...base, status: "conflict",
-        detail: `could not append project '${input.projectId}' to ${input.catalogPath} without rewriting the file; nothing was changed. Add this entry under projects by hand: { id: ${input.projectId}, root: ${relativeRoot}, rigs: [${input.rigName}] }`,
+        detail: `could not append project '${input.projectId}' to ${input.catalogPath} without rewriting the file; nothing was changed. Add this entry under projects by hand: { id: ${scalar(input.projectId)}, root: ${scalar(relativeRoot)}, rigs: [${scalar(input.rigName)}] }`,
       };
     }
     const placed = placeFolder();
