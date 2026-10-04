@@ -695,7 +695,7 @@ export interface ExecutableResolverOps {
   isExecutable(path: string): boolean;
   realpath(path: string): string;
   /** Run a launcher (argv, no shell) and return its trimmed stdout. */
-  run(file: string, args: string[], env: NodeJS.ProcessEnv, cwd?: string): string;
+  run(file: string, args: string[], env: NodeJS.ProcessEnv): string;
 }
 
 const nodeResolverOps: ExecutableResolverOps = {
@@ -708,7 +708,7 @@ const nodeResolverOps: ExecutableResolverOps = {
     }
   },
   realpath: (path) => fs.realpathSync(path),
-  run: (file, args, env, cwd) => execFileSync(file, args, { env, cwd, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim(),
+  run: (file, args, env) => execFileSync(file, args, { env, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim(),
 };
 
 /** Resolve `name` to the absolute path of the real binary, using the
@@ -719,16 +719,12 @@ export function resolveRuntimeExecutable(
   name: string,
   env: NodeJS.ProcessEnv,
   ops: ExecutableResolverOps = nodeResolverOps,
-  cwd?: string,
 ): { ok: true; path: string } | { ok: false; error: string } {
-  // With no PATH, Node's POSIX spawn searches /usr/bin:/bin. Keep that Pi
-  // behavior; OMP's existing absolute-only lookup is unchanged.
-  const searchPath = env.PATH ?? (cwd === undefined ? "" : "/usr/bin:/bin");
-  const onPath = searchPath.split(nodePath.delimiter)
-    .filter((dir) => cwd !== undefined || nodePath.isAbsolute(dir))
-    .map((dir) => cwd === undefined ? nodePath.join(dir, name) : nodePath.resolve(cwd, dir, name))
+  const onPath = (env.PATH ?? "").split(nodePath.delimiter)
+    .filter((dir) => nodePath.isAbsolute(dir))
+    .map((dir) => nodePath.join(dir, name))
     .find((candidate) => ops.isExecutable(candidate));
-  if (!onPath) return { ok: false, error: `'${name}' was not found on PATH (${searchPath})` };
+  if (!onPath) return { ok: false, error: `'${name}' was not found on PATH (${env.PATH ?? ""})` };
   let real: string;
   try {
     real = ops.realpath(onPath);
@@ -739,7 +735,7 @@ export function resolveRuntimeExecutable(
   // A mise shim is a symlink to mise itself; ask mise for the tool it maps to.
   let target: string;
   try {
-    target = ops.run(real, ["which", name], env, cwd);
+    target = ops.run(real, ["which", name], env);
   } catch (err) {
     return { ok: false, error: `${onPath} is a mise shim and 'mise which ${name}' failed: ${(err as Error).message}` };
   }
@@ -768,7 +764,7 @@ export function piLaunchCapabilityError(
     const value = stripVTControlCharacters(readVersion()).trim();
     if (/^[0-9][A-Za-z0-9.+_-]{0,63}$/.test(value)) version = `version ${value}`;
   } catch { /* diagnostics only; never changes the child's outcome */ }
-  return `Pi at ${command} (${version}) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
+  return `Pi invoked as ${command} (${version}; exact executable path unknown) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
@@ -822,29 +818,36 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
   console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
 
-  // Resolve inside the pane. OMP needs the original HOME for mise shims; Pi
-  // also preserves relative PATH entries against the actual child cwd.
-  const resolved = resolveRuntimeExecutable(runtime, process.env, nodeResolverOps, runtime === "pi" ? args.cwd : undefined);
-  if (!resolved.ok) {
-    console.error(`[${runtime}-runner] ERROR launch: ${resolved.error}`);
-    // Record the exit for this launch so the adapter fails it now instead
-    // of waiting out its readiness timeout. The durable cursor survives.
-    const at = new Date().toISOString();
-    try {
-      const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
-      const exitedState: PiRunnerState = { ready: false, launchId: args.launchId, lastEntryId: pending?.lastEntryId, updatedAt: at, exited: { code: 127, at } };
-      fs.writeFileSync(paths.runnerStatePath, JSON.stringify(exitedState));
-    } catch { /* the pane ERROR marker still fails readiness */ }
-    process.exitCode = 127;
-    return;
+  // OMP runs under a per-seat HOME. A HOME-dependent launcher on PATH (a mise
+  // shim) cannot find its target there, so resolve the real binary first,
+  // with the runner's own environment.
+  let command: string = runtime;
+  if (runtime === "omp") {
+    const resolved = resolveRuntimeExecutable("omp", process.env);
+    if (!resolved.ok) {
+      console.error(`[omp-runner] ERROR launch: ${resolved.error}`);
+      // Record the exit for this launch so the adapter fails it now instead
+      // of waiting out its readiness timeout. The durable cursor survives.
+      const at = new Date().toISOString();
+      try {
+        const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
+        const exitedState: PiRunnerState = { ready: false, launchId: args.launchId, lastEntryId: pending?.lastEntryId, updatedAt: at, exited: { code: 127, at } };
+        fs.writeFileSync(paths.runnerStatePath, JSON.stringify(exitedState));
+      } catch { /* the pane ERROR marker still fails readiness */ }
+      process.exitCode = 127;
+      return;
+    }
+    command = resolved.path;
   }
-  const command = resolved.path;
 
   const child = spawn(command, childArgs, {
     cwd: args.cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
+
+  // The child may close its pipe before the first RPC write completes.
+  child.stdin.on("error", () => { /* spawn/exit handlers own the diagnosis */ });
 
   const io: RunnerIo = {
     sendRpc: (cmd) => {
@@ -911,7 +914,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (runtime === "pi" && !core.isReady() && !reportedPiCapability) {
       const detail = piLaunchCapabilityError(command, args.trust, line, () => {
         const version = spawnSync(command, ["--version"], { cwd: args.cwd, env: childEnv, encoding: "utf8",
-          timeout: 3000, maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] });
+          timeout: 3000, killSignal: "SIGKILL", maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] });
         if (version.error || version.status !== 0) return "";
         // Older Pi redirects even --version to stderr when stdout is a pipe.
         return version.stdout.trim() || version.stderr.trim();
@@ -927,9 +930,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (runtime === "pi") {
     child.on("error", (err) => {
       console.error(`${PI_RUNNER_ERROR_MARKER} failed to spawn pi: ${err.message}`);
-      core.handlePiExit(null);
+      const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
+      core.handlePiExit(code);
       input.close();
-      process.exitCode = 1;
+      process.exitCode = code;
     });
     child.on("exit", (code) => {
       core.handlePiExit(code);

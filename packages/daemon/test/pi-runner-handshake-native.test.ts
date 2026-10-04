@@ -36,11 +36,11 @@ console.error('Error: Unknown options: --name, --no-approve'); process.exit(1);
       const state = JSON.parse(fs.readFileSync(piSeatPaths(stateRoot, "fixture").runnerStatePath, "utf8"));
       expect(state).toMatchObject({ ready: false, launchId: "owned-attempt" });
       if (kind === "old") {
-        expect(output).toContain(`${bin}/pi (version 0.73.1)`);
+        expect(output).toContain("Pi invoked as pi (version 0.73.1; exact executable path unknown)");
         expect(output).toContain("@earendil-works/pi-coding-agent");
         expect(state.exited.code).toBe(1);
       } else {
-        expect(output).toContain("not found on PATH");
+        expect(output).toContain("failed to spawn pi: spawn pi ENOENT");
         expect(state.exited.code).toBe(127);
       }
     } finally {
