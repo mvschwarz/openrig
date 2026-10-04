@@ -334,6 +334,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
 
       const status = res.data["status"] as string;
       console.log(`Status: ${status}`);
+      for (const line of startupAttentionSummary(res.data)) console.log(line);
       if (imported) for (const line of bundleIdentityLines(res.data)) console.log(line);
       if (res.data["rigId"]) console.log(`Rig: ${res.data["rigId"]}`);
       for (const line of bundleRoutingSummary(res.data)) console.log(line);
@@ -406,6 +407,22 @@ const ROUTING_LABELS: Array<[string, string]> = [
   ["workflowSpecsRouting", "Workflow specs"],
   ["agentImagesRouting", "Agent images"],
 ];
+
+/** Render the daemon's reason verbatim, including continuation guidance when available. */
+export function startupAttentionSummary(data: Record<string, unknown>): string[] {
+  const stages = data["stages"] as Array<{ detail?: { attentionNodes?: Array<{ sessionName?: string; logicalId?: string; reason?: string }> } }> | undefined;
+  const lines: string[] = [];
+  for (const stage of Array.isArray(stages) ? stages : []) {
+    const nodes = stage?.detail?.attentionNodes;
+    for (const node of Array.isArray(nodes) ? nodes : []) {
+      const seat = node?.sessionName || node?.logicalId;
+      if (typeof seat === "string" && typeof node?.reason === "string") {
+        lines.push(`Startup attention (${seat}): ${node.reason}`);
+      }
+    }
+  }
+  return lines;
+}
 
 /** One line per routed kind: what landed, and each declared entry that did not. */
 export function bundleRoutingSummary(data: Record<string, unknown>): string[] {

@@ -1,6 +1,6 @@
 import nodePath from "node:path";
 import { isGitHubBundleLink, importGitHubBundle, bundleIdentityLines, printBundleLinkError } from "../lib/bundle-source.js";
-import { getCliVersion, bundleRoutingSummary, bundleInstallError } from "./bundle.js";
+import { getCliVersion, bundleRoutingSummary, bundleInstallError, startupAttentionSummary } from "./bundle.js";
 import { showBundleBehaviourBeforeAction } from "../bundle-behaviour.js";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { existsSync, readFileSync } from "node:fs";
@@ -131,6 +131,7 @@ Examples:
           else {
             for (const line of bundleIdentityLines(data)) console.log(line);
             console.log(`Status: ${installed.data.status ?? "unknown"}`);
+            for (const line of startupAttentionSummary(installed.data)) console.log(line);
             if (installed.data.rigId) console.log(`Rig: ${installed.data.rigId}`);
             for (const line of bundleRoutingSummary(installed.data)) console.log(line);
             for (const warning of (installed.data.warnings as string[] | undefined) ?? []) console.warn(warning);
@@ -679,6 +680,7 @@ Examples:
           console.log(`Dashboard: rig ui open`);
         }
         console.log(`Status: ${resStatus}`);
+        for (const line of startupAttentionSummary(res.data)) console.log(line);
 
         // Surface warnings (e.g. transcript attach failures)
         const warnings = (res.data["warnings"] as string[]) ?? [];

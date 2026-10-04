@@ -93,6 +93,27 @@ describe("#729 startup warnings", () => {
 });
 
 describe("default-path rig seat continue", () => {
+  it.each([false, true])("names CLI inspection for an ambiguous continuation refusal (json=%s)", async json => {
+    const data = { ok: false, code: "continuation_unavailable", message: "No verified pending fresh-context delivery exists for this occupant. Refresh to inspect its actual state." };
+    const original = structuredClone(data);
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const { logs, errors, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status: 409, data }, calls)).parseAsync([
+      "node", "rig", "seat", "continue", "dev@fixture", ...(json ? ["--json"] : []),
+    ]).then(() => {}));
+    expect(exitCode).toBe(1);
+    expect(calls).toEqual([{ path: "/api/seat/continue/dev%40fixture", body: {} }]);
+    expect(data).toEqual(original);
+    if (json) {
+      expect(logs).toHaveLength(1);
+      expect(JSON.parse(logs[0]!)).toEqual(original);
+      expect(errors).toEqual([]);
+    } else {
+      expect(errors.join("\n")).toContain("No verified pending fresh-context delivery exists");
+      expect(errors.join("\n")).toContain("unknown whether context was already delivered or was never pending");
+      expect(errors.join("\n")).toContain("rig seat status 'dev@fixture'");
+      expect(errors.join("\n")).not.toContain("Refresh");
+    }
+  });
   it.each([[200, false], [200, true], [409, false], [409, true]] as const)("preserves response and warnings (HTTP %s, json=%s)", async (status, json) => {
     const data = { ok: status === 200, message: "Configured context delivered to the existing fresh conversation.", warnings: ["Submission unverified"] };
     const calls: Array<{ path: string; body: unknown }> = [];

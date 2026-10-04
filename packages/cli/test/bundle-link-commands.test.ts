@@ -82,6 +82,31 @@ describe("bundle link command dispatch", () => {
     expect(help).toMatch(/source\s+[^\n]*GitHub/);
   });
 
+  it.each(["up", "install"])("%s shows pending startup guidance without changing its JSON or exit", async verb => {
+    const attentionNodes = ["owner", "checker"].map(member => ({
+      logicalId: `dev.${member}`, sessionName: `dev-${member}@fixture`,
+      reason: `Permission consent needs attention; After resolving it in dev-${member}@fixture, run: rig seat continue 'dev-${member}@fixture'`,
+    }));
+    const data = { status: "partial", rigId: "fixture", stages: [{ stage: "import_rig", status: "blocked", detail: { attentionNodes } }] };
+    // An unavailable optional inspection keeps the install result unaugmented.
+    f.post.mockImplementation(async (url: string) => url === "/api/bundles/install"
+      ? { status: 200, data }
+      : { status: 500, data: { error: "view unavailable" } });
+    const argv = verb === "up" ? ["up", link] : ["bundle", "install", link];
+    const command = () => new Command().addCommand(verb === "up" ? upCommand(deps) : bundleCommand(deps));
+    await command().parseAsync(argv, { from: "user" });
+    const output = log.mock.calls.map(c => String(c[0]));
+    expect(output).toContain("Status: partial");
+    for (const node of attentionNodes) expect(output).toContain(`Startup attention (${node.sessionName}): ${node.reason}`);
+    expect(process.exitCode).toBe(2);
+    log.mockClear(); f.post.mockClear();
+    await command().parseAsync([...argv, "--json"], { from: "user" });
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(log.mock.calls[0]![0]))).toEqual({ ...data, ...identity });
+    expect(process.exitCode).toBe(2);
+    expect(f.post.mock.calls.map(c => c[0])).toEqual(["/api/bundles/inspect", "/api/bundles/install"]);
+  });
+
   it("reports unknown install outcome, retains the path, and never retries", async () => {
     f.post.mockImplementation(async (url: string) => {
       if (url === "/api/bundles/inspect") return { status: 500, data: { error: "view unavailable" } };

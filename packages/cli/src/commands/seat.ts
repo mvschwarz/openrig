@@ -3,6 +3,7 @@ import { DaemonClient, DaemonTimeoutError, terminalAuthHeaders } from "../client
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { shellQuote } from "../cross-host-executor.js";
 
 export type SeatDeps = StatusDeps;
 
@@ -540,7 +541,14 @@ identity remains unverified; a version number alone cannot clear it.
       for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
     }
     if (res.status >= 400) {
-      printSeatError(res.data as unknown as SeatStatusError, `Seat ${path} failed (HTTP ${res.status})`);
+      const error = path === "continue" && res.data["code"] === "continuation_unavailable"
+        ? {
+          ...res.data,
+          message: "No verified pending fresh-context delivery exists for this occupant. It is unknown whether context was already delivered or was never pending.",
+          guidance: `Inspect its current state: rig seat status ${shellQuote(seat)}`,
+        }
+        : res.data;
+      printSeatError(error as unknown as SeatStatusError, `Seat ${path} failed (HTTP ${res.status})`);
       process.exitCode = res.status >= 500 ? 2 : 1;
       return;
     }
