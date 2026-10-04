@@ -253,7 +253,7 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
   }
 
   const midWorkEvidence = findPatternEvidence(recentLines, [...MID_WORK_PATTERNS, CLAUDE_LIVE_STATUS_PATTERN]);
-  if (idleStatusBarLine && !midWorkEvidence) {
+  if (idleStatusBarLine && (!idleStatusBarLine.includes("⏵⏵ accept edits") || !midWorkEvidence)) {
     return {
       state: "agent_idle",
       reason: "idle_status_bar",
