@@ -1,4 +1,5 @@
 import * as crypto from "node:crypto";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -180,6 +181,18 @@ describe("startup prompt submission", () => {
     ...(identity ? [{ type: "send_text" as const, builtin: "session_identity" as const, value: "OpenRig session identity: fixture", phase: "after_ready" as const, appliesOn: ["fresh_start" as const], idempotent: true }] : []),
     { type: "startup_proof", value: "authenticated", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true },
   ];
+  const transientFrames = JSON.parse(readFileSync(new URL("./fixtures/claude-startup-paste-2.1.289.json", import.meta.url), "utf8")) as Array<{
+    name: string; pane: string; expected: "clear" | "unverified";
+  }>;
+  it.each(transientFrames)("gates the proof line on the 2.1.289 $name capture", async frame => {
+    const f = fixture(0, "claude-code", true);
+    f.tmux.capturePaneContent.mockResolvedValue(frame.pane);
+    const result = await f.start({ startupActions: proofActions(false) });
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(f.tmux.sendText).toHaveBeenCalledTimes(frame.expected === "clear" ? 2 : 1);
+    expect(f.submitted.includes(STARTUP_PROOF_INSTRUCTION_LINE)).toBe(frame.expected === "clear");
+    if (frame.expected === "unverified") expect(result).toMatchObject({ submission: { status: "unverified" } });
+  });
   for (const identity of [false, true]) {
     const path = identity ? "identity" : "challenge-only";
     for (const observation of ["unavailable", "mismatch"] as const) {
