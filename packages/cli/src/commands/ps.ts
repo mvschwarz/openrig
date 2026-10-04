@@ -198,6 +198,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "canonicalSessionName",
   "nodeKind",
   "runtime",
+  "model",
   "sessionStatus",
   "startupStatus",
   "restoreOutcome",
@@ -808,7 +809,7 @@ contextUsage.percent, contextUsage.state. Other keys are rejected.
 activeCount, hasWorkCount, attentionCount, status, lifecycleState, uptime,
 latestSnapshot.
 --fields accepts (node-level, with --nodes): rigId, rigName, logicalId, podId,
-podNamespace, canonicalSessionName, nodeKind, runtime, sessionStatus,
+podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, model, sessionStatus,
 startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,

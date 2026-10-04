@@ -25,6 +25,7 @@ import { upCommand } from "./commands/up.js";
 import { downCommand } from "./commands/down.js";
 import { archiveCommand } from "./commands/archive.js";
 import { unarchiveCommand } from "./commands/unarchive.js";
+import { rosterCommand } from "./commands/roster.js";
 import { psCommand } from "./commands/ps.js";
 import { hostCommand } from "./commands/host.js";
 import { gatewayCommand } from "./commands/gateway.js";
@@ -197,6 +198,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(unarchiveCommand(depsOverride?.unarchiveDeps));
   program.addCommand(hostCommand());
   program.addCommand(psCommand(depsOverride?.psDeps));
+  program.addCommand(rosterCommand());
   program.addCommand(mcpCommand(depsOverride?.mcpDeps));
   program.addCommand(agentCommand(depsOverride?.agentDeps));
   program.addCommand(rigCommand(depsOverride?.rigDeps));
