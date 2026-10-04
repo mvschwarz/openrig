@@ -17,6 +17,7 @@ const library = resolve(here, "../../test-system/scenarios");
 describe("stub CLI journeys", () => {
   let scaffold: HermeticScaffold | undefined;
   let daemon: ScenarioDaemon | undefined;
+  const launchedRigs: string[] = [];
   const sender = "work-worker@rig-alpha";
   const recipient = "work-worker@rig-beta";
 
@@ -34,12 +35,19 @@ describe("stub CLI journeys", () => {
       mkdirSync(cwd);
       const result = await runRig(["up", join(library, `rig-${name}-stub.yaml`), "--cwd", cwd, "--json", "--yes"], daemon.readEnv, rigBin, 120_000);
       expect(result.code, JSON.stringify({ name, ...result })).toBe(0);
+      launchedRigs.push(`rig-${name}`);
     }
   }, 120_000);
 
   afterAll(async () => {
-    if (daemon) await daemon.stop();
-    else scaffold?.cleanup();
+    if (!daemon) { scaffold?.cleanup(); return; }
+    try {
+      // Stop the launched seats while their daemon can still coordinate teardown.
+      // Removing the scratch tree with live rigs can race their final writes.
+      for (const rig of launchedRigs) await cli(["down", rig, "--json", "--force"]);
+    } finally {
+      await daemon.stop();
+    }
   }, 60_000);
 
   it("verified send renders in the addressed pane and not its sibling", async () => {
