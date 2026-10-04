@@ -68,4 +68,19 @@ describe("advisory bundle check", () => {
       expect(JSON.parse(String(log.mock.calls[0]![0])).standardVersion).toBe("openrig.bundle-standard/v1");
     } finally { log.mockRestore(); }
   });
+
+  it("checks that the recommended configuration is the authored team", async () => {
+    const config = `schema: openrig.bundle-configurations/v1
+recommended: authored
+seats:
+  infra.observer: { runtimes: { terminal: none, codex: default } }
+presets:
+  authored: { infra.observer: terminal }
+  alternate: { infra.observer: codex }
+`;
+    fs.writeFileSync(path.join(root, "configurations.yaml"), config);
+    expect((await checkBundleFolder(root)).checks).toContainEqual(expect.objectContaining({ ruleId: "configurations", status: "pass" }));
+    fs.writeFileSync(path.join(root, "configurations.yaml"), config.replace("recommended: authored", "recommended: alternate"));
+    expect((await checkBundleFolder(root)).checks).toContainEqual(expect.objectContaining({ ruleId: "configurations", status: "finding" }));
+  });
 });

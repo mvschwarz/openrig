@@ -9,7 +9,7 @@ import { realDeps } from "./daemon.js";
 import { isGitHubBundleLink, importGitHubBundle, bundleIdentityLines, printBundleLinkError } from "../lib/bundle-source.js";
 import { checkBundleFolder } from "../lib/bundle-check.js";
 import type { StatusDeps } from "./status.js";
-import { readDeclaredConfigurations, authoredMapping, resolveConfiguration, listConfigurations, stageConfiguration, ConfigurationError, type ChosenConfiguration } from "../lib/bundle-configuration.js";
+import { readDeclaredConfigurations, authoredMapping, resolveConfiguration, listConfigurations, checkDeclaredConfigurations, stageConfiguration, ConfigurationError, type ChosenConfiguration } from "../lib/bundle-configuration.js";
 
 /**
  * Read the CLI's own package.json version at call time (Item 1 / slice-05).
@@ -62,10 +62,10 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--bundle-version <ver>", "Bundle version", "0.1.0")
     .option("--include-packages <refs...>", "Package refs to include (default: all from spec)")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
-    .option("--preset <name>", "Build one of the configurations the bundle declares in configurations.yaml (for example all-claude)")
-    .option("--seat <member=runtime>", "Use this runtime for one seat, within what configurations.yaml allows (pod.member=runtime); repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--context-pack <dir>", "Carry the context pack in <dir> (its manifest.yaml and declared files), which may sit outside the rig folder; repeatable", (dir: string, dirs: string[]) => [...dirs, dir], [] as string[])
     .option("--project-dir <dir>", "Carry the project this rig works in: the folder holding its project.yaml (with an id) and files such as SPEC.md. Install registers it in the workspace catalog and associates the rig with it")
+    .option("--preset <name>", "Build one of the configurations the bundle declares in configurations.yaml (for example all-claude)")
+    .option("--seat <member=runtime>", "Use this runtime for one seat, within what configurations.yaml allows (pod.member=runtime); repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--notes <text>", "Operator notes captured in bundle provenance metadata")
     .option("--min-daemon-version <ver>", "Minimum daemon version required to install this bundle (Item 2 compatibility)")
     .option("--min-cli-version <ver>", "Minimum CLI version required to install this bundle (Item 2 compatibility)")
@@ -134,9 +134,9 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         specPath, bundleName: opts.name, bundleVersion: opts.bundleVersion, outputPath: nodePath.resolve(opts.output),
         includePackages: opts.includePackages,
         rigRoot,
-        ...(chosen ? { configuration: { id: chosen.configurationId, ...(chosen.preset ? { preset: chosen.preset } : {}) } } : {}),
         ...(opts.contextPack?.length ? { contextPackDirs: opts.contextPack.map((dir) => nodePath.resolve(dir)) } : {}),
         ...(opts.projectDir ? { projectDir: nodePath.resolve(opts.projectDir) } : {}),
+        ...(chosen ? { configuration: { id: chosen.configurationId, ...(chosen.preset ? { preset: chosen.preset } : {}) } } : {}),
         provenance: buildClientProvenance(opts.notes),
         ...(hasCompatibility ? { compatibility } : {}),
         ...(opts.allowDrift ? { allowDrift: true } : {}),
@@ -164,9 +164,22 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output")
     .action((spec: string, opts: { json?: boolean }) => {
       const specPath = nodePath.resolve(spec);
-      const declared = readDeclaredConfigurations(nodePath.dirname(specPath));
-      const authored = authoredMapping(specPath);
-      const configurations = declared ? listConfigurations(declared, authored) : [];
+      let declared: ReturnType<typeof readDeclaredConfigurations>;
+      let configurations: ReturnType<typeof listConfigurations> = [];
+      try {
+        declared = readDeclaredConfigurations(nodePath.dirname(specPath));
+        const authored = authoredMapping(specPath);
+        if (declared) {
+          checkDeclaredConfigurations(declared, authored);
+          configurations = listConfigurations(declared, authored);
+        }
+      } catch (err) {
+        if (!(err instanceof ConfigurationError)) throw err;
+        if (opts.json) console.log(JSON.stringify({ declared: true, error: err.message }));
+        else console.error(err.message);
+        process.exitCode = 2;
+        return;
+      }
       if (opts.json) {
         console.log(JSON.stringify({ declared: Boolean(declared), configurations }));
         return;
@@ -176,7 +189,6 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         const notes = [c.recommended ? "recommended" : "", c.authored ? "as rig.yaml is written" : ""].filter(Boolean).join(", ");
         console.log(`${c.preset}: ${c.configurationId}${notes ? `  (${notes})` : ""}`);
       }
-      if (!configurations.some((c) => c.authored)) console.log("Note: no preset matches rig.yaml as written.");
     });
 
   // rig bundle inspect <path>

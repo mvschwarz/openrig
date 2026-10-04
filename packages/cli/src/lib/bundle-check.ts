@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { authoredMapping, readDeclaredConfigurations, resolveConfiguration } from "./bundle-configuration.js";
+import { authoredMapping, readDeclaredConfigurations, checkDeclaredConfigurations } from "./bundle-configuration.js";
 import { authoredCompatibility } from "./bundle-source.js";
 
 interface Check {
@@ -111,8 +111,7 @@ export async function checkBundleFolder(folder: string) {
     const declared = readDeclaredConfigurations(root);
     if (declared) {
       const authored = authoredMapping(path.join(root, "rig.yaml"));
-      if (!declared.presets || !declared.seats || !declared.presets[declared.recommended]) throw new Error("Declare seats, presets and a recommended preset.");
-      for (const preset of Object.keys(declared.presets)) resolveConfiguration(declared, authored, { preset });
+      checkDeclaredConfigurations(declared, authored);
     }
     add("configurations", "pass", declared ? "Every declared preset resolves against the authored team." : "No alternate configurations declared; the authored team is used.");
   } catch { add("configurations", "finding", "configurations.yaml is unreadable or inconsistent with the authored team.", "configurations.yaml"); }

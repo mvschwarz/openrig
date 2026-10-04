@@ -392,6 +392,18 @@ describe("Bundle CLI", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("bundle configurations refuses a recommended preset that isn't rig.yaml as written", async () => {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "cli-configs-"));
+    fs.writeFileSync(nodePath.join(dir, "rig.yaml"), 'version: "0.2"\nname: r\npods:\n  - id: build\n    members:\n      - { id: lead, agent_ref: "local:a", profile: lead, runtime: claude-code }\n');
+    fs.writeFileSync(nodePath.join(dir, "configurations.yaml"), "schema: openrig.bundle-configurations/v1\nrecommended: all-pi\nseats:\n  build.lead: { runtimes: { claude-code: lead, pi: lead-pi } }\npresets:\n  recommended: { build.lead: claude-code }\n  all-pi: { build.lead: pi }\n");
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "configurations", nodePath.join(dir, "rig.yaml")]);
+    });
+    expect(exitCode).toBe(2);
+    expect(logs.join("\n")).toMatch(/the recommended preset 'all-pi' must be rig.yaml as written \(build\.lead=claude-code\)/);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("control: bundle install --plan without --target still sends no targetRoot", async () => {
     capturedInstallBodies = [];
     await captureLogs(async () => {
