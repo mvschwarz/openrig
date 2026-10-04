@@ -266,7 +266,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
       : cmd;
     // Stage long commands without leaving a shell above the live runner.
-    const textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
+    let textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
+    // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
+      textResult = await this.tmux.sendShellCommand(sessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
+    }
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }

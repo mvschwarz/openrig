@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 import { execFile, execFileSync, exec as execCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TmuxAdapter, type TmuxFileOps } from "../src/adapters/tmux.js";
 import { PiRuntimeAdapter } from "../src/adapters/pi-runtime-adapter.js";
 import { PiResumeAdapter } from "../src/adapters/pi-resume.js";
@@ -23,10 +23,10 @@ const quote = (s: string) => "'" + s.replace(/'/g, "'\"'\"'") + "'";
 describe.skipIf(!hasTmux || process.platform === "win32")("Pi launch through native tty", () => {
   it.each([...["fresh", "fork", "resume", "short-long-tmpdir", "fresh-long-tmpdir", "fork-long-tmpdir", "resume-long-tmpdir"].flatMap(mode => [
     { mode, canonical: true }, { mode, canonical: false },
-  ]), ...["fresh-routing", "fork-routing", "resume-routing"].map(mode => ({ mode, canonical: false }))])("preserves $mode runner arguments (canonical reader: $canonical)", async ({ mode, canonical }) => {
+  ]), ...["fresh-routing", "fork-routing", "resume-routing", "fork-routing-long-tmpdir", "resume-routing-long-tmpdir"].map(mode => ({ mode, canonical: false }))])("preserves $mode runner arguments (canonical reader: $canonical)", async ({ mode, canonical }) => {
     const launchMode = mode.split("-")[0];
     const longTmp = mode.endsWith("long-tmpdir");
-    const routing = mode.endsWith("-routing");
+    const routing = mode.includes("-routing");
     const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-shell-"));
     const socket = path.join(temp, "tmux.sock");
     const session = "pi-fixture";
@@ -111,6 +111,7 @@ setInterval(() => {}, 1000);
       }
       const tmux = new TmuxAdapter(async command => (await exec(command.replace(/^tmux /,
         `tmux -S ${quote(socket)} `))).stdout, fileOps);
+      const send = vi.spyOn(tmux, "sendShellCommand");
       await new Promise(resolve => setTimeout(resolve, 100));
       if (routing) {
         for (let i = 0; i < 100 && !fs.existsSync(path.join(temp, "rc-ready")); i++) {
@@ -122,16 +123,24 @@ setInterval(() => {}, 1000);
       if (launchMode === "resume") {
         const adapter = new PiResumeAdapter(tmux, fsOps, { stateRoot, runnerEntryPath: runner },
           { seatLaunchEnvironment, maxWaitMs: 4000, pollMs: 25, newLaunchId: () => "attempt" });
-        expect(await adapter.resume(session, "pi_session_file", parent, cwd, model)).toMatchObject({ ok: true });
+        const result = await adapter.resume(session, "pi_session_file", parent, cwd, model);
+        expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
       } else {
         const adapter = new PiRuntimeAdapter({ tmux, fsOps, stateRoot, runnerEntryPath: runner, seatLaunchEnvironment,
           sleep: () => new Promise(resolve => setTimeout(resolve, 25)), newLaunchId: () => "attempt" });
-        expect(await adapter.launchHarness({ tmuxSession: session, cwd, model, nodeId: "fixture-node", launchGeneration: "reserved-generation" } as never,
-          { name: session, ...(launchMode === "fork" ? { forkSource: { kind: "native_id" as const, value: parent } } : {}) }))
-          .toMatchObject({ ok: true });
+        const result = await adapter.launchHarness({ tmuxSession: session, cwd, model, nodeId: "fixture-node", launchGeneration: "reserved-generation" } as never,
+          { name: session, ...(launchMode === "fork" ? { forkSource: { kind: "native_id" as const, value: parent } } : {}) });
+        expect(result, JSON.stringify(result)).toMatchObject({ ok: true });
       }
       const received = JSON.parse(fs.readFileSync(path.join(stateRoot, session, "received.json"), "utf8"));
-      if (routing) {
+      if (routing && longTmp) {
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(Buffer.byteLength(send.mock.calls[0]![1])).toBeGreaterThanOrEqual(1024);
+        expect(await send.mock.results[0]!.value).toMatchObject({ ok: false, code: "launch_path_too_long" });
+        expect(send.mock.calls[1]![1]).toBe(expected);
+        // The supported bare fallback launches; routing correction is best-effort here.
+        expect(received.route).toMatchObject({ body: { instance: "wrong-cli" }, home: "/wrong", node: "wrong" });
+      } else if (routing) {
         expect(received.route).toMatchObject({ body: { instance: "intended", node: "fixture-node" },
           home: sessionEnv.OPENRIG_HOME, node: "fixture-node", runtime: "pi", HOME: temp,
           generation: launchMode === "resume" ? "existing-generation" : "reserved-generation",

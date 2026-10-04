@@ -114,7 +114,11 @@ export class PiResumeAdapter {
       ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime })
       : cmd;
     // Short commands retain the direct path; long commands exec from a private script.
-    const textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
+    let textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
+    // This refusal precedes any input: retain the bare-command fallback when routing cannot fit.
+    if (!textResult.ok && textResult.code === "launch_path_too_long" && command !== cmd) {
+      textResult = await this.tmux.sendShellCommand(tmuxSessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
+    }
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };
     }
