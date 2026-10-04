@@ -2,6 +2,27 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 // -- Shared types --
 
+export interface BundleSourceIdentity {
+  repository: string;
+  folder: string;
+  requestedRef: string;
+  resolvedCommit: string;
+  canonicalUrl: string;
+}
+
+/** Shared source-format spelling. Attribution only, not proof of authorship. */
+export function normalizeBundleSource(raw: unknown): BundleSourceIdentity | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const s = raw as Record<string, unknown>;
+  if (typeof s.repository !== "string" || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(s.repository)
+    || typeof s.folder !== "string" || /[\x00-\x1f\x7f]/.test(s.folder) || (s.folder !== "." && !isRelativeSafePath(s.folder))
+    || typeof s.requestedRef !== "string" || !s.requestedRef || /[\x00-\x1f\x7f]/.test(s.requestedRef)
+    || typeof s.resolvedCommit !== "string" || !/^[a-f0-9]{40}$/.test(s.resolvedCommit)) return undefined;
+  const expected = `${s.repository}/tree/${s.resolvedCommit}${s.folder === "." ? "" : "/" + s.folder.split("/").map(encodeURIComponent).join("/")}`;
+  if (s.canonicalUrl !== expected) return undefined;
+  return { repository: s.repository, folder: s.folder, requestedRef: s.requestedRef, resolvedCommit: s.resolvedCommit, canonicalUrl: expected };
+}
+
 /**
  * Provenance block — attribution metadata for a bundle artifact. All fields
  * optional for backward compat; bundles without provenance install unchanged.
@@ -9,6 +30,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
  * and audit-trail records. Not cryptographically signed at this stage.
  */
 export interface BundleProvenance {
+  source?: BundleSourceIdentity;
   /** ISO timestamp; mirrors root createdAt at create time. */
   createdAt?: string;
   /** os.hostname() of the host that ran rig bundle create. */
@@ -51,11 +73,13 @@ function validateProvenanceBlock(raw: unknown, errors: string[]): void {
       errors.push(`provenance.${field} must be a string`);
     }
   }
+  if (p.source !== undefined && !normalizeBundleSource(p.source)) errors.push("provenance.source must name a credential-free GitHub folder at a full commit");
 }
 
 /** Serialize a typed BundleProvenance to the snake_case YAML record shape. */
 function provenanceToYamlRecord(p: BundleProvenance): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  if (p.source) out.source = p.source;
   if (p.createdAt !== undefined) out["created_at"] = p.createdAt;
   if (p.sourceHost !== undefined) out["source_host"] = p.sourceHost;
   if (p.authorSession !== undefined) out["author_session"] = p.authorSession;
@@ -343,6 +367,8 @@ export function normalizeProvenanceBlock(raw: unknown): BundleProvenance | undef
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const p = raw as Record<string, unknown>;
   const result: BundleProvenance = {};
+  const source = normalizeBundleSource(p.source);
+  if (source) result.source = source;
   if (typeof p["created_at"] === "string") result.createdAt = p["created_at"];
   if (typeof p["source_host"] === "string") result.sourceHost = p["source_host"];
   if (typeof p["author_session"] === "string") result.authorSession = p["author_session"];
@@ -383,6 +409,7 @@ export interface PodBundleManifest {
   cultureFile?: string;
   integrity?: BundleIntegrity;
   provenance?: BundleProvenance;
+  assembler?: { openrigVersion: string; commit?: string };
   compatibility?: BundleCompatibility;
   /** Item 6 cross-primitive bundling: skill paths to route to the operator skills library on install. */
   skills?: string[];
@@ -457,6 +484,7 @@ export function serializePodBundleManifest(manifest: PodBundleManifest): string 
   };
   if (manifest.cultureFile) doc["culture_file"] = manifest.cultureFile;
   if (manifest.integrity) doc["integrity"] = { algorithm: manifest.integrity.algorithm, files: manifest.integrity.files };
+  if (manifest.assembler) doc["assembler"] = manifest.assembler;
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);
   if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
@@ -501,6 +529,7 @@ export interface LegacyBundleManifest {
   packages: LegacyBundlePackageEntry[];
   integrity?: BundleIntegrity;
   provenance?: BundleProvenance;
+  assembler?: { openrigVersion: string; commit?: string };
   compatibility?: BundleCompatibility;
   /** Item 6 cross-primitive bundling: skill paths to route to the operator skills library on install. */
   skills?: string[];
@@ -651,6 +680,8 @@ export function normalizeLegacyBundleManifest(raw: unknown): LegacyBundleManifes
     };
   }
 
+  const assembler = m["assembler"] as { openrigVersion?: unknown; commit?: unknown } | undefined;
+  if (assembler && typeof assembler.openrigVersion === "string") result.assembler = { openrigVersion: assembler.openrigVersion, ...(typeof assembler.commit === "string" ? { commit: assembler.commit } : {}) };
   const provenance = normalizeProvenanceBlock(m["provenance"]);
   if (provenance) result.provenance = provenance;
 
@@ -699,6 +730,7 @@ export function serializeLegacyBundleManifest(manifest: LegacyBundleManifest): s
     };
   }
 
+  if (manifest.assembler) doc["assembler"] = manifest.assembler;
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
 
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);

@@ -18,13 +18,14 @@ import { LegacyRigSpecCodec } from "../domain/rigspec-codec.js";
 import { LegacyRigSpecSchema } from "../domain/rigspec-schema.js";
 import { RigSpecCodec } from "../domain/rigspec-codec.js";
 import { RigSpecSchema } from "../domain/rigspec-schema.js";
-import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, serializePodBundleManifest, parsePodBundleManifest, validatePodBundleManifest, validateLegacyBundleManifest, normalizeProvenanceBlock, normalizeCompatibilityBlock, isRelativeSafePath } from "../domain/bundle-types.js";
+import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, serializePodBundleManifest, parsePodBundleManifest, validatePodBundleManifest, validateLegacyBundleManifest, normalizeProvenanceBlock, normalizeBundleSource, normalizeCompatibilityBlock, isRelativeSafePath } from "../domain/bundle-types.js";
 import type { PodBundleManifest, BundleProvenance, BundleCompatibility, BundlePluginReference } from "../domain/bundle-types.js";
 import { detectBundleConflicts, type BundleConflict } from "../domain/bundle-conflict-detector.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import { BundleAuditReader, BundleAuditWriter, type BundleAuditFsOps, type BundleAuditRecord } from "../domain/bundle-audit.js";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { routingFailureWarnings, type BundleContentRouting } from "../domain/bundle-content-routing.js";
+import { configurationId, packageDigest } from "../domain/bundle-identity.js";
 import { getDaemonVersion } from "../domain/daemon-version.js";
 import { assertShippableSubstance } from "../domain/agent-resolver.js";
 
@@ -197,6 +198,8 @@ function provenanceFromRequestBody(raw: unknown): BundleProvenance | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const p = raw as Record<string, unknown>;
   const result: BundleProvenance = {};
+  const source = normalizeBundleSource(p["source"]);
+  if (source) result.source = source;
   if (typeof p["sourceHost"] === "string") result.sourceHost = p["sourceHost"];
   if (typeof p["authorSession"] === "string") result.authorSession = p["authorSession"];
   if (typeof p["sourceRigId"] === "string") result.sourceRigId = p["sourceRigId"];
@@ -684,6 +687,17 @@ function assertShippableStagingTree(staging: string): void {
   assertShippableSubstance(sources);
 }
 
+/** Describe this artifact; inspecting an older archive never substitutes the current daemon's version. */
+function bundleBuildIdentity(manifest: { provenance?: BundleProvenance; configuration?: { id: string }; integrity?: { files: Record<string, string> }; assembler?: { openrigVersion: string; commit?: string } }, archiveHash: string | null) {
+  return {
+    source: manifest.provenance?.source ?? null,
+    configurationId: manifest.configuration?.id ?? null,
+    packageDigest: manifest.integrity ? packageDigest(manifest.integrity.files) : null,
+    archiveHash,
+    assembler: manifest.assembler ?? null,
+  };
+}
+
 // POST /api/bundles/create
 bundleRoutes.post("/create", async (c) => {
   const { eventBus } = getDeps(c);
@@ -703,7 +717,9 @@ bundleRoutes.post("/create", async (c) => {
   const allowDrift = body["allowDrift"] === true;
 
   // Item 1 / slice-05: build provenance from request body + inject daemonVersion server-side
-  const clientProvenance = provenanceFromRequestBody(body["provenance"]);
+  const rawProvenance = body["provenance"] as Record<string, unknown> | undefined;
+  if (rawProvenance?.source !== undefined && !normalizeBundleSource(rawProvenance.source)) return c.json({ error: "Invalid GitHub bundle source identity" }, 400);
+  const clientProvenance = provenanceFromRequestBody(rawProvenance);
   let provenance: BundleProvenance | undefined = clientProvenance
     ? { ...clientProvenance, daemonVersion: getDaemonVersion() }
     : undefined;
@@ -780,7 +796,14 @@ bundleRoutes.post("/create", async (c) => {
         if (authorPrimitives.workflowSpecs) result.manifest.workflowSpecs = authorPrimitives.workflowSpecs;
         if (authorPrimitives.contextPacks) result.manifest.contextPacks = authorPrimitives.contextPacks;
         if (authorPrimitives.agentImages) result.manifest.agentImages = authorPrimitives.agentImages;
-        if (configuration) result.manifest.configuration = configuration;
+        const actualMapping: Record<string, string> = {};
+        for (const pod of RigSpecSchema.normalize(rawParsed as Record<string, unknown>).pods) {
+          for (const member of pod.members) actualMapping[`${pod.id}.${member.id}`] = member.runtime;
+        }
+        const actualConfigurationId = configurationId(actualMapping);
+        if (configuration && configuration.id !== actualConfigurationId) return c.json({ error: "Configuration ID does not match the packaged rig spec" }, 400);
+        result.manifest.configuration = { id: actualConfigurationId, ...(configuration?.preset ? { preset: configuration.preset } : {}) };
+        result.manifest.assembler = { openrigVersion: getDaemonVersion() };
 
         const integrity = computeIntegrity(tmpStaging, integrityFsOps());
         result.manifest.integrity = integrity;
@@ -790,7 +813,7 @@ bundleRoutes.post("/create", async (c) => {
         const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
         eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
         const warning = [driftWarning, ...(result.warnings ?? [])].filter(Boolean).join("; ");
-        return c.json({ bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length, ...(warning ? { warning } : {}) }, 201);
+        return c.json({ ...bundleBuildIdentity(result.manifest, archiveHash), bundleName, bundleVersion, archiveHash, schemaVersion: 2, agents: result.manifest.agents.length, ...(warning ? { warning } : {}) }, 201);
       } finally {
         fs.rmSync(tmpStaging, { recursive: true, force: true });
       }
@@ -841,6 +864,7 @@ bundleRoutes.post("/create", async (c) => {
         specPath: nodePath.resolve(specPath), packages, outputDir: tmpStaging, bundleName, bundleVersion, provenance, compatibility,
       });
 
+      manifest.assembler = { openrigVersion: getDaemonVersion() };
       // Item 6 / Checkpoint 7.5 (QA-20260601 A2 repair, legacy path mirror):
       // auto-detect author bundle.yaml in source dir; vendor + carry
       // cross-primitive fields before integrity. Re-serialize bundle.yaml
@@ -848,7 +872,7 @@ bundleRoutes.post("/create", async (c) => {
       const legacyAuthorPrimitives = consumeAuthorBundleYaml(specDir, tmpStaging);
       const hasLegacyPrimitives = legacyAuthorPrimitives.skills || legacyAuthorPrimitives.plugins ||
         legacyAuthorPrimitives.workflowSpecs || legacyAuthorPrimitives.contextPacks || legacyAuthorPrimitives.agentImages;
-      if (hasLegacyPrimitives) {
+      if (hasLegacyPrimitives || manifest.assembler) {
         if (legacyAuthorPrimitives.skills) manifest.skills = legacyAuthorPrimitives.skills;
         if (legacyAuthorPrimitives.plugins) manifest.plugins = legacyAuthorPrimitives.plugins;
         if (legacyAuthorPrimitives.workflowSpecs) manifest.workflowSpecs = legacyAuthorPrimitives.workflowSpecs;
@@ -860,11 +884,12 @@ bundleRoutes.post("/create", async (c) => {
 
       const integrity = computeIntegrity(tmpStaging, integrityFsOps());
       writeIntegrity(tmpStaging, integrity, integrityFsOps());
+      manifest.integrity = integrity;
 
       assertShippableStagingTree(tmpStaging);
       const archiveHash = await pack(tmpStaging, nodePath.resolve(outputPath));
       eventBus.emit({ type: "bundle.created", bundleName, bundleVersion, archiveHash });
-      return c.json({ bundleName, bundleVersion, archiveHash, packages: manifest.packages.length, ...(driftWarning ? { warning: driftWarning } : {}) }, 201);
+      return c.json({ ...bundleBuildIdentity(manifest, archiveHash), bundleName, bundleVersion, archiveHash, packages: manifest.packages.length, ...(driftWarning ? { warning: driftWarning } : {}) }, 201);
     } finally {
       fs.rmSync(tmpStaging, { recursive: true, force: true });
     }
@@ -881,9 +906,11 @@ bundleRoutes.post("/inspect", async (c) => {
   if (!bundlePath) return c.json({ error: "bundlePath is required" }, 400);
 
   let digestValid = false;
+  let archiveHash: string | null = null;
   try {
     const dr = verifyArchiveDigest(bundlePath);
     digestValid = dr.valid;
+    archiveHash = dr.actual;
   } catch { /* missing digest = invalid */ }
 
   const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-inspect-"));
@@ -942,6 +969,10 @@ bundleRoutes.post("/inspect", async (c) => {
         // (v1 path normalizes through normalizeLegacyBundleManifest below).
         // Field is optional; undefined when bundle has no provenance.
         provenance: normalizeProvenanceBlock(rawParsed["provenance"]),
+        configuration: typeof (rawParsed["configuration"] as { id?: unknown } | undefined)?.id === "string"
+          ? rawParsed["configuration"] as { id: string; preset?: string } : undefined,
+        assembler: typeof (rawParsed["assembler"] as { openrigVersion?: unknown } | undefined)?.openrigVersion === "string"
+          ? rawParsed["assembler"] as { openrigVersion: string; commit?: string } : undefined,
         // Item 2 / slice-05: surface compatibility normalized to camelCase
         // (same single-contract reason as provenance above). v1 already
         // surfaces via the normalizer at the end of this handler.
@@ -979,14 +1010,14 @@ bundleRoutes.post("/inspect", async (c) => {
       const integrityResult = integrityCompat
         ? verifyIntegrity(tmpDir, integrityCompat, integrityFsOps())
         : { passed: false, mismatches: [], missing: [], extra: [], errors: ["no integrity section"] };
-      return c.json({ manifest: podManifest, digestValid, integrityResult }, 200);
+      return c.json({ ...bundleBuildIdentity(podManifest, archiveHash), manifest: podManifest, digestValid, integrityResult }, 200);
     }
 
     const manifest = normalizeBundleManifest(parseBundleManifest(manifestYaml));
     const integrityResult = manifest.integrity
       ? verifyIntegrity(tmpDir, manifest, integrityFsOps())
       : { passed: false, mismatches: [], missing: [], extra: [], errors: ["no integrity section"] };
-    return c.json({ manifest, digestValid, integrityResult }, 200);
+    return c.json({ ...bundleBuildIdentity(manifest, archiveHash), manifest, digestValid, integrityResult }, 200);
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500);
   } finally {

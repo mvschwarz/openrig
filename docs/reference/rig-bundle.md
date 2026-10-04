@@ -1,10 +1,61 @@
 # RigBundle Reference
 
 Version: 2 (pod-aware)
-Last validated against code: 2026-09-29 (install paths and `--target` only; other sections last checked 2026-04-11)
+Last validated against code: 2026-10-04 (GitHub source input, author check and identity fields; install paths and `--target` checked 2026-09-29; other sections last checked 2026-04-11)
 Source of truth: `packages/daemon/src/domain/bundle-types.ts`, `packages/daemon/src/domain/bundle-archive.ts`, `packages/daemon/src/domain/pod-bundle-assembler.ts`
 
 A `.rigbundle` is a self-contained distributable archive that packages a rig spec, all referenced agent specs, their resources (skills, guidance, startup files), culture file, documentation, and an integrity manifest into a single file. The recipient can install and launch the rig without needing the original source tree.
+
+## GitHub folder links
+
+`rig bundle create`, `inspect`, `install`, and `rig up` accept a public HTTPS GitHub folder link:
+
+```sh
+rig bundle create https://github.com/example/teams/tree/main/rigs/team -o team.rigbundle
+rig bundle inspect https://github.com/example/teams/tree/v1/rigs/team --json
+rig up https://github.com/example/teams/tree/COMMIT/rigs/team --target ./project
+```
+
+Replace `COMMIT` with a full commit ID. Branches and tags are also accepted, including names containing `/`: they
+resolve once to a full commit before fetching. Each result names the resolved source, configuration ID, package digest
+and assembler. Save the printed commit-pinned URL to repeat the same source selection. `--preset` and repeatable
+`--seat pod.member=runtime` select only configurations the folder declares.
+
+Link import needs a running, verified local daemon and a credential-free, publicly readable GitHub URL. It does not
+upload files to remote daemons. For a remote target, run the link command on that host, or create an archive, transfer
+it with its sibling digest, and use the existing path command there. Existing local path/name commands keep their
+dispatch. Importing does not install dependencies or execute repository scripts.
+
+The selected source is packaged through the existing bundler once. Link `up`/`install` then use the existing bundle
+install path, including compatibility and target-conflict checks. For a link, the default install target is the current
+directory; `--cwd` separately overrides seat working directories. Imported archives and source/build receipts remain
+under the selected OpenRig home's `bundle-imports/` directory for install history. If a response is lost, inputs stay
+available and the outcome is reported as unknown; inspect `rig ps` and `rig bundle history` before retrying.
+
+An author's root `bundle.yaml` can declare `compatibility.min_cli_version` and `compatibility.min_daemon_version`.
+Link import passes these into create; explicit create minimum-version flags override them. No implicit minimum is
+added to existing local-path builds.
+
+The package digest covers the packaged `integrity.files` entries, excluding `bundle.yaml`, ignored junk basenames,
+and file modes. It does not cover resources resolved on the installing host or prove what ran. The archive hash is
+separate. See [bundle formats](bundle-formats.md) for the exact coverage and identity definitions. Older archives can
+have unknown source, configuration or assembler; inspection does not fill those gaps with the inspecting daemon's
+identity.
+
+## Advisory author check
+
+```sh
+rig bundle check ./my-team --json
+```
+
+This local, read-only check reports `openrig.bundle-standard/v1` with `pass`, `finding` or `not_checked` per rule. It
+checks pod-aware rig validity, README inclusion in `docs`, readable declared files, in-folder agent refs/imports,
+minimum-version shape, declared preset consistency and known sensitive filenames. It does not contact a daemon,
+build an archive, run preflight or launch anything. Findings give exit status 1; they are never an install gate.
+
+README completeness and arbitrary embedded secrets need human review and are reported as `not_checked`. A bounded
+or unreadable scan is also `not_checked`, never a clean scan. The check is advice for authors, not a security audit or
+listing approval.
 
 ---
 

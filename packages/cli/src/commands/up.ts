@@ -1,4 +1,6 @@
 import nodePath from "node:path";
+import { isGitHubBundleLink, importGitHubBundle, bundleIdentityLines, printBundleLinkError } from "../lib/bundle-source.js";
+import { getCliVersion, bundleRoutingSummary } from "./bundle.js";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYamlDoc } from "yaml";
@@ -81,11 +83,13 @@ Examples:
     .option("--yes", "Auto-approve trusted actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")
     .option("--target <root>", "Install target for a .rigbundle (default: current directory). A v2 bundle is materialized there and relative member cwds resolve against it; --cwd still overrides launch cwd")
+    .option("--preset <name>", "For a GitHub bundle link, choose a declared configuration")
+    .option("--seat <member=runtime>", "For a GitHub bundle link, choose a declared seat runtime; repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--existing", "Treat <source> as an existing rig name; bypass library-spec name resolution")
     .option("--fresh <seats...>", "Deliberately fresh-prime the named seats (logical ids) instead of resuming their original sessions (operation B; reported as fresh-primed)")
     .option("--json", "JSON output for agents")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
-    .action(async (source: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string }) => {
+    .action(async (source: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string; preset?: string; seat?: string[] }) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly. Topology
@@ -94,6 +98,42 @@ Examples:
       // topology up into the rejected --host form.
       if (!sourceLooksLikeTopology(source)) opts.host = resolveEffectiveHost(opts.host);
       const deps = getDepsF();
+
+      // Link preparation verifies the effective endpoint before fetch or local auto-start.
+      // Existing path/name dispatch below is unchanged.
+      if (isGitHubBundleLink(source)) {
+        try {
+          const imported = await importGitHubBundle(source, deps, opts);
+          if (imported.res.status >= 400) {
+            if (opts.json) console.log(JSON.stringify(imported.res.data)); else console.error(imported.res.data.error ?? "Create failed");
+            process.exitCode = 2; return;
+          }
+          let installed: { status: number; data: Record<string, unknown> };
+          try {
+            installed = await imported.client.post<Record<string, unknown>>("/api/bundles/install", {
+              bundlePath: imported.bundlePath, plan: opts.plan ?? false, autoApprove: opts.yes ?? false,
+              targetRoot: opts.target ? nodePath.resolve(opts.target) : process.cwd(),
+              cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
+              cliVersion: getCliVersion(),
+            }, { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
+          } catch {
+            throw new Error(`Bundle install outcome is unknown. Archive retained at ${imported.bundlePath}; check rig ps and rig bundle history before retrying.`);
+          }
+          const { source: builtSource, configurationId, packageDigest, archiveHash, assembler } = imported.res.data;
+          const data = { ...installed.data, source: builtSource, configurationId, packageDigest, archiveHash, assembler };
+          if (opts.json) console.log(JSON.stringify(data));
+          else {
+            for (const line of bundleIdentityLines(data)) console.log(line);
+            console.log(`Status: ${installed.data.status ?? "unknown"}`);
+            if (installed.data.rigId) console.log(`Rig: ${installed.data.rigId}`);
+            for (const line of bundleRoutingSummary(installed.data)) console.log(line);
+            for (const warning of (installed.data.warnings as string[] | undefined) ?? []) console.warn(warning);
+            if (installed.status >= 400) console.error(installed.data.error ?? installed.data.errors ?? "Install failed");
+          }
+          if (installed.status >= 400 || ["failed", "partial", "partially_restored", "not_attempted"].includes(String(installed.data.status ?? installed.data.rigResult))) process.exitCode = installed.status === 409 ? 1 : 2;
+        } catch (err) { printBundleLinkError(err, opts.json); }
+        return;
+      }
 
       if (opts.host) {
         // OPR.0.4.4.11 R11-2: --host + topology source is REJECTED before
