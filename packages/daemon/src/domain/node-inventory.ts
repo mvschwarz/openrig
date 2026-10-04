@@ -286,19 +286,21 @@ function eventObject(value: unknown): Record<string, any> | undefined {
 }
 
 // One batch for either the selected rig or the fleet. Keep the outcome arm's
-// existing partial indexes; pin starts (NULL node_id) to the node/type index
-// rather than filtering all of a rig's activity history. UNION ALL adds attempt
-// boundaries without a per-node receipt query. Ascending seq with overwrites
-// preserves the former newest-node, first-wins fold. Evidence is never borrowed
+// existing partial indexes; exclude the rig-only index for starts (NULL node_id)
+// so the node/type index can select them, with a scan fallback if it is absent.
+// UNION ALL adds attempt boundaries without a per-node receipt query.
+// Ascending seq with overwrites preserves the former newest-node, first-wins
+// fold. Evidence is never borrowed
 // from an older reconciliation when a newer acknowledgment wins.
 function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<string, RestoreProjection> {
   const filter = rigId ? " AND rig_id = ?" : "";
+  const startsFilter = rigId ? " AND +rig_id = ?" : "";
   const rows = db.prepare(`
     SELECT type, payload, seq, rig_id, node_id FROM events
       WHERE type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled')${filter}
     UNION ALL
-    SELECT type, payload, seq, rig_id, node_id FROM events INDEXED BY idx_events_node_type_seq
-      WHERE node_id IS NULL AND type = 'restore.started'${filter}
+    SELECT type, payload, seq, rig_id, node_id FROM events
+      WHERE node_id IS NULL AND type = 'restore.started'${startsFilter}
     ORDER BY seq ASC
   `).all(...(rigId ? [rigId, rigId] : [])) as {
     type: string; payload: string; seq: number; rig_id: string; node_id: string | null;

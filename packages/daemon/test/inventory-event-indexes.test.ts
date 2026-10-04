@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import { eventsNodeTypeIndexSchema } from "../src/db/migrations/047_events_node_type_index.js";
 import { inventoryEventIndexesSchema } from "../src/db/migrations/084_inventory_event_indexes.js";
 import { getNodeInventory, getNodeInventoryForRigs } from "../src/domain/node-inventory.js";
 
@@ -73,6 +74,20 @@ function expectIndexed(db: Database.Database) {
 }
 
 describe("084 inventory event read indexes", () => {
+  it("preserves rig and fleet inventory when the optional node/type index is absent", () => {
+    const db = database();
+    migrate(db, THROUGH.filter(m => m.name !== eventsNodeTypeIndexSchema.name));
+    seed(db);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'idx_events_node_type_seq'").get()).toBeUndefined();
+    const value = projection(db), history = rows(db);
+    expect(value.selected[0]?.restoreOutcome).toBe("operator_recovered");
+    expect(value.all).toHaveLength(2);
+    migrate(db, [eventsNodeTypeIndexSchema]);
+    expectIndexed(db);
+    expect(projection(db)).toEqual(value);
+    expect(rows(db)).toEqual(history);
+  });
+
   it("upgrades the actual read plans without changing history, membership or newest-event meaning", () => {
     const db = database(); migrate(db, BEFORE); seed(db);
     const value = projection(db), history = rows(db);
