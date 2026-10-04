@@ -45,6 +45,7 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
   }
   try {
     const [exclude, common] = git(root, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude", "--git-common-dir"]).trimEnd().split("\n");
+    if (!exclude || !common) throw new Error("Git did not return exclusion and common metadata paths");
     const metadataIdentity = (file: string) => fs.existsSync(file) ? fs.realpathSync(file)
       : path.join(fs.realpathSync(path.dirname(file)), path.basename(file));
     // One index/untracked listing per worktree, including ignored files. No per-file Git probes.
