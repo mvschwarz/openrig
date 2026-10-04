@@ -32,17 +32,17 @@ describe("bundle link command dispatch", () => {
     expect(f.imported).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(log.mock.calls[0]![0]))).toMatchObject(identity);
-    const expected = verb === "create" ? [] : [verb === "inspect" ? "/api/bundles/inspect" : "/api/bundles/install"];
+    const expected = verb === "create" ? [] : verb === "inspect" ? ["/api/bundles/inspect"] : ["/api/bundles/inspect", "/api/bundles/install"];
     expect(f.post.mock.calls.map(c => c[0])).toEqual(expected);
     if (verb !== "create") expect(f.post.mock.calls[0]![1]).toMatchObject({ bundlePath: "/tmp/owned/bundle.rigbundle" });
-    if (verb === "up" || verb === "install") expect(f.post.mock.calls[0]![1].targetRoot).toBe(process.cwd());
+    if (verb === "up" || verb === "install") expect(f.post.mock.calls.find(c => c[0] === "/api/bundles/install")![1].targetRoot).toBe(process.cwd());
   });
 
   it("passes configuration choices and up target/cwd to the one resolved archive", async () => {
     const program = new Command().addCommand(upCommand(deps));
     await program.parseAsync(["up", link, "--preset", "all-codex", "--seat", "build.dev=pi", "--target", "project", "--cwd", "work", "--plan", "--json"], { from: "user" });
     expect(f.imported.mock.calls[0]![2]).toMatchObject({ preset: "all-codex", seat: ["build.dev=pi"] });
-    expect(f.post.mock.calls[0]![1]).toMatchObject({ targetRoot: path.resolve("project"), cwdOverride: path.resolve("work"), plan: true });
+    expect(f.post.mock.calls.find(c => c[0] === "/api/bundles/install")![1]).toMatchObject({ targetRoot: path.resolve("project"), cwdOverride: path.resolve("work"), plan: true });
   });
 
   it("does not call install after create returns an error", async () => {
@@ -52,9 +52,12 @@ describe("bundle link command dispatch", () => {
   });
 
   it("reports unknown install outcome, retains the path, and never retries", async () => {
-    f.post.mockRejectedValueOnce(new Error("lost response"));
+    f.post.mockImplementation(async (url: string) => {
+      if (url === "/api/bundles/inspect") return { status: 500, data: { error: "view unavailable" } };
+      throw new Error("lost response");
+    });
     await new Command().addCommand(bundleCommand(deps)).parseAsync(["bundle", "install", link, "--json"], { from: "user" });
-    expect(f.post).toHaveBeenCalledTimes(1);
+    expect(f.post.mock.calls.map(c => c[0])).toEqual(["/api/bundles/inspect", "/api/bundles/install"]);
     expect(String(log.mock.calls[0]![0])).toContain("outcome is unknown");
     expect(String(log.mock.calls[0]![0])).toContain("/tmp/owned/bundle.rigbundle");
   });

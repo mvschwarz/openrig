@@ -113,7 +113,7 @@ describe("bundle view at the real CLI command boundary", () => {
     const output = vi.spyOn(console, "log").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const client = new DaemonClient("http://127.0.0.1:8123");
-    vi.spyOn(client, "get").mockResolvedValue({ status: 404, data: {} } as never);
+    vi.spyOn(client, "get").mockResolvedValue({ status: 200, data: [{ id: "existing", name: "existing-rig" }] } as never);
     const post = vi.spyOn(client, "post").mockResolvedValue({ status: 201, data: { status: "completed" } } as never);
     const program = new Command().exitOverride().addCommand(upCommand(runningDeps(client)));
     await program.parseAsync(["node", "rig", "up", source, "--existing", "--json"]);

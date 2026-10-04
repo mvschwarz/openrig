@@ -25,15 +25,16 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
+function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; stdout: string[]; exitCode: number | undefined }> {
   return new Promise(async (resolve) => {
     const logs: string[] = [];
+    const stdout: string[] = [];
     const origLog = console.log;
     const origErr = console.error;
     const origWarn = console.warn;
     const origExitCode = process.exitCode;
     process.exitCode = undefined;
-    console.log = (...args: unknown[]) => logs.push(args.join(" "));
+    console.log = (...args: unknown[]) => { const line = args.join(" "); logs.push(line); stdout.push(line); };
     console.error = (...args: unknown[]) => logs.push(args.join(" "));
     // The drift banner goes to stderr via console.warn — stdout stays clean for piping. Capture it
     // here or a test asserting the operator SEES the warning would pass on an empty transcript.
@@ -41,7 +42,7 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
     try { await fn(); } finally { console.log = origLog; console.error = origErr; console.warn = origWarn; }
     const exitCode = process.exitCode;
     process.exitCode = origExitCode;
-    resolve({ logs, exitCode });
+    resolve({ logs, stdout, exitCode });
   });
 }
 
@@ -286,10 +287,11 @@ describe("Bundle CLI", () => {
   });
 
   it("bundle install --json preserves blocked exit code", async () => {
-    const { logs, exitCode } = await captureLogs(async () => {
+    const { stdout, exitCode } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "bundle", "install", "/tmp/blocked.rigbundle", "--json"]);
     });
-    expect(JSON.parse(logs.join("")).error).toBe("blocked");
+    expect(stdout).toHaveLength(1);
+    expect(JSON.parse(stdout[0]!).error).toBe("blocked");
     expect(exitCode).toBe(1);
   });
 
