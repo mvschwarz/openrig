@@ -695,7 +695,7 @@ export interface ExecutableResolverOps {
   isExecutable(path: string): boolean;
   realpath(path: string): string;
   /** Run a launcher (argv, no shell) and return its trimmed stdout. */
-  run(file: string, args: string[], env: NodeJS.ProcessEnv): string;
+  run(file: string, args: string[], env: NodeJS.ProcessEnv, cwd?: string): string;
 }
 
 const nodeResolverOps: ExecutableResolverOps = {
@@ -708,7 +708,7 @@ const nodeResolverOps: ExecutableResolverOps = {
     }
   },
   realpath: (path) => fs.realpathSync(path),
-  run: (file, args, env) => execFileSync(file, args, { env, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim(),
+  run: (file, args, env, cwd) => execFileSync(file, args, { env, cwd, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim(),
 };
 
 /** Resolve `name` to the absolute path of the real binary, using the
@@ -739,7 +739,7 @@ export function resolveRuntimeExecutable(
   // A mise shim is a symlink to mise itself; ask mise for the tool it maps to.
   let target: string;
   try {
-    target = ops.run(real, ["which", name], env);
+    target = ops.run(real, ["which", name], env, cwd);
   } catch (err) {
     return { ok: false, error: `${onPath} is a mise shim and 'mise which ${name}' failed: ${(err as Error).message}` };
   }

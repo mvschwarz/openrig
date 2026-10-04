@@ -37,4 +37,15 @@ describe("Pi pane capability check", () => {
     expect(resolveRuntimeExecutable("pi", {}, ops, "/project"))
       .toEqual({ ok: true, path: "/usr/bin/pi" });
   });
+
+  it("resolves a Pi mise shim using the actual project cwd", () => {
+    const ops = { isExecutable: () => true, realpath: (p: string) => p === "/shims/pi" ? "/bin/mise" : p,
+      run: (_file: string, args: string[], _env: NodeJS.ProcessEnv, cwd?: string) => {
+        expect(args).toEqual(["which", "pi"]);
+        expect(cwd).toBe("/project");
+        return "/project-tool/pi";
+      } };
+    expect(resolveRuntimeExecutable("pi", { PATH: "/shims" }, ops, "/project"))
+      .toEqual({ ok: true, path: "/project-tool/pi" });
+  });
 });
