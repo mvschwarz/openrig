@@ -211,6 +211,52 @@ future managed launches of that stable seat; it does not rewrite this spec or
 its inherited policy provenance. `inherit` removes that override. See
 [per-seat permission mode](getting-started.md#per-seat-permission-mode).
 
+### Built-in permission policies
+
+The four built-ins live in `packages/daemon/policies/builtin/`. Action names are the
+policies' own semantic classes.
+
+| Policy | Surface | Runs without asking | Asks a person | Denied |
+|--------|---------|---------------------|---------------|--------|
+| `builtin:locked` | config | `run_toolchain` (npm, node, tsc, tests, lint), `rig_up`, `rig_down` | nothing | everything else (`default_posture: deny`) |
+| `builtin:standard` | config | everything not listed, including `push_to_remote` (`default_posture: allow`) | `create_pr`, `publish_package`, `merge_or_release`, `force_push`, and the destructive class | nothing |
+| `builtin:open` | config | everything, including PRs, publishing, merges and force pushes (`default_posture: allow`) | the destructive class only | nothing |
+| `builtin:yolo` | flag (`launch_posture: full_bypass`) | everything; the runtime's permission prompts are bypassed at launch | nothing | nothing |
+
+The destructive class is `delete_everything`, `drop_persistent_store` and
+`reset_or_discard_vcs`.
+
+**At launch.** `builtin:yolo` selects Claude `--dangerously-skip-permissions`, Codex
+`-s danger-full-access -a never`, and Pi `--approve`. Every other seat launches at the
+floor:
+- Claude `--permission-mode acceptEdits`;
+- Codex `-s workspace-write`, or `-p <profile>` when the member sets
+  `codex_config_profile`, in which case the profile governs its own sandbox;
+- Pi `--no-approve` by default.
+
+**Config-surface policies are recorded, not applied at launch.** The seat still starts at
+the floor. The `allow`, `ask` and `deny` rules take effect once they are translated into the
+runtime's native settings. The `applying-a-permission-policy` skill in `openrig-core` does
+that translation, with per-runtime limits. For example, Claude's prefix rules can't
+reliably tell `git push --force` from `git push`. An `ask` waits for a person, so it pauses
+an autonomous seat. Standard suits interactive work, and the policy files point
+autonomous teams to Open or YOLO.
+
+**Pi has no permission surface.** `--approve` and `--no-approve` set Pi's resource trust,
+not a permission policy.
+
+**A custom policy file** is Markdown with frontmatter: `policy_schema_version: 1`, `name`,
+`source: custom`, `description`, and `surface`.
+- `surface: flag` adds `launch_posture` (`floor` or `full_bypass`).
+- `surface: config` adds `default_posture` (`allow`, `ask` or `deny`) and the `allow`, `ask`,
+  `deny` and `destructive_class` lists (`[]` for none).
+
+**Claude Code's own checks.** The first time Claude Code starts an interactive session
+with permissions bypassed, it shows a warning dialog asking you to accept responsibility;
+declining exits. On Linux and macOS it refuses that mode when run as root or under `sudo`,
+except inside a recognized sandbox. See Claude Code's
+[Choose a permission mode](https://code.claude.com/docs/en/permission-modes#skip-all-checks-with-bypasspermissions-mode).
+
 ### Choosing the Claude instruction file
 
 OpenRig writes its instructions for Claude Code members into managed blocks in
