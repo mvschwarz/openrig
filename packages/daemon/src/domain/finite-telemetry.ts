@@ -24,6 +24,8 @@ type Cursor = {
     filter: string;
     last: string;
     through: string | null;
+    /** Lowest retained ordinal observed when this descending window opened. */
+    floor?: string;
 };
 type Gap = {
     code: string;
@@ -74,6 +76,8 @@ function decode(raw: string): Cursor {
         typeof value.boot !== "string" || value.boot.length > 128 || typeof value.filter !== "string" || value.filter.length !== 64 ||
         !id(value.last) || !(value.through === null || id(value.through)))
         throw new TelemetryInputError("Invalid telemetry cursor");
+    if (value.stream === "tenures" && (!id(value.floor) || value.floor === "0" || BigInt(value.floor) > BigInt(value.last)))
+        throw new TelemetryInputError("Invalid tenure cursor floor");
     return value as Cursor;
 }
 function boundedFilter(value: string | undefined): string | null {
@@ -150,7 +154,8 @@ export function readTelemetryPage(db: Database.Database, source: TelemetrySource
         const rows: Array<Record<string, string | null>> = [];
         let fetched = 0, scanned = 0, filtered = 0, withheld = 0, rowBytes = 0;
         let capReason: string | null = null;
-        const cursor = (lastId: string, end: string | null) => encode({ v: 1, stream, boot, filter, last: lastId, through: end });
+        const floor = stream === "tenures" ? previous?.floor ?? low ?? undefined : undefined;
+        const cursor = (lastId: string, end: string | null) => encode({ v: 1, stream, boot, filter, last: lastId, through: end, ...(floor ? { floor } : {}) });
         const reset = previous && (previous.boot !== boot || BigInt(previous.last) > BigInt(high) || (previous.through !== null && BigInt(previous.through) > BigInt(high)));
         if (reset)
             gap({ code: previous.boot !== boot ? "boot_boundary_history_unverified" : "watermark_regression_history_unverified" });
@@ -158,6 +163,13 @@ export function readTelemetryPage(db: Database.Database, source: TelemetrySource
             gap({ code: `historical_${stream === "events" ? "events" : "transitions"}_not_read`, through: high });
         if (stream === "tenures" && low === null)
             gap({ code: "tenure_history_unavailable" });
+        if (!reset && stream === "tenures" && previous && floor && low && BigInt(low) > BigInt(floor)) {
+            // Only describe the remaining part of the already observed window.
+            // The cause of a changed retained floor is unknown.
+            const missingThrough = (BigInt(low) < BigInt(previous.last) ? BigInt(low) : BigInt(previous.last)) - 1n;
+            if (missingThrough >= BigInt(floor))
+                gap({ code: "tenure_floor_history_unavailable", from: floor, through: missingThrough.toString() });
+        }
         if (!reset && !startLatest && stream !== "tenures" && low && BigInt(last) + 1n < BigInt(low)) {
             const missingThrough = BigInt(low) - 1n < BigInt(through) ? (BigInt(low) - 1n).toString() : through;
             gap({ code: "before_retained_floor", from: (BigInt(last) + 1n).toString(), through: missingThrough });

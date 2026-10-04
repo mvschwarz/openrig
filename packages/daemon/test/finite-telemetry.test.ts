@@ -200,6 +200,32 @@ describe("finite telemetry history", () => {
         expect(empty.rows).toEqual([]);
         expect(empty.coverage.gaps[0]!.code).toBe("tenure_history_unavailable");
     });
+    it.each([0, 2, 3])("retains the observed tenure floor when %i oldest ordinals disappear", (removed) => {
+        const db = fixture();
+        tenures(db, 35);
+        const first = readTelemetryPage(db, source, "tenures", { nodeId: "node-a" });
+        expect(first.coverage.retainedMinimum).toBe("1");
+        expect(first.page.lastScanned).toBe("4");
+        db.prepare("DELETE FROM occupant_tenures WHERE generation_ordinal <= ?").run(removed);
+        const next = readTelemetryPage(db, source, "tenures", { nodeId: "node-a", cursor: first.page.nextCursor! });
+        expect(next.rows.map(row => row.generationOrdinal)).toEqual([3, 2, 1].filter(n => n > removed).map(String));
+        expect(next.page.hasMore).toBe(false);
+        if (removed) {
+            expect(next.coverage.status).toBe("partial");
+            expect(next.coverage.gaps).toContainEqual({ code: "tenure_floor_history_unavailable", from: "1", through: String(removed) });
+        } else expect(next.coverage.gapCount).toBe(0);
+    });
+    it("does not invent lost tenure history below the first observed retained floor", () => {
+        const db = fixture();
+        tenures(db, 35);
+        db.exec("DELETE FROM occupant_tenures WHERE generation_ordinal < 3");
+        const first = readTelemetryPage(db, source, "tenures", { nodeId: "node-a" });
+        expect(first.coverage.retainedMinimum).toBe("3");
+        const next = readTelemetryPage(db, source, "tenures", { nodeId: "node-a", cursor: first.page.nextCursor! });
+        expect(next.rows.map(row => row.generationOrdinal)).toEqual(["3"]);
+        expect(next.coverage.gapCount).toBe(0);
+        expect(next.coverage.historyCompleteness).toBe("unknown");
+    });
     it("matches the collector metadata contract without deriving semantic state from event kind", async () => {
         const db = fixture();
         events(db, 1);

@@ -54,6 +54,8 @@ records are never joined to today's owner or node name.
 `capReason`. New writes above a window's `through` wait until that window is
 complete. A complete ascending checkpoint opens another finite window on its next
 use. Descending tenure history ends with a null continuation.
+Its cursor also retains the first observed lower ordinal, so disappearance of that
+older range produces a named gap even when some records remain on the final page.
 
 ## Bounds and privacy
 
@@ -94,6 +96,13 @@ before explicitly adopting the fresh checkpoint. Tenures may be requested fresh
 without a cursor. Do not silently reset to zero or conflate existing collector
 source identity, native-tail cursors and these cursors. An arbitrary in-place
 database restore/copy without an observable regression is not detected.
+
+After **every daemon restart**, a following collector cannot continue its old
+cursor. To recover available retained history, record the boot gap and start a new
+read with `start=retained`, accepting possible overlap with previously read records.
+Alternatively, adopting `restartCursor` observes only new records after the fresh
+high watermark; it does not recover the missed interval. Neither choice proves
+continuity across the restart while `sequenceSpaceId` remains null.
 
 Malformed cursors/options return HTTP 400 `telemetry_invalid_request`.
 Schema/read/source failures return HTTP 503 `telemetry_read_unavailable`, never a
