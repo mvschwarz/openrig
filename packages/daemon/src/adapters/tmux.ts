@@ -655,14 +655,24 @@ export class TmuxAdapter {
 
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
     const commandBytes = Buffer.byteLength(command, "utf8");
-    // Fish uses its own source builtin; POSIX shells retain subshell isolation.
-    // Unknown/unreadable panes keep the ordinary /bin/sh staging invocation.
+    // POSIX shells retain subshell isolation; unknown/unreadable panes use sh.
     const paneShell = options.sourceInPane ? (await this.getPaneCommand(target) ?? "").replace(/^-/, "") : "";
     const sourceInPane = ["bash", "zsh", "sh", "dash", "ksh"].includes(paneShell);
     let path = options.stageIfLong && commandBytes <= 512 ? undefined : this.fileOps.tmpName();
-    let invocation = path
-      ? paneShell === "fish" ? `source ${shellQuote(path)}` : sourceInPane ? `( . ${shellQuote(path)} )` : `/bin/sh ${shellQuote(path)}`
-      : command;
+    let invocation = path ? sourceInPane ? `( . ${shellQuote(path)} )` : `/bin/sh ${shellQuote(path)}` : command;
+    if (path && paneShell === "fish") {
+      const quotedPath = shellQuote(path);
+      invocation = `/bin/sh ${quotedPath}`;
+      // Fish single quotes reinterpret POSIX backslashes. Keep those payloads
+      // (and paths) on sh, preserving existing executable launches byte-for-byte.
+      if (!command.includes("\\") && !path.includes("\\")) {
+        // Older fish rejects prefix assignments before executing any script line.
+        // Only an unconsumed script may fall back; a completed launch removed it.
+        const sourced = `source ${quotedPath}; or begin; test -f ${quotedPath}; and /bin/sh ${quotedPath}; end`;
+        // Repeating the path must not add a refusal for previously valid TMPDIRs.
+        if (Buffer.byteLength(sourced, "utf8") <= 512) invocation = sourced;
+      }
+    }
     if (Buffer.byteLength(invocation, "utf8") > 512) {
       // Pi commands below the canonical tty limit still fit when staging cannot.
       if (options.stageIfLong && commandBytes < 1024) {
