@@ -31,7 +31,7 @@ export interface RosterInventory {
 const object = (v: unknown): v is Row => !!v && typeof v === "object" && !Array.isArray(v);
 const text = (v: unknown): string | null => typeof v === "string" && v.trim() ? v : null;
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every(x => text(x) !== null);
-const reference = (v: unknown): v is Reference => object(v) && text(v.seat) !== null && text(v.host) !== null;
+const reference = (v: unknown): v is Row & Reference => object(v) && text(v.seat) !== null && text(v.host) !== null;
 
 /** Select authored fields only: a file cannot supply runtime or observed-model facts. */
 export function parseRoster(value: unknown): Roster {
