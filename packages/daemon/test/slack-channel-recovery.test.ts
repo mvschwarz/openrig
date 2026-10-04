@@ -154,6 +154,7 @@ it("filters bots, replies, edits and unknown senders; preserves files and exact 
 
 it.each([
   { messages: [], has_more: true },
+  { messages: [event("1000.000000"), event("1001.1")], has_more: true },
   { messages: [event("2000.1")], has_more: false },
   { messages: [], has_more: false, is_limited: true },
   { messages: [{ text: "missing timestamp" }], has_more: false },

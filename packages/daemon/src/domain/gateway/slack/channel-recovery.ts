@@ -106,11 +106,11 @@ export class ChannelRecovery {
             slackMicros(m.ts)! < lower || slackMicros(m.ts)! >= latest)) {
         this.state = "incomplete"; this.reason = "invalid-history-page"; return;
       }
+      const ordered = [...messages].sort((a, b) => slackMicros(a.ts)! < slackMicros(b.ts)! ? -1 : 1);
       const more = r.json.has_more || (typeof cursor === "string" && cursor.length > 0);
-      if (more && (!messages.length || slackMicros(messages.at(-1)?.ts)! <= lower)) {
+      if (more && (!messages.length || slackMicros(ordered[0]?.ts)! <= lower)) {
         this.state = "incomplete"; this.reason = "history-page-no-progress"; return;
       }
-      const ordered = [...messages].sort((a, b) => slackMicros(a.ts)! < slackMicros(b.ts)! ? -1 : 1);
       for (const message of ordered) {
         if (this.stopped) return;
         if (this.now() >= deadline || entries >= 100) { this.state = "incomplete"; this.reason = "pass-budget"; return; }
