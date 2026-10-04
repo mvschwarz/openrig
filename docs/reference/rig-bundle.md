@@ -190,7 +190,7 @@ where the daemon runs.
 ### Create a bundle
 
 ```bash
-rig bundle create <spec-path> -o <output.rigbundle> [--rig-root <dir>] [--name <name>] [--bundle-version <ver>]
+rig bundle create <spec-path> -o <output.rigbundle> [--rig-root <dir>] [--context-pack <dir>]... [--name <name>] [--bundle-version <ver>]
 ```
 
 | Flag | Required | Default | Description |
@@ -198,6 +198,7 @@ rig bundle create <spec-path> -o <output.rigbundle> [--rig-root <dir>] [--name <
 | `<spec-path>` | yes | — | Path to the rig spec YAML file. |
 | `-o, --output` | yes | — | Output path. Must end with `.rigbundle`. |
 | `--rig-root` | no | spec directory | Root directory for resolving `agent_ref` and other relative paths. |
+| `--context-pack <dir>` | no | — | Carry the context pack in `<dir>`. Repeatable. The directory may be outside the rig folder, for example a world pack whose `manifest.yaml` is at its repository root. Only `manifest.yaml` and the files it declares are carried, the same set `rig context add --git` installs, and the pack lands in the bundle at `context-packs/<manifest name>/`. Needs a pod-aware spec. |
 | `--name` | no | `my-bundle` | Bundle name in the manifest. |
 | `--bundle-version` | no | `0.1.0` | Bundle version in the manifest. |
 
@@ -211,6 +212,8 @@ The create command:
 7. Writes the manifest (`bundle.yaml`)
 8. Packs into a deterministic `.tar.gz`
 9. Writes the sibling `.sha256` digest
+
+On install, a carried pack is routed into `context.root` under its manifest name. If a pack of that name is already installed, install never merges into it: an identical pack is reported as `already_installed`, and a different one (for example a `rig context add --git` install at another revision) is kept unchanged and reported as `kept_existing`, with the `rig context rm <name>` command to use the bundle's copy instead.
 
 ### Inspect a bundle
 

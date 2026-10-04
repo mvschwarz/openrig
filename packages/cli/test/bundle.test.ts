@@ -317,6 +317,22 @@ describe("Bundle CLI", () => {
     });
   });
 
+  it("bundle create --context-pack (repeatable) sends client-absolute pack directories", async () => {
+    capturedCreateBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "rigs/dev/rig.yaml", "-o", "out.rigbundle", "--context-pack", ".", "--context-pack", "packs/extra"]);
+    });
+    expect(capturedCreateBodies.at(-1)?.["contextPackDirs"]).toEqual([nodePath.resolve("."), nodePath.resolve("packs/extra")]);
+  });
+
+  it("control: bundle create without --context-pack sends no contextPackDirs", async () => {
+    capturedCreateBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", "rigs/dev/rig.yaml", "-o", "out.rigbundle"]);
+    });
+    expect(capturedCreateBodies.at(-1)?.["contextPackDirs"]).toBeUndefined();
+  });
+
   it("bundle install --cwd sends a client-absolute cwdOverride", async () => {
     capturedInstallBodies = [];
     await captureLogs(async () => {

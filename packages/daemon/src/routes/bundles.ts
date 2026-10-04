@@ -25,6 +25,7 @@ import type { RigRepository } from "../domain/rig-repository.js";
 import { BundleAuditReader, BundleAuditWriter, type BundleAuditFsOps, type BundleAuditRecord } from "../domain/bundle-audit.js";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 import { routingFailureWarnings, type BundleContentRouting } from "../domain/bundle-content-routing.js";
+import { vendorContextPackDir } from "../domain/bundle-carried-context-pack.js";
 import { getDaemonVersion } from "../domain/daemon-version.js";
 import { assertShippableSubstance } from "../domain/agent-resolver.js";
 
@@ -694,6 +695,10 @@ bundleRoutes.post("/create", async (c) => {
   const outputPath = typeof body["outputPath"] === "string" ? body["outputPath"] : "";
   const rigRoot = typeof body["rigRoot"] === "string" ? body["rigRoot"] : undefined;
   const includePackages = Array.isArray(body["includePackages"]) ? body["includePackages"] as string[] : undefined;
+  // `rig bundle create --context-pack <dir>`: packs to carry from anywhere the author names, by manifest name
+  const contextPackDirs = Array.isArray(body["contextPackDirs"])
+    ? (body["contextPackDirs"] as unknown[]).filter((d): d is string => typeof d === "string" && d.length > 0)
+    : [];
 
   const allowDrift = body["allowDrift"] === true;
 
@@ -775,6 +780,8 @@ bundleRoutes.post("/create", async (c) => {
         if (authorPrimitives.workflowSpecs) result.manifest.workflowSpecs = authorPrimitives.workflowSpecs;
         if (authorPrimitives.contextPacks) result.manifest.contextPacks = authorPrimitives.contextPacks;
         if (authorPrimitives.agentImages) result.manifest.agentImages = authorPrimitives.agentImages;
+        const carriedPacks = contextPackDirs.map((dir) => vendorContextPackDir(nodePath.resolve(dir), tmpStaging));
+        if (carriedPacks.length > 0) result.manifest.contextPacks = [...(result.manifest.contextPacks ?? []), ...carriedPacks];
 
         const integrity = computeIntegrity(tmpStaging, integrityFsOps());
         result.manifest.integrity = integrity;
@@ -792,6 +799,9 @@ bundleRoutes.post("/create", async (c) => {
 
     // Legacy bundle creation
     // Validated above, before the drift guard ran.
+    if (contextPackDirs.length > 0) {
+      return c.json({ error: "--context-pack needs a pod-aware rig spec (one with pods:)" }, 400);
+    }
     const spec = LegacyRigSpecSchema.normalize(rawParsed);
 
     const specDir = nodePath.dirname(nodePath.resolve(specPath));

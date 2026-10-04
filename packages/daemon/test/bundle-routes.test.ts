@@ -3238,3 +3238,111 @@ describe("POST /api/bundles/install: pre-launch routing report", () => {
     expect(audit.at(-1)).toMatchObject({ outcome: "partial", routingFailures: [failure] });
   });
 });
+
+describe("bundle create --context-pack: a world pack outside the rig folder", () => {
+  let db: Database.Database;
+  let setup: ReturnType<typeof createTestApp>;
+  let work: string;
+  let worldRepo: string;
+  let contextRoot: string;
+  let savedContextRoot: string | undefined;
+
+  const WORLD_MANIFEST = [
+    "name: demo-world",
+    "version: 0.1.0",
+    "taxonomy: world",
+    "files:",
+    "  - path: identity/who.md",
+    "    role: identity",
+  ].join("\n") + "\n";
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    setup = createTestApp(db);
+    work = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-carried-world-"));
+    contextRoot = path.join(work, "context");
+    savedContextRoot = process.env["OPENRIG_CONTEXT_ROOT"];
+    process.env["OPENRIG_CONTEXT_ROOT"] = contextRoot;
+    // The openrig-world layout: the pack manifest at the repository root, the rig in rigs/dev/
+    worldRepo = path.join(work, "world");
+    const rigDir = path.join(worldRepo, "rigs", "dev");
+    fs.mkdirSync(path.join(rigDir, "agents", "impl"), { recursive: true });
+    fs.mkdirSync(path.join(worldRepo, "identity"), { recursive: true });
+    fs.writeFileSync(path.join(worldRepo, "manifest.yaml"), WORLD_MANIFEST);
+    fs.writeFileSync(path.join(worldRepo, "identity", "who.md"), "# Who we are\n");
+    fs.writeFileSync(path.join(worldRepo, "README.md"), "# Repository readme, not part of the pack\n");
+    fs.writeFileSync(path.join(rigDir, "agents", "impl", "agent.yaml"),
+      ['name: impl-agent', 'version: "1.0.0"', 'resources:', '  skills: []', 'profiles:', '  default:', '    uses:', '      skills: []'].join("\n"));
+    fs.writeFileSync(path.join(rigDir, "rig.yaml"), [
+      'version: "0.2"', 'name: carried-world-rig', 'pods:', '  - id: dev', '    label: Dev', '    members:',
+      '      - id: impl', '        agent_ref: "local:agents/impl"', '        profile: default', '        runtime: claude-code', '        cwd: .',
+      '    edges: []', 'edges: []',
+    ].join("\n"));
+  });
+
+  afterEach(() => {
+    db.close();
+    if (savedContextRoot === undefined) delete process.env["OPENRIG_CONTEXT_ROOT"];
+    else process.env["OPENRIG_CONTEXT_ROOT"] = savedContextRoot;
+    fs.rmSync(work, { recursive: true, force: true });
+  });
+
+  async function create(extra: Record<string, unknown>) {
+    const outputPath = path.join(work, "carried.rigbundle");
+    const res = await setup.app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath: path.join(worldRepo, "rigs", "dev", "rig.yaml"), bundleName: "carried", bundleVersion: "0.1.0", outputPath, ...extra }),
+    });
+    return { res, outputPath };
+  }
+
+  it("carries the root-level pack by name, with only its declared files, and install routes it by that name", async () => {
+    const { res, outputPath } = await create({ contextPackDirs: [worldRepo] });
+    expect(res.status).toBe(201);
+
+    const { unpack } = await import("../src/domain/bundle-archive.js");
+    const extracted = path.join(work, "extracted");
+    fs.mkdirSync(extracted);
+    await unpack(outputPath, extracted);
+    expect(fs.readdirSync(path.join(extracted, "context-packs", "demo-world")).sort()).toEqual(["identity", "manifest.yaml"]);
+    expect(fs.readFileSync(path.join(extracted, "bundle.yaml"), "utf-8")).toContain("context-packs/demo-world/manifest.yaml");
+
+    const { routeBundleContents } = await import("../src/domain/bundle-content-routing.js");
+    const routing = await routeBundleContents(outputPath);
+    expect(routing.contextPacksRouting?.records[0]).toMatchObject({ status: "routed" });
+    expect(fs.readFileSync(path.join(contextRoot, "demo-world", "identity", "who.md"), "utf-8")).toBe("# Who we are\n");
+    expect(fs.existsSync(path.join(contextRoot, "demo-world", "README.md"))).toBe(false);
+  });
+
+  it("install leaves an existing different install of the same pack byte-for-byte untouched", async () => {
+    const { outputPath } = await create({ contextPackDirs: [worldRepo] });
+    const installed = path.join(contextRoot, "demo-world");
+    fs.mkdirSync(path.join(installed, "identity"), { recursive: true });
+    const gitManifest = WORLD_MANIFEST.replace("0.1.0", "0.0.9");
+    fs.writeFileSync(path.join(installed, "manifest.yaml"), gitManifest);
+    fs.writeFileSync(path.join(installed, "identity", "who.md"), "# Older text\n");
+    fs.writeFileSync(path.join(installed, ".openrig-git-source.json"), '{"pack":"."}\n');
+
+    const { routeBundleContents } = await import("../src/domain/bundle-content-routing.js");
+    const routing = await routeBundleContents(outputPath);
+
+    expect(routing.contextPacksRouting?.records[0]?.status).toBe("kept_existing");
+    expect(fs.readFileSync(path.join(installed, "manifest.yaml"), "utf-8")).toBe(gitManifest);
+    expect(fs.readFileSync(path.join(installed, "identity", "who.md"), "utf-8")).toBe("# Older text\n");
+    expect(fs.readFileSync(path.join(installed, ".openrig-git-source.json"), "utf-8")).toBe('{"pack":"."}\n');
+  });
+
+  it("a legacy (non-pod) spec cannot carry a pack", async () => {
+    const legacySpec = path.join(work, "legacy-rig.yaml");
+    fs.writeFileSync(legacySpec, ['schema_version: 1', 'name: legacy-rig', 'version: "1.0"', 'nodes:', '  - id: a', '    runtime: claude-code'].join("\n"));
+    const res = await setup.app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath: legacySpec, bundleName: "legacy", bundleVersion: "0.1.0", outputPath: path.join(work, "legacy.rigbundle"), contextPackDirs: [worldRepo] }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/--context-pack needs a pod-aware rig spec/);
+  });
+});
