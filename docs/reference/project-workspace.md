@@ -83,7 +83,9 @@ order:
 3. the project whose entry lists the calling seat's rig under `rigs`;
 4. the deepest declared project root that contains the working directory
    (`--cwd`, else the current directory);
-5. otherwise it stops with `project_required` and prints each candidate's exact
+5. the only project whose entry lists no `rigs`, so a rig that isn't listed
+   anywhere keeps its project after a claimed project is added beside it;
+6. otherwise it stops with `project_required` and prints each candidate's exact
    command.
 
 ```yaml

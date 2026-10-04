@@ -346,9 +346,12 @@ Examples:
         for (const warning of result.warnings) console.error(`Warning: ${warning}`);
         return;
       }
-      const selectedBy = result.position.selectedBy === "rig"
-        ? " (selected by this rig's catalog entry)"
-        : result.position.selectedBy === "cwd" ? " (selected by the working directory)" : "";
+      const selectedByLabels: Record<string, string> = {
+        rig: " (selected by this rig's catalog entry)",
+        cwd: " (selected by the working directory)",
+        unclaimed: " (the only project no rig claims)",
+      };
+      const selectedBy = selectedByLabels[result.position.selectedBy] ?? "";
       console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}${selectedBy}`);
       printWorkInstallSelectors(result, (opts.topology ?? "").split(",").map((id) => id.trim()).filter(Boolean));
       for (const planned of result.pieces) {

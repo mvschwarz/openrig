@@ -20,8 +20,8 @@ export type WorkInstallSource = "explicit" | "manifest" | "default";
 export type WorkInstallAltitude = "project" | "mission" | "slice";
 /** How the project was chosen: --project, the only catalog entry, the calling
  *  rig's catalog association, the deepest catalog root containing the working
- *  directory, or the uncatalogued workspace itself. */
-export type WorkInstallSelectedBy = "explicit" | "single" | "rig" | "cwd" | "workspace";
+ *  directory, the only entry no rig claims, or the uncatalogued workspace itself. */
+export type WorkInstallSelectedBy = "explicit" | "single" | "rig" | "cwd" | "unclaimed" | "workspace";
 
 export interface WorkInstallPiece {
   altitude: WorkInstallAltitude;
@@ -148,42 +148,54 @@ function rigFromSession(sessionName: string | undefined): string | null {
   return at > 0 && at < sessionName!.length - 1 ? sessionName!.slice(at + 1) : null;
 }
 
-/** Steps 3 and 4 of project selection, used only where the catalog alone would
- *  stop with project_required: the calling rig's association
- *  (workspace.yaml `projects[].rigs`), then the unique deepest project root
- *  containing the working directory. Neither adds a refusal: an unusable signal
- *  is a warning, and no unique answer keeps project_required. */
+function selectInferred(
+  catalogPath: string,
+  id: string,
+  selectedBy: "rig" | "cwd" | "unclaimed",
+): { id: string; root: string; selectedBy: "rig" | "cwd" | "unclaimed" } | WorkInstallFailure {
+  try {
+    const selected = selectCatalogProject(catalogPath, id);
+    return selected ? { ...selected, selectedBy } : failure("project_not_found", `project '${id}' is not declared in ${catalogPath}`);
+  } catch (err) {
+    if (err instanceof ProjectReadError) return failure(err.code, err.message, err.candidates);
+    throw err;
+  }
+}
+
+/** Steps 3-5 of project selection, used only where the catalog alone would stop
+ *  with project_required: the calling rig's association (workspace.yaml
+ *  `projects[].rigs`), then the unique deepest project root containing the
+ *  working directory, then the only entry that no rig claims. The last keeps a
+ *  user's own rigs on their project after a claimed project (a contributor
+ *  bundle) is added beside it. None adds a refusal: an unusable signal is a
+ *  warning, and no unique answer keeps project_required. */
 function inferCatalogProject(
   catalogPath: string,
   required: ProjectReadError,
   opts: { cwd?: string; sessionName?: string },
   warnings: string[],
-): { id: string; root: string; selectedBy: "rig" | "cwd" } | WorkInstallFailure {
+): { id: string; root: string; selectedBy: "rig" | "cwd" | "unclaimed" } | WorkInstallFailure {
+  const raw = readYaml(catalogPath).value?.["projects"];
+  const claims = new Map<string, string[]>();
+  const malformed = new Set<string>();
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    if (!isRecord(entry) || typeof entry["id"] !== "string" || entry["rigs"] === undefined) continue;
+    const rigs = entry["rigs"];
+    if (!Array.isArray(rigs) || !rigs.every((name) => typeof name === "string")) {
+      warnings.push(`${catalogPath}: project '${entry["id"]}' rigs must be a list of rig names; ignored it`);
+      malformed.add(entry["id"]);
+      continue;
+    }
+    claims.set(entry["id"], rigs as string[]);
+  }
+
   const rig = rigFromSession(opts.sessionName);
   if (rig) {
-    const raw = readYaml(catalogPath).value?.["projects"];
-    const claimants: string[] = [];
-    for (const entry of Array.isArray(raw) ? raw : []) {
-      if (!isRecord(entry) || entry["rigs"] === undefined) continue;
-      const rigs = entry["rigs"];
-      if (!Array.isArray(rigs) || !rigs.every((name) => typeof name === "string")) {
-        warnings.push(`${catalogPath}: project '${String(entry["id"])}' rigs must be a list of rig names; ignored it`);
-        continue;
-      }
-      if (rigs.includes(rig) && typeof entry["id"] === "string") claimants.push(entry["id"]);
-    }
+    const claimants = [...claims].filter(([, rigs]) => rigs.includes(rig)).map(([id]) => id);
     if (claimants.length > 1) {
       return failure("project_required", `rig '${rig}' is listed under several projects in ${catalogPath}; select one with --project`, claimants);
     }
-    if (claimants.length === 1) {
-      try {
-        const selected = selectCatalogProject(catalogPath, claimants[0]);
-        if (selected) return { ...selected, selectedBy: "rig" };
-      } catch (err) {
-        if (err instanceof ProjectReadError) return failure(err.code, err.message, err.candidates);
-        throw err;
-      }
-    }
+    if (claimants.length === 1) return selectInferred(catalogPath, claimants[0]!, "rig");
   }
 
   const cwd = opts.cwd === undefined ? null : canonicalExisting(opts.cwd);
@@ -208,6 +220,10 @@ function inferCatalogProject(
       );
     }
   }
+
+  const unclaimed = (readProjectCatalog(catalogPath) ?? [])
+    .filter((entry) => !malformed.has(entry.id) && (claims.get(entry.id) ?? []).length === 0);
+  if (unclaimed.length === 1) return selectInferred(catalogPath, unclaimed[0]!.id, "unclaimed");
   return failure(required.code, required.message, required.candidates);
 }
 

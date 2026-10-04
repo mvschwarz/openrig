@@ -265,6 +265,36 @@ skills: [system-skill]
       });
     });
 
+    it("keeps a rig with no association on the only unclaimed project after a claimed project is added", async () => {
+      mkdirSync(join(catalogRoot, "projects", "bundle"), { recursive: true });
+      catalog(`  - id: default\n    root: .\n  - id: bundle\n    root: projects/bundle\n    rigs: [openrig-dev]\n`);
+
+      process.env["OPENRIG_SESSION_NAME"] = "driver@user-rig";
+      const userRig = await run("--cwd", workingRoot, "--json");
+      expect(userRig.exitCode).toBeUndefined();
+      expect((JSON.parse(userRig.logs.join("")) as Plan).position).toMatchObject({ projectId: "default", projectRoot: catalogRoot, selectedBy: "unclaimed" });
+      expect((await run("--cwd", workingRoot)).logs[0]).toBe(`project default: ${catalogRoot} (the only project no rig claims)`);
+
+      delete process.env["OPENRIG_SESSION_NAME"];
+      const plainShell = await run("--cwd", workingRoot, "--json");
+      expect((JSON.parse(plainShell.logs.join("")) as Plan).position).toMatchObject({ projectId: "default", selectedBy: "unclaimed" });
+
+      process.env["OPENRIG_SESSION_NAME"] = "driver@openrig-dev";
+      const bundleRig = await run("--cwd", workingRoot, "--json");
+      expect((JSON.parse(bundleRig.logs.join("")) as Plan).position).toMatchObject({ projectId: "bundle", selectedBy: "rig" });
+    });
+
+    it("keeps project_required when every project is claimed and the calling rig has no association", async () => {
+      catalog(`  - id: alpha\n    root: ${alphaRel()}\n    rigs: [rig-a]\n  - id: beta\n    root: ${betaRel()}\n    rigs: [rig-b]\n`);
+      process.env["OPENRIG_SESSION_NAME"] = "driver@rig-c";
+
+      const result = await run("--cwd", workingRoot, "--json");
+      expect(result.exitCode).toBe(1);
+      expect(JSON.parse(result.logs.join("")) as Failure).toMatchObject({
+        error: { code: "project_required", candidates: ["alpha", "beta"] },
+      });
+    });
+
     it("lets an explicit --project override the rig and the working directory, and reports a single entry", async () => {
       catalog(`  - id: alpha\n    root: ${alphaRel()}\n  - id: beta\n    root: ${betaRel()}\n    rigs: [dev-rig]\n`);
       process.env["OPENRIG_SESSION_NAME"] = "driver@dev-rig";
