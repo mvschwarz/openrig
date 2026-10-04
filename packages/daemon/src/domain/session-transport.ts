@@ -188,7 +188,7 @@ function findClaudeComposer(paneContent: string) {
     // or completed status ends this block; do not revive an older work row.
     if (!/^\s/.test(line)) { headSeen = true; break; }
   }
-  return { text: prompt.slice(indent.length), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, headSeen, liveStatus };
+  return { text: prompt.slice(indent.length), bar: lines[bar]!.trim(), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, headSeen, liveStatus };
 }
 
 function findPromptDraftBeforeFooter(paneContent: string): string | null {
@@ -234,9 +234,11 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     : null;
   const claudeComposer = findClaudeComposer(paneContent);
   const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
-  // A complete later empty composer makes the preceding question history.
+  // A complete later empty composer with a recognized Claude bar makes the preceding question history.
   // Keep draft handling and selectors without this dialog boundary unchanged.
-  const selectionLines = claudeComposer?.framed && IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text)) &&
+  const selectionLines = claudeComposer?.framed &&
+      /^(?:⏵⏵ (?:accept edits|bypass permissions|auto mode) on\b|⏸ plan mode on\b|\? for shortcuts$)/.test(claudeComposer.bar) &&
+      IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text)) &&
       oldQuestionEnd >= 0 && oldQuestionEnd < promptScanLines.length - 1
     ? promptScanLines.slice(oldQuestionEnd + 1) : promptScanLines;
   const selectionPromptEvidence = findCurrentClaudeQuestion(paneContent) ??

@@ -31,6 +31,8 @@ const shapes: Record<string, { content: string; state: string }> = {
   // Existing ordinary-send behavior for this draft is not changed by picker recognition.
   history_draft: { content: picker13 + "\n" + framed("❯ unfinished message"), state: "agent_idle" },
   historical_short_picker: { content: ["Which region?", "❯ 1. us-east", "  2. us-west", footer, framed("❯ ")].join("\n"), state: "agent_idle" },
+  unvalidated_history_frame: { content: ["Which region?", "❯ 1. us-east", "  2. us-west", footer,
+    framed("❯ ").replace("⏵⏵ accept edits on (shift+tab to cycle) · ← for agents", "Not an input mode bar")].join("\n"), state: "attention" },
   footer_only: { content: footer, state: "unknown" },
   later_output: { content: picker13 + "\nLater unrelated output", state: "unknown" },
   // Preserve the existing short-window behavior; this change does not broaden draft parsing.
@@ -58,6 +60,17 @@ describe("current Claude question picker", () => {
       expect(lines.length - lines.findIndex(line => line.startsWith("❯ 1."))).toBe(distance);
       expect(classifyPaneActivity(content)).toMatchObject({ state: "attention", reason: "selection_prompt" });
     }
+  });
+
+  it.each([
+    "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents",
+    "⏵⏵ bypass permissions on (shift+tab to cycle)",
+    "⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+    "⏸ plan mode on (shift+tab to cycle)",
+    "? for shortcuts",
+  ])("allows the history exemption under the recognized Claude bar: %s", bar => {
+    const content = shapes.unvalidated_history_frame!.content.replace("Not an input mode bar", bar);
+    expect(classifyPaneActivity(content).state).toBe("agent_idle");
   });
 
   it.each([100, 160])("handles selection changes and rejects quoted or interrupted blocks at %i columns", width => {
