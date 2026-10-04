@@ -19,7 +19,7 @@ import {
   statusGuardMessage,
 } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
-import { resolveIdentitySource } from "./whoami.js";
+import { identityRoutingHint, resolveIdentitySource } from "./whoami.js";
 import type { StatusDeps } from "./status.js";
 import { shellQuote } from "../cross-host-executor.js";
 import { omittedReadField, readView } from "../read-view.js";
@@ -100,6 +100,7 @@ interface HealthCliError {
   message: string;
   nextInspection: string;
   details?: unknown;
+  hint?: string;
 }
 
 function defaultDeps(): HealthDeps {
@@ -124,6 +125,7 @@ function emitError(error: HealthCliError, json: boolean): void {
   } else {
     console.error(`Error: ${error.message}`);
     console.error(`  Next inspection: ${error.nextInspection}`);
+    if (error.hint) console.error(`  ${error.hint}`);
   }
   process.exitCode = 1;
 }
@@ -219,6 +221,7 @@ async function readSelfSeatId(client: DaemonClient, deps: HealthDeps, json: bool
       message: "The daemon could not resolve the current seat identity.",
       nextInspection: "rig whoami --json",
       details: response.data,
+      ...(response.status === 404 ? { hint: await identityRoutingHint(client) } : {}),
     }, json);
     return null;
   }
