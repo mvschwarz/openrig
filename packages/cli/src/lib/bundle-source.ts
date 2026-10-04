@@ -96,7 +96,7 @@ export async function bundleGit(cwd: string, args: string[]): Promise<string> {
   try {
     const result = await execFileAsync("git", ["-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", ...args], {
       cwd, encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
-      env: { ...env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/usr/bin/false", SSH_ASKPASS: "/usr/bin/false" },
+      env: { ...env, HOME: cwd, XDG_CONFIG_HOME: path.join(cwd, ".config"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/usr/bin/false", SSH_ASKPASS: "/usr/bin/false" },
     });
     return result.stdout.trimEnd();
   } catch { throw new Error("GitHub bundle fetch failed or timed out. Check that the repository and ref are publicly readable; no credentials are requested."); }
@@ -148,7 +148,7 @@ export function authoredCompatibility(folder: string): Record<string, string> {
   for (const [key, field] of [["min_cli_version", "minCliVersion"], ["min_daemon_version", "minDaemonVersion"]] as const) {
     const v = (value as Record<string, unknown>)[key];
     if (v === undefined) continue;
-    if (typeof v !== "string" || !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(v)) throw new Error(`bundle.yaml compatibility.${key} must be a version string.`);
+    if (typeof v !== "string" || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/.test(v)) throw new Error(`bundle.yaml compatibility.${key} must be a version string.`);
     result[field] = v;
   }
   return result;
@@ -161,6 +161,9 @@ export function bundleIdentityLines(data: Record<string, unknown>): string[] {
   if (typeof data.configurationId === "string") lines.push(`Configuration: ${data.configurationId}`);
   const digest = data.packageDigest as { value?: string; coverage?: string } | undefined;
   if (digest?.value) lines.push(`Package SHA-256: ${digest.value}`, `Coverage: ${digest.coverage}; packaged files only; excludes bundle.yaml, ignored junk and file modes; not host-resolved resources or execution.`);
+  const assembler = data.assembler as { openrigVersion?: string; commit?: string } | undefined;
+  if (assembler?.openrigVersion) lines.push(`Assembler: OpenRig ${assembler.openrigVersion}${assembler.commit ? ` (${assembler.commit})` : ""}`);
+  if (typeof data.archiveHash === "string") lines.push(`Archive SHA-256: ${data.archiveHash}`);
   return lines;
 }
 

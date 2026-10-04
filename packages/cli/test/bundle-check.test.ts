@@ -12,6 +12,7 @@ name: author-fixture
 docs: [{path: README.md}]
 pods:
   - id: infra
+    label: Infrastructure
     members:
       - { id: observer, runtime: terminal, agent_ref: "builtin:terminal", profile: none, cwd: "." }
     edges: []
@@ -44,6 +45,17 @@ describe("advisory bundle check", () => {
   ] as const)("reports a broken %s rule", async (rule, breakRule) => {
     breakRule();
     expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: rule, status: "finding" })]));
+  });
+
+
+  it("checks startup paths relative to the declaring local agent", async () => {
+    const dir = path.join(root, "agent"); fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("builtin:terminal", "local:agent").replace("runtime: terminal", "runtime: codex"));
+    fs.writeFileSync(path.join(dir, "agent.yaml"), 'name: fixture\nversion: "1.0"\nstartup:\n  files:\n    - path: context.md\nprofiles:\n  none: {}\n');
+    fs.writeFileSync(path.join(dir, "context.md"), "Context");
+    expect((await checkBundleFolder(root)).checks.filter(c => c.status === "finding")).toEqual([]);
+    fs.rmSync(path.join(dir, "context.md"));
+    expect((await checkBundleFolder(root)).checks).toEqual(expect.arrayContaining([expect.objectContaining({ ruleId: "referenced_files", status: "finding", path: "agent/context.md" })]));
   });
 
   it("command does not resolve a daemon, create a bundle, or invoke preflight", async () => {

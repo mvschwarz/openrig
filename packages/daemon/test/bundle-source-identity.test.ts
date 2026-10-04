@@ -16,6 +16,7 @@ name: source-identity-fixture
 docs: [{path: README.md}]
 pods:
   - id: infra
+    label: Infrastructure
     members:
       - { id: shell, runtime: terminal, agent_ref: "builtin:terminal", profile: none, cwd: "." }
     edges: []
@@ -44,7 +45,7 @@ describe("bundle source and artifact identity", () => {
 
   it("create and inspect name the same source/configuration/package/assembler; manifest changes do not change file digest", async () => {
     const first = await post("create", body("one"));
-    expect(first.status).toBe(201);
+    expect(first.status, JSON.stringify(first.data)).toBe(201);
     expect(first.data).toMatchObject({ source, configurationId: "infra.shell=terminal", assembler: { openrigVersion: expect.any(String) } });
     const second = await post("create", body("two", { provenance: { source: { ...source, requestedRef: "v1" }, notes: "second metadata" } }));
     expect(second.status).toBe(201);
@@ -60,12 +61,12 @@ describe("bundle source and artifact identity", () => {
 
   it("checks the configuration ID against the actual spec, not a caller's label", async () => {
     const res = await post("create", body("bad", { configuration: { id: "infra.shell=codex" } }));
-    expect(res.status).toBe(400); expect(fs.existsSync(path.join(root, "bad.rigbundle"))).toBe(false);
+    expect(res.status, JSON.stringify(res.data)).toBe(400); expect(res.data.error).toBe("Configuration ID does not match the packaged rig spec"); expect(fs.existsSync(path.join(root, "bad.rigbundle"))).toBe(false);
   });
 
   it("author minima reach the manifest and the existing install check before bootstrap", async () => {
     const created = await post("create", body("min", { compatibility: { minCliVersion: "99.0.0", minDaemonVersion: "99.0.0" } }));
-    expect(created.status).toBe(201);
+    expect(created.status, JSON.stringify(created.data)).toBe(201);
     const bundlePath = path.join(root, "min.rigbundle");
     const inspected = await post("inspect", { bundlePath });
     expect(inspected.data.manifest.compatibility).toMatchObject({ minCliVersion: "99.0.0", minDaemonVersion: "99.0.0" });

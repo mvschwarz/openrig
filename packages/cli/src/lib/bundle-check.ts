@@ -58,15 +58,15 @@ export async function checkBundleFolder(folder: string) {
   for (const doc of docs) if (typeof doc.path === "string") fileRead(doc.path);
 
   // Declared startup/culture file references are mechanical. Inline text is not a file.
-  const startupFiles = (value: unknown): void => {
+  const startupFiles = (value: unknown, base = root): void => {
     if (!value || typeof value !== "object") return;
-    if (Array.isArray(value)) { for (const entry of value) startupFiles(entry); return; }
+    if (Array.isArray(value)) { for (const entry of value) startupFiles(entry, base); return; }
     for (const [key, v] of Object.entries(value)) {
       if (key === "startup" && v && typeof v === "object") {
-        for (const file of (v as { files?: Array<{ path?: string }> }).files ?? []) if (typeof file.path === "string") fileRead(file.path);
+        for (const file of (v as { files?: Array<{ path?: string }> }).files ?? []) if (typeof file.path === "string") fileRead(file.path, base);
       }
-      if ((key === "file" || key === "culture_file") && typeof v === "string") fileRead(v);
-      else if (typeof v === "object") startupFiles(v);
+      if ((key === "file" || key === "culture_file") && typeof v === "string") fileRead(v, base);
+      else if (typeof v === "object") startupFiles(v, base);
     }
   };
   startupFiles(spec);
@@ -89,6 +89,7 @@ export async function checkBundleFolder(folder: string) {
       const valid = validateAgentSpecFromYaml(yaml);
       if (!valid.valid) { agentFindings++; add("portable_agents", "finding", valid.errors.join("; "), path.relative(root, dir)); return; }
       const a = parseYaml(yaml) as { imports?: Array<{ ref?: string }>; resources?: Record<string, unknown> };
+      startupFiles(a, dir);
       for (const imp of a.imports ?? []) agent(imp.ref, dir);
       for (const entries of Object.values(a.resources ?? {})) {
         if (!Array.isArray(entries)) continue;

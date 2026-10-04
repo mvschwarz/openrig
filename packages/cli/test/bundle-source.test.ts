@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import type { StatusDeps } from "../src/commands/status.js";
 import { DaemonClient } from "../src/client.js";
-import { parseGitHubBundleLink, selectGitHubBundleSource, prepareGitHubBundle, importGitHubBundle, bundleIdentityLines, localBundleClient, authoredCompatibility } from "../src/lib/bundle-source.js";
+import { parseGitHubBundleLink, selectGitHubBundleSource, prepareGitHubBundle, importGitHubBundle, bundleIdentityLines, bundleGit, authoredCompatibility } from "../src/lib/bundle-source.js";
 
 const state = vi.hoisted(() => ({ host: undefined as string | undefined, origin: "local-instance", remote: "local-instance" }));
 vi.mock("../src/local-origin.js", () => ({ readLocalOrigin: () => state.origin }));
@@ -72,12 +73,43 @@ describe("GitHub bundle source", () => {
     await expect(prepareGitHubBundle(URL, missing, root)).rejects.toThrow(/must contain rig.yaml/);
   });
 
+
+  it("resolves and checks out an actual Git commit after its branch moves", async () => {
+    const repository = path.join(root, "repository"); fs.mkdirSync(repository);
+    const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+    const git = (cwd: string, args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", ...args], { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trimEnd();
+    git(repository, ["init", "--template=", "-b", "main"]);
+    fs.mkdirSync(path.join(repository, "rigs/dev"), { recursive: true });
+    fs.writeFileSync(path.join(repository, "rigs/dev/rig.yaml"), "name: original\n");
+    git(repository, ["add", "."]); git(repository, ["commit", "-m", "original"]);
+    const original = git(repository, ["rev-parse", "HEAD"]);
+    const adapter = async (cwd: string, args: string[]) => {
+      if (args[0] === "ls-remote") {
+        const listed = git(cwd, ["ls-remote", repository]);
+        fs.writeFileSync(path.join(repository, "rigs/dev/rig.yaml"), "name: moved\n");
+        git(repository, ["commit", "-am", "moved"]);
+        return listed;
+      }
+      return git(cwd, args.map(arg => arg === "https://github.com/example/teams" ? repository : arg));
+    };
+    const prepared = await prepareGitHubBundle(URL, adapter, path.join(root, "imports"));
+    expect(prepared.source.resolvedCommit).toBe(original);
+    expect(fs.readFileSync(path.join(prepared.folder, "rig.yaml"), "utf8")).toBe("name: original\n");
+    expect(git(repository, ["rev-parse", "HEAD"])).not.toBe(original);
+  });
+
+  it("uses a credential-free Git environment and sanitizes actual Git errors", async () => {
+    expect(await bundleGit(root, ["config", "--global", "--list"])).toBe("");
+    await expect(bundleGit(root, ["not-a-command-SECRET"])).rejects.toThrow("GitHub bundle fetch failed or timed out.");
+    try { await bundleGit(root, ["not-a-command-SECRET"]); } catch (error) { expect(String(error)).not.toContain("SECRET"); }
+  });
+
   function fixture() {
     const checkoutDir = path.join(root, "source"); fs.mkdirSync(checkoutDir);
     fs.writeFileSync(path.join(checkoutDir, "rig.yaml"), 'version: "0.2"\nname: sample\npods: []\n');
     fs.writeFileSync(path.join(checkoutDir, "bundle.yaml"), 'compatibility:\n  min_daemon_version: "0.6.6"\n  min_cli_version: "0.6.5"\n');
     const prepared = { source: selectGitHubBundleSource(URL, refs), folder: checkoutDir, checkoutDir, archivePath: path.join(root, "bundle.rigbundle"), receiptPath: path.join(root, "source.json") };
-    const post = vi.fn(async (_url: string, body: Record<string, unknown>) => ({ status: 201, data: { source: (body.provenance as { source: unknown }).source, configurationId: "build.dev=codex", packageDigest: { value: "digest", coverage: "openrig.package-digest/v1" } } }));
+    const post = vi.fn(async (_url: string, body: Record<string, unknown>) => ({ status: 201, data: { source: (body.provenance as { source: unknown }).source, configurationId: "build.dev=codex", packageDigest: { value: "digest", coverage: "openrig.package-digest/v1" }, assembler: { openrigVersion: "0.6.6" }, archiveHash: "archive" } }));
     const client = { get: vi.fn(async () => ({ status: 200, data: { selfHostId: state.remote } })), post } as unknown as DaemonClient;
     const deps = { lifecycleDeps: {}, clientFactory: () => client } as StatusDeps;
     return { prepared, post, deps, prepare: vi.fn(async () => prepared) };
@@ -101,6 +133,7 @@ describe("GitHub bundle source", () => {
     expect(fs.existsSync(path.join(root, "build.json"))).toBe(true);
     expect(result.bundlePath).toBe(f.prepared.archivePath);
     expect(bundleIdentityLines(result.res.data).join("\n")).toContain("excludes bundle.yaml");
+    expect(bundleIdentityLines(result.res.data)).toContain("Assembler: OpenRig 0.6.6");
   });
 
   it("retains input after an unknown create outcome and never installs/retries", async () => {
