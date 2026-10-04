@@ -38,6 +38,6 @@ export function nonInterruptiveNotice(runtime: string, choice: LaunchChoice): st
 
 export function nonInterruptiveSummary(enabled: boolean): string {
   return enabled
-    ? "Non-interruptive mode is saved for this rig and remains in effect on later launches and restores. Only full-bypass Claude and Codex seats receive warning flags; other seats are unchanged. Use --no-non-interruptive to clear this rig's choice."
+    ? "Non-interruptive mode is saved for this rig and remains in effect on later launches and restores. Only full-bypass Claude and Codex seats receive warning flags; other seats are unchanged. To clear this rig's choice, first run rig down <rig-name>, then rig up <rig-name> --existing --no-non-interruptive."
     : "Non-interruptive mode is off for this rig's launches; OpenRig will not pass warning-acceptance flags. This does not erase warnings you previously accepted in the harness.";
 }

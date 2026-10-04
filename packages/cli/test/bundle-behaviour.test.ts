@@ -159,7 +159,7 @@ describe("before-action bundle view", () => {
     expect(formatBundleBehaviour(older).join("\n")).not.toContain("Non-interruptive mode is available");
     expect(validate({ ...actual, posture: [{ ...actual.posture[0], nonInterruptive: "selected" }] })).toBe(false);
     const lines = formatBundleBehaviour(actual);
-    expect(lines.join("\n")).toContain("does not select it or check native acceptance");
+    expect(lines.join("\n")).toContain("does not select the mode or check whether you've already accepted the warning on this machine");
     expect(lines.join("\n")).toContain("when it has not been remembered");
     const start = lines.indexOf("Permission posture:");
     expect(start).toBeGreaterThan(0);

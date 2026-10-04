@@ -81,7 +81,7 @@ Examples:
   cmd
     .argument("<source>", "GitHub bundle link, path to a .yaml rig spec or .rigbundle, or a library name such as secrets-manager")
     .option("--non-interruptive", "Accept harness first-launch warnings for this rig at full bypass; saved for later launches")
-    .option("--no-non-interruptive", "Turn off this rig's saved warning-acceptance choice")
+    .option("--no-non-interruptive", "Turn off this rig's saved warning-acceptance choice (stop an existing rig with rig down first)")
     .option("--plan", "Plan mode — preview without executing")
     .option("--yes", "Auto-approve trusted actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")

@@ -170,6 +170,7 @@ decision, recorded in the registry entry's `evidenceReuse`.
   status file; never Not tested by OpenRig. A listing whose records can't be read is `status_unavailable` as a whole.
 - **Platform keys** are `<os>-<arch>` (`linux`, `darwin` or `win32`; `x64` or `arm64`).
 - **`tested` means no help was needed:** it can't carry an assistance count above zero.
+- **An assist** is one action a person or the test runner took to get past a problem during the run, such as restarting a seat or re-running a command; following the bundle's own documented steps doesn't count.
 - **The file holds no private paths, host names, row IDs, account names or receipt text,** and regenerating it gives
   identical bytes.
 - **`bodyDigest`** is SHA-256, lowercase hex, over the RFC 8785 (JCS) canonical JSON, as UTF-8, of an object holding
