@@ -1,7 +1,7 @@
 import {afterEach, expect, it, vi} from 'vitest';
 import {Hono} from 'hono';
 import {compactionRoutes} from '../src/routes/compaction.js';
-import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
@@ -267,4 +267,68 @@ for(const expiry of ['missing map','idle after completed map'])it(`route reports
  expect(body.error).toContain('managed compaction is disarmed');
  expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
  expect(compacts(f)).toHaveLength(0);
+});
+
+function routeFixture(f:ReturnType<typeof fixture>, cwd?:string){
+ vi.spyOn(f.transport,'resolveSessions').mockResolvedValue({ok:true,sessions:[seat]} as any);
+ const app=new Hono();
+ app.use('*',async(c,next)=>{
+  c.set('compactionEnforcer' as never,f.e);
+  c.set('sessionTransport' as never,f.transport);
+  c.set('contextUsageStore' as never,{getForNode:()=>({availability:'known',usedPercentage:4})});
+  c.set('db' as never,{prepare:()=>({get:()=>({node_id:'node-one',runtime:'claude-code',cwd})})});
+  await next();
+ });
+ app.route('/api/compaction',compactionRoutes());
+ return ()=>app.request('/api/compaction/trigger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session:seat})});
+}
+
+it('preparation receipt: later permission refusal discloses the delivered prep and its exact attempt',async()=>{
+ const f=fixture();f.onSleep(async()=>{publish(f);f.activity('needs_input');});
+ const res=await routeFixture(f)();const body=await res.json();
+ expect(res.status).toBe(409);expect(body.reason).toBe('target_needs_input');
+ expect(body.preparation).toMatchObject({attemptId:f.e.getPreparationState(seat)!.attemptId,delivery:'delivered'});
+ expect(body.error).toContain('Preparation was sent');expect(body.error).not.toContain('could not be sent');
+ expect(body.error).toContain('disarmed');expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
+});
+it('preparation receipt: lost send reply is uncertainty, not an unsent refusal',async()=>{
+ const f=fixture();vi.spyOn(f.transport,'send').mockRejectedValueOnce(new Error('receipt lost'));
+ const body=await (await routeFixture(f)()).json();
+ expect(body.preparation.delivery).toBe('uncertain');expect(body.error).toContain('may have reached');
+ expect(body.error).not.toContain('Preparation was sent');expect(compacts(f)).toHaveLength(0);
+});
+it('preparation receipt: positive permission prompt before prep is an unsent refusal',async()=>{
+ const f=fixture();f.activity('needs_input');
+ const body=await (await routeFixture(f)()).json();
+ expect(body.preparation.delivery).toBe('not_sent');expect(body.error).toContain('could not be sent');
+ expect(f.writes).toHaveLength(0);
+});
+it('registered cwd: manual route selects a self-ignoring map inside the launch workspace',async()=>{
+ const f=fixture();const cwd=join(f.home,'code repo');mkdirSync(cwd);
+ f.onSleep(async()=>{publish(f);});
+ expect((await routeFixture(f,cwd)()).status).toBe(200);
+ const a=f.e.getPreparationState(seat)!;
+ expect(a.mapPath).toBe(join(cwd,'.openrig','compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ expect(readFileSync(join(cwd,'.openrig','compaction','.gitignore'),'utf8')).toBe('*\n');
+ expect(f.writes[0]).toContain(JSON.stringify(a.mapPath));expect(compacts(f)).toHaveLength(1);
+});
+it('registered cwd: automatic monitor forwards the launch workspace and isolates sibling maps',async()=>{
+ const f=fixture();const cwd=join(f.home,'code repo');mkdirSync(cwd);
+ const usage={availability:'known',fresh:true,usedPercentage:90};
+ const db={prepare:()=>({all:()=>[{node_id:'node-one',session_id:1,session_name:seat,runtime:'claude-code',cwd,startup_status:'ready'}]})};
+ const store={readAndNormalize:()=>usage,persist:()=>{}};
+ const monitor=new ContextMonitor(db as any,store as any,undefined,f.e);
+ await monitor.pollOnce();
+ const a=f.e.getPreparationState(seat)!;
+ expect(a.mapPath).toBe(join(cwd,'.openrig','compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ await f.e.maybeAutoCompact({...input,sessionName:'sibling@demo',cwd} as any);
+ const b=f.e.getPreparationState('sibling@demo')!;
+ expect(b.mapPath).not.toBe(a.mapPath);expect(compacts(f)).toHaveLength(0);
+});
+it('registered cwd: absent, relative or unwritable cwd preserves the legacy map location',async()=>{
+ for(const cwd of [undefined,'relative',join('/dev/null','unwritable')]){
+  const f=fixture();await f.e.maybeAutoCompact({...input,cwd} as any);
+  expect(f.e.getPreparationState(seat)!.mapPath).toBe(join(f.home,'compaction','preparation',seat,f.e.getPreparationState(seat)!.attemptId,'RESTORE-MAP.md'));
+  expect(f.writes).toHaveLength(1);
+ }
 });
