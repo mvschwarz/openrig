@@ -6,6 +6,25 @@ import {
   isProbeShellReady,
 } from "../src/domain/native-resume-probe.js";
 
+import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
+
+describe("default-path consent", () => {
+  it.each([CLAUDE_BYPASS_CONSENT, CLAUDE_BYPASS_CONSENT.replace("    No, exit\n  ❯ Yes, I accept", "  ❯ No, exit\n    Yes, I accept")])("recognizes the current consent menu", screen => {
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: screen,
+      claudeResumeIdentityVerified: true })).toMatchObject({ status: "attention_required", code: "bypass_consent_gate" });
+  });
+  it.each([
+    "I saw Yes, I accept and No, exit in Bypass Permissions mode.",
+    CLAUDE_BYPASS_CONSENT + "\n❯ ",
+    CLAUDE_BYPASS_CONSENT.split("\n").map(line => "> " + line).join("\n"),
+    "```\n" + CLAUDE_BYPASS_CONSENT + "\n```",
+    CLAUDE_BYPASS_CONSENT.replace("❯ Yes", "Yes"),
+    CLAUDE_BYPASS_CONSENT.replace("in Bypass Permissions mode.", "in another mode."),
+  ])("does not treat prose or an inactive menu as consent", screen => {
+    expect(assessNativeResumeProbe({ runtime: "claude-code", paneCommand: "claude", paneContent: screen }).code).not.toBe("bypass_consent_gate");
+  });
+});
+
 describe("native resume probe", () => {
   describe("headerless Claude auto-mode requires managed identity proof", () => {
     const screen = "Restored conversation\n❯\u00a0\n  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n";

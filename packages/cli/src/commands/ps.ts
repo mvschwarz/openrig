@@ -1246,6 +1246,12 @@ async function handleNodes(
       ));
     }
   }
+  // Keep an actionable startup continuation outside the table's clipped cells.
+  for (const n of humanList as NodeEntry[]) {
+    if (n.startupStatus === "attention_required" && n.latestError?.includes("rig seat continue ")) {
+      console.log(`Startup details (${n.canonicalSessionName ?? n.logicalId}): ${n.latestError}`);
+    }
+  }
   if (humanTruncated) {
     const remaining = filtered.length - HUMAN_NODE_BUDGET;
     console.log(`... and ${remaining} more node${remaining === 1 ? "" : "s"} (truncated at ${HUMAN_NODE_BUDGET}).`);

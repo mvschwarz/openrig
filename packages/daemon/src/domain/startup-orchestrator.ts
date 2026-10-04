@@ -22,9 +22,18 @@ import { startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./s
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
+import { shellQuote } from "../adapters/shell-quote.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
 const STARTUP_SUBMIT_CAPTURE_LINES = 200;
+
+/** Pending context belongs to this occupant and is consumed before delivery starts. */
+export function hasPendingFreshStartup(db: Database.Database, nodeId: string, sessionId: string): boolean {
+  const row = db.prepare("SELECT payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed') ORDER BY seq DESC LIMIT 1").get(nodeId) as { payload: string } | undefined;
+  if (!row) return false;
+  const event = JSON.parse(row.payload);
+  return event.type === "node.startup_failed" && event.sessionId === sessionId && event.freshContextPending === true;
+}
 
 // -- Types --
 
@@ -539,10 +548,7 @@ export class StartupOrchestrator {
    * daemon loss during delivery: uncertain delivery is never blindly replayed.
    */
   canContinueFresh(nodeId: string, sessionId: string): boolean {
-    const row = this.db.prepare("SELECT payload FROM events WHERE node_id = ? AND type IN ('node.startup_pending', 'node.startup_ready', 'node.startup_failed') ORDER BY seq DESC LIMIT 1").get(nodeId) as { payload: string } | undefined;
-    if (!row) return false;
-    const event = JSON.parse(row.payload);
-    return event.type === "node.startup_failed" && event.sessionId === sessionId && event.freshContextPending === true;
+    return hasPendingFreshStartup(this.db, nodeId, sessionId);
   }
 
   /**
@@ -586,6 +592,9 @@ export class StartupOrchestrator {
     evidence?: string,
     freshContextPending = false,
   ): StartupResult {
+    if (status === "attention_required" && freshContextPending && input.binding.tmuxSession) {
+      errors.push(`After resolving it in ${input.binding.tmuxSession}, run: rig seat continue ${shellQuote(input.binding.tmuxSession)}`);
+    }
     this.sessionRegistry.updateStartupStatus(input.sessionId, status);
     this.eventBus.emit({
       type: "node.startup_failed",

@@ -398,6 +398,37 @@ describe("rig seat status", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it.each([false, true])("default-path continue reports an unknown outcome without retrying on timeout (json=%s)", async json => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true });
+    }));
+    const deps = makeDeps({ status: 200, data: FRESH_LAUNCH_RESULT }, []);
+    deps.clientFactory = url => new DaemonClient(url, { fetchImpl });
+    const result = captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "continue", "dev-impl@seat-rig", ...(json ? ["--json"] : []),
+    ]).then(() => undefined)).catch(error => ({ error }));
+
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    const output = await result;
+    expect(output).toMatchObject({ exitCode: 1 });
+    if (!("logs" in output)) throw output.error;
+    if (json) {
+      expect(output.errors).toEqual([]);
+      expect(JSON.parse(output.logs.join("\n"))).toMatchObject({
+        status: "unknown",
+        code: "continue_outcome_unknown",
+        guidance: expect.stringContaining("rig seat status dev-impl@seat-rig"),
+      });
+    } else {
+      expect(output.logs).toEqual([]);
+      expect(output.errors.join("\n")).toContain("may still be in progress");
+      expect(output.errors.join("\n")).toContain("rig seat status dev-impl@seat-rig");
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("handover --dry-run --json prints the stable planner shape", async () => {
     const paths: string[] = [];
     const deps = makeDeps({ status: 200, data: HANDOVER_PLAN }, paths);

@@ -19,6 +19,9 @@ import { deriveRehydrateSessionIdByNode } from "../src/domain/active-occupant.js
 import { readFreshOccupantRelations } from "../src/domain/fresh-occupant-relation.js";
 import type { NativeProcessLister, NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
+import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
+import { CLAUDE_BYPASS_CONSENT } from "./fixtures/claude-bypass-consent.js";
+
 function startupEntry(category: "skill" | "guidance", id: string) {
   return {
     category,
@@ -174,12 +177,56 @@ describe("SeatLifecycleService.launchFresh", () => {
     if (mode === "valid") expect(observe).toHaveBeenCalledTimes(2);
   });
 
+  it("default-path consent retains context and continues the same occupant once after late acceptance", async () => {
+    const seat = seedSeat();
+    const actions = normalizeStartupBlock({ actions: [{ type: "send_text", value: "Configured startup instructions", idempotent: true }] }).actions;
+    db.prepare("UPDATE node_startup_context SET startup_actions_json=? WHERE node_id=?").run(JSON.stringify(actions), seat.node.id);
+    let screen = CLAUDE_BYPASS_CONSENT;
+    tmux.capturePaneContent = vi.fn(async () => screen);
+    const native = new ClaudeCodeAdapter({ tmux, fsOps: {
+      readFile: () => "", writeFile: () => {}, exists: () => false, mkdirp: () => {}, copyFile: () => {},
+    } });
+    adapter.checkReady = binding => native.checkReady(binding);
+    const first = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "fixture" });
+    expect(first).toMatchObject({ ok: false, status: "attention_required" });
+    const message = "message" in first ? first.message : "";
+    expect(message).toContain("rig seat continue");
+    expect(message).toContain(seat.sessionName);
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    expect(tmux.sendKeys).not.toHaveBeenCalled();
+    const sessions = sessionRegistry.getSessionsForRig(seat.rig.id);
+    const binding = sessionRegistry.getBindingForNode(seat.node.id);
+    const nativeIds = db.prepare("SELECT id, resume_type, resume_token FROM sessions WHERE node_id=? ORDER BY id").all(seat.node.id);
+    const launch = vi.spyOn(adapter, "launchHarness");
+    expect(await service.continueFreshStartup(seat.sessionName)).toMatchObject({ ok: false, code: "attention_required" });
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    // The person has accepted in the same pane; no new process or session.
+    screen = "Claude Code v2.1.282\n❯ ";
+    const send = vi.mocked(tmux.sendText);
+    send.mockImplementation(async () => {
+      const last = db.prepare("SELECT type FROM events WHERE node_id=? AND type IN ('node.startup_pending','node.startup_ready','node.startup_failed') ORDER BY seq DESC LIMIT 1").get(seat.node.id);
+      expect(last).toEqual({ type: "node.startup_pending" });
+      return { ok: true };
+    });
+    expect(await service.continueFreshStartup(seat.sessionName)).toMatchObject({ ok: true });
+    expect(launch).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.prepare("SELECT id, resume_type, resume_token FROM sessions WHERE node_id=? ORDER BY id").all(seat.node.id)).toEqual(nativeIds);
+    expect(send.mock.calls[0]?.[1]).toContain("Configured startup instructions");
+    expect(sessionRegistry.getSessionsForRig(seat.rig.id).map(s => s.id)).toEqual(sessions.map(s => s.id));
+    expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxPane).toBe(binding?.tmuxPane);
+    expect(await service.continueFreshStartup(seat.sessionName)).toMatchObject({ ok: false, code: "continuation_unavailable" });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["launch", "readiness"])("continues a fresh occupant gated at %s exactly once without another launch", async (gate) => {
     const seat = seedSeat();
     if (gate === "launch") harnessResult = { ok: false, recovery: "attention_required", error: "native gate" };
     else adapter.checkReady = async () => ({ ready: false, code: "hook_trust_gate", reason: "native gate" });
     const first = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
     expect(first.ok).toBe(false);
+    if (first.ok) throw new Error("expected pending startup context");
+    expect(first.message).toContain(`After resolving it in ${seat.sessionName}, run: rig seat continue`);
     adapter.checkReady = async () => ({ ready: true });
     const rows = sessionRegistry.getSessionsForRig(seat.rig.id).map((s) => s.id);
     const launch = vi.spyOn(adapter, "launchHarness");

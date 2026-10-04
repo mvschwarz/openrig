@@ -290,6 +290,11 @@ seatRoutes.post("/launch/:seatRef", async (c) => {
   return c.json(result, seatLifecycleStatus(result.code));
 });
 
+seatRoutes.post("/continue/:seatRef", async (c) => {
+  const result = await seatLifecycleService(c).continueFreshStartup(decodeURIComponent(c.req.param("seatRef")));
+  return c.json(result, result.ok ? 200 : 409);
+});
+
 seatRoutes.post("/stop/:seatRef", async (c) => {
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
   const result = await seatLifecycleService(c).stopSeat({

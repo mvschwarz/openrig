@@ -95,6 +95,13 @@ export function assessNativeResumeProbe(
   const paneContent = input.paneContent ?? "";
 
   if (runtime === "claude-code") {
+    if (looksLikeClaudeBypassConsentPrompt(paneContent)) {
+      return {
+        status: "attention_required",
+        code: "bypass_consent_gate",
+        detail: "Claude is waiting for you to review its bypass-permissions warning and choose whether to accept. Startup context has not been sent.",
+      };
+    }
     if (paneContent.includes("No conversation found")) {
       return {
         status: "failed",
@@ -293,6 +300,17 @@ function looksLikeClaudeTui(paneContent: string): boolean {
 
 function hasClaudeComposerPrompt(paneContent: string): boolean {
   return /(^|\n)\s*❯/.test(paneContent);
+}
+
+function looksLikeClaudeBypassConsentPrompt(paneContent: string): boolean {
+  // Plain capture of Claude's current consent menu. Labels in prose or a menu
+  // followed by a new composer are not evidence of an active dialog.
+  const lines = paneContent.trimEnd().split(/\r?\n/).filter(line => line.trim()).slice(-16);
+  if (lines.at(-1)?.trim() !== "Enter to confirm · Esc to cancel") return false;
+  const choices = lines.slice(-3, -1).map(line => line.trim());
+  if (!(choices[0] === "❯ No, exit" && choices[1] === "Yes, I accept")
+    && !(choices[0] === "No, exit" && choices[1] === "❯ Yes, I accept")) return false;
+  return /\b(?:in|running in) Bypass Permissions mode\./.test(lines.slice(0, -3).join(" ").replace(/\s+/g, " "));
 }
 
 function looksLikeClaudeTrustPrompt(paneContent: string): boolean {

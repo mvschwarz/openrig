@@ -495,6 +495,23 @@ describe("OPR.0.4.0.25 — rig ps token-safe defaults", () => {
   });
 
   // -- Human table compact --
+  it.each(["compact", "full", "json"])("preserves a pending startup continuation in %s node output", async mode => {
+    const node = RIG_A_NODES.find(n => n.startupStatus === "attention_required")!;
+    const previous = node.latestError;
+    const command = `rig seat continue '${node.canonicalSessionName}'`;
+    node.latestError = `Startup requires attention: resolve the native provider prerequisite before startup context can be delivered; After resolving it in ${node.canonicalSessionName}, run: ${command}`;
+    try {
+      const { logs } = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A", ...(mode === "full" ? ["--full"] : mode === "json" ? ["--json"] : [])]);
+      });
+      const output = logs.join("\n");
+      expect(output).toContain(command);
+      expect(output).toContain(node.canonicalSessionName);
+      if (mode === "json") expect(Array.isArray(JSON.parse(output))).toBe(true);
+      else expect(output).toContain(`Startup details (${node.canonicalSessionName}):`);
+    } finally { node.latestError = previous; }
+  });
+
   it("compact default human table uses compact columns and omits full-only columns", async () => {
     const { logs } = await captureLogs(async () => {
       await makeCmd().parseAsync(["node", "rig", "ps", "--nodes", "-A"]);

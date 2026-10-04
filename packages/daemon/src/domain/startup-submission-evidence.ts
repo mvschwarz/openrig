@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 
 const normalize = (text: string): string => text.replace(/\s+/g, "");
+// Claude 2.1.289 briefly replaces its mode bar after a bracketed paste.
+// Only the bare hint and medium-effort suffix are established by retained captures.
+const isComposerFooter = (line: string): boolean => /(?:shift\+tab to cycle|\? for shortcuts)/i.test(line)
+  || /^paste again to expand(?:\s{2,}◐ medium · \/effort)?$/.test(line);
+// This placeholder occupies an empty composer while submitted text is queued.
+const QUEUED_PLACEHOLDER = normalize("Press up to edit queued messages");
 
 /** The same composer region used by the startup Enter guard. No transcript fallback. */
 function composerRegion(pane: string | null) {
@@ -14,7 +20,7 @@ function composerRegion(pane: string | null) {
     // Prompt text can itself contain rules (the startup challenge does).
     for (let i = lines.length - 1; i > inputAt; i--) {
       if (/^[─═-]{10,}$/.test(lines[i]!.trim())
-        && /(?:shift\+tab to cycle|\? for shortcuts)/i.test(lines.slice(i + 1).find((next) => next.trim()) ?? "")) {
+        && isComposerFooter((lines.slice(i + 1).find((next) => next.trim()) ?? "").trim())) {
         end = i;
         break;
       }
@@ -31,7 +37,8 @@ export function inspectStartupStagedText(pane: string | null, expected: string):
   const { body } = composerRegion(pane);
   if (body === null) return "unverified";
   if (!body) return "clear";
-  return body === normalize(expected) ? "staged" : "unverified";
+  if (body === normalize(expected)) return "staged";
+  return body === QUEUED_PLACEHOLDER ? "clear" : "unverified";
 }
 
 export interface StartupSubmissionEvidence {

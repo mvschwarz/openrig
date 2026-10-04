@@ -497,7 +497,7 @@ identity remains unverified; a version number alone cannot clear it.
   // Thin CLI over the daemon's SeatLifecycleService; refusals print message +
   // guidance + match list exactly as the daemon named them.
   const runLifecycleVerb = async (
-    path: "set-model" | "set-permissions" | "launch" | "stop" | "clean",
+    path: "set-model" | "set-permissions" | "launch" | "continue" | "stop" | "clean",
     seat: string,
     body: Record<string, unknown>,
     opts: { json?: boolean },
@@ -510,7 +510,7 @@ identity remains unverified; a version number alone cannot clear it.
     let res;
     try {
       const route = `/api/seat/${path}/${encodeURIComponent(seat)}`;
-      res = path === "launch"
+      res = path === "launch" || path === "continue"
         ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 120_000 })
         // #260: a dynamic Claude mode waits up to 5 s for the capability query before the
         // daemon answers, so the 5 s default deadline would abort before its refusal arrives.
@@ -518,12 +518,12 @@ identity remains unverified; a version number alone cannot clear it.
           ? await client.post<Record<string, unknown>>(route, body, { timeoutMs: 10_000 })
           : await client.post<Record<string, unknown>>(route, body);
     } catch (err) {
-      if (path !== "launch" || !(err instanceof DaemonTimeoutError)) throw err;
+      if ((path !== "launch" && path !== "continue") || !(err instanceof DaemonTimeoutError)) throw err;
       const error = {
         ok: false as const,
-        code: "launch_outcome_unknown",
+        code: `${path}_outcome_unknown`,
         status: "unknown",
-        message: "The CLI timed out waiting for the daemon; the launch may still be in progress.",
+        message: `The CLI timed out waiting for the daemon; the ${path === "continue" ? "continuation" : "launch"} may still be in progress.`,
         guidance: `Check the outcome before retrying: rig seat status ${seat}`,
       };
       if (opts.json) console.log(JSON.stringify(error, null, 2));
@@ -536,7 +536,7 @@ identity remains unverified; a version number alone cannot clear it.
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
       return;
     }
-    if (path === "launch") {
+    if (path === "launch" || path === "continue") {
       for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
     }
     if (res.status >= 400) {
@@ -617,6 +617,18 @@ Examples:
         console.log(`Generation: ${String(data["generation"])}; model: ${String(data["model"] ?? "none")}.`);
         console.log(`Startup policy: ${String(data["startupPolicyHash"])}; superseded sessions: ${superseded?.length ?? 0}.`);
         console.log("No continuity source was used; siblings and durable work were preserved.");
+      });
+    });
+
+  cmd
+    .command("continue")
+    .argument("<seat>", "Canonical session name or logical seat ref")
+    .option("--json", "JSON output for agents")
+    .description("Deliver pending startup context after clearing a native prompt, in the same fresh conversation")
+    .addHelpText("after", "\nReview and answer the native prompt yourself first. This reuses the existing occupant and does not relaunch or replay an attempted delivery.")
+    .action(async (seat: string, opts: { json?: boolean }) => {
+      await runLifecycleVerb("continue", seat, {}, opts, data => {
+        console.log(String(data["message"]));
       });
     });
 

@@ -27,6 +27,7 @@ import { buildSlackAppManifest } from "../domain/gateway/slack/manifest.js";
 interface SubsystemHandle {
   restart: () => void;
   status: () => Record<string, unknown>;
+  connectorStatus?: () => Record<string, unknown>;
 }
 
 export function gatewayRoutes(opts: {
@@ -45,6 +46,12 @@ export function gatewayRoutes(opts: {
   });
 
   // OPR.0.6.0.5 — read-only: the same manifest `rig slack manifest` prints. No config, no secrets.
+  app.get("/slack/status", (c) => {
+    const subsystem = c.get("gatewaySubsystem" as never) as SubsystemHandle | undefined;
+    const snapshot = subsystem?.connectorStatus?.();
+    return c.json({ observedAt: new Date().toISOString(), ...(snapshot ?? { state: "unavailable", connector: null }) });
+  });
+
   app.get("/slack/manifest", (c) => c.json(buildSlackAppManifest()));
 
   app.get("/human/:entityId/readiness", async (c) => {

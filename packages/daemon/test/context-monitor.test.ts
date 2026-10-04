@@ -13,6 +13,7 @@ import { ClaudeCompactionEnforcer } from "../src/domain/claude-compaction-enforc
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import type { SessionTransport } from "../src/domain/session-transport.js";
 import type { ReadinessResult } from "../src/domain/runtime-adapter.js";
+import { EventBus } from "../src/domain/event-bus.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 
@@ -369,6 +370,29 @@ describe("ContextMonitor", () => {
     const usage = store.getForNode(node.id, "orch-lead@test");
     expect(usage.availability).toBe("unknown");
     expect(usage.reason).toBe("no_data");
+  });
+
+  it.each(["before", "during", "delivering", "other occupant"])("default-path consent protects pending context (%s)", async timing => {
+    const { rig, node, sessionName } = seedClaudeNode();
+    const session = sessionRegistry.getSessionsForRig(rig.id)[0]!;
+    db.prepare("UPDATE sessions SET startup_status='attention_required' WHERE id=?").run(session.id);
+    const events = new EventBus(db);
+    const pending = () => events.emit({ type: "node.startup_failed", rigId: rig.id, nodeId: node.id,
+      error: "consent", sessionId: timing === "other occupant" ? "old-occupant" : session.id, freshContextPending: true });
+    if (timing === "before" || timing === "other occupant") pending();
+    checkReadySpy.mockImplementation(async () => {
+      if (timing === "during") pending();
+      if (timing === "delivering") {
+        events.emit({ type: "node.startup_pending", rigId: rig.id, nodeId: node.id });
+        db.prepare("UPDATE sessions SET startup_status='pending' WHERE id=?").run(session.id);
+      }
+      return { ready: true };
+    });
+    // No sidecar or orientation telemetry: it must not become a prerequisite.
+    await monitor.pollOnce();
+    const row = db.prepare("SELECT startup_status FROM sessions WHERE id=?").get(session.id);
+    expect(row).toEqual({ startup_status: timing === "other occupant" ? "ready" : timing === "delivering" ? "pending" : "attention_required" });
+    expect(checkReadySpy).toHaveBeenCalledWith(expect.objectContaining({ tmuxSession: sessionName }));
   });
 
   it("pollOnce normalizes stale Claude startup failures back to ready when the runtime is live", async () => {
