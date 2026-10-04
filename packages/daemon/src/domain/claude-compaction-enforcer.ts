@@ -696,8 +696,26 @@ export class ClaudeCompactionEnforcer {
       const root = path.join(input.cwd, ".openrig", "compaction");
       try {
         fs.mkdirSync(root, { recursive: true });
-        fs.writeFileSync(path.join(root, ".gitignore"), "*\n");
-        attempt.mapPath = path.join(root, "preparation", sanitizeSessionKey(input.sessionName), attemptId, "RESTORE-MAP.md");
+        const ignorePath = path.join(root, ".gitignore");
+        try {
+          // Exclusive creation never truncates an existing entry or follows its symlink.
+          fs.writeFileSync(ignorePath, "*\n", { flag: "wx", mode: 0o600 });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          // Reuse only our equivalent, owned regular file; never rewrite it.
+          // NONBLOCK also prevents an unexpected FIFO from stalling preparation.
+          const fd = fs.openSync(ignorePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+          try {
+            const stat = fs.fstatSync(fd);
+            if (!stat.isFile() || stat.uid !== process.getuid?.() || stat.size !== 2 || fs.readFileSync(fd, "utf8") !== "*\n") {
+              throw new Error("Existing compaction ignore file is not owned and equivalent");
+            }
+          } finally { fs.closeSync(fd); }
+        }
+        const parent = path.join(root, "preparation", sanitizeSessionKey(input.sessionName), attemptId);
+        fs.mkdirSync(parent, { recursive: true });
+        fs.accessSync(parent, fs.constants.W_OK | fs.constants.X_OK);
+        attempt.mapPath = path.join(parent, "RESTORE-MAP.md");
       } catch { /* Preserve the existing instance-home path for legacy or unwritable workspaces. */ }
     }
     return attempt;

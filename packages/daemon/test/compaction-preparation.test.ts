@@ -2,7 +2,7 @@ import {afterEach, expect, it, vi} from 'vitest';
 import {Hono} from 'hono';
 import {execFileSync} from 'node:child_process';
 import {compactionRoutes} from '../src/routes/compaction.js';
-import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
 import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
@@ -358,4 +358,48 @@ it('preparation receipt: unknown activity at the final short send is not an unse
  expect(body.reason).toBe('target_activity_unknown');
  expect(body.preparation.delivery).toBe('delivered');expect(body.error).toContain('Preparation was sent');
  expect(body.error).not.toContain('Refused:');expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
+});
+
+for(const kind of ['regular','symlink'])it(`workspace setup: preserves an existing ${kind} ignore file and falls back`,async()=>{
+ const f=fixture(),cwd=join(f.home,'repo'),root=join(cwd,'.openrig','compaction');mkdirSync(root,{recursive:true});
+ const ignore=join(root,'.gitignore'),outside=join(f.home,'unrelated.txt'),original='# user policy\nlogs/\n!shared.txt\n';
+ if(kind==='symlink'){writeFileSync(outside,original);symlinkSync(outside,ignore);}else writeFileSync(ignore,original);
+ await f.e.maybeAutoCompact({...input,cwd});
+ expect(readFileSync(ignore,'utf8')).toBe(original);
+ if(kind==='symlink'){expect(lstatSync(ignore).isSymbolicLink()).toBe(true);expect(readFileSync(outside,'utf8')).toBe(original);}
+ const a=f.e.getPreparationState(seat)!;
+ expect(a.mapPath).toBe(join(f.home,'compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ expect(f.writes[0]).toContain(JSON.stringify(a.mapPath));
+});
+it('workspace setup: reuses an owned equivalent regular ignore without rewriting it',async()=>{
+ const f=fixture(),cwd=join(f.home,'repo'),root=join(cwd,'.openrig','compaction');mkdirSync(root,{recursive:true});
+ const ignore=join(root,'.gitignore');writeFileSync(ignore,'*\n');utimesSync(ignore,100,100);
+ const before=statSync(ignore);
+ await f.e.maybeAutoCompact({...input,cwd});
+ const after=statSync(ignore),a=f.e.getPreparationState(seat)!;
+ expect(after.ino).toBe(before.ino);expect(after.mtimeMs).toBe(before.mtimeMs);expect(readFileSync(ignore,'utf8')).toBe('*\n');
+ expect(a.mapPath).toBe(join(root,'preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+});
+it('workspace setup: a preparation file preserves its bytes and selects the home fallback',async()=>{
+ const f=fixture(),cwd=join(f.home,'repo'),root=join(cwd,'.openrig','compaction');mkdirSync(root,{recursive:true});
+ const blocker=join(root,'preparation');writeFileSync(blocker,'keep descendant');
+ await f.e.maybeAutoCompact({...input,cwd});
+ const a=f.e.getPreparationState(seat)!;
+ expect(a.mapPath).toBe(join(f.home,'compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ expect(readFileSync(blocker,'utf8')).toBe('keep descendant');expect(f.writes[0]).toContain(JSON.stringify(a.mapPath));
+});
+it('workspace setup: publishes only after creating the actual attempt parent',async()=>{
+ const f=fixture(),cwd=join(f.home,'repo');mkdirSync(cwd);
+ await f.e.maybeAutoCompact({...input,cwd});
+ const a=f.e.getPreparationState(seat)!;
+ expect(statSync(dirname(a.mapPath)).isDirectory()).toBe(true);
+ expect(a.mapPath).toBe(join(cwd,'.openrig','compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ publish(f);await f.e.maybeAutoCompact({...input,cwd});expect(compacts(f)).toHaveLength(1);
+});
+it.skipIf(process.getuid?.()===0)('workspace setup: an unwritable descendant selects the home fallback',async()=>{
+ const f=fixture(),cwd=join(f.home,'repo'),parent=join(cwd,'.openrig','compaction','preparation');mkdirSync(parent,{recursive:true});chmodSync(parent,0o500);
+ try{
+  await f.e.maybeAutoCompact({...input,cwd});const a=f.e.getPreparationState(seat)!;
+  expect(a.mapPath).toBe(join(f.home,'compaction','preparation',seat,a.attemptId,'RESTORE-MAP.md'));
+ }finally{chmodSync(parent,0o700);}
 });
