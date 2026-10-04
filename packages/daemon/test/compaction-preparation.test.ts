@@ -347,3 +347,15 @@ it('preparation contract: prompt qualifies later refusal and the shipped skill f
  expect(skill).toContain('Do not substitute the seat folder');
  expect(skill).toContain('Only when none names a path');
 });
+
+it('preparation receipt: unknown activity at the final short send is not an unsent refusal',async()=>{
+ const f=fixture(10_000);f.onSleep(async()=>{publish(f);});
+ const wait=f.transport.waitUntilIdle.bind(f.transport);
+ vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async(...args)=>{
+  const result=await wait(...args);f.activity('unknown');return result;
+ });
+ const body=await (await routeFixture(f)()).json();
+ expect(body.reason).toBe('target_activity_unknown');
+ expect(body.preparation.delivery).toBe('delivered');expect(body.error).toContain('Preparation was sent');
+ expect(body.error).not.toContain('Refused:');expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);
+});

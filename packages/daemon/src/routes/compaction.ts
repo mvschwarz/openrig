@@ -149,7 +149,10 @@ function manualOutcomeMessage(sessionName: string, outcome: Extract<ManualCompac
   const prep = outcome.preparation;
   if (!prep || prep.delivery === "not_sent") return manualReasonMessage(sessionName, outcome.reason);
   const effect = prep.delivery === "delivered" ? "Preparation was sent" : "Preparation may have reached the seat (delivery is unconfirmed)";
-  return `${effect} for '${sessionName}' (attempt ${prep.attemptId}), but /compact was not confirmed (${outcome.reason}). This attempt is disarmed; its map remains at ${prep.mapPath} if written. Inspect rig compact ${shellQuote(sessionName)} --state before an explicit retry.`;
+  const detail = outcome.reason === "preparation_incomplete"
+    ? manualReasonMessage(sessionName, outcome.reason)
+    : `/compact was not confirmed (${outcome.reason}). This attempt is disarmed.`;
+  return `${effect} for '${sessionName}' (attempt ${prep.attemptId}). ${detail} Its map remains at ${prep.mapPath} if written. Inspect rig compact ${shellQuote(sessionName)} --state before an explicit retry.`;
 }
 
 function manualReasonMessage(sessionName: string, reason: string): string {

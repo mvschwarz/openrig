@@ -1186,7 +1186,8 @@ describe("ClaudeCompactionEnforcer", () => {
       const enforcer = new ClaudeCompactionEnforcer(settings, transport);
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
-      expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "wait_for_idle_timeout" });
+      expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "wait_for_idle_timeout",
+        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining("/RESTORE-MAP.md"), delivery: "delivered" } });
       expect(enforcer.getManualCompactionState(SEAT)?.stage).toBe("skipped-or-failed");
 
       // No turn_boundary was seeded, so a below-threshold poll finds nothing to drain.
@@ -1203,7 +1204,8 @@ describe("ClaudeCompactionEnforcer", () => {
       const enforcer = new ClaudeCompactionEnforcer(settings, transport);
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
-      expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "mid_work" });
+      expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "mid_work",
+        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining("/RESTORE-MAP.md"), delivery: "not_sent" } });
       expect(send).toHaveBeenCalledTimes(1);
     });
 
