@@ -19,6 +19,11 @@ export interface CaptureDeps extends StatusDeps {
   ) => ReturnType<typeof runCrossHostCommand>;
 }
 
+function captureFailed(data: Record<string, unknown>): boolean {
+  const results = data.results;
+  return data.ok === false || (Array.isArray(results) && results.some((result) => result?.ok === false));
+}
+
 export function captureCommand(depsOverride?: CaptureDeps): Command {
   const cmd = new Command("capture").description("Capture terminal output from agent sessions");
   const getDeps = (): CaptureDeps => depsOverride ?? {
@@ -97,9 +102,9 @@ Supported notes:
 
       const res = await client.post<Record<string, unknown>>("/api/transport/capture", body, { headers: terminalAuthHeaders() });
 
+      if (res.status >= 400 || captureFailed(res.data)) process.exitCode = 1;
       if (opts.json) {
         console.log(JSON.stringify(res.data));
-        if (res.status >= 400) process.exitCode = 1;
         return;
       }
 
@@ -117,8 +122,8 @@ Supported notes:
       if (results) {
         for (const r of results) {
           console.log(`--- ${r.sessionName} ---`);
-          if (r.ok && r.content) {
-            console.log(r.content);
+          if (r.ok) {
+            console.log(r.content ?? "");
           } else {
             console.log(`  (error: ${r.error ?? "no content"})`);
           }
@@ -176,6 +181,7 @@ async function runCrossHostCapture(
 
   const result = await runner(host, argv);
 
+  if (!result.ok || (result.ok && captureFailed((result.data ?? {}) as Record<string, unknown>))) process.exitCode = 1;
   if (opts.json) {
     console.log(JSON.stringify({
       cross_host: { host: host.id, target: hostDisplayTarget(host) },
@@ -216,6 +222,7 @@ async function runHttpHostCapture(
 
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/capture", body, deps, {});
 
+  if (!result.ok || (result.ok && captureFailed((result.data ?? {}) as Record<string, unknown>))) process.exitCode = 1;
   if (opts.json) {
     console.log(JSON.stringify({
       cross_host: { host: host.id, target: hostDisplayTarget(host), transport: "http" },
@@ -239,8 +246,8 @@ async function runHttpHostCapture(
   if (results) {
     for (const r of results) {
       console.log(`--- ${r.sessionName} ---`);
-      if (r.ok && r.content) {
-        console.log(r.content);
+      if (r.ok) {
+        console.log(r.content ?? "");
       } else {
         console.log(`  (error: ${r.error ?? "no content"})`);
       }

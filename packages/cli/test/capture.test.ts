@@ -38,6 +38,7 @@ describe("Capture CLI", () => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ results: [
               { ok: true, sessionName: "dev-impl@my-rig", content: "impl output", lines: 20 },
+              parsed.rig === "partial" ? { ok: false, sessionName: "dev-qa@my-rig", error: "capture timed out" } :
               { ok: true, sessionName: "dev-qa@my-rig", content: "qa output", lines: 20 },
             ]}));
           } else {
@@ -74,6 +75,15 @@ describe("Capture CLI", () => {
     expect(output).toContain("--- dev-impl@my-rig ---");
     expect(output).toContain("impl output");
     expect(output).toContain("--- dev-qa@my-rig ---");
+  });
+
+  it.each([false, true])("returns failure for a partial capture while retaining successful output %j", async (json) => {
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "capture", "--rig", "partial", ...(json ? ["--json"] : [])]);
+    });
+    expect(logs.join("\n")).toContain("impl output");
+    expect(logs.join("\n")).toContain("capture timed out");
+    expect(exitCode).toBe(1);
   });
 
   it("capture --json prints raw JSON", async () => {
