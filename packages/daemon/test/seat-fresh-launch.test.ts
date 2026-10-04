@@ -139,7 +139,7 @@ describe("SeatLifecycleService.launchFresh", () => {
 
   it.each([true, false])("#729: retains warnings independently of fresh identity (verified=%s)", async verified => {
     const seat = seedSeat();
-    if (!verified) listProcesses = async () => [];
+    if (!verified) paneCommand = "codex"; // Positive wrong-runtime observation, not absent telemetry.
     adapter.project = async () => ({ projected: [], skipped: [], failed: [], warnings: ["Existing projection warning"] });
     db.prepare("UPDATE node_startup_context SET startup_actions_json = ? WHERE node_id = ?").run(JSON.stringify([
       { type: "send_text", value: "Startup context", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true },

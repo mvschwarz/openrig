@@ -3018,7 +3018,7 @@ describe("RestoreOrchestrator", () => {
   });
 
   it.each(["full", "subset"])("#729: persists startup warnings in the original %s restore receipt", async mode => {
-    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }], resumeType: "none", edges: [] });
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }], resumeType: "none", restorePolicy: "relaunch_fresh", edges: [] });
     const snapshot = updateSnapshotData(snap, data => {
       data.nodeStartupContext[data.nodes[0]!.id] = { projectionEntries: [], resolvedStartupFiles: [], startupActions: [], runtime: "claude-code" };
     });
