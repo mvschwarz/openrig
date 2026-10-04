@@ -13,7 +13,9 @@ export interface DaemonClientOptions {
 
 export class StartupRequestError extends Error {
   constructor(readonly status: number, readonly result: Record<string, unknown>) {
-    super(String(result.message ?? result.error ?? `Startup request returned HTTP ${status}`));
+    super([String(result.message ?? result.error ?? `Startup request returned HTTP ${status}`),
+      ...(Array.isArray(result.warnings) ? result.warnings.filter((w): w is string => typeof w === "string") : []),
+    ].join("\n"));
   }
 }
 

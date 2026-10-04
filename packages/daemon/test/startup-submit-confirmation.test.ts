@@ -106,7 +106,7 @@ describe("startup prompt submission", () => {
 
     it.each(["send_text", "auto"] as const)("checks a single %s file without an identity action", async hint => {
       const f = fixture(1, "claude-code", false, true);
-      expect(await f.start({ startupActions: [], resolvedStartupFiles: [file("role.md", true, hint)] })).toMatchObject({ ok: true });
+      expect(await f.start({ startupActions: [], resolvedStartupFiles: [file(hint === "auto" ? "context.txt" : "role.md", true, hint)] })).toMatchObject({ ok: true });
       expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
       expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2);
       expect(f.submitted).toHaveLength(1);

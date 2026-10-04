@@ -146,6 +146,15 @@ describe("TUI startup choices", () => {
     expect(f.posts).toHaveLength(1);
     expect(f.onWork).toHaveBeenCalledTimes(1);
   });
+  it("#729: keeps the warning beside an independently failed startup result", async () => {
+    const f = fixture();
+    f.response(async () => new Response(JSON.stringify({ ok: false, message: "Identity needs attention",
+      warnings: ["Startup submission unverified"] }), { status: 409 }));
+    await chooseOperator(f); await f.controller.key("f"); await f.controller.key("y");
+    expect(f.posts).toHaveLength(1);
+    expect(f.controller.state.notice).toBe("Identity needs attention\nStartup submission unverified");
+    expect(f.controller.state.busy).toBe(false);
+  });
   it("provider failure is visible and does not offer fresh as its cure", async () => {
     const f = fixture();
     f.response(async () => {

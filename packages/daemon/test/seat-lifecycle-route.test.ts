@@ -127,7 +127,7 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
     expect(await res.json()).toMatchObject({ ok: false, code: "fresh_required" });
   });
 
-  it("launch route forwards the explicit fresh/stop/reason contract and returns the service result", async () => {
+  it("#729: launch route forwards the explicit fresh/stop/reason contract and warnings", async () => {
     const launchFresh = vi.spyOn(SeatLifecycleService.prototype, "launchFresh").mockResolvedValue({
       ok: true,
       seat: { ref: "dev-impl@seat-rig", rigId: "rig-1", rigName: "seat-rig", logicalId: "dev.impl", podId: null, podNamespace: null, runtime: "codex" },
@@ -138,6 +138,7 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
       model: "gpt-5.6-codex",
       startupPolicyHash: "policy-hash",
       supersededSessionIds: ["sess-old"],
+      warnings: ["Startup submission unverified"],
     });
 
     const res = await post("launch", "dev-impl@seat-rig", {
@@ -155,6 +156,6 @@ describe("POST /api/seat/{set-model,stop,clean}/:seatRef", () => {
       reason: "deliberate blank restart",
       operator: "orch-lead@seat-rig",
     });
-    expect(await res.json()).toMatchObject({ status: "ready", generation: "gen-fresh" });
+    expect(await res.json()).toMatchObject({ status: "ready", generation: "gen-fresh", warnings: ["Startup submission unverified"] });
   });
 });

@@ -536,6 +536,9 @@ identity remains unverified; a version number alone cannot clear it.
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
       return;
     }
+    if (path === "launch") {
+      for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
+    }
     if (res.status >= 400) {
       printSeatError(res.data as unknown as SeatStatusError, `Seat ${path} failed (HTTP ${res.status})`);
       process.exitCode = res.status >= 500 ? 2 : 1;
@@ -614,7 +617,6 @@ Examples:
         console.log(`Generation: ${String(data["generation"])}; model: ${String(data["model"] ?? "none")}.`);
         console.log(`Startup policy: ${String(data["startupPolicyHash"])}; superseded sessions: ${superseded?.length ?? 0}.`);
         console.log("No continuity source was used; siblings and durable work were preserved.");
-        for (const warning of (data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
       });
     });
 
