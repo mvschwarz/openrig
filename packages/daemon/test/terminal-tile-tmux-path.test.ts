@@ -158,6 +158,23 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded,
     expect(res.degraded.map((d) => d.seat)).toEqual(["a", "b", "c"]);
   });
 
+  it("only seat a's label is left (b, c and the filler gone): a stays opened, b and c are degraded", async () => {
+    const { adapter } = herdrOpening(() => listed("a"));
+    const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
+    expect(res.ok).toBe(true);
+    expect(res.opened).toEqual(["a"]);
+    expect(res.degraded.map((d) => d.seat)).toEqual(["b", "c"]);
+  });
+
+  it("an unlabelled remainder is never counted as filler: nothing is degraded, the loss is a note", async () => {
+    const { adapter } = herdrOpening(() => listed(undefined));
+    const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
+    expect(res.ok).toBe(true);
+    expect(res.opened).toEqual(["a", "b", "c"]);
+    expect(res.degraded).toEqual([]);
+    expect(res.notes?.join(" ")).toContain("3 pane(s) exited right after opening");
+  });
+
   it("the tab isn't in the listing (another id form) or the listing is empty: seats stay opened, with a note", async () => {
     const otherTab: HerdrResult = { type: "pane_list", panes: [{ pane_id: "p0", tab_id: "1", label: "a" }] };
     for (const reply of [otherTab, { type: "pane_list", panes: [] }]) {

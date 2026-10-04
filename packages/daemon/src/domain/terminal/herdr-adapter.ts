@@ -130,8 +130,9 @@ export async function exitedSeats(
     return gone;
   }
   const liveLabels = live.map((p) => p["label"] as string);
-  // Blank filler panes run `sh` and stay. A tab holding nothing else has lost every seat pane.
-  if (live.length <= blanks && liveLabels.every((l) => normalLabel(l) === "")) {
+  // Blank filler panes run `sh` and stay. A tab holding exactly the fillers, all blank-labelled, has
+  // lost every seat pane. Labels are read first: a seat label anywhere means this rule doesn't apply.
+  if (live.length === blanks && liveLabels.every((l) => normalLabel(l) === "")) {
     for (const pane of pagePanes) gone.add(pane.seat);
     return gone;
   }
