@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { NodeBinding } from "./runtime-adapter.js";
-import type { NativePermissionSelection } from "./native-permission-selection.js";
+import { permissionBindingOverride, type NativePermissionSelection } from "./native-permission-selection.js";
 import { builtinLaunchPosture } from "./permission-policy/policy-ref.js";
 
 export interface StoredNativePermissionSelection extends NativePermissionSelection {
@@ -197,11 +197,17 @@ export class NativePermissionStore {
   }
 
   apply(binding: NodeBinding, runtime: string): NodeBinding {
-    const resolved = this.resolve(binding.nodeId, runtime);
+    const selection = this.read(binding.nodeId);
+    if (selection && selection.runtime !== runtime) {
+      throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
+    }
+    const override = permissionBindingOverride(selection);
+    const effectivePosture = override.launchPosture ?? binding.launchPosture;
+    const permissionMode = override.permissionMode ?? (effectivePosture === "auto" && runtime === "claude-code" ? "auto" : undefined);
     return {
       ...binding,
-      ...(resolved.source !== "system_default" && resolved.launchPosture ? { launchPosture: resolved.launchPosture } : {}),
-      ...(resolved.permissionMode ? { permissionMode: resolved.permissionMode } : {}),
+      ...override,
+      ...(permissionMode ? { permissionMode } : {}),
     };
   }
 }

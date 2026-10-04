@@ -448,7 +448,7 @@ describe("StartupOrchestrator Declarative Integration", () => {
       rigId: rig.id,
       nodeId: node.id,
       sessionId: session.id,
-      binding: binding(node.id),
+      binding: { ...binding(node.id), launchPosture: "auto" },
       adapter,
       plan: { entries: [] } as never,
       resolvedStartupFiles: [],
@@ -772,6 +772,298 @@ description: Custom rig policy
           "model",
           undefined,
           node.id,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("pod-aware restore startNode preserves re-read member policy: floor -> full_bypass", async () => {
+      const db = createTestDb();
+      const rigRepo = new RigRepository(db);
+      const registry = new SessionRegistry(db);
+      const eventBus = new EventBus(db);
+      const rig = rigRepo.createRig("restore-custom-rig");
+
+      const dir = mkdtempSync(join(tmpdir(), "openrig-policy-test-"));
+      try {
+        const policyPath = join(dir, "member.policy.md");
+        writeFileSync(policyPath, `---
+source: custom
+name: member-policy
+surface: flag
+launch_posture: floor
+policy_schema_version: 1
+description: Custom member policy
+---
+`);
+
+        const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", permissionPolicy: "member.policy.md" });
+        rigRepo.setNodePolicyProvenance(node.id, {
+          origin: "custom",
+          resolvedTarget: policyPath,
+          declaringDir: dir,
+          launchPosture: "floor",
+        });
+        const session = registry.registerSession(node.id, "worker@restore-custom-rig");
+
+        const ctx = {
+          db,
+          rigRepo,
+          sessionRegistry: registry,
+          appliedLaunchStore: new AppliedLaunchObservationStore(db),
+        };
+
+        // Before edit: resolves floor
+        expect((RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id)).toBe("floor");
+
+        // Edit on disk: floor -> full_bypass
+        writeFileSync(policyPath, `---
+source: custom
+name: member-policy
+surface: flag
+launch_posture: full_bypass
+policy_schema_version: 1
+description: Custom member policy
+---
+`);
+
+        // Re-read during restore resolves full_bypass
+        const updatedPosture = (RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id);
+        expect(updatedPosture).toBe("full_bypass");
+
+        // Pod-aware restore calls startNode with binding.launchPosture = updatedPosture
+        const launchHarness = vi.fn(async () => ({ ok: false as const, error: "offline stop" }));
+        const adapter = {
+          runtime: "claude-code",
+          project: async () => ({ projected: [], skipped: [], failed: [] }),
+          deliverStartup: async () => ({ delivered: [], failed: [] }),
+          launchHarness,
+        } as unknown as RuntimeAdapter;
+
+        const startupOrch = new StartupOrchestrator({
+          db,
+          sessionRegistry: registry,
+          eventBus,
+          tmuxAdapter: {} as TmuxAdapter,
+        });
+
+        await startupOrch.startNode({
+          rigId: rig.id,
+          nodeId: node.id,
+          sessionId: session.id,
+          binding: {
+            ...binding(node.id),
+            launchPosture: updatedPosture,
+          },
+          adapter,
+          plan: { entries: [] } as never,
+          resolvedStartupFiles: [],
+          startupActions: [],
+          isRestore: true,
+        });
+
+        // startNode's NativePermissionStore.apply() MUST preserve re-read launchPosture instead of replacing with initial launch DB column
+        expect(launchHarness).toHaveBeenCalledWith(
+          expect.objectContaining({
+            launchPosture: "full_bypass",
+          }),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("pod-aware restore startNode preserves re-read member policy: full_bypass -> floor", async () => {
+      const db = createTestDb();
+      const rigRepo = new RigRepository(db);
+      const registry = new SessionRegistry(db);
+      const eventBus = new EventBus(db);
+      const rig = rigRepo.createRig("restore-custom-rig");
+
+      const dir = mkdtempSync(join(tmpdir(), "openrig-policy-test-"));
+      try {
+        const policyPath = join(dir, "member.policy.md");
+        writeFileSync(policyPath, `---
+source: custom
+name: member-policy
+surface: flag
+launch_posture: full_bypass
+policy_schema_version: 1
+description: Custom member policy
+---
+`);
+
+        const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code", permissionPolicy: "member.policy.md" });
+        rigRepo.setNodePolicyProvenance(node.id, {
+          origin: "custom",
+          resolvedTarget: policyPath,
+          declaringDir: dir,
+          launchPosture: "full_bypass",
+        });
+        const session = registry.registerSession(node.id, "worker@restore-custom-rig");
+
+        const ctx = {
+          db,
+          rigRepo,
+          sessionRegistry: registry,
+          appliedLaunchStore: new AppliedLaunchObservationStore(db),
+        };
+
+        // Before edit: resolves full_bypass
+        expect((RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id)).toBe("full_bypass");
+
+        // Edit on disk: full_bypass -> floor
+        writeFileSync(policyPath, `---
+source: custom
+name: member-policy
+surface: flag
+launch_posture: floor
+policy_schema_version: 1
+description: Custom member policy
+---
+`);
+
+        // Re-read during restore resolves floor
+        const updatedPosture = (RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id);
+        expect(updatedPosture).toBe("floor");
+
+        // Pod-aware restore calls startNode with binding.launchPosture = updatedPosture
+        const launchHarness = vi.fn(async () => ({ ok: false as const, error: "offline stop" }));
+        const adapter = {
+          runtime: "claude-code",
+          project: async () => ({ projected: [], skipped: [], failed: [] }),
+          deliverStartup: async () => ({ delivered: [], failed: [] }),
+          launchHarness,
+        } as unknown as RuntimeAdapter;
+
+        const startupOrch = new StartupOrchestrator({
+          db,
+          sessionRegistry: registry,
+          eventBus,
+          tmuxAdapter: {} as TmuxAdapter,
+        });
+
+        await startupOrch.startNode({
+          rigId: rig.id,
+          nodeId: node.id,
+          sessionId: session.id,
+          binding: {
+            ...binding(node.id),
+            launchPosture: updatedPosture,
+          },
+          adapter,
+          plan: { entries: [] } as never,
+          resolvedStartupFiles: [],
+          startupActions: [],
+          isRestore: true,
+        });
+
+        // startNode's NativePermissionStore.apply() MUST preserve re-read launchPosture
+        expect(launchHarness).toHaveBeenCalledWith(
+          expect.objectContaining({
+            launchPosture: "floor",
+          }),
+          expect.anything(),
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("pod-aware restore startNode preserves re-read rig-level custom policy changes", async () => {
+      const db = createTestDb();
+      const rigRepo = new RigRepository(db);
+      const registry = new SessionRegistry(db);
+      const eventBus = new EventBus(db);
+      const rig = rigRepo.createRig("restore-rig-policy");
+
+      const dir = mkdtempSync(join(tmpdir(), "openrig-policy-test-"));
+      try {
+        const policyPath = join(dir, "rig.policy.md");
+        writeFileSync(policyPath, `---
+source: custom
+name: rig-policy
+surface: flag
+launch_posture: floor
+policy_schema_version: 1
+description: Custom rig policy
+---
+`);
+
+        rigRepo.setRigPermissionPolicy(rig.id, "rig.policy.md");
+        rigRepo.setRigPolicyProvenance(rig.id, {
+          origin: "custom",
+          resolvedTarget: policyPath,
+          declaringDir: dir,
+          launchPosture: "floor",
+        });
+
+        // Member without its own policy inherits from rig
+        const node = rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
+        const session = registry.registerSession(node.id, "worker@restore-rig-policy");
+
+        const ctx = {
+          db,
+          rigRepo,
+          sessionRegistry: registry,
+          appliedLaunchStore: new AppliedLaunchObservationStore(db),
+        };
+
+        // Before edit: resolves floor
+        expect((RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id)).toBe("floor");
+
+        // Edit on disk: floor -> full_bypass
+        writeFileSync(policyPath, `---
+source: custom
+name: rig-policy
+surface: flag
+launch_posture: full_bypass
+policy_schema_version: 1
+description: Custom rig policy
+---
+`);
+
+        // Re-read during restore resolves full_bypass
+        const updatedPosture = (RestoreOrchestrator.prototype as any).resolveRestorePosture.call(ctx, node.id, rig.id);
+        expect(updatedPosture).toBe("full_bypass");
+
+        const launchHarness = vi.fn(async () => ({ ok: false as const, error: "offline stop" }));
+        const adapter = {
+          runtime: "claude-code",
+          project: async () => ({ projected: [], skipped: [], failed: [] }),
+          deliverStartup: async () => ({ delivered: [], failed: [] }),
+          launchHarness,
+        } as unknown as RuntimeAdapter;
+
+        const startupOrch = new StartupOrchestrator({
+          db,
+          sessionRegistry: registry,
+          eventBus,
+          tmuxAdapter: {} as TmuxAdapter,
+        });
+
+        await startupOrch.startNode({
+          rigId: rig.id,
+          nodeId: node.id,
+          sessionId: session.id,
+          binding: {
+            ...binding(node.id),
+            launchPosture: updatedPosture,
+          },
+          adapter,
+          plan: { entries: [] } as never,
+          resolvedStartupFiles: [],
+          startupActions: [],
+          isRestore: true,
+        });
+
+        expect(launchHarness).toHaveBeenCalledWith(
+          expect.objectContaining({
+            launchPosture: "full_bypass",
+          }),
+          expect.anything(),
         );
       } finally {
         rmSync(dir, { recursive: true, force: true });

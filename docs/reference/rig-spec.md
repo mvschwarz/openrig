@@ -222,7 +222,7 @@ policies' own semantic classes.
 | `builtin:standard` | config | everything not listed, including `push_to_remote` (`default_posture: allow`) | `create_pr`, `publish_package`, `merge_or_release`, `force_push`, and the destructive class | nothing |
 | `builtin:open` | config | everything, including PRs, publishing, merges and force pushes (`default_posture: allow`) | the destructive class only | nothing |
 | `builtin:yolo` | flag (`launch_posture: full_bypass`) | everything; the runtime's permission prompts are bypassed at launch | nothing | nothing |
-| `builtin:auto` | flag (`launch_posture: auto`) | Claude runs with `--permission-mode auto`; Codex and Pi launch at the floor | nothing | nothing |
+| `builtin:auto` | flag (`launch_posture: auto`) | Claude runs with `--permission-mode auto`; Codex and Pi launch at the floor | Claude: decided by auto mode; Codex and Pi: as at the floor | Claude: decided by auto mode; Codex and Pi: as at the floor |
 
 The destructive class is `delete_everything`, `drop_persistent_store` and
 `reset_or_discard_vcs`.
