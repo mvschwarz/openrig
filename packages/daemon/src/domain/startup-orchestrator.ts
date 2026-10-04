@@ -11,7 +11,7 @@ import type {
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
-import { issueStartupChallenge } from "./startup-proof.js";
+import { issueStartupChallenge, STARTUP_PROOF_INSTRUCTION_LINE } from "./startup-proof.js";
 import { resolveStartupProof } from "./startup-resolver.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { NativePermissionStore } from "./native-permission-store.js";
@@ -392,6 +392,7 @@ export class StartupOrchestrator {
         return this.fail(input, "failed", errors);
       }
       postLaunchFiles = initialPrompt.remainingFiles;
+      if (challenge) await this.sendProofInstruction(deliveryInput);
     } else if (challenge) {
       challengeOnlyPrompt = challenge.promptBlock;
     }
@@ -447,7 +448,8 @@ export class StartupOrchestrator {
     // Challenge-only delivery remains best-effort. Staging is reported without
     // turning a recoverable composer into a startup failure/occupant rollback.
     if (challengeOnlyPrompt && input.binding.tmuxSession) {
-      await this.sendInteractiveText(deliveryInput, challengeOnlyPrompt, "challenge");
+      const challengeFailure = await this.sendInteractiveText(deliveryInput, challengeOnlyPrompt, "challenge");
+      if (!challengeFailure) await this.sendProofInstruction(deliveryInput);
     }
 
     // 8. Execute after_files actions
@@ -706,6 +708,18 @@ export class StartupOrchestrator {
     }
 
     return { ok: true, remainingFiles };
+  }
+
+  /**
+   * Claude only: the challenge reached the seat inside a paste, which Claude won't act on alone.
+   * One short line in the person's turn asks it to run the challenge's own command. Best-effort: a
+   * failed send is a submission warning, never a startup failure. Nothing is typed on top of a
+   * startup input left staged in the composer; that input stays for the operator.
+   */
+  private async sendProofInstruction(input: StartupDeliveryInput): Promise<void> {
+    if (input.adapter.runtime !== "claude-code" || !input.binding.tmuxSession || input.stagedSubmissionWarning) return;
+    const failure = await this.sendInteractiveText(input, STARTUP_PROOF_INSTRUCTION_LINE, "startup_proof_instruction");
+    if (failure) input.submissionWarnings.push(`Startup proof instruction was not delivered: ${failure.error}`);
   }
 
   private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {

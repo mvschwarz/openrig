@@ -10,7 +10,7 @@ import { resolveConcreteHint } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan } from "../src/domain/projection-planner.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { StartupAction } from "../src/domain/types.js";
-import { deriveOriented, issueStartupChallenge, verifyStartupProof } from "../src/domain/startup-proof.js";
+import { deriveOriented, issueStartupChallenge, verifyStartupProof, STARTUP_PROOF_INSTRUCTION_LINE } from "../src/domain/startup-proof.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
 import { observeClaudePermission } from "../src/domain/permission-drift.js";
@@ -828,6 +828,49 @@ describe("StartupOrchestrator", () => {
     expect(deriveOriented(db, seed.nodeId)).toBe("missing");
     // The challenge instruction is embedded in the first delivered prompt.
     expect(sendText.mock.calls[0]?.[1]).toContain("startup orientation challenge");
+  });
+
+  // Claude shows the long startup paste as pasted content and won't act on an instruction found only
+  // there; one short line in the person's turn asks it to run the challenge's own command.
+  describe("the Claude startup-proof line", () => {
+    const challengeAndIdentity = () => [makeAction({ type: "startup_proof", value: "authenticated" }), makeIdentityAction()];
+
+    it("follows a Claude seat's challenged prompt with the short line, as its own submission", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, { startupActions: challengeAndIdentity() }));
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(sendText.mock.calls.map((c) => c[1])).toHaveLength(2);
+      expect(sendText.mock.calls[0]![1]).toContain("startup orientation challenge");
+      expect(sendText.mock.calls[1]![1]).toBe(STARTUP_PROOF_INSTRUCTION_LINE);
+      expect(deriveOriented(db, seed.nodeId)).toBe("missing");
+    });
+
+    it("sends no line to a Codex seat, which already acts on the pasted challenge", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, {
+        adapter: mockAdapter({ runtime: "codex" }), startupActions: challengeAndIdentity(),
+      }));
+      expect(sendText.mock.calls.map((c) => c[1])).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+
+    it("sends no line when no challenge was issued", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, _text: string) => ({ ok: true as const }));
+      await createOrchestrator({ tmux: mockTmux({ sendText }) }).startNode(makeInput(seed, { startupActions: [makeIdentityAction()] }));
+      expect(sendText.mock.calls.map((c) => c[1])).not.toContain(STARTUP_PROOF_INSTRUCTION_LINE);
+    });
+
+    it("a line that fails to send is a submission warning; the seat is still ready", async () => {
+      const seed = seedSession();
+      const sendText = vi.fn(async (_session: string, text: string) => text === STARTUP_PROOF_INSTRUCTION_LINE
+        ? { ok: false as const, message: "fixture send failure" }
+        : { ok: true as const });
+      const result = await createOrchestrator({ tmux: mockTmux({ sendText } as unknown as Partial<TmuxAdapter>) }).startNode(makeInput(seed, { startupActions: challengeAndIdentity() }));
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(result.ok && result.submission?.reasons).toContain("Startup proof instruction was not delivered: fixture send failure");
+    });
   });
 
   // OPR.0.4.3.06 — a resumed restore is NOT re-challenged (oriented stays n-a).

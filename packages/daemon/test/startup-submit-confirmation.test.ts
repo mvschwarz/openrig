@@ -10,6 +10,7 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { SessionTransport } from "../src/domain/session-transport.js";
 import { startupSubmissionEvidence } from "../src/domain/startup-submission-evidence.js";
 import { StartupOrchestrator, type StartupInput } from "../src/domain/startup-orchestrator.js";
+import { STARTUP_PROOF_INSTRUCTION_LINE } from "../src/domain/startup-proof.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 
@@ -171,6 +172,15 @@ describe("startup prompt submission", () => {
     f.tmux.capturePaneContent.mockImplementation(async () => `❯ ${f.submitted[0]}\n────────────────────\nWorking… Esc to interrupt\n`);
     expect(await f.start()).toMatchObject({ ok: true, submission: { status: "unverified" } });
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows a submitted challenge-only prompt with the short proof line", async () => {
+    const f = fixture(0, "claude-code", true);
+    expect(await f.start()).toMatchObject({ ok: true, startupStatus: "ready" });
+    expect(f.tmux.sendText).toHaveBeenCalledTimes(2);
+    expect(f.submitted).toHaveLength(2);
+    expect(f.submitted[0]).toContain("startup orientation challenge");
+    expect(f.submitted[1]).toBe(STARTUP_PROOF_INSTRUCTION_LINE);
   });
 
   it("keeps a staged challenge-only prompt best-effort", async () => {
