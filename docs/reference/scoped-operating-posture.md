@@ -54,8 +54,10 @@ global host. The qualifiers are respectively a qitem ID, `project/mission/slice-
 The workstream is an existing authored slice, found by its directory or SPEC ID;
 the returned identity uses its SPEC ID and project/mission qualification.
 
-Project selection reads `workspace.yaml`'s declared `projects: [{id, root}]`
-catalog, or the workspace's own `project.yaml` when no catalog exists. Multiple
+Project selection reads the declared `projects: [{id, root}]` catalog at
+`workspace.catalog_path` (default `workspace.yaml` in the workspace root), the
+same catalog `rig context work-install` uses, or the workspace's own
+`project.yaml` when no catalog exists. Multiple
 projects require an explicit project selection. A sole project may be derived.
 The project manifest validates identity and supplies `missions.root` (default
 `missions`). Mission and slice identities come from those authored work nodes;
