@@ -298,7 +298,7 @@ function analyzeNode(node: NodeEntry, thresholds: CompactPlanThresholds): Candid
     precompactRequirements: PRECOMPACT_REQUIREMENTS,
     seatPolicy: SEAT_POLICY,
     notificationPacket: notificationPacket(node, "candidate_with_caveats", reasons, missingEvidence),
-    nextAction: "Verify checkpoint/restore evidence, get explicit authorization, compact one Claude seat, then audit restore using claude-compact-in-place.",
+    nextAction: "Verify checkpoint/restore evidence, get explicit authorization, compact one Claude seat, then audit restore using claude-compaction-restore.",
   };
 }
 
@@ -388,7 +388,7 @@ function printHuman(plan: CompactPlanResult): void {
   }
 
   console.log();
-  console.log("Next action: verify checkpoint/restore evidence, get explicit authorization, compact one Claude seat only, then audit restore with claude-compact-in-place.");
+  console.log("Next action: verify checkpoint/restore evidence, get explicit authorization, compact one Claude seat only, then audit restore with claude-compaction-restore.");
 }
 
 export function compactPlanCommand(depsOverride?: CompactPlanDeps): Command {

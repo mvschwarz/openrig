@@ -9,15 +9,10 @@ metadata:
     stage: factory-approved
     sibling_skills:
       - claude-compaction-restore
-      - mental-model-ha
-      - scope-recovery
       - session-compaction-and-restore
       - agent-starters
-      - composable-priming-packs
       - session-source-fork
       - seat-continuity-and-handover
-      - claude-compact-in-place
-      - pre-maintenance-agent-preservation
 ---
 
 # Agent Startup and Context Ingestion
@@ -48,7 +43,7 @@ is scattered or stale, agents execute the wrong thing very efficiently.
 
 - The agent is being created via Agent Starter — the starter's manifest carries startup context
 - The work is artifact-backed mental-model rebuild from a packet — that's `session-compaction-and-restore`
-- The intent is to ship reusable startup content as a skill — that's `writing-skills-for-openrig`
+- The intent is to ship reusable startup content as a skill
 
 ## Failure modes (4)
 
@@ -119,10 +114,8 @@ culture / pod / member / operator) handles the layering.
 ## See also
 
 - `mission-slice-sop` — load when starting assigned mission/slice work; the light artifact and handoff procedure for SPEC.md, NOTES.md, PROGRESS.md and proof. It does not choose the SDLC for the task.
-- `writing-skills-for-openrig` skill — authoring discipline for skill content (what doesn't belong in startup)
 - `forming-an-openrig-mental-model` skill — orientation for new agents
 - `session-compaction-and-restore` skill — restore-time startup ingestion
 - `agent-starters` skill — reusable starter manifests that compose startup context
-- `composable-priming-packs` skill — manifests that produce primed sessions
 - `openrig-operating-model` skill — placement and authority of durable context
 - `openrig/docs/reference/agent-startup-guide.md` (product reference doc; not a skill) — the 7-layer additive startup model + delivery hints
