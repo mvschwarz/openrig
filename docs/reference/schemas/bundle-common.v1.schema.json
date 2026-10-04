@@ -53,6 +53,7 @@
     },
     "packageDigest": {
       "type": "object",
+      "description": "SHA-256 over UTF-8 lines JSON.stringify(path) + '\\t' + sha256 + '\\n', one per integrity.files entry, sorted by path in code-unit order. See docs/reference/bundle-formats.md.",
       "required": [
         "algorithm",
         "value",

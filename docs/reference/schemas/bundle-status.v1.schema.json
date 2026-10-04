@@ -161,6 +161,22 @@
                             }
                           }
                         }
+                      },
+                      {
+                        "if": {
+                          "properties": {
+                            "label": {
+                              "const": "tested"
+                            }
+                          }
+                        },
+                        "then": {
+                          "properties": {
+                            "assistanceCount": {
+                              "const": 0
+                            }
+                          }
+                        }
                       }
                     ]
                   },

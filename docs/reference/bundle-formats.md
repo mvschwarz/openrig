@@ -8,9 +8,9 @@ at a pinned commit.
 **A v1 format only grows:** new optional properties may appear, and consumers ignore properties they don't know. Any
 other change is a v2. The schemas are open to new properties, with three closed on purpose: the package digest (an exact
 value), a run record's subject (a harness check can never carry a team's identity), and the public status file, where
-nothing outside the schema may appear, so a private field can't leak in. The
+nothing outside the schema may appear, so a private field can't leak in. A new property in a closed part is a v2. The
 status schema also rejects labels that contradict their evidence: a tested label needs records and a package, tested
-with help needs its count, and an unreadable listing carries only Status unavailable.
+with help needs its count, tested can't carry one, and an unreadable listing carries only Status unavailable.
 
 ## Three identities, kept apart
 
@@ -46,8 +46,12 @@ Preset names such as `recommended` or `all-claude` are aliases shown beside the 
 ### Package digest
 
 `{ algorithm: "sha256", value, coverage: "openrig.package-digest/v1" }`:
-- `value` is SHA-256 over UTF-8 lines `<path>\t<sha256>\n`, one for each entry of the built archive's `integrity.files`,
-  sorted by path in UTF-16 code-unit order;
+- `value` is SHA-256 over UTF-8 lines `<quoted path>\t<sha256>\n`, one for each entry of the built archive's
+  `integrity.files`, sorted by path in UTF-16 code-unit order;
+- `<quoted path>` is the path as a JSON string, exactly as JavaScript's `JSON.stringify(path)` writes it, so a tab or
+  newline in a file name can't make two different file lists hash the same. In words: wrapped in `"`; `"` and `\`
+  escaped with a backslash; U+0008, U+0009, U+000A, U+000C and U+000D written `\b`, `\t`, `\n`, `\f` and `\r`; any
+  other character below U+0020, and any lone surrogate, written `\uXXXX` in lowercase hex; everything else as itself;
 - it's the same when the same folder is rebuilt by the same OpenRig, while the archive's own hash changes with every
   build (`createdAt`).
 
@@ -107,10 +111,12 @@ decision, recorded in the registry entry's `evidenceReuse`.
 - **Labels:** `known_problem`, `tested`, `tested_with_help`, `partly_tested`, `not_tested` and `status_unavailable`.
   They're shown as Known problem, Tested by OpenRig, Tested with help (N), Partly tested, Not tested by OpenRig
   and Status unavailable.
-- **Empty `platforms`** means Not tested by OpenRig.
-- **A listing whose records can't be read** is `status_unavailable`, never Not tested by OpenRig. So is a listed
-  configuration that's missing from the status file. Platform keys are `<os>-<arch>` (`linux`, `darwin` or `win32`;
-  `x64` or `arm64`).
+- **A label belongs to one configuration ID.** No configuration is ever shown another configuration's label.
+- **Empty `platforms`** means Not tested by OpenRig. So does a custom configuration, one the listing doesn't offer.
+- **Status unavailable is only for a listed configuration** whose records can't be read, or that's missing from the
+  status file; never Not tested by OpenRig. A listing whose records can't be read is `status_unavailable` as a whole.
+- **Platform keys** are `<os>-<arch>` (`linux`, `darwin` or `win32`; `x64` or `arm64`).
+- **`tested` means no help was needed:** it can't carry an assistance count above zero.
 - **The file holds no private paths, host names, row IDs, account names or receipt text,** and regenerating it gives
   identical bytes.
 - **`bodyDigest`** is SHA-256, lowercase hex, over the RFC 8785 (JCS) canonical JSON, as UTF-8, of an object holding
