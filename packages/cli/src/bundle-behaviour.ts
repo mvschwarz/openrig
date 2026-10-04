@@ -26,7 +26,11 @@ export function formatBundleBehaviour(view: BundleBehaviour): string[] {
     lines.push("Also declared to run:", ...view.alsoRuns.map(f => `  ${plain(f.kind)}: ${plain(f.pathOrRef)} [${f.resolution}${f.trigger ? `; ${plain(f.trigger)}` : ""}]`));
     lines.push("Writes and library additions (destinations, runtime support and conflicts resolved at launch):", ...view.writes.map(w => `  ${w.seat ? plain(w.seat) + ": " : ""}${plain(w.destinationBase)}/${plain(w.path)} — ${plain(w.operation)}, ${plain(w.phase)}`));
     lines.push(`Outside domains found in files (not predicted traffic): ${view.outsideAddresses.map(a => plain(a.domain)).join(", ") || "none found"}`);
-    lines.push("Needs (not checked):", ...view.needs.map(n => `  ${plain(n.name)}${n.versionConstraint ? ` ${plain(n.versionConstraint)}` : ""}`));
+    lines.push("Needs (not checked):");
+    for (const need of view.needs) {
+      lines.push(`  ${plain(need.name)}${need.versionConstraint ? ` ${plain(need.versionConstraint)}` : ""}`);
+      if (need.commands?.length) lines.push("    Author setup commands (not run; one shell, in order):", ...need.commands.map(command => `      ${plain(command)}`));
+    }
     lines.push("Unknown before launch:", ...view.unknownBeforeLaunch.map(u => `  ${plain(u.subject)}: ${plain(u.reason)}`));
   }
   if (view.identity.packageDigest) lines.push(`Package digest: ${plain(view.identity.packageDigest.value)} (${plain(view.identity.packageDigest.coverage)}). Coverage: packaged content bytes; excludes bundle.yaml, .DS_Store, Thumbs.db, .gitkeep, file modes and host-resolved resources.`);

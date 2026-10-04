@@ -105,6 +105,35 @@ carries no tested status.
 - **`not_generated`:** a combination without a generated view. It carries a reason and the local command that shows it,
   and no sections.
 
+### Declared setup preconditions
+
+The author's `bundle.yaml`, beside `rig.yaml`, may declare setup that the user must do before installing:
+
+```yaml
+preconditions:
+  - name: Run inside an OpenRig source clone with dependencies installed and packages built.
+    commands:
+      - git clone https://github.com/mvschwarz/openrig.git
+      - cd openrig
+      - npm ci
+      - npm run build
+  - name: Sign in to the selected coding runtimes before starting the team.
+```
+
+Local-folder creation and GitHub-link imports carry these declarations into the archive manifest. A generated
+before-install view lists each as `needs[]` with `kind: precondition`, the author's `name`, optional ordered `commands`,
+`status: not_checked`, and a `sourceRefs` entry naming `bundle.yaml` and `preconditions[index]`. Inspect, plan and apply
+previews show the same declaration. A legacy schema-1 archive retains it in the manifest, but its view remains
+`not_generated`. Missing preconditions mean none were declared, not that no setup is needed.
+
+Each command is one plain command line, without shell operators (`;`, `&&`, pipes, command substitution, backticks or
+redirection). Run them in order in **one shell**, then run the install command in that same shell: it inherits the
+working directory left by the setup commands. There is no separate `workdir` field. Commands are untrusted author data;
+a site building a copyable block must validate every line and bound the number of entries, omitting all setup lines
+if any fails its plain-command rule. OpenRig displays these declarations; it does not execute them, verify that setup
+was done, or add a prerequisite gate. The archive hash covers the manifest; `packageDigest` excludes `bundle.yaml`
+and therefore does not cover these declarations.
+
 ### Run records and status
 
 **A run record's subject** is either a team (source, configuration ID, package digest, assembler) or a harness check (a

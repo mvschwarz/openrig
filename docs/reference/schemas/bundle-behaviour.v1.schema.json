@@ -394,6 +394,11 @@
           "versionConstraint": {
             "type": "string"
           },
+          "commands": {
+            "type": "array",
+            "description": "Unexecuted author setup lines, in order in one shell; the install command follows in the resulting working directory.",
+            "items": { "type": "string", "minLength": 1 }
+          },
           "status": {
             "const": "not_checked"
           },

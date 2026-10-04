@@ -31,6 +31,13 @@ const VALID_RAW = {
 };
 
 describe("Bundle types", () => {
+  it("round-trips optional legacy setup declarations without checking them", () => {
+    const preconditions = [{ name: "Prepare source", commands: ["cd source", "npm ci"] }, { name: "Sign in" }];
+    const normalized = normalizeBundleManifest({ ...VALID_RAW, preconditions });
+    expect(normalized.preconditions).toEqual(preconditions);
+    expect(parseBundleManifest(serializeBundleManifest(normalized))).toMatchObject({ preconditions });
+    expect(normalizeBundleManifest(VALID_RAW)).not.toHaveProperty("preconditions");
+  });
   // T1: Valid manifest passes validation
   it("valid manifest with integrity passes validation", () => {
     const result = validateBundleManifest(VALID_RAW);

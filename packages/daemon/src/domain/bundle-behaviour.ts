@@ -5,6 +5,7 @@ import { parseAgentSpec, normalizeAgentSpec } from "./agent-manifest.js";
 import { parsePolicySpec, validatePolicySpec } from "./permission-policy/policy-spec.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import type { AgentSpec, StartupBlock } from "./types.js";
+import { normalizePreconditionsBlock } from "./bundle-types.js";
 
 type ObjectValue = Record<string, unknown>;
 type SourceRef = { path: string; field?: string };
@@ -49,7 +50,7 @@ interface GeneratedBehaviour {
   alsoRuns: FileFact[];
   writes: WriteFact[];
   outsideAddresses: Array<{ domain: string; sourceRefs: SourceRef[] }>;
-  needs: Array<{ kind: string; name: string; versionConstraint?: string; status: "not_checked"; sourceRefs: SourceRef[] }>;
+  needs: Array<{ kind: string; name: string; commands?: string[]; versionConstraint?: string; status: "not_checked"; sourceRefs: SourceRef[] }>;
   unknownBeforeLaunch: Array<{ subject: string; reason: string; sourceRefs: SourceRef[] }>;
 }
 export type BundleBehaviour = GeneratedBehaviour | {
@@ -310,6 +311,11 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
           if (command) view.alsoRuns.push({ kind: "service_checkpoint", pathOrRef: command, resolution: "archive", trigger: field, sourceRefs: refs });
         }
       }
+    }
+    const preconditions = normalizePreconditionsBlock(manifest.preconditions);
+    if (manifest.preconditions !== undefined && !preconditions) unknown("Bundle preconditions", "The archive's setup declarations could not be described; no setup was checked or executed.", [{ path: "bundle.yaml", field: "preconditions" }]);
+    for (const [index, precondition] of (preconditions ?? []).entries()) {
+      view.needs.push({ kind: "precondition", ...precondition, status: "not_checked", sourceRefs: [{ path: "bundle.yaml", field: `preconditions[${index}]` }] });
     }
     for (const [key, name] of [["min_daemon_version", "OpenRig daemon"], ["min_cli_version", "OpenRig CLI"]] as const) {
       const versionConstraint = text(object(manifest.compatibility)[key]);

@@ -2,6 +2,29 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 // -- Shared types --
 
+/** Author-declared setup, for display only. OpenRig never executes or checks it. */
+export interface BundlePrecondition {
+  name: string;
+  commands?: string[];
+}
+
+export function normalizePreconditionsBlock(raw: unknown): BundlePrecondition[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const result: BundlePrecondition[] = [];
+  for (const entry of raw as unknown[]) {
+    const p = entry as Partial<BundlePrecondition> | null;
+    if (!p || typeof p !== "object" || Array.isArray(p) || typeof p.name !== "string" || !p.name.trim()) {
+      return undefined;
+    }
+    if (p.commands !== undefined && (!Array.isArray(p.commands) || p.commands.some(command =>
+      typeof command !== "string" || !command.trim() || /[\r\n]/.test(command)))) {
+      return undefined;
+    }
+    result.push({ name: p.name, ...(p.commands !== undefined ? { commands: [...p.commands] } : {}) });
+  }
+  return result;
+}
+
 export interface BundleSourceIdentity {
   repository: string;
   folder: string;
@@ -411,6 +434,7 @@ export interface PodBundleManifest {
   provenance?: BundleProvenance;
   assembler?: { openrigVersion: string; commit?: string };
   compatibility?: BundleCompatibility;
+  preconditions?: BundlePrecondition[];
   /** Item 6 cross-primitive bundling: skill paths to route to the operator skills library on install. */
   skills?: string[];
   /** Item 6 cross-primitive bundling: plugin references to install via the plugin primitive (HYBRID-mode bundles reference existing plugins rather than forking content). */
@@ -506,6 +530,7 @@ export function serializePodBundleManifest(manifest: PodBundleManifest): string 
   if (manifest.assembler) doc["assembler"] = manifest.assembler;
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);
+  if (manifest.preconditions) doc["preconditions"] = manifest.preconditions;
   if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
   if (manifest.plugins && manifest.plugins.length > 0) doc["plugins"] = manifest.plugins.map((p) => ({ id: p.id, source: { kind: p.source.kind, path: p.source.path } }));
   if (manifest.workflowSpecs && manifest.workflowSpecs.length > 0) doc["workflow_specs"] = manifest.workflowSpecs;
@@ -551,6 +576,7 @@ export interface LegacyBundleManifest {
   provenance?: BundleProvenance;
   assembler?: { openrigVersion: string; commit?: string };
   compatibility?: BundleCompatibility;
+  preconditions?: BundlePrecondition[];
   /** Item 6 cross-primitive bundling: skill paths to route to the operator skills library on install. */
   skills?: string[];
   /** Item 6 cross-primitive bundling: plugin references to install via the plugin primitive (HYBRID-mode bundles reference existing plugins rather than forking content). */
@@ -712,6 +738,8 @@ export function normalizeLegacyBundleManifest(raw: unknown): LegacyBundleManifes
 
   const compatibility = normalizeCompatibilityBlock(m["compatibility"]);
   if (compatibility) result.compatibility = compatibility;
+  const preconditions = normalizePreconditionsBlock(m["preconditions"]);
+  if (preconditions) result.preconditions = preconditions;
 
   const skills = normalizeSkillsBlock(m["skills"]);
   if (skills) result.skills = skills;
@@ -759,6 +787,8 @@ export function serializeLegacyBundleManifest(manifest: LegacyBundleManifest): s
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
 
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);
+
+  if (manifest.preconditions) doc["preconditions"] = manifest.preconditions;
 
   if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
   if (manifest.plugins && manifest.plugins.length > 0) doc["plugins"] = manifest.plugins.map((p) => ({ id: p.id, source: { kind: p.source.kind, path: p.source.path } }));
