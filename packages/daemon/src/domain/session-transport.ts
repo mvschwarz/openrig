@@ -94,6 +94,7 @@ const PERMISSION_PROMPT_PATTERNS = [
 // after hitting this. Erring toward "prompt detected" is the SAFE direction for this guard: a false
 // refusal is overridable; a false-idle lets a message land on a prompt. (EXA: ntm e28763e; AgentDeck.)
 const PROMPT_SCAN_LINES = 12;
+const CLAUDE_QUESTION_FOOTER = "Enter to select · ↑/↓ to navigate · Esc to cancel";
 
 export interface PaneActivityClassification {
   state: "agent_active" | "agent_idle" | "attention" | "unknown";
@@ -117,6 +118,20 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
     if (patterns.some((pattern) => pattern.test(line))) return truncateEvidence(line);
+  }
+  return null;
+}
+
+function findCurrentClaudeQuestion(paneContent: string): string | null {
+  // Claude 2.1.289 can wrap a current choice beyond the general prompt window.
+  // Anchor at its terminal footer, then follow only the adjoining choice block.
+  // Preserve columns so indented draft/quoted text does not gain new authority.
+  const lines = paneContent.split("\n").map(line => line.trimEnd()).filter(line => line.length > 0);
+  if (lines.at(-1) !== CLAUDE_QUESTION_FOOTER) return null;
+  for (let i = lines.length - 2; i >= 0; i--) {
+    const line = lines[i]!;
+    if (/^❯ \d+\.\s+\S/.test(line)) return truncateEvidence(line);
+    if (!/^(?: {2}\d+\.\s+\S| {5}\S|─{3,}$)/.test(line)) break;
   }
   return null;
 }
@@ -217,7 +232,15 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const selectionPromptEvidence = findPatternEvidence(promptScanLines, [/^[❯›]\s*\d+\.\s/m]);
+  const claudeComposer = findClaudeComposer(paneContent);
+  const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
+  // A complete later empty composer makes the preceding question history.
+  // Keep draft handling and selectors without this dialog boundary unchanged.
+  const selectionLines = claudeComposer?.framed && IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text)) &&
+      oldQuestionEnd >= 0 && oldQuestionEnd < promptScanLines.length - 1
+    ? promptScanLines.slice(oldQuestionEnd + 1) : promptScanLines;
+  const selectionPromptEvidence = findCurrentClaudeQuestion(paneContent) ??
+    findPatternEvidence(selectionLines, [/^[❯›]\s*\d+\.\s/m]);
   if (selectionPromptEvidence) {
     return {
       state: "attention",
@@ -238,7 +261,6 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     };
   }
 
-  const claudeComposer = findClaudeComposer(paneContent);
   if (claudeComposer?.hasWarnings && claudeComposer.supportedWarningFooter && PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
     return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(claudeComposer.text) };
   }
