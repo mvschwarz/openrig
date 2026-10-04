@@ -229,3 +229,20 @@ it("rechecks posture after notification readiness I/O and refuses an intervening
   expect(readiness).toHaveBeenCalledOnce();
   expect(t.queue.list({ tag: "health-human", limit: 100 })).toEqual([]);
 });
+
+it("reads the project catalog from the configured workspace.catalog_path, not only <workspace>/workspace.yaml", () => {
+  const home = mkdtempSync(join(tmpdir(), "operating-posture-catalog-")); cleanup.push(() => rmSync(home, { recursive: true, force: true }));
+  const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
+  const workspace = join(home, "workspace"), catalog = join(home, "catalogs", "projects.yaml");
+  mkdirSync(join(workspace, "gamma"), { recursive: true }); mkdirSync(join(home, "catalogs"), { recursive: true });
+  writeFileSync(join(workspace, "gamma", "project.yaml"), "metadata: {id: gamma}\n");
+  // Only the configured catalog declares gamma; its root is relative to the catalog's folder,
+  // and the entry carries the optional rigs key other catalog readers accept.
+  writeFileSync(catalog, "projects: [{id: gamma, root: ../workspace/gamma, rigs: [openrig-dev]}]\n");
+  const service = new OperatingPostureService(db, new RigModeStore(db), () => workspace, () => catalog);
+  expect(service.resolve({ projectId: "gamma" })).toMatchObject({
+    posture: "human-led",
+    source: "product-default",
+    context: { projectId: "gamma", paths: { project: realpathSync(join(workspace, "gamma")) } },
+  });
+});
