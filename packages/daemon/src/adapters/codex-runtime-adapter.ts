@@ -28,6 +28,7 @@ import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "..
 import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
+import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
 import { parseSessionName } from "../domain/session-name.js";
 import { shellQuote } from "./shell-quote.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
@@ -594,30 +595,39 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
     }
 
-    if (isDir && this.fs.listFiles) {
-      for (const file of this.fs.listFiles(entry.absolutePath)) {
-        const src = nodePath.join(entry.absolutePath, file);
-        const dest = nodePath.join(targetDir, file);
-        const content = this.fs.readFile(src);
-        // Reconcile mode even when the content write is skipped: a byte-identical dest
-        // projected earlier may still carry the wrong (default) mode.
-        if (this.fs.exists(dest) && hashContent(content) === hashContent(this.fs.readFile(dest))) {
+    const createdFiles: string[] = [];
+    try {
+      if (isDir && this.fs.listFiles) {
+        for (const file of this.fs.listFiles(entry.absolutePath)) {
+          const src = nodePath.join(entry.absolutePath, file);
+          const dest = nodePath.join(targetDir, file);
+          const content = this.fs.readFile(src);
+          // Reconcile mode even when the content write is skipped: a byte-identical dest
+          // projected earlier may still carry the wrong (default) mode.
+          if (this.fs.exists(dest) && hashContent(content) === hashContent(this.fs.readFile(dest))) {
+            this.preserveMode(src, dest);
+            continue;
+          }
+          const existed = this.fs.exists(dest);
+          this.fs.mkdirp(nodePath.dirname(dest));
+          this.fs.writeFile(dest, content);
+          if (!existed) createdFiles.push(dest);
           this.preserveMode(src, dest);
-          continue;
         }
-        this.fs.mkdirp(nodePath.dirname(dest));
-        this.fs.writeFile(dest, content);
-        this.preserveMode(src, dest);
-      }
-    } else {
-      const content = this.fs.readFile(entry.absolutePath);
-      const destFile = nodePath.join(targetDir, nodePath.basename(entry.absolutePath));
-      if (this.fs.exists(destFile) && hashContent(content) === hashContent(this.fs.readFile(destFile))) {
+      } else {
+        const content = this.fs.readFile(entry.absolutePath);
+        const destFile = nodePath.join(targetDir, nodePath.basename(entry.absolutePath));
+        if (this.fs.exists(destFile) && hashContent(content) === hashContent(this.fs.readFile(destFile))) {
+          this.preserveMode(entry.absolutePath, destFile);
+          return true;
+        }
+        const existed = this.fs.exists(destFile);
+        this.fs.writeFile(destFile, content);
+        if (!existed) createdFiles.push(destFile);
         this.preserveMode(entry.absolutePath, destFile);
-        return true;
       }
-      this.fs.writeFile(destFile, content);
-      this.preserveMode(entry.absolutePath, destFile);
+    } finally {
+      if (entry.category === "plugin") excludeNewGeneratedFiles(cwd, createdFiles);
     }
     return true;
   }

@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { excludeNewGeneratedFiles } from "./generated-file-hygiene.js";
 
 // Pre-release: projection markers that land in user-managed files
 // (CLAUDE.md / AGENTS.md) carry the canonical product name. New writes
@@ -45,6 +46,7 @@ export function mergeManagedBlock(
   if (!fs.exists(targetPath)) {
     fs.mkdirp?.(nodePath.dirname(targetPath));
     fs.writeFile(targetPath, block);
+    excludeNewGeneratedFiles(nodePath.dirname(targetPath), [targetPath]);
     return;
   }
 
