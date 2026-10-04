@@ -21,7 +21,27 @@ function fixture(fail?: string, scriptPath = "/tmp/launch 'quoted'.sh") {
 }
 
 describe("shell launch transport", () => {
-  it.each(["fish", "nu", "unknown", "pwsh", null])("retains /bin/sh staging when the pane reports %s", async shell => {
+  it.each(["fish", "-fish"])("sources in the current fish pane (%s)", async shell => {
+    const f = fixture();
+    vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
+    const command = `OPENRIG_HOME='/instance' PATH='/rig/bin':"$PATH" claude --model '${"m".repeat(4096)}'`;
+    expect(await f.adapter.sendShellCommand("pane", command, undefined, { sourceInPane: true })).toEqual({ ok: true });
+    const invocation = vi.mocked(f.fileOps.writeFile).mock.calls[1]![1];
+    expect(invocation).toBe(`source '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
+    expect(Buffer.byteLength(invocation)).toBeLessThan(512);
+    expect(f.files.get(f.scriptPath)).toBe(`/bin/rm -f -- '/tmp/launch '\"'\"'quoted'\"'\"'.sh'\n${command}\n`);
+    expect(f.commands.at(-1)).toBe("tmux send-keys -t 'pane' 'Enter'");
+  });
+
+  it("keeps ordinary staging unchanged in fish without sourceInPane", async () => {
+    const f = fixture();
+    const paneCommand = vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue("fish");
+    expect(await f.adapter.sendShellCommand("pane", "codex")).toEqual({ ok: true });
+    expect(paneCommand).not.toHaveBeenCalled();
+    expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
+  });
+
+  it.each(["nu", "unknown", "pwsh", null])("retains /bin/sh staging when the pane reports %s", async shell => {
     const f = fixture();
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
@@ -34,7 +54,7 @@ describe("shell launch transport", () => {
     expect(vi.mocked(f.fileOps.writeFile).mock.calls[1]![1]).toBe(`/bin/sh '/tmp/launch '\"'\"'quoted'\"'\"'.sh'`);
   });
 
-  it.each(["bash", "zsh", "sh", "dash", "ksh", "-bash"])("sources in the pane only for a reported POSIX shell (%s)", async shell => {
+  it.each(["bash", "zsh", "sh", "dash", "ksh", "-bash"])("retains subshell sourcing for a reported POSIX shell (%s)", async shell => {
     const f = fixture();
     vi.spyOn(f.adapter, "getPaneCommand").mockResolvedValue(shell);
     expect(await f.adapter.sendShellCommand("pane", "claude", undefined, { sourceInPane: true })).toEqual({ ok: true });
