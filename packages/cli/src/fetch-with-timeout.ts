@@ -22,32 +22,32 @@ export async function fetchWithTimeout(
   const timeout = setTimeout(() => controller.abort(new FetchTimeoutError(options.timeoutMessage)), options.timeoutMs);
   const externalSignal = init.signal;
 
-  if (externalSignal) {
-    if (externalSignal.aborted) {
-      clearTimeout(timeout);
-      throw externalSignal.reason instanceof Error
-        ? externalSignal.reason
-        : new Error(typeof externalSignal.reason === "string" ? externalSignal.reason : "The request was aborted.");
-    }
-
-    externalSignal.addEventListener("abort", () => {
-      controller.abort(
-        externalSignal.reason instanceof Error
-          ? externalSignal.reason
-          : new Error(typeof externalSignal.reason === "string" ? externalSignal.reason : "The request was aborted."),
-      );
-    }, { once: true });
+  if (externalSignal?.aborted) {
+    clearTimeout(timeout);
+    throw externalSignal.reason instanceof Error
+      ? externalSignal.reason
+      : new Error(typeof externalSignal.reason === "string" ? externalSignal.reason : "The request was aborted.");
   }
+  // Native composition keeps streaming cancellation alive after headers without
+  // retaining one explicit listener per request on a reused caller signal.
+  const signal = externalSignal
+    ? AbortSignal.any([controller.signal, externalSignal])
+    : controller.signal;
 
   try {
-    const response = await fetchImpl(url, { ...init, signal: controller.signal });
+    const response = await fetchImpl(url, { ...init, signal });
     await options.consumeResponse?.(response);
     return response;
   } catch (err) {
     if (err instanceof FetchTimeoutError) throw err;
+    if (externalSignal?.aborted && signal.reason === externalSignal.reason) {
+      throw externalSignal.reason instanceof Error
+        ? externalSignal.reason
+        : new Error(typeof externalSignal.reason === "string" ? externalSignal.reason : "The request was aborted.");
+    }
     if (err instanceof Error && err.name === "AbortError") {
-      throw controller.signal.reason instanceof Error
-        ? controller.signal.reason
+      throw signal.reason instanceof Error
+        ? signal.reason
         : new FetchTimeoutError(options.timeoutMessage);
     }
     throw err;
