@@ -337,10 +337,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch };
     }
 
-    // Belt-and-suspenders: prefer an immediately discoverable persisted session,
-    // but fall back to the UUID we assigned explicitly at launch time.
-    const token = this.captureResumeToken(opts.name, managed?.configDir);
-    return { ok: true, resumeToken: token ?? generatedSessionId ?? undefined, resumeType: "claude_id", appliedLaunch };
+    // Fresh launches already have an explicit --session-id. A same-name file
+    // can belong to another seat sharing the Claude config directory.
+    return { ok: true, resumeToken: generatedSessionId!, resumeType: "claude_id", appliedLaunch };
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {

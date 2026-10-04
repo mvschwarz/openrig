@@ -643,30 +643,36 @@ describe("Claude Code runtime adapter", () => {
     });
   });
 
-  it("launchHarness captures resume token from session file", async () => {
+  it.each<[string, string[]]>([
+    ["the only same-name file matches", ["assigned.json"]],
+    ["another same-name seat is first", ["other.json", "assigned.json"]],
+    ["only another same-name seat has written its file", ["other.json"]],
+  ])("fresh launch retains its assigned ID when %s", async (_case, files) => {
     const tmux = mockTmux();
-    const sessionData = JSON.stringify({ pid: 12345, sessionId: "abc-session-id", name: "dev-impl@test-rig" });
+    const assignedId = "11111111-1111-4111-8111-111111111111";
+    const otherId = "22222222-2222-4222-8222-222222222222";
+    const sessionData: Record<string, string> = {
+      "assigned.json": JSON.stringify({ pid: 12345, sessionId: assignedId, name: "dev-impl@test-rig" }),
+      "other.json": JSON.stringify({ pid: 67890, sessionId: otherId, name: "dev-impl@test-rig" }),
+    };
     const fs = mockFs({});
-    // Add readdir + homedir capabilities
     const fsWithDir = {
       ...fs,
-      readdir: (dir: string) => dir.includes("sessions") ? ["12345.json"] : [],
+      readdir: (dir: string) => dir.includes("sessions") ? files : [],
       homedir: "/mock-home",
       readFile: (p: string) => {
-        if (p.includes("12345.json")) return sessionData;
+        const data = sessionData[nodePath.basename(p)];
+        if (data) return data;
         return fs.readFile(p);
       },
       exists: (p: string) => p.includes("sessions") || fs.exists(p),
     };
-    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: fsWithDir });
+    const adapter = new ClaudeCodeAdapter({ tmux, fsOps: fsWithDir, sessionIdFactory: () => assignedId });
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-impl@test-rig" });
 
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.resumeToken).toBe("abc-session-id");
-      expect(result.resumeType).toBe("claude_id");
-    }
+    expect(tmux.sendText).toHaveBeenCalledWith("r01-impl", expect.stringContaining(`--session-id ${assignedId}`));
+    expect(result).toMatchObject({ ok: true, resumeToken: assignedId, resumeType: "claude_id" });
   });
 
   it("launchHarness returns error when no tmux session bound", async () => {
