@@ -908,7 +908,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   let reportedPiCapability = false;
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
     if (line.trim()) process.stdout.write(`[${runtime}:err] ${line}\n`);
-    if (runtime === "pi" && !reportedPiCapability) {
+    if (runtime === "pi" && !core.isReady() && !reportedPiCapability) {
       const detail = piLaunchCapabilityError(command, args.trust, line, () => {
         const version = spawnSync(command, ["--version"], { cwd: args.cwd, env: childEnv, encoding: "utf8",
           timeout: 3000, maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] });

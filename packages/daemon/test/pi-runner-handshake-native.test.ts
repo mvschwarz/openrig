@@ -61,7 +61,9 @@ console.error('Error: Unknown options: --name, --no-approve'); process.exit(1);
 fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
 const cmd=JSON.parse(line); if(cmd.type==='get_state') console.log(JSON.stringify({type:'response',id:cmd.id,success:${success},
-${success ? `data:{sessionFile:${JSON.stringify(sessionFile)},sessionId:'offline'}` : `error:'cannot load saved session'`}}));});\n`, { mode: 0o700 });
+${success ? `data:{sessionFile:${JSON.stringify(sessionFile)},sessionId:'offline'}` : `error:'cannot load saved session'`}}));
+if(cmd.type==='prompt') { console.error('Unknown option: --name'); console.error('AFTER_RUNNING_WARNING'); }
+});\n`, { mode: 0o700 });
     const stateRoot = path.join(temp, "state");
     const runnerStatePath = piSeatPaths(stateRoot, "fixture").runnerStatePath;
     const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../src/adapters/pi-runner.ts", import.meta.url)),
@@ -82,7 +84,16 @@ ${success ? `data:{sessionFile:${JSON.stringify(sessionFile)},sessionId:'offline
       const state = JSON.parse(fs.readFileSync(runnerStatePath, "utf8"));
       expect(state.ready, output).toBe(success);
       expect(state.launchId).toBe("owned-attempt");
-      if (success) expect(state.sessionFile).toBe(sessionFile);
+      if (success) {
+        expect(state.sessionFile).toBe(sessionFile);
+        child.stdin.write("emit a runtime warning\n");
+        const warningDeadline = Date.now() + 5000;
+        while (!output.includes("AFTER_RUNNING_WARNING") && Date.now() < warningDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        expect(output).toContain("AFTER_RUNNING_WARNING");
+        expect(output).not.toContain("rejects the managed");
+      }
       else {
         expect(output).toContain("cannot load saved session");
         expect(output).not.toContain(PI_RUNNER_READY_MARKER);
