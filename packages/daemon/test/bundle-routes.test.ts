@@ -9,6 +9,8 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { createTestApp } from "./helpers/test-app.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import * as tar from "tar";
+import { createHash } from "node:crypto";
 
 
 const VALID_SPEC = `
@@ -192,6 +194,51 @@ describe("Bundle API routes", () => {
     expect(body.manifest.name).toBe("test");
     expect(body.digestValid).toBe(true);
     expect(body.integrityResult.passed).toBe(true);
+  });
+
+  // S1: /inspect must apply the SAME unsafe-entry safety pre-scan that unpack() does.
+  // unpack() rejects Windows drive-letter entries and backslash traversals; /inspect
+  // previously hand-rolled a weaker pre-scan that only caught POSIX "/" absolutes and
+  // forward-slash ".." segments, so it reported such an archive as inspectable.
+  async function writeArchiveWithEntry(entryName: string): Promise<string> {
+    const staging = path.join(tmpDir, "unsafe-staging");
+    fs.mkdirSync(staging, { recursive: true });
+    fs.writeFileSync(path.join(staging, "payload.txt"), "escape!");
+    const archivePath = path.join(tmpDir, `unsafe-${entryName.replace(/[^a-z0-9]/gi, "_")}.rigbundle`);
+    await tar.create({ gzip: true, file: archivePath, cwd: staging, prefix: entryName }, ["payload.txt"]);
+    const digest = createHash("sha256").update(fs.readFileSync(archivePath)).digest("hex");
+    fs.writeFileSync(`${archivePath}.sha256`, digest);
+    return archivePath;
+  }
+
+  it("POST /api/bundles/inspect refuses a Windows drive-letter archive entry", async () => {
+    const bundlePath = await writeArchiveWithEntry("C:\\windows\\temp");
+
+    const res = await app.request("/api/bundles/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.error).toMatch(/Unsafe archive entr/i);
+    expect(body.manifest).toBeUndefined();
+  });
+
+  it("POST /api/bundles/inspect refuses a backslash traversal archive entry", async () => {
+    const bundlePath = await writeArchiveWithEntry("..\\escape");
+
+    const res = await app.request("/api/bundles/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.error).toMatch(/Unsafe archive entr/i);
+    expect(body.manifest).toBeUndefined();
   });
 
   // T6: Create emits bundle.created event

@@ -8,7 +8,7 @@ import type { BootstrapRepository } from "../domain/bootstrap-repository.js";
 import { LegacyBundleAssembler as BundleAssembler, type AssemblerFsOps } from "../domain/bundle-assembler.js";
 import { PodBundleAssembler, type PodAssemblerFsOps } from "../domain/pod-bundle-assembler.js";
 import { computeIntegrity, writeIntegrity, verifyIntegrity, type IntegrityFsOps } from "../domain/bundle-integrity.js";
-import { pack, unpack, verifyArchiveDigest } from "../domain/bundle-archive.js";
+import { pack, unpack, verifyArchiveDigest, collectUnsafeArchiveEntries, unsafeArchiveEntryReason } from "../domain/bundle-archive.js";
 import { resolvePackage } from "../domain/package-resolve-helper.js";
 import {
   compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds, bundleExportWarning,
@@ -710,17 +710,17 @@ bundleRoutes.post("/create", async (c) => {
   const outputPath = typeof body["outputPath"] === "string" ? body["outputPath"] : "";
   const rigRoot = typeof body["rigRoot"] === "string" ? body["rigRoot"] : undefined;
   const includePackages = Array.isArray(body["includePackages"]) ? body["includePackages"] as string[] : undefined;
-  // `rig bundle create --preset/--seat`: the configuration the CLI staged, recorded in the manifest (outside the package digest)
-  const rawConfiguration = body["configuration"] as { id?: unknown; preset?: unknown } | undefined;
-  const configuration = rawConfiguration && typeof rawConfiguration.id === "string"
-    ? { id: rawConfiguration.id, ...(typeof rawConfiguration.preset === "string" ? { preset: rawConfiguration.preset } : {}) }
-    : undefined;
   // `rig bundle create --context-pack <dir>`: packs to carry from anywhere the author names, by manifest name
   const contextPackDirs = Array.isArray(body["contextPackDirs"])
     ? (body["contextPackDirs"] as unknown[]).filter((d): d is string => typeof d === "string" && d.length > 0)
     : [];
   // `rig bundle create --project-dir <dir>`: the project this rig works in (project.yaml and its files)
   const projectDir = typeof body["projectDir"] === "string" && body["projectDir"] ? body["projectDir"] : undefined;
+  // `rig bundle create --preset/--seat`: the configuration the CLI staged, recorded in the manifest (outside the package digest)
+  const rawConfiguration = body["configuration"] as { id?: unknown; preset?: unknown } | undefined;
+  const configuration = rawConfiguration && typeof rawConfiguration.id === "string"
+    ? { id: rawConfiguration.id, ...(typeof rawConfiguration.preset === "string" ? { preset: rawConfiguration.preset } : {}) }
+    : undefined;
 
   const allowDrift = body["allowDrift"] === true;
 
@@ -932,23 +932,29 @@ bundleRoutes.post("/inspect", async (c) => {
 
   const tmpDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "bundle-inspect-"));
   try {
-    // Extract with safety pre-scan (same as unpack) but without content integrity verification
-    const tar = await import("tar");
-    const unsafeEntries: string[] = [];
-    await tar.list({
-      file: bundlePath,
-      onReadEntry: (entry) => {
-        const p = entry.path;
-        const t = entry.type;
-        if (t === "SymbolicLink" || t === "Link") unsafeEntries.push(`${t}: ${p}`);
-        if (p.startsWith("/")) unsafeEntries.push(`absolute: ${p}`);
-        if (p.split("/").some((s: string) => s === "..")) unsafeEntries.push(`traversal: ${p}`);
-      },
-    });
+    // Extract with the SAME shared safety pre-scan that unpack() uses, but without
+    // content integrity verification (inspect must be able to REPORT a broken
+    // bundle rather than refuse it). One source of truth: collectUnsafeArchiveEntries
+    // rejects symlinks/hardlinks, POSIX-absolute and Windows drive-absolute paths,
+    // and dot-dot traversal (POSIX or backslash). Previously this route hand-rolled a
+    // weaker scan that missed drive-letter and backslash-traversal entries, so an
+    // archive unpack() refuses could be reported safe by inspect.
+    const unsafeEntries = await collectUnsafeArchiveEntries(bundlePath);
     if (unsafeEntries.length > 0) {
       return c.json({ error: `Unsafe archive entries: ${unsafeEntries.join("; ")}`, digestValid }, 200);
     }
-    await tar.extract({ file: bundlePath, cwd: tmpDir });
+    const tar = await import("tar");
+    await tar.extract({
+      file: bundlePath,
+      cwd: tmpDir,
+      // Same defensive filter unpack() applies: even if the pre-scan above were
+      // bypassed, no unsafe entry is written.
+      filter: (p, entry) => {
+        if ("isSymbolicLink" in entry && typeof entry.isSymbolicLink === "function" && entry.isSymbolicLink()) return false;
+        const type = "type" in entry ? (entry as { type?: string }).type : undefined;
+        return unsafeArchiveEntryReason(p, type) === null;
+      },
+    });
 
     const manifestPath = nodePath.join(tmpDir, "bundle.yaml");
     if (!fs.existsSync(manifestPath)) {

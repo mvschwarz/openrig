@@ -262,7 +262,7 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
       if (!declared) throw new ConfigurationError("This bundle has no configurations.yaml; build it as authored or choose a bundle with declared configurations.");
       const chosen = resolveConfiguration(declared, authoredMapping(specPath), { preset: opts.preset, seats: opts.seat });
       // Preserve monorepo-relative refs when a preset changes the selected rig.
-      const staged = stageConfiguration(prepared.checkoutDir, specPath, declared, chosen);
+      const staged = stageConfiguration(realpathSync(prepared.checkoutDir), specPath, declared, chosen);
       configurationStaging = staged.stagingDir;
       specPath = staged.rigSpecPath;
       folder = path.dirname(specPath);

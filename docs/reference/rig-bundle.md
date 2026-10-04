@@ -223,12 +223,14 @@ Future enhancement: cryptographic signing (Ed25519) for author authentication.
 The unpacker enforces these safety rules before extraction:
 
 1. **No symlinks or hardlinks** — `SymbolicLink` and `Link` entries are rejected
-2. **No absolute paths** — entries starting with `/` are rejected
-3. **No path traversal** — entries containing `..` segments are rejected
+2. **No absolute paths** — entries starting with `/`, or carrying a Windows drive letter such as `C:\`, are rejected
+3. **No path traversal** — entries containing `..` segments are rejected, on either slash direction (`..` or `..\`)
 4. **Digest verification** — archive SHA-256 must match the sibling `.sha256` file
 5. **Content integrity** — after extraction, per-file hashes are verified against the manifest
 
 If any check fails, extraction is aborted and an error is thrown.
+
+`rig bundle inspect` applies the same unsafe-entry scan (rules 1-3) before it extracts into its temporary directory, so an archive the installer refuses for an unsafe entry is never reported as inspectable. Digest and content-integrity failures are a different case: inspect reports those in its result (`digestValid`, `integrityResult`) instead of refusing, which is what lets it describe a broken bundle rather than throw.
 
 ---
 
