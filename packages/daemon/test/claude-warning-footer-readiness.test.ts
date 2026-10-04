@@ -26,10 +26,12 @@ const captures = [
   ["fresh post-refusal update warning", pane([update])],
 ] as const;
 
-// Observed Claude 2.1.282 live status rows; an empty composer remains visible mid-turn.
+// Observed Claude 2.1.282 rows plus the previously supported thinking shape.
+// An empty composer remains visible mid-turn.
 const workingRows = [
   "✻ Onioning… (2m 38s · ↓ 10.9k tokens · thought for 8s)",
   "· Onioning… (1m 44s · ↓ 6.6k tokens)",
+  "✶ Thinking… (6s · ↑ 284 tokens · thinking)",
 ];
 const workingCaptures = workingRows.flatMap((row, i) => [
   [`timed work ${i} / no warning`, pane([], "❯\u00a0", row)],
@@ -72,7 +74,7 @@ describe("Claude composer below noninteractive status warnings", () => {
 
   it.each([[], [update], [update, focus], [update, weekly]])("keeps completed work idle with suffix %j", (...trailers) => {
     const suffix = trailers as string[];
-    for (const before of ["● Ready.", "✻ Crunched for 2s", `${workingRows[0]}\n● Completed response.\n✻ Crunched for 2s`]) {
+    for (const before of ["● Ready.", "✻ Crunched for 2s", `${workingRows[0]}\n● Completed response.\n✻ Crunched for 2s`, `${workingRows[2]}\n● Ready.`]) {
       expect(classifyPaneActivity(pane(suffix, "❯\u00a0", before)).state).toBe("agent_idle");
     }
   });

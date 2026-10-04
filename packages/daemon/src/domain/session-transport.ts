@@ -149,8 +149,9 @@ function findClaudeComposer(paneContent: string) {
 
   let liveStatus: string | null = null;
   for (let i = bar - 4; i >= 0; i--) {
+    if (!lines[i]!.startsWith(indent)) break;
     const line = lines[i]!.slice(indent.length);
-    if (CLAUDE_LIVE_STATUS_PATTERN.test(line)) {
+    if ([CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS].some((pattern) => pattern.test(line))) {
       liveStatus = truncateEvidence(line);
       break;
     }
@@ -232,9 +233,6 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     return { state: "agent_active", reason: "mid_work_pattern", evidence: claudeComposer.liveStatus };
   }
   if (claudeComposer?.hasWarnings) {
-    // Discarding warnings must not hide work above the empty composer.
-    const working = findPatternEvidence(promptScanLines, MID_WORK_PATTERNS);
-    if (working) return { state: "agent_active", reason: "mid_work_pattern", evidence: working };
     return { state: "agent_idle", reason: "idle_prompt", evidence: truncateEvidence(claudeComposer.text) };
   }
 
