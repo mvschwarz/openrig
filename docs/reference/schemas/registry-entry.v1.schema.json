@@ -112,5 +112,28 @@
       "format": "date",
       "description": "When the entry was withdrawn; set with status: withdrawn."
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "withdrawn"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "withdrawnOn"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "withdrawnOn"
+          ]
+        }
+      }
+    }
+  ]
 }

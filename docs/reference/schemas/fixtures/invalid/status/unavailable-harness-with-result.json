@@ -1,7 +1,7 @@
 {
   "generated": {
     "by": "openrig-world tools/status.mjs",
-    "notice": "edited by hand",
+    "notice": "Generated file. Do not edit by hand; regenerate it.",
     "rule": "openrig.status-rule/v1",
     "generatorVersion": 1
   },
@@ -41,7 +41,7 @@
     }
   },
   "harnessChecks": {
-    "state": "ok",
+    "state": "status_unavailable",
     "harnesses": {
       "pi": {
         "linux-x64": {
@@ -57,5 +57,5 @@
       }
     }
   },
-  "bodyDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  "bodyDigest": "c23b3fae312e39667da2ec9fbb0a44c9d68048e0ca4c392301bf884ca30a44e8"
 }

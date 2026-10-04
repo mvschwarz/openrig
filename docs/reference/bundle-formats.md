@@ -34,7 +34,7 @@ hex).
 
 ### Configuration ID
 
-Every member's `pod.member=runtime`, sorted by `pod.member` in plain code-unit order, joined with `,`. There's no
+Every member's `pod.member=runtime`, sorted by `pod.member` in UTF-16 code-unit order, joined with `,`. There's no
 whitespace, and runtimes are spelled as in `rig.yaml`. For example:
 
 ```text
@@ -47,7 +47,7 @@ Preset names such as `recommended` or `all-claude` are aliases shown beside the 
 
 `{ algorithm: "sha256", value, coverage: "openrig.package-digest/v1" }`:
 - `value` is SHA-256 over UTF-8 lines `<path>\t<sha256>\n`, one for each entry of the built archive's `integrity.files`,
-  sorted by path in code-unit order;
+  sorted by path in UTF-16 code-unit order;
 - it's the same when the same folder is rebuilt by the same OpenRig, while the archive's own hash changes with every
   build (`createdAt`).
 
@@ -108,7 +108,9 @@ decision, recorded in the registry entry's `evidenceReuse`.
   They're shown as Known problem, Tested by OpenRig, Tested with help (N), Partly tested, Not tested by OpenRig
   and Status unavailable.
 - **Empty `platforms`** means Not tested by OpenRig.
-- **A listing whose records can't be read** is `status_unavailable`, never Not tested by OpenRig.
+- **A listing whose records can't be read** is `status_unavailable`, never Not tested by OpenRig. So is a listed
+  configuration that's missing from the status file. Platform keys are `<os>-<arch>` (`linux`, `darwin` or `win32`;
+  `x64` or `arm64`).
 - **The file holds no private paths, host names, row IDs, account names or receipt text,** and regenerating it gives
   identical bytes.
 - **`bodyDigest`** is SHA-256, lowercase hex, over the RFC 8785 (JCS) canonical JSON, as UTF-8, of an object holding

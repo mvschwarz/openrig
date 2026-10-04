@@ -16,6 +16,13 @@
         "a.z": "claude-code"
       },
       "expected": "B.y=codex,a.z=claude-code,b.x=pi"
+    },
+    {
+      "mapping": {
+        "a.b-c": "pi",
+        "a.b": "codex"
+      },
+      "expected": "a.b=codex,a.b-c=pi"
     }
   ],
   "packageDigest": [
