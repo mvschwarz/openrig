@@ -328,7 +328,9 @@ profiles:
       expect(result.ok, JSON.stringify(result)).toBe(true);
       expect(reconciler).toHaveBeenCalledOnce();
       expect(reconciler.mock.results[0]?.value.ok).toBe(true);
-      expect(JSON.stringify(result)).toContain("skill_bundle_precedence");
+      const owner = reconciler.mock.calls[0]![0].topologyOwner;
+      expect(JSON.stringify(result)).toContain(`${owner}: skill_bundle_precedence`);
+      expect(JSON.stringify(result)).toContain("the managed catalog was not changed");
       const selected = reconciler.mock.calls[0]![0].loadout.entries.find(e => e.id === "shared")!;
       expect(selected.sourceDir).toBe(nodePath.join(installed, "agents/impl/skills/shared"));
       expect(fs.readFileSync(nodePath.join(project, runtime === "codex" ? ".agents" : ".claude", "skills/shared/SKILL.md"), "utf8")).toBe(skill("Bundle"));

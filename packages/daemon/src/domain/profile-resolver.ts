@@ -251,7 +251,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
             throw new Error(`skill frontmatter name '${parsed.frontmatter.name}' does not match selected identity '${resource.id}'`);
           }
           if (tree.digest !== managed.digest) {
-            skillWarnings.push(`skill_bundle_precedence: selected '${existing.effectiveId}' from ${existingPath} instead of differing managed catalog ${managed.sourceDir}`);
+            skillWarnings.push(`skill_bundle_precedence: selected '${existing.effectiveId}' from ${existingPath} instead of differing managed catalog ${managed.sourceDir}; the managed catalog was not changed`);
           }
           // Keep the adapter source and the pre-launch reconciler on the same bytes.
           // The existing ownership rules still protect edits in the target workspace.

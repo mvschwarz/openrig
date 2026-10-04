@@ -898,7 +898,7 @@ export function reconcileSkillLoadout(input: {
       renameSync(nodePath.join(staged, receipt.id), receipt.target);
       rollback.push({ target: receipt.target, backup });
       receipt.status = "current";
-      receipt.detail = "projected exact catalog bytes";
+      receipt.detail = "projected exact selected source bytes";
     }
     for (const prior of safeRemovals) {
       const backup = nodePath.join(backups, `removed-${prior.id}`);
