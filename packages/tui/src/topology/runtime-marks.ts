@@ -183,6 +183,14 @@ export function codexMark(): MarkSeg[] {
   ];
 }
 
+/** Cursor Agent: a bright diamond on the shared `_` ink, same two-cell width as codex. */
+export function cursorMark(): MarkSeg[] {
+  return [
+    { text: "◆", token: "bright", bold: true },
+    { text: "_", token: "markInk", bold: true },
+  ];
+}
+
 /** terminal/tty runtime: dark cell + white `>_` — same family, inverted. */
 export function terminalMark(): MarkSeg[] {
   return [
@@ -197,6 +205,7 @@ export function runtimeMarkSegs(runtime: string | null | undefined): MarkSeg[] {
   const r = (runtime ?? "").toLowerCase();
   if (r.startsWith("claude")) return clawdSquareMark(); // round-3 locked square
   if (r.startsWith("codex")) return codexMark();
+  if (r === "cursor") return cursorMark();
   if (r === "terminal" || r === "tty" || r.startsWith("external")) return terminalMark();
   // unknown runtime: honest text token, dimmed — never a fabricated mark
   return [{ text: "?", token: "dim" }];

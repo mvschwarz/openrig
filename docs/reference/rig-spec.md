@@ -322,7 +322,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `agent_ref` | string | yes | — | Reference to an AgentSpec. Must start with `local:` (relative) or `path:` (absolute). Exception: `builtin:terminal` for infrastructure nodes. |
 | `profile` | string | yes | — | Profile name from the referenced AgentSpec. Use `default` for the default profile. Exception: `none` for terminal nodes. |
 | `codex_config_profile` | string | no | — | Codex-only native profile passed as `-p <name>`; letters, numbers, `_`, `.`, `-`. Separate from the AgentSpec `profile`. With the normal launch mode, this replaces OpenRig's explicit workspace-write sandbox flag. A full-bypass policy instead emits danger-full-access and omits this profile argument. |
-| `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `terminal`, `stub`. `stub` is a deterministic test harness, not an agent: a Node runner in the seat's tmux pane goes through the normal launch, skill projection, startup-file and readiness path, follows `<cwd>/.openrig/stub/script.json` when present, and calls no model. See "What a stub can and cannot prove" in `docs/as-built/test-layers.md`. |
+| `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `cursor`, `terminal`, `stub`. `stub` is a deterministic test harness, not an agent: a Node runner in the seat's tmux pane goes through the normal launch, skill projection, startup-file and readiness path, follows `<cwd>/.openrig/stub/script.json` when present, and calls no model. See "What a stub can and cannot prove" in `docs/as-built/test-layers.md`. |
 | `cwd` | string | yes | — | Working directory for the agent. Resolved relative to the rig root (the directory containing the rig spec). Use `"."` for the rig root itself. Can be overridden at launch time with `rig up --cwd`. |
 | `label` | string | no | — | Human-readable member name. Shown in UI when present. |
 | `model` | string | no | — | Model override. Runtime-specific (e.g., `claude-opus-4-6` for Claude Code). |
@@ -358,6 +358,18 @@ profile: none
 ```
 
 All three must be present together. Any partial combination is a validation error.
+
+### Cursor Seats
+
+`runtime: cursor` runs the Cursor CLI (`cursor-agent`) in the seat's pane. Tested with cursor-agent 2026.09.28.
+
+- Each seat gets its own Cursor config dir (`CURSOR_CONFIG_DIR`) at `$OPENRIG_HOME/state/cursor/<nodeId>`, so the seat's model and approval settings never touch your own `~/.cursor/cli-config.json`.
+- Guidance is merged into `AGENTS.md` in the seat's `cwd`, and skills are installed under `.agents/skills/`, the same targets as Codex.
+- Seats start at Cursor's allowlist approval mode. To let Cursor's auto-review classifier approve commands instead, run `rig seat set-permissions <seat> --mode auto_review --reason "<why>"`; it takes effect on the next managed launch. Cursor keeps the approval mode per chat and cannot lower it, so a seat whose mode has changed since its chat last ran (or whose chat OpenRig has no record of) is not resumed into that chat: `rig up` starts a fresh chat, and a restore never reports such a seat as resumed.
+- For activity, OpenRig adds its own entries to `~/.cursor/hooks.json` the first time a Cursor seat launches, and only when `~/.cursor` already exists. Your own entries are kept, and the file is never deleted. To turn this off, run `rig config set runtime.cursor.hooks_enabled false`: seat launches stop adding the entries at once, and the entries already there are removed at the next daemon restart.
+- Set `OPENRIG_CURSOR_HOME` to an absolute path to make the daemon use that directory instead of `~/.cursor` for the hooks file (like `CODEX_HOME` for Codex); the daemon's own tests use it to stay off your real home.
+- A seat's model comes from its spec. If the spec sets none, Cursor's default model is used for new chats; a resumed chat keeps the model it last used.
+- Context usage is read from Cursor's own footer line, so it updates on the context monitor's poll and is a whole-percent figure.
 
 ### agent_ref Rules
 

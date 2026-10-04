@@ -147,6 +147,7 @@ export const SETTINGS_VALID_KEYS = [
   // Codex runtime. When false, operator is managing Codex config
   // independently — daemon does NOT mutate.
   "runtime.codex.hooks_enabled",
+  "runtime.cursor.hooks_enabled",
   "runtime.readiness_timeout_seconds",
   // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
   // 7 keys (lockstep with cli/src/config-store.ts VALID_KEYS).
@@ -262,6 +263,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   // OPENRIG_X primary only per the post-rename 5-key boundary doctrine
   // (no RIGGED_X legacy on net-new keys).
   "runtime.codex.hooks_enabled": { primary: "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED" },
+  "runtime.cursor.hooks_enabled": { primary: "OPENRIG_RUNTIME_CURSOR_HOOKS_ENABLED" },
   "runtime.readiness_timeout_seconds": { primary: "OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS" },
   // Slice 27 — Claude auto-compaction policy. Net-new keys; OPENRIG_X
   // primary only.
@@ -342,6 +344,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "feed.subscriptions.progress": ["feed", "subscriptions", "progress"],
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
+  "runtime.cursor.hooks_enabled": ["runtime", "cursor", "hooksEnabled"],
   "runtime.readiness_timeout_seconds": ["runtime", "readinessTimeoutSeconds"],
   "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
   "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
@@ -605,6 +608,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // Daemon ensures `codex_hooks = true` in ~/.codex/config.toml on
     // launch unless operator explicitly sets to false.
     case "runtime.codex.hooks_enabled": return true;
+    case "runtime.cursor.hooks_enabled": return true;
     case "runtime.readiness_timeout_seconds": return 30;
     // Slice 27 — Claude auto-compaction policy defaults. Opt-in
     // default-off; threshold 80% per spec. Pre/post defaults point at

@@ -151,6 +151,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "feed.subscriptions.audit_log",
       // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
       "runtime.codex.hooks_enabled",
+      "runtime.cursor.hooks_enabled",
       "runtime.readiness_timeout_seconds",
       // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10.
       "policies.claude_compaction.enabled",

@@ -550,7 +550,7 @@ identity remains unverified; a version number alone cannot clear it.
   cmd
     .command("set-permissions")
     .argument("<seat>", "Canonical session name or logical seat ref")
-    .requiredOption("--mode <mode>", "floor, full_bypass, inherit, or a Claude mode supported by the bound managed launch context")
+    .requiredOption("--mode <mode>", "floor, full_bypass, inherit, auto_review (Cursor seats), or a Claude mode supported by the bound managed launch context")
     .requiredOption("--reason <text>", "Reason for the audited future-launch selection")
     .option("--operator <address>", "Operator recorded on the audit event when no session identity is present")
     .option("--json", "JSON output for agents")

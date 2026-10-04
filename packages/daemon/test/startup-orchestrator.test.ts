@@ -1168,6 +1168,20 @@ describe("StartupOrchestrator", () => {
     expect(session!.resumeType).toBe("claude_id");
   });
 
+  it("a resume launch that returns a different token (Cursor fresh chat on a mode change) persists the new token", async () => {
+    const seed = seedSession();
+    const launchHarness = vi.fn(async () => ({ ok: true as const, resumeToken: "new-chat", resumeType: "cursor_chat_id" }));
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, {
+      adapter: mockAdapter({ runtime: "cursor", launchHarness }), isRestore: true, resumeToken: "old-chat", resumeType: "cursor_chat_id",
+    }));
+    expect(result.ok).toBe(true);
+    expect(launchHarness.mock.calls[0]![1]).toMatchObject({ resumeToken: "old-chat" });
+    const session = sessionRegistry.getSessionsForRig(seed.rigId).find((s) => s.id === seed.sessionId);
+    expect(session!.resumeToken).toBe("new-chat");
+    expect(session!.resumeType).toBe("cursor_chat_id");
+  });
+
   it("launchHarness does not persist empty resume token as restoreable state", async () => {
     const seed = seedSession();
     const adapter = mockAdapter({

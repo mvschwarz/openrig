@@ -1,6 +1,6 @@
 import { mockShellCommand } from "./helpers/shell-command-mock.js";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { yoloEnabled, codexPostureArg, piTrust } from "../src/adapters/yolo-mode.js";
+import { yoloEnabled, codexPostureArg, piTrust, cursorApprovalArg } from "../src/adapters/yolo-mode.js";
 import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
@@ -149,5 +149,27 @@ describe("OPR.0.4.8.2 YOLO mode — opt-in, default OFF, launch-flag surface onl
     expect(piTrust(undefined, {} as NodeJS.ProcessEnv)).toBe("no-approve");
     expect(piTrust("approve", {} as NodeJS.ProcessEnv)).toBe("approve");
     expect(piTrust("no-approve", { OPENRIG_YOLO: "1" } as NodeJS.ProcessEnv)).toBe("approve");
+  });
+});
+
+describe("cursorApprovalArg", () => {
+  it("leaves Cursor's own allowlist in charge at the floor", () => {
+    expect(cursorApprovalArg({}, "floor")).toBe("");
+    expect(cursorApprovalArg({})).toBe("");
+    // The Claude-only "auto" posture has no Cursor equivalent; it keeps the floor, as for Codex.
+    expect(cursorApprovalArg({ OPENRIG_YOLO: "1" }, "auto")).toBe("");
+  });
+  it("runs everything under full bypass or global YOLO", () => {
+    expect(cursorApprovalArg({}, "full_bypass")).toBe(" --force");
+    expect(cursorApprovalArg({ OPENRIG_YOLO: "1" })).toBe(" --force");
+  });
+  it("lets an attached floor policy override global YOLO", () => {
+    expect(cursorApprovalArg({ OPENRIG_YOLO: "1" }, "floor")).toBe("");
+  });
+  it("selects auto-review from the native mode, over the posture", () => {
+    expect(cursorApprovalArg({ OPENRIG_YOLO: "1" }, "full_bypass", "auto_review")).toBe(" --auto-review");
+  });
+  it("refuses an unknown native mode", () => {
+    expect(() => cursorApprovalArg({}, undefined, "plan")).toThrow(/Cursor permission mode/);
   });
 });

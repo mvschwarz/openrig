@@ -83,6 +83,11 @@ describe("P16 — AppDeps members with safety semantics are composed (definednes
       expect(deps[member], `AppDeps.${String(member)} must be composed by createDaemon`).toBeDefined();
     });
   }
+
+  it("production runtimeAdapters registry registers the cursor adapter", () => {
+    expect(deps.runtimeAdapters!["cursor"], "a runtime: cursor seat must resolve an adapter").toBeDefined();
+    expect(deps.runtimeAdapters!["cursor"]!.runtime).toBe("cursor");
+  });
 });
 
 describe("P16 — domain-internal safety injections (the recurred class, pinned at the wire)", () => {

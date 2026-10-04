@@ -79,7 +79,7 @@ describe("config routes (User Settings v0)", () => {
     const body = await res.json() as { settings: Record<string, { value: unknown; source: string }> };
     // 18 v0 keys + 2 Phase 4 (advisor/operator) + 5 Phase 5 (feed.subscriptions.*)
     // + 2 V1 pre-release Item 1 (transcripts.lines / transcripts.poll_interval_seconds)
-    // + 1 plugin-primitive Phase 3a slice 3.5 (runtime.codex.hooks_enabled)
+    // + 2 runtime hooks flags (runtime.codex.hooks_enabled, runtime.cursor.hooks_enabled)
     // + 1 V0.3.1 slice 05 (workspace.operator_seat_name)
     // + 7 slice 27 (policies.claude_compaction.*)
     // + 3 OPR.0.3.4.9 (snapshots.periodic.*)
@@ -107,8 +107,9 @@ describe("config routes (User Settings v0)", () => {
     // + 2 OPR.0.5.10.7 context-pressure policy thresholds → 68 total.
     // + 1 S07 local-time preference.
     // + 1 ui.enabled (web UI and its terminal WebSocket; default off).
+    // + 1 runtime.readiness_timeout_seconds.
     // + 1 launch.non_interruptive (new-rig launch default; default off).
-    expect(Object.keys(body.settings).length).toBe(72);
+    expect(Object.keys(body.settings).length).toBe(73);
     expect(body.settings["launch.non_interruptive"]).toMatchObject({ value: false, source: "default" });
     expect(body.settings["runtime.readiness_timeout_seconds"]).toMatchObject({ value: 30, source: "default" });
     expect(body.settings["ui.enabled"]).toMatchObject({ value: false, source: "default" });

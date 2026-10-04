@@ -104,7 +104,7 @@ export interface RungDeclaration {
  *  never inherits its predecessor's rung authority. */
 export interface AdapterRungInventory {
   adapterId: string;
-  runtime: "claude-code" | "codex" | "tmux-generic";
+  runtime: "claude-code" | "codex" | "cursor" | "tmux-generic";
   rungs: RungDeclaration[];
 }
 
@@ -180,6 +180,18 @@ export const CODEX_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
   ],
 };
 
+/** Cursor Agent: beforeSubmitPrompt/preToolUse/stop cover the turn lifecycle, so the hook
+ *  rung is an authority CANDIDATE at TRIAL like Codex. Cursor has no approval-wait hook; needs-input
+ *  comes from the pane (session-transport's Cursor patterns). Sampling stays the floor. */
+export const CURSOR_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "cursor-runtime-adapter",
+  runtime: "cursor",
+  rungs: [
+    { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "trial" },
+    { rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" },
+  ],
+};
+
 /** The generic tmux floor: sampling only — exactly what an undeclared seat gets. */
 export const TMUX_GENERIC_RUNG_INVENTORY: AdapterRungInventory = {
   adapterId: "tmux-generic",
@@ -192,5 +204,6 @@ export const TMUX_GENERIC_RUNG_INVENTORY: AdapterRungInventory = {
 export function runtimeRungInventory(runtime: string | null): AdapterRungInventory {
   if (runtime === "claude-code") return CLAUDE_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
+  if (runtime === "cursor") return CURSOR_ACTIVITY_RUNG_INVENTORY;
   return TMUX_GENERIC_RUNG_INVENTORY;
 }

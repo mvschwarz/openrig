@@ -117,6 +117,9 @@ export interface RiggedConfig {
     codex: {
       hooksEnabled: boolean;
     };
+    cursor: {
+      hooksEnabled: boolean;
+    };
   };
   // Slice 27 — Claude auto-compaction policy. Operator-configurable
   // pre-compaction trigger: when a Claude seat's context usage crosses
@@ -281,6 +284,9 @@ const DEFAULTS = {
     codex: {
       hooksEnabled: true,
     },
+    cursor: {
+      hooksEnabled: true,
+    },
   },
   // Slice 27 — opt-in default-off. Threshold default 80% per spec.
   policies: {
@@ -400,6 +406,7 @@ export const VALID_KEYS = [
   "feed.subscriptions.audit_log",
   // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
   "runtime.codex.hooks_enabled",
+  "runtime.cursor.hooks_enabled",
   "runtime.readiness_timeout_seconds",
   // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
   // 7 ConfigStore keys (lockstep with daemon SETTINGS_VALID_KEYS).
@@ -496,6 +503,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // Net-new key post-rename: OPENRIG_X primary only per the 5-key
   // boundary doctrine (no RIGGED_X legacy on net-new keys).
   "runtime.codex.hooks_enabled": { primary: "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED" },
+  "runtime.cursor.hooks_enabled": { primary: "OPENRIG_RUNTIME_CURSOR_HOOKS_ENABLED" },
   "runtime.readiness_timeout_seconds": { primary: "OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS" },
   // Slice 27 — Claude auto-compaction policy. OPENRIG_X primary only
   // (net-new keys, no legacy).
@@ -577,6 +585,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "feed.subscriptions.progress": ["feed", "subscriptions", "progress"],
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
+  "runtime.cursor.hooks_enabled": ["runtime", "cursor", "hooksEnabled"],
   "runtime.readiness_timeout_seconds": ["runtime", "readinessTimeoutSeconds"],
   "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
   "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
@@ -1064,6 +1073,9 @@ export class ConfigStore {
         readinessTimeoutSeconds: v("runtime.readiness_timeout_seconds") as number,
         codex: {
           hooksEnabled: v("runtime.codex.hooks_enabled") as boolean,
+        },
+        cursor: {
+          hooksEnabled: v("runtime.cursor.hooks_enabled") as boolean,
         },
       },
       policies: {

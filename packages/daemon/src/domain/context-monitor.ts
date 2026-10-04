@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { ClaudeCompactionEnforcer } from "./claude-compaction-enforcer.js";
-import type { ContextUsageStore } from "./context-usage-store.js";
+import { cursorContextUsageFromPane, type ContextUsageStore } from "./context-usage-store.js";
 import {
   isAttentionRequiredReadinessCode,
   type NodeBinding,
@@ -50,6 +50,7 @@ export class ContextMonitor {
   private readinessCheckers: Record<string, RuntimeReadinessChecker | undefined>;
   private usageSamples: UsageSamplesStore | null = null;
   private providerWindowSampler: (() => ProviderWindowSampleInput[]) | null = null;
+  private cursorPaneReader: ((sessionName: string) => Promise<string | null>) | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private activePoll: Promise<void> | null = null;
 
@@ -61,7 +62,9 @@ export class ContextMonitor {
     readinessCheckers?: Record<string, RuntimeReadinessChecker | undefined>,
     usageSamples?: UsageSamplesStore,
     providerWindowSampler?: () => ProviderWindowSampleInput[],
+    cursorPaneReader?: (sessionName: string) => Promise<string | null>,
   ) {
+    this.cursorPaneReader = cursorPaneReader ?? null;
     this.db = db;
     this.store = store;
     this.usageSamples = usageSamples ?? null;
@@ -91,10 +94,23 @@ export class ContextMonitor {
     const sessions = this.getEligibleSessions();
     for (const session of sessions) {
       let observed: ContextUsage | null = null;
-      const canReadContextUsage = session.runtime !== "codex" || !!session.resume_token;
+      const isCursor = session.runtime === "cursor";
+      // Cursor seats are read from the pane footer; with no reader wired there
+      // is nothing honest to persist, so they are skipped.
+      const canReadContextUsage = isCursor
+        ? this.cursorPaneReader !== null
+        : session.runtime !== "codex" || !!session.resume_token;
       if (canReadContextUsage) {
         try {
-          observed = this.readContextUsage(session);
+          observed = isCursor
+            ? await this.readCursorContextUsage(session)
+            : this.readContextUsage(session);
+          // The pane read is async: if the seat was handed over meanwhile, the
+          // reading belongs to the old occupant, so persist nothing this tick.
+          if (isCursor && this.seatChangedSincePoll(session)) {
+            observed = null;
+            continue;
+          }
           this.store.persist(session.node_id, observed);
           // 51-08 A1: the over-time twin — advance-only append on the SAME tick
           // (PM decision 1: piggyback, no parallel sampler). Known samples only:
@@ -154,6 +170,9 @@ export class ContextMonitor {
     usage: ContextUsage | null,
   ): Promise<void> {
     if (!this.compactionEnforcer) return;
+    // The enforcer is Claude's /compact path; never relay other runtimes
+    // (Cursor in particular reads a whole-percent footer, not a Claude sample).
+    if (session.runtime === "cursor") return;
     if (!usage || usage.availability !== "known" || !usage.fresh) return;
     try {
       await this.compactionEnforcer.maybeAutoCompact({
@@ -168,6 +187,28 @@ export class ContextMonitor {
       // Defensive: enforcer should not throw, but absorb here so the
       // polling loop continues to make progress for remaining sessions.
     }
+  }
+
+  /** Cursor: footer from the rendered pane; a reader fault or empty capture is unknown, never a throw. */
+  private async readCursorContextUsage(session: EligibleSession): Promise<ContextUsage> {
+    // Taken before the await so the store's prior-generation guard sees the true read time.
+    const sampledAt = new Date().toISOString();
+    let pane: string | null = null;
+    try {
+      pane = (await this.cursorPaneReader?.(session.session_name)) ?? null;
+    } catch {
+      pane = null;
+    }
+    if (pane === null) return this.store.unknownUsage("no_data");
+    return cursorContextUsageFromPane(pane, session.session_name, sampledAt);
+  }
+
+  /** True when the node's latest session is no longer the one this tick polled. */
+  private seatChangedSincePoll(session: EligibleSession): boolean {
+    const latest = this.db
+      .prepare("SELECT id, session_name FROM sessions WHERE node_id = ? ORDER BY id DESC LIMIT 1")
+      .get(session.node_id) as { id: string; session_name: string } | undefined;
+    return !latest || latest.id !== session.session_id || latest.session_name !== session.session_name;
   }
 
   /** Start polling at the given interval. Idempotent. */
@@ -208,6 +249,7 @@ export class ContextMonitor {
       WHERE (
           (n.runtime = 'claude-code' AND s.status = 'running')
           OR (n.runtime = 'stub' AND s.status = 'running')
+          OR (n.runtime = 'cursor' AND s.status = 'running')
           OR (
             n.runtime = 'codex'
             AND (

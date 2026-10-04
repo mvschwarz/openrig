@@ -793,4 +793,90 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(forced.warning).toContain("busy is advisory");
     expect(runSpy).toHaveBeenCalled();
   });
+
+  // Cursor has no approval hook: preToolUse fires BEFORE the approval panel, so a fresh "running"
+  // hook can coexist with a visible "Run this command?" panel. The pane must veto.
+  describe("Cursor: pane veto over a fresh hook", () => {
+    const footer = ["  Grok 4.7 256K Low · 8.7%                                  Auto-review", "  /work/a/very/long/path/that/wraps/onto", "  two-lines · main"];
+    const CURSOR_APPROVAL = [
+      "  $ touch approval-probe.txt Waiting for approval...",
+      " $  touch approval-probe.txt in .",
+      " Run this command?",
+      " Not in allowlist: touch",
+      "  → Run (once) (y)",
+      "    Add Shell(touch) to allowlist? (tab)",
+      "    Run Everything (shift+tab)",
+      "    Skip & tell the agent what to do instead (esc or n)",
+    ].join("\n");
+    const CURSOR_WORKING = ["  Use the shell to run: touch x", " ⠘⠆ Working", "  → Add a follow-up                                   ctrl+c to stop", ...footer].join("\n");
+    const CURSOR_DRAFT = ["  finished", "  → please also check the tests", ...footer].join("\n");
+
+    function seedCursorSeat(name = "dev-cur@my-rig") {
+      const node = rigRepo.addNode(rigId, "dev.cur", { role: "worker", runtime: "cursor" });
+      const session = sessionRegistry.registerSession(node.id, name);
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: name });
+      return name;
+    }
+
+    it("refuses a fresh running hook when the pane shows the approval panel; types nothing", async () => {
+      const name = seedCursorSeat();
+      agentActivityStore.recordHookEvent({ runtime: "cursor", sessionName: name, hookEvent: "preToolUse" });
+      const { sendText, sendKeys } = spies();
+      const t = makeTransport(mockTmux({ capturePaneContent: async () => CURSOR_APPROVAL, sendText, sendKeys }));
+      const r = await t.send(name, "hello");
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe("target_needs_input");
+      expect(r.activity?.reason).toBe("permission_prompt");
+      expect(sendText).not.toHaveBeenCalled();
+      expect(sendKeys).not.toHaveBeenCalled();
+    });
+
+    it("still proceeds with the busy advisory when the pane is an ordinary working screen", async () => {
+      const name = seedCursorSeat();
+      agentActivityStore.recordHookEvent({ runtime: "cursor", sessionName: name, hookEvent: "preToolUse" });
+      const { sendText } = spies();
+      const t = makeTransport(mockTmux({ capturePaneContent: async () => CURSOR_WORKING, sendText }));
+      const r = await t.send(name, "hello");
+      expect(r.ok).toBe(true);
+      expect(r.warning).toContain("mid-task");
+      expect(sendText).toHaveBeenCalled();
+    });
+
+    it("refuses a fresh idle hook when the pane holds a typed draft", async () => {
+      const name = seedCursorSeat();
+      agentActivityStore.recordHookEvent({ runtime: "cursor", sessionName: name, hookEvent: "stop" });
+      const { sendText } = spies();
+      const t = makeTransport(mockTmux({ capturePaneContent: async () => CURSOR_DRAFT, sendText }));
+      const r = await t.send(name, "hello");
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe("target_needs_input");
+      expect(r.activity?.reason).toBe("prompt_draft");
+      expect(sendText).not.toHaveBeenCalled();
+    });
+
+    it("refuses a default send when the draft begins with placeholder text", async () => {
+      const name = seedCursorSeat();
+      agentActivityStore.recordHookEvent({ runtime: "cursor", sessionName: name, hookEvent: "stop" });
+      const { sendText } = spies();
+      const draft = ["  finished", "  → Add a follow-up about the tests", ...footer].join("\n");
+      const t = makeTransport(mockTmux({ capturePaneContent: async () => draft, sendText }));
+      const r = await t.send(name, "hello");
+      expect(r.ok).toBe(false);
+      expect(r.activity?.reason).toBe("prompt_draft");
+      expect(sendText).not.toHaveBeenCalled();
+    });
+
+    it("leaves claude-code unchanged: a fresh running hook is authoritative and the pane is not captured", async () => {
+      agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit" });
+      const capture = vi.fn(async () => CURSOR_APPROVAL);
+      const { sendText } = spies();
+      const t = makeTransport(mockTmux({ capturePaneContent: capture, sendText }));
+      const r = await t.send("dev-impl@my-rig", "hello");
+      expect(r.ok).toBe(true);
+      expect(r.warning).toContain("mid-task");
+      expect(capture).not.toHaveBeenCalled();
+      expect(sendText).toHaveBeenCalled();
+    });
+  });
 });

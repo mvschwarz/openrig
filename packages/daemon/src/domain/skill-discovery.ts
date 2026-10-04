@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { SkillResource } from "./types.js";
 
-export type SkillRuntime = "claude-code" | "codex" | "pi";
+export type SkillRuntime = "claude-code" | "codex" | "pi" | "cursor";
 
 export interface SkillDiscoveryPaths {
   runtime: SkillRuntime;

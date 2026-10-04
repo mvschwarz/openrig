@@ -41,7 +41,16 @@ function firstString(...values) {
   return null;
 }
 
+// OpenRig's Cursor hooks are user-scope, so they fire for every cursor-agent run, including a
+// nested `cursor-agent -p` inside a Claude or Codex seat that inherits the seat's OPENRIG_* env.
+// Cursor payloads carry `cursor_version`; relay one only from a Cursor seat.
+function isForeignCursorPayload(providerPayload, env = process.env) {
+  if (!providerPayload || typeof providerPayload !== "object" || !("cursor_version" in providerPayload)) return false;
+  return firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME) !== "cursor";
+}
+
 function buildOpenRigPayload(providerPayload, env = process.env, now = () => new Date()) {
+  if (isForeignCursorPayload(providerPayload, env)) return null;
   const sessionName = firstString(env.OPENRIG_SESSION_NAME, env.RIGGED_SESSION_NAME);
   const nodeId = firstString(env.OPENRIG_NODE_ID, env.RIGGED_NODE_ID);
   const runtime = firstString(env.OPENRIG_RUNTIME, env.RIGGED_RUNTIME);
@@ -142,6 +151,7 @@ async function postHookPayload(payload, env = process.env) {
 
 function buildSessionIdentityPayload(providerPayload, env = process.env, now = () => new Date()) {
   if (!providerPayload || typeof providerPayload !== "object") return null;
+  if (isForeignCursorPayload(providerPayload, env)) return null;
   const hookEvent = firstString(
     providerPayload.hookEvent, providerPayload.hookEventName,
     providerPayload.hook_event_name, providerPayload.event, providerPayload.eventName
@@ -168,14 +178,19 @@ function buildSessionIdentityPayload(providerPayload, env = process.env, now = (
   };
 }
 
+/** Everything to post for one hook event, in order: the activity event, then any session identity. */
+function relayPayloads(providerPayload, env = process.env, now = () => new Date()) {
+  if (isForeignCursorPayload(providerPayload, env)) return [];
+  return [
+    buildOpenRigPayload(providerPayload, env, now),
+    buildSessionIdentityPayload(providerPayload, env, now),
+  ].filter(Boolean);
+}
+
 async function main() {
   const providerPayload = parseJson(await readStdin());
-  const payload = buildOpenRigPayload(providerPayload);
-  await postHookPayload(payload);
-
-  const identityPayload = buildSessionIdentityPayload(providerPayload, process.env);
-  if (identityPayload) {
-    await postHookPayload(identityPayload);
+  for (const payload of relayPayloads(providerPayload, process.env)) {
+    await postHookPayload(payload);
   }
 }
 
@@ -188,5 +203,6 @@ module.exports = {
   buildSessionIdentityPayload,
   parseJson,
   postHookPayload,
+  relayPayloads,
   resolveEndpoint,
 };

@@ -18,6 +18,8 @@ import { findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from ".
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
+import nodePath from "node:path";
+import { getOpenRigHome } from "../openrig-compat.js";
 
 // -- Row types for SQL results --
 
@@ -87,8 +89,10 @@ interface BindingRow {
 
 // -- Helpers --
 
-function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null): string | null {
-  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile);
+function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, nodeId?: string): string | null {
+  // Mirrors cursorSeatConfigDir (<OPENRIG_HOME>/state/cursor/<nodeId>) without importing the adapter.
+  const cursorConfigDir = runtime === "cursor" && nodeId ? nodePath.join(getOpenRigHome(), "state", "cursor", nodeId) : null;
+  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, cursorConfigDir);
 }
 
 function computeRecoveryGuidance(input: {
@@ -654,7 +658,7 @@ function buildInventoryEntry(
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? `tmux attach -t ${row.session_name}` : null,
-    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile),
+    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, row.node_id),
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and
     // no node-list consumer reads it. The full guidance is recomputed on

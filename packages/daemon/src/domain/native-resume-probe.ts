@@ -34,6 +34,8 @@ export function buildNativeResumeCommand(
   resumeToken: string | null,
   sessionName?: string | null,
   codexConfigProfile?: string | null,
+  /** Cursor: the seat's CURSOR_CONFIG_DIR, so a manual resume never writes into the operator's ~/.cursor. */
+  cursorConfigDir?: string | null,
 ): string | null {
   if (!resumeToken) return null;
   if (runtime === "claude-code") {
@@ -42,6 +44,10 @@ export function buildNativeResumeCommand(
   }
   if (runtime === "codex") {
     return buildCodexResumeCore(resumeToken, codexConfigProfile);
+  }
+  if (runtime === "cursor") {
+    const env = cursorConfigDir ? `CURSOR_CONFIG_DIR=${shellQuote(cursorConfigDir)} ` : "";
+    return `${env}cursor-agent --resume ${shellQuote(resumeToken)}`;
   }
   return null;
 }
@@ -244,6 +250,31 @@ export function assessNativeResumeProbe(
     };
   }
 
+  if (runtime === "cursor") {
+    if (looksLikeCursorTrustPrompt(paneContent)) {
+      return {
+        status: "attention_required",
+        code: "trust_gate",
+        detail: "Cursor is asking whether to trust this workspace; an operator must answer it.",
+      };
+    }
+    if (SHELL_COMMANDS.has(paneCommand)) {
+      return {
+        status: "failed",
+        code: "returned_to_shell",
+        detail: "The probe pane returned to a shell instead of staying inside the runtime.",
+      };
+    }
+    if (looksLikeCursorTui(paneContent)) {
+      return { status: "resumed", code: "active_runtime", detail: "Cursor Agent is running and showing its prompt." };
+    }
+    return {
+      status: "inconclusive",
+      code: "awaiting_runtime",
+      detail: "Cursor did not report an explicit failure, but its prompt has not been observed.",
+    };
+  }
+
   return {
     status: "inconclusive",
     code: "unsupported_runtime",
@@ -358,6 +389,29 @@ function looksLikeCodexTui(paneContent: string): boolean {
         && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field));
     });
   return hasPromptLine && (current.includes("OpenAI Codex (v") || hasModelFooter || hasCustomModelFooter);
+}
+
+// Cursor Agent's prompt line starts with "→ ". Before the first turn it shows a
+// placeholder; after a turn it shows "Add a follow-up". The header
+// ("Cursor Agent" then "v<date>") scrolls away in a long chat, so either the
+// header with a prompt line, or a placeholder prompt line alone, counts. The
+// chat screen also always has the model footer ("Grok 4.7 256K Low · 8.7%")
+// below its prompt line, so that is required too: a sign-in, update or error
+// screen that happens to show an arrow line is not the chat.
+const CURSOR_PLACEHOLDER_PROMPT_RE = /^→ (?:Plan, search, build anything|Add a follow-up)\b/;
+const CURSOR_MODEL_FOOTER_RE = /\b\d+(?:\.\d+)?[KM]\b/;
+
+function looksLikeCursorTui(paneContent: string): boolean {
+  const lines = paneContent.split("\n").map((line) => line.trim());
+  const lastPrompt = lines.map((line) => line.startsWith("→ ")).lastIndexOf(true);
+  if (lastPrompt < 0) return false;
+  if (!lines.slice(lastPrompt + 1).some((line) => CURSOR_MODEL_FOOTER_RE.test(line))) return false;
+  const hasHeader = /(^|\n)\s*Cursor Agent\s*\n\s*v\d{4}\.\d{2}\.\d{2}/.test(paneContent);
+  return hasHeader || lines.some((line) => CURSOR_PLACEHOLDER_PROMPT_RE.test(line));
+}
+
+function looksLikeCursorTrustPrompt(paneContent: string): boolean {
+  return paneContent.includes("Workspace Trust Required") && paneContent.includes("Trust this workspace");
 }
 
 // Codex prints these messages when its stored OAuth access token can no
