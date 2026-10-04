@@ -65,7 +65,7 @@ edges: []
     expect(readFileSync(join(target, "agents/worker/agent.yaml"), "utf8")).toBe(agent);
     expect(readFileSync(join(target, "rig.yaml"), "utf8")).toContain(`name: ${rigName}`);
     expect(readFileSync(join(cwd, "owned.txt"), "utf8")).toBe("Keep my project\n");
-    const nodes = await cli(["ps", "--nodes", "--rig", rigName, "--json"]);
+    const nodes = await cli(["ps", "--nodes", "--rig", rigName, "--full", "--json"]);
     expect(nodes.map((n: { canonicalSessionName: string }) => n.canonicalSessionName)).toEqual([`work-worker@${rigName}`]);
     expect(nodes[0].sessionStatus).toBe("running");
     expect(nodes[0].cwd).toBe(cwd);
