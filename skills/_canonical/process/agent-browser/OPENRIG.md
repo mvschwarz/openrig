@@ -17,7 +17,7 @@ OpenRig ships `agent-browser` so any agent dispatched by an OpenRig topology can
 
 ## OpenRig-specific modifications
 
-This is the canonical example of the **add-supplementary-files** pattern (see `writing-skills-for-openrig` SKILL.md §"Vendored skills"). The upstream skill is kept structurally intact; OpenRig adds a companion file that captures local-use insights without polluting the upstream content.
+This is the canonical example of the **add-supplementary-files** pattern. The upstream skill is kept structurally intact; OpenRig adds a companion file that captures local-use insights without polluting the upstream content.
 
 | Surface | What changed | Why |
 |---|---|---|
