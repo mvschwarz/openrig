@@ -53,8 +53,8 @@ edges: []
     await cli(["bundle", "create", join(source, "rig.yaml"), "--output", archive, "--name", "portable-team", "--json"]);
     rmSync(source, { recursive: true });
 
-    // No --target here: a plan must not materialize to the caller's cwd.
-    const plan = await cli(["bootstrap", archive, "--plan", "--json"]);
+    // Planning must leave the requested target absent and launch no members.
+    const plan = await cli(["bootstrap", archive, "--target", target, "--plan", "--json"]);
     expect(plan.status).toBe("planned");
     expect(existsSync(target)).toBe(false);
     expect(await cli(["ps", "--nodes", "--all-rigs", "--json"])).toEqual([]);

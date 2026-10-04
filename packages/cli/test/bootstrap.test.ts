@@ -73,6 +73,9 @@ describe("Bootstrap CLI", () => {
 
       if (req.url === "/api/bundles/install" && req.method === "POST") {
         const parsed = JSON.parse(body);
+        if (parsed.bundlePath.endsWith("/slow.rigbundle")) {
+          await new Promise(resolve => setTimeout(resolve, 6_000));
+        }
         res.writeHead(parsed.plan ? 200 : 201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ status: parsed.plan ? "planned" : "completed", stages: [], errors: [], warnings: [] }));
       } else if (req.url === "/api/bootstrap/plan" && req.method === "POST") {
@@ -152,7 +155,7 @@ describe("Bootstrap CLI", () => {
     expect(exitCode).toBeUndefined();
     expect(lastReq.url).toBe("/api/bundles/install");
     const body = JSON.parse(lastReq.body);
-    expect(body).toMatchObject({ bundlePath: nodePath.resolve("relative/team.rigbundle"), targetRoot: process.cwd(), plan, autoApprove: true });
+    expect(body).toMatchObject({ bundlePath: nodePath.resolve("relative/team.rigbundle"), targetRoot: process.cwd(), plan, autoApprove: true, skipVersionCheck: false, force: false });
     expect(body.cliVersion).toMatch(/^\d+\.\d+\.\d+/);
   });
 
@@ -160,6 +163,35 @@ describe("Bootstrap CLI", () => {
     await captureLogs(() => makeCmd().parseAsync(["node", "rig", "bootstrap", "team.rigbundle", "--target", "installed", "--cwd", "project", "--yes"]).then(() => {}));
     expect(lastReq.url).toBe("/api/bundles/install");
     expect(JSON.parse(lastReq.body)).toMatchObject({ targetRoot: nodePath.resolve("installed"), cwdOverride: nodePath.resolve("project") });
+  });
+
+  it.each([false, true])("forwards explicit archive overrides for plan=%s", async (plan) => {
+    const args = ["node", "rig", "bootstrap", "team.rigbundle", "--skip-version-check", "--force", "--json"];
+    if (plan) args.push("--plan");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try { await makeCmd().parseAsync(args); }
+    finally { log.mockRestore(); }
+    expect(JSON.parse(lastReq.body)).toMatchObject({ plan, skipVersionCheck: true, force: true });
+  });
+
+  it("archive plan handles a response beyond the default five-second budget", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await makeCmd().parseAsync(["node", "rig", "bootstrap", "slow.rigbundle", "--plan", "--json"]);
+      expect(lastReq.url).toBe("/api/bundles/install");
+      expect(JSON.parse(lastReq.body).plan).toBe(true);
+      expect(JSON.parse(log.mock.calls[0]![0] as string).status).toBe("planned");
+    } finally { log.mockRestore(); }
+  }, 15_000);
+
+  it("keeps the YAML plan's default timeout budget", async () => {
+    const deps = runningDeps(port);
+    const client = deps.clientFactory(`http://127.0.0.1:${port}`);
+    const post = vi.spyOn(client, "post");
+    const prog = new Command().addCommand(bootstrapCommand({ ...deps, clientFactory: () => client }));
+    await captureLogs(() => prog.parseAsync(["node", "rig", "bootstrap", "rig.yaml", "--plan", "--json"]).then(() => {}));
+    expect(post.mock.calls[0]![0]).toBe("/api/bootstrap/plan");
+    expect(post.mock.calls[0]![2]).toBeUndefined();
   });
 
   it("bootstrap blocked returns exit code 1", async () => {

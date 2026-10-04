@@ -40,8 +40,10 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
     .option("--yes", "Auto-approve trusted deterministic actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")
     .option("--target <path>", "Bundle install directory (defaults to current directory)")
+    .option("--skip-version-check", "Override the archive install compatibility check")
+    .option("--force", "Override archive install conflicts (may produce partial install state)")
     .option("--json", "Output as parseable JSON")
-    .action(async (spec: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; json?: boolean }) => {
+    .action(async (spec: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; skipVersionCheck?: boolean; force?: boolean; json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
@@ -73,6 +75,8 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
         targetRoot: nodePath.resolve(opts.target ?? process.cwd()),
         cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
         cliVersion: getCliVersion(),
+        skipVersionCheck: opts.skipVersionCheck ?? false,
+        force: opts.force ?? false,
       } : undefined;
 
       if (opts.plan) {
@@ -80,7 +84,7 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
         const res = await client.post<Record<string, unknown>>(bundleRequest ? "/api/bundles/install" : "/api/bootstrap/plan", bundleRequest ?? {
           sourceRef,
           cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
-        });
+        }, bundleRequest ? { timeoutMs: LONG_RUNNING_BOOTSTRAP_TIMEOUT_MS } : undefined);
 
         if (opts.json) {
           console.log(JSON.stringify(res.data));
