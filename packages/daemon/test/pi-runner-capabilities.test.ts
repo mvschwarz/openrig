@@ -30,4 +30,11 @@ describe("Pi pane capability check", () => {
     expect(resolveRuntimeExecutable("pi", { PATH: ":/usr/bin" }, ops, "/project"))
       .toEqual({ ok: true, path: "/project/pi" });
   });
+
+  it("keeps the native POSIX default search when Pi has no PATH variable", () => {
+    const ops = { isExecutable: (p: string) => p === "/usr/bin/pi", realpath: (p: string) => p,
+      run: () => { throw new Error("not a shim"); } };
+    expect(resolveRuntimeExecutable("pi", {}, ops, "/project"))
+      .toEqual({ ok: true, path: "/usr/bin/pi" });
+  });
 });

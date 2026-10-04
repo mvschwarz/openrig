@@ -721,7 +721,10 @@ export function resolveRuntimeExecutable(
   ops: ExecutableResolverOps = nodeResolverOps,
   cwd?: string,
 ): { ok: true; path: string } | { ok: false; error: string } {
-  const onPath = (env.PATH ?? "").split(nodePath.delimiter)
+  // With no PATH, Node's POSIX spawn searches /usr/bin:/bin. Keep that Pi
+  // behavior; OMP's existing absolute-only lookup is unchanged.
+  const searchPath = env.PATH ?? (cwd === undefined ? "" : "/usr/bin:/bin");
+  const onPath = searchPath.split(nodePath.delimiter)
     .filter((dir) => cwd !== undefined || nodePath.isAbsolute(dir))
     .map((dir) => cwd === undefined ? nodePath.join(dir, name) : nodePath.resolve(cwd, dir, name))
     .find((candidate) => ops.isExecutable(candidate));
@@ -821,24 +824,21 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   // Resolve inside the pane. OMP needs the original HOME for mise shims; Pi
   // also preserves relative PATH entries against the actual child cwd.
-  let command: string = runtime;
-  {
-    const resolved = resolveRuntimeExecutable(runtime, process.env, nodeResolverOps, runtime === "pi" ? args.cwd : undefined);
-    if (!resolved.ok) {
-      console.error(`[${runtime}-runner] ERROR launch: ${resolved.error}`);
-      // Record the exit for this launch so the adapter fails it now instead
-      // of waiting out its readiness timeout. The durable cursor survives.
-      const at = new Date().toISOString();
-      try {
-        const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
-        const exitedState: PiRunnerState = { ready: false, launchId: args.launchId, lastEntryId: pending?.lastEntryId, updatedAt: at, exited: { code: 127, at } };
-        fs.writeFileSync(paths.runnerStatePath, JSON.stringify(exitedState));
-      } catch { /* the pane ERROR marker still fails readiness */ }
-      process.exitCode = 127;
-      return;
-    }
-    command = resolved.path;
+  const resolved = resolveRuntimeExecutable(runtime, process.env, nodeResolverOps, runtime === "pi" ? args.cwd : undefined);
+  if (!resolved.ok) {
+    console.error(`[${runtime}-runner] ERROR launch: ${resolved.error}`);
+    // Record the exit for this launch so the adapter fails it now instead
+    // of waiting out its readiness timeout. The durable cursor survives.
+    const at = new Date().toISOString();
+    try {
+      const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
+      const exitedState: PiRunnerState = { ready: false, launchId: args.launchId, lastEntryId: pending?.lastEntryId, updatedAt: at, exited: { code: 127, at } };
+      fs.writeFileSync(paths.runnerStatePath, JSON.stringify(exitedState));
+    } catch { /* the pane ERROR marker still fails readiness */ }
+    process.exitCode = 127;
+    return;
   }
+  const command = resolved.path;
 
   const child = spawn(command, childArgs, {
     cwd: args.cwd,
