@@ -7,6 +7,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { readDeclaredConfigurations, authoredMapping, resolveConfiguration, listConfigurations, stageConfiguration, ConfigurationError, type ChosenConfiguration } from "../lib/bundle-configuration.js";
 
 /**
  * Read the CLI's own package.json version at call time (Item 1 / slice-05).
@@ -59,12 +60,14 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--bundle-version <ver>", "Bundle version", "0.1.0")
     .option("--include-packages <refs...>", "Package refs to include (default: all from spec)")
     .option("--rig-root <root>", "Root directory for pod-aware resolution")
+    .option("--preset <name>", "Build one of the configurations the bundle declares in configurations.yaml (for example all-claude)")
+    .option("--seat <member=runtime>", "Use this runtime for one seat, within what configurations.yaml allows (pod.member=runtime); repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--notes <text>", "Operator notes captured in bundle provenance metadata")
     .option("--min-daemon-version <ver>", "Minimum daemon version required to install this bundle (Item 2 compatibility)")
     .option("--min-cli-version <ver>", "Minimum CLI version required to install this bundle (Item 2 compatibility)")
     .option("--allow-drift", "Bundle a spec that disagrees with the running rig of the same name; the divergence is stamped into bundle provenance")
     .option("--json", "JSON output")
-    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
+    .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; preset?: string; seat?: string[]; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
       const deps = getDepsF();
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
@@ -87,14 +90,37 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       // surface (not in slice-05 scope).
       // Paths are resolved here, against the operator's cwd: the daemon would otherwise resolve
       // them against ITS cwd. Nothing is uploaded — the files must exist on the daemon's host.
+      // A chosen configuration is applied to an owned copy of the rig folder; the author's folder is never changed.
+      let specPath = nodePath.resolve(spec);
+      let rigRoot = opts.rigRoot ? nodePath.resolve(opts.rigRoot) : undefined;
+      let chosen: ChosenConfiguration | undefined;
+      let stagingDir: string | undefined;
+      if (opts.preset !== undefined || (opts.seat?.length ?? 0) > 0) {
+        try {
+          const rigDir = rigRoot ?? nodePath.dirname(specPath);
+          const declared = readDeclaredConfigurations(nodePath.dirname(specPath));
+          if (!declared) throw new ConfigurationError(`${nodePath.join(nodePath.dirname(specPath), "configurations.yaml")} doesn't exist, so this bundle offers no other configurations`);
+          chosen = resolveConfiguration(declared, authoredMapping(specPath), { preset: opts.preset, seats: opts.seat });
+          const staged = stageConfiguration(rigDir, specPath, declared, chosen);
+          stagingDir = staged.stagingDir;
+          specPath = staged.rigSpecPath;
+          if (rigRoot) rigRoot = staged.stagingDir;
+        } catch (err) {
+          if (!(err instanceof ConfigurationError)) throw err;
+          console.error(err.message);
+          process.exitCode = 2;
+          return;
+        }
+      }
       const res = await client.post<Record<string, unknown>>("/api/bundles/create", {
-        specPath: nodePath.resolve(spec), bundleName: opts.name, bundleVersion: opts.bundleVersion, outputPath: nodePath.resolve(opts.output),
+        specPath, bundleName: opts.name, bundleVersion: opts.bundleVersion, outputPath: nodePath.resolve(opts.output),
         includePackages: opts.includePackages,
-        rigRoot: opts.rigRoot ? nodePath.resolve(opts.rigRoot) : undefined,
+        rigRoot,
+        ...(chosen ? { configuration: { id: chosen.configurationId, ...(chosen.preset ? { preset: chosen.preset } : {}) } } : {}),
         provenance: buildClientProvenance(opts.notes),
         ...(hasCompatibility ? { compatibility } : {}),
         ...(opts.allowDrift ? { allowDrift: true } : {}),
-      }, { timeoutMs: 120_000 });
+      }, { timeoutMs: 120_000 }).finally(() => { if (stagingDir) fs.rmSync(stagingDir, { recursive: true, force: true }); });
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));
@@ -103,11 +129,33 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       }
       if (res.status >= 400) { console.error(res.data["error"] ?? "Create failed"); process.exitCode = 2; return; }
       console.log(`Bundle created: ${opts.output}`);
+      if (chosen) console.log(`  Configuration: ${chosen.configurationId}${chosen.preset ? ` (${chosen.preset})` : ""}`);
       console.log(`  Name: ${res.data["bundleName"]} v${res.data["bundleVersion"]}`);
       console.log(`  Hash: ${res.data["archiveHash"]}`);
       // The daemon has returned this on every drifted export since Build B and the human path
       // dropped it — the operator saw a clean success while shipping a rig that does not exist.
       if (typeof res.data["warning"] === "string") console.warn(`\n${res.data["warning"]}`);
+    });
+
+  // rig bundle configurations <spec>
+  cmd.command("configurations <spec>")
+    .description("List the configurations a rig spec's configurations.yaml declares, with their configuration IDs")
+    .option("--json", "JSON output")
+    .action((spec: string, opts: { json?: boolean }) => {
+      const specPath = nodePath.resolve(spec);
+      const declared = readDeclaredConfigurations(nodePath.dirname(specPath));
+      const authored = authoredMapping(specPath);
+      const configurations = declared ? listConfigurations(declared, authored) : [];
+      if (opts.json) {
+        console.log(JSON.stringify({ declared: Boolean(declared), configurations }));
+        return;
+      }
+      if (!declared) { console.log("No configurations.yaml: the bundle builds only as rig.yaml is written."); return; }
+      for (const c of configurations) {
+        const notes = [c.recommended ? "recommended" : "", c.authored ? "as rig.yaml is written" : ""].filter(Boolean).join(", ");
+        console.log(`${c.preset}: ${c.configurationId}${notes ? `  (${notes})` : ""}`);
+      }
+      if (!configurations.some((c) => c.authored)) console.log("Note: no preset matches rig.yaml as written.");
     });
 
   // rig bundle inspect <path>
