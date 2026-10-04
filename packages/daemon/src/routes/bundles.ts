@@ -29,6 +29,7 @@ import { configurationId, packageDigest } from "../domain/bundle-identity.js";
 import { vendorContextPackDir } from "../domain/bundle-carried-context-pack.js";
 import { vendorProjectDir } from "../domain/bundle-carried-project.js";
 import { getDaemonVersion } from "../domain/daemon-version.js";
+import { inspectBundleBehaviour } from "../domain/bundle-behaviour-inspect.js";
 import { assertShippableSubstance } from "../domain/agent-resolver.js";
 
 /**
@@ -1041,14 +1042,24 @@ bundleRoutes.post("/inspect", async (c) => {
       const integrityResult = integrityCompat
         ? verifyIntegrity(tmpDir, integrityCompat, integrityFsOps())
         : { passed: false, mismatches: [], missing: [], extra: [], errors: ["no integrity section"] };
-      return c.json({ ...bundleBuildIdentity(podManifest, archiveHash), manifest: podManifest, digestValid, integrityResult }, 200);
+      const identity = bundleBuildIdentity(podManifest, archiveHash);
+      const behaviour = inspectBundleBehaviour(tmpDir, {
+        manifest: rawParsed, ...identity, source: identity.source ? { ...identity.source } : null, generator: { openrigVersion: getDaemonVersion() },
+        digestValid, filesVerified: integrityResult.passed,
+      });
+      return c.json({ ...identity, manifest: podManifest, digestValid, integrityResult, behaviour }, 200);
     }
 
     const manifest = normalizeBundleManifest(parseBundleManifest(manifestYaml));
     const integrityResult = manifest.integrity
       ? verifyIntegrity(tmpDir, manifest, integrityFsOps())
       : { passed: false, mismatches: [], missing: [], extra: [], errors: ["no integrity section"] };
-    return c.json({ ...bundleBuildIdentity(manifest, archiveHash), manifest, digestValid, integrityResult }, 200);
+    const identity = bundleBuildIdentity(manifest, archiveHash);
+    const behaviour = inspectBundleBehaviour(tmpDir, {
+      manifest: rawParsed, ...identity, source: identity.source ? { ...identity.source } : null, generator: { openrigVersion: getDaemonVersion() },
+      digestValid, filesVerified: integrityResult.passed,
+    });
+    return c.json({ ...identity, manifest, digestValid, integrityResult, behaviour }, 200);
   } catch (err) {
     return c.json({ error: (err as Error).message }, 500);
   } finally {

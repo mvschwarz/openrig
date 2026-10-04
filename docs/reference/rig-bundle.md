@@ -300,6 +300,29 @@ rig bundle inspect <bundle-path> [--json]
 
 Shows the manifest, digest validity, and integrity verification result. Inspect extracts the archive into a temporary directory for safe validation, then cleans that directory up. It does not install or launch anything.
 
+The behaviour view describes the selected archive: its team and configured models, declared permission posture,
+files agents receive, startup actions and hooks, managed writes, literal outside domains, prerequisites and what
+remains unknown until launch. It reads packaged declarations; it does not run scripts, contact providers, probe
+runtimes or create a bootstrap run. Source and assembler identity come from the archive, separately from the view
+generator. Configured models are not observations of a running model, and literal domains are not predicted traffic.
+
+`rig bundle install` and bundle-form `rig up` print this same view to stderr before the existing action, including
+`--plan`. With `--json`, stdout remains one result; its optional `behaviour` field carries the structured view.
+GitHub links reuse the single prepared archive. The header is informational: missing views and inspection errors
+print a diagnostic, then the original installation checks and result determine success. Legacy schema-1 archives
+report `not_generated`, rather than an empty team. A local archive can change between inspection and installation;
+the header does not bind a later action atomically to those bytes.
+
+Agents can run shell commands as the launching user, subject to runtime and host policy. Explicit permission bypass
+is distinguished from conditional launch floors; Pi resource trust is separate from native permission policy.
+Host settings, accounts, plugins, runtime support and effective permissions remain unknown. Text scanning is bounded
+and reports unread members; dynamically computed commands and addresses cannot be predicted. Installation targets,
+`--cwd` and configured library roots resolve separately from the archive's declarations. See
+[bundle formats](bundle-formats.md) for the structured view and digest coverage.
+
+**Integrity means the archive is self-consistent, not who made it. Provenance is stated by the bundle and not verified.**
+
+
 ### Install a bundle
 
 ```bash
@@ -475,11 +498,13 @@ Bundle created: my-team.rigbundle
 rig bundle inspect my-team.rigbundle
 ```
 
-Output:
+The manifest summary is followed by the behaviour view:
 ```
 Bundle: my-team v1.0.0
 Digest valid: true
 Integrity: PASS
+What this bundle declares before installation:
+...
 ```
 
 ### Install and launch

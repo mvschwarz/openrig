@@ -1,6 +1,7 @@
 import nodePath from "node:path";
 import { isGitHubBundleLink, importGitHubBundle, bundleIdentityLines, printBundleLinkError } from "../lib/bundle-source.js";
 import { getCliVersion, bundleRoutingSummary } from "./bundle.js";
+import { showBundleBehaviourBeforeAction } from "../bundle-behaviour.js";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYamlDoc } from "yaml";
@@ -108,6 +109,9 @@ Examples:
             if (opts.json) console.log(JSON.stringify(imported.res.data)); else console.error(imported.res.data.error ?? "Create failed");
             process.exitCode = 2; return;
           }
+          const behaviour = await showBundleBehaviourBeforeAction(() => imported.client.post<Record<string, unknown>>(
+            "/api/bundles/inspect", { bundlePath: imported.bundlePath },
+          ));
           let installed: { status: number; data: Record<string, unknown> };
           try {
             installed = await imported.client.post<Record<string, unknown>>("/api/bundles/install", {
@@ -120,7 +124,7 @@ Examples:
             throw new Error(`Bundle install outcome is unknown. Archive retained at ${imported.bundlePath}; check rig ps and rig bundle history before retrying.`);
           }
           const { source: builtSource, configurationId, packageDigest, archiveHash, assembler } = imported.res.data;
-          const data = { ...installed.data, source: builtSource, configurationId, packageDigest, archiveHash, assembler };
+          const data = { ...installed.data, source: builtSource, configurationId, packageDigest, archiveHash, assembler, ...(behaviour ? { behaviour } : {}) };
           if (opts.json) console.log(JSON.stringify(data));
           else {
             for (const line of bundleIdentityLines(data)) console.log(line);
@@ -159,7 +163,13 @@ Examples:
           existing: opts.existing,
           freshLogicalIds: opts.fresh,
         };
+        const behaviour = /\.rigbundle$/i.test(source) && !opts.existing
+          ? await showBundleBehaviourBeforeAction(async () => {
+            const inspected = await runRemoteHttpOp(opts.host!, "POST", "/api/bundles/inspect", { bundlePath: source }, deps, opts);
+            return { status: inspected.ok ? 200 : 500, data: (inspected.data ?? { error: inspected.error }) as Record<string, unknown> };
+          }) : undefined;
         const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", body, deps, { ...opts, timeoutMs: opts.plan ? undefined : LONG_RUNNING_UP_TIMEOUT_MS });
+        if (behaviour) result.data = { ...(result.data as Record<string, unknown> | undefined), behaviour };
         if (opts.json) {
           console.log(JSON.stringify(result));
           if (!result.ok) process.exitCode = 1;
@@ -433,6 +443,9 @@ Examples:
         process.exitCode = 1;
       };
 
+      const behaviour = isRigBundle ? await showBundleBehaviourBeforeAction(() => client.post<Record<string, unknown>>(
+        "/api/bundles/inspect", { bundlePath: sourceRef },
+      )) : undefined;
       let res: { status: number; data: Record<string, unknown> };
       try {
         res = await client.post<Record<string, unknown>>("/api/up", {
@@ -451,6 +464,8 @@ Examples:
         }
         throw err;
       }
+
+      if (behaviour) res.data = { ...res.data, behaviour };
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));

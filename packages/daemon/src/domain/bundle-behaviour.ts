@@ -311,6 +311,10 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         }
       }
     }
+    if (text(object(manifest.project).id)) {
+      write(undefined, "project_registration", "workspace_catalog", String(object(manifest.project).id),
+        [{ path: "bundle.yaml", field: "project" }], "register carried project and associate installed rig");
+    }
     const domains = new Map<string, SourceRef[]>();
     for (const [p, content] of [...files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
       for (const match of content.matchAll(/https?:\/\/[^\s<>"'`\])}]+/g)) {

@@ -9,6 +9,7 @@ import { realDeps } from "./daemon.js";
 import { isGitHubBundleLink, importGitHubBundle, bundleIdentityLines, printBundleLinkError } from "../lib/bundle-source.js";
 import { checkBundleFolder } from "../lib/bundle-check.js";
 import type { StatusDeps } from "./status.js";
+import { showBundleBehaviourBeforeAction } from "../bundle-behaviour.js";
 import { readDeclaredConfigurations, authoredMapping, resolveConfiguration, listConfigurations, checkDeclaredConfigurations, stageConfiguration, ConfigurationError, type ChosenConfiguration } from "../lib/bundle-configuration.js";
 
 /**
@@ -243,6 +244,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       if (packs?.length) console.log(`Context packs: ${packs.join(", ")}`);
       const project = m["project"] as { id?: string; path?: string } | undefined;
       if (project?.id) console.log(`Project: ${project.id} (registered in the workspace catalog on install, with this rig associated)`);
+      await showBundleBehaviourBeforeAction(async () => res, console.log);
       if (!digestValid || !integrityPassed) process.exitCode = 2;
     });
 
@@ -272,6 +274,10 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       }
       const client = imported?.client ?? await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
+
+      const behaviour = await showBundleBehaviourBeforeAction(() => client.post<Record<string, unknown>>(
+        "/api/bundles/inspect", { bundlePath: nodePath.resolve(bundlePath) },
+      ));
 
       // QA-20260601 A1 repair: /install completes a full bootstrap run
       // (resolve → vendor sibling primitives → boot rig sessions) which
@@ -304,6 +310,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         res.data = { ...res.data, source, configurationId, packageDigest, archiveHash, assembler };
       }
       if (imported && ["failed", "partial", "partially_restored", "not_attempted"].includes(String(res.data.status ?? res.data.rigResult))) process.exitCode = 2;
+      if (behaviour) res.data = { ...res.data, behaviour };
 
 
       if (opts.json) {
