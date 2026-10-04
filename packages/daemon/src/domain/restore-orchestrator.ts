@@ -220,6 +220,8 @@ export class RestoreOrchestrator {
      * resume-policy seats STOP as `awaiting-decision` instead.
      */
     freshLogicalIds?: string[];
+    /** Explicit rig launch choice; persisted only after restore preconditions pass. */
+    nonInterruptive?: boolean;
     /** Selection evidence from an automatic caller. Direct restore defaults
      * to explicit because its public door names the snapshot id. */
     snapshotSelection?: RestoreSnapshotSelection;
@@ -297,6 +299,8 @@ export class RestoreOrchestrator {
       // DB still reflects original session state (running for stale sessions)
       const preRestoreSnapshot = this.snapshotCapture.captureSnapshot(rigId, "pre_restore");
 
+      if (opts?.nonInterruptive !== undefined) this.rigRepo.setRigNonInterruptive(rigId, opts.nonInterruptive);
+
       // 2b. NOW mark stale sessions as detached (safe: we've captured the
       // pre-restore snapshot and confirmed no live/unknown sessions remain)
       for (const sessionId of classification.stale) {
@@ -354,6 +358,7 @@ export class RestoreOrchestrator {
       const nodeResults: RestoreNodeResult[] = [];
       const restoreWarnings: string[] = [...validation.warnings];
       if (this.rigRepo.getRigNonInterruptive(rigId)) restoreWarnings.push(nonInterruptiveSummary(true));
+      else if (opts?.nonInterruptive === false) restoreWarnings.push(nonInterruptiveSummary(false));
       for (const entry of plan) {
         const result = await this.restoreNodeWithCompensation(entry, rigId, snapshotId, snapshot.data, opts, restoreWarnings);
         nodeResults.push(result);

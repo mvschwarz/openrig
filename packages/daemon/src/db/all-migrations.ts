@@ -98,8 +98,9 @@ import { nodeEffortSchema } from "./migrations/092_node_effort.js";
 import { usageSamplesLatestIndexesSchema } from "./migrations/094_usage_samples_latest_indexes.js";
 import type { Migration } from "./migrate.js";
 
-/** Ordered migrations; numbers may be reserved by independent changes. */
 import { rigNonInterruptiveSchema } from "./migrations/095_rig_non_interruptive.js";
+
+/** Ordered migrations; numbers may be reserved by independent changes. */
 
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,

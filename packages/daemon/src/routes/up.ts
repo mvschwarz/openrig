@@ -1,4 +1,3 @@
-import { nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import nodePath from "node:path";
 import { Hono } from "hono";
 import type { BootstrapOrchestrator } from "../domain/bootstrap-orchestrator.js";
@@ -134,8 +133,6 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
     return c.json(buildRestorePlanPreview(rig, snapshot ?? null, collectPreviewSessionRows(snapshotRepo.db, rig, snapshot ?? null), freshLogicalIds, Date.now(), readFreshOccupantRelations(snapshotRepo.db, rig.rig.id)), 200);
   }
 
-  if (nonInterruptive !== undefined) deps.rigRepo.setRigNonInterruptive(rigId, nonInterruptive);
-
   if (!snapshot) {
     snapshot = deps.snapshotCapture.captureSnapshot(rigId, "auto-rehydrate");
     snapshotSelection = {
@@ -157,6 +154,7 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
     fsOps: { exists: (p: string) => fs.existsSync(p) },
     // OPR.0.3.4.2 — operation B opt-in seats from `rig up --existing --fresh`.
     freshLogicalIds,
+    nonInterruptive,
     snapshotSelection,
   });
   if (!result.ok) {
@@ -174,8 +172,6 @@ async function restoreByRigId(rigId: string, rigName: string | null, deps: Retur
     }
     return c.json({ error: result.message, code: result.code }, result.code === "rig_not_stopped" ? 409 : 400);
   }
-
-  if (nonInterruptive === false) result.result.warnings.push(nonInterruptiveSummary(false));
 
   // Compute attach command from first running node (same logic as /api/rigs/:id/up)
   const { getNodeInventory } = await import("../domain/node-inventory.js");
