@@ -181,7 +181,6 @@ async function runCrossHostCapture(
 
   const result = await runner(host, argv);
 
-  if (!result.ok || (result.ok && captureFailed((result.data ?? {}) as Record<string, unknown>))) process.exitCode = 1;
   if (opts.json) {
     console.log(JSON.stringify({
       cross_host: { host: host.id, target: hostDisplayTarget(host) },
