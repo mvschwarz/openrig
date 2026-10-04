@@ -343,8 +343,8 @@ resources:
     expect(result.errors[0]).toMatch(/duplicate id "foo"/);
   });
 
-  // T11: profile uses — unqualified missing fails, qualified accepted
-  it("profile uses: unqualified missing ref fails, qualified ref accepted", () => {
+  // Skills can be discovered later; other undeclared local resources still fail.
+  it("profile uses: defers skill lookup but rejects missing guidance", () => {
     const raw = parseAgentSpec(`
 name: test
 version: "1.0"
@@ -356,11 +356,12 @@ profiles:
   main:
     uses:
       skills: [missing-skill, imported-ns:remote-skill]
+      guidance: [missing-guidance]
 `);
     const result = validateAgentSpec(raw);
     expect(result.valid).toBe(false);
-    // Unqualified "missing-skill" should fail
-    expect(result.errors.some((e) => e.includes('"missing-skill" not found'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('"missing-guidance" not found'))).toBe(true);
+    expect(result.errors.some((e) => e.includes("missing-skill"))).toBe(false);
     // Qualified "imported-ns:remote-skill" should NOT produce an error
     expect(result.errors.some((e) => e.includes("imported-ns:remote-skill"))).toBe(false);
   });
@@ -733,4 +734,3 @@ profiles:
     expect((result.advisories ?? []).some((a) => a.includes("preferences.effort"))).toBe(false);
   });
 });
-

@@ -183,6 +183,21 @@ describe("bundle-local skills", () => {
       .toBe(path.join(piSeatPaths(path.join(root, "pi"), "worker@portable").agentDir, "skills/portable/SKILL.md"));
   });
 
+  it("still refuses a selected skill that discovery cannot resolve", () => {
+    seed();
+    write("source/skills/portable/SKILL.md", skill("different-id"));
+    const specRoot = path.join(root, "source");
+    const resolved = resolveAgentRef("local:agents/worker", specRoot, fsOps);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) throw new Error(JSON.stringify(resolved));
+    const rig = RigSpecSchema.normalize(RigSpecCodec.parse(rigYaml) as Record<string, unknown>);
+    const result = resolveNodeConfig({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+      profileName: "default", member: rig.pods[0]!.members[0]!, pod: rig.pods[0]!, rig, specRoot, homedir: path.join(root, "home") });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("missing skill was accepted");
+    expect(result.errors.join("; ")).toMatch(/portable.*not found/);
+  });
+
   it("still rejects a missing declared entry and a helper symlink that escapes the source root", async () => {
     seed();
     fs.unlinkSync(path.join(root, "source/skills/portable/SKILL.md"));
