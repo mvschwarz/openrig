@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdirSync, mkdtempSync, realpathSync, statSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, statSync, lstatSync, readdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { DaemonClient } from "../client.js";
@@ -99,7 +99,30 @@ export async function bundleGit(cwd: string, args: string[]): Promise<string> {
       env: { ...env, HOME: cwd, XDG_CONFIG_HOME: path.join(cwd, ".config"), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: "/usr/bin/false", SSH_ASKPASS: "/usr/bin/false" },
     });
     return result.stdout.trimEnd();
-  } catch { throw new Error("GitHub bundle fetch failed or timed out. Check that the repository and ref are publicly readable; no credentials are requested."); }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && existsSync(cwd)) throw new Error("git is required for GitHub links.");
+    throw new Error("GitHub bundle fetch failed or timed out. Check that the repository and ref are publicly readable; no credentials are requested.");
+  }
+}
+
+/** The link path must not vendor files from the installing host through repository symlinks. */
+function checkGitHubBundleSymlinks(folder: string, checkoutDir: string): void {
+  const root = realpathSync(checkoutDir);
+  const visited = new Set<string>();
+  const walk = (file: string): void => {
+    if (lstatSync(file).isSymbolicLink()) {
+      file = realpathSync(file);
+      const relative = path.relative(root, file);
+      if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error();
+    }
+    if (!statSync(file).isDirectory()) return;
+    const directory = realpathSync(file);
+    if (visited.has(directory)) return;
+    visited.add(directory);
+    for (const name of readdirSync(directory)) walk(path.join(directory, name));
+  };
+  try { walk(folder); }
+  catch { throw new Error("GitHub bundle symlinks must resolve inside the fetched repository; no bundle was built."); }
 }
 
 export interface PreparedBundleSource {
@@ -115,25 +138,31 @@ export async function prepareGitHubBundle(input: string, git = bundleGit, import
   mkdirSync(importsRoot, { recursive: true, mode: 0o700 });
   const owned = mkdtempSync(path.join(importsRoot, "import-"));
   const checkoutDir = path.join(owned, "source");
-  mkdirSync(checkoutDir);
-  await git(checkoutDir, ["init", "--template=", "."]);
-  const refs = await git(checkoutDir, ["ls-remote", parsed.repository]);
-  const source = selectGitHubBundleSource(input, refs);
-  await git(checkoutDir, ["fetch", "--depth=1", "--no-tags", "--", source.repository, source.resolvedCommit]);
-  const fetched = await git(checkoutDir, ["rev-parse", "FETCH_HEAD^{commit}"]);
-  if (fetched !== source.resolvedCommit) throw new Error("GitHub bundle fetch did not match the selected commit; no bundle was built.");
-  await git(checkoutDir, ["checkout", "--detach", source.resolvedCommit]);
-  let folder: string;
   try {
-    folder = realpathSync(path.join(checkoutDir, source.folder));
-    const relative = path.relative(realpathSync(checkoutDir), folder);
-    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || !statSync(folder).isDirectory() || !statSync(path.join(folder, "rig.yaml")).isFile()) throw new Error();
-    const specRelative = path.relative(realpathSync(checkoutDir), realpathSync(path.join(folder, "rig.yaml")));
-    if (specRelative === ".." || specRelative.startsWith(`..${path.sep}`) || path.isAbsolute(specRelative)) throw new Error();
-  } catch { throw new Error("The selected GitHub bundle folder must contain rig.yaml inside the fetched repository."); }
-  const receiptPath = path.join(owned, "source.json");
-  writeFileSync(receiptPath, JSON.stringify(source, null, 2) + "\n");
-  return { source, folder, checkoutDir, archivePath: path.join(owned, "bundle.rigbundle"), receiptPath };
+    mkdirSync(checkoutDir);
+    await git(checkoutDir, ["init", "--template=", "."]);
+    const refs = await git(checkoutDir, ["ls-remote", parsed.repository]);
+    const source = selectGitHubBundleSource(input, refs);
+    await git(checkoutDir, ["fetch", "--depth=1", "--no-tags", "--", source.repository, source.resolvedCommit]);
+    const fetched = await git(checkoutDir, ["rev-parse", "FETCH_HEAD^{commit}"]);
+    if (fetched !== source.resolvedCommit) throw new Error("GitHub bundle fetch did not match the selected commit; no bundle was built.");
+    await git(checkoutDir, ["checkout", "--detach", source.resolvedCommit]);
+    let folder: string;
+    try {
+      folder = realpathSync(path.join(checkoutDir, source.folder));
+      const relative = path.relative(realpathSync(checkoutDir), folder);
+      if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || !statSync(folder).isDirectory() || !statSync(path.join(folder, "rig.yaml")).isFile()) throw new Error();
+      const specRelative = path.relative(realpathSync(checkoutDir), realpathSync(path.join(folder, "rig.yaml")));
+      if (specRelative === ".." || specRelative.startsWith(`..${path.sep}`) || path.isAbsolute(specRelative)) throw new Error();
+    } catch { throw new Error("The selected GitHub bundle folder must contain rig.yaml inside the fetched repository."); }
+    checkGitHubBundleSymlinks(folder, checkoutDir);
+    const receiptPath = path.join(owned, "source.json");
+    writeFileSync(receiptPath, JSON.stringify(source, null, 2) + "\n");
+    return { source, folder, checkoutDir, archivePath: path.join(owned, "bundle.rigbundle"), receiptPath };
+  } catch (error) {
+    rmSync(owned, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 /** Authored minima enter the existing create/install contract only for the new source path. */
@@ -192,18 +221,25 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
   let specPath = path.join(folder, "rig.yaml");
   let configuration: { id: string; preset?: string } | undefined;
   let configurationStaging: string | undefined;
-  const compatibility = authoredCompatibility(folder);
-  if (opts.minDaemonVersion) compatibility.minDaemonVersion = opts.minDaemonVersion;
-  if (opts.minCliVersion) compatibility.minCliVersion = opts.minCliVersion;
-  if (opts.preset !== undefined || (opts.seat?.length ?? 0) > 0) {
-    const declared = readDeclaredConfigurations(folder);
-    if (!declared) throw new ConfigurationError("This bundle has no configurations.yaml; build it as authored or choose a bundle with declared configurations.");
-    const chosen = resolveConfiguration(declared, authoredMapping(specPath), { preset: opts.preset, seats: opts.seat });
-    const staged = stageConfiguration(folder, specPath, declared, chosen);
-    configurationStaging = staged.stagingDir;
-    folder = staged.stagingDir;
-    specPath = staged.rigSpecPath;
-    configuration = { id: chosen.configurationId, ...(chosen.preset ? { preset: chosen.preset } : {}) };
+  let compatibility: Record<string, string>;
+  try {
+    compatibility = authoredCompatibility(folder);
+    if (opts.minDaemonVersion) compatibility.minDaemonVersion = opts.minDaemonVersion;
+    if (opts.minCliVersion) compatibility.minCliVersion = opts.minCliVersion;
+    if (opts.preset !== undefined || (opts.seat?.length ?? 0) > 0) {
+      const declared = readDeclaredConfigurations(folder);
+      if (!declared) throw new ConfigurationError("This bundle has no configurations.yaml; build it as authored or choose a bundle with declared configurations.");
+      const chosen = resolveConfiguration(declared, authoredMapping(specPath), { preset: opts.preset, seats: opts.seat });
+      const staged = stageConfiguration(folder, specPath, declared, chosen);
+      configurationStaging = staged.stagingDir;
+      folder = staged.stagingDir;
+      specPath = staged.rigSpecPath;
+      configuration = { id: chosen.configurationId, ...(chosen.preset ? { preset: chosen.preset } : {}) };
+    }
+  } catch (error) {
+    rmSync(prepared.checkoutDir, { recursive: true, force: true });
+    if (configurationStaging) rmSync(configurationStaging, { recursive: true, force: true });
+    throw error;
   }
   const bundlePath = opts.output ? path.resolve(opts.output) : prepared.archivePath;
   let res: { status: number; data: Record<string, unknown> };

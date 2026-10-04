@@ -69,8 +69,59 @@ describe("GitHub bundle source", () => {
   it("does not substitute another fetched commit or a missing source folder", async () => {
     const wrong = async (_cwd: string, args: string[]) => args[0] === "ls-remote" ? refs : args[0] === "rev-parse" ? B : "";
     await expect(prepareGitHubBundle(URL, wrong, root)).rejects.toThrow(/did not match/);
+    expect(fs.readdirSync(root)).toEqual([]);
     const missing = async (_cwd: string, args: string[]) => args[0] === "ls-remote" ? refs : args[0] === "rev-parse" ? A : "";
     await expect(prepareGitHubBundle(URL, missing, root)).rejects.toThrow(/must contain rig.yaml/);
+    expect(fs.readdirSync(root)).toEqual([]);
+  });
+
+  function checkoutWith(populate: (checkout: string, folder: string) => void) {
+    return async (cwd: string, args: string[]) => {
+      if (args[0] === "ls-remote") return refs;
+      if (args[0] === "rev-parse") return A;
+      if (args[0] === "checkout") {
+        const folder = path.join(cwd, "rigs/dev");
+        fs.mkdirSync(folder, { recursive: true });
+        fs.writeFileSync(path.join(folder, "rig.yaml"), "name: team\n");
+        populate(cwd, folder);
+      }
+      return "";
+    };
+  }
+
+  it.each(["relative", "absolute", "dangling", "nested-directory"])("rejects unsafe repository symlinks: %s", async kind => {
+    const outside = path.join(root, "host-only.txt");
+    fs.writeFileSync(outside, "synthetic host-only fixture\n");
+    const imports = path.join(root, "imports");
+    const git = checkoutWith((checkout, folder) => {
+      let linkDir = folder;
+      if (kind === "nested-directory") {
+        linkDir = path.join(checkout, "shared");
+        fs.mkdirSync(linkDir);
+        fs.symlinkSync("../../shared", path.join(folder, "linked-directory"));
+      }
+      const target = kind === "absolute" ? outside
+        : kind === "dangling" ? "missing.txt"
+        : path.relative(linkDir, outside);
+      fs.symlinkSync(target, path.join(linkDir, "notes.txt"));
+    });
+    await expect(prepareGitHubBundle(URL, git, imports)).rejects.toThrow("GitHub bundle symlinks must resolve inside the fetched repository");
+    expect(fs.readdirSync(imports)).toEqual([]);
+    expect(fs.readFileSync(outside, "utf8")).toBe("synthetic host-only fixture\n");
+  });
+
+  it("preserves contained file and directory symlinks, including directory cycles", async () => {
+    const git = checkoutWith((checkout, folder) => {
+      fs.mkdirSync(path.join(checkout, "shared"));
+      fs.writeFileSync(path.join(checkout, "shared/notes.txt"), "repository fixture\n");
+      fs.symlinkSync("../../shared/notes.txt", path.join(folder, "notes.txt"));
+      fs.symlinkSync("../../shared", path.join(folder, "linked-directory"));
+      fs.symlinkSync(".", path.join(folder, "self"));
+    });
+    const prepared = await prepareGitHubBundle(URL, git, path.join(root, "imports"));
+    expect(fs.lstatSync(path.join(prepared.folder, "notes.txt")).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(path.join(prepared.folder, "notes.txt"), "utf8")).toBe("repository fixture\n");
+    expect(fs.readFileSync(path.join(prepared.folder, "linked-directory/notes.txt"), "utf8")).toBe("repository fixture\n");
   });
 
 
@@ -102,6 +153,12 @@ describe("GitHub bundle source", () => {
     expect(await bundleGit(root, ["config", "--global", "--list"])).toBe("");
     await expect(bundleGit(root, ["not-a-command-SECRET"])).rejects.toThrow("GitHub bundle fetch failed or timed out.");
     try { await bundleGit(root, ["not-a-command-SECRET"]); } catch (error) { expect(String(error)).not.toContain("SECRET"); }
+  });
+
+  it("names a missing git executable without exposing process details", async () => {
+    vi.stubEnv("PATH", root);
+    try { await expect(bundleGit(root, ["--version"])).rejects.toThrow("git is required for GitHub links."); }
+    finally { vi.unstubAllEnvs(); }
   });
 
   function fixture() {
@@ -140,6 +197,14 @@ describe("GitHub bundle source", () => {
     const f = fixture(); f.post.mockRejectedValueOnce(new Error("socket lost"));
     await expect(importGitHubBundle(URL, f.deps, {}, f.prepare)).rejects.toThrow(/outcome is unknown/);
     expect(fs.existsSync(f.prepared.checkoutDir)).toBe(true); expect(f.post).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["compatibility", "configuration"])("removes owned checkout on definite %s failure before create", async kind => {
+    const f = fixture();
+    if (kind === "compatibility") fs.writeFileSync(path.join(f.prepared.folder, "bundle.yaml"), "compatibility: false\n");
+    await expect(importGitHubBundle(URL, f.deps, kind === "configuration" ? { preset: "missing" } : {}, f.prepare)).rejects.toThrow();
+    expect(f.post).not.toHaveBeenCalled();
+    expect(fs.existsSync(f.prepared.checkoutDir)).toBe(false);
   });
 
   it("reports malformed authored minima instead of dropping them", () => {

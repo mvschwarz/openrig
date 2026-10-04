@@ -24,7 +24,9 @@ and assembler. Save the printed commit-pinned URL to repeat the same source sele
 Link import needs a running, verified local daemon and a credential-free, publicly readable GitHub URL. It does not
 upload files to remote daemons. For a remote target, run the link command on that host, or create an archive, transfer
 it with its sibling digest, and use the existing path command there. Existing local path/name commands keep their
-dispatch. Importing does not install dependencies or execute repository scripts.
+dispatch. Importing does not install dependencies or execute repository scripts. Before packaging a link, it checks
+the selected folder's symlinks, including linked directories: every target must resolve inside the fetched checkout.
+Unresolved or escaping links stop the import and remove its temporary source folder.
 
 The selected source is packaged through the existing bundler once. Link `up`/`install` then use the existing bundle
 install path, including compatibility and target-conflict checks. For a link, the default install target is the current

@@ -38,7 +38,7 @@ describe("advisory bundle check", () => {
   it.each([
     ["pod_aware_rig", () => fs.writeFileSync(path.join(root, "rig.yaml"), "not: a rig\n")],
     ["readme_in_docs", () => fs.rmSync(path.join(root, "README.md"))],
-    ["portable_agents", () => fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("builtin:terminal", "path:/outside/agent").replace("runtime: terminal", "runtime: codex"))],
+    ["portable_agents", () => fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("builtin:terminal", "path:/outside/agent").replace("runtime: terminal", "runtime: codex").replace("profile: none", "profile: default"))],
     ["minimum_versions", () => fs.writeFileSync(path.join(root, "bundle.yaml"), "compatibility:\n  min_cli_version: false\n")],
     ["configurations", () => fs.writeFileSync(path.join(root, "configurations.yaml"), "schema: wrong\n")],
     ["credential_paths", () => fs.writeFileSync(path.join(root, ".env"), "FAKE_TEST_ONLY=placeholder\n")],
@@ -50,8 +50,8 @@ describe("advisory bundle check", () => {
 
   it("checks startup paths relative to the declaring local agent", async () => {
     const dir = path.join(root, "agent"); fs.mkdirSync(dir);
-    fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("builtin:terminal", "local:agent").replace("runtime: terminal", "runtime: codex"));
-    fs.writeFileSync(path.join(dir, "agent.yaml"), 'name: fixture\nversion: "1.0"\nstartup:\n  files:\n    - path: context.md\nprofiles:\n  none: {}\n');
+    fs.writeFileSync(path.join(root, "rig.yaml"), SPEC.replace("builtin:terminal", "local:agent").replace("runtime: terminal", "runtime: codex").replace("profile: none", "profile: default"));
+    fs.writeFileSync(path.join(dir, "agent.yaml"), 'name: fixture\nversion: "1.0"\nstartup:\n  files:\n    - path: context.md\nprofiles:\n  default: {}\n');
     fs.writeFileSync(path.join(dir, "context.md"), "Context");
     expect((await checkBundleFolder(root)).checks.filter(c => c.status === "finding")).toEqual([]);
     fs.rmSync(path.join(dir, "context.md"));
