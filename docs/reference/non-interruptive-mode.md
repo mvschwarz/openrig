@@ -5,7 +5,7 @@ to accept supported harness first-launch warnings for this rig. Sessions remain 
 This does not sign in to a provider or change any seat's permission policy.
 
 The option applies only to seats whose resolved launch posture is `full_bypass`.
-This must be declared through `builtin:yolo`, a `full_bypass` flag policy, or an explicit permission selection;
+This must be declared through `builtin:yolo`, a `full_bypass` flag policy, or an explicit `full_bypass` selection;
 ambient `OPENRIG_YOLO` alone without an attached policy is not covered.
 
 - Claude Code receives `--settings '{"skipDangerousModePermissionPrompt":true}'`, accepting its bypass-permissions warning.
