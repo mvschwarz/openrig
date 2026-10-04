@@ -37,6 +37,11 @@ export interface BundleContentRoutingOptions {
   onContextPacksRouted?: () => { errors?: Array<{ source: string; error: string }> } | void;
 }
 
+/** The message of anything thrown or rejected, including values that are not Errors (null, undefined, strings). */
+export function thrownMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** One human-readable warning per routing failure, for the result's warnings list. */
 export function routingFailureWarnings(routing: BundleContentRouting | undefined): string[] {
   return (routing?.routingFailures ?? []).map((f) => `Bundle ${f.kind} routing failed: ${f.error}`);
@@ -78,7 +83,7 @@ export async function routeBundleContents(
     try {
       return run();
     } catch (err) {
-      failures.push({ kind, error: (err as Error).message });
+      failures.push({ kind, error: thrownMessage(err) });
       return undefined;
     }
   };
@@ -95,7 +100,7 @@ export async function routeBundleContents(
         manifest = parsePodBundleManifest(fs.readFileSync(manifestPath, "utf-8")) as Record<string, unknown>;
       }
     } catch (err) {
-      failures.push({ kind: "bundle", error: (err as Error).message });
+      failures.push({ kind: "bundle", error: thrownMessage(err) });
     }
 
     if (manifest) {
@@ -173,7 +178,7 @@ export async function routeBundleContents(
       }
     }
   } catch (err) {
-    failures.push({ kind: "bundle", error: (err as Error).message });
+    failures.push({ kind: "bundle", error: thrownMessage(err) });
   } finally {
     if (tmpDir) {
       try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* a leftover temp directory is not a routing failure */ }

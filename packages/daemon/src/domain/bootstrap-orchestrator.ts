@@ -23,7 +23,7 @@ import fs from "node:fs";
 import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js";
 import { runSyncSite } from "./sync-site-wrap.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
-import { routeBundleContents, routingFailureWarnings, type BundleContentRouting } from "./bundle-content-routing.js";
+import { routeBundleContents, routingFailureWarnings, thrownMessage, type BundleContentRouting } from "./bundle-content-routing.js";
 
 /** Bootstrap mode */
 export type BootstrapMode = "plan" | "apply";
@@ -124,7 +124,7 @@ export class BootstrapOrchestrator {
     try {
       return await (this.deps.routeBundleContents ? this.deps.routeBundleContents(bundlePath) : routeBundleContents(bundlePath));
     } catch (err) {
-      return { routingFailures: [{ kind: "bundle", error: (err as Error).message }] };
+      return { routingFailures: [{ kind: "bundle", error: thrownMessage(err) }] };
     }
   }
 
@@ -675,7 +675,7 @@ export class BootstrapOrchestrator {
           try {
             bundleRouting = await this.routeBundleContents(opts.sourceRef);
           } catch (err) {
-            bundleRouting = { routingFailures: [{ kind: "bundle", error: (err as Error).message }] };
+            bundleRouting = { routingFailures: [{ kind: "bundle", error: thrownMessage(err) }] };
           }
           const failureWarnings = routingFailureWarnings(bundleRouting);
           stages.push({ stage: "route_bundle_contents", status: failureWarnings.length > 0 ? "failed" : "ok", detail: bundleRouting });

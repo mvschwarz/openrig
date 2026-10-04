@@ -232,6 +232,24 @@ describe("bundle contents are routed before any seat launches", () => {
     expect(result.stages.find((s) => s.stage === "route_bundle_contents")?.status).toBe("failed");
   });
 
+  it.each([null, undefined, "plain string"])("a router rejecting with %s still lets the rig launch, with a warning", async (rejection) => {
+    const route = vi.fn(async (): Promise<BundleContentRouting> => { throw rejection; });
+
+    const result = await orchestrator(route).bootstrap({
+      mode: "apply", sourceRef: bundlePath, sourceKind: "rig_bundle", targetRoot: path.join(workDir, "target"),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(seenAtLaunch).not.toBeNull();
+    expect(result.warnings).toContain(`Bundle bundle routing failed: ${String(rejection)}`);
+    expect(result.stages.find((s) => s.stage === "route_bundle_contents")?.status).toBe("failed");
+  });
+
+  it("the legacy fallback's wrapper turns a null rejection into a reported failure", async () => {
+    const routing = await orchestrator(async () => { throw null; }).routeBundleContents(bundlePath);
+    expect(routing.routingFailures).toEqual([{ kind: "bundle", error: "null" }]);
+  });
+
   it("a pack the live library rejects is reported, not counted as usable", async () => {
     const badBundle = await buildBundleWithPack(fs.mkdtempSync(path.join(workDir, "bad-")), "name: demo\ntaxonomy: world\nfiles:\n  - path: intro.md\n    role: overview\n");
     const library = new ContextPackLibraryService({ roots: [{ path: contextRoot, sourceType: "user_file" }] });
