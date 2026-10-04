@@ -1,0 +1,102 @@
+{
+  "schema": "openrig.bundle-behaviour/v1",
+  "state": "generated",
+  "identity": {
+    "source": null,
+    "configurationId": null,
+    "packageDigest": null,
+    "assembler": null,
+    "generator": {
+      "openrigVersion": "0.6.6"
+    },
+    "integrity": {
+      "digestValid": false,
+      "filesVerified": false
+    }
+  },
+  "team": [
+    {
+      "seat": "team.claude-code",
+      "pod": "team",
+      "member": "claude-code",
+      "agentRef": "local:agent",
+      "profile": "default",
+      "runtime": "claude-code",
+      "cwd": "."
+    },
+    {
+      "seat": "team.codex",
+      "pod": "team",
+      "member": "codex",
+      "agentRef": "local:agent",
+      "profile": "default",
+      "runtime": "codex",
+      "cwd": "."
+    },
+    {
+      "seat": "team.pi",
+      "pod": "team",
+      "member": "pi",
+      "agentRef": "local:agent",
+      "profile": "default",
+      "runtime": "pi",
+      "cwd": "."
+    }
+  ],
+  "posture": [
+    {
+      "seat": "team.claude-code",
+      "shellAccess": "Can run shell commands as the launching user, subject to runtime and host policy.",
+      "selection": "Permission prompts: off; Claude bypasses permissions (full_bypass)",
+      "basis": "explicit",
+      "permissionPrompts": "off",
+      "nativeEffect": "unknown",
+      "sourceRefs": [
+        {
+          "path": "rig.yaml",
+          "field": "permission_policy"
+        }
+      ]
+    },
+    {
+      "seat": "team.codex",
+      "shellAccess": "Can run shell commands as the launching user, subject to runtime and host policy.",
+      "selection": "Permission prompts: off; Codex runs with full access and never asks (full_bypass)",
+      "basis": "explicit",
+      "permissionPrompts": "off",
+      "nativeEffect": "unknown",
+      "sourceRefs": [
+        {
+          "path": "rig.yaml",
+          "field": "permission_policy"
+        }
+      ]
+    },
+    {
+      "seat": "team.pi",
+      "shellAccess": "Can run shell commands as the launching user, subject to runtime and host policy.",
+      "selection": "Permission prompts: off; Pi gets full resource trust (full_bypass / approve); not a native permission policy",
+      "basis": "explicit",
+      "permissionPrompts": "off",
+      "nativeEffect": "unknown",
+      "sourceRefs": [
+        {
+          "path": "rig.yaml",
+          "field": "permission_policy"
+        }
+      ]
+    }
+  ],
+  "toldFiles": [],
+  "alsoRuns": [],
+  "writes": [],
+  "outsideAddresses": [],
+  "needs": [],
+  "unknownBeforeLaunch": [
+    {
+      "subject": "host and native settings",
+      "reason": "Effective native permissions are not observed before launch.",
+      "sourceRefs": []
+    }
+  ]
+}

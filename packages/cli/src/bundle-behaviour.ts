@@ -16,8 +16,12 @@ export function formatBundleBehaviour(view: BundleBehaviour): string[] {
   } else {
     lines.push(`Configuration: ${plain(view.identity.configurationId ?? "not recorded in the archive")}`);
     for (const member of view.team) lines.push(`  ${plain(member.seat)}: ${plain(member.runtime)}, profile ${plain(member.profile)}, declared working folder ${plain(member.cwd)}${member.model ? `, configured model ${plain(member.model)}` : ""}`);
-    lines.push("Access: agents can run shell commands using your account, subject to runtime and host policy.");
+    lines.push("Permission posture:");
+    if (view.posture.length > 0 && view.posture.length === view.team.length && view.posture.every(item => item.permissionPrompts === "off")) {
+      lines.push("Permission prompts: off for all seats (archive declaration).");
+    }
     for (const item of view.posture) lines.push(`  ${plain(item.seat)}: ${plain(item.selection)} (${item.basis}); effective native settings unknown.`);
+    lines.push("Access: agents can run shell commands using your account, subject to runtime and host policy.");
     lines.push("Told files:", ...view.toldFiles.map(f => `  ${f.seat ? plain(f.seat) + ": " : ""}${plain(f.pathOrRef)} [${f.resolution}${f.delivery ? `; ${plain(f.delivery)}` : ""}]`));
     lines.push("Also declared to run:", ...view.alsoRuns.map(f => `  ${plain(f.kind)}: ${plain(f.pathOrRef)} [${f.resolution}${f.trigger ? `; ${plain(f.trigger)}` : ""}]`));
     lines.push("Writes and library additions (destinations, runtime support and conflicts resolved at launch):", ...view.writes.map(w => `  ${w.seat ? plain(w.seat) + ": " : ""}${plain(w.destinationBase)}/${plain(w.path)} — ${plain(w.operation)}, ${plain(w.phase)}`));

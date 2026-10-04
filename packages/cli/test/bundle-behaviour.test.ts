@@ -54,6 +54,73 @@ describe("before-action bundle view", () => {
     for (const record of [generated, view]) {
       expect(validate(record), JSON.stringify(validate.errors)).toBe(true);
     }
+    if (generated.state !== "generated") throw new Error(generated.reason);
+    const oldGenerator = structuredClone(generated);
+    delete oldGenerator.posture[0]!.permissionPrompts;
+    expect(validate(oldGenerator), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({ ...generated, posture: [{ ...generated.posture[0], permissionPrompts: "not-stated" }] })).toBe(false);
+  });
+
+  it.each(["rig", "member"])("states declared %s-level yolo plainly for Claude, Codex and Pi", location => {
+    const members = ["claude-code", "codex", "pi"].map(runtime => ({
+      id: runtime, runtime, agent_ref: "local:agent", profile: "default", cwd: ".",
+      ...(location === "member" ? { permission_policy: "builtin:yolo" } : {}),
+    }));
+    const files = new Map([
+      ["rig.yaml", stringifyYaml({ name: "mixed", version: "1", ...(location === "rig" ? { permission_policy: "builtin:yolo" } : {}), pods: [{ id: "team", members }] })],
+      ["agent/agent.yaml", "name: worker\nversion: '1'\nprofiles: {default: {uses: {}}}\n"],
+    ]);
+    const actual = describeBundleBehaviour({ files, manifest: { schema_version: 2, rig_spec: "rig.yaml" }, generator: { openrigVersion: "0.6.6" }, digestValid: false, filesVerified: false });
+    expect(actual.state).toBe("generated");
+    if (actual.state !== "generated") throw new Error(actual.reason);
+    const declarations = [
+      "Permission prompts: off; Claude bypasses permissions",
+      "Permission prompts: off; Codex runs with full access and never asks",
+      "Permission prompts: off; Pi gets full resource trust",
+    ];
+    expect(actual.posture).toHaveLength(3);
+    for (const [index, declaration] of declarations.entries()) {
+      expect(actual.posture[index]).toMatchObject({ basis: "explicit", permissionPrompts: "off", nativeEffect: "unknown", selection: expect.stringContaining(declaration) });
+    }
+    const lines = formatBundleBehaviour(actual);
+    const start = lines.indexOf("Permission posture:");
+    expect(start).toBeGreaterThan(0);
+    expect(lines[start + 1]).toBe("Permission prompts: off for all seats (archive declaration).");
+    declarations.forEach((declaration, index) => expect(lines[start + index + 2]).toContain(declaration));
+    expect(lines[start + 5]).toContain("subject to runtime and host policy");
+    expect(actual.unknownBeforeLaunch.some(item => item.subject === "host and native settings")).toBe(true);
+  });
+
+  it("does not label a member override, a default or an unresolved policy as prompts off", () => {
+    for (const [rigPolicy, memberPolicy, basis, permissionPrompts] of [
+      ["builtin:yolo", "builtin:standard", "explicit", "on"],
+      [undefined, undefined, "product_default", "default"],
+      ["missing-policy.md", undefined, "unresolved", undefined],
+    ] as const) {
+      const files = new Map([
+        ["rig.yaml", stringifyYaml({ name: "mixed", version: "1", ...(rigPolicy ? { permission_policy: rigPolicy } : {}), pods: [{ id: "team", members: [{ id: "worker", runtime: "codex", agent_ref: "local:agent", profile: "default", cwd: ".", ...(memberPolicy ? { permission_policy: memberPolicy } : {}) }] }] })],
+        ["agent/agent.yaml", "name: worker\nversion: '1'\nprofiles: {default: {uses: {}}}\n"],
+      ]);
+      const actual = describeBundleBehaviour({ files, manifest: { schema_version: 2, rig_spec: "rig.yaml" }, generator: { openrigVersion: "0.6.6" }, digestValid: false, filesVerified: false });
+      expect(actual.state).toBe("generated");
+      if (actual.state !== "generated") throw new Error(actual.reason);
+      expect(actual.posture[0]).toMatchObject({ basis, nativeEffect: "unknown" });
+      expect(actual.posture[0]?.permissionPrompts).toBe(permissionPrompts);
+      if (!permissionPrompts) expect(actual.posture[0]).not.toHaveProperty("permissionPrompts");
+      expect(formatBundleBehaviour(actual).join("\n")).not.toContain("Permission prompts: off");
+    }
+  });
+
+  it.each(["full_bypass", "floor"] as const)("resolves an archived custom %s policy without observing native settings", launchPosture => {
+    const files = new Map([
+      ["rig.yaml", stringifyYaml({ name: "custom", version: "1", permission_policy: "policy.md", pods: [{ id: "team", members: [{ id: "worker", runtime: "codex", agent_ref: "local:agent", profile: "default", cwd: "." }] }] })],
+      ["agent/agent.yaml", "name: worker\nversion: '1'\nprofiles: {default: {uses: {}}}\n"],
+      ["policy.md", `---\npolicy_schema_version: 1\nname: custom\nsource: custom\ndescription: Declared launch posture.\nsurface: flag\nlaunch_posture: ${launchPosture}\n---\n`],
+    ]);
+    const actual = describeBundleBehaviour({ files, manifest: { schema_version: 2, rig_spec: "rig.yaml" }, generator: { openrigVersion: "0.6.6" }, digestValid: false, filesVerified: false });
+    expect(actual.state).toBe("generated");
+    if (actual.state !== "generated") throw new Error(actual.reason);
+    expect(actual.posture[0]).toMatchObject({ basis: "explicit", permissionPrompts: launchPosture === "full_bypass" ? "off" : "on", nativeEffect: "unknown" });
   });
 
   it.each(["recommended", "all-claude", "all-codex", "all-pi"])("describes the shared synthetic %s configuration, without borrowing another preset", preset => {
@@ -82,6 +149,7 @@ describe("before-action bundle view", () => {
       expect(actual.toldFiles).toEqual(expect.arrayContaining([expect.objectContaining({ seat: member.seat, pathOrRef: `agents/${member.member}/role.md`, resolution: "archive" })]));
       expect(actual.alsoRuns).toEqual(expect.arrayContaining([expect.objectContaining({ seat: member.seat, pathOrRef: "openrig-home:plugins/core", resolution: "host_at_launch" })]));
       expect(actual.posture.find(p => p.seat === member.seat)?.nativeEffect).toBe("unknown");
+      expect(actual.posture.find(p => p.seat === member.seat)?.permissionPrompts).toBe("default");
       if (member.runtime !== "pi") {
         expect(actual.writes).toEqual(expect.arrayContaining([expect.objectContaining({ seat: member.seat, path: member.runtime === "codex" ? "AGENTS.md" : "CLAUDE.local.md" })]));
       } else {

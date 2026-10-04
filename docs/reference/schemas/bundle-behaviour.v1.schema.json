@@ -211,6 +211,10 @@
             "const": "unknown",
             "description": "Host settings (for example OPENRIG_YOLO, persisted or native settings) decide the effective permission at launch."
           },
+          "permissionPrompts": {
+            "enum": ["off", "on", "default"],
+            "description": "Archive declaration per seat: off for full_bypass (including builtin:yolo); on for an explicit floor policy; default when no policy is declared (prompts on unless host settings turn them off). Absent means not stated, never on. nativeEffect remains unknown."
+          },
           "sourceRefs": {
             "type": "array",
             "items": {

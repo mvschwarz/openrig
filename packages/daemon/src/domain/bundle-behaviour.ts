@@ -44,7 +44,7 @@ interface GeneratedBehaviour {
   state: "generated";
   identity: BehaviourIdentity;
   team: Array<{ seat: string; pod: string; member: string; agentRef: string; profile: string; runtime: string; model?: string; cwd: string }>;
-  posture: Array<{ seat: string; shellAccess: string; selection: string; basis: "explicit" | "product_default" | "unresolved"; nativeEffect: "unknown"; sourceRefs: SourceRef[] }>;
+  posture: Array<{ seat: string; shellAccess: string; selection: string; basis: "explicit" | "product_default" | "unresolved"; permissionPrompts?: "off" | "on" | "default"; nativeEffect: "unknown"; sourceRefs: SourceRef[] }>;
   toldFiles: FileFact[];
   alsoRuns: FileFact[];
   writes: WriteFact[];
@@ -191,12 +191,15 @@ export function describeBundleBehaviour(input: DescribeBundleInput): BundleBehav
         }
         const selection = runtime === "terminal" ? "Terminal shell; no native agent permission flag"
           : basis === "unresolved" ? `unresolved policy: ${policy}`
-          : runtime === "pi" ? `${posture === "full_bypass" ? "approve (full resource trust)" : "resource trust resolved at launch"}; not a permission policy`
-          : posture === "full_bypass" ? "full_bypass: native permission bypass / unrestricted sandbox requested"
+          : runtime === "pi" ? `${posture === "full_bypass" ? "Permission prompts: off; Pi gets full resource trust (full_bypass / approve)" : "resource trust resolved at launch"}; not a native permission policy`
+          : posture === "full_bypass" ? runtime === "claude-code" ? "Permission prompts: off; Claude bypasses permissions (full_bypass)"
+            : runtime === "codex" ? "Permission prompts: off; Codex runs with full access and never asks (full_bypass)"
+            : "full_bypass: native permission bypass / unrestricted sandbox requested"
           : runtime === "claude-code" ? "acceptEdits (conditional launch floor)"
           : runtime === "codex" ? (text(member.codex_config_profile) ? `native profile ${member.codex_config_profile}; sandbox and approvals resolved at launch` : "workspace-write (conditional launch floor); approval policy resolved at launch")
           : "runtime-specific access; resolved at launch";
-        view.posture.push({ seat, shellAccess: "Can run shell commands as the launching user, subject to runtime and host policy.", selection, basis, nativeEffect: "unknown", sourceRefs });
+        const permissionPrompts = posture === "full_bypass" ? "off" : posture === "floor" ? "on" : basis === "product_default" ? "default" : undefined;
+        view.posture.push({ seat, shellAccess: "Can run shell commands as the launching user, subject to runtime and host policy.", selection, basis, ...(permissionPrompts ? { permissionPrompts } : {}), nativeEffect: "unknown", sourceRefs });
         const managed = runtime === "claude-code" ? text(object(rig.managed_blocks)["claude-code"]) ?? "CLAUDE.md" : runtime === "codex" ? "AGENTS.md" : undefined;
         if (managed) write(seat, "managed_guidance", "seat_cwd", managed, sourceRefs, "merge managed blocks");
         const startup = (block: StartupBlock | undefined, base: string, refs: SourceRef[]) => {
