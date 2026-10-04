@@ -70,6 +70,30 @@ describe("registerBundleProject", () => {
     expect(fs.readdirSync(workspace).filter((name) => name.startsWith("workspace.yaml"))).toEqual(["workspace.yaml"]);
   });
 
+  it("keeps the existing catalog's permission bits", () => {
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(catalogPath, USER_CATALOG);
+    fs.chmodSync(catalogPath, 0o600);
+    register();
+    expect(fs.statSync(catalogPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("quotes values YAML would read as something other than a string", () => {
+    const oddWorkspace = path.join(work, "false");
+    const outside = path.join(work, "workspace.yaml");
+    fs.mkdirSync(oddWorkspace);
+    const result = registerBundleProject({ bundleProjectDir: bundleProject, projectId: "null", rigName: "123", projectsRoot: path.join(work, "true"), catalogPath: outside, workspaceRoot: oddWorkspace });
+    expect(result.status).toBe("registered");
+    expect(readProjectCatalog(outside)).toEqual([
+      { id: "default", root: "false" },
+      { id: "null", root: "true/null" },
+    ]);
+    const appendedTo = path.join(work, "second.yaml");
+    fs.writeFileSync(appendedTo, USER_CATALOG);
+    registerBundleProject({ bundleProjectDir: bundleProject, projectId: "true", rigName: "1e3", projectsRoot: path.join(work, "p"), catalogPath: appendedTo, workspaceRoot: oddWorkspace });
+    expect((parseYaml(fs.readFileSync(appendedTo, "utf-8")) as { projects: unknown[] }).projects[1]).toEqual({ id: "true", root: "p/true", rigs: ["1e3"] });
+  });
+
   it("the existing catalog reader still reads the catalog, ignoring the rigs list", () => {
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(catalogPath, USER_CATALOG);

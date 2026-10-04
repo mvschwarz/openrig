@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import nodePath from "node:path";
-import { Document, isMap, isScalar, isSeq, parseDocument, type YAMLMap, type YAMLSeq } from "yaml";
+import { Document, isMap, isScalar, isSeq, parse as parseYaml, parseDocument, type YAMLMap, type YAMLSeq } from "yaml";
 
 /**
  * Registers a bundle's project in the workspace catalog and records which rig
@@ -58,6 +58,8 @@ const CATALOG_HEADER = "schema: openrig.workspace/v0alpha1\n";
 function writeCatalog(catalogPath: string, text: string): void {
   const temp = `${catalogPath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(temp, text);
+  // Keep an existing catalog's permission bits (ownership is the writing user's, as with any edit).
+  if (fs.existsSync(catalogPath)) fs.chmodSync(temp, fs.statSync(catalogPath).mode & 0o7777);
   try {
     fs.renameSync(temp, catalogPath);
   } catch (err) {
@@ -94,9 +96,13 @@ function materializeProjectFolder(source: string, target: string): boolean {
   return !identical;
 }
 
-/** A YAML scalar for a simple value: plain when it is a plain-safe name or path, else double-quoted. */
+/**
+ * A YAML scalar for a string value: plain only when it is a simple name or path that YAML reads back as
+ * the same string (so not `false`, `null`, `123` and the like); otherwise double-quoted.
+ */
 function scalar(value: string): string {
-  return /^[A-Za-z0-9_/][A-Za-z0-9._/-]*$|^\.{1,2}(\/[A-Za-z0-9._/-]*)?$/.test(value) ? value : JSON.stringify(value);
+  const simple = /^[A-Za-z0-9_/][A-Za-z0-9._/-]*$|^\.{1,2}(\/[A-Za-z0-9._/-]*)?$/.test(value);
+  return simple && parseYaml(value) === value ? value : JSON.stringify(value);
 }
 
 /**
