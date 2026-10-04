@@ -1474,6 +1474,7 @@ export class RestoreOrchestrator {
     const launchGeneration = this.sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid;
     const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string } | undefined;
     const nonInterruptive = node ? this.rigRepo.getRigNonInterruptive(node.rig_id) : false;
+    const launchTail: [effort?: string | null, nonInterruptive?: boolean] = nonInterruptive ? [effort, true] : effort !== undefined ? [effort] : [];
     let permissionMode: string | undefined;
     try {
       const runtime = this.claudeResume.canResume(resumeType, resumeToken) ? "claude-code"
@@ -1485,7 +1486,7 @@ export class RestoreOrchestrator {
       permissionMode = override.permissionMode ?? (resolvedPosture === "auto" && runtime === "claude-code" ? "auto" : undefined);
     } catch (error) { return { kind: "failed", message: `Permission selection: ${(error as Error).message}` }; }
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
-      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId, ...(nonInterruptive ? [effort, true] as const : effort !== undefined ? [effort] as const : []));
+      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId, ...launchTail);
       if (result.ok) {
         const notice = nonInterruptiveNotice("claude-code", { nonInterruptive, launchPosture: resolvedPosture, permissionMode });
         if (notice) warnings?.push(`${sessionName}: ${notice}`);
@@ -1505,7 +1506,7 @@ export class RestoreOrchestrator {
     }
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
-      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model, ...(nonInterruptive ? [effort, true] as const : effort !== undefined ? [effort] as const : []));
+      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model, ...launchTail);
       if (result.ok) {
         const notice = nonInterruptiveNotice("codex", { nonInterruptive, launchPosture: resolvedPosture, permissionMode });
         if (notice) warnings?.push(`${sessionName}: ${notice}`);

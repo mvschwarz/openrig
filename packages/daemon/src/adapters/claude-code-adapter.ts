@@ -254,8 +254,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           session: binding.tmuxSession, pane: binding.tmuxPane, generation: binding.launchGeneration }, binding.permissionMode);
       } catch (error) { return { ok: false, error: (error as Error).message }; }
     }
-    const permissionMode = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode) + nonInterruptiveArg(this.runtime, binding);
-    const appliedLaunch = observeClaudePermission(permissionMode);
+    const posture = claudePostureFlag(process.env, binding.launchPosture, binding.permissionMode);
+    const appliedLaunch = observeClaudePermission(posture);
+    const permissionMode = posture + nonInterruptiveArg(this.runtime, binding);
     // OPR.0.5.3.1: classic-renderer env prefix (default on) → native scrollback for every
     // managed launch path (fresh/resume/fork). "" when overridden off → byte-identical command.
     const rendererPrefix = claudeClassicRendererEnvPrefix(process.env);

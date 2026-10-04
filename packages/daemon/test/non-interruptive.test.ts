@@ -79,7 +79,11 @@ describe("non-interruptive launch choice", () => {
     const adapter = new ClaudeCodeAdapter({ tmux, fsOps, sleep: async () => {}, sessionIdFactory: () => "fresh-id" });
     const opts = { name: "dev@test", ...(mode === "resume" ? { resumeToken: "old-id" } : {}),
       ...(mode === "fork" ? { forkSource: { kind: "native_id" as const, value: "old-id" } } : {}) };
-    await adapter.launchHarness(binding, opts);
+    const result = await adapter.launchHarness(binding, opts);
+    if (mode === "fresh") {
+      expect(result.ok).toBe(true);
+      expect(result.ok && result.appliedLaunch).toMatchObject({ state: "observed", value: "bypassPermissions" });
+    }
     const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
     expect(command).toContain("'--settings' '{\"skipDangerousModePermissionPrompt\":true}'");
     expect(command).toContain("--dangerously-skip-permissions");
@@ -94,16 +98,20 @@ describe("non-interruptive launch choice", () => {
     const adapter = new CodexRuntimeAdapter({ tmux, fsOps, sleep: async () => {} });
     const opts = { name: "dev@test", ...(mode === "resume" ? { resumeToken: "old-id" } : {}),
       ...(mode === "fork" ? { forkSource: { kind: "native_id" as const, value: "old-id" } } : {}) };
-    await adapter.launchHarness(binding, opts);
-    const command = vi.mocked(tmux.sendText).mock.calls[0]![1];
+    const result = await adapter.launchHarness(binding, opts);
+    if (mode === "fresh") {
+      expect(result.ok).toBe(true);
+      expect(result.ok && result.appliedLaunch).toMatchObject({ state: "observed", value: "danger-full-access" });
+    }
+    const command = vi.mocked(tmux.sendShellCommand).mock.calls[0]![1];
     expect(command).toContain("notice.hide_full_access_warning=true");
     expect(command).toContain("notice.hide_gpt5_1_migration_prompt=true");
     expect(command).toContain('notice."hide_gpt-5.1-codex-max_migration_prompt"=true');
     expect(command).toContain("-s danger-full-access -a never");
     expect(fsOps.writeFile).not.toHaveBeenCalled();
-    vi.mocked(tmux.sendText).mockClear();
+    vi.mocked(tmux.sendShellCommand).mockClear();
     await adapter.launchHarness({ ...binding, nonInterruptive: false }, opts);
-    expect(vi.mocked(tmux.sendText).mock.calls[0]![1]).toBe(command.replace(/ '-c' '[^']*'/g, ""));
+    expect(vi.mocked(tmux.sendShellCommand).mock.calls[0]![1]).toBe(command.replace(/ '-c' '[^']*'/g, ""));
   });
 
   it("legacy restore adapters also receive the launch-only override", async () => {

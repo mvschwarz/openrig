@@ -79,8 +79,9 @@ export class ClaudeResumeAdapter {
       } catch (error) { return { ok: false, code: "permission_selection_refused", message: (error as Error).message }; }
     }
     const choice = { nonInterruptive, launchPosture: resolvedPosture, permissionMode: selectedPermissionMode };
-    const permissionMode = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode) + nonInterruptiveArg("claude-code", choice);
-    const appliedLaunch = observeClaudePermission(permissionMode);
+    const posture = claudePostureFlag(process.env, resolvedPosture, selectedPermissionMode);
+    const appliedLaunch = observeClaudePermission(posture);
+    const permissionMode = posture + nonInterruptiveArg("claude-code", choice);
     const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...nonInterruptiveArgs("claude-code", choice), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), "--resume", resumeToken!])
       : `${claudeClassicRendererEnvPrefix(process.env)}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(resumeToken!)}`;
 

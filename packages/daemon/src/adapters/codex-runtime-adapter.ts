@@ -355,8 +355,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` -c ${shellQuote(`model_reasoning_effort="${effort}"`)}` : "";
     const profile = binding.codexConfigProfile?.trim();
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
-    const postureArg = codexPostureArg(profileArg, process.env, binding.launchPosture) + nonInterruptiveArg(this.runtime, binding);
-    const appliedLaunch = observeCodexSandbox(postureArg);
+    const posture = codexPostureArg(profileArg, process.env, binding.launchPosture);
+    const appliedLaunch = observeCodexSandbox(posture);
+    const postureArg = posture + nonInterruptiveArg(this.runtime, binding);
 
     // OPR.0.3.4.7 — profile-LOAD probe before launch/resume. A legacy
     // [profiles.<name>] table or invalid TOML must fail BEFORE the opaque

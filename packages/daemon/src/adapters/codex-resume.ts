@@ -92,8 +92,9 @@ export class CodexResumeAdapter {
     }
 
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
-    const postureArg = codexPostureArg(profileArg, process.env, resolvedPosture) + nonInterruptiveArg("codex", { nonInterruptive, launchPosture: resolvedPosture });
-    const appliedLaunch = observeCodexSandbox(postureArg);
+    const posture = codexPostureArg(profileArg, process.env, resolvedPosture);
+    const appliedLaunch = observeCodexSandbox(posture);
+    const postureArg = posture + nonInterruptiveArg("codex", { nonInterruptive, launchPosture: resolvedPosture });
     const networkArg = await codexNetworkDefaultArg(this.options.readNetworkDefault, appliedLaunch, cwd, tmuxSessionName);
     const cmd = buildCodexResumeCore(
       resumeToken ?? "",
