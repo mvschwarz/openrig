@@ -53,6 +53,7 @@ import { preflightCommand } from "./commands/preflight.js";
 import { authCommand } from "./commands/auth.js";
 import { providerCommand } from "./commands/provider.js";
 import { usageCommand } from "./commands/usage.js";
+import { telemetryCommand } from "./commands/telemetry.js";
 import { healthCommand, type HealthDeps } from "./commands/health.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { expandCommand } from "./commands/expand.js";
@@ -93,6 +94,7 @@ import { CLI_VERSION } from "./version.js";
 export interface ProgramDeps {
   daemonDeps?: LifecycleDeps;
   statusDeps?: StatusDeps;
+  telemetryDeps?: StatusDeps;
   snapshotDeps?: StatusDeps;
   restoreDeps?: StatusDeps;
   uiDeps?: UiDeps;
@@ -232,6 +234,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(authCommand());
   program.addCommand(providerCommand());
   program.addCommand(usageCommand());
+  program.addCommand(telemetryCommand(depsOverride?.telemetryDeps));
   program.addCommand(healthCommand(depsOverride?.healthDeps));
   program.addCommand(doctorCommand());
   program.addCommand(expandCommand(depsOverride?.expandDeps));

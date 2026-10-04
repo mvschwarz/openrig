@@ -817,7 +817,8 @@ export function createApp(deps: AppDeps): Hono {
   // SCOPES VIEW (d64d2f5c): the store-direct TUI read.
   app.route("/api/scopes", scopesRoutes());
   // 51-08 A3 — usage series + top-N burn over usage_samples (one projection, CLI+HTTP).
-  app.route("/api/telemetry", telemetryRoutes({ db: () => deps.rigRepo.db }));
+  app.route("/api/telemetry", telemetryRoutes({ db: () => deps.rigRepo.db,
+    source: { hostId: getSelfHostId(), bootEpoch: deps.daemonLifecycleStore.get()?.bootEpoch ?? null } }));
   // OPR.0.4.4.19 FR-9 — scope approve: frontmatter stamp + audit row.
   app.route("/api/scope/approve", scopeApproveRoutes());
   app.route("/api/proof", proofRoutes());
