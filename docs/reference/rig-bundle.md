@@ -255,6 +255,12 @@ rig up <bundle-path> [--target <root>] [--cwd <dir>]
 
 `rig up` auto-detects `.rigbundle` files and routes them through the bundle bootstrap path.
 
+`rig bootstrap <bundle-path>` also accepts archives and uses the ordinary bundle
+install path, including compatibility checks and the install audit. Use `--plan`
+to preview, or `--target <root>` to choose the persistent install directory. Its
+default target is the caller's current directory; `--cwd` only changes the agents'
+working directory. YAML files and library spec names keep the spec bootstrap path.
+
 - `--target <root>` is the install target described above (for a schema-version-2 bundle, the directory the bundle is copied into and launched from)
 - if `--target` is omitted for a `.rigbundle`, the CLI defaults the install target to the current working directory, so the bundle's files are written there
 - `rig up` resolves a relative `--target` against your current directory before sending it, like `rig bundle install`; with `--host`, `--target` is sent as given and must be a path that exists on that host
