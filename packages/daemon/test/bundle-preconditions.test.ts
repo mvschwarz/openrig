@@ -25,7 +25,7 @@ const legacySpec = `schema_version: 1
 name: setup-fixture
 version: "1.0"
 nodes:
-  - {id: shell, runtime: terminal}
+  - {id: shell, runtime: claude-code}
 edges: []
 `;
 
