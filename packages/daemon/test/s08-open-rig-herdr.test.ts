@@ -3,7 +3,7 @@
 // how it reads replies; they do not prove what a real Herdr does with duplicate labels or focus.
 import { describe, expect, it } from "vitest";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
-import { HerdrAdapter, HERDR_PANES_PER_PAGE, planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
+import { HerdrAdapter, HERDR_PANES_PER_PAGE, HERDR_PANES_UNCONFIRMED_NOTE, planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { PANES_PER_PAGE } from "../src/domain/terminal/view-composer.js";
 import { MAX_COLS, MAX_PER_WORKSPACE } from "../src/domain/cmux-layout-service.js";
 import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
@@ -16,9 +16,22 @@ const rows = Array.from({ length: 17 }, (_, i) => {
 });
 
 type Req = { method: string; params: Record<string, unknown> };
+/** Every pane leaf's label in a layout.apply root (blank filler panes included). */
+const leafLabels = (root: unknown): string[] => {
+  const out: string[] = [];
+  const walk = (n: any) => {
+    if (!n || typeof n !== "object") return;
+    if (n.type === "pane") out.push(String(n.label ?? ""));
+    walk(n.first); walk(n.second);
+  };
+  walk(root);
+  return out;
+};
 function herdrTransport(respond?: (method: string, params: Record<string, unknown>, n: number) => HerdrResult): { transport: HerdrTransport; requests: Req[] } {
   const requests: Req[] = [];
   let applied = 0;
+  // The default fake answers pane.list the way a live herdr would: every applied pane, still alive.
+  const panes: Array<{ pane_id: string; tab_id: string; label: string }> = [];
   return {
     requests,
     transport: {
@@ -27,7 +40,12 @@ function herdrTransport(respond?: (method: string, params: Record<string, unknow
         requests.push({ method, params: params as Record<string, unknown> });
         if (respond) return respond(method, params as Record<string, unknown>, applied);
         if (method === "workspace.create") return { type: "workspace_created", workspace: { workspace_id: "w1" }, tab: { tab_id: "w1:t0" } };
-        if (method === "layout.apply") { applied++; return { type: "layout_apply", layout: { workspace_id: "w1", tab_id: `w1:t${applied}` } }; }
+        if (method === "layout.apply") {
+          applied++;
+          for (const label of leafLabels((params as Record<string, unknown>)["root"])) panes.push({ pane_id: `p${panes.length}`, tab_id: `w1:t${applied}`, label });
+          return { type: "layout_apply", layout: { workspace_id: "w1", tab_id: `w1:t${applied}` } };
+        }
+        if (method === "pane.list") return { type: "pane_list", panes };
         return { type: "ok" };
       },
     },
@@ -100,7 +118,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const { transport, requests } = herdrTransport();
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport }));
     const res = await svc.openView({ view: `rig:${RIG}` });
-    // #707: each applied page is followed by one pane.list read (this fake's reply has no panes, so nothing changes).
+    // #707: each applied page is followed by one pane.list read (this fake lists every pane alive, so nothing changes).
     expect(requests.map((r) => r.method)).toEqual(["workspace.create", "layout.apply", "pane.list", "layout.apply", "pane.list", "tab.focus", "tab.close"]);
     expect(requests[2]!.params).toEqual({ workspace_id: "w1" });
     expect(requests[5]!.params).toEqual({ tab_id: "w1:t1" });
@@ -144,7 +162,8 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(requests.filter((r) => r.method === "workspace.create").map((c) => c.params["label"])).toEqual([RIG, `${RIG} (3)`]);
     expect(res.ok).toBe(true);
-    expect(res.notes).toEqual([`A workspace named "${RIG}" already exists, so this one is "${RIG} (3)".`]);
+    // This fake answers pane.list with no listing, so the page is unconfirmed (#707) and stays opened.
+    expect(res.notes).toEqual([`A workspace named "${RIG}" already exists, so this one is "${RIG} (3)".`, HERDR_PANES_UNCONFIRMED_NOTE]);
   });
 
   it("a refused focus or close is a note; the opened seats are unchanged", async () => {
@@ -157,7 +176,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const res = await svc.openView({ view: `rig:${RIG}` });
     expect(res.opened).toHaveLength(17);
     expect(res.degraded).toEqual([]);
-    expect(res.notes).toEqual(["herdr did not focus the first tab: tab.focus unsupported", "herdr kept the blank starting tab: tab.close unsupported"]);
+    expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE, "herdr did not focus the first tab: tab.focus unsupported", "herdr kept the blank starting tab: tab.close unsupported"]);
   });
 
   it("honest partials: a page herdr refuses names its seats as degraded; the tile count never overclaims", async () => {
@@ -192,7 +211,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(closes(requests)).toEqual([]);
     expect(requests.find((r) => r.method === "tab.focus")!.params).toEqual({ tab_id: "t2" });
     expect(res.opened).toHaveLength(17);
-    expect(res.notes).toEqual([KEPT]);
+    expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
   });
 
   it("no page reports a tab id: no focus and no close, both said", async () => {
@@ -215,7 +234,7 @@ describe("S08 correction — the starting tab is kept unless it is known blank",
     expect(closes(requests)).toEqual([]);
     expect(res.opened).toEqual([rows[16]!.canonicalSessionName]);
     expect(res.degraded).toHaveLength(16);
-    expect(res.notes).toEqual([KEPT]);
+    expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE, KEPT]);
   });
 
   it("every page fails: nothing is focused or closed", async () => {

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { composeView, type ViewMemberInput } from "../src/domain/terminal/view-composer.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
-import { HerdrAdapter, HERDR_PANE_EXITED_REASON } from "../src/domain/terminal/herdr-adapter.js";
+import { HerdrAdapter, HERDR_PANE_EXITED_REASON, HERDR_PANES_UNCONFIRMED_NOTE } from "../src/domain/terminal/herdr-adapter.js";
 import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
 import type { ComposedPane, ComposedView, OpenViewResult, TerminalProvider } from "../src/domain/terminal/terminal-provider.js";
 
@@ -136,8 +136,8 @@ const listed = (...labels: Array<string | undefined>): HerdrResult => ({
   panes: labels.map((label, i) => ({ pane_id: `p${i}`, tab_id: "w1:t1", ...(label === undefined ? {} : { label }) })),
 });
 
-describe("#707 herdr reports a pane already gone after layout.apply as degraded", () => {
-  it("one seat's pane is gone: that seat is degraded, its siblings stay opened", async () => {
+describe("#707 herdr reports a pane already gone after layout.apply as degraded, and fails safe", () => {
+  it("a confirmed tab with one seat's label missing: that seat is degraded, its siblings stay opened", async () => {
     const { adapter, methods } = herdrOpening((params) => {
       expect(params).toEqual({ workspace_id: "w1" });
       return listed("a", "c", "");
@@ -150,21 +150,39 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded"
     expect(res.notes).toBeUndefined();
   });
 
-  it("every seat pane is gone (only the filler left, or the tab closed): all degraded, not ok", async () => {
-    for (const reply of [listed(""), { type: "pane_list", panes: [] }]) {
+  it("the reporter's case: the tab holds only blank filler, so every seat is degraded and the open is not ok", async () => {
+    const { adapter } = herdrOpening(() => listed(""));
+    const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
+    expect(res.ok).toBe(false);
+    expect(res.opened).toEqual([]);
+    expect(res.degraded.map((d) => d.seat)).toEqual(["a", "b", "c"]);
+  });
+
+  it("the tab isn't in the listing (another id form) or the listing is empty: seats stay opened, with a note", async () => {
+    const otherTab: HerdrResult = { type: "pane_list", panes: [{ pane_id: "p0", tab_id: "1", label: "a" }] };
+    for (const reply of [otherTab, { type: "pane_list", panes: [] }]) {
       const { adapter } = herdrOpening(() => reply);
-      const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
-      expect(res.ok).toBe(false);
-      expect(res.opened).toEqual([]);
-      expect(res.degraded.map((d) => d.seat)).toEqual(["a", "b", "c"]);
+      const res = await adapter.openView(viewOf(pane("a"), pane("b")));
+      expect(res.ok).toBe(true);
+      expect(res.opened).toEqual(["a", "b"]);
+      expect(res.degraded).toEqual([]);
+      expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
     }
   });
 
-  it("panes in another tab don't count as this page's panes", async () => {
-    const { adapter } = herdrOpening(() => ({ type: "pane_list", panes: [{ pane_id: "p0", tab_id: "w1:t9", label: "a" }] }));
-    const res = await adapter.openView(viewOf(pane("a")));
-    expect(res.opened).toEqual([]);
-    expect(res.degraded.map((d) => d.seat)).toEqual(["a"]);
+  it("listed labels that match none of the page's seats: nothing is degraded, with a note", async () => {
+    const { adapter } = herdrOpening(() => listed("renamed-1", "renamed-2", ""));
+    const res = await adapter.openView(viewOf(pane("a"), pane("b"), pane("c")));
+    expect(res.opened).toEqual(["a", "b", "c"]);
+    expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
+  });
+
+  it("a truncated or padded label still matches its seat", async () => {
+    const { adapter } = herdrOpening(() => listed("  pod.a ·  a-long-sli…", "pod.b · short"));
+    const res = await adapter.openView(viewOf(pane("a", "pod.a · a-long-slice-name"), pane("b", "pod.b · short")));
+    expect(res.opened).toEqual(["a", "b"]);
+    expect(res.degraded).toEqual([]);
+    expect(res.notes).toBeUndefined();
   });
 
   it("seats sharing a label are not attributed; a note says one exited", async () => {
@@ -182,14 +200,14 @@ describe("#707 herdr reports a pane already gone after layout.apply as degraded"
     expect(res.notes?.join(" ")).toContain("2 pane(s) exited right after opening");
   });
 
-  it("an unreadable or unrecognised listing changes nothing", async () => {
+  it("an unreadable or unrecognised listing keeps every seat opened, with a note", async () => {
     for (const paneList of [() => { throw new Error("unknown method"); }, () => ({ type: "ok" })]) {
       const { adapter } = herdrOpening(paneList);
       const res = await adapter.openView(viewOf(pane("a"), pane("b")));
       expect(res.ok).toBe(true);
       expect(res.opened).toEqual(["a", "b"]);
       expect(res.degraded).toEqual([]);
-      expect(res.notes).toBeUndefined();
+      expect(res.notes).toEqual([HERDR_PANES_UNCONFIRMED_NOTE]);
     }
   });
 });
