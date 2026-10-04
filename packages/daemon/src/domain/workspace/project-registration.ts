@@ -57,20 +57,24 @@ const CATALOG_HEADER = "schema: openrig.workspace/v0alpha1\n";
 
 /** Replace the catalog in one step: a reader sees the old file or the new one, never a partial write. */
 function writeCatalog(catalogPath: string, text: string): void {
-  const temp = `${catalogPath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temp, text);
-  // Keep an existing catalog's permission bits (ownership is the writing user's, as with any edit).
-  if (fs.existsSync(catalogPath)) fs.chmodSync(temp, fs.statSync(catalogPath).mode & 0o7777);
+  // Replace the file a symlinked catalog points at, so the link survives.
+  const target = fs.existsSync(catalogPath) ? fs.realpathSync(catalogPath) : catalogPath;
+  const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
   try {
-    fs.renameSync(temp, catalogPath);
+    fs.writeFileSync(temp, text);
+    // Keep an existing catalog's permission bits (ownership is the writing user's, as with any edit).
+    if (fs.existsSync(target)) fs.chmodSync(temp, fs.statSync(target).mode & 0o7777);
+    fs.renameSync(temp, target);
   } catch (err) {
     try { fs.rmSync(temp, { force: true }); } catch { /* best effort */ }
     throw err;
   }
 }
 
+/** The real path, or, for a folder not created yet, its real parent plus its name. */
 function canonical(p: string): string {
-  try { return fs.realpathSync(p); } catch { return nodePath.resolve(p); }
+  try { return fs.realpathSync(p); } catch { /* not created yet */ }
+  try { return nodePath.join(fs.realpathSync(nodePath.dirname(p)), nodePath.basename(p)); } catch { return nodePath.resolve(p); }
 }
 
 function listFiles(dir: string, prefix = ""): string[] {
@@ -176,10 +180,12 @@ function entryRigs(entry: YAMLMap): string[] {
 
 export function registerBundleProject(input: ProjectRegistrationInput): ProjectRegistrationResult {
   const projectRoot = nodePath.join(input.projectsRoot, input.projectId);
-  const projectFolderKept = materializeProjectFolder(input.bundleProjectDir, projectRoot);
   const catalogDir = nodePath.dirname(input.catalogPath);
   const relativeRoot = nodePath.relative(catalogDir, projectRoot).split(nodePath.sep).join("/") || ".";
-  const base = { projectId: input.projectId, projectRoot, catalogPath: input.catalogPath, rigName: input.rigName, ...(projectFolderKept ? { projectFolderKept } : {}) };
+  const base = { projectId: input.projectId, projectRoot, catalogPath: input.catalogPath, rigName: input.rigName };
+  // The project folder is placed only once every check has passed, so a conflict changes nothing.
+  const placeFolder = (): { projectFolderKept?: true } =>
+    (materializeProjectFolder(input.bundleProjectDir, projectRoot) ? { projectFolderKept: true } : {});
 
   let doc: Document;
   let existingText: string | undefined;
@@ -247,7 +253,7 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
   }
 
   if (target) {
-    if (entryRigs(target).includes(input.rigName)) return { ...base, projectId: targetId!, status: "already_registered" };
+    if (entryRigs(target).includes(input.rigName)) return { ...base, ...placeFolder(), projectId: targetId!, status: "already_registered" };
     const edited = existingText !== undefined ? addRigText(existingText, targetId!, input.rigName) : null;
     if (edited === null) {
       return {
@@ -255,8 +261,9 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
         detail: `could not add rig '${input.rigName}' to project '${targetId}' in ${input.catalogPath} without rewriting the file; nothing was changed. Add '${input.rigName}' to that entry's rigs list (rigs: [${input.rigName}]) by hand`,
       };
     }
+    const placed = placeFolder();
     writeCatalog(input.catalogPath, edited);
-    return { ...base, projectId: targetId!, status: "associated" };
+    return { ...base, ...placed, projectId: targetId!, status: "associated" };
   }
 
   const entry = { id: input.projectId, root: relativeRoot, rigs: [input.rigName] };
@@ -268,11 +275,13 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
         detail: `could not append project '${input.projectId}' to ${input.catalogPath} without rewriting the file; nothing was changed. Add this entry under projects by hand: { id: ${input.projectId}, root: ${relativeRoot}, rigs: [${input.rigName}] }`,
       };
     }
+    const placed = placeFolder();
     writeCatalog(input.catalogPath, appended);
-    return { ...base, status: "registered" };
+    return { ...base, ...placed, status: "registered" };
   }
   (projects as YAMLSeq).add(doc.createNode(entry));
+  const placed = placeFolder();
   fs.mkdirSync(catalogDir, { recursive: true });
   writeCatalog(input.catalogPath, doc.toString());
-  return { ...base, status: "registered" };
+  return { ...base, ...placed, status: "registered" };
 }

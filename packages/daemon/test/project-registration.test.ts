@@ -89,6 +89,26 @@ describe("registerBundleProject", () => {
     expect(fs.existsSync(catalogPath)).toBe(false);
   });
 
+  it("a conflict leaves the project folder uncreated", () => {
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(catalogPath, `${USER_CATALOG}  - id: openrig\n    root: ../code/openrig-fork\n`);
+
+    expect(register().status).toBe("conflict");
+    expect(fs.existsSync(path.join(projectsRoot, "openrig"))).toBe(false);
+  });
+
+  it("edits the file a symlinked catalog points at, and keeps the link", () => {
+    fs.mkdirSync(workspace, { recursive: true });
+    const real = path.join(work, "dotfiles", "workspace.yaml");
+    fs.mkdirSync(path.dirname(real), { recursive: true });
+    fs.writeFileSync(real, USER_CATALOG);
+    fs.symlinkSync(real, catalogPath);
+
+    expect(register().status).toBe("registered");
+    expect(fs.lstatSync(catalogPath).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(real, "utf-8")).toContain("rigs: [openrig-dev]");
+  });
+
   it("keeps the existing catalog's permission bits", () => {
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(catalogPath, USER_CATALOG);
