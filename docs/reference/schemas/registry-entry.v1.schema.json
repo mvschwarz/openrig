@@ -110,6 +110,11 @@
         "listed",
         "withdrawn"
       ]
+    },
+    "withdrawnOn": {
+      "type": "string",
+      "format": "date",
+      "description": "When the entry was withdrawn; set with status: withdrawn."
     }
   }
 }

@@ -101,14 +101,14 @@ decision, recorded in the registry entry's `evidenceReuse`.
 
 **The status file** is generated from records by rule `openrig.status-rule/v1`:
 - **Labels:** `known_problem`, `tested`, `tested_with_help`, `partly_tested`, `not_tested` and `status_unavailable`.
-  They're shown as Known problem, Tested by OpenRig, Tested with help (N), Partly tested, Not tested and Status
-  unavailable.
-- **Empty `platforms`** means Not tested.
-- **A listing whose records can't be read** is `status_unavailable`, never Not tested.
+  They're shown as Known problem, Tested by OpenRig, Tested with help (N), Partly tested, Not tested by OpenRig
+  and Status unavailable.
+- **Empty `platforms`** means Not tested by OpenRig.
+- **A listing whose records can't be read** is `status_unavailable`, never Not tested by OpenRig.
 - **The file holds no private paths, host names, row IDs, account names or receipt text,** and regenerating it gives
   identical bytes.
-- **`bodyDigest`** is SHA-256 over the canonical JSON of every other top-level field: object keys sorted by code unit at
-  every depth, no whitespace, numbers and strings in `JSON.stringify` form, UTF-8. `harnessChecks` has its own
+- **`bodyDigest`** is SHA-256, lowercase hex, over the RFC 8785 (JCS) canonical JSON, as UTF-8, of an object holding
+  every other top-level field. The site import recomputes it and rejects a hand-edited file. `harnessChecks` has its own
   `state`, so an unreadable harness-check record reads Status unavailable too.
 
 ### Registry entries
@@ -117,6 +117,8 @@ Each entry records:
 - the source at its reviewed commit;
 - each offered configuration with its package digest, assembler and behaviour-view file;
 - optional `evidenceReuse`;
-- the review date, and `listed` or `withdrawn`.
+- the review date, and `listed` or `withdrawn` (with `withdrawnOn`).
+
+v1 has no author field: a listing shows the owner of `source.repository`.
 
 A listing shows "Reviewed for listing on `<date>` at commit `<short>`. Review is not a security audit."

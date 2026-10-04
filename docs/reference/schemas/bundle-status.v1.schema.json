@@ -200,7 +200,7 @@
     "bodyDigest": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$",
-      "description": "SHA-256 hex over the canonical JSON of every other top-level field: object keys sorted by code unit at every depth, no whitespace, numbers and strings in JSON.stringify form, UTF-8."
+      "description": "SHA-256, lowercase hex, over the RFC 8785 (JCS) canonical JSON, as UTF-8, of an object holding every other top-level field."
     }
   }
 }
