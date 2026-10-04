@@ -43,6 +43,22 @@ workingCaptures.push(["live status above a task list", pane([update, focus], "�
   workingRows[0], ...Array.from({ length: 7 }, (_, i) => `  □ Pending task ${i + 1}`),
 ].join("\n"))]);
 
+// Constructed footer substitutions/task lists; no native task-count bound is known.
+const otherBars = [
+  "⏵⏵ bypass permissions on (shift+tab to cycle)",
+  "⏸ plan mode on (shift+tab to cycle)",
+  "? for shortcuts",
+  "custom mode hint",
+];
+const incompleteBlocks = [[], [update], [update, focus], [update, focus, weekly]].map((suffix) => [
+  `${suffix.length} warnings`, pane(suffix, "❯\u00a0", [workingRows[0],
+    ...Array.from({ length: 21 }, (_, i) => `  □ Pending task ${i + 1}`)].join("\n")),
+]);
+for (const hint of otherBars) incompleteBlocks.push([
+  `tall block / ${hint}`, incompleteBlocks[0]![1]!.replace(bar, hint),
+]);
+const alternateWorking = otherBars.map(hint => [hint, pane([], "❯\u00a0", workingRows[0]).replace(bar, hint)]);
+
 // Constructed multiline drafts, not native captures. Indentation distinguishes
 // continuation text from the actual input box's border and first prompt column.
 const nestedDrafts = [
@@ -79,15 +95,37 @@ describe("Claude composer below noninteractive status warnings", () => {
     }
   });
 
-  it("ignores a historical timer outside the normal activity capture", () => {
+  it("does not infer completion when the status head is outside the scan", () => {
     const content = pane([update], "❯\u00a0", [workingRows[0], ...Array.from({ length: 21 }, () => "  prior output")].join("\n"));
-    expect(classifyPaneActivity(content).state).toBe("agent_idle");
+    expect(classifyPaneActivity(content).state).toBe("unknown");
   });
 
   it("preserves a uniformly indented input block without mistaking its columns", () => {
     const indent = (content: string) => content.split("\n").map(line => `  ${line}`).join("\n");
     expect(classifyPaneActivity(indent(pane([update]))).state).toBe("agent_idle");
     expect(classifyPaneActivity(indent(pane([], "❯\u00a0", workingRows[0]))).state).toBe("agent_active");
+  });
+
+  it.each(incompleteBlocks)("keeps an incomplete status block unknown: %s", async (_name, content) => {
+    expect(classifyPaneActivity(content)).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
+    const service = new SeatStructuralActivityService({ capturePaneContent: async () => content });
+    expect((await service.pollSeat("seat@rig"))?.state).toBe("unknown");
+  });
+
+  it.each(alternateWorking)("recognizes work independently of the mode hint: %s", async (_name, content) => {
+    expect(classifyPaneActivity(content).state).toBe("agent_active");
+    const service = new SeatStructuralActivityService({ capturePaneContent: async () => content });
+    expect((await service.pollSeat("seat@rig"))?.state).toBe("agent_active");
+  });
+
+  it.each(otherBars)("keeps completed work idle under mode hint %s", (hint) => {
+    for (const before of ["● Ready.", "✻ Crunched for 2s", `${workingRows[0]}\n● Ready.`]) {
+      expect(classifyPaneActivity(pane([], "❯\u00a0", before).replace(bar, hint)).state).toBe("agent_idle");
+    }
+  });
+
+  it("recognizes a live timer on the existing unframed prompt path", () => {
+    expect(classifyPaneActivity(`${workingRows[0]}\n❯ \n? for shortcuts`).state).toBe("agent_active");
   });
 
   it.each([
@@ -221,6 +259,23 @@ describe("first guarded Claude send with retained warning-shaped composer", () =
     const result = await f.transport.send(f.name, "ordinary marker", { waitForIdleMs: 20 });
     expect(result).toMatchObject({ ok: true, sent: true, activity: { state: "idle", evidenceSource: "runtime_hook" } });
     expect(f.sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([...incompleteBlocks, ...alternateWorking])("explicit wait preserves input for %s", async (_name, content) => {
+    const f = setup(content);
+    const result = await f.transport.send(f.name, "ordinary marker", { waitForIdleMs: 20 });
+    expect(result).toMatchObject({ ok: false, sent: false });
+    expect(f.sendText).not.toHaveBeenCalled();
+    expect(f.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("ordinary send still advises and proceeds on an incomplete status block", async () => {
+    const f = setup(incompleteBlocks[0]![1]!);
+    const result = await f.transport.send(f.name, "ordinary marker");
+    expect(result.ok).toBe(true);
+    expect(result.warning).toContain("activity could not be determined");
+    expect(f.sendText).toHaveBeenCalledTimes(1);
+    expect(f.sendKeys).toHaveBeenCalledTimes(1);
   });
 
   it.each([
