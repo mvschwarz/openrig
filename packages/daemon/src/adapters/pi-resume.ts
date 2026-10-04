@@ -11,6 +11,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
+import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import type { ResumeResult } from "./claude-resume.js";
 import { piTrust, yoloEnabled } from "./yolo-mode.js";
 import {
@@ -28,6 +29,7 @@ export interface PiResumeFsOps {
 }
 
 interface PiResumeOptions {
+  seatLaunchEnvironment?: SeatLaunchEnvironment;
   pollMs?: number;
   maxWaitMs?: number;
   sleep?: (ms: number) => Promise<void>;
@@ -108,8 +110,11 @@ export class PiResumeAdapter {
       launchId,
     });
 
+    const command = this.runtime === "pi" && this.options.seatLaunchEnvironment
+      ? await this.options.seatLaunchEnvironment.command(tmuxSessionName, cmd, { runtime: this.runtime })
+      : cmd;
     // Short commands retain the direct path; long commands exec from a private script.
-    const textResult = await this.tmux.sendShellCommand(tmuxSessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
+    const textResult = await this.tmux.sendShellCommand(tmuxSessionName, command, undefined, { stageIfLong: true, execInScript: true });
     if (!textResult.ok) {
       return { ok: false, code: "resume_failed", message: textResult.message };
     }

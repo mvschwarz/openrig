@@ -112,3 +112,12 @@ it("B: a reused link remains rig-only; unexpected contents are preserved and fal
   expect(readdirSync(path.dirname(rig)).sort()).toEqual(["node", "rig"]);
   expect(readlinkSync(rig)).toBe(realpathSync(f.cli)); expect(f.warn).toHaveBeenCalledTimes(1);
 });
+
+
+it.each(["nu", "nu.exe", "fish", "csh", "", "unknown"])("Pi preserves its existing command on an unsupported pane: %s", async shell => {
+  const f = fixture(); f.tmux.getPaneCommand.mockResolvedValue(shell);
+  const command = "node '/runner.js' --session '/history.jsonl'";
+  expect(await f.launch.command("seat@rig", command, { runtime: "pi" })).toBe(command);
+  expect(f.tmux.getSessionEnv).not.toHaveBeenCalled();
+  expect(f.warn).toHaveBeenCalledTimes(1);
+});

@@ -110,6 +110,10 @@ export class SeatLaunchEnvironment {
       // Nushell does not expand "$PATH". Keep its pre-existing literal command.
       const shell = path.basename(await this.tmux.getPaneCommand(session) ?? "").replace(/^-/, "");
       if (shell === "nu" || shell === "nu.exe") throw new Error("Non-POSIX pane");
+      // Pi keeps its existing command on shells where this PATH expression is not supported.
+      if (target.runtime === "pi" && !["bash", "zsh", "sh", "dash", "ksh"].includes(shell)) {
+        throw new Error("Unsupported Pi pane shell");
+      }
       const identity: Record<string, string | undefined> = {};
       for (const key of ["OPENRIG_NODE_ID", "OPENRIG_SESSION_NAME", "OPENRIG_RUNTIME", "OPENRIG_OCCUPANT_GENERATION"]) {
         identity[key] = await this.tmux.getSessionEnv(session, key);

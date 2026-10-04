@@ -12,6 +12,7 @@
 import nodePath from "node:path";
 import { randomUUID } from "node:crypto";
 import type { TmuxAdapter } from "./tmux.js";
+import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js";
 import { piTrust, yoloEnabled } from "./yolo-mode.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -41,6 +42,7 @@ export interface PiAdapterFsOps {
 
 export interface PiRuntimeAdapterDeps {
   tmux: TmuxAdapter;
+  seatLaunchEnvironment?: SeatLaunchEnvironment;
   fsOps: PiAdapterFsOps;
   /** Root under which every Pi seat gets its isolated state dir (FR-7).
    *  Typically <OPENRIG_HOME>/state/pi. */
@@ -60,6 +62,7 @@ export interface PiRuntimeAdapterDeps {
 export class PiRuntimeAdapter implements RuntimeAdapter {
   readonly runtime: RunnerRuntime = "pi";
   private tmux: TmuxAdapter;
+  private seatLaunchEnvironment?: SeatLaunchEnvironment;
   private fs: PiAdapterFsOps;
   protected stateRoot: string;
   private runnerEntryPath: string;
@@ -69,6 +72,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
 
   constructor(deps: PiRuntimeAdapterDeps) {
     this.tmux = deps.tmux;
+    this.seatLaunchEnvironment = deps.seatLaunchEnvironment;
     this.fs = deps.fsOps;
     this.stateRoot = deps.stateRoot;
     this.runnerEntryPath = deps.runnerEntryPath;
@@ -258,8 +262,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       launchId,
     });
 
+    const command = this.runtime === "pi" && this.seatLaunchEnvironment
+      ? await this.seatLaunchEnvironment.command(sessionName, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration, runtime: this.runtime })
+      : cmd;
     // Stage long commands without leaving a shell above the live runner.
-    const textResult = await this.tmux.sendShellCommand(sessionName, cmd, undefined, { stageIfLong: true, execInScript: true });
+    const textResult = await this.tmux.sendShellCommand(sessionName, command, undefined, { stageIfLong: true, execInScript: true });
     if (!textResult.ok) {
       return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
     }
