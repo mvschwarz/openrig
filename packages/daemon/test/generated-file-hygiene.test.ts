@@ -212,6 +212,33 @@ catch(e) { process.stderr.write(e.stderr||''); process.exit(e.status||1); }
     }
   });
 
+  it.each(["current", "sibling"])("does not inventory a large ignored tree in the %s worktree", location => {
+    const linked = path.join(root, "linked"); git(repo, "worktree", "add", "-q", "-b", "linked", linked);
+    const target = location === "current" ? repo : linked;
+    write(".gitignore", "/node_modules/\n", target);
+    const dependencies = path.join(target, "node_modules"); fs.mkdirSync(dependencies);
+    for (let i = 0; i < 10000; i++) fs.writeFileSync(path.join(dependencies, `${i}-${"x".repeat(210)}`), "");
+    const unbounded = execFileSync("git", ["-C", target, "ls-files", "--cached", "--others", "-t", "-z"], { maxBuffer: 4 * 1024 * 1024 });
+    expect(unbounded.length).toBeGreaterThan(2 * 1024 * 1024);
+    const tracked = write("AGENTS.md"); git(repo, "add", "AGENTS.md");
+    const generated = write(".codex/plugins/openrig-core/payload.txt");
+    expect(excludeNewGeneratedFiles(repo, [generated, tracked])).toEqual([]);
+    expect(git(repo, "check-ignore", "--", generated).trim()).toBe(generated);
+    expect(git(repo, "ls-files", "--", "AGENTS.md").trim()).toBe("AGENTS.md");
+  });
+
+  it("matches case-variant plugin directories from a literal subdirectory", () => {
+    git(repo, "config", "core.ignorecase", "true");
+    const linked = path.join(root, "linked"); git(repo, "worktree", "add", "-q", "-b", "linked", linked);
+    const userFile = "SUB [LITERAL]/.CODEX/PLUGINS/OPENRIG-CORE/PAYLOAD.TXT";
+    write(userFile, "User", linked);
+    const generated = write("sub [literal]/.codex/plugins/openrig-core/payload.txt");
+    expect(excludeNewGeneratedFiles(path.join(repo, "sub [literal]"), [generated]))
+      .toEqual([expect.stringContaining("already exists in worktree")]);
+    git(linked, "add", "-A");
+    expect(git(linked, "ls-files", "-z")).toBe(userFile + "\0");
+  });
+
   it("uses one overall Git deadline and leaves excludes unchanged when it expires", () => {
     const beforePath = process.env.PATH;
     const realGit = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();

@@ -48,10 +48,15 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
     if (!exclude || !common) throw new Error("Git did not return exclusion and common metadata paths");
     const metadataIdentity = (file: string) => fs.existsSync(file) ? fs.realpathSync(file)
       : path.join(fs.realpathSync(path.dirname(file)), path.basename(file));
-    // One index/untracked listing per worktree, including ignored files. No per-file Git probes.
-    const inventory = (dir: string) => git(dir, ["ls-files", "--cached", "--others", "-t", "-z"])
+    const coreDirectory = path.join(path.relative(root, fs.realpathSync(cwd)), ".codex/plugins/openrig-core");
+    const ignoresCase = (dir: string) => git(dir, ["config", "--type=bool", "--get", "core.ignorecase"], undefined, true).trim() === "true";
+    // One bounded listing per worktree, including ignored files only at relevant paths.
+    const inventory = (dir: string, ignoreCase: boolean, paths = [coreDirectory]) => git(dir, ["ls-files", "--cached", "--others", "-t", "-z", "--",
+      ...[...new Set(paths)].map(file => `:(literal${ignoreCase ? ",icase" : ""})${file.split(path.sep).join("/")}`)])
       .split("\0").filter(Boolean).map(record => ({ tracked: record[0] !== "?", name: record.slice(2) }));
-    const own = inventory(root);
+    const rootIgnoreCase = ignoresCase(root);
+    // Guidance also needs an exact tracked-file check, but never a directory-wide scan.
+    const own = inventory(root, rootIgnoreCase, [coreDirectory, ...files.map(file => path.relative(root, fs.realpathSync(file)))]);
     const ignored = new Set(git(root, ["check-ignore", "--stdin", "-z"], files.join("\0") + "\0", true).split("\0"));
     const candidates: Array<{ file: string; relative: string }> = [];
     for (const file of files) {
@@ -81,8 +86,8 @@ export function excludeNewGeneratedFiles(cwd: string, createdFiles: string[]): s
       const isRoot = fs.realpathSync(peer) === root;
       const peerExclude = isRoot ? exclude : git(peer, ["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"]).trim();
       if (metadataIdentity(peerExclude) !== metadataIdentity(exclude)) continue;
-      const ignoreCase = git(peer, ["config", "--type=bool", "--get", "core.ignorecase"], undefined, true).trim() === "true";
-      const names = isRoot ? own : inventory(peer);
+      const ignoreCase = isRoot ? rootIgnoreCase : ignoresCase(peer);
+      const names = isRoot ? own : inventory(peer, ignoreCase);
       const normalize = ignoreCase ? foldCase : (name: string) => name;
       for (const candidate of candidates) {
         remaining();
