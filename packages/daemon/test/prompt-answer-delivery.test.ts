@@ -129,8 +129,9 @@ describe("explicit prompt answer delivery", () => {
   });
 
   // Actual Commander -> injected HTTP seam -> real transport/adapter/audit.
-  // Independent review supplied the next-menu and unknown-border controls.
-  async function viaCli(f: ReturnType<typeof fixture>, answer: string, fanout: boolean, json = true) {
+  // Next-menu and unknown-border controls exercise the real CLI dispatch path.
+  async function viaCli(f: ReturnType<typeof fixture>, answer: string, fanout: boolean, options: { json?: boolean; omitDisposition?: boolean; override?: boolean } = {}) {
+    const { json = true, omitDisposition = false, override = true } = options;
     const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
     const logs: string[] = [];
     const previousExit = process.exitCode;
@@ -139,10 +140,14 @@ describe("explicit prompt answer delivery", () => {
     const client = { baseUrl: "http://127.0.0.1:1", post: async (path: string, body: Record<string, unknown>) => {
       calls.push({ path, body });
       if (path.endsWith("/capture")) return { status: 200, data: { content: await f.tmux.capturePaneContent(f.name) } };
-      if (path.endsWith("/broadcast")) return { status: 200,
-        data: await f.transport.broadcast({ sessions: [f.name] }, String(body.text), body as SendOpts) };
+      if (path.endsWith("/broadcast")) {
+        const data = await f.transport.broadcast({ sessions: [f.name] }, String(body.text), body as SendOpts);
+        if (omitDisposition) for (const result of data.results) delete result.promptInteraction;
+        return { status: 200, data };
+      }
       if (path.endsWith("/send")) {
         const data = await f.transport.send(f.name, String(body.text ?? ""), body as SendOpts);
+        if (omitDisposition) delete data.promptInteraction;
         return { status: data.ok ? 200 : 409, data };
       }
       throw new Error(`Unexpected request ${path}`);
@@ -156,8 +161,8 @@ describe("explicit prompt answer delivery", () => {
     const error = vi.spyOn(console, "error").mockImplementation((...args) => { logs.push(args.join(" ")); });
     try {
       await new Command().addCommand(sendCommand(deps)).parseAsync(["node", "rig", "send",
-        ...(fanout ? ["--to", f.name] : [f.name]), answer, "--dangerously-interact", "--reason", "harmless answer control",
-        "--verify", ...(json ? ["--json"] : [])]);
+        ...(fanout ? ["--to", f.name] : [f.name]), answer,
+        ...(override ? ["--dangerously-interact", "--reason", "harmless answer control"] : ["--raw"]), "--verify", ...(json ? ["--json"] : [])]);
       return { calls, logs, exit: process.exitCode ?? 0 };
     } finally {
       log.mockRestore(); error.mockRestore(); vi.unstubAllEnvs(); process.exitCode = previousExit;
@@ -181,13 +186,49 @@ describe("explicit prompt answer delivery", () => {
 
     it.each([true, false])("round1: unknown input stays unsubmitted, including human output (json=%s)", async json => {
       const f = fixture("text"); f.state.capture = "❯ green please\n[unrecognized footer]";
-      const r = await viaCli(f, "green please", fanout, json);
+      const r = await viaCli(f, "green please", fanout, { json });
       expect(f.state.received).toEqual(["green please"]);
       expect(f.state.submitted).toEqual([]);
       expect(r.calls.filter(c => c.body.submitOnly)).toHaveLength(0);
       expect(r.exit).toBe(0);
       expect(r.logs.join("\n")).toContain("consumption unverified");
       expect(r.logs.join("\n")).not.toContain("staged, not consumed");
+    });
+
+    it.each([".", ")", "unknown-border"])("round2: own intent prevents remediation without daemon metadata (%s)", async shape => {
+      const f = fixture(shape === "unknown-border" ? "text" : "choice");
+      const answer = shape === "unknown-border" ? "green please" : "3";
+      f.state.capture = shape === "unknown-border" ? "❯ green please\n[unrecognized footer]"
+        : `Choose a harmless colour\n❯ 1${shape} Blue\n  2${shape} Green\n  3${shape} No`;
+      // The response seam models an older daemon's absent field. The remote
+      // source-composition control also substitutes the actual older transport.
+      const r = await viaCli(f, answer, fanout, { omitDisposition: true });
+      expect(f.state.selected).toEqual(shape === "unknown-border" ? [] : [3]);
+      expect(f.state.submitted).toEqual([]);
+      expect(r.calls.filter(c => c.body.submitOnly)).toHaveLength(0);
+      expect(r.exit).toBe(0);
+      expect(r.logs.join("\n")).toContain("not reported by the daemon");
+      expect(r.logs.join("\n")).not.toContain("staged-not-consumed");
+    });
+
+    it("round2: own intent skips repair even if no prompt override occurred", async () => {
+      const f = fixture("ordinary"); f.state.capture = "❯ green please\n────────────────────";
+      const r = await viaCli(f, "green please", fanout);
+      expect(f.state.submitted).toEqual(["green please"]);
+      expect(r.calls.filter(c => c.body.submitOnly)).toHaveLength(0);
+      expect(r.exit).toBe(0);
+      expect(r.logs.join("\n")).toContain("not reported by the daemon");
+      expect(db.prepare("SELECT count(*) AS n FROM events WHERE type = 'transport.prompt_override'").get()).toEqual({ n: 0 });
+    });
+
+    it("round2: ordinary sends retain their one guarded repair", async () => {
+      const f = fixture("ordinary"); f.state.capture = "❯ green please\n────────────────────";
+      const r = await viaCli(f, "green please", fanout, { override: false });
+      expect(r.calls.filter(c => c.body.submitOnly)).toHaveLength(1);
+      expect(f.state.submitted).toEqual(["green please", ""]);
+      // This fixture deliberately holds the staged render after both Enters.
+      expect(r.exit).toBe(1);
+      expect(r.logs.join("\n")).toContain("staged-not-consumed");
     });
 
     it.each(["claude-code", "codex"] as const)("round1: submits a complete %s answer once, with no verify remediation", async runtime => {

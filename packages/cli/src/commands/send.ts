@@ -272,8 +272,9 @@ without the From/To envelope (e.g. a slash command); it is still guarded. Use
 option or approve a permission) — the only override of the prompt guard; it
 implies --raw and is audit-logged. The answer is typed as keystrokes: letters may
 be menu shortcuts, and CR/ESC act as keys. An Enter is added only when the complete
-answer is visibly staged in a recognized text input. With --verify, an audited
-prompt answer is reported without automatic submit retries; unknown consumption
+answer is visibly staged in a recognized text input. Combining --verify with
+--dangerously-interact never adds an automatic submit retry, even when the daemon
+did not detect a prompt or did not report its disposition. Unknown consumption
 is not a send failure.
 
 --host sends on a remote host declared in ~/.openrig/hosts.yaml. The host
@@ -493,7 +494,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       // return alone when --verify asked for consumption.
       let effect: EffectCheck | undefined;
       if (opts.verify && res.status < 400) {
-        effect = await classifyDeliveryEffect(client, session, stagedIdentityFor(payload, outboundText), waitForIdleMs, res.data["promptInteraction"]);
+        effect = await classifyDeliveryEffect(client, session, stagedIdentityFor(payload, outboundText), waitForIdleMs, res.data["promptInteraction"], opts.dangerouslyInteract);
       }
 
       if (opts.json) {
@@ -598,11 +599,16 @@ async function classifyDeliveryEffect(
   identity: StagedIdentity,
   waitForIdleMs?: number,
   promptInteraction?: unknown,
+  dangerouslyInteract = false,
 ): Promise<EffectCheck> {
   // A prompt answer can consume itself and advance to another menu. Never
   // let generic residual matching turn observational verification into a key.
-  if (promptInteraction === "enter-sent" || promptInteraction === "unverified") {
-    return { checked: false, why: `explicit prompt answer (${promptInteraction}); consumption unverified; no automatic submit retry` };
+  // Our intent also covers an older daemon that cannot report the disposition,
+  // and a flagged send that the daemon treated as ordinary (no detected prompt).
+  if (dangerouslyInteract || promptInteraction === "enter-sent" || promptInteraction === "unverified") {
+    const disposition = promptInteraction === "enter-sent" || promptInteraction === "unverified"
+      ? promptInteraction : "not reported by the daemon";
+    return { checked: false, why: `explicit interaction (${disposition}); consumption unverified; no automatic submit retry` };
   }
   const probe = await detectStagedAtPrompt(client, session, identity);
   if (probe.state === "unchecked") return { checked: false, why: probe.why };
@@ -969,7 +975,7 @@ async function runFanOutSend(params: {
     effects = [];
     const okRecipients = ((res.data["results"] as Array<{ sessionName: string; ok: boolean; outcome?: string; promptInteraction?: unknown }> | undefined) ?? []).filter((r) => r.ok && r.outcome !== "retained" && r.sessionName);
     for (const r of okRecipients) {
-      effects.push({ sessionName: r.sessionName, effect: await classifyDeliveryEffect(client, r.sessionName, stagedIdentityFor(message, message), undefined, r.promptInteraction) });
+      effects.push({ sessionName: r.sessionName, effect: await classifyDeliveryEffect(client, r.sessionName, stagedIdentityFor(message, message), undefined, r.promptInteraction, opts.dangerouslyInteract) });
     }
   }
   const effectBySeat = new Map((effects ?? []).map((e) => [e.sessionName, e.effect]));
