@@ -130,7 +130,7 @@ export class ComposeServicesAdapter {
   }): Promise<ComposeLogsResult> {
     const args = this.baseArgs(opts.composeFile, opts.projectName, opts.profiles);
     const serviceArg = opts.service ? ` ${sq(opts.service)}` : "";
-    const tailArg = opts.tail ? ` --tail ${opts.tail}` : "";
+    const tailArg = opts.tail !== undefined ? ` --tail ${opts.tail}` : "";
     const cmd = `docker compose ${args} logs${tailArg}${serviceArg} 2>&1`;
     try {
       const output = await this.exec(cmd);
