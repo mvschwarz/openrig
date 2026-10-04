@@ -113,6 +113,21 @@ describe("env routes", () => {
     expect(receipt["capturedAt"]).toBe("2026-04-09T11:00:00Z");
   });
 
+  it("refreshes a malformed cached receipt instead of failing before the fresh probe", async () => {
+    let probes = 0;
+    const fresh = { kind: "compose", services: [], capturedAt: "2026-10-04T00:00:00Z" };
+    const app = createApp({ getServicesRecord: () => ({ ...SERVICE_RECORD, latestReceiptJson: "{torn" }), captureReceipt: () => { probes++; return fresh; } });
+    const res = await app.request("/api/rigs/rig-1/env");
+    expect(res.status).toBe(200); expect(probes).toBe(1);
+    expect(await res.json()).toMatchObject({ receipt: fresh, probeStatus: "fresh" });
+  });
+  it("reports unavailable cached receipt without hiding service configuration", async () => {
+    const app = createApp({ getServicesRecord: () => ({ ...SERVICE_RECORD, latestReceiptJson: "{torn" }) });
+    const res = await app.request("/api/rigs/rig-1/env");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ hasServices: true, receipt: null, probeStatus: "no_orchestrator", probeError: "Cached service receipt could not be parsed" });
+  });
+
   it("GET /env returns probeStatus=fresh when captureReceipt succeeds", async () => {
     const freshReceipt = { kind: "compose", services: [{ name: "vault", status: "running", health: "healthy" }], capturedAt: "2026-04-09T12:00:00Z" };
     const app = createApp({
