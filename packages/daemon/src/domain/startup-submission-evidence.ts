@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 
 const normalize = (text: string): string => text.replace(/\s+/g, "");
 // Claude 2.1.289 briefly replaces its mode bar after a bracketed paste.
+// Only the bare hint and medium-effort suffix are established by retained captures.
 const isComposerFooter = (line: string): boolean => /(?:shift\+tab to cycle|\? for shortcuts)/i.test(line)
-  || /^paste again to expand(?:\s{2,}\S.* · \/effort)?$/.test(line);
+  || /^paste again to expand(?:\s{2,}◐ medium · \/effort)?$/.test(line);
 // This placeholder occupies an empty composer while submitted text is queued.
 const QUEUED_PLACEHOLDER = normalize("Press up to edit queued messages");
 
@@ -35,8 +36,9 @@ function composerRegion(pane: string | null) {
 export function inspectStartupStagedText(pane: string | null, expected: string): "staged" | "clear" | "unverified" {
   const { body } = composerRegion(pane);
   if (body === null) return "unverified";
-  if (!body || body === QUEUED_PLACEHOLDER) return "clear";
-  return body === normalize(expected) ? "staged" : "unverified";
+  if (!body) return "clear";
+  if (body === normalize(expected)) return "staged";
+  return body === QUEUED_PLACEHOLDER ? "clear" : "unverified";
 }
 
 export interface StartupSubmissionEvidence {

@@ -18,12 +18,27 @@ describe("Claude transient startup composer", () => {
     expect(inspectStartupStagedText(composer("Press up to edit queued messages"), expected)).toBe("clear");
   });
 
+  it.each(["? for shortcuts", "paste again to expand", "paste again to expand  ◐ medium · /effort"])("keeps an exact expected placeholder staged under %s", footer => {
+    const placeholder = "Press up to edit queued messages";
+    expect(inspectStartupStagedText(composer(placeholder, footer), placeholder)).toBe("staged");
+    expect(inspectStartupStagedText(composer("Press up\nto edit queued messages", footer), ` ${placeholder} `)).toBe("staged");
+  });
+
   it.each(["[Pasted text #2 +29 lines]", "an unrelated draft", "Try fixing the tests", "Press up to edit queued messages\nadditional draft"])("keeps opaque or unrelated input unverified: %s", body => {
     expect(inspectStartupStagedText(composer(body), expected)).toBe("unverified");
   });
 
-  it.each(["paste again to expand later", "prefix paste again to expand", "paste again to expand · /effort", "Working…"])("does not accept an approximate hint: %s", footer => {
+  it.each([
+    "paste again to expand later", "prefix paste again to expand", "paste again to expand · /effort", "Working…",
+    "paste again to expand  ordinary text · /effort", "paste again to expand  ❯ unfinished draft · /effort",
+    "paste again to expand  medium · /effort", "paste again to expand  ◐ unknown · /effort",
+    "paste again to expand  ◐ medium extra · /effort", "paste again to expand  ◐ medium · /effort trailing",
+  ])("does not accept an approximate hint: %s", footer => {
     expect(inspectStartupStagedText(composer("", footer), expected)).toBe("unverified");
+  });
+
+  it.each(["", " \n "])("keeps an empty composer clear with empty expected text: %j", text => {
+    expect(inspectStartupStagedText(composer(""), text)).toBe("clear");
   });
 
   it.each([null, "", "❯\n────────────────────\n"])("keeps an unavailable or incomplete capture unverified: %j", pane => {
