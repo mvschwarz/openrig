@@ -125,8 +125,8 @@ function checkGitHubBundleSymlinks(checkoutDir: string): void {
   catch { throw new Error("GitHub bundle symlinks must resolve inside the fetched repository; no bundle was built."); }
 }
 
-/** Match the assembler: member refs use the rig directory; imports use their agent directory. */
-function checkGitHubBundleAgentRefs(folder: string, checkoutDir: string, retainedCheckoutDir?: string): void {
+/** Match create: member/package refs use the rig directory; imports use their agent directory. */
+function checkGitHubBundleRefs(folder: string, checkoutDir: string, retainedCheckoutDir?: string, includePackages: readonly string[] = []): void {
   const roots = [checkoutDir, ...(retainedCheckoutDir ? [retainedCheckoutDir] : [])].map(dir => realpathSync(dir));
   const contained = (file: string): string => {
     const real = realpathSync(file);
@@ -150,10 +150,24 @@ function checkGitHubBundleAgentRefs(folder: string, checkoutDir: string, retaine
     for (const imp of spec.imports ?? []) agent(imp.ref, dir, next);
   };
   try {
-    const spec = parseYaml(readFileSync(path.join(folder, "rig.yaml"), "utf8")) as { pods?: Array<{ members?: Array<{ agent_ref?: unknown }> }> };
-    for (const pod of spec.pods ?? []) for (const member of pod.members ?? []) agent(member.agent_ref, folder);
+    const spec = parseYaml(readFileSync(path.join(folder, "rig.yaml"), "utf8")) as {
+      pods?: Array<{ members?: Array<{ agent_ref?: unknown }> }>;
+      nodes?: Array<{ package_refs?: unknown[] }>;
+    };
+    if (Array.isArray(spec.pods)) {
+      for (const pod of spec.pods) for (const member of pod.members ?? []) agent(member.agent_ref, folder);
+    } else {
+      // Legacy create strips only local:, then resolvePackage uses an absolute or spec-relative path.
+      const refs = [...(spec.nodes ?? []).flatMap(node => node.package_refs ?? []), ...includePackages];
+      for (const ref of refs) {
+        if (typeof ref !== "string") throw new Error();
+        const dir = path.resolve(folder, ref.startsWith("local:") ? ref.slice(6) : ref);
+        contained(dir);
+        contained(path.join(dir, "package.yaml"));
+      }
+    }
   } catch {
-    throw new Error("GitHub bundle agent refs and imports must resolve inside the fetched repository; no bundle was built.");
+    throw new Error("GitHub bundle refs must resolve inside the fetched repository; no bundle was built.");
   }
 }
 
@@ -188,7 +202,7 @@ export async function prepareGitHubBundle(input: string, git = bundleGit, import
       if (specRelative === ".." || specRelative.startsWith(`..${path.sep}`) || path.isAbsolute(specRelative)) throw new Error();
     } catch { throw new Error("The selected GitHub bundle folder must contain rig.yaml inside the fetched repository."); }
     checkGitHubBundleSymlinks(checkoutDir);
-    checkGitHubBundleAgentRefs(folder, checkoutDir);
+    checkGitHubBundleRefs(folder, checkoutDir);
     const receiptPath = path.join(owned, "source.json");
     writeFileSync(receiptPath, JSON.stringify(source, null, 2) + "\n");
     return { source, folder, checkoutDir, archivePath: path.join(owned, "bundle.rigbundle"), receiptPath };
@@ -268,13 +282,15 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
       configurationStaging = staged.stagingDir;
       specPath = staged.rigSpecPath;
       folder = path.dirname(specPath);
-      // An absolute in-checkout ref still names the retained original; both owned trees stay until create settles.
-      checkGitHubBundleAgentRefs(folder, staged.stagingDir, prepared.checkoutDir);
       configuration = { id: chosen.configurationId, ...(chosen.preset ? { preset: chosen.preset } : {}) };
     }
+    if (configurationStaging || opts.includePackages) {
+      // An absolute in-checkout ref still names the retained original; both owned trees stay until create settles.
+      checkGitHubBundleRefs(folder, configurationStaging ?? prepared.checkoutDir, prepared.checkoutDir, opts.includePackages);
+    }
   } catch (error) {
-    rmSync(prepared.checkoutDir, { recursive: true, force: true });
-    rmSync(prepared.receiptPath, { force: true });
+    // No request has started: the entire owned import (including its receipt) is disposable.
+    rmSync(path.dirname(prepared.receiptPath), { recursive: true, force: true });
     if (configurationStaging) rmSync(configurationStaging, { recursive: true, force: true });
     throw error;
   }

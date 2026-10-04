@@ -129,7 +129,7 @@ describe("GitHub bundle source", () => {
         writeAgent(helper, "helper", [ref]);
       }
     });
-    await expect(prepareGitHubBundle(URL, git, imports)).rejects.toThrow(/agent refs and imports must resolve inside/);
+    await expect(prepareGitHubBundle(URL, git, imports)).rejects.toThrow(/refs must resolve inside/);
     expect(fs.readdirSync(imports)).toEqual([]);
     expect(fs.readFileSync(path.join(outside, "notes.txt"), "utf8")).toBe("host-fixture repository fixture\n");
   });
