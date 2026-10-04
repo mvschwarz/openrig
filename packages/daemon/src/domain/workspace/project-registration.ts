@@ -54,6 +54,18 @@ export interface ProjectRegistrationResult {
 
 const CATALOG_HEADER = "schema: openrig.workspace/v0alpha1\n";
 
+/** Replace the catalog in one step: a reader sees the old file or the new one, never a partial write. */
+function writeCatalog(catalogPath: string, text: string): void {
+  const temp = `${catalogPath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temp, text);
+  try {
+    fs.renameSync(temp, catalogPath);
+  } catch (err) {
+    try { fs.rmSync(temp, { force: true }); } catch { /* best effort */ }
+    throw err;
+  }
+}
+
 function canonical(p: string): string {
   try { return fs.realpathSync(p); } catch { return nodePath.resolve(p); }
 }
@@ -223,7 +235,7 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
         detail: `could not add rig '${input.rigName}' to project '${targetId}' in ${input.catalogPath} without rewriting the file; nothing was changed. Add '${input.rigName}' to that entry's rigs list (rigs: [${input.rigName}]) by hand`,
       };
     }
-    fs.writeFileSync(input.catalogPath, edited);
+    writeCatalog(input.catalogPath, edited);
     return { ...base, projectId: targetId!, status: "associated" };
   }
 
@@ -236,11 +248,11 @@ export function registerBundleProject(input: ProjectRegistrationInput): ProjectR
         detail: `could not append project '${input.projectId}' to ${input.catalogPath} without rewriting the file; nothing was changed. Add this entry under projects by hand: { id: ${input.projectId}, root: ${relativeRoot}, rigs: [${input.rigName}] }`,
       };
     }
-    fs.writeFileSync(input.catalogPath, appended);
+    writeCatalog(input.catalogPath, appended);
     return { ...base, status: "registered" };
   }
   (projects as YAMLSeq).add(doc.createNode(entry));
   fs.mkdirSync(catalogDir, { recursive: true });
-  fs.writeFileSync(input.catalogPath, doc.toString());
+  writeCatalog(input.catalogPath, doc.toString());
   return { ...base, status: "registered" };
 }

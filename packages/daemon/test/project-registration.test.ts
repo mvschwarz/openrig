@@ -62,6 +62,14 @@ describe("registerBundleProject", () => {
     expect(fs.readFileSync(path.join(projectsRoot, "openrig", "SPEC.md"), "utf-8")).toBe("# Contributing to OpenRig\n");
   });
 
+  it("replaces the catalog in one step, leaving no temporary file beside it", () => {
+    fs.mkdirSync(workspace, { recursive: true });
+    fs.writeFileSync(catalogPath, USER_CATALOG);
+    register();
+    register("openrig-dev-pi");
+    expect(fs.readdirSync(workspace).filter((name) => name.startsWith("workspace.yaml"))).toEqual(["workspace.yaml"]);
+  });
+
   it("the existing catalog reader still reads the catalog, ignoring the rigs list", () => {
     fs.mkdirSync(workspace, { recursive: true });
     fs.writeFileSync(catalogPath, USER_CATALOG);
