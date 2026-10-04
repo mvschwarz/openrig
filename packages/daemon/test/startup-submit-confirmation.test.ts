@@ -92,6 +92,18 @@ describe("startup prompt submission", () => {
       expect(f.submitted.slice(1)).toEqual(["Body of /fixture/second.md", "Body of /fixture/third.md"]);
     });
 
+    it("reports a later file still staged after its one retry without failing startup", async () => {
+      const f = fixture(new Set([2, 3]), "claude-code", false, true);
+      f.readFile.mockImplementation(p => p);
+      const result = await f.start({ resolvedStartupFiles: [file("first.md"), file("second.md")] });
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "staged" } });
+      expect(result.warnings).toEqual([expect.stringContaining("press Enter in that pane")]);
+      expect(f.tmux.sendText).toHaveBeenCalledTimes(2);
+      expect(f.tmux.sendKeys).toHaveBeenCalledTimes(3);
+      expect(f.submitted).toHaveLength(1);
+      expect(f.composer()).toBe("/fixture/second.md");
+    });
+
     it.each(["send_text", "auto"] as const)("checks a single %s file without an identity action", async hint => {
       const f = fixture(1, "claude-code", false, true);
       expect(await f.start({ startupActions: [], resolvedStartupFiles: [file("role.md", true, hint)] })).toMatchObject({ ok: true });
