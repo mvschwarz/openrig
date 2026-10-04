@@ -13,6 +13,7 @@ import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { RECOMMENDED_MODE_DEFAULTS } from "../src/domain/rig-mode/rig-mode-defaults.js";
 import type { OperatorContextScope } from "../src/domain/rig-mode/rig-mode-types.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { HealthPolicyStore } from "../src/domain/health-policy.js";
 import { HealthProjectionService, type HealthDetectorObservation } from "../src/domain/health-detectors.js";
@@ -274,4 +275,71 @@ it("keeps the default catalog beside the real workspace when workspace.root is a
   writeFileSync(join(root, "catalogs", "projects.yaml"), "projects: [{id: delta, root: ../physical/delta}]\n");
   expect(resolveWith({ root: alias, catalogPath: join(root, "catalogs", "projects.yaml") }, "delta"))
     .toMatchObject({ posture: "human-led", context: { projectId: "delta", paths: { project: delta } } });
+});
+
+// A user's own project beside a contributor bundle's project, which claims the bundle's rig (the installer's
+// association). A row that names only its mission must pick a project the way work-install does.
+async function inferenceSetup(catalog = "projects: [{id: bundle, root: bundle, rigs: [bundle-rig]}, {id: mine, root: mine}]\n") {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "operating-posture-infer-"))); cleanup.push(() => rmSync(home, { recursive: true, force: true }));
+  const db = createDb(); migrate(db, ALL_MIGRATIONS); cleanup.push(() => db.close());
+  const rigs = new RigRepository(db), sessions = new SessionRegistry(db);
+  const queue = new QueueRepository(db, new EventBus(db)); queue.attachTransport({ send: vi.fn(async () => ({ ok: true, verified: true })) });
+  const write = (path: string, bytes: string) => { mkdirSync(join(home, path, ".."), { recursive: true }); writeFileSync(join(home, path), bytes); };
+  write("workspace.yaml", catalog);
+  for (const project of ["bundle", "mine"]) {
+    write(project + "/project.yaml", "metadata: {id: " + project + "}\n");
+    write(project + "/missions/release/SPEC.md", "---\nid: release\n---\n# Release\n");
+    write(project + "/missions/release/mission.yaml", "kind: mission\nmetadata: {name: release, status: active}\nrelease: {phase: planning}\n");
+  }
+  mkdirSync(join(home, "elsewhere"));
+  const seat = (rigName: string, cwd: string) => {
+    const rig = rigs.createRig(rigName), node = rigs.addNode(rig.id, "dev.impl", { cwd });
+    sessions.registerSession(node.id, "dev-impl@" + rigName);
+    return "dev-impl@" + rigName;
+  };
+  const row = (qitemId: string, destinationSession: string, tags: string[]) =>
+    queue.create({ qitemId, sourceSession: "author@" + destinationSession.split("@")[1], destinationSession, body: "Scoped work", tags, nudge: false });
+  return { home, db, service: new OperatingPostureService(db, new RigModeStore(db), () => home), seat, row, write };
+}
+
+it("picks the project the bundle's rig claims for a row that names only its mission", async () => {
+  const t = await inferenceSetup();
+  await t.row("claimed", t.seat("bundle-rig", join(t.home, "elsewhere")), ["mission:release"]);
+  const result = t.service.resolve({ qitemId: "claimed" });
+  expect(result).toMatchObject({ posture: "human-led", source: "product-default", context: { projectId: "bundle", missionId: "release", paths: { project: join(t.home, "bundle") } } });
+  expect(result.context!.sources).toContain(join(t.home, "workspace.yaml") + "#selected-by=rig:bundle-rig");
+});
+
+it("picks the user's own project for its unclaimed rig by working folder, then as the only unclaimed entry", async () => {
+  const t = await inferenceSetup();
+  await t.row("by-folder", t.seat("user-rig", join(t.home, "mine", "missions")), ["mission:release"]);
+  const byFolder = t.service.resolve({ qitemId: "by-folder" });
+  expect(byFolder).toMatchObject({ posture: "human-led", context: { projectId: "mine", paths: { project: join(t.home, "mine") } } });
+  expect(byFolder.context!.sources).toContain(join(t.home, "workspace.yaml") + "#selected-by=cwd:" + join(t.home, "mine", "missions"));
+  await t.row("unclaimed", t.seat("other-rig", join(t.home, "elsewhere")), ["mission:release"]);
+  const unclaimed = t.service.resolve({ qitemId: "unclaimed" });
+  expect(unclaimed).toMatchObject({ posture: "human-led", context: { projectId: "mine" } });
+  expect(unclaimed.context!.sources).toContain(join(t.home, "workspace.yaml") + "#selected-by=unclaimed");
+});
+
+it("infers for a rig-scoped read without a qitem: the rig's claim, then the only unclaimed entry", async () => {
+  const t = await inferenceSetup();
+  t.seat("bundle-rig", join(t.home, "elsewhere")); t.seat("user-rig", join(t.home, "mine"));
+  expect(t.service.resolve({ rigId: "bundle-rig", missionId: "release" })).toMatchObject({ posture: "human-led", context: { projectId: "bundle" } });
+  // No working folder for a rig-only read, so the user's rig falls to the only unclaimed entry.
+  expect(t.service.resolve({ rigId: "user-rig", missionId: "release" })).toMatchObject({ posture: "human-led", context: { projectId: "mine" } });
+});
+
+it("leaves explicit projects alone and stays unknown when no single project is inferable", async () => {
+  const t = await inferenceSetup();
+  await t.row("explicit", t.seat("bundle-rig", join(t.home, "elsewhere")), ["project:mine", "mission:release"]);
+  const explicit = t.service.resolve({ qitemId: "explicit" });
+  expect(explicit).toMatchObject({ posture: "human-led", context: { projectId: "mine" } });
+  expect(explicit.context!.sources.some(s => s.includes("#selected-by="))).toBe(false);
+  const ambiguous = await inferenceSetup("projects: [{id: bundle, root: bundle, rigs: [bundle-rig]}, {id: mine, root: mine, rigs: [bundle-rig]}]\n");
+  await ambiguous.row("ambiguous", ambiguous.seat("bundle-rig", join(ambiguous.home, "elsewhere")), ["mission:release"]);
+  expect(ambiguous.service.resolve({ qitemId: "ambiguous" })).toMatchObject({ posture: "unknown", source: "unknown", reason: expect.stringContaining("several projects") });
+  const unclaimedPair = await inferenceSetup("projects: [{id: bundle, root: bundle}, {id: mine, root: mine}]\n");
+  await unclaimedPair.row("pair", unclaimedPair.seat("user-rig", join(unclaimedPair.home, "elsewhere")), ["mission:release"]);
+  expect(unclaimedPair.service.resolve({ qitemId: "pair" })).toMatchObject({ posture: "unknown", reason: expect.stringContaining("multiple projects are declared") });
 });
