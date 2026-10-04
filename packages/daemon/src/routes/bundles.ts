@@ -450,8 +450,9 @@ function writeInstallAudit(opts: {
  * - Symlinks are FOLLOWED at create time and written as regular files
  *   to the staging tree (tar safety; banked pre-existing-trust-
  *   boundary lesson — never include a symlink entry in an archive).
- * - Per-kind shape: skills + workflow_specs are file paths (single
- *   file copy); plugins + context_packs (manifest.yaml path → parent
+ * - Skills at skills/<name>/SKILL.md carry their whole skill directory;
+ *   other skill entries and workflow_specs keep their single-file shape.
+ *   Plugins + context_packs (manifest.yaml path → parent
  *   dir) + agent_images are dir paths (recursive copy with symlink
  *   dereference).
  * - Throws on missing source path / path-containment violation /
@@ -605,11 +606,15 @@ function consumeAuthorBundleYaml(sourceRoot: string, staging: string): AuthorBun
     fs.cpSync(sourceAbs, targetAbs, { recursive: true, dereference: true });
   };
 
-  // skills[] — file paths
+  // A portable skill includes its helpers/references. Retain the legacy
+  // single-file payload contract outside the discovered skills/<name> tree.
   const rawSkills = authorParsed["skills"];
   if (Array.isArray(rawSkills) && rawSkills.length > 0) {
     const skills = rawSkills.filter((s): s is string => typeof s === "string" && s.length > 0);
-    for (const declared of skills) vendorFile(declared, "skill");
+    for (const declared of skills) {
+      vendorFile(declared, "skill");
+      if (/^skills\/[^/]+\/SKILL\.md$/.test(declared)) vendorDir(nodePath.dirname(declared), "skill");
+    }
     if (skills.length > 0) result.skills = skills;
   }
 

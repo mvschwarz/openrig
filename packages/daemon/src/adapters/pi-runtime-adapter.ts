@@ -38,6 +38,8 @@ export interface PiAdapterFsOps {
   exists(path: string): boolean;
   mkdirp(path: string): void;
   listFiles?(dirPath: string): string[];
+  statMode?(path: string): number;
+  chmod?(path: string, mode: number): void;
 }
 
 export interface PiRuntimeAdapterDeps {
@@ -110,6 +112,12 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
       }
     }
     return results;
+  }
+
+  /** Conflict detection must inspect this seat's copy, not a Claude sibling. */
+  skillTargetPath(tmuxSession: string | null, effectiveId: string): string | null {
+    if (!tmuxSession) return null;
+    return nodePath.join(piSeatPaths(this.stateRoot, tmuxSession).agentDir, "skills", effectiveId, "SKILL.md");
   }
 
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
@@ -429,12 +437,14 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
           const dest = nodePath.join(targetDir, file);
           this.fs.mkdirp(nodePath.dirname(dest));
           this.fs.writeFile(dest, this.fs.readFile(nodePath.join(entry.absolutePath, file)));
+          this.preserveMode(nodePath.join(entry.absolutePath, file), dest);
         }
       } else {
         this.fs.writeFile(
           nodePath.join(targetDir, nodePath.basename(entry.absolutePath)),
           this.fs.readFile(entry.absolutePath),
         );
+        this.preserveMode(entry.absolutePath, nodePath.join(targetDir, nodePath.basename(entry.absolutePath)));
       }
       return true;
     }
@@ -442,6 +452,10 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // Plugins / subagents / runtime resources have no Pi projection target at
     // MVP (PRD §7 out-of-scope) — an honest skip, never a misdelivery.
     return false;
+  }
+
+  private preserveMode(source: string, target: string): void {
+    if (this.fs.statMode && this.fs.chmod) this.fs.chmod(target, this.fs.statMode(source) & 0o777);
   }
 
   private mergeGuidance(targetPath: string, blockId: string, content: string): boolean {

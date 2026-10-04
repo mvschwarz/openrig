@@ -245,6 +245,31 @@ For a pod-aware (schema version 2) bundle, apply copies the extracted contents (
 
 The bundle's declared skills, plugins, workflow specs, context packs and agent images are routed into your libraries **before any member launches**, and the context-pack library is rescanned, so a member's first turn can already read a pack the bundle carried. A routing failure does not stop the install: it is printed as a warning, returned in `routingFailures`, and recorded in the install audit. The human output lists what each declared kind routed and any entry that was not routed.
 
+### Skills shared by bundle profiles
+
+For skills shared by several agents, place each complete skill directory at
+`skills/<name>/` beside the rig spec and declare its entry point in the source
+`bundle.yaml`:
+
+```yaml
+skills:
+  - skills/review-work/SKILL.md
+```
+
+`rig bundle create` includes that directory's helper scripts and references as
+well as `SKILL.md`. The skill needs valid `name` and `description` frontmatter;
+the name is the ID a profile selects with `uses.skills: [review-work]`.
+Undeclared sibling directories are not bundled. Other declared skill file paths
+retain their single-file behavior.
+
+Claude, Codex and Pi profiles can select this installed bundle pool even when
+their working directory is elsewhere. Explicit AgentSpec resources keep priority
+over a discovered skill with the same ID. Pi projects selected skills into its
+seat's agent directory; it does not scan Claude or Codex home/workspace pools.
+Installing the bundle does not add these skills to the operator's managed
+`skills.root` catalog. Profiles that already get a skill from a plugin should not
+also select its bundle copy.
+
 Legacy (schema version 1) bundles keep their old behavior: `--target` is only where packages are installed, and their declared contents are routed after a completed install.
 
 ### Launch directly
