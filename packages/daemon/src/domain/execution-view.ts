@@ -268,6 +268,14 @@ interface ArrangementSlice {
   dependsOn?: string[];
 }
 
+function isValidGitRef(ref: string): boolean {
+  if (typeof ref !== "string" || !ref || ref.startsWith("-")) return false;
+  if (ref.startsWith("/") || ref.endsWith("/") || ref.includes("//")) return false;
+  if (ref.includes("..") || ref.includes("@{") || ref.endsWith(".lock") || ref.endsWith(".")) return false;
+  if (/[\s\x00-\x1f\x7f~^:?*\[\\]/.test(ref)) return false;
+  return true;
+}
+
 type ArrangementData =
   | { state: "missing"; missionPath: string }
   | { state: "malformed"; missionPath: string; warning: string }
@@ -277,6 +285,7 @@ type ArrangementData =
       byId: Map<string, ArrangementSlice>;
       byDir: Map<string, ArrangementSlice>;
       guidance: Array<{ label: string; text: string; source: string; wave?: string }>;
+      integrationRef?: string;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -467,15 +476,26 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
         ...(wave ? { wave } : {}),
       });
     };
+    let integrationRef: string | undefined;
     const arrangement = manifest["arrangement"];
-    if (isRecord(arrangement)) for (const [field, label, key] of [
-      ["source", "Integration decision", "rule"],
-      ["planning_posture", "Planning posture", "rule"],
-      ["execution_posture", "Execution posture", "parallelism"],
-      ["integration_exit", "Shared acceptance", "rule"],
-    ] as const) {
-      const value = arrangement[field];
-      if (isRecord(value)) addGuidance(label, value[key], `${field}.${key}`);
+    if (isRecord(arrangement)) {
+      for (const [field, label, key] of [
+        ["source", "Integration decision", "rule"],
+        ["planning_posture", "Planning posture", "rule"],
+        ["execution_posture", "Execution posture", "parallelism"],
+        ["integration_exit", "Shared acceptance", "rule"],
+      ] as const) {
+        const value = arrangement[field];
+        if (isRecord(value)) addGuidance(label, value[key], `${field}.${key}`);
+      }
+      const source = arrangement["source"];
+      if (isRecord(source) && source["integration_ref"] !== undefined) {
+        const raw = source["integration_ref"];
+        if (typeof raw !== "string" || !isValidGitRef(raw.trim())) {
+          throw new Error("arrangement.source.integration_ref must be a valid Git ref name not starting with '-'");
+        }
+        integrationRef = raw.trim();
+      }
     }
     if (isRecord(arrangement) && arrangement["waves"] != null) {
       if (!Array.isArray(arrangement["waves"])) throw new Error("arrangement.waves is not a list");
@@ -543,7 +563,7 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
       byDir.set(dir, entry);
       if (facts && facts.id !== INDETERMINATE) byId.set(facts.id, entry);
     }
-    return { state: "valid", missionPath, byId, byDir, guidance };
+    return { state: "valid", missionPath, byId, byDir, guidance, ...(integrationRef ? { integrationRef } : {}) };
   } catch (err) {
     return {
       state: "malformed",
@@ -640,7 +660,7 @@ async function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha
     if (code === 1 || status === 1) {
       return { value: false, basis: `git -C ${repoCtx} merge-base --is-ancestor ${sha} ${ref} (exit 1)` };
     }
-    return { value: INDETERMINATE, basis: `merge-base failed in ${repoCtx}: ${(err as Error).message?.slice(0, 120)}` };
+    return { value: INDETERMINATE, basis: `merge-base failed in ${repoCtx} (${ref}): ${(err as Error).message?.slice(0, 120)}` };
   }
 }
 
@@ -814,6 +834,9 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   const arrangement = missionsRoot && mission !== INDETERMINATE
     ? readArrangement(missionsRoot, mission, slices)
     : null;
+  const targetRef = arrangement?.state === "valid" && arrangement.integrationRef
+    ? arrangement.integrationRef
+    : "main";
   const lifecycleExecutions = mission === INDETERMINATE ? [] : readLifecycleExecutions(deps.db, mission, opts?.project);
   const arrangementSlice = (id: string, dir?: string): ArrangementSlice | null => {
     if (arrangement?.state !== "valid") return null;
@@ -930,7 +953,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       ? { value: INDETERMINATE, basis: "no candidate sha to test" }
       : !repoCtx
         ? { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" }
-        : await gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, "main");
+        : await gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, targetRef);
     const adopted: Rung = opts?.project
       ? { value: "NOT_APPLICABLE", basis: "selected project has no binding to the OpenRig daemon source; daemon adoption is not project progress" }
       : !candidateSha || !repoCtx
@@ -982,7 +1005,7 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
       nextUpBasis = "already claimed in-progress";
     } else if (ownFolded.value === true) {
       nextUp = false;
-      nextUpBasis = "own candidate already folded to main — nothing left to dispatch";
+      nextUpBasis = `own candidate already folded to ${targetRef} — nothing left to dispatch`;
     } else if (ownFolded.value === INDETERMINATE) {
       // Unknown own-completion must never read as dispatchable — INDETERMINATE
       // is the honest verdict, not true (the S24/S25 live false-green class).

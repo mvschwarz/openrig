@@ -817,6 +817,54 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     }
   });
 
+  it("derives folded rung against arrangement.source.integration_ref when declared, falling back to main", async () => {
+    git(repoDir, "branch", "integration", "main~1");
+    git(laneWorktree, "checkout", "-q", "integration");
+    git(laneWorktree, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "integration-only");
+    const integrationCandidate = git(laneWorktree, "rev-parse", "HEAD");
+    git(laneWorktree, "checkout", "-q", branchName);
+
+    db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = 'qitem-lane-31'")
+      .run(JSON.stringify([`mission:${MISSION}`, "slice:OPR.9.9.31", `candidate:${integrationCandidate}`]));
+
+    // 1. Fallback with no declaration: ancestor of integration but not main tests false against main
+    const fallbackDoc = await show();
+    const fallbackSlice = (fallbackDoc.q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    expect((fallbackSlice.folded as Record<string, unknown>).value).toBe(false);
+    expect(String((fallbackSlice.folded as Record<string, unknown>).basis)).toContain("merge-base --is-ancestor");
+    expect(String((fallbackSlice.folded as Record<string, unknown>).basis)).toContain("main");
+
+    // 2. Declared ref: tests ancestry against integration ref, basis names the ref, and next_up names it
+    const missionYamlPath = path.join(missionsRoot, MISSION, "mission.yaml");
+    const originalYaml = fs.readFileSync(missionYamlPath, "utf8");
+    fs.writeFileSync(missionYamlPath, originalYaml + "\n  source:\n    integration_ref: integration\n");
+
+    db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-31'").run();
+
+    const declaredDoc = await show();
+    const declaredSlice = (declaredDoc.q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    expect((declaredSlice.folded as Record<string, unknown>).value).toBe(true);
+    expect(String((declaredSlice.folded as Record<string, unknown>).basis)).toContain("merge-base --is-ancestor");
+    expect(String((declaredSlice.folded as Record<string, unknown>).basis)).toContain("integration");
+    const q2Slice = (declaredDoc.q2_sequencing as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    expect(q2Slice.next_up).toBe(false);
+    expect(q2Slice.next_up_basis).toBe("own candidate already folded to integration — nothing left to dispatch");
+
+    // 3. Unresolvable ref: gives INDETERMINATE result that names the ref, never false
+    fs.writeFileSync(missionYamlPath, originalYaml + "\n  source:\n    integration_ref: unresolvable-branch\n");
+    const unresolvableDoc = await show();
+    const unresolvableSlice = (unresolvableDoc.q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    expect((unresolvableSlice.folded as Record<string, unknown>).value).toBe("INDETERMINATE");
+    expect(String((unresolvableSlice.folded as Record<string, unknown>).basis)).toContain("unresolvable-branch");
+
+    // 4. Invalid ref name: rejects ref starting with '-' and marks arrangement malformed
+    fs.writeFileSync(missionYamlPath, originalYaml + "\n  source:\n    integration_ref: -invalid-branch\n");
+    const invalidDoc = await show();
+    const sources = invalidDoc.sources as Record<string, Record<string, unknown>>;
+    expect(sources.arrangement.value).toBe("INDETERMINATE");
+    expect(String(sources.arrangement.basis)).toMatch(/arrangement\.source\.integration_ref must be a valid Git ref name/);
+  });
+
   it("stays a registered-name error at base and a clean not-found for unknown names either way", () => {
     expect(() => projector.show("no-such-view")).toThrow(ViewProjectorError);
   });
