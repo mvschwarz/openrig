@@ -257,7 +257,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
           // The existing ownership rules still protect edits in the target workspace.
           const sourceSpec = [baseSpec, ...importedSpecs].find((item) => item.sourcePath === existing.sourcePath) ?? baseSpec;
           Object.assign(managed, {
-            sourceDir: realpathSync(existingPath), sourceRoot: bundleRoot,
+            sourceDir: existingPath, sourceRoot: bundleRoot,
             revision: `agent-spec:${sourceSpec.hash}`, digest: tree.digest, files: tree.files,
             selectedBy: [...new Set([...managed.selectedBy, "topology" as const])],
           });
@@ -351,7 +351,7 @@ function selectedBundleRoot(ctx: ResolutionContext, entry: QualifiedResource, so
     : [ctx.specRoot, entry.sourcePath].filter((root): root is string => !!root && within(root, source));
   for (const root of roots) {
     const canonicalRoot = realpathSync(root);
-    if (within(canonicalRoot, realpathSync(source))) return canonicalRoot;
+    if (within(canonicalRoot, realpathSync(source))) return nodePath.resolve(root);
   }
   return null;
 }
