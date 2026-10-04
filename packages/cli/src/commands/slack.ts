@@ -150,7 +150,26 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       } else {
         log(`slack-connector configuration checks (config: ${cfg.enabled ? "enabled" : "disabled"}; delivery runs IN-DAEMON — S10 subsystem)`);
         for (const r of readiness) log(`  ${r.ok ? "✓" : "✗"} ${r.label}: ${r.detail}`);
-        log(`Daemon observation: ${JSON.stringify(observation)}`);
+        log(`Daemon: ${observation.state}${observation.reason ? ` (${observation.reason})` : ""}`);
+        const connector = observation.connector as { configurationDigest?: string;
+          inbound?: { state?: string; generation?: number; lastEventAt?: string };
+          recovery?: { state?: string; reason?: string; lastScanAt?: string; acceptedThisProcess?: number; deadLetteredThisProcess?: number;
+            coverage?: { coverageStart: string; coveredThrough: string; pending?: { upper: string; nextLatest: string }; nextRetryAt?: number } | null;
+            limits?: string[] } } | undefined;
+        if (connector) {
+          log(`  Socket: ${connector.inbound?.state ?? "unknown"}; generation ${connector.inbound?.generation ?? "unknown"}; last event ${connector.inbound?.lastEventAt ?? "unknown"}`);
+          const recovery = connector.recovery;
+          log(`  Recovery: ${recovery?.state ?? "unknown"}${recovery?.reason ? ` (${recovery.reason})` : ""}; last scan ${recovery?.lastScanAt ?? "unknown"}`);
+          const coverage = recovery?.coverage;
+          if (coverage) {
+            log(`  Available history scanned: [${coverage.coverageStart}, ${coverage.coveredThrough}); older history unknown`);
+            if (coverage.pending) log(`  Pending interval to ${coverage.pending.upper}; next page before ${coverage.pending.nextLatest}`);
+            if (coverage.nextRetryAt) log(`  Retry after: ${new Date(coverage.nextRetryAt).toISOString()}`);
+          }
+          log(`  Recovery counts since connector start: accepted ${recovery?.acceptedThisProcess ?? "unknown"}; dead-lettered ${recovery?.deadLetteredThisProcess ?? "unknown"} (custody, not delivery)`);
+          if (connector.configurationDigest) log(`  Observed configuration digest: ${connector.configurationDigest} (local configuration above)`);
+          for (const limit of recovery?.limits ?? []) log(`  Limit: ${limit}`);
+        }
         log("Connected/configured alone is not proof of delivery. Recovery covers available top-level channel history only.");
         if (permWarn) log(`  ⚠ ${permWarn}`);
         if (next) log(`  ${next}`);

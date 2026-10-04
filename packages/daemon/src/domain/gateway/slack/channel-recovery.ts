@@ -47,7 +47,7 @@ export class ChannelRecovery {
     return { state: this.state, reason: this.reason, channel: this.opts.channel, lastScanAt: this.lastScanAt,
       coverage: this.coverage ? structuredClone(this.coverage) : null,
       acceptedThisProcess: this.accepted, deadLetteredThisProcess: this.deadLettered,
-      limits: ["older history unknown", "top-level configured-channel messages only; thread recovery deferred",
+      limits: ["older history unknown", "counts reset on connector rewire/restart", "top-level configured-channel messages only; thread recovery deferred",
         "coverage means scanned available history; dead letters are custody, not delivery",
         "four pages / 100 entries / 15 seconds admission per pass; no global chronological ordering"] };
   }
