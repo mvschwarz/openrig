@@ -242,8 +242,9 @@ reliably tell `git push --force` from `git push`. An `ask` waits for a person, s
 an autonomous seat. Standard suits interactive work, and the policy files point
 autonomous teams to Open or YOLO.
 
-**Pi has no permission surface.** `--approve` and `--no-approve` set Pi's resource trust,
-not a permission policy.
+**Pi has no permission policy.** `--approve` and `--no-approve` set Pi's resource trust. The
+OMP variant maps that trust to its approval mode: `yolo` under `--approve`, otherwise
+`always-ask`.
 
 **A custom policy file** is Markdown with frontmatter: `policy_schema_version: 1`, `name`,
 `source: custom`, `description`, and `surface`.
