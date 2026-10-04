@@ -136,7 +136,11 @@ describe("contained Claude restore activity resources", () => {
     vi.mocked(adapter.launchHarness).mockImplementation(async (_b, opts) => { atLaunch(); return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id" }; });
     const result = await restore(f, adapter, atLaunch);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.result.nodes[0]?.status).toBe("resumed");
+    if (result.ok) expect(result.result.nodes[0]).toMatchObject({
+      // Native launch is simulated; no process identity is supplied to the final
+      // joined proof. Keep that honest attention outcome separate from projection.
+      status: "attention_required", error: expect.stringContaining("joined restore proof is incomplete"),
+    });
     expect(owned()).toEqual(enabled);
     expect(settings().hooks.Stop).toContainEqual(userHook);
     expect(settings().env).toEqual(originalSettings.env);
@@ -158,7 +162,11 @@ describe("contained Claude restore activity resources", () => {
     vi.mocked(adapter.launchHarness).mockImplementation(async (_b, opts) => { atLaunch(); return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id" }; });
     const result = await restore(f, adapter, atLaunch);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.result.nodes[0]?.status).toBe("resumed");
+    if (result.ok) expect(result.result.nodes[0]).toMatchObject({
+      // Native launch is simulated; no process identity is supplied to the final
+      // joined proof. Keep that honest attention outcome separate from projection.
+      status: "attention_required", error: expect.stringContaining("joined restore proof is incomplete"),
+    });
     expect(owned().length).toBeGreaterThan(0);
     expect(settings().hooks.Stop).toContainEqual(userHook);
     expect(settings().env).toEqual(originalSettings.env);
