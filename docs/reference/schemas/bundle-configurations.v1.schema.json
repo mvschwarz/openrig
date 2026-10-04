@@ -9,7 +9,6 @@
     "seats",
     "presets"
   ],
-  "additionalProperties": false,
   "properties": {
     "schema": {
       "const": "openrig.bundle-configurations/v1"
@@ -30,7 +29,6 @@
         "required": [
           "runtimes"
         ],
-        "additionalProperties": false,
         "properties": {
           "runtimes": {
             "type": "object",

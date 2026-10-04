@@ -6,7 +6,11 @@ fixtures that pass and fail them in [`schemas/fixtures/`](schemas/fixtures/). To
 at a pinned commit.
 
 **A v1 format only grows:** new optional properties may appear, and consumers ignore properties they don't know. Any
-other change is a v2.
+other change is a v2. The schemas are open to new properties, with three closed on purpose: the package digest (an exact
+value), a run record's subject (a harness check can never carry a team's identity), and the public status file, where
+nothing outside the schema may appear, so a private field can't leak in. The
+status schema also rejects labels that contradict their evidence: a tested label needs records and a package, tested
+with help needs its count, and an unreadable listing carries only Status unavailable.
 
 ## Three identities, kept apart
 

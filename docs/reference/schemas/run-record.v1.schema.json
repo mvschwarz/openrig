@@ -66,8 +66,8 @@
               "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/runtime"
             }
           },
-          "additionalProperties": false,
-          "description": "A harness check never upgrades a team label."
+          "description": "A harness check never upgrades a team label.",
+          "additionalProperties": false
         }
       ]
     },

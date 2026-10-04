@@ -12,7 +12,6 @@
     "review",
     "status"
   ],
-  "additionalProperties": false,
   "properties": {
     "schema": {
       "const": "openrig.registry-entry/v1"
@@ -42,7 +41,6 @@
           "assembler",
           "behaviour"
         ],
-        "additionalProperties": false,
         "properties": {
           "id": {
             "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/configurationId"
@@ -81,8 +79,7 @@
                   "type": "string",
                   "minLength": 1
                 }
-              },
-              "additionalProperties": false
+              }
             },
             "description": "Earlier packages whose evidence still applies to this one, with the public reason (for example 'only EVIDENCE.md changed'). Labels resting on it show both digests."
           }
@@ -94,7 +91,6 @@
       "required": [
         "date"
       ],
-      "additionalProperties": false,
       "properties": {
         "date": {
           "type": "string",
