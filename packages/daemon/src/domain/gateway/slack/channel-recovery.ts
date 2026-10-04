@@ -100,14 +100,15 @@ export class ChannelRecovery {
       if (r.json.is_limited === true) { this.state = "incomplete"; this.reason = "history-retention-limited"; return; }
       const messages = r.json.messages;
       const cursor = (r.json.response_metadata as { next_cursor?: unknown } | undefined)?.next_cursor;
-      if (!Array.isArray(messages) || typeof r.json.has_more !== "boolean" ||
+      if (!Array.isArray(messages) || (r.json.has_more !== undefined && typeof r.json.has_more !== "boolean") ||
+          (r.json.has_more === undefined && cursor === undefined) ||
           (cursor !== undefined && typeof cursor !== "string") || messages.length > 25 ||
           messages.some(m => !m || typeof m !== "object" || slackMicros(m.ts) === null ||
             slackMicros(m.ts)! < lower || slackMicros(m.ts)! >= latest)) {
         this.state = "incomplete"; this.reason = "invalid-history-page"; return;
       }
       const ordered = [...messages].sort((a, b) => slackMicros(a.ts)! < slackMicros(b.ts)! ? -1 : 1);
-      const more = r.json.has_more || (typeof cursor === "string" && cursor.length > 0);
+      const more = r.json.has_more === true || (typeof cursor === "string" && cursor.length > 0);
       if (more && (!messages.length || slackMicros(ordered[0]?.ts)! <= lower)) {
         this.state = "incomplete"; this.reason = "history-page-no-progress"; return;
       }

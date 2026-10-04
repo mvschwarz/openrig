@@ -165,7 +165,7 @@ it.each([
 
 it("honors cursor continuation even on a short page and yields at deadline mid-page without losing earlier work", async () => {
   const f=fixture(); const r=f.recovery(); f.time(1_010_000);
-  f.respond(u=>Response.json({ok:true, messages:u.searchParams.get("latest")==="1010.000000"?[event("1002.1")]:[event("1001.1")], has_more:false,
+  f.respond(u=>Response.json({ok:true, messages:u.searchParams.get("latest")==="1010.000000"?[event("1002.1")]:[event("1001.1")],
     response_metadata:{next_cursor:u.searchParams.get("latest")==="1010.000000"?"continued":""}}));
   await r.run(); expect(f.repo.list({limit:100})).toHaveLength(2);
   const g=fixture(); const mid=g.recovery(); g.history.push(event("1001.1",{files:[{}]}),event("1002.1")); g.time(1_010_000);
