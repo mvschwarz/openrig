@@ -218,3 +218,23 @@ describe("Slack status separates local configuration from bounded daemon observa
     } finally {vi.useRealTimers();}
   });
 });
+
+
+describe("Slack recovery status times", () => {
+  it("renders scanned and pending bounds as ISO times while preserving JSON timestamps", async () => {
+    const coverage = { coverageStart: "1000.000000", coveredThrough: "1005.000000",
+      pending: { upper: "1010.000000", nextLatest: "1008.123456" }, nextRetryAt: 1_015_000 };
+    const get = vi.fn(async <T>() => ({ status: 200, data: { state: "active", connector: {
+      recovery: { state: "backoff", coverage, limits: ["Slack plan limit excludes older history"] },
+    } } as T }));
+    const { deps, logs } = makeDeps({ clientFactory: () => ({ get, post: vi.fn() }) });
+    await run(slackCommand(deps), ["status"]);
+    const text = logs.join("\n");
+    expect(text).toContain("Available history scanned: [1970-01-01T00:16:40.000Z, 1970-01-01T00:16:45.000Z)");
+    expect(text).toContain("Pending interval to 1970-01-01T00:16:50.000Z; next page before 1970-01-01T00:16:48.123Z");
+    expect(text).toContain("Retry after: 1970-01-01T00:16:55.000Z");
+    expect(text).toContain("Slack plan limit");
+    logs.length = 0; await run(slackCommand(deps), ["status", "--json"]);
+    expect(JSON.parse(logs[0]!).observation.connector.recovery.coverage).toEqual(coverage);
+  });
+});

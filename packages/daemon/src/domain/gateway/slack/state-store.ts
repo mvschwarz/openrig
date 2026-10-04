@@ -238,6 +238,8 @@ export interface ChannelCoverage {
   seedBasis: "newest-durable-landing" | "feature-adoption";
   pending?: { upper: string; nextLatest: string };
   nextRetryAt?: number;
+  /** Available history was scanned, but Slack reported older history beyond its plan limit. */
+  historyLimited?: boolean;
 }
 
 function readOptional(file: string, fsops: StateFsOps): string | undefined {
@@ -261,6 +263,7 @@ export class ChannelCoverageStore {
       const start = slackMicros(c?.coverageStart), through = slackMicros(c?.coveredThrough);
       if (start === null || through === null || start > through ||
         !["newest-durable-landing", "feature-adoption"].includes(c.seedBasis) ||
+        (c.historyLimited !== undefined && typeof c.historyLimited !== "boolean") ||
         (c.nextRetryAt !== undefined && (!Number.isFinite(c.nextRetryAt) || c.nextRetryAt < 0))) throw new Error("invalid coverage checkpoint");
       if (c.pending) {
         const upper = slackMicros(c.pending.upper), next = slackMicros(c.pending.nextLatest);

@@ -34,6 +34,11 @@ import type {
 const SECRET_BOT = "SLACK_BOT_TOKEN";
 const SECRET_APP = "SLACK_APP_TOKEN";
 
+function slackTime(value: unknown): string {
+  if (typeof value !== "string" || !/^\d{1,12}\.\d{1,6}$/.test(value)) return "unknown";
+  return new Date(Number(value) * 1000).toISOString();
+}
+
 interface SlackSurface {
   loadConfig: typeof LoadConfigFn;
   saveConfig: typeof SaveConfigFn;
@@ -162,8 +167,8 @@ export function slackCommand(deps: SlackDeps = {}): Command {
           log(`  Recovery: ${recovery?.state ?? "unknown"}${recovery?.reason ? ` (${recovery.reason})` : ""}; last scan ${recovery?.lastScanAt ?? "unknown"}`);
           const coverage = recovery?.coverage;
           if (coverage) {
-            log(`  Available history scanned: [${coverage.coverageStart}, ${coverage.coveredThrough}); older history unknown`);
-            if (coverage.pending) log(`  Pending interval to ${coverage.pending.upper}; next page before ${coverage.pending.nextLatest}`);
+            log(`  Available history scanned: [${slackTime(coverage.coverageStart)}, ${slackTime(coverage.coveredThrough)}); older history unknown`);
+            if (coverage.pending) log(`  Pending interval to ${slackTime(coverage.pending.upper)}; next page before ${slackTime(coverage.pending.nextLatest)}`);
             if (coverage.nextRetryAt) log(`  Retry after: ${new Date(coverage.nextRetryAt).toISOString()}`);
           }
           log(`  Recovery counts since connector start: accepted ${recovery?.acceptedThisProcess ?? "unknown"}; dead-lettered ${recovery?.deadLetteredThisProcess ?? "unknown"} (custody, not delivery)`);

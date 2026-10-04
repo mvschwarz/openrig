@@ -48,7 +48,9 @@ export class ChannelRecovery {
       coverage: this.coverage ? structuredClone(this.coverage) : null,
       acceptedThisProcess: this.accepted, deadLetteredThisProcess: this.deadLettered,
       limits: ["older history unknown", "counts reset on connector rewire/restart", "top-level configured-channel messages only; thread recovery deferred",
+        ...(this.coverage?.historyLimited ? ["Slack plan limit excludes older history; only available messages were scanned"] : []),
         "coverage means scanned available history; dead letters are custody, not delivery",
+        "five-second settle margin; larger clock skew or history visibility lag remains unverified",
         "four pages / 100 entries / 15 seconds admission per pass; no global chronological ordering"] };
   }
 
@@ -77,13 +79,15 @@ export class ChannelRecovery {
     this.lastScanAt = new Date(this.now()).toISOString();
     this.state = "scanning"; this.reason = undefined;
     if (!this.coverage!.pending) {
-      const upper = slackTimestamp(BigInt(this.now()) * 1000n);
+      // Leave recent posts for the next interval so ordinary visibility lag/clock skew
+      // does not mark their timestamps covered before history can expose them.
+      const upper = slackTimestamp(BigInt(Math.max(0, this.now() - 5000)) * 1000n);
       if (slackMicros(upper)! <= slackMicros(this.coverage!.coveredThrough)!) { this.state = "pending"; return; }
       this.save({ ...this.coverage!, nextRetryAt: undefined, pending: { upper, nextLatest: upper } });
     }
     let entries = 0;
     for (let pages = 0; pages < 4 && !this.stopped && this.now() < deadline; pages++) {
-      const c = this.coverage!;
+      const c = { ...this.coverage! };
       const lower = slackMicros(c.coveredThrough)!;
       const latest = slackMicros(c.pending!.nextLatest)!;
       const r = await callWebApi("conversations.history", this.opts.token!, {
@@ -94,10 +98,10 @@ export class ChannelRecovery {
       if (!r.ok) {
         const known = ["missing_scope", "not_in_channel", "channel_not_found", "invalid_auth", "token_revoked"];
         this.reason = r.status === 429 ? "rate-limited" : known.includes(r.error ?? "") ? r.error : "history-api-unavailable";
-        this.save({ ...c, nextRetryAt: this.now() + (r.retryAfterSeconds ?? 300) * 1000 });
+        const retrySeconds = r.retryAfterSeconds ?? (r.status === 0 || r.status >= 500 ? 5 : 300);
+        this.save({ ...c, nextRetryAt: this.now() + retrySeconds * 1000 });
         this.state = "backoff"; return;
       }
-      if (r.json.is_limited === true) { this.state = "incomplete"; this.reason = "history-retention-limited"; return; }
       const messages = r.json.messages;
       const cursor = (r.json.response_metadata as { next_cursor?: unknown } | undefined)?.next_cursor;
       if (!Array.isArray(messages) || (r.json.has_more !== undefined && typeof r.json.has_more !== "boolean") ||
@@ -112,6 +116,9 @@ export class ChannelRecovery {
       if (more && (!messages.length || slackMicros(ordered[0]?.ts)! <= lower)) {
         this.state = "incomplete"; this.reason = "history-page-no-progress"; return;
       }
+      // The page is valid; the flag describes unreachable older history. Retain that
+      // qualification with the next durable page boundary rather than stalling forever.
+      if (r.json.is_limited === true) c.historyLimited = true;
       for (const message of ordered) {
         if (this.stopped) return;
         if (this.now() >= deadline || entries >= 100) { this.state = "incomplete"; this.reason = "pass-budget"; return; }
