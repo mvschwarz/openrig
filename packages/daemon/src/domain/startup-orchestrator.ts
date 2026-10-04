@@ -78,6 +78,8 @@ type StartupSendFailure = { error: string };
 type StartupDeliveryInput = StartupInput & {
   submissionWarnings: string[]; stagedSubmissionWarning?: string;
   startupAttemptId: string; sendOrder: number; submissionDiagnostics: StartupSubmissionDiagnostic[];
+  /** Claude only: whether the latest interactive send was observed submitted (a clear composer). */
+  lastSubmissionConfirmed?: boolean;
 };
 
 export type StartupResult =
@@ -713,11 +715,16 @@ export class StartupOrchestrator {
   /**
    * Claude only: the challenge reached the seat inside a paste, which Claude won't act on alone.
    * One short line in the person's turn asks it to run the challenge's own command. Best-effort: a
-   * failed send is a submission warning, never a startup failure. Nothing is typed on top of a
-   * startup input left staged in the composer; that input stays for the operator.
+   * failed send is a submission warning, never a startup failure. It is sent only after the startup
+   * prompt was observed submitted: staged, unverified or unobservable input stays in the composer
+   * for the operator, and nothing is typed on top of it.
    */
   private async sendProofInstruction(input: StartupDeliveryInput): Promise<void> {
-    if (input.adapter.runtime !== "claude-code" || !input.binding.tmuxSession || input.stagedSubmissionWarning) return;
+    if (input.adapter.runtime !== "claude-code" || !input.binding.tmuxSession) return;
+    if (!input.lastSubmissionConfirmed) {
+      input.submissionWarnings.push("Startup proof instruction was not sent: the startup prompt was not confirmed submitted.");
+      return;
+    }
     const failure = await this.sendInteractiveText(input, STARTUP_PROOF_INSTRUCTION_LINE, "startup_proof_instruction");
     if (failure) input.submissionWarnings.push(`Startup proof instruction was not delivered: ${failure.error}`);
   }
@@ -725,6 +732,7 @@ export class StartupOrchestrator {
   private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {
     const sendOrder = ++input.sendOrder;
     const tmuxSession = input.binding.tmuxSession!;
+    input.lastSubmissionConfirmed = false;
     const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
     if (!textResult.ok) {
       return { error: (textResult as { message?: string }).message ?? "unknown" };
@@ -757,7 +765,7 @@ export class StartupOrchestrator {
       const pane = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
       if (!pane?.trim()) { record(pane); return unverified("Startup submission capture is unavailable after Enter."); }
       const before = inspectStartupStagedText(pane, text);
-      if (before === "clear") return null;
+      if (before === "clear") { input.lastSubmissionConfirmed = true; return null; }
       if (before === "unverified") {
         const evidence = record(pane);
         return unverified(evidence?.reason === "unrecognized_composer_boundary"
@@ -793,6 +801,7 @@ export class StartupOrchestrator {
           : "Startup submission is unverified after the guarded retry: the current composer is ambiguous.");
       }
       if (!retry.ok) return unverified(`Guarded startup retry did not submit: ${retry.error ?? retry.reason}; matching staged text is no longer visible.`);
+      input.lastSubmissionConfirmed = true;
       return null;
     } catch (error) {
       if (!diagnostic.observations.some(observation => observation.phase === phase)) record(null);
