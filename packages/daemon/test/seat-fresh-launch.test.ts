@@ -17,6 +17,7 @@ import { normalizeStartupBlock } from "../src/domain/startup-validation.js";
 import { deriveOriented } from "../src/domain/startup-proof.js";
 import { deriveRehydrateSessionIdByNode } from "../src/domain/active-occupant.js";
 import { readFreshOccupantRelations } from "../src/domain/fresh-occupant-relation.js";
+import type { NativeProcessLister, NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 function startupEntry(category: "skill" | "guidance", id: string) {
   return {
@@ -47,6 +48,7 @@ describe("SeatLifecycleService.launchFresh", () => {
   let invalidations: Array<Record<string, unknown>>;
   let activitySwaps: Array<{ nodeId: string; generation: string }>;
   let service: SeatLifecycleService;
+  let listProcesses: NativeProcessLister;
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -116,14 +118,15 @@ describe("SeatLifecycleService.launchFresh", () => {
     });
     invalidations = [];
     activitySwaps = [];
+    listProcesses = async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
+      executableName: "codex", command: "/opt/native/codex -m model", startedAt: "Sat Jan  1 12:00:00 2000" }];
     service = new SeatLifecycleService({
       db,
       rigRepo,
       sessionRegistry,
       eventBus,
       tmuxAdapter: tmux,
-      listProcesses: async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
-        executableName: "codex", command: "/opt/native/codex -m model", startedAt: "Sat Jan  1 12:00:00 2000" }],
+      listProcesses: () => listProcesses(),
       nodeLauncher,
       startupOrchestrator,
       runtimeAdapters: { "claude-code": adapter, codex: { ...adapter, runtime: "codex" } },
@@ -133,6 +136,29 @@ describe("SeatLifecycleService.launchFresh", () => {
   });
 
   afterEach(() => db.close());
+
+  it.each(["valid", "missing path", "wrong token", "no token"])("numeric Claude pane fresh launch: %s", async mode => {
+    const seat = seedSeat();
+    paneCommand = "2.1.289";
+    if (mode === "no token") harnessResult = { ok: true };
+    const startedAt = "Sun Oct  4 12:00:00 2026";
+    const rows: NativeProcessRow[] = [
+      { pid: 4242, ppid: 1, pgid: 4242, tpgid: 4243, executableName: "zsh", command: "-zsh", startedAt },
+      { pid: 4243, ppid: 4242, pgid: 4243, tpgid: 4243, executableName: "2.1.289",
+        command: `claude --session-id ${mode === "wrong token" ? "other" : "fresh-native-uuid"}`, startedAt,
+        executablePath: mode === "missing path" ? undefined : "/fixture/.local/share/claude/versions/2.1.289" },
+    ];
+    const observe = vi.fn(async () => rows);
+    listProcesses = observe;
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "fresh occupant" });
+    expect(result.ok).toBe(mode === "valid");
+    const current = sessionRegistry.getSessionsForRig(seat.rig.id).find(s => s.status === "running")!;
+    expect(current.id).not.toBe(seat.session!.id);
+    expect(current.startupStatus).toBe(mode === "valid" ? "ready" : "attention_required");
+    expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe(mode === "valid" ? "verified" : "mismatch");
+    expect(alive.has(seat.sessionName)).toBe(true);
+    if (mode === "valid") expect(observe).toHaveBeenCalledTimes(2);
+  });
 
   it.each(["launch", "readiness"])("continues a fresh occupant gated at %s exactly once without another launch", async (gate) => {
     const seat = seedSeat();

@@ -8,7 +8,7 @@ import type { HealthRecord } from "../health-projection.js";
 import type { RigModeStore } from "./rig-mode-store.js";
 import { missionModeQualifier, type OperatorContextReadContext, type OperatorContextScope } from "./rig-mode-types.js";
 import { validateModeName, validateRecord } from "./rig-mode-validator.js";
-import { selectCatalogProject } from "../workspace/project-catalog.js";
+import { inferCatalogProject, rigFromSession, selectCatalogProject, ProjectReadError } from "../workspace/project-catalog.js";
 import type { SettingsStore } from "../user-settings/settings-store.js";
 
 /** Production wiring for the catalogPath callback: an explicitly configured
@@ -27,6 +27,8 @@ export interface OperatingContext extends OperatorContextReadContext {
   phase: { value: string | null; source: string | null };
   sources: string[];
   paths?: { project: string; mission?: string; workstream?: string };
+  /** Signals the shared project inference skipped (for example a malformed rigs list). */
+  warnings?: string[];
 }
 export interface OperatingPosture {
   posture: "human-led" | "delegated" | "unknown";
@@ -91,9 +93,11 @@ export class OperatingPostureService {
       merge("projectId", parts[0], "workstream qualifier"); merge("missionId", parts[1], "workstream qualifier");
       ctx.workstreamId = parts[2];
     }
+    let destination: string | null = null;
     if (ctx.qitemId) {
       const row = this.db.prepare("SELECT tags, destination_session FROM queue_items WHERE qitem_id = ?").get(ctx.qitemId) as { tags: string | null; destination_session: string } | undefined;
       if (!row) throw new Error("qitem not found: " + ctx.qitemId);
+      destination = row.destination_session;
       const tags: unknown = JSON.parse(row.tags ?? "[]");
       if (!Array.isArray(tags) || tags.some(t => typeof t !== "string")) throw new Error("invalid qitem tags");
       for (const [prefix, key] of [["project:", "projectId"], ["mission:", "missionId"], ["slice:", "workstreamId"], ["workstream:", "workstreamId"]] as const) {
@@ -121,7 +125,19 @@ export class OperatingPostureService {
       // The same catalog and reader as work-install and the project reads.
       const catalogPath = this.catalogPath?.() || join(workspace, "workspace.yaml");
       let projectRoot = workspace;
-      const selected = selectCatalogProject(catalogPath, ctx.projectId);
+      let selected: { id: string; root: string } | null;
+      try { selected = selectCatalogProject(catalogPath, ctx.projectId); }
+      catch (error) {
+        if (!(error instanceof ProjectReadError) || error.code !== "project_required") throw error;
+        // The same order as work-install: the rig's association, then the seat's working folder, then the only
+        // unclaimed entry. No unique answer re-throws project_required, so the read stays unknown.
+        const signals = this.inferenceSignals(ctx, destination), warnings: string[] = [];
+        const inferred = inferCatalogProject(catalogPath, error, signals, warnings);
+        selected = inferred;
+        ctx.sources.push(catalogPath + "#selected-by=" + inferred.selectedBy
+          + (inferred.selectedBy === "rig" ? ":" + signals.rigName : inferred.selectedBy === "cwd" ? ":" + signals.cwd : ""));
+        if (warnings.length) ctx.warnings = warnings;
+      }
       if (selected) {
         if (!ctx.projectId) ctx.projectId = selected.id;
         projectRoot = selected.root;
@@ -172,6 +188,18 @@ export class OperatingPostureService {
     }
     if (!ctx.rigId && !ctx.projectId) throw new Error("select an exact rig or project/work scope");
     return ctx;
+  }
+
+  /** What the shared inference reads: a qitem's destination rig and that seat's working folder, or for a
+   *  rig-scoped read the rig's name alone. */
+  private inferenceSignals(ctx: OperatingContext, destination: string | null): { rigName: string | null; cwd: string | null } {
+    if (destination) {
+      const seat = this.db.prepare("SELECT n.cwd FROM sessions s JOIN nodes n ON n.id = s.node_id WHERE s.session_name = ? ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1")
+        .get(destination) as { cwd: string | null } | undefined;
+      return { rigName: rigFromSession(destination), cwd: seat?.cwd ?? null };
+    }
+    const rig = ctx.rigId ? this.db.prepare("SELECT name FROM rigs WHERE id = ?").get(ctx.rigId) as { name: string } | undefined : undefined;
+    return { rigName: rig?.name ?? null, cwd: null };
   }
 
   resolve(input: OperatorContextReadContext): OperatingPosture {

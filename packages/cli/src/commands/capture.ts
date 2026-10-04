@@ -117,8 +117,8 @@ Supported notes:
       if (results) {
         for (const r of results) {
           console.log(`--- ${r.sessionName} ---`);
-          if (r.ok && r.content) {
-            console.log(r.content);
+          if (r.ok) {
+            console.log(r.content ?? "");
           } else {
             console.log(`  (error: ${r.error ?? "no content"})`);
           }
@@ -239,8 +239,8 @@ async function runHttpHostCapture(
   if (results) {
     for (const r of results) {
       console.log(`--- ${r.sessionName} ---`);
-      if (r.ok && r.content) {
-        console.log(r.content);
+      if (r.ok) {
+        console.log(r.content ?? "");
       } else {
         console.log(`  (error: ${r.error ?? "no content"})`);
       }

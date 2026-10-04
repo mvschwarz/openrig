@@ -49,6 +49,8 @@ export interface SlowOperationInstrumentation {
     classify?: (value: T) => "ok" | "failed",
   ): Promise<T>;
   recordRequest?(site: string, durationMs: number): void;
+  /** Bounded nonblocking diagnostic append; false means observation was dropped. */
+  recordDiagnostic?(record: Record<string, unknown>): boolean;
   snapshot?(): SlowOperationSnapshot;
   setDegradedHandler?(handler: (snapshot: Required<Pick<SlowOperationSnapshot, "reason" | "site">>) => void): void;
   // OPR.0.4.3.21 (51elv2) — optional graceful-shutdown lifecycle. A drain that
@@ -171,6 +173,9 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
   // durability is lost, so flush()/close() must refuse to report a clean drain.
   private acknowledgedWriteFailure = false;
 
+  private diagnosticIds = new Set<string>();
+  private diagnostic = { offered: 0, enqueued: 0, dropped: 0, acknowledged: 0, failed: 0 };
+
   constructor(options: SlowOpRecorderOptions) {
     this.logPath = options.logPath;
     this.maxBytes = options.maxBytes ?? SLOW_OPERATION_ROTATION_BYTES;
@@ -181,6 +186,10 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
     this.worker.unref();
     this.worker.on("message", (message: { id?: string; ok?: boolean }) => {
       if (!message.id) return;
+      if (this.diagnosticIds.delete(message.id)) {
+        if (message.ok === false) this.diagnostic.failed++;
+        else this.diagnostic.acknowledged++;
+      }
       if (message.ok === false) {
         // Latch the lost durability BEFORE resolving this waiter (the write
         // attempt is done, just failed): keep the one-shot degraded signal and
@@ -280,6 +289,22 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
     this.recordMeasurement(`request:${site}`, durationMs);
   }
 
+  recordDiagnostic(record: Record<string, unknown>): boolean {
+    this.diagnostic.offered++;
+    const coverage = { ...this.diagnostic, pending: this.diagnosticIds.size,
+      recorderHealthy: this.degraded.healthy, maxBytes: this.maxBytes, rotationCount: this.rotationCount };
+    let bytes: number;
+    try { bytes = Buffer.byteLength(JSON.stringify({ ...record, coverage })); }
+    catch { this.diagnostic.dropped++; return false; }
+    if (this.closed || this.terminalReason !== null || this.diagnosticIds.size >= 1024 || bytes > 1024) {
+      this.diagnostic.dropped++; return false;
+    }
+    this.diagnostic.enqueued++;
+    void this.postAndWait({ type: "append", logPath: this.logPath, maxBytes: this.maxBytes,
+      rotationCount: this.rotationCount, record: { ...record, coverage } }, true).catch(() => {});
+    return true;
+  }
+
   async flush(): Promise<void> {
     if (this.closed) return;
     // Rejects with SlowOpRecorderTerminatedError when the Worker is lost —
@@ -335,12 +360,13 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
     }).catch(() => {});
   }
 
-  private postAndWait(message: Record<string, unknown>): Promise<void> {
+  private postAndWait(message: Record<string, unknown>, diagnostic = false): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.terminalReason !== null) return Promise.reject(this.terminalError());
     const id = randomUUID();
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
+      if (diagnostic) this.diagnosticIds.add(id);
       try {
         this.worker.postMessage({ ...message, id });
       } catch {
@@ -370,6 +396,8 @@ export class SlowOpRecorder implements SlowOperationInstrumentation {
     const error = this.terminalError();
     for (const waiter of this.pending.values()) waiter.reject(error);
     this.pending.clear();
+    this.diagnostic.failed += this.diagnosticIds.size;
+    this.diagnosticIds.clear();
   }
 
   private markDegraded(reason: string, site: string): void {

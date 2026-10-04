@@ -30,6 +30,11 @@ interface SeatStatusResponse {
     lastLaunchArguments: { value: string | null; approvalPolicy?: string } | null;
     nativeEffect: "unverified";
     error?: string;
+    effective?: {
+      effectiveMode: string;
+      source: string;
+      fallbackReason?: string;
+    };
   };
   session_status: string | null;
   startup_status: string | null;
@@ -156,7 +161,18 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Session: ${display(status.session_status, "unknown")}`);
   if (status.permissions) {
     const p = status.permissions;
-    console.log(`Permission mode for future launches: ${p.desired?.mode ?? p.selectionState}`);
+    const formatSource = (source: string): string => {
+      if (source === "member_spec") return "from the member's permission_policy";
+      if (source === "rig_spec") return "from the rig's permission_policy";
+      if (source === "system_default") return "OpenRig default";
+      return source;
+    };
+    const modeStr = p.desired?.mode
+      ? `${p.desired.mode} (explicit)`
+      : p.effective
+      ? `${p.effective.effectiveMode} (${formatSource(p.effective.source)}${p.effective.fallbackReason ? `; ${p.effective.fallbackReason}` : ""})`
+      : p.selectionState;
+    console.log(`Permission mode for future launches: ${modeStr}`);
     console.log(`Last launch arguments: ${p.lastLaunchArguments?.value ?? "unknown"}${p.lastLaunchArguments?.approvalPolicy ? `; approval=${p.lastLaunchArguments.approvalPolicy}` : ""}`);
     console.log("Native permission effect: unverified by this status read");
     if (p.error) console.log(`Permission selection unavailable: ${p.error}`);
@@ -443,6 +459,12 @@ If the recorded native token needs correction and you know the actual token:
   printf '%s' "$TOKEN" | rig seat set-resume-token dev-impl@my-rig --token-stdin --reason "verified native token"
 Then rerun clear-attention to check the live evidence. Setting the token alone,
 or stopping and relaunching the seat, does not prove continuity.
+reconcile-session adopts a binding; it does not clear a failed full-restore
+attempt. Use clear-attention for that: the recorded token must match the live
+foreground process and its pane must be usable. This check sends no input.
+Version-named Claude processes behind a shell need an OS executable-path
+witness (Linux /proc or macOS proc_pidpath). If that read is unavailable, the
+identity remains unverified; a version number alone cannot clear it.
 `)
     .action(async (session: string, opts: { reason?: string; json?: boolean }) => {
       const deps = getDeps();

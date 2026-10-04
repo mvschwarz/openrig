@@ -6,7 +6,7 @@ import {
   buildCursorLaunchCommand, cursorChatApprovalChanged, cursorSeatConfigDir, resetCursorSeatConfig, recordCursorChatLaunch,
   type CursorAdapterFsOps,
 } from "./cursor-runtime-adapter.js";
-import { cursorApprovalArg } from "./yolo-mode.js";
+import { cursorApprovalArg, type ResolvedLaunchPosture } from "./yolo-mode.js";
 
 interface CursorResumeOptions {
   stateRoot: string;
@@ -42,7 +42,7 @@ export class CursorResumeAdapter {
     cwd: string,
     nodeId: string,
     model?: string | null,
-    resolvedPosture?: "floor" | "full_bypass",
+    resolvedPosture?: ResolvedLaunchPosture,
     permissionMode?: string,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) return { ok: false, code: "no_resume", message: "Cursor resume not available" };

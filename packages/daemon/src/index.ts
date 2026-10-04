@@ -370,7 +370,7 @@ export async function startServer(port?: number) {
       }
     });
     injectWebSocket(srv);
-    trackHttpServerResponses(srv);
+    trackHttpServerResponses(srv, deps.requestPhaseObserver?.observeRequest);
     servers.push(srv);
   }
 
@@ -398,6 +398,7 @@ export async function startServer(port?: number) {
       ["event-loop-monitor", () => eventLoopMonitor.stop()],
       ["connections", () => Promise.all(servers.map((srv) => closeHttpServer(srv)))],
       ["recorder", async () => {
+        deps.requestPhaseObserver?.close();
         if (await drainSlowOpRecorderOnShutdown(deps.slowOpRecorder) !== 0) {
           throw new Error("slow-operation recorder drain incomplete; records may be lost");
         }

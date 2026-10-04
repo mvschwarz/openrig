@@ -211,6 +211,10 @@
             "const": "unknown",
             "description": "Host settings (for example OPENRIG_YOLO, persisted or native settings) decide the effective permission at launch."
           },
+          "permissionPrompts": {
+            "enum": ["off", "on", "default"],
+            "description": "Archive declaration per seat: off for full_bypass (including builtin:yolo) on any runtime; on for a Claude/Codex flag-surface floor policy, or Codex under auto; default for Claude/Codex with no declared policy. Omitted for Claude under auto, config-surface policies, host-resolved Codex profiles, and Pi except declared full bypass. Absent means not stated, never on. Host settings may differ; nativeEffect remains unknown."
+          },
           "sourceRefs": {
             "type": "array",
             "items": {
@@ -379,6 +383,9 @@
           "status"
         ],
         "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
           "kind": {
             "type": "string",
             "minLength": 1
@@ -389,6 +396,11 @@
           },
           "versionConstraint": {
             "type": "string"
+          },
+          "commands": {
+            "type": "array",
+            "description": "Unexecuted author setup lines, in order in one shell; the install command follows in the resulting working directory.",
+            "items": { "type": "string", "minLength": 1 }
           },
           "status": {
             "const": "not_checked"
@@ -411,6 +423,9 @@
           "reason"
         ],
         "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
           "subject": {
             "type": "string",
             "minLength": 1

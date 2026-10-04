@@ -16,7 +16,7 @@ describe("expensiveRouteLabel", () => {
 
   it("returns null for cheap routes, sub-paths, and non-GET verbs", () => {
     expect(expensiveRouteLabel("GET", "/healthz")).toBeNull();
-    expect(expensiveRouteLabel("GET", "/api/rigs")).toBeNull();
+    expect(expensiveRouteLabel("GET", "/api/rigs")).toBe("GET /api/rigs");
     expect(expensiveRouteLabel("GET", "/api/rigs/abc-123")).toBeNull();
     expect(expensiveRouteLabel("GET", "/api/rigs/abc/nodes/deep")).toBeNull();
     expect(expensiveRouteLabel("POST", "/api/ps")).toBeNull();

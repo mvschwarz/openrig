@@ -207,6 +207,7 @@ export interface AppDeps {
   chatRepo?: ChatRepository;
   streamStore?: StreamStore;
   slowOpRecorder?: SlowOperationInstrumentation;
+  requestPhaseObserver?: import("./domain/request-phase-observer.js").RequestPhaseObserver;
   queueRepo?: QueueRepository;
   /** S02 — the standing stuck sweep's observable heartbeat (ADDITIVE on healthz;
    *  absent = legacy body). Set by the index.ts scheduler when the loop starts. */
@@ -493,6 +494,7 @@ export function createApp(deps: AppDeps): Hono {
   }
 
   const app = new Hono();
+  if (deps.requestPhaseObserver) app.use("*", deps.requestPhaseObserver.middleware());
   // A malformed request body is a 400, not the default 500.
   app.use("*", trackJsonBodyParseErrors);
   app.onError(jsonBodyErrorHandler);

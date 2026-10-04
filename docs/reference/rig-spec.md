@@ -213,7 +213,7 @@ its inherited policy provenance. `inherit` removes that override. See
 
 ### Built-in permission policies
 
-The four built-ins live in `packages/daemon/policies/builtin/`. Action names are the
+The five built-ins live in `packages/daemon/policies/builtin/`. Action names are the
 policies' own semantic classes.
 
 | Policy | Surface | Runs without asking | Asks a person | Denied |
@@ -222,13 +222,15 @@ policies' own semantic classes.
 | `builtin:standard` | config | everything not listed, including `push_to_remote` (`default_posture: allow`) | `create_pr`, `publish_package`, `merge_or_release`, `force_push`, and the destructive class | nothing |
 | `builtin:open` | config | everything, including PRs, publishing, merges and force pushes (`default_posture: allow`) | the destructive class only | nothing |
 | `builtin:yolo` | flag (`launch_posture: full_bypass`) | everything; the runtime's permission prompts are bypassed at launch | nothing | nothing |
+| `builtin:auto` | flag (`launch_posture: auto`) | Claude runs with `--permission-mode auto`; Codex and Pi launch at the floor | Claude: decided by auto mode; Codex and Pi: as at the floor | Claude: decided by auto mode; Codex and Pi: as at the floor |
 
 The destructive class is `delete_everything`, `drop_persistent_store` and
 `reset_or_discard_vcs`.
 
 **At launch.** `builtin:yolo` selects Claude `--dangerously-skip-permissions`, Codex
-`-s danger-full-access -a never`, and Pi `--approve`. Every other seat launches at the
-floor:
+`-s danger-full-access -a never`, and Pi `--approve`. `builtin:auto` selects Claude
+`--permission-mode auto`, while Codex and Pi do not have an auto mode and launch at the floor.
+Every other seat launches at the floor:
 - Claude `--permission-mode acceptEdits`;
 - Codex `-s workspace-write`, or `-p <profile>` when the member sets
   `codex_config_profile`, in which case the profile governs its own sandbox;
@@ -248,7 +250,7 @@ OMP variant maps that trust to its approval mode: `yolo` under `--approve`, othe
 
 **A custom policy file** is Markdown with frontmatter: `policy_schema_version: 1`, `name`,
 `source: custom`, `description`, and `surface`.
-- `surface: flag` adds `launch_posture` (`floor` or `full_bypass`).
+- `surface: flag` adds `launch_posture` (`floor`, `full_bypass` or `auto`).
 - `surface: config` adds `default_posture` (`allow`, `ask` or `deny`) and the `allow`, `ask`,
   `deny` and `destructive_class` lists (`[]` for none).
 

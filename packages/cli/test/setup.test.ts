@@ -867,7 +867,7 @@ describe("rig setup --policy (onboarding record)", () => {
     const step = result.steps.find((s) => s.id === "policy_record");
     expect(step?.status).toBe("fail");
     // The rejection surfaces the valid set to the operator (message + reason are what they see).
-    expect(`${step?.message ?? ""} ${step?.reason ?? ""}`).toMatch(/locked, standard, open, yolo, none/);
+    expect(`${step?.message ?? ""} ${step?.reason ?? ""}`).toMatch(/locked, standard, open, yolo, auto, none/);
     expect(sink[SPEC]).toBeUndefined();
   });
 

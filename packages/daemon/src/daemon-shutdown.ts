@@ -34,12 +34,13 @@ const activeResponses = new WeakMap<object, {
 /** Register before requests arrive so shutdown can end SSE without cutting ordinary requests. */
 export function trackHttpServerResponses(server: {
   prependListener(event: "request", listener: (request: unknown, response: StreamResponse) => void): unknown;
-}): void {
+}, observeRequest?: (request: unknown, response: unknown) => void): void {
   if (activeResponses.has(server)) return;
   const responses = new Set<{ response: StreamResponse; contentType?: string }>();
   const state: NonNullable<ReturnType<typeof activeResponses.get>> = { responses };
   activeResponses.set(server, state);
   server.prependListener("request", (_request, response) => {
+    try { observeRequest?.(_request, response); } catch { /* Observation cannot change HTTP/shutdown. */ }
     const tracked: { response: StreamResponse; contentType?: string } = { response };
     responses.add(tracked);
     const writeHead = response.writeHead;

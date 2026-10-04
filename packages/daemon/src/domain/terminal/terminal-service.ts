@@ -32,6 +32,7 @@
 
 import { composeView, type ViewMemberInput } from "./view-composer.js";
 import { createHash } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { buildGridRoot } from "./herdr-adapter.js";
 // deriveViewMembers is a VALUE exported by the views store (not the composer).
 import { deriveViewMembers } from "./terminal-views-store.js";
@@ -111,6 +112,11 @@ export interface TerminalServiceDeps {
   resolveHost(id: string): HostEntry | null;
   /** Local liveness refine — has-session for a local tmux session; remote members are not probed here. */
   hasSession(tmuxSession: string): Promise<boolean> | boolean;
+  /**
+   * The tmux executable the daemon itself resolves, for local pane commands (#707). Only an
+   * absolute path is used; anything else, or no resolver, keeps the bare `tmux` token.
+   */
+  resolveLocalTmux?(): Promise<string | null> | string | null;
 }
 
 /** Build the one shared result shape for a pre-provider failure (view/provider not found). */
@@ -138,7 +144,22 @@ function savedMemberToInput(m: SavedViewMember): ViewMemberInput {
 type ResolvedView = { id: string; members: ViewMemberInput[] } | { code: string; error: string };
 
 export class TerminalService {
+  private localTmux?: Promise<string | undefined>;
+
   constructor(private readonly deps: TerminalServiceDeps) {}
+
+  /** Resolved once, so a preview and the open that follows compose the same pane commands. */
+  private resolveLocalTmux(): Promise<string | undefined> {
+    this.localTmux ??= (async () => {
+      try {
+        const path = await this.deps.resolveLocalTmux?.();
+        return typeof path === "string" && isAbsolute(path) ? path : undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+    return this.localTmux;
+  }
 
   /** Open a view in the chosen provider. Always returns the one shared result shape. */
   async openView(req: OpenViewRequest): Promise<OpenViewResult> {
@@ -165,7 +186,7 @@ export class TerminalService {
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
-    return composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage });
+    return composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage, localTmux: await this.resolveLocalTmux() });
   }
 
   private planId(provider: string, composed: ComposedView): string {
@@ -197,7 +218,7 @@ export class TerminalService {
       const inventory = await this.deps.listRigSeatsBatch?.(result.rigs);
       for (const entry of entries) {
         const rows = entry.kind === "derived" ? inventory?.get(entry.name) : undefined;
-        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage })
+        const plan = rows ? composeView(entry.view, await this.refineLiveness(deriveViewMembers(rows, { readOnly: false })), { resolveHost: id => this.deps.resolveHost(id), panesPerPage: this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage, localTmux: await this.resolveLocalTmux() })
           : await this.resolveComposed(entry.view, this.deps.resolveProvider(DEFAULT_PROVIDER)?.panesPerPage);
         if ("code" in plan) continue;
         result.catalog.push({ ...entry, members: [...plan.opened, ...plan.absent, ...plan.degraded].map((m) => m.seat), ready: plan.opened.length, absent: plan.absent.length, degraded: plan.degraded.length, pages: plan.pages.length });

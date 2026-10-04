@@ -156,6 +156,8 @@ describe("cursorApprovalArg", () => {
   it("leaves Cursor's own allowlist in charge at the floor", () => {
     expect(cursorApprovalArg({}, "floor")).toBe("");
     expect(cursorApprovalArg({})).toBe("");
+    // The Claude-only "auto" posture has no Cursor equivalent; it keeps the floor, as for Codex.
+    expect(cursorApprovalArg({ OPENRIG_YOLO: "1" }, "auto")).toBe("");
   });
   it("runs everything under full bypass or global YOLO", () => {
     expect(cursorApprovalArg({}, "full_bypass")).toBe(" --force");

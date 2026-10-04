@@ -1,9 +1,12 @@
 import fs from "node:fs";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
+import { BUILD_INFO } from "../build-info.js";
 
 /**
- * Read the daemon's own package.json version at call time. Function-level read
+ * Use the packaged build stamp, as /healthz does. The CLI ships daemon/dist
+ * without daemon/package.json. For unstamped development runs, read the
+ * daemon's own package.json version at call time. Function-level read
  * on purpose: a module-level constant would mask test isolation per the
  * audit-every-layer discipline, and the read is cheap. Returns "unknown" on any
  * failure (missing/garbled package.json, no version field) so callers can
@@ -16,6 +19,7 @@ import { fileURLToPath } from "node:url";
  * location (import.meta.url), so it is correct regardless of the caller.
  */
 export function getDaemonVersion(): string {
+  if (BUILD_INFO.semver) return BUILD_INFO.semver;
   try {
     const here = fileURLToPath(import.meta.url);
     const pkgPath = nodePath.join(nodePath.dirname(here), "..", "..", "package.json");

@@ -1390,7 +1390,7 @@ export class RestoreOrchestrator {
    *   3. Nothing attached (or a resolution error) → EXPLICIT "floor" — the locked
    *      minimum-floor absence contract; never undefined/env-delegation for managed seats.
    */
-  private resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" {
+  private resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" | "auto" {
     try {
       const prov = this.rigRepo.getNodePolicyProvenance(nodeId);
       if (prov) {
@@ -1452,7 +1452,7 @@ export class RestoreOrchestrator {
     model?: string | null,
     // OPR.0.4.8.3 Seam B: the seat's restored launch posture (persisted provenance,
     // custom policies re-validated when readable). Absent = env decision.
-    resolvedPosture?: "floor" | "full_bypass",
+    resolvedPosture?: "floor" | "full_bypass" | "auto",
     effort?: string | null,
   ): Promise<
     | { kind: "resumed" }
@@ -1463,14 +1463,14 @@ export class RestoreOrchestrator {
     const launchGeneration = this.sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid;
     let permissionMode: string | undefined;
     try {
-      const selection = new NativePermissionStore(this.db).read(nodeId);
       const runtime = this.claudeResume.canResume(resumeType, resumeToken) ? "claude-code"
         : this.codexResume.canResume(resumeType, resumeToken) ? "codex"
         : this.cursorResume?.canResume(resumeType, resumeToken) ? "cursor" : "pi";
+      const selection = new NativePermissionStore(this.db).read(nodeId);
       if (selection && selection.runtime !== runtime) throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
       const override = permissionBindingOverride(selection);
       resolvedPosture = override.launchPosture ?? resolvedPosture;
-      permissionMode = override.permissionMode;
+      permissionMode = override.permissionMode ?? (resolvedPosture === "auto" && runtime === "claude-code" ? "auto" : undefined);
     } catch (error) { return { kind: "failed", message: `Permission selection: ${(error as Error).message}` }; }
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId, ...(effort !== undefined ? [effort] : []));

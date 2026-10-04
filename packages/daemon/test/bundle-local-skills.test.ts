@@ -12,6 +12,7 @@ import { PodBundleSourceResolver, materializePodBundle } from "../src/domain/bun
 import { resolveAgentRef } from "../src/domain/agent-resolver.js";
 import { resolveNodeConfig } from "../src/domain/profile-resolver.js";
 import { discoverSkillsForRuntime, discoverSkillsWithProvenance } from "../src/domain/skill-discovery.js";
+import { inspectSkillDirectory, reconcileSkillLoadout, resolveSkillLoadout } from "../src/domain/skill-catalog.js";
 import { planProjection } from "../src/domain/projection-planner.js";
 import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
 import { RigSpecCodec } from "../src/domain/rigspec-codec.js";
@@ -163,6 +164,87 @@ describe("bundle-local skills", () => {
     expect(fs.readFileSync(path.join(catalog, "catalog.yaml"))).toEqual(catalogBefore);
     expect(execFileSync("git", ["-C", catalog, "status", "--porcelain"], { encoding: "utf8" })).toBe("");
   });
+
+  it.each(["different-bytes", "different-mode", "same-bytes", "no-catalog"] as const)(
+    "keeps selected bundle bytes through managed reconciliation and all adapters: %s", async (kind) => {
+      seed();
+      write("source/agents/worker/agent.yaml", `name: worker\nversion: "1.0"\nresources:\n  skills:\n    - id: portable\n      path: skills/portable\nprofiles:\n  default:\n    uses:\n      skills: [portable]\n`);
+      fs.cpSync(path.join(root, "source/skills/portable"), path.join(root, "source/agents/worker/skills/portable"), { recursive: true });
+      const { response, outputPath } = await create();
+      expect(response.status, await response.text()).toBe(201);
+      const resolver = new PodBundleSourceResolver();
+      const extracted = await resolver.resolve(outputPath);
+      const installed = path.join(root, "installed");
+      expect(materializePodBundle(extracted.tempDir, installed)).toEqual({ ok: true });
+      resolver.cleanup(extracted.tempDir);
+      fs.rmSync(path.join(root, "source"), { recursive: true });
+      const catalog = path.join(root, "catalog");
+      if (kind !== "no-catalog") {
+        fs.cpSync(path.join(installed, "agents/worker/skills/portable"), path.join(catalog, "portable"), { recursive: true });
+        if (kind === "different-bytes") write("catalog/portable/references/example.md", "Catalog reference\n");
+        if (kind === "different-mode") fs.chmodSync(path.join(catalog, "portable/scripts/helper.sh"), 0o644);
+        write("catalog/catalog.yaml", "schema: openrig.skill-catalog/v1\nsystem: [system-only]\n");
+        write("catalog/system-only/SKILL.md", skill("system-only"));
+        write("catalog/project-only/SKILL.md", skill("project-only"));
+        execFileSync("git", ["init", "-q", catalog]);
+        execFileSync("git", ["-C", catalog, "add", "."]);
+        execFileSync("git", ["-C", catalog, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "catalog"]);
+      }
+      const catalogBefore = kind === "no-catalog" ? null : inspectSkillDirectory(path.join(catalog, "portable"));
+      const rig = RigSpecSchema.normalize(RigSpecCodec.parse(fs.readFileSync(path.join(installed, "rig.yaml"), "utf8")) as Record<string, unknown>);
+      const resolved = resolveAgentRef("local:agents/worker", installed, fsOps);
+      if (!resolved.ok) throw new Error(JSON.stringify(resolved));
+      const tmux = {} as TmuxAdapter;
+      const pi = new PiRuntimeAdapter({ tmux, fsOps, stateRoot: path.join(root, "pi"), runnerEntryPath: "unused" });
+      for (const adapter of [new ClaudeCodeAdapter({ tmux, fsOps }), new CodexRuntimeAdapter({ tmux, fsOps }), pi]) {
+        const cwd = path.join(root, `work-${adapter.runtime}`);
+        fs.mkdirSync(cwd);
+        if (kind !== "no-catalog") fs.writeFileSync(path.join(cwd, "project.yaml"), "install:\n  skills: [project-only]\n");
+        const session = `${adapter.runtime}@portable`;
+        const targetPath = (id: string) => adapter.runtime === "pi" ? pi.skillTargetPath(session, id)!
+          : path.join(cwd, adapter.runtime === "codex" ? ".agents" : ".claude", "skills", id, "SKILL.md");
+        // Exercise an already-owned catalog projection, not just an empty workspace.
+        if (kind !== "no-catalog" && adapter.runtime !== "pi") {
+          const old = resolveSkillLoadout({ catalogRoot: catalog, topologySkills: ["portable"], projectRoot: cwd });
+          if (!old.ok) throw new Error(JSON.stringify(old));
+          expect(reconcileSkillLoadout({ loadout: old.loadout, cwd, runtime: adapter.runtime, topologyOwner: session, apply: true }).ok).toBe(true);
+        }
+        for (let repeat = 0; repeat < 2; repeat++) {
+          const result = resolveNodeConfig({ baseSpec: resolved.resolved, importedSpecs: resolved.imports, collisions: resolved.collisions,
+            profileName: "default", member: { ...rig.pods[0]!.members[0]!, runtime: adapter.runtime, cwd }, pod: rig.pods[0]!, rig,
+            specRoot: installed, homedir: path.join(root, "home"), skillsRoot: catalog });
+          expect(result.ok, JSON.stringify(result)).toBe(true);
+          if (!result.ok) throw new Error(result.errors.join(";"));
+          expect(result.config.skillWarnings?.length ?? 0).toBe(kind.startsWith("different") ? 1 : 0);
+          if (adapter.runtime !== "pi") {
+            const receipt = reconcileSkillLoadout({ loadout: result.config.skillLoadout!, cwd, runtime: adapter.runtime, topologyOwner: session, apply: true });
+            expect(receipt.ok, JSON.stringify(receipt)).toBe(true);
+            if (kind !== "no-catalog") expect(receipt.receipts.find(r => r.id === "portable")?.sourceRoot).toBe(installed);
+          }
+          const plan = planProjection({ config: result.config, collisions: resolved.collisions, fsOps,
+            resolveTargetPath: (_cat, id) => targetPath(id) });
+          if (!plan.ok) throw new Error(plan.errors.join(";"));
+          expect((await adapter.project(plan.plan, { tmuxSession: session, cwd } as NodeBinding)).failed).toEqual([]);
+          expect(inspectSkillDirectory(path.dirname(targetPath("portable"))))
+            .toEqual(inspectSkillDirectory(path.join(installed, "agents/worker/skills/portable")));
+          if (kind !== "no-catalog") for (const id of ["system-only", "project-only"]) {
+            expect(fs.readFileSync(targetPath(id), "utf8")).toBe(skill(id));
+          }
+          if (repeat === 1 && kind !== "no-catalog" && adapter.runtime !== "pi") {
+            fs.writeFileSync(targetPath("portable"), "Operator edit\n");
+            const protectedResult = reconcileSkillLoadout({ loadout: result.config.skillLoadout!, cwd, runtime: adapter.runtime, topologyOwner: session, apply: true });
+            expect(protectedResult.ok).toBe(false);
+            expect(protectedResult.errors[0]?.code).toBe("target_conflict");
+            expect(fs.readFileSync(targetPath("portable"), "utf8")).toBe("Operator edit\n");
+          }
+        }
+      }
+      if (catalogBefore) {
+        expect(inspectSkillDirectory(path.join(catalog, "portable"))).toEqual(catalogBefore);
+        expect(execFileSync("git", ["-C", catalog, "status", "--porcelain"], { encoding: "utf8" })).toBe("");
+      } else expect(fs.existsSync(catalog)).toBe(false);
+    },
+  );
 
   it.each(["changed", "missing", "added", "mode-only"] as const)(
     "reapplies a Pi skill with an unchanged SKILL.md and a %s helper",

@@ -31,7 +31,7 @@ export interface StubRunnerArgs {
   sessionName: string;
   cwd: string;
   launchId: string;
-  posture: "floor" | "full_bypass";
+  posture: "floor" | "full_bypass" | "auto";
   resumeToken?: string;
 }
 

@@ -2080,7 +2080,10 @@ export class PodRigInstantiator {
     }
     // P17: a divergent target is never SILENT again — each conflict rides the
     // instantiate warnings surface with the file, reason, and consequence.
-    (launchResult.warnings ??= []).push(...projectionConflictWarnings(planResult.plan));
+    (launchResult.warnings ??= []).push(
+      ...(configResult.config.skillWarnings ?? []).map(warning => `${canonicalSessionName}: ${warning}`),
+      ...projectionConflictWarnings(planResult.plan),
+    );
 
     // Codex project() writes plan entries before startup-file delivery. Protect
     // edited skills there too; filtering only startup files is insufficient.
@@ -2291,7 +2294,7 @@ export class PodRigInstantiator {
       return {
         status: "launched",
         sessionName: canonicalSessionName,
-        warnings: launchResult.warnings,
+        warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
       };
     }
     return {
@@ -2299,7 +2302,7 @@ export class PodRigInstantiator {
       error: startupResult.errors.join("; "),
       evidence: startupResult.evidence,
       sessionName: canonicalSessionName,
-      warnings: launchResult.warnings,
+      warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
     };
   }
 
@@ -2399,7 +2402,7 @@ export class PodRigInstantiator {
       status: startupResult.ok ? "launched" : "failed",
       error: startupResult.ok ? undefined : startupResult.errors.join("; "),
       sessionName: canonicalSessionName,
-      warnings: launchResult.warnings,
+      warnings: startupResult.warnings?.length ? [...(launchResult.warnings ?? []), ...startupResult.warnings] : launchResult.warnings,
     };
   }
 

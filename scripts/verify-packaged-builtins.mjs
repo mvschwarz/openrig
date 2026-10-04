@@ -19,10 +19,11 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const AUTHORITY_SHA256 = {
+  "auto.policy.md": "ffd0347af4bc5d5fdb4e5f8208577ca72dcc085883ea4fa0b10e9c6ac3022bde",
   "locked.policy.md": "dcb38c372def7fe58ddfc9f1f3e97b9ba391ae79a99ef486e44f017cb39e57fe",
   "standard.policy.md": "737d3f56e6d8275fe548a3a06e9b02ede8f328207ec2e6223cea6a83f40f5148",
   "open.policy.md": "bb5fbb18e1f3706bd0676a9e709e29b5754bb6b41b6f304453dd6d73e7a4d62b",
-  "yolo.policy.md": "f0277fc5bb7ecbff88861a042eefc3bd79aa829e00dc4ee342bd82276019f601",
+  "yolo.policy.md": "1c34fff0b385426689fd26e20b8b431de6b688028d584924e7d5384fe5ff6d42",
 };
 
 const [cliDir, expectedSha] = process.argv.slice(2);
@@ -51,10 +52,10 @@ const assembledDir = join(cli, "daemon", "policies", "builtin");
 const assembledFiles = readdirSync(assembledDir).sort();
 const expectedFiles = Object.keys(AUTHORITY_SHA256).sort();
 if (JSON.stringify(assembledFiles) !== JSON.stringify(expectedFiles))
-  fail(`assembled inventory ${assembledFiles.join(",")} !== known four`);
+  fail(`assembled inventory ${assembledFiles.join(",")} !== known five`);
 for (const [file, hash] of Object.entries(AUTHORITY_SHA256))
   if (sha256(join(assembledDir, file)) !== hash) fail(`assembled ${file} diverged from authority`);
-ok("assembled daemon/policies/builtin: exactly the known four, all authority hashes match");
+ok("assembled daemon/policies/builtin: exactly the known five, all authority hashes match");
 
 // ---- 3. compiled assembled startup boundary (guard finding 1) ----
 const home = mkdtempSync(join(tmpdir(), "builtins-probe-home-"));
@@ -93,14 +94,14 @@ try {
   const refDir = join(home, "reference", "policies", "builtin");
   const files = readdirSync(refDir).sort();
   if (JSON.stringify(files) !== JSON.stringify(expectedFiles))
-    fail(`materialized inventory [${files.join(",")}] !== known four`);
+    fail(`materialized inventory [${files.join(",")}] !== known five`);
   for (const [file, hash] of Object.entries(AUTHORITY_SHA256)) {
     const p = join(refDir, file);
     if (sha256(p) !== hash) fail(`materialized ${file} not byte-identical to authority`);
     const mode = statSync(p).mode & 0o777;
     if (mode !== 0o444) fail(`materialized ${file} mode ${mode.toString(8)} !== 444`);
   }
-  ok("compiled assembled startup materialized EXACTLY the four stable files — byte-identical, mode 0444");
+  ok("compiled assembled startup materialized EXACTLY the five stable files — byte-identical, mode 0444");
   // best-effort dispose of constructed daemon resources (no server was bound)
   try { await daemon?.contextMonitor?.stop?.(); } catch { /* best-effort */ }
   try { daemon?.eventLoopMonitor?.stop?.(); } catch { /* best-effort */ }

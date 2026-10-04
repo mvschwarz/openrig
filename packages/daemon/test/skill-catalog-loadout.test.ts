@@ -143,7 +143,7 @@ describe("managed skill catalog and composable loadouts", () => {
     expect(idempotent.ok).toBe(true);
     expect(idempotent.applied).toBe(false);
     expect(idempotent.freshLaunchRequired).toBe(false);
-    expect(idempotent.receipts.every((receipt) => receipt.detail === "owned target matches catalog bytes")).toBe(true);
+    expect(idempotent.receipts.every((receipt) => receipt.detail === "owned target matches selected source bytes")).toBe(true);
 
     writeSkill(join(f.project, harnessDir, "skills"), "unrelated", "unrelated", "# user-owned\n");
     const switched = resolveSkillLoadout({ catalogRoot: f.catalog, projectSkills: ["two"] });

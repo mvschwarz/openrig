@@ -6,7 +6,10 @@ import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
+import { isGitHubBundleLink, importGitHubBundle, bundleIdentityLines, printBundleLinkError } from "../lib/bundle-source.js";
+import { checkBundleFolder } from "../lib/bundle-check.js";
 import type { StatusDeps } from "./status.js";
+import { showBundleBehaviourBeforeAction } from "../bundle-behaviour.js";
 import { readDeclaredConfigurations, authoredMapping, resolveConfiguration, listConfigurations, checkDeclaredConfigurations, stageConfiguration, ConfigurationError, type ChosenConfiguration } from "../lib/bundle-configuration.js";
 
 /**
@@ -14,7 +17,7 @@ import { readDeclaredConfigurations, authoredMapping, resolveConfiguration, list
  * Function-level read on purpose: module-level constants would mask test
  * isolation per the audit-every-layer discipline.
  */
-function getCliVersion(): string {
+export function getCliVersion(): string {
   try {
     const here = fileURLToPath(import.meta.url);
     const pkgPath = nodePath.join(nodePath.dirname(here), "..", "..", "package.json");
@@ -23,6 +26,12 @@ function getCliVersion(): string {
   } catch {
     return "unknown";
   }
+}
+
+/** Keep the daemon's messages readable in human output; JSON retains the original body. */
+export function bundleInstallError(data: Record<string, unknown>): unknown {
+  const error = data.error ?? data.errors ?? "Install failed";
+  return Array.isArray(error) ? error.join("\n") : error;
 }
 
 /**
@@ -54,7 +63,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
 
   // rig bundle create <spec> -o <path>
   cmd.command("create <spec>")
-    .description("Create a .rigbundle from a rig spec")
+    .description("Create a .rigbundle from a rig spec or GitHub folder link")
     .requiredOption("-o, --output <path>", "Output path for .rigbundle")
     .option("--name <name>", "Bundle name", "my-bundle")
     .option("--bundle-version <ver>", "Bundle version", "0.1.0")
@@ -71,6 +80,20 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--json", "JSON output")
     .action(async (spec: string, opts: { output: string; name: string; bundleVersion: string; includePackages?: string[]; rigRoot?: string; contextPack?: string[]; projectDir?: string; preset?: string; seat?: string[]; notes?: string; minDaemonVersion?: string; minCliVersion?: string; allowDrift?: boolean; json?: boolean }) => {
       const deps = getDepsF();
+      if (isGitHubBundleLink(spec)) {
+        try {
+          const { res } = await importGitHubBundle(spec, deps, { ...opts, provenance: buildClientProvenance(opts.notes) });
+          if (opts.json) console.log(JSON.stringify(res.data));
+          else if (res.status >= 400) console.error(res.data.error ?? "Create failed");
+          else {
+            console.log(`Bundle created: ${opts.output}`);
+            for (const line of bundleIdentityLines(res.data)) console.log(line);
+            if (res.data.warning) console.warn(res.data.warning);
+          }
+          if (res.status >= 400) process.exitCode = 2;
+        } catch (err) { printBundleLinkError(err, opts.json); }
+        return;
+      }
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
 
@@ -124,7 +147,8 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         provenance: buildClientProvenance(opts.notes),
         ...(hasCompatibility ? { compatibility } : {}),
         ...(opts.allowDrift ? { allowDrift: true } : {}),
-      }, { timeoutMs: 120_000 }).finally(() => { if (stagingDir) fs.rmSync(stagingDir, { recursive: true, force: true }); });
+      }, { timeoutMs: 120_000 });
+      if (stagingDir) fs.rmSync(stagingDir, { recursive: true, force: true });
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));
@@ -176,11 +200,23 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
 
   // rig bundle inspect <path>
   cmd.command("inspect <path>")
-    .description("Inspect a .rigbundle")
+    .description("Inspect a .rigbundle or build and inspect a GitHub folder link")
+    .option("--preset <name>", "For a GitHub link, choose a declared configuration")
+    .option("--seat <member=runtime>", "For a GitHub link, choose a declared seat runtime; repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--json", "JSON output")
-    .action(async (bundlePath: string, opts: { json?: boolean }) => {
+    .action(async (bundlePath: string, opts: { json?: boolean; preset?: string; seat?: string[] }) => {
       const deps = getDepsF();
-      const client = await getClient(deps);
+      let imported: Awaited<ReturnType<typeof importGitHubBundle>> | undefined;
+      if (isGitHubBundleLink(bundlePath)) {
+        try { imported = await importGitHubBundle(bundlePath, deps, opts); }
+        catch (err) { printBundleLinkError(err, opts.json); return; }
+        if (imported.res.status >= 400) {
+          if (opts.json) console.log(JSON.stringify(imported.res.data)); else console.error(imported.res.data.error ?? "Create failed");
+          process.exitCode = 2; return;
+        }
+        bundlePath = imported.bundlePath;
+      }
+      const client = imported?.client ?? await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
 
       const res = await client.post<Record<string, unknown>>("/api/bundles/inspect", { bundlePath: nodePath.resolve(bundlePath) });
@@ -205,6 +241,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       const m = res.data["manifest"] as Record<string, unknown>;
       if (!m) { console.error("No manifest in response"); process.exitCode = 2; return; }
       console.log(`Bundle: ${m["name"]} v${m["version"]}`);
+      for (const line of bundleIdentityLines(res.data)) console.log(line);
       console.log(`Digest valid: ${res.data["digestValid"]}`);
       const ir = res.data["integrityResult"] as Record<string, unknown>;
       console.log(`Integrity: ${ir["passed"] ? "PASS" : "FAIL"}`);
@@ -213,12 +250,15 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       if (packs?.length) console.log(`Context packs: ${packs.join(", ")}`);
       const project = m["project"] as { id?: string; path?: string } | undefined;
       if (project?.id) console.log(`Project: ${project.id} (registered in the workspace catalog on install, with this rig associated)`);
+      await showBundleBehaviourBeforeAction(async () => res, console.log);
       if (!digestValid || !integrityPassed) process.exitCode = 2;
     });
 
   // rig bundle install <path>
   cmd.command("install <path>")
-    .description("Install a .rigbundle (bootstrap from bundle)")
+    .description("Install a .rigbundle or GitHub folder link (bootstrap from bundle)")
+    .option("--preset <name>", "For a GitHub link, choose a declared configuration")
+    .option("--seat <member=runtime>", "For a GitHub link, choose a declared seat runtime; repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--plan", "Plan mode")
     .option("--yes", "Auto-approve")
     .option("--target <root>", "Target root directory")
@@ -226,10 +266,24 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--skip-version-check", "Operator-explicit override of the Item-2 install-time compatibility check (NOT recommended for routine use)")
     .option("--force", "Operator-explicit override of the Item-3 install-time conflict check (NOT recommended; conflicts may produce partial install state)")
     .option("--json", "JSON output")
-    .action(async (bundlePath: string, opts: { plan?: boolean; yes?: boolean; target?: string; cwd?: string; skipVersionCheck?: boolean; force?: boolean; json?: boolean }) => {
+    .action(async (bundlePath: string, opts: { plan?: boolean; yes?: boolean; target?: string; cwd?: string; skipVersionCheck?: boolean; force?: boolean; json?: boolean; preset?: string; seat?: string[] }) => {
       const deps = getDepsF();
-      const client = await getClient(deps);
+      let imported: Awaited<ReturnType<typeof importGitHubBundle>> | undefined;
+      if (isGitHubBundleLink(bundlePath)) {
+        try { imported = await importGitHubBundle(bundlePath, deps, opts); }
+        catch (err) { printBundleLinkError(err, opts.json); return; }
+        if (imported.res.status >= 400) {
+          if (opts.json) console.log(JSON.stringify(imported.res.data)); else console.error(imported.res.data.error ?? "Create failed");
+          process.exitCode = 2; return;
+        }
+        bundlePath = imported.bundlePath;
+      }
+      const client = imported?.client ?? await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
+
+      const behaviour = await showBundleBehaviourBeforeAction(() => client.post<Record<string, unknown>>(
+        "/api/bundles/inspect", { bundlePath: nodePath.resolve(bundlePath) },
+      ));
 
       // QA-20260601 A1 repair: /install completes a full bootstrap run
       // (resolve → vendor sibling primitives → boot rig sessions) which
@@ -237,9 +291,11 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
       // timeout (client.ts:31) caused CLI to report failure while
       // daemon completed the mutating install — operator-unsafe retry
       // path (rig_name_collision on second attempt). Bumped to 120s.
-      const res = await client.post<Record<string, unknown>>("/api/bundles/install", {
+      let res: { status: number; data: Record<string, unknown> };
+      try {
+      res = await client.post<Record<string, unknown>>("/api/bundles/install", {
         bundlePath: nodePath.resolve(bundlePath), plan: opts.plan ?? false, autoApprove: opts.yes ?? false,
-        targetRoot: opts.target ? nodePath.resolve(opts.target) : undefined,
+        targetRoot: opts.target ? nodePath.resolve(opts.target) : (imported ? process.cwd() : undefined),
         cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
         // Item 2 / slice-05 Checkpoint 3.3: send CLI version + skip flag for the
         // daemon-side install-time compatibility check. CLI version read at call
@@ -250,6 +306,18 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         // install-time conflict check. Operator-explicit override only.
         force: opts.force ?? false,
       }, { timeoutMs: 120_000 });
+      } catch (err) {
+        if (!imported) throw err;
+        printBundleLinkError(new Error(`Bundle install outcome is unknown. Archive retained at ${bundlePath}; check rig ps and rig bundle history before retrying.`), opts.json);
+        return;
+      }
+      if (imported) {
+        const { source, configurationId, packageDigest, archiveHash, assembler } = imported.res.data;
+        res.data = { ...res.data, source, configurationId, packageDigest, archiveHash, assembler };
+      }
+      if (imported && ["failed", "partial", "partially_restored", "not_attempted"].includes(String(res.data.status ?? res.data.rigResult))) process.exitCode = 2;
+      if (behaviour) res.data = { ...res.data, behaviour };
+
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));
@@ -257,16 +325,30 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
         return;
       }
       if (res.status >= 400) {
-        console.error(res.data["error"] ?? res.data["errors"] ?? "Install failed");
+        console.error(bundleInstallError(res.data));
         process.exitCode = res.status === 409 ? 1 : 2;
         return;
       }
 
       const status = res.data["status"] as string;
       console.log(`Status: ${status}`);
+      if (imported) for (const line of bundleIdentityLines(res.data)) console.log(line);
       if (res.data["rigId"]) console.log(`Rig: ${res.data["rigId"]}`);
       for (const line of bundleRoutingSummary(res.data)) console.log(line);
       for (const w of (res.data["warnings"] as string[] | undefined) ?? []) console.log(`Warning: ${w}`);
+    });
+
+  cmd.command("check <folder>")
+    .description("Check the shareable bundle standard locally; advisory, no daemon or launch")
+    .option("--json", "JSON output")
+    .action(async (folder: string, opts: { json?: boolean }) => {
+      const result = await checkBundleFolder(nodePath.resolve(folder));
+      if (opts.json) console.log(JSON.stringify(result));
+      else {
+        console.log(`Bundle standard: ${result.standardVersion} (advisory)`);
+        for (const check of result.checks) console.log(`${check.status}: ${check.ruleId}: ${check.reason}`);
+      }
+      if (result.checks.some(check => check.status === "finding")) process.exitCode = 1;
     });
 
   // rig bundle history — Item 4 / slice-05 Checkpoint 5.2

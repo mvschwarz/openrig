@@ -35,6 +35,7 @@ export interface RouteTiming {
 export function expensiveRouteLabel(method: string, path: string): string | null {
   if (method !== "GET") return null;
   if (path === "/api/ps") return "GET /api/ps";
+  if (path === "/api/rigs") return "GET /api/rigs";
   if (path === "/api/rigs/summary") return "GET /api/rigs/summary";
   // /api/rigs/:id/graph and /api/rigs/:id/nodes — a single dynamic segment
   // between /api/rigs/ and the trailing verb.

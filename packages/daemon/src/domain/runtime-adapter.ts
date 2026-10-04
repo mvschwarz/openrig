@@ -14,7 +14,7 @@ export interface NodeBinding extends Binding {
    * attachment (member > rig precedence, resolved by the core resolver at materialize /
    * restore). Absent = no policy attached → the env-driven floor/YOLO decision stands.
    * Present = authoritative for this seat (overrides the env read in BOTH directions). */
-  launchPosture?: "floor" | "full_bypass";
+  launchPosture?: "floor" | "full_bypass" | "auto";
   /** Explicit Claude native mode; checked against the bound managed executable. */
   permissionMode?: string;
   /** Reserved successor generation; current tenure remains the input fence until commit. */
@@ -47,12 +47,14 @@ export interface InstalledResource {
 }
 
 export interface ProjectionResult {
+  warnings?: string[];
   projected: string[];
   skipped: string[];
   failed: Array<{ effectiveId: string; error: string }>;
 }
 
 export interface StartupDeliveryResult {
+  warnings?: string[];
   delivered: number;
   failed: Array<{ path: string; error: string }>;
 }

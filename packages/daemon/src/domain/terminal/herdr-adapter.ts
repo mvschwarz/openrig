@@ -75,6 +75,93 @@ import { autoGridCols } from "../cmux-layout-service.js";
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
 const HERDR_SURFACE_HOST = "herdr";
 
+/** The degrade reason for a seat whose pane was already gone right after its page applied (#707). */
+export const HERDR_PANE_EXITED_REASON = "the pane had already exited when OpenRig checked right after herdr opened it";
+
+/** The note when the pane listing can't confirm a page's panes; its seats stay listed as opened. */
+export const HERDR_PANES_UNCONFIRMED_NOTE = "herdr's pane list couldn't confirm the panes after layout, so those seats are listed as opened without that check.";
+
+const normalLabel = (label: string): string => label.trim().replace(/\s+/g, " ");
+
+/** A listed label matches a composed one exactly, or as a prefix (a truncated label, with or without a trailing ellipsis). */
+function labelMatches(listed: string, composed: string): boolean {
+  const shown = normalLabel(listed).replace(/(…|\.\.\.)$/, "").trimEnd();
+  const full = normalLabel(composed);
+  return shown.length > 0 && (shown === full || full.startsWith(shown));
+}
+
+/**
+ * #707 — `layout.apply` acknowledges the tab, not that each pane's command stayed alive. One read of
+ * the workspace's panes right after a page applies finds seats whose pane is already gone. There is
+ * no wait, so only a pane that exited before this read is seen.
+ *
+ * It fails safe: a seat is degraded only when the listing positively shows the page's tab, and
+ * either another seat's label from the same apply is matched there (so labels compare) or the tab
+ * holds nothing but blank filler panes. A missing tab, an empty or unreadable listing, or labels
+ * that match nothing keep today's `opened`, with a note.
+ */
+export async function exitedSeats(
+  transport: HerdrTransport,
+  workspaceId: string,
+  tabId: string,
+  pagePanes: ComposedPane[],
+  blanks: number,
+  notes: string[],
+): Promise<Set<string>> {
+  const gone = new Set<string>();
+  const unconfirmed = (): Set<string> => {
+    if (!notes.includes(HERDR_PANES_UNCONFIRMED_NOTE)) notes.push(HERDR_PANES_UNCONFIRMED_NOTE);
+    return gone;
+  };
+  let listed: unknown;
+  try {
+    listed = (await transport.request("pane.list", { workspace_id: workspaceId }))["panes"];
+  } catch {
+    return unconfirmed();
+  }
+  if (!Array.isArray(listed)) return unconfirmed();
+  const live = listed.filter((p): p is Record<string, unknown> =>
+    p !== null && typeof p === "object" && (p as Record<string, unknown>)["tab_id"] === tabId);
+  if (live.length === 0) return unconfirmed();
+  if (!live.every((p) => typeof p["label"] === "string")) {
+    // Panes without labels can't be told apart, so a loss is only counted.
+    const missing = pagePanes.length + blanks - live.length;
+    if (missing > 0) notes.push(`${missing} pane(s) exited right after opening. herdr's pane list doesn't say which, so those seats stay listed as opened.`);
+    return gone;
+  }
+  const liveLabels = live.map((p) => p["label"] as string);
+  // A seat whose label is blank can't be matched, and can't be told apart from a filler pane.
+  const blankSeats = pagePanes.filter((pane) => normalLabel(pane.label) === "");
+  // Blank filler panes run `sh` and stay. A tab holding exactly the fillers, all blank-labelled, has
+  // lost every seat pane. Labels are read first: a seat label anywhere means this rule doesn't apply,
+  // and neither does a blank-labelled seat, which would look like a filler.
+  if (blankSeats.length === 0 && live.length === blanks && liveLabels.every((l) => normalLabel(l) === "")) {
+    for (const pane of pagePanes) gone.add(pane.seat);
+    return gone;
+  }
+  if (blankSeats.length > 0) unconfirmed();
+  if (!pagePanes.some((pane) => liveLabels.some((l) => labelMatches(l, pane.label)))) return unconfirmed();
+  const perLabel = new Map<string, ComposedPane[]>();
+  for (const pane of pagePanes) {
+    const key = normalLabel(pane.label);
+    if (key === "") continue; // never attributed; the note above says so
+    perLabel.set(key, [...(perLabel.get(key) ?? []), pane]);
+  }
+  const shared: string[] = [];
+  for (const [label, seats] of perLabel) {
+    const alive = liveLabels.filter((l) => labelMatches(l, label)).length;
+    if (seats.length === 1) {
+      if (alive === 0) gone.add(seats[0]!.seat);
+    } else if (alive < seats.length) {
+      shared.push(label);
+    }
+  }
+  if (shared.length > 0) {
+    notes.push(`A pane labelled ${shared.map((l) => `"${l}"`).join(", ")} exited right after opening. Several seats share that label, so they stay listed as opened.`);
+  }
+  return gone;
+}
+
 /** A herdr layout-tree pane leaf — `command` is an ARGV array (capture-verified). */
 export interface HerdrPaneNode {
   type: "pane";
@@ -423,8 +510,18 @@ export class HerdrAdapter implements TerminalProvider {
           root: pagePlan.root,
         });
         const tabId = extractTabId(applied);
-        if (tabId) { appliedTabIds.push(tabId); firstPopulatedTabId ??= tabId; } else everyPageKnown = false;
-        for (const pane of pagePanes) opened.push(pane.seat);
+        // Without a tab id the page's panes can't be told apart from other tabs, so no check runs.
+        const gone = tabId
+          ? await exitedSeats(this.transport, workspaceId, tabId, pagePanes, pagePlan.blanks, notes)
+          : new Set<string>();
+        if (tabId) {
+          appliedTabIds.push(tabId);
+          if (pagePanes.some((pane) => !gone.has(pane.seat))) firstPopulatedTabId ??= tabId;
+        } else everyPageKnown = false;
+        for (const pane of pagePanes) {
+          if (gone.has(pane.seat)) degraded.push({ seat: pane.seat, host: HERDR_SURFACE_HOST, reason: HERDR_PANE_EXITED_REASON });
+          else opened.push(pane.seat);
+        }
       } catch (err) {
         everyPageKnown = false;
         // The whole page failed to apply — degrade its seats honestly.

@@ -17,7 +17,7 @@
  *  (an attached builtin:locked keeps the floor even under global YOLO; an attached custom
  *  full_bypass flag policy lifts the seat without the env switch). Absent = no policy
  *  attached → the env decision stands (0.4.8.2 behavior, unchanged). */
-export type ResolvedLaunchPosture = "floor" | "full_bypass";
+export type ResolvedLaunchPosture = "floor" | "full_bypass" | "auto";
 
 export function yoloEnabled(
   env: NodeJS.ProcessEnv = process.env,
@@ -43,6 +43,9 @@ export function claudePostureFlag(
   if (permissionMode !== undefined) {
     if (!/^[A-Za-z][A-Za-z0-9]*$/.test(permissionMode)) throw new Error("Invalid Claude permission mode");
     return `--permission-mode ${permissionMode}`;
+  }
+  if (resolvedPosture === "auto") {
+    return "--permission-mode auto";
   }
   return yoloEnabled(env, resolvedPosture) ? "--dangerously-skip-permissions" : "--permission-mode acceptEdits";
 }

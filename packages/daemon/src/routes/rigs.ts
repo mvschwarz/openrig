@@ -1,6 +1,7 @@
 import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
 import { DeliveryGuardError } from "../domain/seat-delivery-guard.js";
 import { Hono } from "hono";
+import { observeInventoryHandler, observeInventoryQuery } from "../domain/request-phase-observer.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
@@ -322,11 +323,11 @@ rigsRoutes.post("/", async (c) => {
   return c.json(rig, 201);
 });
 
-rigsRoutes.get("/", (c) => {
+rigsRoutes.get("/", observeInventoryHandler, (c) => {
   // OPR.0.3.3.19 - default excludes archived; ?includeArchived=true / ?archived=only opt in.
   const includeArchived = c.req.query("includeArchived") === "true";
   const archivedOnly = c.req.query("archived") === "only";
-  const rigs = getRepo(c).listRigs({ includeArchived, archivedOnly });
+  const rigs = getRepo(c).listRigs({ includeArchived, archivedOnly }, observeInventoryQuery(c));
   return c.json(rigs);
 });
 
