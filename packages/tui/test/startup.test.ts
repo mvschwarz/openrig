@@ -122,6 +122,21 @@ describe("TUI startup choices", () => {
     expect(f.controller.state.notice).toBe("Hook review needs a decision");
     expect(f.posts).toHaveLength(1);
   });
+  it.each(["running", "attention_required"] as const)("#729: retains startup warnings after the %s refresh", async state => {
+    const f = fixture();
+    f.response(async () => {
+      f.seat.observed.state = state;
+      f.seat.observed.detail = "Current observed state";
+      return new Response(JSON.stringify({ ok: true, message: "Launch returned", warnings: ["Startup submission unverified: capture unavailable"] }));
+    });
+    await chooseOperator(f); await f.controller.key("enter");
+    expect(f.controller.state.notice).toContain("Startup submission unverified: capture unavailable");
+    if (state === "attention_required") {
+      expect(f.controller.state.notice).toContain("Current observed state");
+      expect(f.controller.state.notice).not.toContain("Launch returned");
+    }
+    expect(f.posts).toHaveLength(1);
+  });
   it("a lost launch response reads the actual effect and never repeats the POST", async () => {
     const f = fixture(); f.seat.intendedAction = "resume-original";
     f.response(async () => { f.seat.observed.state = "running"; f.seat.revision = "rev2"; throw new Error("response lost"); });

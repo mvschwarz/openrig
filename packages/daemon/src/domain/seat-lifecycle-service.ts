@@ -122,12 +122,14 @@ export type LaunchFreshResult =
       effort?: string | null;
       startupPolicyHash: string;
       supersededSessionIds: string[];
+      warnings?: string[];
     }
   | (SeatRefusal & {
       status?: "attention_required" | "failed";
       sessionName?: string;
       sessionId?: string;
       generation?: string;
+      warnings?: string[];
     });
 
 interface LatestSessionRow {
@@ -773,6 +775,7 @@ export class SeatLifecycleService {
         sessionName: canonicalSessionName,
         sessionId: launch.session.id,
         generation,
+        warnings: startupResult.warnings,
       };
     }
 
@@ -787,6 +790,7 @@ export class SeatLifecycleService {
       effort: node.effort ?? undefined,
       startupPolicyHash: startup.context.hash,
       supersededSessionIds,
+      warnings: startupResult.warnings,
     };
   }
 

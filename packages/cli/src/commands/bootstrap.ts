@@ -148,8 +148,8 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
         logStageDetailErrors(res.data);
         if (bundleRequest) {
           for (const line of bundleRoutingSummary(res.data)) console.log(line);
-          for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.log(`Warning: ${warning}`);
         }
+        for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.log(`Warning: ${warning}`);
       }
 
       const resultStatus = (res.data["status"] as string) ?? "";

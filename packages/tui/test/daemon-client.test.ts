@@ -104,6 +104,11 @@ describe("daemon client = the §4.A table, one module, nothing else (FR-8/FR-9)"
     expect(postCalls).toHaveLength(2);
   });
 
+  it("#729: launch notice retains startup observations", () => {
+    expect(launchNodeNotice("dev.qa", { ok: true, launched: [{ logicalId: "dev.qa" }], warnings: ["Startup prompt still staged; press Enter in that pane."] }))
+      .toContain("Startup prompt still staged; press Enter in that pane.");
+  });
+
   it("reports an already-running launch response honestly", () => {
     expect(launchNodeNotice("dev.qa", { ok: true, code: "already_running", alreadyRunning: [{ logicalId: "dev.qa" }] }))
       .toBe("agent already running: dev.qa");

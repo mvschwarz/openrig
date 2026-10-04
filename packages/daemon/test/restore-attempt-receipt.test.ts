@@ -47,7 +47,7 @@ describe("deriveRestoreAttemptReceipt", () => {
           { nodeId: "n1", logicalId: "lead", status: "resumed" },
           { nodeId: "n2", logicalId: "worker", status: "attention_required" },
         ],
-        warnings: [],
+        warnings: ["Startup submission unverified in lead@fixture: capture unavailable"],
       },
     });
     events.emit({
@@ -64,6 +64,7 @@ describe("deriveRestoreAttemptReceipt", () => {
 
     expect(receipt.ok).toBe(true);
     if (!receipt.ok) return;
+    expect(receipt.originalResult.warnings).toEqual(["Startup submission unverified in lead@fixture: capture unavailable"]);
     expect(receipt.originalResult.rigResult).toBe("partially_restored");
     expect(receipt.originalResult.nodes[1]!.status).toBe("attention_required");
     expect(receipt.reconciliations).toHaveLength(1);

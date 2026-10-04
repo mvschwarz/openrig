@@ -614,6 +614,7 @@ Examples:
         console.log(`Generation: ${String(data["generation"])}; model: ${String(data["model"] ?? "none")}.`);
         console.log(`Startup policy: ${String(data["startupPolicyHash"])}; superseded sessions: ${superseded?.length ?? 0}.`);
         console.log("No continuity source was used; siblings and durable work were preserved.");
+        for (const warning of (data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
       });
     });
 

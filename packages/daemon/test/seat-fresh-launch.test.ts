@@ -137,6 +137,18 @@ describe("SeatLifecycleService.launchFresh", () => {
 
   afterEach(() => db.close());
 
+  it("#729: returns startup observations with other warnings without changing fresh identity", async () => {
+    const seat = seedSeat();
+    adapter.project = async () => ({ projected: [], skipped: [], failed: [], warnings: ["Existing projection warning"] });
+    db.prepare("UPDATE node_startup_context SET startup_actions_json = ? WHERE node_id = ?").run(JSON.stringify([
+      { type: "send_text", value: "Startup context", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true },
+    ]), seat.node.id);
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("Startup submission unverified")]);
+    expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe("verified");
+  });
+
   it.each(["valid", "missing path", "wrong token", "no token"])("numeric Claude pane fresh launch: %s", async mode => {
     const seat = seedSeat();
     paneCommand = "2.1.289";

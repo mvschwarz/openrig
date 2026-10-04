@@ -92,7 +92,7 @@ describe("Bootstrap CLI", () => {
           res.end(JSON.stringify({
             runId: "run-2", status: "completed", rigId: "rig-1",
             stages: [{ stage: "resolve_spec", status: "ok" }, { stage: "import_rig", status: "ok" }],
-            errors: [], warnings: [],
+            errors: [], warnings: ["Startup submission unverified in worker@fixture"],
           }));
         } else {
           res.writeHead(409, { "Content-Type": "application/json" });
@@ -127,6 +127,16 @@ describe("Bootstrap CLI", () => {
     });
     expect(logs.some((l) => l.includes("BOOTSTRAP PLAN"))).toBe(true);
     expect(logs.some((l) => l.includes("resolve_spec"))).toBe(true);
+  });
+
+  it("#729: non-bundle bootstrap preserves warnings in human and JSON success", async () => {
+    const human = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes"]));
+    expect(human.logs.join("\n")).toContain("Warning: Startup submission unverified in worker@fixture");
+    expect(human.exitCode).toBeUndefined();
+    const json = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "bootstrap", "/tmp/rig.yaml", "--yes", "--json"]));
+    expect(json.logs).toHaveLength(1);
+    expect(JSON.parse(json.logs[0]!).warnings).toEqual(["Startup submission unverified in worker@fixture"]);
+    expect(json.exitCode).toBeUndefined();
   });
 
   // T2: bootstrap apply prints result

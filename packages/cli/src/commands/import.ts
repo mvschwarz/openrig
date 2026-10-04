@@ -175,8 +175,9 @@ export function importCommand(depsOverride?: ImportDeps): Command {
           console.error(`Import failed (HTTP ${res.status}). Check spec and daemon logs.`);
           process.exitCode = 1;
         } else {
-          const data = res.data as { rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }>; attachCommand?: string };
+          const data = res.data as { rigId: string; specName: string; specVersion: string; nodes: Array<{ logicalId: string; status: string }>; attachCommand?: string; warnings?: string[] };
           console.log(`Rig created: ${data.specName} (${data.rigId})`);
+          for (const warning of data.warnings ?? []) console.warn(`Warning: ${warning}`);
           for (const n of data.nodes) {
             console.log(`  ${n.logicalId}: ${n.status}`);
           }

@@ -54,7 +54,7 @@ export interface StartupSubmissionDiagnostic {
   startupAttemptId: string;
   /** One-based order among this orchestrator's interactive sends. */
   sendOrder: number;
-  source: "initial_identity" | "restore_preload" | "challenge" | "startup_proof_instruction" | "after_files" | "after_ready";
+  source: "initial_identity" | "restore_preload" | "post_launch_file" | "challenge" | "startup_proof_instruction" | "after_files" | "after_ready";
   /** Zero-based index in the authored action list, when applicable. */
   actionIndex?: number;
   observations: Array<StartupSubmissionEvidence & { phase: "initial" | "guarded_retry" | "after_retry" }>;

@@ -148,8 +148,9 @@ export interface RuntimeAdapter {
   /** Project resources from a projection plan to the runtime target locations. */
   project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult>;
 
-  /** Deliver startup files to the runtime. */
-  deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult>;
+  /** Deliver startup files. Claude's post-launch path can reuse the orchestrator's checked send.
+   * The adapter still owns file reads, ordering, provisioning and required/optional errors. */
+  deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding, sendInteractiveText?: (text: string) => Promise<void>): Promise<StartupDeliveryResult>;
 
   /**
    * Launch the harness (claude/codex/terminal) inside the tmux session.

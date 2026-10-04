@@ -77,6 +77,7 @@ type StartupSendFailure = { error: string };
 
 type StartupDeliveryInput = StartupInput & {
   submissionWarnings: string[]; stagedSubmissionWarning?: string;
+  warnings: string[];
   startupAttemptId: string; sendOrder: number; submissionDiagnostics: StartupSubmissionDiagnostic[];
   /** Claude only: whether the latest interactive send was observed submitted (a clear composer). */
   lastSubmissionConfirmed?: boolean;
@@ -176,7 +177,7 @@ export class StartupOrchestrator {
     // and reads the file already written in its cwd.
     const claudeManagedBlockFile = new RigRepository(this.db).getRigClaudeManagedBlockFile(input.rigId);
     if (claudeManagedBlockFile) input = { ...input, binding: { ...input.binding, claudeManagedBlockFile } };
-    const deliveryInput: StartupDeliveryInput = { ...input, submissionWarnings: [], startupAttemptId: randomUUID(), sendOrder: 0, submissionDiagnostics: [] };
+    const deliveryInput: StartupDeliveryInput = { ...input, warnings, submissionWarnings: [], startupAttemptId: randomUUID(), sendOrder: 0, submissionDiagnostics: [] };
     const errors: string[] = [];
     let continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" = input.resumeToken
       ? "resumed"
@@ -445,7 +446,13 @@ export class StartupOrchestrator {
     // 7. Deliver post-launch files (send_text → TUI, now that harness is ready)
     if (postLaunchFiles.length > 0) {
       try {
-        const deliveryResult = await input.adapter.deliverStartup(postLaunchFiles, input.binding);
+        // Keep reads/provisioning and required/optional errors in the adapter. Only Claude's
+        // already-partitioned interactive files use the same bounded check as startup actions.
+        const checkedSend = input.adapter.runtime === "claude-code" ? async (content: string) => {
+          const failure = await this.sendInteractiveText(deliveryInput, content, "post_launch_file");
+          if (failure) throw new Error(failure.error);
+        } : undefined;
+        const deliveryResult = await input.adapter.deliverStartup(postLaunchFiles, input.binding, checkedSend);
         warnings.push(...(deliveryResult.warnings ?? []));
         if (deliveryResult.failed.length > 0) {
           for (const f of deliveryResult.failed) {
@@ -490,7 +497,7 @@ export class StartupOrchestrator {
         }
       } catch (error) {
         // An unavailable observation is not a positive provider prerequisite.
-        deliveryInput.submissionWarnings.push(`Post-delivery runtime state is unverified: ${(error as Error).message}`);
+        this.recordSubmissionWarning(deliveryInput, `Post-delivery runtime state is unverified: ${(error as Error).message}`);
       }
     }
 
@@ -734,11 +741,18 @@ export class StartupOrchestrator {
   private async sendProofInstruction(input: StartupDeliveryInput): Promise<void> {
     if (input.adapter.runtime !== "claude-code" || !input.binding.tmuxSession) return;
     if (!input.lastSubmissionConfirmed) {
-      input.submissionWarnings.push("Startup proof instruction was not sent: the startup prompt was not confirmed submitted.");
+      this.recordSubmissionWarning(input, "Startup proof instruction was not sent: the startup prompt was not confirmed submitted.");
       return;
     }
     const failure = await this.sendInteractiveText(input, STARTUP_PROOF_INSTRUCTION_LINE, "startup_proof_instruction");
-    if (failure) input.submissionWarnings.push(`Startup proof instruction was not delivered: ${failure.error}`);
+    if (failure) this.recordSubmissionWarning(input, `Startup proof instruction was not delivered: ${failure.error}`);
+  }
+
+  private recordSubmissionWarning(input: StartupDeliveryInput, reason: string): void {
+    input.submissionWarnings.push(reason);
+    // Keep every observation in the ordinary result, including if a later file fails.
+    input.warnings.push(reason === input.stagedSubmissionWarning ? reason
+      : `Startup submission unverified in ${input.binding.tmuxSession}: ${reason}`);
   }
 
   private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {
@@ -767,7 +781,7 @@ export class StartupOrchestrator {
       return evidence;
     };
     const unverified = (reason: string): null => {
-      input.submissionWarnings.push(reason);
+      this.recordSubmissionWarning(input, reason);
       return null; // An unavailable observation is not a failed delivery.
     };
     // tmux accepting Enter does not prove the TUI submitted a large bracketed paste.
@@ -802,8 +816,8 @@ export class StartupOrchestrator {
       if (observed === "staged") {
         const warning = `Startup prompt still staged in ${tmuxSession}; press Enter in that pane.`;
         input.stagedSubmissionWarning = warning;
-        input.submissionWarnings.push(warning);
-        if (!retry.ok) input.submissionWarnings.push(`Guarded retry did not submit: ${retry.error ?? retry.reason}`);
+        this.recordSubmissionWarning(input, warning);
+        if (!retry.ok) this.recordSubmissionWarning(input, `Guarded retry did not submit: ${retry.error ?? retry.reason}`);
         return null;
       }
       if (observed === "unverified") {

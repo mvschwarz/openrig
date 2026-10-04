@@ -47,12 +47,14 @@ export interface LaunchNodeResult {
   code?: string;
   launched?: Array<{ logicalId?: string }>;
   alreadyRunning?: Array<{ logicalId?: string }>;
+  warnings?: string[];
 }
 
 export function launchNodeNotice(agent: string, result: LaunchNodeResult): string {
-  return result.code === "already_running"
+  const notice = result.code === "already_running"
     ? `agent already running: ${agent}`
     : `agent run requested: ${agent}`;
+  return [notice, ...(result.warnings ?? [])].join("\n");
 }
 
 export class DaemonClient {

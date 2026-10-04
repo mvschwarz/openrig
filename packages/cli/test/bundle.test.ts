@@ -135,7 +135,7 @@ describe("Bundle CLI", () => {
             },
             routingFailures: [{ kind: "skills", error: "boom" }],
             projectRegistration: { status: "registered", projectId: "openrig", projectRoot: "/ws/projects/openrig", rigName: "openrig-dev", catalogPath: "/ws/workspace.yaml" },
-            warnings: ["Bundle skills routing failed: boom"],
+            warnings: ["Bundle skills routing failed: boom", "Startup submission unverified in worker@fixture"],
           }));
         } else {
           res.writeHead(201, { "Content-Type": "application/json" });
@@ -362,6 +362,7 @@ describe("Bundle CLI", () => {
     expect(logs).toContain("Context packs: 1 routed; not routed: context-packs/gone/manifest.yaml (missing), context-packs/openrig-world/manifest.yaml (kept_existing)");
     expect(logs).toContain("  context-packs/openrig-world/manifest.yaml: a different 'openrig-world' pack is already installed; kept it unchanged. To use the bundle's copy instead, run 'rig context rm openrig-world' and install the bundle again");
     expect(logs).toContain("Warning: Bundle skills routing failed: boom");
+    expect(logs).toContain("Warning: Startup submission unverified in worker@fixture");
     expect(logs).toContain("Project: openrig (registered) at /ws/projects/openrig; rig openrig-dev is associated with it in /ws/workspace.yaml");
   });
 
