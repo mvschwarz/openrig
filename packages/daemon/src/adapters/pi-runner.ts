@@ -719,10 +719,11 @@ export function resolveRuntimeExecutable(
   name: string,
   env: NodeJS.ProcessEnv,
   ops: ExecutableResolverOps = nodeResolverOps,
+  cwd?: string,
 ): { ok: true; path: string } | { ok: false; error: string } {
   const onPath = (env.PATH ?? "").split(nodePath.delimiter)
-    .filter((dir) => nodePath.isAbsolute(dir))
-    .map((dir) => nodePath.join(dir, name))
+    .filter((dir) => cwd !== undefined || nodePath.isAbsolute(dir))
+    .map((dir) => cwd === undefined ? nodePath.join(dir, name) : nodePath.resolve(cwd, dir, name))
     .find((candidate) => ops.isExecutable(candidate));
   if (!onPath) return { ok: false, error: `'${name}' was not found on PATH (${env.PATH ?? ""})` };
   let real: string;
@@ -747,6 +748,24 @@ export function resolveRuntimeExecutable(
   } catch (err) {
     return { ok: false, error: `could not resolve ${target}: ${(err as Error).message}` };
   }
+}
+
+/** Enrich an actual CLI rejection, without guessing compatibility from a version
+ * or from help (older Pi prints help before validating unknown long flags). */
+export function piLaunchCapabilityError(
+  command: string,
+  trust: "approve" | "no-approve",
+  line: string,
+  readVersion: () => string,
+): string | undefined {
+  const diagnostic = stripVTControlCharacters(line);
+  if (!/unknown options?:/i.test(diagnostic) || !/--(?:name|approve|no-approve)(?=[\s,.:]|$)/.test(diagnostic)) return;
+  let version = "unknown version";
+  try {
+    const value = readVersion().trim();
+    if (/^[0-9][A-Za-z0-9.+_-]{0,63}$/.test(value)) version = `version ${value}`;
+  } catch { /* diagnostics only; never changes the child's outcome */ }
+  return `Pi at ${command} (${version}) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
@@ -800,14 +819,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
   console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
 
-  // OMP runs under a per-seat HOME. A HOME-dependent launcher on PATH (a mise
-  // shim) cannot find its target there, so resolve the real binary first,
-  // with the runner's own environment.
+  // Resolve inside the pane. OMP needs the original HOME for mise shims; Pi
+  // also preserves relative PATH entries against the actual child cwd.
   let command: string = runtime;
-  if (runtime === "omp") {
-    const resolved = resolveRuntimeExecutable("omp", process.env);
+  {
+    const resolved = resolveRuntimeExecutable(runtime, process.env, nodeResolverOps, runtime === "pi" ? args.cwd : undefined);
     if (!resolved.ok) {
-      console.error(`[omp-runner] ERROR launch: ${resolved.error}`);
+      console.error(`[${runtime}-runner] ERROR launch: ${resolved.error}`);
       // Record the exit for this launch so the adapter fails it now instead
       // of waiting out its readiness timeout. The durable cursor survives.
       const at = new Date().toISOString();
@@ -887,8 +905,18 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   // Re-deliver OMP identity until the daemon confirms the resume token.
   const identityRetry = runtime === "omp" ? setInterval(() => core.retrySessionIdentity(), IDENTITY_RETRY_MS) : undefined;
   identityRetry?.unref();
+  let reportedPiCapability = false;
   readline.createInterface({ input: child.stderr }).on("line", (line) => {
     if (line.trim()) process.stdout.write(`[${runtime}:err] ${line}\n`);
+    if (runtime === "pi" && !reportedPiCapability) {
+      const detail = piLaunchCapabilityError(command, args.trust, line, () =>
+        execFileSync(command, ["--version"], { cwd: args.cwd, env: childEnv, encoding: "utf8",
+          timeout: 3000, maxBuffer: 4096, stdio: ["ignore", "pipe", "pipe"] }));
+      if (detail) {
+        reportedPiCapability = true;
+        process.stdout.write(`[pi-runner] ${detail}\n`);
+      }
+    }
   });
   const input = createRunnerInput(process.stdin, process.stdout, (block) => core.handleUserBlock(block));
 
