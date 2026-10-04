@@ -45,11 +45,15 @@ Node `^22 || ^24` and a working `tmux` are required. Then:
 ```bash
 git clone https://github.com/mvschwarz/openrig.git
 cd openrig
-npm install
+npm ci                 # exactly what package-lock.json records
 npm run build          # all workspaces
 npm test               # repo checks + daemon, cli, tui test suites
 npm run lint           # typecheck every package
 ```
+
+`npm ci` installs the locked versions and never rewrites `package-lock.json`, which is what CI
+runs too. Use `npm install <package>` only when you're adding or changing a dependency, and commit
+the lockfile change with it.
 
 `npm test` builds the daemon and runs repository checks before the package suites. Read the
 specific failure. A shipped skill may exist in more than one copy (see ARCHITECTURE.md): edit every copy, then run
