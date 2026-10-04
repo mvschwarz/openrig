@@ -22,6 +22,10 @@ export function formatBundleBehaviour(view: BundleBehaviour): string[] {
     }
     for (const item of view.posture) lines.push(`  ${plain(item.seat)}: ${plain(item.selection)} (${item.basis}); effective native settings unknown.`);
     lines.push("Access: agents can run shell commands using your account, subject to runtime and host policy.");
+    for (const item of view.posture) {
+      if (item.firstRunWarnings?.claudeBypass === "harness_asks_once") lines.push(`  ${plain(item.seat)}: Claude Code asks for bypass-warning acceptance when it has not been remembered. With --non-interruptive, OpenRig can accept it for this rig's launches using a launch flag.`);
+    }
+    if (view.posture.some(item => item.nonInterruptive === "available")) lines.push("Non-interruptive mode is available with --non-interruptive for the declared full-bypass Claude/Codex seats. This view does not select it or check native acceptance; login and other harness preconditions still apply.");
     lines.push("Told files:", ...view.toldFiles.map(f => `  ${f.seat ? plain(f.seat) + ": " : ""}${plain(f.pathOrRef)} [${f.resolution}${f.delivery ? `; ${plain(f.delivery)}` : ""}]`));
     lines.push("Also declared to run:", ...view.alsoRuns.map(f => `  ${f.seat ? plain(f.seat) + ": " : ""}${plain(f.kind)}: ${plain(f.pathOrRef)} [${f.resolution}${f.trigger ? `; ${plain(f.trigger)}` : ""}]`));
     lines.push("Writes and library additions (destinations, runtime support and conflicts resolved at launch):", ...view.writes.map(w => `  ${w.seat ? plain(w.seat) + ": " : ""}${plain(w.destinationBase)}/${plain(w.path)} — ${plain(w.operation)}, ${plain(w.phase)}`));

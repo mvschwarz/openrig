@@ -102,6 +102,12 @@ carries no tested status.
     An absent field means not stated, never `on`. For `off`, Claude
     bypasses permissions, Codex runs with full access and never asks, and Pi gets full resource trust (`--approve`,
     not a permission mode). These are archive facts; `nativeEffect` remains `unknown`.
+    Optional `posture[].firstRunWarnings.claudeBypass: "harness_asks_once"` names the first-run bypass warning for a
+    declared full-bypass Claude seat, conditional on whether the harness has remembered acceptance.
+    `posture[].nonInterruptive: "available"` says a full-bypass Claude/Codex seat can use
+    [non-interruptive launch flags](non-interruptive-mode.md). It does not select the option, read host acceptance
+    state or prove a prompt-free launch. Both fields are omitted where inapplicable or unresolved; older v1 views
+    remain valid without them. Pi has no additional warning-suppression flag. `nativeEffect` stays `unknown`.
   - An empty list means none are known. Something unknown goes in `unknownBeforeLaunch`.
   - Per-seat facts carry `seat` (`pod.member`) and human output labels them with that identity. On `needs` and
     `unknownBeforeLaunch`, it is optional: bundle-wide facts omit it, and older generators may not have stated it.

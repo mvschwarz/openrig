@@ -146,7 +146,21 @@ describe("before-action bundle view", () => {
     for (const [index, declaration] of declarations.entries()) {
       expect(actual.posture[index]).toMatchObject({ basis: "explicit", permissionPrompts: "off", nativeEffect: "unknown", selection: expect.stringContaining(declaration) });
     }
+    expect(actual.posture.map(p => p.nonInterruptive)).toEqual(["available", "available", undefined]);
+    expect(actual.posture.map(p => p.firstRunWarnings)).toEqual([{ claudeBypass: "harness_asks_once" }, undefined, undefined]);
+    const schemas = new URL("../../../docs/reference/schemas/", import.meta.url);
+    const ajv = new Ajv2020({ strict: false, allErrors: true });
+    for (const file of ["bundle-common.v1.schema.json", "bundle-behaviour.v1.schema.json"]) ajv.addSchema(JSON.parse(fs.readFileSync(new URL(file, schemas), "utf8")));
+    const validate = ajv.getSchema("https://openrig.dev/schemas/bundle-behaviour.v1.json")!;
+    expect(validate(actual), JSON.stringify(validate.errors)).toBe(true);
+    const older = structuredClone(actual);
+    for (const item of older.posture) { delete item.nonInterruptive; delete item.firstRunWarnings; }
+    expect(validate(older), JSON.stringify(validate.errors)).toBe(true);
+    expect(formatBundleBehaviour(older).join("\n")).not.toContain("Non-interruptive mode is available");
+    expect(validate({ ...actual, posture: [{ ...actual.posture[0], nonInterruptive: "selected" }] })).toBe(false);
     const lines = formatBundleBehaviour(actual);
+    expect(lines.join("\n")).toContain("does not select it or check native acceptance");
+    expect(lines.join("\n")).toContain("when it has not been remembered");
     const start = lines.indexOf("Permission posture:");
     expect(start).toBeGreaterThan(0);
     expect(lines[start + 1]).toBe("Permission prompts: off for all seats (archive declaration).");
