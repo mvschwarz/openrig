@@ -156,6 +156,20 @@ describe("contained Claude restore activity resources", () => {
     expect(writes.filter(w => w.file === settingsPath).every(w => owned(JSON.parse(w.text)).length > 0)).toBe(true);
   });
 
+  it("#729: keeps startup warnings when the final joined restore proof needs attention", async () => {
+    const f = seed(true);
+    const { StartupOrchestrator } = await import("../src/domain/startup-orchestrator.js");
+    const warning = "Startup submission unverified: capture unavailable";
+    vi.spyOn(StartupOrchestrator.prototype, "startNode").mockResolvedValue({
+      ok: true, startupStatus: "ready", continuityOutcome: "resumed", warnings: [warning],
+    });
+    const result = await restore(f);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.nodes[0]).toMatchObject({ status: "attention_required" });
+    expect(result.result.warnings).toContain(warning);
+  });
+
   it.each([false, true])("heals already stripped settings before native resume (pod=%s)", async pod => {
     const f = seed(pod);
     const atLaunch = () => expect(owned().length).toBeGreaterThan(0);

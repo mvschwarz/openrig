@@ -463,7 +463,7 @@ export type Action =
   | { type: "error"; message: string }
   | { type: "jump"; section: string }
   | { type: "filter"; text: string }
-  | { type: "select"; delta?: number; index?: number; rowCount?: number }
+  | { type: "select"; delta?: number; index?: number; rowCount?: number; origin?: "refresh" }
   | { type: "activate" }
   | { type: "drill"; resource: ResourceKind; name: string; target?: ResourceTarget }
   | { type: "cross"; kind: "spec-of" | "running"; name: string; target?: ResourceTarget }

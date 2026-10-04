@@ -260,7 +260,7 @@ export function bundleCommand(depsOverride?: StatusDeps): Command {
     .option("--preset <name>", "For a GitHub link, choose a declared configuration")
     .option("--seat <member=runtime>", "For a GitHub link, choose a declared seat runtime; repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--non-interruptive", "Accept harness first-launch warnings for this rig at full bypass; saved for later launches")
-    .option("--no-non-interruptive", "Turn off this rig's saved warning-acceptance choice")
+    .option("--no-non-interruptive", "Turn off this rig's saved warning-acceptance choice (stop an existing rig with rig down first)")
     .option("--plan", "Plan mode")
     .option("--yes", "Auto-approve")
     .option("--target <root>", "Target root directory")

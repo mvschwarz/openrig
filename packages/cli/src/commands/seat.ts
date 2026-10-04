@@ -536,6 +536,9 @@ identity remains unverified; a version number alone cannot clear it.
       if (res.status >= 400) process.exitCode = res.status >= 500 ? 2 : 1;
       return;
     }
+    if (path === "launch") {
+      for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.warn(`Warning: ${warning}`);
+    }
     if (res.status >= 400) {
       printSeatError(res.data as unknown as SeatStatusError, `Seat ${path} failed (HTTP ${res.status})`);
       process.exitCode = res.status >= 500 ? 2 : 1;

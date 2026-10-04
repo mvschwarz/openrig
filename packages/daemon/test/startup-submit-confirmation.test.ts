@@ -1,3 +1,4 @@
+import { ClaudeCodeAdapter } from "../src/adapters/claude-code-adapter.js";
 import * as crypto from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -21,7 +22,7 @@ describe("startup prompt submission", () => {
   const dbs: ReturnType<typeof createFullTestDb>[] = [];
   afterEach(() => { vi.restoreAllMocks(); for (const db of dbs.splice(0)) db.close(); });
 
-  function fixture(lostEnters: number, runtime = "claude-code", challengeOnly = false) {
+  function fixture(lostEnters: number | ReadonlySet<number>, runtime = "claude-code", challengeOnly = false, realDelivery = false) {
     const db = createFullTestDb(); dbs.push(db); db.exec(outboxEntriesSchema.sql); db.exec(seatDeliveryGuardSchema.sql);
     const registry = new SessionRegistry(db), eventBus = new EventBus(db);
     const repo = new RigRepository(db), rig = repo.createRig("startup-submit");
@@ -40,7 +41,7 @@ describe("startup prompt submission", () => {
       sendText: vi.fn(async (_name: string, text: string) => { composer += text; return { ok: true as const }; }),
       sendKeys: vi.fn(async (_name: string, keys: string[]) => {
         expect(keys).toEqual(["Enter"]);
-        if (++enters > lostEnters) { submitted.push(composer); composer = ""; }
+        if (typeof lostEnters === "number" ? ++enters > lostEnters : !lostEnters.has(++enters)) { submitted.push(composer); composer = ""; }
         return { ok: true as const }; // successful tmux command can still leave input staged
       }),
       capturePaneContent: vi.fn(async (_target: string, scrollback = 50): Promise<string | null> => {
@@ -49,14 +50,18 @@ describe("startup prompt submission", () => {
         return screen.split("\n").slice(-(scrollback + 24)).join("\n");
       }),
     };
-    const adapter = {
-      runtime, project: async () => ({ projected: [], skipped: [], failed: [] }),
-      deliverStartup: async () => ({ delivered: 0, failed: [] }),
-      launchHarness: async () => ({ ok: true }), checkReady: async () => ({ ready: true }),
-    } as unknown as RuntimeAdapter;
     const role = Array.from({ length: 100 }, (_, i) => `Startup instruction ${i}: read the assigned project source.`).join("\n");
+    const readFile = vi.fn((_path: string) => role);
+    const sleep = vi.fn(async (_ms: number) => {});
+    const nativeAdapter = new ClaudeCodeAdapter({ tmux: tmux as unknown as TmuxAdapter, sleep,
+      fsOps: { readFile, writeFile: vi.fn(), exists: () => false, mkdirp: vi.fn(), copyFile: vi.fn(), homedir: "/fixture/home" } });
+    const adapter = {
+      runtime, project: vi.fn(async () => ({ projected: [], skipped: [], failed: [], warnings: [] as string[] })),
+      deliverStartup: vi.fn(realDelivery ? nativeAdapter.deliverStartup.bind(nativeAdapter) : async () => ({ delivered: 0, failed: [] })),
+      launchHarness: vi.fn(async () => ({ ok: true })), checkReady: vi.fn(async () => ({ ready: true })),
+    } as unknown as RuntimeAdapter;
     const orch = new StartupOrchestrator({ db, sessionRegistry: registry, eventBus,
-      tmuxAdapter: tmux as unknown as TmuxAdapter, readFile: () => role, sleep: async () => {} });
+      tmuxAdapter: tmux as unknown as TmuxAdapter, readFile, sleep });
     const start = (overrides: Partial<StartupInput> = {}) => orch.startNode({ rigId: rig.id, nodeId: node.id, sessionId: session.id,
       binding: { id: "binding", nodeId: node.id, tmuxSession: name, tmuxPane: "%1", tmuxWindow: null,
         cmuxWorkspace: null, cmuxSurface: null, updatedAt: "", cwd: "/fixture" },
@@ -65,8 +70,134 @@ describe("startup prompt submission", () => {
       startupActions: challengeOnly ? [{ type: "startup_proof", value: "authenticated", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true }] : [{ type: "send_text", builtin: "session_identity", value: "OpenRig session identity: worker@startup-submit", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true }],
       isRestore: false, ...overrides,
     });
-    return { db, session, tmux, submitted, start, composer: () => composer };
+    return { db, session, tmux, adapter, readFile, sleep, submitted, start, composer: () => composer };
   }
+
+  const file = (name: string, required = true, deliveryHint = "send_text" as "send_text" | "auto" | "guidance_merge"): StartupInput["resolvedStartupFiles"][number] => ({
+    path: name, absolutePath: `/fixture/${name}`, ownerRoot: "/fixture", deliveryHint, required, appliesOn: ["fresh_start", "restore"],
+  });
+
+  describe("remaining Claude startup files (#729)", () => {
+    it.each(["claude-code", "codex", "pi"])("#736 labels an unavailable post-delivery readiness observation independently (%s)", async runtime => {
+      const f = fixture(0, runtime);
+      f.adapter.checkReady = vi.fn().mockResolvedValueOnce({ ready: true }).mockRejectedValueOnce(new Error("fixture observation unavailable"));
+      const result = await f.start();
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready", warnings: [
+        "Post-delivery runtime state is unverified in worker@startup-submit: fixture observation unavailable",
+      ] });
+      expect(f.adapter.checkReady).toHaveBeenCalledTimes(2);
+      expect(f.submitted).toHaveLength(1);
+    });
+    it("checks a lost Enter on each later file, with one paste per body and preserved order", async () => {
+      // The actual Claude adapter delivers these files on the parent; a no-op mock would hide the gap.
+      const f = fixture(new Set([2, 4]), "claude-code", false, true);
+      f.readFile.mockImplementation(p => `Body of ${p}`);
+      const result = await f.start({ resolvedStartupFiles: [file("first.md"), file("second.md"), file("third.md")] });
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(result.warnings).toBeUndefined();
+      expect(f.tmux.sendText).toHaveBeenCalledTimes(3);
+      expect(f.tmux.sendKeys).toHaveBeenCalledTimes(5);
+      expect(f.submitted).toEqual(f.tmux.sendText.mock.calls.map(c => c[1]));
+      expect(f.submitted[0]).toContain("first.md");
+      expect(f.submitted.slice(1)).toEqual(["Body of /fixture/second.md", "Body of /fixture/third.md"]);
+    });
+
+    it("reports a later file still staged after its one retry without failing startup", async () => {
+      const f = fixture(new Set([2, 3]), "claude-code", false, true);
+      f.readFile.mockImplementation(p => p);
+      const result = await f.start({ resolvedStartupFiles: [file("first.md"), file("second.md")] });
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "staged" } });
+      expect(result.warnings).toEqual([expect.stringContaining("press Enter in that pane")]);
+      expect(f.tmux.sendText).toHaveBeenCalledTimes(2);
+      expect(f.tmux.sendKeys).toHaveBeenCalledTimes(3);
+      expect(f.submitted).toHaveLength(1);
+      expect(f.composer()).toBe("/fixture/second.md");
+    });
+
+    it.each(["send_text", "auto"] as const)("checks a single %s file without an identity action", async hint => {
+      const f = fixture(1, "claude-code", false, true);
+      expect(await f.start({ startupActions: [], resolvedStartupFiles: [file(hint === "auto" ? "context.txt" : "role.md", true, hint)] })).toMatchObject({ ok: true });
+      expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+      expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2);
+      expect(f.submitted).toHaveLength(1);
+    });
+
+    it("keeps prelaunch delivery before harness launch and adds only the bounded check delay", async () => {
+      const f = fixture(0, "claude-code", false, true);
+      await f.start({ startupActions: [], resolvedStartupFiles: [file("CLAUDE.md", true, "guidance_merge"), file("role.md")] });
+      expect(f.adapter.deliverStartup).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(f.adapter.deliverStartup).mock.calls[0]![0].map(f => f.path)).toEqual(["CLAUDE.md"]);
+      expect(vi.mocked(f.adapter.deliverStartup).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(f.adapter.launchHarness).mock.invocationCallOrder[0]!);
+      expect(f.sleep.mock.calls).toEqual([[200], [200]]);
+      expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
+    });
+
+    it("checks remaining restore files after the existing bundled preload", async () => {
+      const f = fixture(new Set([2]), "claude-code", false, true);
+      f.readFile.mockImplementation(p => p);
+      await f.start({ isRestore: true, skipHarnessLaunch: true, resumeToken: "fixture-original", resolvedStartupFiles: [file("first.md"), file("second.md")], startupActions: [
+        { type: "send_text", value: "Restore context", phase: "after_ready", appliesOn: ["restore"], idempotent: true },
+      ] });
+      expect(f.tmux.sendText).toHaveBeenCalledTimes(2);
+      expect(f.tmux.sendKeys).toHaveBeenCalledTimes(3);
+      expect(f.submitted[0]).toContain("Restore context");
+      expect(f.submitted[1]).toBe("/fixture/second.md");
+    });
+
+    it("keeps an earlier staged observation and other warnings after a later file clears", async () => {
+      const f = fixture(new Set([1, 2]), "claude-code", false, true);
+      f.readFile.mockImplementation(p => p);
+      vi.mocked(f.adapter.project).mockResolvedValue({ projected: [], skipped: [], failed: [], warnings: ["Existing projection warning"] });
+      const result = await f.start({ startupActions: [], resolvedStartupFiles: [file("first.md"), file("second.md")] });
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "staged" } });
+      expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("press Enter in that pane")]);
+      expect(f.tmux.sendText).toHaveBeenCalledTimes(2);
+      expect(f.tmux.sendKeys).toHaveBeenCalledTimes(3);
+      expect(f.composer()).toBe("");
+    });
+
+    it.each(["null", "throw", "different"])("retains earlier %s uncertainty after a successful file without claiming staging", async mode => {
+      const f = fixture(0, "claude-code", false, true);
+      if (mode === "throw") f.tmux.capturePaneContent.mockRejectedValueOnce(new Error("capture unavailable"));
+      else f.tmux.capturePaneContent.mockResolvedValueOnce(mode === "null" ? null : "❯ a different body\n────────────────────\n? for shortcuts");
+      const result = await f.start({ startupActions: [], resolvedStartupFiles: [file("first.md"), file("second.md")] });
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified" } });
+      expect(result.warnings).toEqual([expect.stringContaining("Startup submission unverified")]);
+      expect(result.warnings!.join()).not.toContain("press Enter");
+      expect(f.tmux.sendText).toHaveBeenCalledTimes(2);
+      expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2);
+    });
+
+    it.each([false, true])("preserves required=%s read failures and still attempts the following file", async required => {
+      const f = fixture(0, "claude-code", false, true);
+      f.readFile.mockImplementation(p => { if (p.endsWith("missing.md")) throw new Error("missing file"); return p; });
+      const result = await f.start({ startupActions: [], resolvedStartupFiles: [file("missing.md", required), file("last.md")] });
+      expect(result.ok).toBe(!required);
+      if (!result.ok) expect(result.errors).toEqual(["Post-launch file delivery failed: missing.md: missing file"]);
+      expect(f.submitted).toEqual(["/fixture/last.md"]);
+    });
+
+    it.each([false, true])("preserves required=%s transport errors and retains an earlier unknown observation", async required => {
+      const f = fixture(0, "claude-code", false, true);
+      f.tmux.capturePaneContent.mockResolvedValueOnce(null);
+      const send = f.tmux.sendText.getMockImplementation()!;
+      f.tmux.sendText.mockImplementationOnce(send).mockRejectedValueOnce(new Error("paste unavailable"));
+      const result = await f.start({ startupActions: [], resolvedStartupFiles: [file("first.md"), file("bad.md", required)] });
+      expect(result.ok).toBe(!required);
+      expect(result.warnings).toEqual([expect.stringContaining("unverified")]);
+      if (!result.ok) expect(result.errors).toEqual(["Post-launch file delivery failed: bad.md: paste unavailable"]);
+      expect(f.tmux.sendText).toHaveBeenCalledTimes(2);
+      expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves non-Claude remaining files with their adapter and no observation", async () => {
+      const f = fixture(0, "codex", false, true);
+      expect(await f.start({ startupActions: [], resolvedStartupFiles: [file("role.md")] })).toMatchObject({ ok: true });
+      expect(f.adapter.deliverStartup).toHaveBeenCalledTimes(2);
+      expect(f.tmux.capturePaneContent).not.toHaveBeenCalled();
+      expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
+    });
+  });
 
   it("retries only Enter when the initial startup paste is still staged", async () => {
     const f = fixture(1);

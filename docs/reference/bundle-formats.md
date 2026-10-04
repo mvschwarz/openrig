@@ -102,6 +102,12 @@ carries no tested status.
     An absent field means not stated, never `on`. For `off`, Claude
     bypasses permissions, Codex runs with full access and never asks, and Pi gets full resource trust (`--approve`,
     not a permission mode). These are archive facts; `nativeEffect` remains `unknown`.
+    Optional `posture[].firstRunWarnings.claudeBypass: "harness_asks_once"` names the first-run bypass warning for a
+    declared full-bypass Claude seat, conditional on whether the harness has remembered acceptance.
+    `posture[].nonInterruptive: "available"` says a full-bypass Claude/Codex seat can use
+    [non-interruptive launch flags](non-interruptive-mode.md). It does not select the option, read host acceptance
+    state or prove a prompt-free launch. Both fields are omitted where inapplicable or unresolved; older v1 views
+    remain valid without them. Pi has no additional warning-suppression flag. `nativeEffect` stays `unknown`.
   - An empty list means none are known. Something unknown goes in `unknownBeforeLaunch`.
   - Per-seat facts carry `seat` (`pod.member`) and human output labels them with that identity. On `needs` and
     `unknownBeforeLaunch`, it is optional: bundle-wide facts omit it, and older generators may not have stated it.
@@ -164,6 +170,7 @@ decision, recorded in the registry entry's `evidenceReuse`.
   status file; never Not tested by OpenRig. A listing whose records can't be read is `status_unavailable` as a whole.
 - **Platform keys** are `<os>-<arch>` (`linux`, `darwin` or `win32`; `x64` or `arm64`).
 - **`tested` means no help was needed:** it can't carry an assistance count above zero.
+- **An assist** is one action a person or the test runner took to get past a problem during the run, such as restarting a seat or re-running a command; following the bundle's own documented steps doesn't count.
 - **The file holds no private paths, host names, row IDs, account names or receipt text,** and regenerating it gives
   identical bytes.
 - **`bodyDigest`** is SHA-256, lowercase hex, over the RFC 8785 (JCS) canonical JSON, as UTF-8, of an object holding

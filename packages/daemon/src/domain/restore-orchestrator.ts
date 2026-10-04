@@ -1232,6 +1232,7 @@ export class RestoreOrchestrator {
               sessionName: sessionName,
               allowFreshFallback: !(isPodAware && resumeRequested),
             });
+            warnings?.push(...(startupResult.warnings ?? []));
             if (startupResult.ok) {
               const nativeContinuityProved = isPodAware
                 && resumeRequested

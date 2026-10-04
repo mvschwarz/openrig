@@ -77,6 +77,9 @@ describe("archive-only bundle behaviour", () => {
     if (runtime === "claude-code" && (policy === "builtin:auto" || policy === "auto.md")) {
       expect(view.posture[0]?.selection).toContain("auto mode");
     }
+    const bypass = policy === "builtin:yolo" || policy === "bypass.md";
+    expect(view.posture[0]?.nonInterruptive).toBe(bypass && runtime !== "pi" ? "available" : undefined);
+    expect(view.posture[0]?.firstRunWarnings).toEqual(bypass && runtime === "claude-code" ? { claudeBypass: "harness_asks_once" } : undefined);
     expect(view.posture[0]?.nativeEffect).toBe("unknown");
   });
 

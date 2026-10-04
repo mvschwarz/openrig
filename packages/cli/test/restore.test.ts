@@ -28,11 +28,13 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; errLogs
     const errLogs: string[] = [];
     const origLog = console.log;
     const origErr = console.error;
+    const origWarn = console.warn;
     const origExitCode = process.exitCode;
     process.exitCode = undefined;
     console.log = (...args: unknown[]) => logs.push(args.join(" "));
     console.error = (...args: unknown[]) => errLogs.push(args.join(" "));
-    try { await fn(); } finally { console.log = origLog; console.error = origErr; }
+    console.warn = (...args: unknown[]) => logs.push(args.join(" "));
+    try { await fn(); } finally { console.log = origLog; console.error = origErr; console.warn = origWarn; }
     const exitCode = process.exitCode;
     process.exitCode = origExitCode;
     resolve({ logs, errLogs, exitCode });
@@ -94,6 +96,7 @@ describe("Restore CLI (L3)", () => {
     const out = logs.join("\n");
     expect(out).toContain("Restore attempt id: 42");
     expect(out).toContain("Status: started");
+    expect(out).toContain("rig restore status 42 --rig rig-1");
     expect(exitCode).toBeUndefined(); // 0
   });
 
@@ -129,14 +132,14 @@ describe("Restore CLI (L3)", () => {
     expect(exitCode).toBe(1);
   });
 
-  it("restore status renders the original and current intended-set verdicts", async () => {
+  it("#729: restore status renders the original and current intended-set verdicts", async () => {
     routeResponse = {
       status: 200,
       body: {
         ok: true,
         attemptId: 42,
         snapshotSelection: { snapshotId: "manual-1", kind: "manual", mode: "explicit", ageMs: 1, rationale: "operator selected exact snapshot" },
-        originalResult: { rigResult: "partially_restored" },
+        originalResult: { rigResult: "partially_restored", warnings: ["Startup submission unverified in lead@fixture: capture unavailable"] },
         currentIntendedSetVerdict: "fully_restored",
         intendedRoster: [{ nodeId: "n1", logicalId: "lead" }],
         excludedNodes: [{ nodeId: "old", logicalId: "historical" }],
@@ -150,7 +153,23 @@ describe("Restore CLI (L3)", () => {
 
     expect(lastRoutePath).toBe("/api/rigs/rig-1/restore/status/42");
     expect(logs.join("\n")).toContain("Original verdict: partially_restored");
+    expect(logs.join("\n")).toContain("Original attempt warning: Startup submission unverified in lead@fixture: capture unavailable");
     expect(logs.join("\n")).toContain("Current intended-set verdict: fully_restored");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("#729: legacy completed restore prints original warnings without failing", async () => {
+    routeResponse = { status: 200, body: { rigResult: "fully_restored", nodes: [], warnings: ["Startup prompt still staged in lead@fixture; press Enter in that pane."] } };
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "restore", "snap", "--rig", "rig-1"]));
+    expect(logs.join("\n")).toContain("Original attempt warning: Startup prompt still staged");
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("#729: status JSON keeps the original warning as one structured result", async () => {
+    routeResponse = { status: 200, body: { ok: true, originalResult: { warnings: ["unverified startup"] } } };
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "restore", "status", "42", "--rig", "rig-1", "--json"]));
+    expect(logs).toHaveLength(1);
+    expect(JSON.parse(logs[0]!).originalResult.warnings).toEqual(["unverified startup"]);
     expect(exitCode).toBeUndefined();
   });
 

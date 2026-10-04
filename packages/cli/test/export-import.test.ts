@@ -28,11 +28,14 @@ function captureLogs(fn: () => Promise<void>): Promise<string[]> {
     const logs: string[] = [];
     const origLog = console.log;
     const origErr = console.error;
+    const origWarn = console.warn;
     console.log = (...args: unknown[]) => logs.push(args.join(" "));
     console.error = (...args: unknown[]) => logs.push(args.join(" "));
+    console.warn = (...args: unknown[]) => logs.push(args.join(" "));
     try { await fn(); } finally {
       console.log = origLog;
       console.error = origErr;
+      console.warn = origWarn;
     }
     resolve(logs);
   });
@@ -136,7 +139,7 @@ function createMockDaemon() {
           res.end(JSON.stringify({ ok: false, code: "preflight_failed", message: "conflict" }));
         } else {
           res.writeHead(201, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ rigId: "rig-new", specName: "imported-rig", specVersion: "0.1.0", nodes: [{ logicalId: "orchestrator", status: "launched" }, { logicalId: "worker", status: "launched" }], attachCommand: "tmux attach -t orch-lead@imported-rig" }));
+          res.end(JSON.stringify({ rigId: "rig-new", specName: "imported-rig", specVersion: "0.1.0", nodes: [{ logicalId: "orchestrator", status: "launched" }, { logicalId: "worker", status: "launched" }], attachCommand: "tmux attach -t orch-lead@imported-rig", warnings: ["Startup submission unverified in worker@imported-rig"] }));
         }
       });
       return;
@@ -273,7 +276,7 @@ describe("rig export + import", () => {
   });
 
   // Test 6: import --instantiate prints per-node status
-  it("import --instantiate: prints nodes", async () => {
+  it("#729: import --instantiate: prints nodes", async () => {
     const deps = importDeps("schema_version: 1\nname: test\n");
     const program = new Command();
     program.addCommand(importCommand(deps));
@@ -285,6 +288,7 @@ describe("rig export + import", () => {
     // Must include per-node status, not just names
     expect(output).toMatch(/orchestrator: launched/);
     expect(output).toMatch(/worker: launched/);
+    expect(output).toContain("Warning: Startup submission unverified in worker@imported-rig");
   });
 
   // Test 7: import --preflight prints warnings + errors

@@ -137,6 +137,20 @@ describe("SeatLifecycleService.launchFresh", () => {
 
   afterEach(() => db.close());
 
+  it.each([true, false])("#729: retains warnings independently of fresh identity (verified=%s)", async verified => {
+    const seat = seedSeat();
+    if (!verified) paneCommand = "codex"; // Positive wrong-runtime observation, not absent telemetry.
+    adapter.project = async () => ({ projected: [], skipped: [], failed: [], warnings: ["Existing projection warning"] });
+    db.prepare("UPDATE node_startup_context SET startup_actions_json = ? WHERE node_id = ?").run(JSON.stringify([
+      { type: "send_text", value: "Startup context", phase: "after_ready", appliesOn: ["fresh_start"], idempotent: true },
+    ]), seat.node.id);
+    const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "explicit fresh" });
+    expect(result.ok).toBe(verified);
+    expect(result.warnings).toEqual(["Existing projection warning", expect.stringContaining("Startup submission unverified")]);
+    if (verified) expect(new SeatIdentityStore(db).getForNode(seat.node.id)?.verdict).toBe("verified");
+    else expect(result).toMatchObject({ code: "runtime_identity_unverified", status: "attention_required" });
+  });
+
   it.each(["valid", "missing path", "wrong token", "no token"])("numeric Claude pane fresh launch: %s", async mode => {
     const seat = seedSeat();
     paneCommand = "2.1.289";
@@ -629,8 +643,9 @@ describe("SeatLifecycleService.launchFresh", () => {
   it("compensates a hard startup failure to zero live session and binding while retaining audit tenure", async () => {
     const seat = seedSeat({ clean: true });
     harnessResult = { ok: false, error: "binary missing" };
+    adapter.project = async () => ({ projected: [], skipped: [], failed: [], warnings: ["Earlier projection warning"] });
     const result = await service.launchFresh({ seatRef: "dev.impl", fresh: true, reason: "hard failure proof" });
-    expect(result).toMatchObject({ ok: false, code: "startup_failed", status: "failed" });
+    expect(result).toMatchObject({ ok: false, code: "startup_failed", status: "failed", warnings: ["Earlier projection warning"] });
     expect(alive.has(seat.sessionName)).toBe(false);
     expect(sessionRegistry.getBindingForNode(seat.node.id)).toBeNull();
     const sessions = sessionRegistry.getSessionsForRig(seat.rig.id).filter((row) => row.nodeId === seat.node.id);

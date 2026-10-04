@@ -62,9 +62,8 @@ const PROMPT_DRAFT_PATTERNS = [
   /^[❯›]\s+\S/,
 ];
 
-// Status-bar patterns that ONLY appear when the harness is at its idle
-// prompt. These are more reliable than the prompt char alone because they
-// are never rendered during active tool execution.
+// Footer hints, not proof of inactivity: Claude also renders its mode bar
+// during a turn. Current live-status evidence must take precedence below.
 const IDLE_STATUS_BAR_PATTERNS = [
   /gpt-\d[\d.]* .+ · Context \[/,  // Codex model/context footer
   /⏵⏵ accept edits/,              // Claude Code edit-accept bar
@@ -136,6 +135,61 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
+// Claude can leave these noninteractive warnings BELOW the input box and mode bar.
+// Recognize the complete input block, never a warning or historical prompt alone.
+const CLAUDE_STATUS_WARNINGS = [
+  /^✘ Auto-update failed: no write permission to npm prefix · Run claude doctor$/,
+  /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
+  /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
+];
+// Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
+// Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
+const CLAUDE_LIVE_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S[^(]*(?:…|\.{3})\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/;
+
+function findClaudeComposer(paneContent: string) {
+  // Preserve columns: a multiline draft may contain indented border/prompt text.
+  // This classifier scans at most 20 physical lines; captures can be taller.
+  // Exhausting the scan without reaching the status head is unknown, not idle.
+  const lines = paneContent.split("\n").slice(-20)
+    .map((line) => line.trimEnd()).filter((line) => line.trim().length > 0);
+  let bar = lines.length - 1;
+  while (bar >= 0 && CLAUDE_STATUS_WARNINGS.some((pattern) => pattern.test(lines[bar]!.trim()))) bar--;
+  const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
+  let indent = /^([ \t]*)─{3,}$/.exec(lines[bar - 1] ?? "")?.[1];
+  const framed = indent !== undefined;
+  let prompt = lines[bar - 2] ?? "";
+  let statusStart = bar - 4;
+  if (indent === undefined) {
+    // The unframed Claude prompt has the same current status/task block.
+    // Keep Codex footers and a bare prompt with no visible block on their old path.
+    if (bar < 2 || !/^(?:⏵⏵ (?:accept edits|bypass permissions) on\b|⏸ plan mode on\b|\? for shortcuts$)/.test(lines[bar]!.trim())) return null;
+    prompt = lines[bar - 1] ?? "";
+    indent = /^([ \t]*)❯\s*$/.exec(prompt)?.[1];
+    if (indent === undefined) return null;
+    statusStart = bar - 2;
+  } else {
+    const upper = lines[bar - 3] ?? "";
+    if (!upper.startsWith(indent) || !/^─{3,}(?: .+ ─+)?$/.test(upper.slice(indent.length)) ||
+        !prompt.startsWith(`${indent}❯`) || !/^❯(?:\s|$)/.test(prompt.slice(indent.length))) return null;
+  }
+
+  let liveStatus: string | null = null;
+  let headSeen = false;
+  for (let i = statusStart; i >= 0; i--) {
+    if (!lines[i]!.startsWith(indent)) break;
+    const line = lines[i]!.slice(indent.length);
+    if ([CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS].some((pattern) => pattern.test(line))) {
+      liveStatus = truncateEvidence(line);
+      headSeen = true;
+      break;
+    }
+    // Indented task rows can follow the live status. A newer unindented output
+    // or completed status ends this block; do not revive an older work row.
+    if (!/^\s/.test(line)) { headSeen = true; break; }
+  }
+  return { text: prompt.slice(indent.length), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, headSeen, liveStatus };
+}
+
 function findPromptDraftBeforeFooter(paneContent: string): string | null {
   const rawLines = paneContent.split("\n").map((line) => line.trimEnd());
   let lastLineIndex = rawLines.length - 1;
@@ -166,7 +220,6 @@ export function classifyPaneActivity(paneContent: string, runtime?: string | nul
   }
 
   const recentLines = lastNonBlank.slice(-8);
-  const recentWindow = recentLines.join("\n");
   // Wider window for prompt SIGNATURES so a tall footer can't push a real prompt out of view (see
   // PROMPT_SCAN_LINES). The generic activity checks below keep the tighter 8-line window.
   const promptScanLines = lastNonBlank.slice(-PROMPT_SCAN_LINES);
@@ -217,6 +270,23 @@ export function classifyPaneActivity(paneContent: string, runtime?: string | nul
     }
   }
 
+  const claudeComposer = findClaudeComposer(paneContent);
+  if (claudeComposer?.hasWarnings && claudeComposer.supportedWarningFooter && PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
+    return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(claudeComposer.text) };
+  }
+  if (claudeComposer?.liveStatus) {
+    return { state: "agent_active", reason: "mid_work_pattern", evidence: claudeComposer.liveStatus };
+  }
+  // Unframed status evidence can veto idle, but warnings require a complete input frame to prove it.
+  if (claudeComposer && (!claudeComposer.headSeen || (claudeComposer.hasWarnings && !claudeComposer.framed))) {
+    return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
+  }
+  if (claudeComposer && (!claudeComposer.hasWarnings || claudeComposer.supportedWarningFooter) &&
+      IDLE_PROMPT_PATTERNS.some((pattern) => pattern.test(claudeComposer.text))) {
+    return { state: "agent_idle", reason: idleStatusBarLine ? "idle_status_bar" : "idle_prompt",
+      evidence: truncateEvidence(idleStatusBarLine ?? claudeComposer.text) };
+  }
+
   const promptDraftEvidence = findPromptDraftBeforeFooter(paneContent);
   if (promptDraftEvidence) {
     return {
@@ -226,7 +296,8 @@ export function classifyPaneActivity(paneContent: string, runtime?: string | nul
     };
   }
 
-  if (idleStatusBarLine) {
+  const midWorkEvidence = findPatternEvidence(recentLines, [...MID_WORK_PATTERNS, CLAUDE_LIVE_STATUS_PATTERN]);
+  if (idleStatusBarLine && (!idleStatusBarLine.includes("⏵⏵ accept edits") || !midWorkEvidence)) {
     return {
       state: "agent_idle",
       reason: "idle_status_bar",
@@ -248,7 +319,7 @@ export function classifyPaneActivity(paneContent: string, runtime?: string | nul
       evidence: placeholderMidWork,
     };
   }
-  if (idlePromptLine && !MID_WORK_PATTERNS.some((pattern) => pattern.test(recentWindow))) {
+  if (idlePromptLine && !midWorkEvidence) {
     return {
       state: "agent_idle",
       reason: "idle_prompt",
@@ -256,7 +327,6 @@ export function classifyPaneActivity(paneContent: string, runtime?: string | nul
     };
   }
 
-  const midWorkEvidence = findPatternEvidence(recentLines, MID_WORK_PATTERNS);
   if (midWorkEvidence) {
     return {
       state: "agent_active",

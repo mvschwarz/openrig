@@ -3124,6 +3124,29 @@ describe("RestoreOrchestrator", () => {
     });
   });
 
+  it.each(["full", "subset"])("#729: persists startup warnings in the original %s restore receipt", async mode => {
+    const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }], resumeType: "none", restorePolicy: "relaunch_fresh", edges: [] });
+    const snapshot = updateSnapshotData(snap, data => {
+      data.nodeStartupContext[data.nodes[0]!.id] = { projectionEntries: [], resolvedStartupFiles: [], startupActions: [], runtime: "claude-code" };
+    });
+    const { StartupOrchestrator } = await import("../src/domain/startup-orchestrator.js");
+    const warnings = ["Existing projection warning", "Startup submission unverified in agent-a@test-rig: capture unavailable."];
+    const start = vi.spyOn(StartupOrchestrator.prototype, "startNode").mockResolvedValue({ ok: true, startupStatus: "ready", continuityOutcome: "fresh", warnings });
+    const adapter = { runtime: "claude-code" } as import("../src/domain/runtime-adapter.js").RuntimeAdapter;
+    try {
+      const orch = createOrchestrator();
+      const options = { adapters: { "claude-code": adapter }, freshLogicalIds: ["agent-a"] };
+      const result = mode === "full" ? await orch.restore(snapshot.id, options)
+        : await orch.launchNodeSubset(snapshot.rigId, ["agent-a"], { adapters: options.adapters, snapshotId: snapshot.id });
+      expect(start).toHaveBeenCalled();
+      const eventType = mode === "full" ? "restore.completed" : "restore.subset_completed";
+      const rows = db.prepare("SELECT payload FROM events WHERE type = ? ORDER BY seq DESC LIMIT 1").all(eventType) as Array<{ payload: string }>;
+      expect(rows).toHaveLength(1);
+      expect(JSON.parse(rows[0]!.payload).result.warnings).toEqual(expect.arrayContaining(warnings));
+      expect(result.ok).toBe(true);
+    } finally { start.mockRestore(); }
+  });
+
   it("D1/D4: missing optional startup file is a warning, not a blocker", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],

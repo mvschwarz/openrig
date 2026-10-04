@@ -169,7 +169,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return { projected, skipped, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
-  async deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult> {
+  async deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding, sendInteractiveText?: (text: string) => Promise<void>): Promise<StartupDeliveryResult> {
     try { this.ensureManagedBootstrap(binding); } catch (err) {
       console.error(`[openrig] claude bootstrap warning: ${(err as Error).message}`);
     }
@@ -208,6 +208,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
           }
           case "send_text": {
             if (binding.tmuxSession) {
+              if (sendInteractiveText) {
+                await sendInteractiveText(content);
+                break;
+              }
               const textResult = await this.tmux.sendText(binding.tmuxSession, content);
               if (!textResult.ok) throw new Error(textResult.message);
               await this.sleep(200);

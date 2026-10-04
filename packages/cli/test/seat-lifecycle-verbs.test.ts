@@ -73,6 +73,25 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("#729 startup warnings", () => {
+  it.each([[200, false], [200, true], [409, false], [409, true]] as const)("seat launch retains warnings and HTTP %s (json=%s)", async (status, json) => {
+    const warning = "Startup submission unverified: capture unavailable";
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const deps = makeDeps({ status, data: { ok: status === 200, message: "Identity needs attention", warnings: [warning] } }, calls);
+    const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--reason", "requested", ...(json ? ["--json"] : []),
+    ]));
+    expect(exitCode).toBe(status === 200 ? undefined : 1);
+    if (json) {
+      expect(logs).toHaveLength(1);
+      expect(JSON.parse(logs[0]!).warnings).toEqual([warning]);
+      expect(warn).not.toHaveBeenCalled();
+    } else expect(warn).toHaveBeenCalledWith(`Warning: ${warning}`);
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe("rig seat set-permissions", () => {
   it("posts the explicit operator with the existing mode and reason", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];

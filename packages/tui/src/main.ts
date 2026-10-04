@@ -158,7 +158,7 @@ async function run(): Promise<void> {
         const rows = computeExplorerRows(view.get(), next);
         const index = oldKey ? rows.findIndex(row => row.key === oldKey) : -1;
         const selection = index >= 0 ? index : Math.min(view.get().selection, Math.max(0, rows.length - 1));
-        if (selection !== view.get().selection) view.dispatch({ type: "select", index: selection, rowCount: rows.length });
+        if (selection !== view.get().selection) view.dispatch({ type: "select", index: selection, rowCount: rows.length, origin: "refresh" });
       }
       drawnScope = scope; drawnSnapshot = next; drawnSettled = live.load().settled;
     }

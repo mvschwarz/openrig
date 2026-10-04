@@ -220,6 +220,19 @@
             "items": {
               "$ref": "#/$defs/sourceRef"
             }
+          },
+          "firstRunWarnings": {
+            "type": "object",
+            "properties": {
+              "claudeBypass": {
+                "const": "harness_asks_once"
+              }
+            },
+            "description": "Declared full-bypass Claude seat: the harness asks for bypass-warning acceptance if it has not been remembered. No host acceptance state is read; nativeEffect stays unknown."
+          },
+          "nonInterruptive": {
+            "const": "available",
+            "description": "This declared full-bypass Claude/Codex seat can use --non-interruptive launch flags. Availability is not the operator choice or proof that no prompt will appear. Omitted for other postures, unresolved policies and runtimes with no such flags."
           }
         }
       }

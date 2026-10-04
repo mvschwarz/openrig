@@ -694,7 +694,7 @@ describe("Up CLI", () => {
             status: "completed", runId: "run-3", rigId: "rig-2",
             stages: [{ stage: "import_rig", status: "ok" }],
             errors: [],
-            warnings: ["Transcript capture failed for dev-impl@test-rig: pipe-pane failed"],
+            warnings: ["Transcript capture failed for dev-impl@test-rig: pipe-pane failed", "Startup submission unverified in dev-impl@test-rig: capture unavailable"],
           }));
         } else {
           res.writeHead(404).end();
@@ -707,6 +707,7 @@ describe("Up CLI", () => {
     });
     const output = logs.join("\n");
     expect(output).toContain("warning: Transcript capture failed");
+    expect(output).toContain("Startup submission unverified in dev-impl@test-rig");
 
     server.removeAllListeners("request");
     for (const l of origListeners) server.on("request", l as (...args: unknown[]) => void);
