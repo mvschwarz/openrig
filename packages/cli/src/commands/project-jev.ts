@@ -14,7 +14,7 @@ export type JevResult = { status: "answered"; answers: Answers; model: string } 
 const hash = (text: string) => "sha256:" + createHash("sha256").update(text).digest("hex");
 
 export function readBounded(file: string, limit = 1024 * 1024): string {
-  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
     const s = fs.fstatSync(fd);
     if (!s.isFile() || s.size > limit) throw Error("input must be a bounded regular file");
