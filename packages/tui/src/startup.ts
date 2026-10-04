@@ -231,7 +231,13 @@ export class StartupController {
         throw error;
       }
       const notice = this.state.notice;
-      await this.readRig(rigId);
+      try {
+        await this.readRig(rigId);
+      } catch (error) {
+        // The launch response is known; only this later observation failed.
+        this.state.notice = `${notice}\nStatus refresh unavailable: ${error instanceof Error ? error.message : String(error)}`;
+        return;
+      }
       this.state.selected = Math.max(0, this.state.rig!.seats.findIndex((s) => s.nodeId === seat.nodeId));
       const observed = this.state.rig!.seats[this.state.selected]?.observed;
       this.state.notice = observed && observed.state !== "running" ? [observed.detail, ...warnings].join("\n") : notice;
