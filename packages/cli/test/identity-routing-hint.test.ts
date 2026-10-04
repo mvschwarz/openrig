@@ -142,13 +142,20 @@ it("omits URL credentials, query and fragment from the additive hint", async () 
 
 it("bounds a hanging identity response with the actual DaemonClient timeout", async () => {
   vi.useFakeTimers();
-  const fetchImpl = vi.fn(async (url: string | URL | Request) => String(url).endsWith("/healthz")
-    ? new Promise<Response>(() => {})
-    : new Response(JSON.stringify(original), { status: 404 }));
+  let started!: () => void;
+  const healthStarted = new Promise<void>((resolve) => { started = resolve; });
+  const fetchImpl = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    if (!String(url).endsWith("/healthz")) return new Response(JSON.stringify(original), { status: 404 });
+    started();
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    });
+  });
   const client = new DaemonClient("http://selected-daemon:7433", { fetchImpl: fetchImpl as typeof fetch });
   const { deps } = setup();
   deps.clientFactory = () => client;
   const pending = run("whoami", deps, ["--json"]);
+  await healthStarted;
   await vi.advanceTimersByTimeAsync(1_001);
   await pending;
   const body = JSON.parse(out.join("\n"));
