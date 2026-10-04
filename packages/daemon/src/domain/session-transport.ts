@@ -122,6 +122,26 @@ function findPatternEvidence(lines: string[], patterns: RegExp[]): string | null
   return null;
 }
 
+// Claude can leave these noninteractive warnings BELOW the input box and mode bar.
+// Recognize the complete input block, never a warning or historical prompt alone.
+const CLAUDE_STATUS_WARNINGS = [
+  /^✘ Auto-update failed: no write permission to npm prefix · Run claude doctor$/,
+  /^tmux focus-events off · add 'set -g focus-events on' to ~\/\.tmux\.conf and re…$/,
+  /^You've used (?:\d|[1-9]\d)% of your weekly limit · resets \d{1,2}(?::\d{2})?(?:am|pm) \(UTC\)$/,
+];
+
+function findClaudeComposerBeforeWarnings(lines: string[]): string | null {
+  let bar = lines.length - 1;
+  while (bar >= 0 && CLAUDE_STATUS_WARNINGS.some((pattern) => pattern.test(lines[bar]!))) bar--;
+  // No warning suffix: leave all previously supported shapes on their existing paths.
+  if (bar === lines.length - 1 || lines[bar] !== "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents") return null;
+  const composer = lines[bar - 2] ?? "";
+  if (!/^─{3,}$/.test(lines[bar - 1] ?? "") ||
+      !/^─{3,}(?: .+ ─+)?$/.test(lines[bar - 3] ?? "") ||
+      !/^❯(?:\s|$)/.test(composer)) return null;
+  return composer;
+}
+
 function findPromptDraftBeforeFooter(paneContent: string): string | null {
   const rawLines = paneContent.split("\n").map((line) => line.trimEnd());
   let lastLineIndex = rawLines.length - 1;
@@ -183,6 +203,18 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
       reason: "permission_prompt",
       evidence: permissionPromptEvidence,
     };
+  }
+
+  const claudeComposer = findClaudeComposerBeforeWarnings(promptScanLines);
+  if (claudeComposer) {
+    if (PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(claudeComposer))) {
+      return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(claudeComposer) };
+    }
+    // Check the original bounded tail: discarding the warnings must not hide work
+    // or make an empty composer (also displayed during a turn) sufficient by itself.
+    const working = findPatternEvidence(promptScanLines, MID_WORK_PATTERNS);
+    if (working) return { state: "agent_active", reason: "mid_work_pattern", evidence: working };
+    return { state: "agent_idle", reason: "idle_prompt", evidence: truncateEvidence(claudeComposer) };
   }
 
   const promptDraftEvidence = findPromptDraftBeforeFooter(paneContent);
