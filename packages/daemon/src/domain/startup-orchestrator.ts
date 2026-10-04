@@ -18,13 +18,17 @@ import { AppliedLaunchObservationStore } from "./applied-launch-observation-stor
 import { NativePermissionStore } from "./native-permission-store.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
-import { startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import { startupComposerRecognized, startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
 const STARTUP_SUBMIT_CAPTURE_LINES = 200;
+// Claude Code 2.1.289 has accepted Enter on a large startup paste after the first look, while the
+// composer still showed the collapsed paste. A recognized composer holding anything else is
+// re-observed, 200 ms apart, for about 5 s; nothing is typed while it settles.
+const STARTUP_SUBMIT_SETTLE_LOOKS = 25;
 
 // -- Types --
 
@@ -791,12 +795,12 @@ export class StartupOrchestrator {
       return null; // An unavailable observation is not a failed delivery.
     };
     // tmux accepting Enter does not prove the TUI submitted a large bracketed paste.
-    // Reuse submitOnly's content check and guarded retry; never repaste or loop.
+    // Reuse submitOnly's content check and guarded retry; never repaste or resend.
     try {
       await this.sleep(200);
-      const pane = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
-      if (!pane?.trim()) { record(pane); return unverified("Startup submission capture is unavailable after Enter."); }
-      const before = inspectStartupStagedText(pane, text);
+      const first = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
+      if (!first?.trim()) { record(first); return unverified("Startup submission capture is unavailable after Enter."); }
+      const { pane, state: before } = await this.settleComposer(tmuxSession, first, text);
       if (before === "clear") { input.lastSubmissionConfirmed = true; return null; }
       if (before === "unverified") {
         const evidence = record(pane);
@@ -816,9 +820,9 @@ export class StartupOrchestrator {
       diagnostic.retry = retry.ok ? "ok" : "refused_or_failed";
       phase = "after_retry";
       await this.sleep(200);
-      const after = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
-      if (!after?.trim()) { record(after); return unverified("Startup submission capture is unavailable after the guarded retry."); }
-      const observed = inspectStartupStagedText(after, text);
+      const afterFirst = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
+      if (!afterFirst?.trim()) { record(afterFirst); return unverified("Startup submission capture is unavailable after the guarded retry."); }
+      const { pane: after, state: observed } = await this.settleComposer(tmuxSession, afterFirst, text);
       if (observed === "staged") {
         const warning = `Startup prompt still staged in ${tmuxSession}; press Enter in that pane.`;
         input.stagedSubmissionWarning = warning;
@@ -841,6 +845,24 @@ export class StartupOrchestrator {
     } finally {
       if (diagnostic.observations.length) input.submissionDiagnostics.push(diagnostic);
     }
+  }
+
+  /**
+   * Re-observes a recognized composer that holds something other than the prompt, until it reads clear
+   * or staged, stops being recognized, or the looks run out. Observation only. A screen with no
+   * recognized composer (a menu, a dialog, an unknown footer) keeps its first verdict.
+   */
+  private async settleComposer(tmuxSession: string, pane: string, text: string): Promise<{ pane: string; state: ReturnType<typeof inspectStartupStagedText> }> {
+    let state = inspectStartupStagedText(pane, text);
+    for (let look = 0; state === "unverified" && startupComposerRecognized(pane) && look < STARTUP_SUBMIT_SETTLE_LOOKS; look++) {
+      await this.sleep(200);
+      // A failed re-look adds nothing; the last usable observation stands.
+      const next = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES).catch(() => null);
+      if (!next?.trim()) break;
+      pane = next;
+      state = inspectStartupStagedText(pane, text);
+    }
+    return { pane, state };
   }
 }
 

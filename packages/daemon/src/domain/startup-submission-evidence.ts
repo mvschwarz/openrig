@@ -41,6 +41,11 @@ export function inspectStartupStagedText(pane: string | null, expected: string):
   return body === QUEUED_PLACEHOLDER ? "clear" : "unverified";
 }
 
+/** Whether the current composer region is recognized at all, whatever it holds. */
+export function startupComposerRecognized(pane: string | null): boolean {
+  return composerRegion(pane).body !== null;
+}
+
 export interface StartupSubmissionEvidence {
   normalization: "whitespace-stripped-utf8";
   expected: { bytes: number; sha256: string };
