@@ -1,3 +1,5 @@
+import os from "node:os";
+import fs from "node:fs";
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
 import nodePath from "node:path";
@@ -359,6 +361,35 @@ describe("Bundle CLI", () => {
     expect(logs).toContain("  context-packs/openrig-world/manifest.yaml: a different 'openrig-world' pack is already installed; kept it unchanged. To use the bundle's copy instead, run 'rig context rm openrig-world' and install the bundle again");
     expect(logs).toContain("Warning: Bundle skills routing failed: boom");
     expect(logs).toContain("Project: openrig (registered) at /ws/projects/openrig; rig openrig-dev is associated with it in /ws/workspace.yaml");
+  });
+
+  it("bundle create --preset builds a staged copy and sends the configuration; the author's folder is unchanged", async () => {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "cli-preset-"));
+    const rig = 'version: "0.2"\nname: r\npods:\n  - id: build\n    members:\n      - { id: lead, agent_ref: "local:a", profile: lead, runtime: claude-code }\n';
+    fs.writeFileSync(nodePath.join(dir, "rig.yaml"), rig);
+    fs.writeFileSync(nodePath.join(dir, "configurations.yaml"), "schema: openrig.bundle-configurations/v1\nrecommended: recommended\nseats:\n  build.lead: { runtimes: { claude-code: lead, pi: lead-pi } }\npresets:\n  recommended: { build.lead: claude-code }\n  all-pi: { build.lead: pi }\n");
+    capturedCreateBodies = [];
+    await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", nodePath.join(dir, "rig.yaml"), "-o", nodePath.join(dir, "out.rigbundle"), "--preset", "all-pi"]);
+    });
+    const body = capturedCreateBodies.at(-1)!;
+    expect(body["configuration"]).toEqual({ id: "build.lead=pi", preset: "all-pi" });
+    expect(String(body["specPath"])).toContain("rig-configuration-");
+    expect(fs.readFileSync(nodePath.join(dir, "rig.yaml"), "utf-8")).toBe(rig);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("bundle create --seat with an undeclared runtime sends nothing and names the allowed set", async () => {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "cli-seat-"));
+    fs.writeFileSync(nodePath.join(dir, "rig.yaml"), 'version: "0.2"\nname: r\npods:\n  - id: build\n    members:\n      - { id: lead, agent_ref: "local:a", profile: lead, runtime: claude-code }\n');
+    fs.writeFileSync(nodePath.join(dir, "configurations.yaml"), "schema: openrig.bundle-configurations/v1\nrecommended: recommended\nseats:\n  build.lead: { runtimes: { claude-code: lead } }\npresets:\n  recommended: { build.lead: claude-code }\n");
+    capturedCreateBodies = [];
+    const { exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["node", "rig", "bundle", "create", nodePath.join(dir, "rig.yaml"), "-o", nodePath.join(dir, "o.rigbundle"), "--seat", "build.lead=codex"]);
+    });
+    expect(capturedCreateBodies).toHaveLength(0);
+    expect(exitCode).toBe(2);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("control: bundle install --plan without --target still sends no targetRoot", async () => {

@@ -702,6 +702,11 @@ bundleRoutes.post("/create", async (c) => {
     : [];
   // `rig bundle create --project-dir <dir>`: the project this rig works in (project.yaml and its files)
   const projectDir = typeof body["projectDir"] === "string" && body["projectDir"] ? body["projectDir"] : undefined;
+  // `rig bundle create --preset/--seat`: the configuration the CLI staged, recorded in the manifest (outside the package digest)
+  const rawConfiguration = body["configuration"] as { id?: unknown; preset?: unknown } | undefined;
+  const configuration = rawConfiguration && typeof rawConfiguration.id === "string"
+    ? { id: rawConfiguration.id, ...(typeof rawConfiguration.preset === "string" ? { preset: rawConfiguration.preset } : {}) }
+    : undefined;
 
   const allowDrift = body["allowDrift"] === true;
 
@@ -786,6 +791,7 @@ bundleRoutes.post("/create", async (c) => {
         const carriedPacks = contextPackDirs.map((dir) => vendorContextPackDir(nodePath.resolve(dir), tmpStaging));
         if (carriedPacks.length > 0) result.manifest.contextPacks = [...(result.manifest.contextPacks ?? []), ...carriedPacks];
         if (projectDir) result.manifest.project = vendorProjectDir(nodePath.resolve(projectDir), tmpStaging);
+        if (configuration) result.manifest.configuration = configuration;
 
         const integrity = computeIntegrity(tmpStaging, integrityFsOps());
         result.manifest.integrity = integrity;

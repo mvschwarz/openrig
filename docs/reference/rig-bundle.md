@@ -200,6 +200,8 @@ rig bundle create <spec-path> -o <output.rigbundle> [--rig-root <dir>] [--contex
 | `--rig-root` | no | spec directory | Root directory for resolving `agent_ref` and other relative paths. |
 | `--context-pack <dir>` | no | — | Carry the context pack in `<dir>`. Repeatable. The directory may be outside the rig folder, for example a world pack whose `manifest.yaml` is at its repository root. Only `manifest.yaml` and the files it declares are carried, the same set `rig context add --git` installs, and the pack lands in the bundle at `context-packs/<manifest name>/`. Needs a pod-aware spec. |
 | `--project-dir <dir>` | no | — | Carry the project the rig works in: the folder holding its `project.yaml` (which must declare an `id`) and files beside it, such as `SPEC.md`. On install the project is registered in the workspace catalog and the rig is associated with it, before any seat launches (see [project-workspace.md](project-workspace.md)). Needs a pod-aware spec. |
+| `--preset <name>` | no | — | Build one of the configurations the bundle declares in `configurations.yaml` beside `rig.yaml` (see [bundle-formats.md](bundle-formats.md)). The chosen runtimes and profiles are applied to an owned copy of the rig folder, never to yours. |
+| `--seat <pod.member=runtime>` | no | — | Use this runtime for one seat, within what `configurations.yaml` allows. Repeatable; applied after `--preset`. An undeclared choice is refused with the allowed set, and nothing is built. |
 | `--name` | no | `my-bundle` | Bundle name in the manifest. |
 | `--bundle-version` | no | `0.1.0` | Bundle version in the manifest. |
 
@@ -215,6 +217,14 @@ The create command:
 9. Writes the sibling `.sha256` digest
 
 On install, a carried pack is routed into `context.root` under its manifest name. If a pack of that name is already installed, install never merges into it: an identical pack is reported as `already_installed`, and a different one (for example a `rig context add --git` install at another revision) is kept unchanged and reported as `kept_existing`, with the `rig context rm <name>` command to use the bundle's copy instead.
+
+### List a bundle's configurations
+
+```bash
+rig bundle configurations <spec-path> [--json]
+```
+
+Lists the presets that `configurations.yaml` declares, each with its configuration ID, which one is recommended, and which one matches `rig.yaml` as written.
 
 ### Inspect a bundle
 
