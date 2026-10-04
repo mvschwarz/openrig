@@ -4,10 +4,13 @@ Use `rig up <source> --non-interruptive` or `rig bundle install <archive-or-link
 to accept supported harness first-launch warnings for this rig. Sessions remain interactive.
 This does not sign in to a provider or change any seat's permission policy.
 
-The option applies only to seats whose resolved launch posture is `full_bypass`:
+The option applies only to seats whose resolved launch posture is `full_bypass`.
+This must be declared through `builtin:yolo`, a `full_bypass` flag policy, or an explicit permission selection;
+ambient `OPENRIG_YOLO` alone without an attached policy is not covered.
 
 - Claude Code receives `--settings '{"skipDangerousModePermissionPrompt":true}'`, accepting its bypass-permissions warning.
 - Codex receives per-launch `-c notice.…=true` overrides for the full-access and GPT-5.1 migration notices.
+  The separate GPT-5.1-Codex-Max migration notice is not suppressed.
 - Pi's existing launch flags are unchanged.
 
 OpenRig saves the choice on the rig. Later launches, restores, forks and handovers keep it, including

@@ -166,7 +166,7 @@ describe("S03 future native permission selections (offline; no native effect cla
   it.each(["codex", "claude-code"])("legacy restore resolves current stored selection for %s", async runtime => {
     const f = fixture(runtime); await f.service.setPermissions(input(runtime === "codex" ? "full_bypass" : "auto"));
     const resume = vi.fn(async () => ({ ok: false, code: "offline", message: "stop" }));
-    const ctx = { db: f.db, sessionRegistry: f.registry, appliedLaunchStore: new AppliedLaunchObservationStore(f.db),
+    const ctx = { db: f.db, rigRepo: f.rigRepo, sessionRegistry: f.registry, appliedLaunchStore: new AppliedLaunchObservationStore(f.db),
       claudeResume: { canResume: () => runtime === "claude-code", resume }, codexResume: { canResume: () => runtime === "codex", resume } };
     await (RestoreOrchestrator.prototype as any).attemptResume.call(ctx, f.node.id, "seat", runtime === "codex" ? "codex_id" : "claude_id", "original", "/inert", null, "model", "floor");
     expect(resume).toHaveBeenCalledWith(...(runtime === "codex"

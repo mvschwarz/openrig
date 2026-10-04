@@ -74,6 +74,30 @@ describe("non-interruptive launch choice", () => {
     expect(nonInterruptiveNotice("claude-code", { nonInterruptive: true, launchPosture: "full_bypass" })).toContain("accepted Claude's bypass-permissions warning");
   });
 
+  it("Codex boolean overrides decode to known notice fields without quoted dotted paths", () => {
+    // Codex 0.153.4 keeps the left-hand key literally, then splits every dot:
+    // https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/utils/cli/src/config_override.rs
+    // https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/config/src/overrides.rs
+    // This models that path contract for our boolean-only overrides, not the native UI.
+    const args = nonInterruptiveArgs("codex", { nonInterruptive: true, launchPosture: "full_bypass" });
+    const layer: Record<string, any> = {};
+    for (let i = 0; i < args.length; i += 2) {
+      expect(args[i]).toBe("-c");
+      const [key, value] = args[i + 1]!.split("=");
+      expect(value).toBe("true");
+      const path = key!.split(".");
+      let table = layer;
+      for (const segment of path.slice(0, -1)) table = table[segment] ??= {};
+      table[path.at(-1)!] = value === "true";
+    }
+    expect(layer).toEqual({ notice: {
+      hide_full_access_warning: true,
+      hide_gpt5_1_migration_prompt: true,
+    } });
+    // No whole-table assignment or unknown path can reset unrelated notice settings.
+    expect(args.filter((_, i) => i % 2 === 1).every(arg => arg.startsWith("notice."))).toBe(true);
+  });
+
   it.each(["fresh", "resume", "fork"] as const)("Claude %s emits only the selected per-launch settings", async mode => {
     const { tmux, fsOps, binding } = fixture("claude-code");
     const adapter = new ClaudeCodeAdapter({ tmux, fsOps, sleep: async () => {}, sessionIdFactory: () => "fresh-id" });
@@ -106,7 +130,7 @@ describe("non-interruptive launch choice", () => {
     const command = vi.mocked(tmux.sendShellCommand).mock.calls[0]![1];
     expect(command).toContain("notice.hide_full_access_warning=true");
     expect(command).toContain("notice.hide_gpt5_1_migration_prompt=true");
-    expect(command).toContain('notice."hide_gpt-5.1-codex-max_migration_prompt"=true');
+    expect(command).not.toContain("hide_gpt-5.1-codex-max_migration_prompt");
     expect(command).toContain("-s danger-full-access -a never");
     expect(fsOps.writeFile).not.toHaveBeenCalled();
     vi.mocked(tmux.sendShellCommand).mockClear();

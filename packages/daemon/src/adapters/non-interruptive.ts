@@ -19,7 +19,8 @@ export function nonInterruptiveArgs(runtime: string, choice: LaunchChoice): stri
   if (runtime === "codex") return [
     "-c", "notice.hide_full_access_warning=true",
     "-c", "notice.hide_gpt5_1_migration_prompt=true",
-    "-c", 'notice."hide_gpt-5.1-codex-max_migration_prompt"=true',
+    // Codex 0.153.4 splits override paths on every dot, even inside quotes.
+    // Leave the dotted GPT-5.1-Codex-Max notice key unchanged.
   ];
   return [];
 }
@@ -32,7 +33,7 @@ export function nonInterruptiveNotice(runtime: string, choice: LaunchChoice): st
   if (!nonInterruptiveArgs(runtime, choice).length) return undefined;
   return `Non-interruptive: OpenRig ${runtime === "claude-code"
     ? "accepted Claude's bypass-permissions warning"
-    : "hid Codex's full-access and model-migration notices"} for this seat using launch flags. The saved choice applies to this rig's launches only; no warning-acceptance settings were written.`;
+    : "hid Codex's full-access and GPT-5.1 migration notices"} for this seat using launch flags. The saved choice applies to this rig's launches only; no warning-acceptance settings were written.`;
 }
 
 export function nonInterruptiveSummary(enabled: boolean): string {
