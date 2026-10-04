@@ -166,6 +166,10 @@ export class ResumeMetadataRefresher {
       if (session.runtime === "claude-code") {
         if (!fillNullOnly) {
           const current = await this.captureClaudeSessionId(session);
+          if (current && this.sessionRegistry.resumeTokenMatches(session.sessionId, "claude_id", current)) {
+            this.sessionRegistry.markResumeProbeResult(session.sessionId, "resumable");
+            continue;
+          }
           if (current && this.sessionRegistry.updateResumeToken(session.sessionId, "claude_id", current, "scrape")) {
             continue;
           }
@@ -191,7 +195,7 @@ export class ResumeMetadataRefresher {
         // probe on the recurring snapshot path (rev1-r1), and never clear a present
         // token (rev1-r2). A present-but-not-resumable token stays in the ledger for
         // FR-6 to surface as `stale/unverified — re-verify`. Only the legacy/teardown
-        // default path probes + clears (a one-time at-shutdown check).
+        // default path probes and records freshness without clearing the token.
         if (fillNullOnly) {
           // OPR.0.4.3.20 FR-6.1 — equal-value freshness RE-STAMP on the periodic path
           // (NO probe; never spawns `claude --resume`). Re-derive via the pure-read

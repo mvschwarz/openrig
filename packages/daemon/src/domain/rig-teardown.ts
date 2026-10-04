@@ -118,7 +118,13 @@ export class RigTeardownOrchestrator {
     // 4. Auto-snapshot before teardown (always, best-effort)
     try {
       if (this.deps.resumeMetadataRefresher) {
-        await this.deps.resumeMetadataRefresher.refresh(liveSessions);
+        // A live namesake cannot supply resume metadata for an archived row.
+        // Keep that row's own token in the snapshot, just as the kill below
+        // leaves the other owner's session alone.
+        const refreshableSessions = archived.archived_at === null ? liveSessions : liveSessions.filter(
+          session => findOtherSessionOwner(this.db, session.sessionName, session.nodeId, { ignoreArchived: true }) === null,
+        );
+        await this.deps.resumeMetadataRefresher.refresh(refreshableSessions);
       }
       const snap = this.deps.snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
       result.snapshotId = snap.id;

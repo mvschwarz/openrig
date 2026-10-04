@@ -102,6 +102,40 @@ describe("Claude current conversation at shutdown", () => {
     expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBe(oldId);
   });
 
+  it("preserves null provenance when the current token is unchanged", async () => {
+    const f = fixture();
+    db.prepare("UPDATE sessions SET resume_provenance = NULL WHERE id = ?").run(f.session.id);
+    fs.writeFileSync(f.file, JSON.stringify({ name: f.name, sessionId: oldId }));
+    await f.teardown.teardown(f.rig.id);
+    const session = registry.getSessionsForRig(f.rig.id)[0]!;
+    expect(session.resumeToken).toBe(oldId);
+    expect(session.resumeProvenance).toBeNull();
+    expect(session.resumeLastProbeStatus).toBe("resumable");
+    expect(f.probe).not.toHaveBeenCalled();
+  });
+
+  it("keeps an archived namesake's own conversation in the pre-down snapshot", async () => {
+    const f = fixture();
+    rigRepo.archiveRig(f.rig.id);
+    const live = rigRepo.createRig("clear-test");
+    const liveNode = rigRepo.addNode(live.id, "worker", { runtime: "claude-code", cwd: root });
+    const liveSession = registry.registerSession(liveNode.id, f.name);
+    registry.updateStatus(liveSession.id, "running");
+    registry.updateBinding(liveNode.id, { tmuxSession: f.name, tmuxPane: "%2" });
+    registry.updateResumeToken(liveSession.id, "claude_id", newId, "scrape");
+    // The name and PID file now belong to the live rig, not the archived row.
+    f.rows[1]!.command = `claude --session-id ${newId} --name ${f.name}`;
+    const result = await f.teardown.teardown(f.rig.id);
+    const snap = snapshotRepo.getSnapshot(result.snapshotId!)!;
+    expect(result.errors).toEqual([]);
+    expect(f.tmux.killSession).not.toHaveBeenCalled();
+    expect(registry.getSessionsForRig(live.id)[0]).toMatchObject({ resumeToken: newId, status: "running" });
+    expect(snap.data.sessions.find(s => s.id === f.session.id)?.resumeToken).toBe(oldId);
+    expect(registry.getSessionsForRig(f.rig.id)[0]?.resumeToken).toBe(oldId);
+    expect(f.listClaudeProcesses).not.toHaveBeenCalled();
+    expect(f.probe).not.toHaveBeenCalled();
+  });
+
   it.each(["missing", "malformed", "wrong-name", "invalid-id", "old-file", "changed-process", "ambiguous-process", "background-process"])("keeps existing shutdown behavior on %s evidence", async (kind) => {
     const f = fixture();
     if (kind === "missing") fs.unlinkSync(f.file);
