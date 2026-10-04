@@ -886,7 +886,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       const settingsStore = new ContextPackSettingsStore();
       const cfg = settingsStore.resolveConfig();
       const workspacePacksRoot = nodePath.join(cfg.workspaceRoot, ".openrig", "context-packs");
-      if (workspacePacksRoot !== userPacksRoot && workspacePacksRoot !== systemPacksRoot && fs.existsSync(workspacePacksRoot)) {
+      // Registered even before it exists: scan() skips a missing root, so a
+      // folder created after startup is found by the next sync, not a restart.
+      if (workspacePacksRoot !== userPacksRoot && workspacePacksRoot !== systemPacksRoot) {
         roots.push({ path: workspacePacksRoot, sourceType: "workspace" });
       }
     } catch { /* settings unavailable; fall through with user-file root only */ }
