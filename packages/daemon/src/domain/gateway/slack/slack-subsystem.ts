@@ -12,6 +12,7 @@
 // the relay's history IS the subsystem's history — enabling the subsystem replays nothing the
 // relay already delivered (the enable-time backlog rule survives the cutover by construction).
 
+import { ChannelRecovery } from "./channel-recovery.js";
 import { channelStateDigest } from "../channel-operations.js";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -219,7 +220,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       deliver: async () => ({ ok: false, class: "slack-not-configured", detail: missing }),
       log,
     });
-    return { ...inert, status: () => ({ platform: "slack", configurationDigest: channelStateDigest(cfg), outboundReady: false, inboundReady: false, inbound: { state: "not-configured" } }) };
+    return { ...inert, status: () => ({ platform: "slack", configurationDigest: channelStateDigest(cfg), outboundReady: false, inboundReady: false, recovery: { state: "unavailable", reason: "inbound-not-configured" }, inbound: { state: "not-configured" } }) };
   }
 
   const registrySurface: RegistrySurface = opts.registry ?? { loadHumanRegistry, resolveSlackHandle };
@@ -540,6 +541,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   const stops: Array<() => void> = [];
   const starts: Array<() => void> = [];
   let inboundHandle: SocketInboundHandle | undefined;
+  let recovery: ChannelRecovery | undefined;
 
   if (outboundReady) {
     const driver = new SlackOutboundDriver({
@@ -601,13 +603,16 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       } : {}),
       log,
     });
+    recovery = new ChannelRecovery({ channel: cfg.channel, token: bot, stateDir: stateDir(opts.home), router, fetchImpl: opts.fetchImpl });
     starts.push(() => {
+      recovery!.initialize(); // persist the once-only floor before any live events
       inboundHandle = startSocketInbound(app!, router, {
         fetchImpl: opts.fetchImpl,
         wsFactory: opts.wsFactory,
         retryIntervalMs: opts.inboundRetryIntervalMs,
         inboundMaxConnects: opts.inboundMaxConnects,
         receipts,
+        recovery,
         log,
       });
       log("slack socket-mode inbound started (subsystem path)");
@@ -634,6 +639,7 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       platform: "slack", configurationDigest: channelStateDigest(cfg),
       outboundReady,
       inboundReady,
+      recovery: recovery?.status() ?? { state: "unavailable", reason: "inbound-not-configured" },
       inbound: inboundHandle?.status() ?? { state: inboundReady ? "not-started" : "not-configured", generation: 0, reconnects: 0 },
     }),
   };

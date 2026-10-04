@@ -68,6 +68,7 @@ export async function postWebhook(
 }
 
 export interface WebApiResult {
+  retryAfterSeconds?: number;
   ok: boolean; // Slack-level ok (json.ok === true AND 2xx)
   status: number;
   grantedScopes: string[]; // parsed from x-oauth-scopes response header (item 5)
@@ -141,7 +142,9 @@ export async function callWebApi(
         /* non-JSON */
       }
       const ok = res.ok && json.ok === true;
-      return { ok, status: res.status, grantedScopes, json, error: ok ? undefined : String(json.error ?? `http ${res.status}`) };
+      const retryAfter = Number(res.headers.get("retry-after"));
+      return { ok, status: res.status, grantedScopes, json,
+        ...(Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}), error: ok ? undefined : String(json.error ?? `http ${res.status}`) };
     });
   } catch (e) {
     return { ok: false, status: 0, grantedScopes: [], json: {}, error: `web-api transport: ${(e as Error).message}` };

@@ -53,7 +53,7 @@ export interface SlackDeps {
   log?: (msg: string) => void;
   /** Injectable daemon-surface loader (tests). Default: lazy import of the narrow subpath. */
   surface?: () => Promise<SlackSurface>;
-  clientFactory?: () => Pick<DaemonClient, "post">;
+  clientFactory?: () => Pick<DaemonClient, "post"> & Partial<Pick<DaemonClient, "get">>;
 }
 
 const RETIRED_TEACHING =
@@ -117,10 +117,10 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       log(`Next: if you have no Slack app yet, start with ${MANIFEST_FIRST_STEP}. Then put SLACK_BOT_TOKEN / SLACK_APP_TOKEN in ${next.secretsEnvFile ?? "<--secrets-env-file> (0600)"}, then \`rig slack verify\`, then \`rig slack enable\`.`);
     });
 
-  // ---- status (honest unconfigured, no network) ----
+  // ---- status (local configuration + bounded daemon snapshot; no Slack calls) ----
   cmd
     .command("status")
-    .description("Show the connector's configured + resolvable state (honest; no network)")
+    .description("Show local configuration and bounded daemon socket/recovery observations (no Slack calls)")
     .option("--json", "JSON output")
     .action(async (opts) => {
       const surface = await loadSurface();
@@ -130,11 +130,28 @@ export function slackCommand(deps: SlackDeps = {}): Command {
       const permWarn = cfg.secretsEnvFile ? surface.checkEnvFilePermissions(cfg.secretsEnvFile) : null;
       const unconfigured = readiness.some((r) => !r.ok);
       const next = unconfigured ? `First step: ${MANIFEST_FIRST_STEP}.` : null;
+      let observation: Record<string, unknown> = { state: "unknown", reason: "daemon-unavailable" };
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // Default client's identity lookup and request each have a <=900ms bound.
+        // The outer deadline also bounds injected/old clients; this read starts no work.
+        const client = deps.clientFactory?.() ?? new DaemonClient(undefined, { timeoutMs: 900 });
+        const response = await Promise.race([
+          client.get?.<Record<string, unknown>>("/api/gateway/slack/status", { timeoutMs: 900 }),
+          new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), 2000); }),
+        ]);
+        if (response?.status === 200 && response.data && typeof response.data.state === "string") {
+          observation = response.data;
+        }
+      } catch { /* Local config remains useful when daemon observation is unavailable. */ }
+      finally { if (timer) clearTimeout(timer); }
       if (opts.json) {
-        log(JSON.stringify({ config: { ...cfg }, readiness, permWarning: permWarn, next }));
+        log(JSON.stringify({ config: { ...cfg }, readiness, permWarning: permWarn, next, observation }));
       } else {
-        log(`slack-connector (config: ${cfg.enabled ? "enabled" : "disabled"}; delivery runs IN-DAEMON — S10 subsystem)`);
+        log(`slack-connector configuration checks (config: ${cfg.enabled ? "enabled" : "disabled"}; delivery runs IN-DAEMON — S10 subsystem)`);
         for (const r of readiness) log(`  ${r.ok ? "✓" : "✗"} ${r.label}: ${r.detail}`);
+        log(`Daemon observation: ${JSON.stringify(observation)}`);
+        log("Connected/configured alone is not proof of delivery. Recovery covers available top-level channel history only.");
         if (permWarn) log(`  ⚠ ${permWarn}`);
         if (next) log(`  ${next}`);
       }

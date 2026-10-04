@@ -221,3 +221,80 @@ export class InboundReceiptStore {
     }
   }
 }
+
+/** Slack timestamps are decimal seconds with up to six fractional digits, not floats. */
+export function slackMicros(value: unknown): bigint | null {
+  if (typeof value !== "string" || !/^\d{1,12}\.\d{1,6}$/.test(value)) return null;
+  const [seconds, fraction] = value.split(".");
+  return BigInt(seconds!) * 1_000_000n + BigInt(fraction!.padEnd(6, "0"));
+}
+export function slackTimestamp(micros: bigint): string {
+  return `${micros / 1_000_000n}.${String(micros % 1_000_000n).padStart(6, "0")}`;
+}
+
+export interface ChannelCoverage {
+  coverageStart: string;
+  coveredThrough: string;
+  seedBasis: "newest-durable-landing" | "feature-adoption";
+  pending?: { upper: string; nextLatest: string };
+  nextRetryAt?: number;
+}
+
+function readOptional(file: string, fsops: StateFsOps): string | undefined {
+  try { return fsops.readFileSync(file); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error; // Never replace unreadable existing coverage with a new floor.
+  }
+}
+
+/** A scan boundary, not an event receipt. Status uses an in-memory snapshot, never this file. */
+export class ChannelCoverageStore {
+  constructor(private readonly file: string, private readonly fsops: StateFsOps = nodeStateFs) {}
+
+  private read(): Record<string, ChannelCoverage> {
+    const raw = readOptional(this.file, this.fsops);
+    if (raw === undefined) return {};
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("invalid coverage store");
+    for (const c of Object.values(data) as ChannelCoverage[]) {
+      const start = slackMicros(c?.coverageStart), through = slackMicros(c?.coveredThrough);
+      if (start === null || through === null || start > through ||
+        !["newest-durable-landing", "feature-adoption"].includes(c.seedBasis) ||
+        (c.nextRetryAt !== undefined && (!Number.isFinite(c.nextRetryAt) || c.nextRetryAt < 0))) throw new Error("invalid coverage checkpoint");
+      if (c.pending) {
+        const upper = slackMicros(c.pending.upper), next = slackMicros(c.pending.nextLatest);
+        if (upper === null || next === null || next <= through || next > upper) throw new Error("invalid pending interval");
+      }
+    }
+    return data;
+  }
+
+  save(channel: string, coverage: ChannelCoverage): void {
+    const data = this.read();
+    Object.defineProperty(data, channel, { value: coverage, enumerable: true, configurable: true });
+    this.fsops.mkdirp(path.dirname(this.file));
+    this.fsops.writeFileSync(`${this.file}.tmp`, JSON.stringify(data) + "\n");
+    this.fsops.rename(`${this.file}.tmp`, this.file);
+  }
+
+  initialize(channel: string, at: string, seenFile: string, receiptsFile: string): ChannelCoverage {
+    const data = this.read();
+    if (Object.hasOwn(data, channel)) return data[channel]!;
+    // Only once per channel. A live event can seed an upgrade, never advance later coverage.
+    const candidates: string[] = [];
+    for (const r of parseLines(readOptional(seenFile, this.fsops) ?? "") as SeenRecord[]) {
+      if (typeof r.id === "string" && r.id.startsWith(`${channel}:`)) candidates.push(r.id.slice(channel.length + 1));
+    }
+    for (const r of parseLines(readOptional(receiptsFile, this.fsops) ?? "") as InboundReceipt[]) {
+      if (r.status === "accepted" && r.channel === channel && r.eventTs) candidates.push(r.eventTs);
+    }
+    const valid = candidates.filter(ts => slackMicros(ts) !== null);
+    valid.sort((a, b) => slackMicros(a)! < slackMicros(b)! ? 1 : -1);
+    const floor = valid[0] ?? at;
+    const coverage: ChannelCoverage = { coverageStart: floor, coveredThrough: floor,
+      seedBasis: valid.length ? "newest-durable-landing" : "feature-adoption" };
+    this.save(channel, coverage);
+    return coverage;
+  }
+}

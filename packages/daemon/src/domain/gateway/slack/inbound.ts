@@ -32,6 +32,8 @@ export interface SlackEvent {
   thread_ts?: string;
   channel?: string;
   files?: unknown[];
+  /** Internal history provenance, retained across dead-letter retry. */
+  recoveredAfterGap?: boolean;
 }
 
 /** #193 — the parts of a Socket Mode `block_actions` payload (a button click) we read. */
@@ -146,6 +148,10 @@ export class InboundRouter {
     // nothing; the media file is OUR copy). Failures are per-file and named:
     // the message always survives a failed transfer.
     const sections: string[] = [text];
+    if (ev.recoveredAfterGap) {
+      const posted = new Date(Number(ev.ts) * 1000).toISOString();
+      sections.unshift(`Recovered after a gap (late delivery). Originally posted ${posted} (Slack ts ${ev.ts}).`);
+    }
     if (transfer && (transfer.stored.length > 0 || transfer.failed.length > 0)) {
       const lines: string[] = [];
       if (transfer.stored.length > 0) {
@@ -162,7 +168,7 @@ export class InboundRouter {
     const firstFileName = transfer?.stored[0]?.name ?? transfer?.failed[0]?.name;
     const headline = text.trim() ? text : firstFileName ? `[file] ${firstFileName}` : text;
     return {
-      summary: `Founder via Slack: ${headline.slice(0, 90)}`,
+      summary: `${ev.recoveredAfterGap ? "[Recovered after gap] " : ""}Founder via Slack: ${headline.slice(0, 90)}`,
       body: `${sections.filter((s) => s.length > 0).join("\n\n")}\n\n---\nSource: ${meta}${correlationQitemId ? `\nIn reply to: ${correlationQitemId}` : ""}\nRouted by openrig slack-inbound. Default destination per config; re-route via queue as needed.`,
     };
   }
@@ -182,16 +188,18 @@ export class InboundRouter {
    * failure so callers dead-letter ONLY real failures. On success, marks seen
    * (durable qitem exists → safe).
    */
-  private async attemptLand(ev: SlackEvent): Promise<{
+  private async attemptLand(ev: SlackEvent, isCurrent: () => boolean = () => true): Promise<{
     landed: boolean;
     qitemId?: string;
-    reason?: "dup" | "create_failed" | "resolve_failed" | "unregistered";
+    reason?: "dup" | "inflight" | "inactive" | "create_failed" | "resolve_failed" | "unregistered";
     correlationQitemId?: string;
     replyResolution?: "resolved" | "already-resolved" | "not-applicable";
   }> {
     const ts = ev.ts ?? "";
     const eventId = this.inboundEventId(ev);
-    if (!ts || this.inflight.has(eventId) || this.deps.seen.load().has(eventId)) return { landed: false, reason: "dup" };
+    if (!ts || this.deps.seen.load().has(eventId)) return { landed: false, reason: "dup" };
+    if (this.inflight.has(eventId)) return { landed: false, reason: "inflight" };
+    if (!isCurrent()) return { landed: false, reason: "inactive" };
     // A6 v3 registration gate: admit-iff-registered. An unregistered sender is REFUSED here —
     // never landed as a fabricated human-<slackid>@kernel seat. This is a POLICY refusal, not a
     // transient failure, so it is NOT dead-lettered (retrying can't help until the human registers).
@@ -230,6 +238,7 @@ export class InboundRouter {
           }
         }
       }
+      if (!isCurrent()) return { landed: false, reason: "inactive" };
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
       const { summary, body } = this.summaryOf(ev, transfer, route.correlationQitemId);
@@ -273,7 +282,7 @@ export class InboundRouter {
    * LIVE path: attempt to land; on a genuine create failure, dead-letter the
    * event (attempt-counted) BEFORE returning — NOT marked seen (item 8).
    */
-  async route(ev: SlackEvent, attempts = 0): Promise<{
+  async route(ev: SlackEvent, attempts = 0, isCurrent: () => boolean = () => true): Promise<{
     landed: boolean;
     qitemId?: string;
     disposition: "accepted" | "ignored" | "refused" | "dead-lettered";
@@ -281,12 +290,12 @@ export class InboundRouter {
     correlationQitemId?: string;
     replyResolution?: "resolved" | "already-resolved" | "not-applicable";
   }> {
-    const r = await this.attemptLand(ev);
+    const r = await this.attemptLand(ev, isCurrent);
     if (!r.landed && (r.reason === "create_failed" || r.reason === "resolve_failed")) {
       this.deps.deadLetter.append(ev, attempts + 1);
       this.deps.log?.(`dead-lettered ts=${ev.ts} (attempt ${attempts + 1})`);
     }
-    const disposition = r.landed ? "accepted" : r.reason === "unregistered" ? "refused" : r.reason === "dup" ? "ignored" : "dead-lettered";
+    const disposition = r.landed ? "accepted" : r.reason === "unregistered" ? "refused" : (r.reason === "dup" || r.reason === "inflight" || r.reason === "inactive") ? "ignored" : "dead-lettered";
     return { landed: r.landed, qitemId: r.qitemId, disposition, reason: r.reason, correlationQitemId: r.correlationQitemId, replyResolution: r.replyResolution };
   }
 
@@ -397,7 +406,7 @@ export class InboundRouter {
       const r = await this.attemptLand(e.ev);
       if (r.landed) landed++;
       else if (r.reason === "create_failed" || r.reason === "resolve_failed") stillFailing.push({ ev: e.ev, at: e.at, attempts: e.attempts + 1 });
-      // reason === "dup" (in-flight) → drop; a concurrent path owns it
+      else if (r.reason === "inflight") stillFailing.push(e); // owner has not proved durable landing yet
     }
     this.deps.deadLetter.replaceBatch(entries, stillFailing); // atomic; newer appends stay owed
     const actions = await this.retryActionDeadLetters();
@@ -451,7 +460,7 @@ export async function handleEnvelope(
     return router.routeAction(env.payload);
   }
   if (env.type !== "events_api") return { status: "ignored", reason: "envelope-type" };
-  const ev = env.payload?.event ?? {};
+  const ev = { ...env.payload?.event, recoveredAfterGap: undefined }; // only history admission supplies recovery provenance
   const decision = ingestDecision(ev);
   if (!decision.ingest) {
     // P28: name the branch that FIRED and the conversation it came from. Privacy rail — a channel

@@ -194,3 +194,27 @@ describe("Slack verify reports optional capabilities from granted scopes", () =>
     });
   }
 });
+
+describe("Slack status separates local configuration from bounded daemon observation", () => {
+  it("retains local JSON fields and reports the observed socket and pending interval without Slack I/O", async () => {
+    const get=vi.fn(async <T>(path:string,opts:unknown)=>{
+      expect(path).toBe("/api/gateway/slack/status");expect(opts).toEqual({timeoutMs:900});
+      return {status:200,data:{state:"active",connector:{configurationDigest:"observed-digest",inbound:{state:"connected",generation:2},recovery:{state:"incomplete",reason:"pass-budget"}}} as T};
+    });
+    const fetchImpl=vi.fn(async()=>{throw new Error("no Slack call");});
+    const {deps,logs,posts}=makeDeps({fetchImpl,clientFactory:()=>({get,post:vi.fn()})});
+    await run(slackCommand(deps),["status","--json"]);
+    expect(JSON.parse(logs[0]!)).toMatchObject({config:{enabled:false},readiness:[],permWarning:null,next:null,
+      observation:{state:"active",connector:{configurationDigest:"observed-digest",recovery:{state:"incomplete"}}}});
+    expect(posts).toEqual([]);expect(fetchImpl).not.toHaveBeenCalled();
+  });
+  it.each(["offline","malformed","slow"])("keeps configuration and labels live state unknown when %s",async mode=>{
+    vi.useFakeTimers();
+    try {
+      const get=vi.fn(async<T>()=>{if(mode==="offline")throw new Error("offline");if(mode==="slow")return new Promise<never>(()=>{});return {status:200,data:{unexpected:true} as T};});
+      const {deps,logs}=makeDeps({clientFactory:()=>({get,post:vi.fn()})});
+      const pass=run(slackCommand(deps),["status","--json"]);await vi.advanceTimersByTimeAsync(2000);await pass;
+      expect(JSON.parse(logs[0]!)).toMatchObject({config:{channel:"C1"},observation:{state:"unknown",reason:"daemon-unavailable"}});
+    } finally {vi.useRealTimers();}
+  });
+});
