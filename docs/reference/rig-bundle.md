@@ -25,8 +25,9 @@ Link import needs a running, verified local daemon and a credential-free, public
 upload files to remote daemons. For a remote target, run the link command on that host, or create an archive, transfer
 it with its sibling digest, and use the existing path command there. Existing local path/name commands keep their
 dispatch. Importing does not install dependencies or execute repository scripts. Before packaging a link, it checks
-the selected folder's symlinks, including linked directories: every target must resolve inside the fetched checkout.
-Unresolved or escaping links stop the import and remove its temporary source folder.
+the checkout's symlinks (excluding Git metadata), member agent refs and agent imports: every target must resolve inside
+the fetched checkout. Shared agents outside the selected folder are allowed within that repository. Preset staging
+preserves that directory layout. Unresolved or escaping references stop the import and remove its temporary source.
 
 The selected source is packaged through the existing bundler once. Link `up`/`install` then use the existing bundle
 install path, including compatibility and target-conflict checks. For a link, the default install target is the current

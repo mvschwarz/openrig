@@ -5,6 +5,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import type { StatusDeps } from "../src/commands/status.js";
 import { DaemonClient } from "../src/client.js";
+import { PodBundleAssembler } from "../../daemon/src/domain/pod-bundle-assembler.js";
 import { parseGitHubBundleLink, selectGitHubBundleSource, prepareGitHubBundle, importGitHubBundle, bundleIdentityLines, bundleGit, authoredCompatibility } from "../src/lib/bundle-source.js";
 
 const state = vi.hoisted(() => ({ host: undefined as string | undefined, origin: "local-instance", remote: "local-instance" }));
@@ -88,6 +89,85 @@ describe("GitHub bundle source", () => {
       return "";
     };
   }
+
+  function rigWithAgent(folder: string, ref: string) {
+    fs.writeFileSync(path.join(folder, "rig.yaml"), `version: "0.2"\nname: team\npods:\n  - id: dev\n    label: Dev\n    members:\n      - id: helper\n        agent_ref: ${JSON.stringify(ref)}\n        profile: default\n        runtime: codex\n        cwd: .\n`);
+  }
+
+  function writeAgent(dir: string, name: string, imports: string[] = []) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "agent.yaml"), `name: ${name}\nversion: "1.0.0"\nresources:\n  skills: []\nprofiles:\n  default:\n    uses:\n      skills: []\n${imports.length ? "imports:\n" + imports.map(ref => `  - ref: ${JSON.stringify(ref)}\n`).join("") : ""}`);
+    fs.writeFileSync(path.join(dir, "notes.txt"), `${name} repository fixture\n`);
+  }
+
+  it("rejects an outside-folder agent symlink and removes the import", async () => {
+    const outside = path.join(root, "host-only.txt");
+    fs.writeFileSync(outside, "synthetic host-only fixture\n");
+    const imports = path.join(root, "imports");
+    const git = checkoutWith((checkout, folder) => {
+      rigWithAgent(folder, "local:../../agents/helper");
+      const agent = path.join(checkout, "agents/helper");
+      writeAgent(agent, "helper");
+      fs.symlinkSync(outside, path.join(agent, "outside.txt"));
+    });
+    await expect(prepareGitHubBundle(URL, git, imports)).rejects.toThrow(/symlinks must resolve inside/);
+    expect(fs.readdirSync(imports)).toEqual([]);
+    expect(fs.readFileSync(outside, "utf8")).toBe("synthetic host-only fixture\n");
+  });
+
+  it.each(["member-local", "member-path", "import-local", "import-path"])("rejects outside agent references: %s", async kind => {
+    const outside = path.join(root, "host-agent");
+    writeAgent(outside, "host-fixture");
+    const imports = path.join(root, "imports");
+    const git = checkoutWith((checkout, folder) => {
+      const helper = path.join(checkout, "agents/helper");
+      const base = kind.startsWith("member") ? folder : helper;
+      const ref = kind.endsWith("local") ? `local:${path.relative(base, outside)}` : `path:${outside}`;
+      if (kind.startsWith("member")) rigWithAgent(folder, ref);
+      else {
+        rigWithAgent(folder, "local:../../agents/helper");
+        writeAgent(helper, "helper", [ref]);
+      }
+    });
+    await expect(prepareGitHubBundle(URL, git, imports)).rejects.toThrow(/agent refs and imports must resolve inside/);
+    expect(fs.readdirSync(imports)).toEqual([]);
+    expect(fs.readFileSync(path.join(outside, "notes.txt"), "utf8")).toBe("host-fixture repository fixture\n");
+  });
+
+  it.each([false, true])("assembles shared agents and imports outside the selected folder (preset=%s)", async preset => {
+    const git = checkoutWith((checkout, folder) => {
+      rigWithAgent(folder, "local:../../agents/helper");
+      writeAgent(path.join(checkout, "agents/helper"), "helper", ["local:../library"]);
+      writeAgent(path.join(checkout, "agents/library"), "library");
+      fs.writeFileSync(path.join(folder, "configurations.yaml"), 'schema: openrig.bundle-configurations/v1\nrecommended: authored\nseats:\n  dev.helper:\n    runtimes: { codex: default, claude-code: default }\npresets:\n  authored: { dev.helper: codex }\n  alternate: { dev.helper: claude-code }\n');
+    });
+    const prepared = await prepareGitHubBundle(URL, git, path.join(root, "imports"));
+    const output = path.join(root, "assembled");
+    const assembler = new PodBundleAssembler({ fsOps: {
+      readFile: file => fs.readFileSync(file, "utf8"), readFileBuffer: fs.readFileSync,
+      exists: fs.existsSync, realpath: fs.realpathSync,
+      mkdirp: dir => { fs.mkdirSync(dir, { recursive: true }); },
+      writeFile: (file, bytes) => fs.writeFileSync(file, bytes),
+      copyDir: (from, to) => fs.cpSync(from, to, { recursive: true }),
+      listFiles: dir => fs.readdirSync(dir, { recursive: true }).map(String).filter(file => fs.statSync(path.join(dir, file)).isFile()),
+    } });
+    const f = fixture();
+    let assembledRigRoot = "";
+    f.post.mockImplementation(async (_url, body) => {
+      assembledRigRoot = body.rigRoot as string;
+      const result = assembler.assemble({ rigRoot: assembledRigRoot, rigSpecPath: body.specPath as string,
+        outputDir: output, bundleName: "fixture", bundleVersion: "1.0.0" });
+      expect(result.manifest.agents.map(agent => agent.name)).toEqual(["helper"]);
+      expect(fs.readFileSync(path.join(output, "agents/helper/notes.txt"), "utf8")).toBe("helper repository fixture\n");
+      expect(fs.readFileSync(path.join(output, "agents/library/notes.txt"), "utf8")).toBe("library repository fixture\n");
+      expect(fs.readFileSync(path.join(output, "rig.yaml"), "utf8")).toContain(`runtime: ${preset ? "claude-code" : "codex"}`);
+      return { status: 201, data: { source: prepared.source, configurationId: "fixture", packageDigest: { value: "fixture", coverage: "openrig.package-digest/v1" }, assembler: { openrigVersion: "0.6.6" }, archiveHash: "fixture" } };
+    });
+    await importGitHubBundle(URL, f.deps, preset ? { preset: "alternate" } : {}, async () => prepared);
+    expect(f.post).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(prepared.checkoutDir)).toBe(false);
+    expect(fs.existsSync(assembledRigRoot)).toBe(false);
+  });
 
   it.each(["relative", "absolute", "dangling", "nested-directory"])("rejects unsafe repository symlinks: %s", async kind => {
     const outside = path.join(root, "host-only.txt");
@@ -201,10 +281,12 @@ describe("GitHub bundle source", () => {
 
   it.each(["compatibility", "configuration"])("removes owned checkout on definite %s failure before create", async kind => {
     const f = fixture();
+    fs.writeFileSync(f.prepared.receiptPath, "{}\n");
     if (kind === "compatibility") fs.writeFileSync(path.join(f.prepared.folder, "bundle.yaml"), "compatibility: false\n");
     await expect(importGitHubBundle(URL, f.deps, kind === "configuration" ? { preset: "missing" } : {}, f.prepare)).rejects.toThrow();
     expect(f.post).not.toHaveBeenCalled();
     expect(fs.existsSync(f.prepared.checkoutDir)).toBe(false);
+    expect(fs.existsSync(f.prepared.receiptPath)).toBe(false);
   });
 
   it("reports malformed authored minima instead of dropping them", () => {

@@ -106,7 +106,7 @@ export async function bundleGit(cwd: string, args: string[]): Promise<string> {
 }
 
 /** The link path must not vendor files from the installing host through repository symlinks. */
-function checkGitHubBundleSymlinks(folder: string, checkoutDir: string): void {
+function checkGitHubBundleSymlinks(checkoutDir: string): void {
   const root = realpathSync(checkoutDir);
   const visited = new Set<string>();
   const walk = (file: string): void => {
@@ -119,10 +119,40 @@ function checkGitHubBundleSymlinks(folder: string, checkoutDir: string): void {
     const directory = realpathSync(file);
     if (visited.has(directory)) return;
     visited.add(directory);
-    for (const name of readdirSync(directory)) walk(path.join(directory, name));
+    for (const name of readdirSync(directory)) if (name !== ".git") walk(path.join(directory, name));
   };
-  try { walk(folder); }
+  try { walk(root); }
   catch { throw new Error("GitHub bundle symlinks must resolve inside the fetched repository; no bundle was built."); }
+}
+
+/** Match the assembler: member refs use the rig directory; imports use their agent directory. */
+function checkGitHubBundleAgentRefs(folder: string, checkoutDir: string): void {
+  const root = realpathSync(checkoutDir);
+  const contained = (file: string): string => {
+    const real = realpathSync(file);
+    const relative = path.relative(root, real);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error();
+    return real;
+  };
+  const agent = (ref: unknown, from: string, ancestors = new Set<string>()): void => {
+    if (ref === "builtin:terminal") return;
+    if (typeof ref !== "string") throw new Error();
+    const dir = ref.startsWith("local:") && ref.length > 6 ? path.resolve(from, ref.slice(6))
+      : ref.startsWith("path:") && path.isAbsolute(ref.slice(5)) ? ref.slice(5) : undefined;
+    if (!dir) throw new Error();
+    const real = contained(dir);
+    if (ancestors.has(real)) throw new Error();
+    const spec = parseYaml(readFileSync(contained(path.join(dir, "agent.yaml")), "utf8")) as { imports?: Array<{ ref?: unknown }> };
+    const next = new Set(ancestors).add(real);
+    // Keep the lexical directory: resolving it first would change relative imports through an alias.
+    for (const imp of spec.imports ?? []) agent(imp.ref, dir, next);
+  };
+  try {
+    const spec = parseYaml(readFileSync(path.join(folder, "rig.yaml"), "utf8")) as { pods?: Array<{ members?: Array<{ agent_ref?: unknown }> }> };
+    for (const pod of spec.pods ?? []) for (const member of pod.members ?? []) agent(member.agent_ref, folder);
+  } catch {
+    throw new Error("GitHub bundle agent refs and imports must resolve inside the fetched repository; no bundle was built.");
+  }
 }
 
 export interface PreparedBundleSource {
@@ -155,7 +185,8 @@ export async function prepareGitHubBundle(input: string, git = bundleGit, import
       const specRelative = path.relative(realpathSync(checkoutDir), realpathSync(path.join(folder, "rig.yaml")));
       if (specRelative === ".." || specRelative.startsWith(`..${path.sep}`) || path.isAbsolute(specRelative)) throw new Error();
     } catch { throw new Error("The selected GitHub bundle folder must contain rig.yaml inside the fetched repository."); }
-    checkGitHubBundleSymlinks(folder, checkoutDir);
+    checkGitHubBundleSymlinks(checkoutDir);
+    checkGitHubBundleAgentRefs(folder, checkoutDir);
     const receiptPath = path.join(owned, "source.json");
     writeFileSync(receiptPath, JSON.stringify(source, null, 2) + "\n");
     return { source, folder, checkoutDir, archivePath: path.join(owned, "bundle.rigbundle"), receiptPath };
@@ -230,14 +261,17 @@ export async function importGitHubBundle(input: string, deps: StatusDeps, opts: 
       const declared = readDeclaredConfigurations(folder);
       if (!declared) throw new ConfigurationError("This bundle has no configurations.yaml; build it as authored or choose a bundle with declared configurations.");
       const chosen = resolveConfiguration(declared, authoredMapping(specPath), { preset: opts.preset, seats: opts.seat });
-      const staged = stageConfiguration(folder, specPath, declared, chosen);
+      // Preserve monorepo-relative refs when a preset changes the selected rig.
+      const staged = stageConfiguration(prepared.checkoutDir, specPath, declared, chosen);
       configurationStaging = staged.stagingDir;
-      folder = staged.stagingDir;
       specPath = staged.rigSpecPath;
+      folder = path.dirname(specPath);
+      checkGitHubBundleAgentRefs(folder, staged.stagingDir);
       configuration = { id: chosen.configurationId, ...(chosen.preset ? { preset: chosen.preset } : {}) };
     }
   } catch (error) {
     rmSync(prepared.checkoutDir, { recursive: true, force: true });
+    rmSync(prepared.receiptPath, { force: true });
     if (configurationStaging) rmSync(configurationStaging, { recursive: true, force: true });
     throw error;
   }
