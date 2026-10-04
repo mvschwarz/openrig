@@ -100,6 +100,14 @@ describe("Claude composer below noninteractive status warnings", () => {
     expect(classifyPaneActivity(content).state).toBe("unknown");
   });
 
+  it.each([[update], [focus], [weekly], [update, focus], [update, focus, weekly]])("requires a complete input frame for warning-suffixed idle: %j", (...trailers) => {
+    for (const before of ["● Ready.", "✻ Crunched for 2s", `${workingRows[0]}\n● Completed response.`]) {
+      const framed = pane(trailers as string[], "❯\u00a0", before);
+      expect(classifyPaneActivity(framed).state).toBe("agent_idle");
+      expect(classifyPaneActivity(framed.replaceAll(border, "")).state).toBe("unknown");
+    }
+  });
+
   it("preserves a uniformly indented input block without mistaking its columns", () => {
     const indent = (content: string) => content.split("\n").map(line => `  ${line}`).join("\n");
     expect(classifyPaneActivity(indent(pane([update]))).state).toBe("agent_idle");

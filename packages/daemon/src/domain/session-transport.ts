@@ -142,6 +142,7 @@ function findClaudeComposer(paneContent: string) {
   while (bar >= 0 && CLAUDE_STATUS_WARNINGS.some((pattern) => pattern.test(lines[bar]!.trim()))) bar--;
   const supportedWarningFooter = lines[bar]?.trim() === "⏵⏵ accept edits on (shift+tab to cycle) · ← for agents";
   let indent = /^([ \t]*)─{3,}$/.exec(lines[bar - 1] ?? "")?.[1];
+  const framed = indent !== undefined;
   let prompt = lines[bar - 2] ?? "";
   let statusStart = bar - 4;
   if (indent === undefined) {
@@ -172,7 +173,7 @@ function findClaudeComposer(paneContent: string) {
     // or completed status ends this block; do not revive an older work row.
     if (!/^\s/.test(line)) { headSeen = true; break; }
   }
-  return { text: prompt.slice(indent.length), hasWarnings: bar < lines.length - 1, supportedWarningFooter, headSeen, liveStatus };
+  return { text: prompt.slice(indent.length), framed, hasWarnings: bar < lines.length - 1, supportedWarningFooter, headSeen, liveStatus };
 }
 
 function findPromptDraftBeforeFooter(paneContent: string): string | null {
@@ -244,7 +245,8 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
   if (claudeComposer?.liveStatus) {
     return { state: "agent_active", reason: "mid_work_pattern", evidence: claudeComposer.liveStatus };
   }
-  if (claudeComposer && !claudeComposer.headSeen) {
+  // Unframed status evidence can veto idle, but warnings require a complete input frame to prove it.
+  if (claudeComposer && (!claudeComposer.headSeen || (claudeComposer.hasWarnings && !claudeComposer.framed))) {
     return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
   }
   if (claudeComposer && (!claudeComposer.hasWarnings || claudeComposer.supportedWarningFooter) &&
