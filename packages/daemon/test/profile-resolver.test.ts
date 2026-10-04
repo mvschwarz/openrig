@@ -817,7 +817,7 @@ describe("managed catalog selection composition", () => {
     }
   });
 
-  it("refuses a topology source whose identity matches the catalog but whose bytes do not", () => {
+  it("keeps selected bundle provenance when its identity matches a differing catalog copy", () => {
     const root = mkdtempSync(join(tmpdir(), "openrig-profile-skill-conflict-"));
     try {
       const catalog = join(root, "skills");
@@ -845,9 +845,64 @@ describe("managed catalog selection composition", () => {
         homedir: join(root, "home"),
       }));
 
-      expect(result).toMatchObject({ ok: false, errors: [expect.stringContaining("skill_identity_conflict")] });
+      expect(result).toMatchObject({ ok: true });
+      if (!result.ok) throw new Error(result.errors.join("; "));
+      expect(result.config.selectedResources.skills[0]).toMatchObject({ sourcePath: root, resource: { path: local } });
+      expect(result.config.skillLoadout?.entries[0]).toMatchObject({ sourceDir: local, sourceRoot: root, revision: "agent-spec:abc123" });
+      expect(result.config.skillWarnings).toEqual([expect.stringContaining("skill_bundle_precedence")]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+
+describe("selected bundle identity boundaries", () => {
+  it.each(["imported", "qualified", "same-bytes", "malformed", "wrong-name", "outside", "ambient", "unselected", "ambiguous"])("preserves %s semantics", (kind) => {
+    const root = mkdtempSync(join(tmpdir(), "bundle-skill-identity-"));
+    try {
+      const catalog = join(root, "catalog");
+      const installed = join(root, "installed");
+      const local = join(installed, "local");
+      const home = join(root, "home");
+      const id = kind === "qualified" ? "lib:shared" : "shared";
+      const text = (name: string, body: string) => `---\nname: ${name}\ndescription: Skill fixture\n---\n${body}\n`;
+      mkdirSync(join(catalog, id), { recursive: true });
+      mkdirSync(local, { recursive: true });
+      writeFileSync(join(catalog, "catalog.yaml"), `schema: openrig.skill-catalog/v1\nsystem: [${id}]\n`);
+      writeFileSync(join(catalog, id, "SKILL.md"), text(id, "Catalog"));
+      writeFileSync(join(local, "SKILL.md"), kind === "malformed" ? "Invalid skill" : text(kind === "wrong-name" ? "other" : "shared", kind === "same-bytes" ? "Catalog" : "Bundle"));
+      execFileSync("git", ["init", "-q", catalog]);
+      execFileSync("git", ["-C", catalog, "add", "."]);
+      execFileSync("git", ["-C", catalog, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "catalog"]);
+      const resources = { skills: [{ id: "shared", path: local }], guidance: [], subagents: [], plugins: [], runtimeResources: [] };
+      const imported = ["imported", "qualified", "ambiguous"].includes(kind);
+      const spec = makeSpec({ resources: imported || kind === "ambient" ? { ...resources, skills: [] } : resources,
+        profiles: { default: { uses: { skills: kind === "unselected" ? [] : [id], guidance: [], subagents: [], plugins: [], runtimeResources: [] } } } });
+      if (kind === "outside") {
+        const outside = join(root, "outside"); mkdirSync(outside);
+        writeFileSync(join(outside, "SKILL.md"), text("shared", "Outside"));
+        resources.skills[0]!.path = outside;
+      }
+      if (kind === "ambient") {
+        mkdirSync(join(home, ".claude/skills/shared"), { recursive: true });
+        writeFileSync(join(home, ".claude/skills/shared/SKILL.md"), text("shared", "Ambient"));
+      }
+      const result = resolveNodeConfig(makeCtx({ baseSpec: makeResolved(spec, installed), specRoot: installed,
+        importedSpecs: imported ? [makeResolved(makeSpec({ name: "lib", resources }), installed),
+          ...(kind === "ambiguous" ? [makeResolved(makeSpec({ name: "other", resources }), installed)] : [])] : [],
+        skillsRoot: catalog, homedir: home, member: makeMember({ cwd: join(root, "work") }) }));
+      if (["malformed", "wrong-name", "outside", "ambient", "ambiguous"].includes(kind)) {
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("invalid selection accepted");
+        expect(result.errors.join(";")).toMatch(kind === "ambiguous" ? /ambiguous/ : /skill_identity_conflict/);
+      } else {
+        expect(result.ok, JSON.stringify(result)).toBe(true);
+        if (!result.ok) throw new Error(result.errors.join(";"));
+        expect(result.config.skillLoadout?.entries[0]?.sourceDir).toBe(kind === "unselected" ? join(catalog, id) : local);
+        expect(result.config.selectedResources.skills.map(e => e.effectiveId)).toEqual([id]);
+        expect(result.config.skillWarnings?.length ?? 0).toBe(["same-bytes", "unselected"].includes(kind) ? 0 : 1);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

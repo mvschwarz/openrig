@@ -637,7 +637,7 @@ function classifySkillProjectionTarget(
     const actual = inspectSkillDirectory(target);
     if (actual.digest === skill.digest) {
       return prior
-        ? { status: "current", detail: "owned target matches catalog bytes" }
+        ? { status: "current", detail: "owned target matches selected source bytes" }
         : { status: "shadowed", detail: "equal unowned target already supplies these bytes" };
     }
     if (prior && actual.digest === prior.digest) {
@@ -646,8 +646,8 @@ function classifySkillProjectionTarget(
     return {
       status: "conflicting",
       detail: prior
-        ? "target differs from both the catalog and OpenRig's last owned projection; refusing to overwrite an operator edit"
-        : "unowned target differs from the selected catalog skill; move it aside or reconcile its bytes explicitly",
+        ? "target differs from both the selected source and OpenRig's last owned projection; refusing to overwrite an operator edit"
+        : "unowned target differs from the selected skill source; move it aside or reconcile its bytes explicitly",
     };
   } catch (err) {
     return { status: "conflicting", detail: (err as Error).message };
@@ -794,13 +794,13 @@ export function reconcileSkillLoadout(input: {
         const source = inspectSkillDirectory(skill.sourceDir);
         if (source.digest !== skill.digest) {
           status = "conflicting";
-          detail = "catalog source bytes no longer match the resolved loadout; resolve a fresh loadout before applying";
+          detail = "selected source bytes no longer match the resolved loadout; resolve a fresh loadout before applying";
           receipts[receipts.length - 1]!.status = status;
           receipts[receipts.length - 1]!.detail = detail;
         }
       } catch (err) {
         status = "conflicting";
-        detail = `catalog source cannot be projected safely: ${(err as Error).message}`;
+        detail = `selected source cannot be projected safely: ${(err as Error).message}`;
         receipts[receipts.length - 1]!.status = status;
         receipts[receipts.length - 1]!.detail = detail;
       }

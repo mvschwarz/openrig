@@ -2080,7 +2080,7 @@ export class PodRigInstantiator {
     }
     // P17: a divergent target is never SILENT again — each conflict rides the
     // instantiate warnings surface with the file, reason, and consequence.
-    (launchResult.warnings ??= []).push(...projectionConflictWarnings(planResult.plan));
+    (launchResult.warnings ??= []).push(...(configResult.config.skillWarnings ?? []), ...projectionConflictWarnings(planResult.plan));
 
     // Codex project() writes plan entries before startup-file delivery. Protect
     // edited skills there too; filtering only startup files is insufficient.
