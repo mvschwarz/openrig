@@ -168,18 +168,40 @@ describe("env routes", () => {
     expect(receipt["capturedAt"]).toBe("2026-04-09T11:00:00Z");
   });
 
-  it.each(["false", "true", 1, [], {}, null])("refuses non-boolean volume deletion consent %j without teardown", async (volumes) => {
-    let calls = 0;
-    const app = createApp({ getServicesRecord: () => SERVICE_RECORD, teardown: () => { calls++; return { ok: true }; } });
-    const res = await app.request("/api/rigs/rig-1/env/down", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ volumes }) });
-    expect({ status: res.status, calls }).toEqual({ status: 400, calls: 0 });
+  it.each(["false", "true", 1, 0, "", [], {}, null])("tears down normally for non-boolean volumes %j", async (volumes) => {
+    let capturedOpts: unknown = "not called";
+    const app = createApp({
+      getServicesRecord: () => SERVICE_RECORD,
+      teardown: (_rigId: string, opts?: unknown) => {
+        capturedOpts = opts;
+        return { ok: true };
+      },
+    });
+    const res = await app.request("/api/rigs/rig-1/env/down", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ volumes }),
+    });
+    expect(res.status).toBe(200);
+    expect(capturedOpts).toBeUndefined();
   });
 
-  it.each(["null", "[]", "{", "false"])("refuses invalid teardown envelopes %s", async (body) => {
-    let calls = 0;
-    const app = createApp({ getServicesRecord: () => SERVICE_RECORD, teardown: () => { calls++; return { ok: true }; } });
-    const res = await app.request("/api/rigs/rig-1/env/down", { method: "POST", headers: { "content-type": "application/json" }, body });
-    expect({ status: res.status, calls }).toEqual({ status: 400, calls: 0 });
+  it.each([undefined, "null", "[]", "{", "false"])("tears down normally for malformed or absent envelope %s", async (body) => {
+    let capturedOpts: unknown = "not called";
+    const app = createApp({
+      getServicesRecord: () => SERVICE_RECORD,
+      teardown: (_rigId: string, opts?: unknown) => {
+        capturedOpts = opts;
+        return { ok: true };
+      },
+    });
+    const res = await app.request("/api/rigs/rig-1/env/down", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(capturedOpts).toBeUndefined();
   });
 
   it("POST /env/down with volumes=true passes policyOverride=down_and_volumes to teardown", async () => {

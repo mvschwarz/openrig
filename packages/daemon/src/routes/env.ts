@@ -117,14 +117,8 @@ export function envRoutes(): Hono {
       return c.json({ error: "Service orchestrator not available" }, 500);
     }
 
-    const body: unknown = await c.req.json().catch(() => null);
-    if (!body || typeof body !== "object" || Array.isArray(body)) {
-      return c.json({ error: "Service teardown requires a JSON object" }, 400);
-    }
-    const volumes = (body as { volumes?: unknown }).volumes;
-    if (volumes !== undefined && typeof volumes !== "boolean") {
-      return c.json({ error: "volumes must be a boolean; only true authorizes volume deletion" }, 400);
-    }
+    const body = await c.req.json<{ volumes?: unknown } | null>().catch(() => null);
+    const volumes = body?.volumes;
 
     const result = volumes === true
       ? await serviceOrchestrator.teardown(rigId, { policyOverride: "down_and_volumes" })
