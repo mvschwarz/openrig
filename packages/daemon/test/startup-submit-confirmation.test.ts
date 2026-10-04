@@ -324,6 +324,25 @@ describe("startup prompt submission", () => {
     expect(f.submitted.includes(STARTUP_PROOF_INSTRUCTION_LINE)).toBe(frame.expected === "clear");
     if (frame.expected === "unverified") expect(result).toMatchObject({ submission: { status: "unverified" } });
   });
+  // Claude Code 2.1.289 can accept Enter after the first look: in an all-claude native run every seat's first
+  // look showed its startup prompt still collapsed ("[Pasted text #1 +95 lines]" on one seat), and each seat
+  // accepted that prompt moments later with no second Enter. Composer crops in 2.1.289's shape.
+  const pasteHint = "  paste again to expand                                     ◐ medium · /effort";
+  const composerCrop = (body: string) => `❯ ${body}\n${"─".repeat(80)}\n${pasteHint}\n`;
+  const collapsedPaste = composerCrop("[Pasted text #1 +95 lines]");
+  for (const identity of [false, true]) {
+    const path = identity ? "identity" : "challenge-only";
+    it(`confirms a ${path} prompt that Claude accepts after the first look, then sends the proof line`, async () => {
+      const f = fixture(0, "claude-code", !identity);
+      f.tmux.capturePaneContent.mockResolvedValueOnce(collapsedPaste).mockResolvedValueOnce(composerCrop("Press up to edit queued messages"));
+      const result = await f.start({ startupActions: proofActions(identity) });
+      expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(result.ok && result.submission).toBeUndefined();
+      expect(f.submitted).toHaveLength(2);
+      expect(f.submitted[1]).toBe(STARTUP_PROOF_INSTRUCTION_LINE);
+      expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2); // one Enter per submission; the startup prompt's is not repeated
+    });
+  }
   for (const identity of [false, true]) {
     const path = identity ? "identity" : "challenge-only";
     for (const observation of ["unavailable", "mismatch"] as const) {
