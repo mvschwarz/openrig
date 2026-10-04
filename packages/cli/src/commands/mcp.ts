@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { DaemonClient } from "../client.js";
-import { getDaemonStatus, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { createMcpServer } from "../mcp-server.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -22,21 +22,22 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
     .action(async (opts: { port?: string }) => {
       const deps = getDepsF();
 
-      let daemonPort: number;
+      let daemonUrl: string;
       if (opts.port) {
-        daemonPort = parseInt(opts.port, 10);
+        const daemonPort = parseInt(opts.port, 10);
         if (isNaN(daemonPort)) {
           console.error("Invalid port number");
           process.exitCode = 1;
           return;
         }
+        daemonUrl = `http://127.0.0.1:${daemonPort}`;
       } else {
         const status = await getDaemonStatus(deps.lifecycleDeps);
         if (!daemonStatusGuard(status)) return;
-        daemonPort = status.port!;
+        daemonUrl = getDaemonUrl(status);
       }
 
-      const client = deps.clientFactory(`http://127.0.0.1:${daemonPort}`);
+      const client = deps.clientFactory(daemonUrl);
       const server = createMcpServer(client);
       const transport = new StdioServerTransport();
       await server.connect(transport);
