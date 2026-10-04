@@ -443,6 +443,12 @@ If the recorded native token needs correction and you know the actual token:
   printf '%s' "$TOKEN" | rig seat set-resume-token dev-impl@my-rig --token-stdin --reason "verified native token"
 Then rerun clear-attention to check the live evidence. Setting the token alone,
 or stopping and relaunching the seat, does not prove continuity.
+reconcile-session adopts a binding; it does not clear a failed full-restore
+attempt. Use clear-attention for that: the recorded token must match the live
+foreground process and its pane must be usable. This check sends no input.
+Version-named Claude processes behind a shell need an OS executable-path
+witness (Linux /proc or macOS proc_pidpath). If that read is unavailable, the
+identity remains unverified; a version number alone cannot clear it.
 `)
     .action(async (session: string, opts: { reason?: string; json?: boolean }) => {
       const deps = getDeps();

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { isShellForeground } from "./shell-classifier.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
+import { readNativeExecutablePaths } from "./native-process-executable.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -12,6 +13,8 @@ export interface NativeProcessRow {
   pgid?: number;
   tpgid?: number;
   executableName?: string;
+  /** OS executable path, not argv[0], for otherwise unresolved Claude rows. */
+  executablePath?: string;
   startedAt?: string;
 }
 
@@ -40,8 +43,20 @@ function claudeExecutable(token: string, selectedExecutable?: string): boolean {
 
 function claudeProcess(row: NativeProcessRow, selectedExecutable?: string): boolean {
   const argv0 = tokens(row.command)[0] ?? "";
-  return claudeExecutable(argv0, selectedExecutable)
-    && executableName(row.executableName ?? "") === executableName(argv0);
+  if (!claudeExecutable(argv0, selectedExecutable)) return false;
+  if (executableName(row.executableName ?? "") === executableName(argv0)) return true;
+  // Native Claude can retain its versioned OS name while rewriting argv[0] to
+  // claude. A version only selects candidates for an OS path read; it is not proof.
+  return needsClaudeExecutablePath(row) && !!row.executablePath
+    && claudeExecutable(row.executablePath, selectedExecutable)
+    && executableName(row.executablePath) === executableName(row.executableName ?? "");
+}
+
+function needsClaudeExecutablePath(row: NativeProcessRow): boolean {
+  const argv0 = tokens(row.command)[0] ?? "";
+  return claudeExecutable(argv0)
+    && executableName(row.executableName ?? "") !== executableName(argv0)
+    && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(row.executableName ?? "");
 }
 
 function commandUsesExpectedToken(command: string, runtime: NativeRuntime, expectedToken: string): boolean {
@@ -169,7 +184,7 @@ export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
       const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,pgid,tpgid,ucomm,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
       return stdout;
     });
-    return output.split("\n").slice(1).flatMap((line) => {
+    const rows: NativeProcessRow[] = output.split("\n").slice(1).flatMap((line) => {
       // ucomm may contain spaces on every platform: macOS app helpers (`Slack Helper`), and on
       // Linux task names set by prctl(PR_SET_NAME) or process.title (`tmux: server`,
       // `node (vitest 1)`). lstart always begins with a weekday word and runs to the year, and
@@ -178,6 +193,12 @@ export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
       const match = line.trim().match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(.+?)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/);
       return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), tpgid: Number(match[4]), executableName: match[5]!, startedAt: match[6]!, command: match[7]! }] : [];
     });
+    const candidates = rows.filter(needsClaudeExecutablePath);
+    if (candidates.length > 0) {
+      const paths = await readNativeExecutablePaths(candidates.map(row => row.pid));
+      for (const row of candidates) row.executablePath = paths.get(row.pid);
+    }
+    return rows;
   } catch { return []; }
 }
 
@@ -207,7 +228,7 @@ function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runt
     }
   }
   return matches.map(({ process, chain }) => ({ panePid, process,
-    fingerprint: JSON.stringify(chain.map(row => [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command])) }));
+    fingerprint: JSON.stringify(chain.map(row => [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command, row.executablePath])) }));
 }
 
 function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex", selectedExecutable?: string): NativeProcessObservation | null {
