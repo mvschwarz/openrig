@@ -30,7 +30,7 @@ import { addGitContext, inspectGitContext, updateGitContext } from "../lib/conte
 import { ConfigStore } from "../config-store.js";
 import { DaemonClient } from "../client.js";
 import { enumArg } from "../cli-error.js";
-import { getDaemonStatus, getDaemonUrl , statusGuardMessage} from "../daemon-lifecycle.js";
+import { getDaemonStatus, getDaemonUrl, startDaemon, statusGuardMessage} from "../daemon-lifecycle.js";
 import { resolveWorkPosition, type WorkInstallPlan } from "../lib/work-install.js";
 import {
   reconcileSkillLoadout,
@@ -39,6 +39,8 @@ import {
   type SkillLoadout,
 } from "@openrig/daemon/skill-loadout";
 import { realDeps } from "./daemon.js";
+import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
+import { readOpenRigEnv } from "../openrig-compat.js";
 import type { StatusDeps } from "./status.js";
 
 const contextRuntimeArg = enumArg(["claude-code", "claude", "codex"]);
@@ -236,7 +238,7 @@ async function resolvePack(client: DaemonClient, nameOrRef: string): Promise<Con
   return matches[0]!;
 }
 
-export function contextCommand(depsOverride?: StatusDeps): Command {
+export function contextCommand(depsOverride?: StatusDeps & { preflightExec?: (cmd: string) => Promise<string> }): Command {
   const cmd = new Command("context")
     .description("Browse, preview, compose, and manage operator-authored context packs")
     .addHelpText("after", `
@@ -389,9 +391,20 @@ Examples:
       for (const warning of result.warnings) console.error(`Warning: ${warning}`);
     });
 
-  async function getClient(): Promise<DaemonClient> {
+  async function getClient(autoStartLocal = false): Promise<DaemonClient> {
     const deps = getDeps();
-    const status = await getDaemonStatus(deps.lifecycleDeps);
+    let status = await getDaemonStatus(deps.lifecycleDeps);
+    if (autoStartLocal && (status.state === "stopped" || status.state === "stale")
+      && !readOpenRigEnv("OPENRIG_URL", "RIGGED_URL")
+      && ["127.0.0.1", "localhost", "[::1]"].includes(new URL(new DaemonClient().baseUrl).hostname)) {
+      const prepared = await prepareDaemonAutoStart(deps.lifecycleDeps, depsOverride?.preflightExec);
+      if (!prepared.preflight.ready) {
+        throw new Error(prepared.preflight.checks.filter((check) => !check.ok)
+          .map((check) => `${check.name}: ${check.error}${check.fix ? ` Fix: ${check.fix}` : ""}`).join("\n"));
+      }
+      await startDaemon(prepared.options, deps.lifecycleDeps);
+      status = await getDaemonStatus(deps.lifecycleDeps);
+    }
     if (status.state !== "running" || status.healthy === false) {
       // B8-1b: epistemic-matched language via the one helper (down ≠ busy).
       const gm = statusGuardMessage(status); throw new Error(`${gm.fact} ${gm.action}`);
@@ -834,7 +847,7 @@ Examples:
         let gitSelection: ReturnType<typeof addGitContext>["selected"] | undefined;
         if ((opts.pack || opts.checkout) && !opts.git) throw new Error("--pack and --checkout require --git.");
         if (opts.git) {
-          const gitClient = await getClient();
+          const gitClient = await getClient(true);
           assertLocalGitClient(gitClient);
           ({ installedAt: targetDir, selected: gitSelection } = addGitContext(source, opts, targetRoot));
         } else if (isHttpUrl(source)) {
@@ -878,7 +891,7 @@ Examples:
           }
         }
         // Sync the daemon library so the new pack appears immediately.
-        const client = await getClient();
+        const client = await getClient(true);
         const syncRes = await client.post<{ count: number; errors?: Array<{ source: string; error: string }>; entries: ContextPackEntryWire[] }>("/api/context-packs/library/sync");
         if (syncRes.status !== 200) {
           // Install succeeded; sync failed → still surface install path.

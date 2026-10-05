@@ -8,7 +8,8 @@ import { parse as parseYamlDoc } from "yaml";
 import { Command } from "commander";
 import { DaemonClient, DaemonConnectionError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, startDaemon, type LifecycleDeps, daemonStatusGuard } from "../daemon-lifecycle.js";
-import type { RiggedConfig } from "../config-store.js";
+import { prepareDaemonAutoStart } from "../daemon-auto-start.js";
+import type { StartOptions } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { formatThreePart, type ThreePartRejection } from "./workflow-errors.js";
@@ -188,42 +189,11 @@ Examples:
       // Run preflight before auto-start
       let status = await getDaemonStatus(deps.lifecycleDeps);
       if (status.state !== "running") {
-        let resolvedConfig: RiggedConfig | null = null;
-        // bug-fix slice auth-bearer-tailscale-trust: track whether
-        // daemon.host was operator-explicit (env or config file) vs
-        // default-fallback. The daemon's multi-bind path (loopback +
-        // tailscale auto-detect) only runs when OPENRIG_HOST is NOT
-        // exported to the child, so we omit it on the default path.
-        // Hoisted to function scope so the startDaemon block below can
-        // read it after the preflight try-catch.
-        let hostForDaemon: string | undefined;
+        let startOptions: StartOptions;
         try {
-          const { ConfigStore } = await import("../config-store.js");
-          const { SystemPreflight } = await import("../system-preflight.js");
-          const { execSync } = await import("node:child_process");
-          const { OPENRIG_DIR, resolveBindIntent } = await import("../daemon-lifecycle.js");
-          const configStore = new ConfigStore();
-          resolvedConfig = configStore.resolve();
-          const hostResolution = configStore.resolveWithSource("daemon.host");
-          // S20 (r2 repair): the SHARED dedicated-intent seam — an env-sourced
-          // daemon.host (ENV_MAP ← OPENRIG_HOST, the injected routing channel) never
-          // creates bind intent through auto-start; flag-less auto-start honors only a
-          // FILE-sourced daemon.host or OPENRIG_BIND_HOST.
-          hostForDaemon = resolveBindIntent({
-            flagHost: undefined,
-            envBindHost: process.env["OPENRIG_BIND_HOST"],
-            configSource: hostResolution.source,
-            configHost: resolvedConfig.daemon.host,
-          }).host;
-          const preflightExec = depsOverride?.preflightExec ?? (async (cmd: string) =>
-            execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }));
-          const preflight = new SystemPreflight({
-            exec: preflightExec,
-            configStore,
-            getDaemonStatus: () => getDaemonStatus(deps.lifecycleDeps),
-            openrigHome: OPENRIG_DIR,
-          });
-          const preflightResult = await preflight.run();
+          const prepared = await prepareDaemonAutoStart(deps.lifecycleDeps, depsOverride?.preflightExec);
+          startOptions = prepared.options;
+          const preflightResult = prepared.preflight;
           if (!preflightResult.ready) {
             for (const check of preflightResult.checks.filter((c) => !c.ok)) {
               console.error(`✗ ${check.name}: ${check.error}`);
@@ -240,17 +210,7 @@ Examples:
         }
 
         try {
-          await startDaemon({
-            port: resolvedConfig?.daemon.port,
-            host: hostForDaemon,
-            db: resolvedConfig?.db.path,
-            transcriptsEnabled: resolvedConfig?.transcripts.enabled,
-            transcriptsPath: resolvedConfig?.transcripts.path,
-            workspaceRoot: resolvedConfig?.workspace.root,
-            contextRoot: resolvedConfig?.context.root,
-            skillsRoot: resolvedConfig?.skills.root,
-            topologyRoot: resolvedConfig?.topology.root,
-          }, deps.lifecycleDeps);
+          await startDaemon(startOptions, deps.lifecycleDeps);
           status = await getDaemonStatus(deps.lifecycleDeps);
         } catch (err) {
           console.error(err instanceof Error ? err.message : String(err));
