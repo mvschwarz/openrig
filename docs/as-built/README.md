@@ -10,14 +10,14 @@ applies-when: |
   its own source-verification stamp.
 siblings: [codemap.md, arteries.md, test-layers.md, cli-reference.md, frontmatter-schema.md]
 prerequisite-reads: []
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
-last-updated: 2026-10-03
+last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-updated: 2026-10-05
 ---
 
 # OpenRig as-built docs
 
 These pages describe the code and point to its owning files. This index was checked against
-main commit `254122872cf477511514979a4300b695d77cd1f7`. A linked module's
+main commit `a350c59b5a5fb37ee4a21b1026b595068b603df1`. A linked module's
 `last-verified-against-source` is its own verification boundary; updating this index does not
 revalidate that module or identify a running daemon or published package.
 
@@ -72,8 +72,8 @@ from `docs/reference/`; this as-built tree is developer documentation. The assem
 
 ### Web UI reference
 
-The following pages remain discoverable at their own historical stamps. Their contents are not
-reverified by this index update.
+Each page below carries its own verification stamp. This index checks that the pages exist, not
+their contents.
 
 | Document | Topic |
 |---|---|
@@ -93,7 +93,7 @@ At the named commit there are **26 Markdown files**: **14** under `architecture/
 these counts from the repository root:
 
 ```bash
-source_commit=254122872cf477511514979a4300b695d77cd1f7
+source_commit=a350c59b5a5fb37ee4a21b1026b595068b603df1
 git ls-tree -r --name-only "$source_commit" -- docs/as-built | grep -E '\.md$' | wc -l
 git ls-tree -r --name-only "$source_commit" -- docs/as-built/architecture | grep -E '\.md$' | wc -l
 git ls-tree -r --name-only "$source_commit" -- docs/as-built/ui | grep -E '\.md$' | wc -l

@@ -9,14 +9,14 @@ applies-when: |
   Follow the module and source entry points below, then read the implementation.
 siblings: [README.md, arteries.md, test-layers.md, cli-reference.md]
 prerequisite-reads: [README.md]
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
-last-updated: 2026-10-03
+last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-updated: 2026-10-05
 ---
 
 # OpenRig codemap
 
 The paths and named entry points below were checked at main
-`254122872cf477511514979a4300b695d77cd1f7`. This is a navigation map, not a replacement for
+`a350c59b5a5fb37ee4a21b1026b595068b603df1`. This is a navigation map, not a replacement for
 reading the implementation. Linked documents retain their individual verification stamps.
 [README.md](README.md) lists the complete document tree and commands to derive its inventory.
 
@@ -65,6 +65,22 @@ related code; they are not an exhaustive dependency list.
 For an execution projection, also read `packages/daemon/src/domain/execution-view.ts` and
 `packages/daemon/src/domain/view-projector.ts`. The terminal-side consumer starts in
 `packages/tui/src/execution/`. These sit alongside the queue and workflow sources above.
+
+### Newer entry points
+
+These features were added after the module pages above were last verified. Each module's own
+stamp says whether it already covers them; until then, start from the source named here.
+
+| Question | Source entry points | Nearest module |
+|---|---|---|
+| How does a GitHub folder link become a bundle source? | `isGitHubBundleLink()` and the bundle source in `packages/cli/src/lib/bundle-source.ts`, used by `packages/cli/src/commands/up.ts` and `packages/cli/src/commands/bundle.ts`. | [Packaging and bundles](architecture/packaging-bootstrap-bundles.md) |
+| What does `rig bundle check` read? | `checkBundleFolder()` in `packages/cli/src/lib/bundle-check.ts`: advisory file reads against `openrig.bundle-standard/v1`, with no daemon, launch or provider call. | [Packaging and bundles](architecture/packaging-bootstrap-bundles.md) |
+| How does a member's `permission_policy` become a launch posture, including `builtin:auto`? | `packages/daemon/src/domain/bundle-behaviour.ts` (`builtin:yolo` is full bypass and `builtin:auto` is auto, both by launch flag; `builtin:locked`, `builtin:standard` and `builtin:open` are configuration). | [Adapters and runtimes](architecture/adapters-and-runtimes.md) |
+| What does a non-interruptive launch add? | `nonInterruptiveArgs()` in `packages/daemon/src/adapters/non-interruptive.ts` (per-launch arguments only; it never changes permissions or native settings files). The separate instance-wide YOLO setting, off by default, is in `packages/daemon/src/adapters/yolo-mode.ts`. | [Adapters and runtimes](architecture/adapters-and-runtimes.md) |
+| How does `rig seat continue` finish a fresh startup that stopped before its context was delivered? | `continueFreshStartup()` in `packages/daemon/src/domain/seat-lifecycle-service.ts`, `canContinueFresh()` in `packages/daemon/src/domain/startup-orchestrator.ts`, the route in `packages/daemon/src/routes/seat.ts`, and the command in `packages/cli/src/commands/seat.ts`. | [Agent spec and startup](architecture/agent-spec-and-startup.md) |
+| How does `rig context work-install` choose a project and position? | `resolveWorkPosition()` in `packages/cli/src/lib/work-install.ts`, `packages/cli/src/commands/context.ts`, and `packages/daemon/src/domain/workspace/project-catalog.ts`. | [Workspace](architecture/workspace-primitive.md) |
+| Where do rosters come from? | `packages/cli/src/commands/roster.ts`: `rig roster list`, `show` and `find` read JSON roster files from `<workspace.root>/rosters` (or `--folder`) and are read-only. | No module page covers rosters. |
+| What telemetry can be read? | `packages/daemon/src/domain/finite-telemetry.ts` (the `events`, `queue-transitions` and `tenures` streams), `/api/telemetry` in `packages/daemon/src/routes/telemetry.ts`, and `packages/cli/src/commands/telemetry.ts`. | No module page covers telemetry. |
 
 ## Change and verification guides
 
