@@ -69,13 +69,16 @@ delete process.env["RIGGED_HOME"];
 // to this fixture. Merely changing HOME would not override OPENRIG_HOME or DB.
 // Keep ordinary user files outside the state root, as in a real installation.
 // Otherwise file-transfer correctly rejects every ~/ path as OpenRig state.
-const userHome = `${fixtureHome}-user-home`;
-fs.mkdirSync(userHome, { recursive: true });
-process.env["HOME"] = userHome;
-for (const [key, suffix] of Object.entries({
-  XDG_CONFIG_HOME: ".config", XDG_STATE_HOME: ".local/state",
-  XDG_DATA_HOME: ".local/share", XDG_CACHE_HOME: ".cache",
-})) process.env[key] = path.join(userHome, suffix);
+if (process.env["OPENRIG_E2E_REAL_CODEX"] !== "1") {
+  const userHome = `${fixtureHome}-user-home`;
+  fs.mkdirSync(userHome, { recursive: true });
+  process.env["HOME"] = userHome;
+  delete process.env["CODEX_HOME"];
+  for (const [key, suffix] of Object.entries({
+    XDG_CONFIG_HOME: ".config", XDG_STATE_HOME: ".local/state",
+    XDG_DATA_HOME: ".local/share", XDG_CACHE_HOME: ".cache",
+  })) process.env[key] = path.join(userHome, suffix);
+}
 
 // (3) ASSERT — capture the resolved home + fail loud if it is not fixture-scoped.
 const { OPENRIG_HOME } = await import("../packages/cli/src/openrig-compat.js");
