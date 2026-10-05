@@ -662,7 +662,7 @@ export class RigRepository {
       JOIN rigs predecessor ON predecessor.id = ?
       WHERE s.project_name = ? AND r.id != predecessor.id
         AND predecessor.archived_at IS NOT NULL AND r.archived_at IS NULL
-        AND r.name = predecessor.name AND r.created_at >= predecessor.created_at
+        AND r.name = predecessor.name
       ORDER BY r.created_at DESC LIMIT 1
     `).get(rigId, projectName) as { id: string; name: string } | undefined ?? null;
   }

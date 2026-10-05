@@ -97,8 +97,10 @@ rigspecImportRoutes.post("/", async (c) => {
         : outcome.code === "rig_name_running" ? 409
         // #141: an import refused because a same-name rig could not be confirmed stopped.
         : outcome.code === "generation_unconfirmed" ? 409
+        // A Compose project conflict is an actionable request conflict, not a server failure.
+        : outcome.code === "compose_project_conflict" ? 409
         : 500;
-      const body = outcome.code === "rig_name_running" || outcome.code === "generation_unconfirmed"
+      const body = outcome.code === "rig_name_running" || outcome.code === "generation_unconfirmed" || outcome.code === "compose_project_conflict"
         ? { ...outcome, error: outcome.message }
         : outcome;
       return c.json(body, status);
