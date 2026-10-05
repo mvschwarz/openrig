@@ -111,12 +111,14 @@ export function chatRoutes(): Hono {
         }
 
         // Flush any messages received during initial batch, dedup by ID
-        initialDone = true;
         for (const pending of pendingMessages) {
           if (!sentIds.has(pending.id)) {
             await stream.writeSSE(pending);
           }
         }
+        // Arrivals during an awaited flush must join its tail, not bypass
+        // older buffered messages through the live write path.
+        initialDone = true;
 
         await aborted;
       } finally {

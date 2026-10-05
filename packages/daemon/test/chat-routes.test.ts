@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
+import { SSEStreamingApi } from "hono/streaming";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -50,6 +51,62 @@ describe("chat routes", () => {
 
   afterEach(() => {
     db.close();
+  });
+
+  it.each([false, true])("watch drains buffered messages before switching to live delivery (late arrival: %s)", async lateArrival => {
+    const history = [chatRepo.send(rigId, "alice", "history one"), chatRepo.send(rigId, "alice", "history two")];
+    const expected = [...history];
+    const send = (body: string) => {
+      const message = chatRepo.send(rigId, "bob", body);
+      expected.push(message);
+      eventBus.emit({ type: "chat.message", rigId, messageId: message.id, sender: message.sender,
+        kind: message.kind, body: message.body });
+    };
+    const original = SSEStreamingApi.prototype.writeSSE;
+    let initialInjected = false;
+    let lateInjected = false;
+    // Observe real Hono writes, retaining its TransformStream/backpressure.
+    // Schedule arrivals at replay and drain boundaries instead of racing sleeps.
+    const writes = vi.spyOn(SSEStreamingApi.prototype, "writeSSE").mockImplementation(function (message) {
+      const body = JSON.parse(String(message.data)).body;
+      const writing = original.call(this, message);
+      if (!initialInjected) {
+        initialInjected = true;
+        send("buffered one");
+        send("buffered two");
+      } else if (lateArrival && body === "buffered one" && !lateInjected) {
+        lateInjected = true;
+        send("arrived during drain");
+      }
+      return writing;
+    });
+    const before = eventBus.subscriberCount;
+    const response = await app.request(`/api/rigs/${rigId}/chat/watch`);
+    const reader = response.body!.getReader();
+    const observed: string[] = [];
+    let buffer = "";
+    const decoder = new TextDecoder();
+    try {
+      while (observed.length < (lateArrival ? 5 : 4)) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop()!;
+        for (const frame of frames) {
+          const data = frame.split("\n").find(line => line.startsWith("data: "));
+          if (data) observed.push(JSON.parse(data.slice(6)).id);
+        }
+      }
+      expect(observed).toEqual(expected.map(message => message.id));
+      expect(new Set(observed).size).toBe(observed.length);
+      expect(chatRepo.history(rigId).map(message => message.id)).toEqual(observed);
+    } finally {
+      await reader.cancel();
+      reader.releaseLock();
+      writes.mockRestore();
+      await vi.waitFor(() => expect(eventBus.subscriberCount).toBe(before));
+    }
   });
 
   it("watch disconnect during history releases the subscription", async () => {
