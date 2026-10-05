@@ -27,7 +27,7 @@ import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitio
 import { queueTransitionWakesSchema } from "../src/db/migrations/073_queue_transition_wakes.js";
 import { viewsCustomSchema } from "../src/db/migrations/030_views_custom.js";
 import { EventBus } from "../src/domain/event-bus.js";
-import { buildExecutionView } from "../src/domain/execution-view.js";
+import { buildExecutionView, type ExecutionViewDeps } from "../src/domain/execution-view.js";
 import { ViewProjector, ViewProjectorError } from "../src/domain/view-projector.js";
 import { Hono } from "hono";
 import { viewsRoutes } from "../src/routes/views.js";
@@ -858,13 +858,93 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect(String((unresolvableSlice.folded as Record<string, unknown>).basis)).toContain("unresolvable-branch");
 
     // 4. Invalid ref name: rejects ref starting with '-', '@', components starting with '.', or ending with '.lock'
+    // Keeps unusable declaration indeterminate naming the ref, rather than falling back to main
+    db.prepare("UPDATE queue_items SET state = 'done' WHERE qitem_id = 'qitem-lane-32'").run();
     for (const badRef of ["-invalid-branch", "@", "refs/heads/.bad", "refs/bad.lock/foo"]) {
       fs.writeFileSync(missionYamlPath, originalYaml + `\n  source:\n    integration_ref: "${badRef}"\n`);
       const invalidDoc = await show();
       const sources = invalidDoc.sources as Record<string, Record<string, unknown>>;
       expect(sources.arrangement.value).toBe("INDETERMINATE");
       expect(String(sources.arrangement.basis)).toMatch(/arrangement\.source\.integration_ref must be a valid Git ref name/);
+      const invalidSlice = (invalidDoc.q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+      expect((invalidSlice.folded as Record<string, unknown>).value).toBe("INDETERMINATE");
+      expect(String((invalidSlice.folded as Record<string, unknown>).basis)).toContain(badRef);
+      const q2Invalid = (invalidDoc.q2_sequencing as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+      expect(q2Invalid.next_up).toBe("INDETERMINATE");
+      expect(String(q2Invalid.next_up_basis)).toContain(badRef);
+      // Same-mission dependency: 32 depends on 31
+      const q2Dep = (invalidDoc.q2_sequencing as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.32")!;
+      expect(q2Dep.next_up).toBe("INDETERMINATE");
+      expect(String(q2Dep.next_up_basis)).toContain(badRef);
     }
+
+    // 5. Unrelated arrangement-validation failure: valid declared ref beside invalid waves does not fall back to main
+    const invalidWavesYaml = [
+      "schema: openrig.mission/v0alpha1",
+      "kind: mission",
+      "composition:",
+      "  slices:",
+      "    - { ref: slices/31-alpha/slice.yaml, order: 10, active: true }",
+      "    - { ref: slices/32-beta/slice.yaml, order: 20, active: true }",
+      "arrangement:",
+      "  source:",
+      "    integration_ref: integration",
+      "  waves: not-a-list",
+      "",
+    ].join("\n");
+    fs.writeFileSync(missionYamlPath, invalidWavesYaml);
+    const unrelatedDoc = await show();
+    const unrelatedSources = unrelatedDoc.sources as Record<string, Record<string, unknown>>;
+    expect(unrelatedSources.arrangement.value).toBe("INDETERMINATE");
+    expect(String(unrelatedSources.arrangement.basis)).toContain("arrangement.waves is not a list");
+    const unrelatedSlice = (unrelatedDoc.q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    expect((unrelatedSlice.folded as Record<string, unknown>).value).toBe("INDETERMINATE");
+    expect(String((unrelatedSlice.folded as Record<string, unknown>).basis)).toContain("integration");
+    const q2Unrelated = (unrelatedDoc.q2_sequencing as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    expect(q2Unrelated.next_up).toBe("INDETERMINATE");
+    expect(String(q2Unrelated.next_up_basis)).toContain("integration");
+    const q2UnrelatedDep = (unrelatedDoc.q2_sequencing as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.32")!;
+    expect(q2UnrelatedDep.next_up).toBe("INDETERMINATE");
+    expect(String(q2UnrelatedDep.next_up_basis)).toContain("integration");
+
+    // 6. Pin error texts: absent ref keeps legacy error text without ref context, adopted rung stays without ref context, declared ref includes ref context
+    const failingExec: ExecutionViewDeps["exec"] = async (cmd, args) => {
+      if (cmd === "git" && args?.includes("merge-base")) {
+        throw new Error("simulated merge-base failure");
+      }
+      return { stdout: "", stderr: "" };
+    };
+    (projector as unknown as { setExecutionDeps: (d: unknown) => void }).setExecutionDeps({
+      db,
+      slicesRoot: () => missionsRoot,
+      rigsRoot: () => rigsRoot,
+      buildInfo: { semver: null, commit: "adopt-commit-sha", dirty: null, builtAt: null },
+      now: () => fixedNow,
+      seatActivity: { getSeatStateBySession: (s: string) => arbitratedBySession.get(s) ?? null },
+      exec: failingExec,
+    });
+
+    // 6a. No ref declared -> folded and adopted error texts have NO ref context
+    fs.writeFileSync(missionYamlPath, originalYaml);
+    const legacyErrDoc = await show();
+    const legacySlice = (legacyErrDoc.q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    expect((legacySlice.folded as Record<string, unknown>).basis).toBe(
+      `merge-base failed in ${laneWorktree}: simulated merge-base failure`,
+    );
+    expect((legacySlice.adopted as Record<string, unknown>).basis).toBe(
+      `merge-base failed in ${laneWorktree}: simulated merge-base failure`,
+    );
+
+    // 6b. Declared ref -> folded error text includes (<ref>), adopted rung stays without ref context
+    fs.writeFileSync(missionYamlPath, originalYaml + "\n  source:\n    integration_ref: integration\n");
+    const declaredErrDoc = await show();
+    const declaredErrSlice = (declaredErrDoc.q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    expect((declaredErrSlice.folded as Record<string, unknown>).basis).toBe(
+      `merge-base failed in ${laneWorktree} (integration): simulated merge-base failure`,
+    );
+    expect((declaredErrSlice.adopted as Record<string, unknown>).basis).toBe(
+      `merge-base failed in ${laneWorktree}: simulated merge-base failure`,
+    );
   });
 
   it("stays a registered-name error at base and a clean not-found for unknown names either way", () => {

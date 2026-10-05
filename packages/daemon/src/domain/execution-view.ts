@@ -282,7 +282,7 @@ function isValidGitRef(ref: string): boolean {
 
 type ArrangementData =
   | { state: "missing"; missionPath: string }
-  | { state: "malformed"; missionPath: string; warning: string }
+  | { state: "malformed"; missionPath: string; warning: string; declaredIntegrationRef?: string }
   | {
       state: "valid";
       missionPath: string;
@@ -467,6 +467,7 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
   const missionRoot = path.join(missionsRoot, mission);
   const missionPath = path.join(missionRoot, "mission.yaml");
   if (!fs.existsSync(missionPath)) return { state: "missing", missionPath };
+  let declaredIntegrationRef: string | undefined;
   try {
     const manifest = parseYaml(fs.readFileSync(missionPath, "utf8")) as unknown;
     if (!isRecord(manifest)) throw new Error("root is not a mapping");
@@ -495,6 +496,7 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
       const source = arrangement["source"];
       if (isRecord(source) && source["integration_ref"] !== undefined) {
         const raw = source["integration_ref"];
+        declaredIntegrationRef = typeof raw === "string" ? raw : String(raw);
         if (typeof raw !== "string" || !isValidGitRef(raw.trim())) {
           throw new Error("arrangement.source.integration_ref must be a valid Git ref name not starting with '-'");
         }
@@ -573,6 +575,7 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
       state: "malformed",
       missionPath,
       warning: err instanceof Error ? err.message : String(err),
+      ...(declaredIntegrationRef !== undefined ? { declaredIntegrationRef } : {}),
     };
   }
 }
@@ -654,7 +657,7 @@ type Rung =
   | { value: boolean; basis: string }
   | { value: Indeterminate | "NOT_APPLICABLE"; basis: string };
 
-async function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha: string, ref: string): Promise<Rung> {
+async function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha: string, ref: string, declaredRef?: string): Promise<Rung> {
   const run = exec ?? defaultExec;
   try {
     await run("git", ["-C", repoCtx, "merge-base", "--is-ancestor", sha, ref]);
@@ -664,7 +667,8 @@ async function gitAncestor(exec: ExecutionViewDeps["exec"], repoCtx: string, sha
     if (code === 1 || status === 1) {
       return { value: false, basis: `git -C ${repoCtx} merge-base --is-ancestor ${sha} ${ref} (exit 1)` };
     }
-    return { value: INDETERMINATE, basis: `merge-base failed in ${repoCtx} (${ref}): ${(err as Error).message?.slice(0, 120)}` };
+    const refContext = declaredRef ? ` (${declaredRef})` : "";
+    return { value: INDETERMINATE, basis: `merge-base failed in ${repoCtx}${refContext}: ${(err as Error).message?.slice(0, 120)}` };
   }
 }
 
@@ -838,6 +842,12 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
   const arrangement = missionsRoot && mission !== INDETERMINATE
     ? readArrangement(missionsRoot, mission, slices)
     : null;
+  const declaredRef = arrangement?.state === "valid"
+    ? arrangement.integrationRef
+    : arrangement?.state === "malformed"
+      ? arrangement.declaredIntegrationRef
+      : undefined;
+  const isUnusableDeclaration = arrangement?.state === "malformed" && arrangement.declaredIntegrationRef !== undefined;
   const targetRef = arrangement?.state === "valid" && arrangement.integrationRef
     ? arrangement.integrationRef
     : "main";
@@ -953,11 +963,13 @@ export async function buildExecutionView(deps: ExecutionViewDeps, opts?: { missi
     // The selected project has no binding to the OpenRig daemon's source.
     // Missing Git objects cannot establish applicability. Keep daemon ancestry
     // only on the legacy unscoped view, with its existing unknown/false rules.
-    const folded: Rung = !candidateSha
-      ? { value: INDETERMINATE, basis: "no candidate sha to test" }
-      : !repoCtx
-        ? { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" }
-        : await gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, targetRef);
+    const folded: Rung = isUnusableDeclaration
+      ? { value: INDETERMINATE, basis: `declared integration_ref unusable (${declaredRef})` }
+      : !candidateSha
+        ? { value: INDETERMINATE, basis: "no candidate sha to test" }
+        : !repoCtx
+          ? { value: INDETERMINATE, basis: "no reachable repo context (no EC-3 worktree on the board)" }
+          : await gitAncestor(exec, repoCtx, builtResolved ?? candidateSha, targetRef, declaredRef);
     const adopted: Rung = opts?.project
       ? { value: "NOT_APPLICABLE", basis: "selected project has no binding to the OpenRig daemon source; daemon adoption is not project progress" }
       : !candidateSha || !repoCtx
