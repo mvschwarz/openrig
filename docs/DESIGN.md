@@ -4,6 +4,10 @@ This document captures the current OpenRig visual system so the product can be
 recreated, extended, or translated into other media without reverse-engineering
 the UI from code.
 
+It describes the web UI in `packages/ui`, which is in maintenance mode (see
+`docs/reference/developing.md`). The terminal UI has its own theme layer in
+`packages/tui/src/theme.ts`.
+
 ## Essence
 
 OpenRig is a local control plane for multi-agent work. The interface should feel
@@ -81,6 +85,12 @@ terminal emulator.
 
 The canonical tokens live in `packages/ui/src/globals.css` and are surfaced to
 Tailwind in `packages/ui/tailwind.config.ts`.
+
+The values below are the light set (`:root`). A `.dark` block in the same file
+redeclares the same names for Vellum Dark. The theme selector offers Vellum
+Light, Vellum Dark and System (`packages/ui/src/lib/theme.ts`). With no stored
+choice the UI follows the operating system's color scheme (`system`); the choice
+is stored under the `openrig.theme` local-storage key.
 
 Paper:
 
@@ -230,6 +240,8 @@ Runtime marks:
 
 - Claude: pixel-style Claude mark, label `Claude`
 - Codex: Codex CLI terminal-circle mark, label `Codex`
+- Pi: blue rounded-square π mark, label `Pi`
+- Oh My Pi: violet rounded-square π mark, label `Oh My Pi` (short label `OMP`)
 - Terminal: compact terminal glyph, label `TTY` or `Terminal`
 - Unknown: neutral fallback
 
