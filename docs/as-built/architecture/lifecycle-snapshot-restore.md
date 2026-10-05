@@ -265,7 +265,9 @@ cited here by number with the code that carries them):
   for one seat. `resume` captures an eligibility-checked `auto-rehydrate`
   snapshot when none exists and goes through `launchSingleNode`.
 - **Seat handover** — `rig seat handover <seat> --source
-  fresh|rebuild|fork:<id>|discovered:<id> [--dry-run]`
+  fresh|rebuild|fork:<id>|discovered:<id> --reason <reason> [--dry-run]`
+  (the reason is required, dry run included; without it the command exits 2
+  before contacting the daemon)
   (`packages/cli/src/commands/seat.ts:363`) calls
   `POST /api/seat/handover/:seatRef` (`routes/seat.ts:94`), which runs
   `SeatHandoverService.handover` (`seat-handover-service.ts:267`).

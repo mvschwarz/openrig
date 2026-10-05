@@ -102,8 +102,10 @@ without the daemon; [workspace-primitive.md](workspace-primitive.md) covers proj
 resolution.
 
 On a profile read, the route adds each piece's `sha256` and provenance, with a warning when a
-piece's bytes come from outside the granted folder. When rig and seat are given, it adds the
-seat's `LEARNED.md` as an implicit atom.
+piece's bytes come from outside the granted folder. Rig and seat selectors grant the seat's
+folder as a source root and supply a default `seat:LEARNED.md` atom to named profiles whose
+phases request seat context. An ordinary situation profile includes that file only when the
+pack authors a seat atom; the selectors alone don't add it.
 
 ### System World, seat recaps and skill loadouts
 
@@ -124,8 +126,9 @@ catalog at `skills.root` (`catalog.yaml`, schema `openrig.skill-catalog/v1`) and
 topology and project selections. It projects skills into `<cwd>/.claude/skills` or
 `<cwd>/.agents/skills` and tracks what it owns in
 `<cwd>/.openrig/skill-loadouts/<runtime>.json`. Each projection reports `current`, `missing`,
-`shadowed`, `stale` or `conflicting`. `rig skill loadout|audit` reads and reconciles it, and
-launch applies it per seat.
+`shadowed`, `stale` or `conflicting`. `rig skill loadout --runtime <runtime>` inspects the
+composed projection and reconciles it only with `--apply`; `rig skill audit` is a separate
+read-only provenance and freshness audit. Launch applies the selected loadout per seat.
 
 ## Agent images and forks
 
@@ -270,7 +273,8 @@ PreCompact hook writes. A per-seat `compaction/post-compact-extra/<session>.md` 
 over the global extra file, and an extra file that declares a different seat is refused.
 
 `rig compact <session>` (`packages/cli/src/commands/compact.ts`) runs the same sequence
-manually through `/api/compaction/trigger`, `cancel` and `state`, behind the bearer token.
+manually through `/api/compaction/trigger`, `cancel` and `state`, which use the terminal
+bearer-token middleware; it passes every request through when no token is configured.
 `--skip-map` skips the map requirement once, `--cancel` ends the preparation, and `--state`
 shows the attempt, its expected map and its deadline. A manual attempt has 120 seconds for
 preparation and the idle wait.
