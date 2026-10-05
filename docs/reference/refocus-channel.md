@@ -26,7 +26,10 @@ redundant double-fire around Codex's own compaction cadence. Set
 `OPENRIG_REFOCUS_ENABLED=0` to disable the feature. Fresh `SessionStart` is
 always a no-op: the default onboarding pack owns fresh orientation. Both
 runtimes retain `PostCompact` due-state for the next prompt. Otherwise the hook
-is a silent no-op, and it degrades to silence on unrelated hook errors. A
+is a no-op (it writes a stderr advisory when the transcript shrinks or the
+session has no identity), and it degrades to silence on unrelated hook errors.
+Both runtimes stop the hook after 5 seconds, and the content REF lookup gets 2;
+a slow REF shows as `REFOCUS CONTENT REF FAILED`. A
 configured REF resolution failure instead degrades
 loudly in the delivered payload while still completing the hook — a refocus
 must never break a seat's turn.
@@ -44,8 +47,9 @@ Resolution order:
 1. `OPENRIG_REFOCUS_CONTENT_REF` — a path-like context-library ref resolved
    through `rig context get`, so refocus receives the same assembled bytes as
    on-demand pull. This wins when REF and FILE are both set.
-2. `OPENRIG_REFOCUS_CONTENT_FILE` — an operator-authored file (per-seat or
-   per-rig via spec env).
+2. `OPENRIG_REFOCUS_CONTENT_FILE` — an operator-authored file, set in the
+   environment the seat's harness runs in (rig and agent specs have no `env`
+   key).
 3. `$OPENRIG_HOME/refocus/REFOCUS.md` — the instance's standing content.
 4. The generic default at
    `skills/refocusing/references/refocus.md`: three project-neutral orientation
@@ -77,8 +81,10 @@ This automatic hook path is additive to one-shot manual injection through
 
 The chain files are the durable, altitude-addressed home of orientation
 content; the refocus channel is its delivery schedule. A practice added to a
-rig's `CRAFT.md` today reaches running seats through their next refocus
-pointer, and future installs through the shipped defaults
+rig's `LEARNED.md` today reaches running seats through their next refocus
+trace, which reads `LEARNED.md` at each topology level. A `CRAFT.md` practice
+reaches them only through the configured refocus content (REF or FILE), and future
+installs through the shipped defaults
 (discovery → curation → ship, per the convention doc).
 
 ## What a refocus is NOT

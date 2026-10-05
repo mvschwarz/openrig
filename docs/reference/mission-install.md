@@ -196,7 +196,9 @@ The layers compose from surfaces that already exist; no new mechanism is require
   retains `claude-code`. Profile defaults from `OPENRIG_RUNTIME`, otherwise
   Claude; work-install requires the flag to inspect or apply skills.
 - Delivery: `rig walk <seat> --through-profile world-public --profile <profile>
-  --situation <situation> ...` applies the already-inspected profile;
+  --situation <situation> ...` applies the already-inspected profile (walk's
+  seat grant is `--seat-grant`, and its `--runtime` takes `claude` or `codex`,
+  defaulting to `claude`, so a Codex profile needs `--runtime codex`);
   `--through <files> --pace <interval>` remains the raw byte-walk path. Paced
   sends naming addressed reads serve pointer-walks.
 - The delta: a dated markdown file beside the seat's recap; verified by reading it.
