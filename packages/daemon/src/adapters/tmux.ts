@@ -245,13 +245,15 @@ function posixJoinArgv(argv: string[]): string {
 function parseSessionLine(line: string): TmuxSession | null {
   const parts = line.split(TMUX_FIELD_SEPARATOR);
   if (parts.length < 4) return null;
-  const windows = parseInt(parts[1]!, 10);
+  // Only the final three fields are metadata; a literal session name may
+  // itself contain the printable separator, just like pane paths/window names.
+  const windows = parseInt(parts.at(-3)!, 10);
   if (isNaN(windows)) return null;
   return {
-    name: parts[0]!,
+    name: parts.slice(0, -3).join(TMUX_FIELD_SEPARATOR),
     windows,
-    created: parts[2]!,
-    attached: parts[3] === "1",
+    created: parts.at(-2)!,
+    attached: parts.at(-1) === "1",
   };
 }
 
@@ -1013,7 +1015,7 @@ export class TmuxAdapter {
     let live: Set<string>;
     try {
       const listing = await this.run(["tmux", "list-sessions", "-F", "#{session_name}"], "tmux list-sessions -F '#{session_name}'");
-      live = new Set(listing.split("\n").map((s) => s.trim()).filter(Boolean));
+      live = new Set(listing.split(/\r?\n/).filter(Boolean));
     } catch {
       return null;
     }
