@@ -44,9 +44,14 @@ not fill in; if so, follow the form.
    SLACK_APP_TOKEN=xapp-...
    ```
 
-8. Run `rig slack setup --channel <channel-id> --secrets-env-file <path>`, then
-   `rig slack verify`, then `rig slack enable`.
-9. Invite the bot to the channel you configured (`/invite @OpenRig` in that channel).
+8. Invite the bot to the channel you will use (`/invite @OpenRig` in that channel).
+   `rig slack verify` reports NOT ready until the app is a member.
+9. Register yourself as the human the connector delivers to, with a Slack binding that names
+   your Slack user ID (`rig gateway human add`; its `--help` shows the binding format).
+   `rig slack enable` refuses until a human is registered, and messages from Slack users who
+   are not registered are not delivered.
+10. Run `rig slack setup --channel <channel-id> --secrets-env-file <path>`, then
+    `rig slack verify`, then `rig slack enable`.
 
 ## What the app asks for
 
@@ -58,8 +63,8 @@ groups:
   `rig slack verify` checks these.
 - **Feature scopes**: `files:read` (download attachments people send), `files:write` (upload
   attachments to Slack), and `app_mentions:read` (receive @-mentions of the app). `rig slack verify`
-  does **not** check these, so a READY from verify does not prove attachments or mentions will
-  work.
+  warns when one of these is missing (if Slack returns the granted scopes) but does not require
+  them, so a READY from verify does not prove attachments or mentions will work.
 
 If a feature scope was not granted, the effect differs by feature:
 
@@ -67,8 +72,8 @@ If a feature scope was not granted, the effect differs by feature:
   message with an attachment that could not be downloaded is still delivered, with the failed
   file named in it. A post whose attachment could not be uploaded still delivers its text, and
   the failure appears only in the daemon log (`rig daemon logs`).
-- **Mentions** (`app_mentions:read`): Slack does not deliver `app_mention` events to the app, and
-  nothing in OpenRig reports that they are missing.
+- **Mentions** (`app_mentions:read`): Slack does not deliver `app_mention` events to the app.
+  Only `rig slack verify` warns that the scope is missing; nothing reports the missing events.
 
 So after installing, compare the granted scopes Slack shows for the app with all six scopes that
 `rig slack manifest --json` lists.
@@ -127,7 +132,8 @@ outside this recovery scope; global chronological order is not promised.
 
 `rig slack status` retains local configuration checks and adds a bounded daemon
 snapshot: socket state/generation, last event, recovery interval/state/reason,
-retry time and accepted/dead-lettered recovery counts for this daemon process.
+retry time and accepted/dead-lettered recovery counts since the connector last
+started (they reset when it is enabled or disabled, and when the daemon restarts).
 Human-readable coverage and pending bounds use ISO timestamps; JSON keeps Slack timestamps.
 The status read calls no Slack API and starts no scan. If the daemon cannot be
 observed, local configuration remains visible and live state is unknown. A

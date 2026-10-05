@@ -12,8 +12,9 @@ observer. Do not copy the token to incidental identity or health checks.
 
 Records use `schema: openrig.request-phase/v1` in the existing
 `logs/slow-operations.jsonl`. Each process has an observation `epoch` and sequence
-`seq`. An activation record carries the installed build stamp (null for an
-unstamped development build). Each admitted request gets a distinct
+`seq`. An activation record carries the installed build stamp (`semver`,
+`commit`, `dirty`, `builtAt`; each is null in an unstamped development build).
+Each admitted request gets a distinct
 `serverRequestId`, even if a caller reuses an `attemptId`. Routes are recorded as
 `rigs_list` or `rig_nodes`, never a rig name or full URL.
 
@@ -52,7 +53,8 @@ observations, never requests. The existing 1 MiB log plus three rotated files an
 0600 file modes apply. The worker writes asynchronously; HTTP observation never
 waits for fsync or the synchronous slow-operation BEGIN barrier.
 
-Records carry cumulative admission/expiry/observer-error counters and writer
+Records carry cumulative `rejected` (admission refused), `expired` and
+`observerErrors` counters and writer
 `coverage` counters (`offered`, `enqueued`, `dropped`, `acknowledged`, `failed`,
 `pending`, `recorderHealthy`). Writer counters describe the state sampled for that
 record, not an acknowledgment of that record itself. Retained epoch/sequence

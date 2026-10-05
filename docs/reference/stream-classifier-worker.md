@@ -61,12 +61,14 @@ The smaller of `--limit` and the configured request maximum bounds the wake.
 Unknown answers remain null; a wholly unknown answer abstains. Invalid model,
 provider, answer keys, choices, probabilities or response bytes reject the whole
 answer. Probability sums retain the strict 0.001 tolerance; there is no rounding
-repair or partial salvage. Unavailable/invalid provider work stops that run with
-no classification write. Inspect the returned attempt state: terminal abstentions
+repair or partial salvage. Unavailable/invalid provider work, Ctrl-C or SIGTERM
+stops that run with no classification write; the item in hand is recorded as an
+abstention, final for that classifier version, taxonomy version and evidence epoch. Inspect the returned attempt state: terminal abstentions
 are not reopened, and failed/unknown daemon writes must be reconciled through the
 existing ledger. Never change the evidence epoch merely to retry an experiment.
 
-Disable is checked before each call and before applying its result. A separate
+Disable, a changed `--max-requests` or `--timeout-ms`, or an unreadable configuration
+is checked before each call and before applying its result, and stops the run. A separate
 disable command cannot cancel an already forwarded remote request; its late
 result is discarded, with the existing deadline bounding the wait. Ctrl-C or
 SIGTERM requests immediate cancellation of the foreground run. An uncooperative
@@ -169,7 +171,8 @@ source churn can require repeated preparation and is not a throughput claim.
 Each wake processes at most `--limit` items (1–100; default 20), starting with the
 oldest eligible work rather than relying on a lossy notification cursor. Durable
 terminal attempts stay excluded. A new candidate version does **not** authorize
-another pass: only an owner-selected evidence epoch changes that attempt identity.
+another pass: only a new classifier version, taxonomy version or owner-selected
+evidence epoch changes that attempt identity.
 Retain the candidates output beside the decisions and result so its version is
 reproducible. The CLI does not keep a second local ledger.
 
@@ -197,6 +200,9 @@ capture. Retained-no-write is a separate event, never delivery evidence.
 
 Activation requires explicitly supplied `OPENRIG_SHADOW_CAPTURE` JSON at a later
 authorized daemon start. Absence or invalid configuration leaves capture disabled.
+Daemon start checks only that `destination` is an absolute normalized path and the
+numeric ceilings; the private-directory checks and exclusive file creation happen
+at the first drain, and a failure there stops the sink.
 This document supplies no live destination or activation instruction. Required
 fields and engineering ceilings are:
 
@@ -220,7 +226,7 @@ observation; explicit production configuration supplies each value.
 `rig project shadow-drain` asks the existing HTTP service to drain up to 64 rows;
 it requires an actor (outside a managed seat, name one with `--actor <name>`)
 and never enables capture. No background drain timer is added.
-`rig project shadow-stop` disables new enqueueing immediately, finishes any active
+`rig project shadow-stop` (which needs an actor the same way) disables new enqueueing immediately, finishes any active
 drain and the finite retained queue, then closes the sink. Repeated stop is
 idempotent; it cannot enable capture or delete the existing archive. Existing
 quota and sink-failure losses remain counted. A slow disk can leave stop pending;
@@ -237,8 +243,9 @@ start another writer. Overflow drops new observations. Capacity exhaustion stops
 the sink. Errors stop writes, count losses and preserve any partial file; failed
 batches are not replayed. `reservedRecords/Bytes` include attempted writes, while
 `completedRecords/Bytes` count successful appends. `drained` means removed from
-the observer, not necessarily persisted. Queue count drops, byte-bound drops,
-record errors, missing/unavailable captures and sink failures remain separate.
+the observer, not necessarily persisted. Queue drops (count-bound and byte-bound
+together in `dropped`; `droppedBytes` adds the bytes of byte-bound drops), record
+errors, missing/unavailable captures and sink failures remain separate.
 
 Live collection, private destination/retention selection, corpus labels, hosted
 calibration, native placement, package/install proof and independent visible /
