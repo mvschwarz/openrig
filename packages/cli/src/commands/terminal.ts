@@ -38,6 +38,10 @@ interface OpenViewResult {
   notes?: string[];
 }
 
+// Opening applies pages through several bounded provider round trips; it is
+// an operation, not a read that can share the client's five-second default.
+const TERMINAL_OPEN_TIMEOUT_MS = 45_000;
+
 async function withClient<T>(
   deps: TerminalDeps,
   fn: (client: DaemonClient) => Promise<T>,
@@ -105,7 +109,7 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const body = { view, ...(opts.provider ? { provider: opts.provider } : {}) };
-        const res = await client.post<OpenViewResult>("/api/terminal/open", body);
+        const res = await client.post<OpenViewResult>("/api/terminal/open", body, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
         if (!Array.isArray(res.data?.opened)) {
           printResult(opts.json ?? false, res.data, res.status);
           return;
