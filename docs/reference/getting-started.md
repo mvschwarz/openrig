@@ -191,12 +191,12 @@ rig ps --nodes --rig kernel --json --fields logicalId,runtime,canonicalSessionNa
 rig terminal status --json
 ```
 
-Use the returned bindings, not the library preview. The examples below use the
-standard `advisor-lead@kernel`, `operator-agent@kernel` and
-`operator-human@kernel` bindings. If the inventory reports different names,
-the installing agent substitutes those exact names in the file and commands
-before giving them to you. Missing bindings stay named missing. Compare the
-advisor and operator runtimes to choose the dual- or single-runtime view.
+Use the returned bindings, not the library preview. Find the rows whose
+`logicalId` is `advisor.lead`, `operator.agent` and `operator.human` (the TUI).
+For each, take its `canonicalSessionName`; a logical ID is not a tmux session
+name. The installing agent fills in those exact values before opening the
+view or handing commands to you. Missing bindings stay named missing. Compare
+the advisor and operator runtimes to choose the dual- or single-runtime view.
 
 ### Herdr or cmux: one new workspace
 
@@ -204,7 +204,9 @@ Both providers can open the same saved view. On the daemon's machine, add the
 following entry to `terminal-views.yaml` in its OpenRig home (normally
 `~/.openrig`; `OPENRIG_HOME`, or the legacy `RIGGED_HOME`, selects another home).
 If the file already has views, keep them and add only this entry; choose a fresh
-id if `kernel-conversation` already means something else. A new file is:
+id if `kernel-conversation` already means something else. In this template,
+replace each `SESSION_FOR_...` value with the `canonicalSessionName` from the
+matching logical-ID row above; these are placeholders, not literal targets:
 
 ```yaml
 version: 1
@@ -212,11 +214,11 @@ views:
   - id: kernel-conversation
     name: Kernel conversation
     members:
-      - seat: advisor-lead@kernel
+      - seat: SESSION_FOR_ADVISOR_LEAD
         label: Advisor
-      - seat: operator-agent@kernel
+      - seat: SESSION_FOR_OPERATOR_AGENT
         label: Operator
-      - seat: operator-human@kernel
+      - seat: SESSION_FOR_OPERATOR_HUMAN
         label: OpenRig TUI
 ```
 
@@ -254,25 +256,30 @@ terminal.
 If neither provider is available, compose existing tmux attachments. These
 commands create only a new viewing session; they do not move or recreate the
 kernel's panes. Run them once on the kernel host after checking the bindings
-above:
+above. For a manual install, these prompts collect the two exact session names
+from that inventory. An installing agent sets the same variables from the
+observed values itself:
 
 ```sh
+printf 'canonicalSessionName for advisor.lead: '; read -r advisor_session
+printf 'canonicalSessionName for operator.human (TUI): '; read -r tui_session
 kernel_view="openrig-kernel-$(date +%s)-$$"
-kernel_pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$kernel_view" -n kernel 'env -u TMUX tmux attach-session -t =advisor-lead@kernel')
-tmux split-window -h -t "$kernel_pane" 'env -u TMUX tmux attach-session -t =operator-human@kernel'
+kernel_pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$kernel_view" -n kernel "env -u TMUX tmux attach-session -t '=$advisor_session'")
+tmux split-window -h -t "$kernel_pane" "env -u TMUX tmux attach-session -t '=$tui_session'"
 ```
 
 For a dual-runtime kernel, add the operator beside the advisor:
 
 ```sh
-tmux split-window -h -t "$kernel_pane" 'env -u TMUX tmux attach-session -t =operator-agent@kernel'
+printf 'canonicalSessionName for operator.agent: '; read -r operator_session
+tmux split-window -h -t "$kernel_pane" "env -u TMUX tmux attach-session -t '=$operator_session'"
 ```
 
 Then arrange the view and print its exact attach command:
 
 ```sh
 tmux select-layout -t "$kernel_view:" even-horizontal
-printf 'env -u TMUX tmux attach-session -t =%s\n' "$kernel_view"
+printf "env -u TMUX tmux attach-session -t '=%s'\n" "$kernel_view"
 ```
 
 **On macOS**, the installer can open a new Terminal window with that view:
