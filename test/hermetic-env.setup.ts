@@ -67,7 +67,9 @@ process.env["OPENRIG_HOME"] = fixtureHome;
 delete process.env["RIGGED_HOME"];
 // Legacy ~/.rigged discovery and ordinary home-based config must also stay local
 // to this fixture. Merely changing HOME would not override OPENRIG_HOME or DB.
-const userHome = path.join(fixtureHome, "user-home");
+// Keep ordinary user files outside the state root, as in a real installation.
+// Otherwise file-transfer correctly rejects every ~/ path as OpenRig state.
+const userHome = `${fixtureHome}-user-home`;
 fs.mkdirSync(userHome, { recursive: true });
 process.env["HOME"] = userHome;
 for (const [key, suffix] of Object.entries({
