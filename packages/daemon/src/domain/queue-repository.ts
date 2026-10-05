@@ -1401,9 +1401,19 @@ export class QueueRepository {
       throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
     }
 
+    let wakeStaged = false;
     const txn = this.db.transaction(() => {
       const created = this.createInTransactionalContext(input);
-      if (this.outbox) this.stageWakeIntent(created.qitemId, input.sourceSession, input.destinationSession, input.identityProvenance ?? null, input.nudge);
+      if (this.outbox && input.nudge !== false) {
+        try {
+          // A savepoint removes any partial intent when staging fails, while
+          // preserving ordinary create's existing acceptance of the task.
+          this.db.transaction(() => this.stageWakeIntent(created.qitemId, input.sourceSession, input.destinationSession, input.identityProvenance ?? null, input.nudge))();
+          wakeStaged = true;
+        } catch (err) {
+          this.recordNudgeAttempt(created.qitemId, `failed:wake not retained: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       return created;
     });
     let id: string;
@@ -1455,10 +1465,11 @@ export class QueueRepository {
     }
     this.eventBus.notifySubscribers(persistedEvent);
     // The receipt acknowledges persistence, not terminal delivery. The intent
-    // survives a crash before the scheduled wake; embedded callers without an
-    // outbox retain their existing best-effort path without claiming durability.
+    // survives a crash before the scheduled wake if staging succeeded. A staging
+    // failure is recorded on the row; callers without an outbox retain their
+    // existing best-effort path without claiming durability.
     if (this.outbox) {
-      if (input.nudge !== false) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${id}`);
+      if (wakeStaged) this.deliverWakeIntentAfterCommit(`${WAKE_INTENT_PREFIX}${id}`);
     } else {
       await this.maybeNudge(id, input.destinationSession, input.nudge, input.sourceSession);
     }

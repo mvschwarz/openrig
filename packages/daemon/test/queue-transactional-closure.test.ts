@@ -661,15 +661,18 @@ describe("W1 re-seal #3 — real file-backed close/reopen crash boundary", () =>
 
 
 describe("ordinary create wake durability", () => {
-  it("rolls back the queue row and event if create intent staging fails", async () => {
+  it("preserves the task and reports an unretained wake, rolling back partial intent staging", async () => {
     const h = makeHarness();
     try {
-      vi.spyOn(h.outbox, "record").mockImplementationOnce(() => { throw new Error("create intent fault"); });
-      await expect(h.repo.create({ sourceSession: "writer@rig", destinationSession: "reader@rig", body: "work" })).rejects.toThrow("create intent fault");
-      expect(h.db.prepare("SELECT * FROM queue_items").all()).toEqual([]);
-      expect(h.db.prepare("SELECT * FROM queue_transitions").all()).toEqual([]);
-      expect(h.db.prepare("SELECT * FROM events").all()).toEqual([]);
+      const record = h.outbox.record.bind(h.outbox);
+      vi.spyOn(h.outbox, "record").mockImplementationOnce((input) => { record(input); throw new Error("create intent fault"); });
+      const row = await h.repo.create({ sourceSession: "writer@rig", destinationSession: "reader@rig", body: "work" });
+      expect(row).toMatchObject({ body: "work", lastNudgeResult: "failed:wake not retained: create intent fault" });
+      expect(h.db.prepare("SELECT * FROM queue_items").all()).toHaveLength(1);
+      expect(h.db.prepare("SELECT * FROM queue_transitions").all()).toHaveLength(1);
+      expect(h.db.prepare("SELECT * FROM events").all()).toHaveLength(1);
       expect(h.outbox.listForSender("writer@rig")).toEqual([]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
       expect(h.calls).toEqual([]);
     } finally { h.db.close(); }
   });

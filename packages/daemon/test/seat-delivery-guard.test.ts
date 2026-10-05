@@ -222,6 +222,28 @@ function queueFixture() {
 }
 
 describe("real queue transaction and retained delivery",()=>{
+  async function createWithFullHeldQuota() {
+    const f=queueFixture();
+    try {
+      await f.guard.set("a",true,"person","draft");
+      for(let i=0;i<100;i++) f.outbox.retain({outboxId:`full${i}`,senderSession:"sender@test",destinationSession:"worker@test",body:"held"},f.guard.target("a"));
+      const row=await f.repo.create({sourceSession:"sender@test",destinationSession:"worker@test",body:"keep this task"});
+      expect(f.repo.getById(row.qitemId)!.body).toBe("keep this task");
+      expect(row.lastNudgeResult).toMatch(/^failed:.*quota/i);
+      expect(f.db.prepare("SELECT count(*) n FROM queue_items").get()).toEqual({n:1});
+      expect(f.outbox.heldForNode("a").total).toBe(100);
+      expect(f.outbox.getById(`wake-intent-${row.qitemId}`)).toBeNull();
+      expect(f.writes).toEqual([]);
+      return row;
+    } finally { f.db.close(); }
+  }
+  it("ordinary create survives full held quota without bypassing retention limits",async()=>{
+    await createWithFullHeldQuota();
+  });
+  it("ordinary create full-quota receipt names the unretained wake",async()=>{
+    const row=await createWithFullHeldQuota();
+    expect(row.lastNudgeResult).toContain("wake not retained");
+  });
   it("precommit quota refusal rolls back closure, successor, transitions and events",async()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
     await f.guard.set("a",true,"person","draft");
