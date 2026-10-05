@@ -471,6 +471,13 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
   try {
     const manifest = parseYaml(fs.readFileSync(missionPath, "utf8")) as unknown;
     if (!isRecord(manifest)) throw new Error("root is not a mapping");
+    const arrangement = manifest["arrangement"];
+    if (isRecord(arrangement) && isRecord(arrangement["source"])) {
+      const raw = arrangement["source"]["integration_ref"];
+      if (raw !== undefined) {
+        declaredIntegrationRef = typeof raw === "string" ? raw : String(raw);
+      }
+    }
     const compositionMembers = validateMissionComposition(manifest, missionPath);
     const waveReview = new Map<string, string>();
     const waveBySlice = new Map<string, string>();
@@ -482,7 +489,6 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
       });
     };
     let integrationRef: string | undefined;
-    const arrangement = manifest["arrangement"];
     if (isRecord(arrangement)) {
       for (const [field, label, key] of [
         ["source", "Integration decision", "rule"],
@@ -496,7 +502,6 @@ function readArrangement(missionsRoot: string, mission: string, slices: SliceFac
       const source = arrangement["source"];
       if (isRecord(source) && source["integration_ref"] !== undefined) {
         const raw = source["integration_ref"];
-        declaredIntegrationRef = typeof raw === "string" ? raw : String(raw);
         if (typeof raw !== "string" || !isValidGitRef(raw.trim())) {
           throw new Error("arrangement.source.integration_ref must be a valid Git ref name not starting with '-'");
         }

@@ -907,6 +907,27 @@ describe("execution view — S27 (OPR.0.5.6.27)", () => {
     expect(q2UnrelatedDep.next_up).toBe("INDETERMINATE");
     expect(String(q2UnrelatedDep.next_up_basis)).toContain("integration");
 
+    // 5b. Unrelated composition-validation failure: valid declared ref beside invalid composition does not fall back to main
+    const invalidCompositionYaml = [
+      "schema: openrig.mission/v0alpha1",
+      "kind: mission",
+      "composition: not-a-mapping",
+      "arrangement:",
+      "  source:",
+      "    integration_ref: integration",
+      "",
+    ].join("\n");
+    fs.writeFileSync(missionYamlPath, invalidCompositionYaml);
+    const compDoc = await show();
+    const compSources = compDoc.sources as Record<string, Record<string, unknown>>;
+    expect(compSources.arrangement.value).toBe("INDETERMINATE");
+    const compSlice = (compDoc.q4_ladder as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    expect((compSlice.folded as Record<string, unknown>).value).toBe("INDETERMINATE");
+    expect(String((compSlice.folded as Record<string, unknown>).basis)).toContain("integration");
+    const q2Comp = (compDoc.q2_sequencing as Record<string, unknown>[]).find(s => s.slice_id === "OPR.9.9.31")!;
+    expect(q2Comp.next_up).toBe("INDETERMINATE");
+    expect(String(q2Comp.next_up_basis)).toContain("integration");
+
     // 6. Pin error texts: absent ref keeps legacy error text without ref context, adopted rung stays without ref context, declared ref includes ref context
     const failingExec: ExecutionViewDeps["exec"] = async (cmd, args) => {
       if (cmd === "git" && args?.includes("merge-base")) {
