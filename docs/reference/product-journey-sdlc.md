@@ -1,8 +1,8 @@
 # Product-journey SDLC components
 
 This is a reusable menu for building the smallest complete user outcome. A
-mission or slice selects only the components its work needs and records their
-order in mission/slice YAML. This is **not a mode, pipeline, topology, rig
+mission or slice selects only the components its work needs and records them,
+with any explicit edges between them, in mission/slice YAML. This is **not a mode, pipeline, topology, rig
 shape, or mandatory gate set**. If no composition is present, use the light
 Part A flow in `sdlc-conventions.md`.
 
@@ -215,7 +215,8 @@ possible explanation.
 ## Composition rules
 
 1. `project.yaml` may declare project defaults; `mission.yaml` may select the
-   catalog and override those defaults for the mission.
+   catalog and override those defaults for the mission. Some file in that chain
+   must name the catalog: there is no default catalog.
 2. `slice.yaml` selects or overrides the components for that slice.
 3. Edges are explicit data. Array order is presentation, not dependency.
 4. Select the fewest components that honestly fit the work.
@@ -305,15 +306,19 @@ On a fresh start, restore, or new assignment:
    Do not choose a mission from an old onboarding packet or a folder's recency.
 3. Resolve SDLC selection in order: project defaults, mission defaults, then the
    active slice's explicit selection/override. A narrower explicit selection
-   replaces the broader component list; it does not append every ancestor's
-   gates. Follow an addressed wave map for its membership, review model and
+   replaces the broader component list and its edges; it does not append every
+   ancestor's gates. Follow an addressed wave map for its membership, review model and
    boundary; an explicit named-slice exception applies only to that slice.
 4. Read only the selected components and additional addressed context. Repository
-   references resolve from the code repository root; installed references from
+   references resolve from the Git root of the repository that holds the YAML
+   declaring the catalog, which may not be the code checkout; installed references from
    `$OPENRIG_HOME/reference`; context-pack refs use `rig context get`. For a
    Markdown `#section` address, use `loading-addressable-markdown` rather than
    loading an entire unrelated manual. Expand the investigation when the task's
    evidence requires it: the address map is a starting point, not a search limit.
+   For work running as a workflow instance, `rig workflow guidance <instance>`
+   reads the effective selection, the selected catalog sections and the original
+   intent; add `--component <id>` or `--full` to expand.
 5. State briefly the user outcome, current role, candidate, selected path and
    next completion boundary. No composition means the light Part A flow in
    `sdlc-conventions.md#a1-the-flow-in-one-pass`. Do not author a
