@@ -2,6 +2,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    setupFiles: ["../../test/hermetic-env.setup.ts"],
     include: ["test/**/*.test.ts"],
     // P6/D12-residue: many daemon suites spawn REAL child processes (stub-runner-*,
     // precompact-hook, bridge, restore-from-jsonl — 20+ files). Under fold-gate
