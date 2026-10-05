@@ -142,6 +142,11 @@ answer in time, the launch is left unchanged.
 Fresh Codex launches also add writable access to the workspace's `.git` and the
 pod's shared queue-state directory with `--add-dir`; the shared root comes from
 `OPENRIG_SHARED_DOCS_ROOT` or `~/.openrig/shared-docs`.
+Seats of the rig named `kernel` launch with an operational default instead,
+unless a permission policy, a per-seat choice or (for Codex) a named profile
+applies: Claude in `acceptEdits` with a per-launch allow list for its file tools
+and operational commands (including reads under your home folder), and Codex with
+`-s danger-full-access -a never`. Neither writes a permission file.
 YOLO is **off by default**. An explicitly selected full-bypass policy selects
 Claude's `--dangerously-skip-permissions` or Codex's
 `-s danger-full-access -a never`. The legacy environment-only `OPENRIG_YOLO=1`

@@ -237,6 +237,11 @@ Every other seat launches at the floor:
   `codex_config_profile`, in which case the profile governs its own sandbox;
 - Pi `--no-approve` by default.
 
+Seats of the rig named `kernel` are the exception. With no member or rig policy, no
+per-seat choice and (for Codex) no named profile, Claude launches in `acceptEdits` with a
+per-launch `--settings` allow list for its file tools and operational commands, and Codex
+launches with `-s danger-full-access -a never`.
+
 **Config-surface policies are recorded, not applied at launch.** The seat still starts at
 the floor. The `allow`, `ask` and `deny` rules take effect once they are translated into the
 runtime's native settings. The `applying-a-permission-policy` skill in `openrig-core` does
