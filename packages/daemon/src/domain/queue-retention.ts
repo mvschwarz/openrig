@@ -226,8 +226,8 @@ export interface PruneBatchResult {
  * ONE bounded batch: DELETE up to `batchSize` watchdog_history rows that are
  * older than the cutoff AND outside the most-recent-K per job. The per-job
  * recency rank rides idx_watchdog_history_job_recent (job_id, evaluated_at DESC).
- * `>=` in the rank subquery means exact-timestamp ties over-KEEP (never
- * over-delete) — the safe direction.
+ * Count strictly newer rows so exact-timestamp ties at the keep boundary
+ * over-KEEP (never over-delete) — the safe direction.
  */
 export function pruneWatchdogHistory(
   db: Database.Database,
@@ -250,8 +250,8 @@ export function pruneWatchdogHistory(
              AND (
                SELECT COUNT(*) FROM watchdog_history w2
                 WHERE w2.job_id = wh.job_id
-                  AND w2.evaluated_at >= wh.evaluated_at
-             ) > ?
+                  AND w2.evaluated_at > wh.evaluated_at
+             ) >= ?
            LIMIT ?
         )`,
     )
