@@ -143,10 +143,13 @@ comments:
   and Codex seats, and is saved per rig, off by default
   (`adapters/non-interruptive.ts:9`–`26`; `rigs.non_interruptive`, migration
   `095`).
-- **Events written inside a transaction are delivered from the log.** Every
-  event persisted through the event bus in a caller-owned transaction must be
-  registered before it returns; after commit the bus delivers from the log
-  (`event-bus.ts:106`–`111`). An unreadable row emits `event.delivery_poisoned`.
+- **Inside a notify envelope, events are delivered from the log.** Within
+  `withNotifyEnvelope` (`event-bus.ts:106`–`112`), every event persisted through
+  the event bus must be registered before the callback returns; after commit
+  the bus delivers the committed rows from the log, and an unreadable row
+  emits `event.delivery_poisoned`. Legacy callers outside an envelope persist
+  inside their own transaction and notify subscribers explicitly after commit
+  (`persistWithinTransaction`, `:70`; for example `node-launcher.ts:240`).
 
 ## 2. Event system
 

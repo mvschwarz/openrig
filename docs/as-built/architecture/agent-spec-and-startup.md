@@ -184,8 +184,10 @@ after the startup prompt was confirmed submitted (`sendProofInstruction`,
 hook route (`routes/activity.ts:239`); `verifyStartupProof`
 (`startup-proof.ts:133`) records `node.startup_proof_verified` or
 `node.startup_proof_rejected`. Orientation status is derived from those events
-(`startup-proof.ts:239`), never from `startup_status`. Other launches record
-`node.startup_proof_skipped`.
+(`startup-proof.ts:239`), never from `startup_status`. Other fresh launches (no
+proof selected, or a terminal runtime) record `node.startup_proof_skipped`
+(`startup-orchestrator.ts:374`); resume, fork and rebuild keep the existing proof
+history.
 
 **Fresh context pending and `rig seat continue`.** When a fresh launch stops at
 a native prompt before its context is delivered, `fail()` (`:592`) marks the

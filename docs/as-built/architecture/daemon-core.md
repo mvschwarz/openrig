@@ -111,7 +111,8 @@ in `003_events.ts`, `snapshots` (serialized rig state) in `004_snapshots.ts`, an
   `checkpoints`.
 - `015_startup_context.ts` — persisted startup replay context for restore.
 - `016_chat_messages.ts` — durable rig-scoped chat (SQLite-backed; transcripts
-  remain filesystem-backed via pipe-pane).
+  remain filesystem-backed, written by bounded periodic `capture-pane` snapshots;
+  see `transport-and-transcripts.md`).
 - `017_pod_namespace.ts` — first-class authored pod namespace for export/adoption.
 - `018_context_usage.ts` — per-node context-usage snapshots.
 - `019_external_cli_attachment.ts` — binding-row extension for external CLI attach.
