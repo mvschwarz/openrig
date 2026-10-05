@@ -11,8 +11,8 @@ applies-when: |
   vs tmux-metadata-key naming distinction.
 siblings: [daemon-core.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
-last-updated: 2026-10-03
+last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-updated: 2026-10-05
 ---
 
 # Transport, Transcripts, Chat, Ask
@@ -22,7 +22,7 @@ capture/broadcast wrap tmux with honest errors; transcripts are bounded
 `tmux capture-pane` snapshots written to files; chat is daemon-backed SQLite;
 the daemon's `rig ask` service gathers evidence and never calls an LLM.
 
-> Verified against source at main `254122872cf477511514979a4300b695d77cd1f7`. Each count below sits beside the
+> Verified against source at main `a350c59b5a5fb37ee4a21b1026b595068b603df1`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -85,32 +85,58 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
 `SessionTransport.send()`:
 
 1. Resolve the session name (`resolveBySessionName`,
-   `session-transport.ts:729`): not found → 404; the same name in more than
-   one rig → 409. Pod, rig, global and `--to` list targets go through
-   `POST /api/transport/broadcast`, which resolves them with
-   `resolveSessions`.
-2. Classify send readiness. Only a positive interactive-prompt reading
+   `session-transport.ts:942`): not found → 404; the same name in more than
+   one rig → 409. A tmux probe of the session can also refuse it as missing or
+   tmux as unavailable (`:1294`–`1318`). Pod, rig, global and `--to` list
+   targets go through `POST /api/transport/broadcast`, which resolves them
+   with `resolveSessions` and sends to each recipient in turn.
+2. Take the seat's delivery lease. Every write runs under a per-seat,
+   serialized lease from the seat delivery guard, installed at daemon start
+   (`send`, `:1134`). With the seat's typing guard on, the message is held
+   instead of typed: the result is `outcome: "retained"` with HTTP 200
+   (`routes/transport.ts:115`); operators use `rig seat set-typing-guard` and
+   `rig seat held-messages`.
+3. Classify send readiness. Only a positive interactive-prompt reading
    (`needs_input`) refuses, with `target_needs_input`
-   (`session-transport.ts:1272`), unless the caller passes
+   (`session-transport.ts:1458`), unless the caller passes
    `--dangerously-interact --reason`. A mid-work reading (`running`, from a
    fresh runtime hook or the pane's mid-work patterns,
-   `findPatternEvidence(recentLines, MID_WORK_PATTERNS)`, `:225`) or an
-   `unknown` one proceeds with an advisory `warning` (`:1321`). `--force` has
-   no effect on this path.
-3. Two-step tmux send: a unique file/buffer pasted with `paste-buffer -d -r -p`
-   at every payload size (`packages/daemon/src/adapters/tmux.ts:604`) →
-   ~200ms delay (`session-transport.ts:1378`) → separate named `Enter` (`:1385`).
+   `findPatternEvidence(recentLines, [...MID_WORK_PATTERNS, CLAUDE_LIVE_STATUS_PATTERN])`,
+   `:291`) or an `unknown` one proceeds with an advisory `warning` (`:1471`,
+   `:1479`). `--force` has no effect on this path, and combining it with
+   `--wait-for-idle` is refused with 400 (`routes/transport.ts:66`–`73`).
+4. Two-step tmux send: a unique file/buffer pasted with `paste-buffer -d -r -p`
+   (`packages/daemon/src/adapters/tmux.ts:623`) → ~200ms delay
+   (`session-transport.ts:1534`) → separate named `Enter` (`:1552`). The paste
+   targets the seat's registered pane ID, not the session name, and is refused
+   with no input written if the session no longer holds exactly that pane.
    Bracketed paste preserves multiline input in supporting TUIs; the payload
-   never enters a shell argument. A successful paste proves transport
-   execution, not runtime consumption.
-4. Optional `--verify`: capture the last 30 pane lines before and after the
-   send and count the message's first 40 characters in each. A higher count
-   after the send reports `outcome: "delivered"`; otherwise the outcome is
-   `rendered-unconfirmed` — text and Enter landed but the capture could not
-   re-confirm the render, which is not a failure (`session-transport.ts:472`
-   `verify?`; `:1403` `if (opts?.verify)`; `:1415`
-   `verified = postCount > preCount`).
-5. Honest result with reason on failure.
+   never enters a shell argument. A `--dangerously-interact` answer is pasted
+   without `-p` (`session-transport.ts:1517`) and Enter is pressed only if the
+   whole answer is still staged (`:1538`–`1546`). A successful paste proves
+   transport execution, not runtime consumption.
+5. Optional `--verify`: capture the last 30 pane lines before and after the
+   send (after a 500 ms wait, `:1573`) and count the message's first 40
+   characters in each. A higher count after the send reports
+   `outcome: "delivered"`; otherwise the outcome is `rendered-unconfirmed` —
+   text and Enter landed but the capture could not re-confirm the render,
+   which is not a failure at the daemon (`session-transport.ts:674`
+   `verify?`; `:1572` `if (opts?.verify)`; `:1584`
+   `verified = postCount > preCount`). The outcome values are `delivered`,
+   `rendered-unconfirmed`, `failed` and `retained` (`:741`).
+6. CLI `--verify` goes further (`packages/cli/src/commands/send.ts:596`): it
+   looks for the text still unsubmitted at the prompt, makes one guarded
+   Enter-only retry through the daemon's `submitOnly` path
+   (`session-transport.ts:1321`, which refuses with `staged_mismatch` unless the
+   pane shows the expected staged text), and ends `staged-not-consumed` with
+   exit code 1 if it is still there.
+7. Honest result with reason on failure. Reasons missing from the send
+   route's status map (among them the runtime-identity refusals) are returned
+   with HTTP 500 (`routes/transport.ts:118`–`140`).
+
+The sender comes from the `X-OpenRig-Session` header; an unsigned send gets an
+unknown-sender notice. The CLI adds a From/To envelope, and the daemon appends
+a delivered-latency note for delays of 10 s or more.
 
 Architecture rule 18 (`architecture-rules-and-event-system.md`): tmux is
 transport, not truth — `send/capture/broadcast` wrap tmux reliably with honest
@@ -144,13 +170,13 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
 - **Terminal-bearer posture (`/api/transport/*` only).** The remote's
   transport routes (send/capture/broadcast) gate on its terminal bearer
   (`routes/transport.ts:26`; `OPENRIG_TERMINAL_BEARER_TOKEN`,
-  `packages/daemon/src/index.ts:283`). With no token configured the
+  `packages/daemon/src/index.ts:291`). With no token configured the
   middleware passes every request through
   (`packages/daemon/src/middleware/auth-bearer-token.ts:99`) — the tailnet is
   the auth boundary by design — except that a daemon bound to an explicit
   address that is neither local nor tailnet falls back to
   `OPENRIG_AUTH_BEARER_TOKEN`
-  (`index.ts:289`). The CLI presents the registry bearer from `hosts.yaml`
+  (`index.ts:297`). The CLI presents the registry bearer from `hosts.yaml`
   when one is configured; for a URL-only anonymous host the `Authorization`
   header is omitted. A remote enforcing a different terminal bearer answers
   401, which surfaces as the structured `permission-gate` step
@@ -158,17 +184,20 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
   Remedy: set the remote terminal bearer equal to the paired registry bearer,
   or rely on the tailnet boundary. **The transcript read is deliberately
   outside this class:** `/api/transcripts/*` mounts with no bearer middleware
-  (`packages/daemon/src/server.ts:749`, beside the gated `/api/transport` at
-  `:750`), and credential-shaped text is redacted on the `/full` route only
+  (`packages/daemon/src/server.ts:748`, beside the gated `/api/transport` at
+  `:749`), and credential-shaped text is redacted on the `/full` route only
   (`routes/transcripts.ts:292`). So a wrong terminal bearer that
   permission-gates `send --host` does NOT gate `transcript --host` — the read
-  keeps succeeding, and the auth-failure class is not uniform across the four
-  verbs. The route's own comment (`routes/transcripts.ts:250`) leaves a
+  keeps succeeding for a Host name the remote's browser boundary accepts
+  (`server.ts:647`; it applies to every `/api/*` route), and the auth-failure
+  class is not uniform across the four verbs. The route's own comment (`routes/transcripts.ts:250`) leaves a
   coherent transcript-read auth policy across tail/grep/full for later.
 - **The 3-part form is CLI-edge sugar only.** `resolveCrossHostTarget`
   (`packages/cli/src/cross-host-target.ts:58`) strips the suffix only when it
   resolves to a registered host, or equals this host's own id, which routes
-  home (`:95`); otherwise the string passes through unchanged with a loud
+  home (`:95`; only `rig send` passes the self id,
+  `packages/cli/src/commands/send.ts:398`, so `capture` and `transcript` treat
+  their own id as unknown); otherwise the string passes through unchanged with a loud
   host hint. Every session string that reaches any daemon stays
   `member@rig`; the host travels out-of-band. Durable cross-host
   coordination stays the queue's cross-host routing
@@ -179,23 +208,30 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
 1. `NodeLauncher` starts transcript rotation right after tmux session
    creation, before the harness boots
    (`packages/daemon/src/domain/node-launcher.ts:181`).
-2. Each rotation tick runs `tmux capture-pane -p -S -<lines>`
-   (`adapters/tmux.ts:1020`) and atomically overwrites (temp file + rename,
-   `transcript-rotation.ts:146`)
-   `~/.openrig/transcripts/{rig-name}/{session-name}.log`. Defaults: 1000
-   trailing lines every 2 s (`transcript-rotation.ts:27`–`28`), tunable with
-   `OPENRIG_TRANSCRIPTS_LINES` and `OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS`.
-   This bounded capture replaced the earlier `tmux pipe-pane` stream
-   (`transcript-rotation.ts:3`), so the file holds a trailing window, not the
-   whole session.
+2. Each rotation tick captures the trailing lines with
+   `capturePaneContent` (`transcript-rotation.ts:213` →
+   `adapters/tmux.ts:1079`) and atomically overwrites (temp file + rename,
+   `transcript-rotation.ts:283`–`285`)
+   `transcripts/{rig-name}/{session-name}.log` under the OpenRig home (or
+   the `transcripts.path` setting). It skips the write when the captured bytes
+   are unchanged. Defaults: 1000 trailing lines every 2 s
+   (`transcript-rotation.ts:27`–`28`); an idle seat is captured less often,
+   within the 10-second freshness window. Both are tunable with
+   `OPENRIG_TRANSCRIPTS_LINES` and `OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS`
+   or the matching `transcripts.*` settings. This bounded capture replaced the
+   earlier `tmux pipe-pane` stream (`transcript-rotation.ts:3`), so the file
+   holds a trailing window, not the whole session.
 3. `TranscriptStore` owns path convention, ANSI stripping on read, boundary
-   markers, `readTail`, `readFull`, `grep`.
+   markers, `readTail`, `readFull`, `grep`. `readFull` returns the raw bytes
+   (`transcript-store.ts:366`); the `/full` route redacts them. The transcript
+   routes check capture health first and can start capture lazily for a seat
+   that has none.
 4. `rig transcript <session> --tail N / --grep "pattern"` provides
    agent-facing access.
 5. On restore: a `--- SESSION BOUNDARY: … ---` marker is written before
-   re-launch (`restore-orchestrator.ts:1100`); each rotation tick keeps every
-   boundary line as a header above the fresh capture
-   (`transcript-rotation.ts:122`). (Restore-side detail in
+   re-launch (`restore-orchestrator.ts:894`); each rotation tick keeps each
+   distinct boundary line once, as a header above the fresh capture
+   (`transcript-rotation.ts:254`–`257`). (Restore-side detail in
    `lifecycle-snapshot-restore.md`.)
 6. `rig ask` gathers rig summary plus transcript excerpts, chat excerpts,
    insufficiency state, and guidance.
@@ -260,9 +296,8 @@ The intentional limits in this layer (numbered as in
   markers.
 - `coordination-primitive.md` — cross-host queue routing (the two-sided
   daemon-forward twin of §3b's one-sided CLI-direct verbs).
-- `../cli-reference.md` § Cross-host execution (`--host <id>`) — the per-verb
-  transport table, the `agent@rig@host` parse rules, and the structured
-  failure modes.
+- `../cli-reference.md` — each verb's registered `--host <id>` option; run
+  `rig <verb> --help` for its cross-host behaviour.
 - Source roots: `packages/daemon/src/domain/{session-transport,transcript-store,transcript-rotation,history-query,ask-service,chat-repository}.ts`,
   `packages/daemon/src/routes/{transport,transcripts,ask,chat}.ts`,
   `packages/cli/src/mcp-server.ts`,

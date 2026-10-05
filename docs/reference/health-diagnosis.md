@@ -115,9 +115,12 @@ outcome list affirms zero outcomes, not failed discovery. `false-positive`
 clears the suspicion without inventing a denominator when no missing facts remain.
 A false-positive assessment that still names missing facts stays indeterminate
 and does not close the episode interval. `indeterminate` supplies
-no outcomes and names the missing fact in `missingFacts`. Required references
-must resolve inside the workspace; extra evidence beyond the initial packet is
-allowed. The receipt retains the actual actor, timestamp, identity provenance,
+no outcomes and names the missing fact in `missingFacts`. `established` needs
+`boundedAuthority` set to true or false (not null) and no missing facts; while an
+established census still confirms the signal, a `false positive`, `insufficient
+evidence` or `resolved` verdict is refused. Required references must resolve
+inside the finding's resolved project folder (the configured workspace when no
+project resolves); extra evidence beyond the initial packet is allowed. The receipt retains the actual actor, timestamp, identity provenance,
 source basis, and evidence hashes. A changed basis refuses a stale submission.
 Later evidence changes make confirmation indeterminate rather than preserving
 a false ratio. Outcome meaning remains attributed agent judgment.
@@ -131,7 +134,8 @@ traffic in the same family starts a new episode. Repeated reads never advance
 these boundaries. One occurrence and the existing owner cooldown apply to each
 episode; a disposition stops repeated requests.
 
-This bounded source covers explicitly linked project or mission work: at most 2,000 touched
+This bounded source reads every handoff family touched in the window; only
+explicitly linked project or mission work resolves a scope. Its bounds: at most 2,000 touched
 qitems, 1,000 members / 10,000 transitions per family, 200 workflow
 receipts, 200 declared slices, and 100 proof files per selected slice. Overflow
 refuses visibly. When more than 200 families (roots) were touched, it evaluates the
@@ -375,7 +379,9 @@ A consumer such as a later Herder plugin reads `GET /api/health` and
 `rig health explain <finding-id> --json` records. The record schema is
 `openrig.health/v0alpha1`; list metadata is `openrig.health-list/v0alpha1`.
 For a source that bounds its input, list metadata also carries `coverage`
-(`source`, `total`, `evaluated`, `omitted`, `limit`, `order`, `partial`), and
+(`source`, `evaluatedAt`, `unit`, `total`, `evaluated`, `omitted`, `limit`,
+`order`, `partial`). A source that failed or hit a limit appears instead as
+`status: "unavailable"` with its `reason`, and its findings are left out.
 `rig health policy` reports the scheduled evaluation's coverage under
 `engine.lastEvaluation.coverage`. Preserve ID, status, policy version, time window, freshness, evidence and
 threshold together. There is no health score or implicit remediation authority.
@@ -399,7 +405,9 @@ Behavioral and epistemic categories intentionally have no detector. Review
 carousel, redundant wakes, stale directives and scope admission have typed
 evaluators and replay controls, but the live source does not infer their missing
 candidate-change, rescue, directive-conflict or admission-authority facts.
-Untagged work and undeclared relationships remain outside passive ceremony
+Untagged work is still read: a family whose scope can't be resolved shows as an
+indeterminate instance-scope finding that names the unresolved scope and can't
+start a diagnosis. Undeclared relationships remain outside passive ceremony
 coverage; normal tagged work no longer requires a special outcome census. A small lineage below the configured threshold may still deserve an
 agent's inspection; the threshold is a conservative admission rule, not a
 definition of good process.

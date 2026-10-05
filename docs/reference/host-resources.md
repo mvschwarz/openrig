@@ -6,8 +6,9 @@ operators and monitoring tools. This view is host-scoped; rig/node filters and
 multi-host fan-out do not apply. Ordinary `rig ps` output is unchanged.
 
 The view reports available CPU count, host load averages (1/5/15 minutes),
-load divided by CPU count, running seats, and transcript capture attempts,
-failures, UTF8 bytes and elapsed capture time for currently rotating seats.
+load divided by CPU count, running seats, the number of rotating seats and how
+many of them are backed off, and transcript capture attempts, failures, UTF8
+bytes and elapsed capture time for currently rotating seats.
 Load is not CPU utilization; capture elapsed time includes waiting for tmux,
 and is not daemon CPU time. Load averages are unavailable on Windows, rather
 than reported as zero. Counters reset when a rotation is restarted/stopped or

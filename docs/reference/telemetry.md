@@ -7,6 +7,7 @@ private SQLite schema. It neither watches nor automatically drains history.
 ```sh
 rig telemetry events --json
 rig telemetry events --start retained --node NODE_ID --limit 128 --json
+rig telemetry events --start retained --rig RIG_ID --json
 rig telemetry events --cursor CURSOR --node NODE_ID --json
 rig telemetry transitions --start retained --qitem QUEUE_ITEM_ID --json
 rig telemetry tenures NODE_ID --json
@@ -69,7 +70,8 @@ Physical `fetched` can therefore exceed logical `scanned`.
 Responses are at most 128 KiB, with a 4 KiB projected-record cap. SQL guards bound
 fields before fetching them: identifiers 256 bytes, timestamps/enums 128 bytes,
 and actor/closure references 512 bytes. Oversized fields become null with an
-`oversized_field` gap; they are never truncated into a different identity. A record
+`oversized_field` gap, and non-text values become null with an `invalid_type` gap;
+they are never truncated into a different identity. A record
 whose JSON escaping still exceeds 4 KiB is withheld and counted. A response-byte
 stop leaves the next unprocessed record for the continuation. Gap details are
 capped at 32; `gapCount` and `gapDetailsTruncated` preserve the count. Cursor input

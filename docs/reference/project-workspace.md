@@ -41,8 +41,12 @@ Reinstalling changes nothing. If the file's shape doesn't allow that (for
 example a flow-style list), if the id is already taken by another root, if the
 folder is registered under a different id, or if the rig is already listed
 under another project, install writes nothing to the catalog and prints what to
-change. Without a catalog, the one it writes keeps a `default` entry for the
-workspace root beside the bundle's.
+change, and the folder isn't copied either. An existing folder at
+`<workspace.projects_root>/<id>/` is never overwritten: if its files differ from
+the bundle's, install keeps it and says so. Without a catalog, the one it writes
+keeps an entry for the workspace root beside the bundle's, under the id from the
+workspace's own `project.yaml` (`default` when it declares none); if that id is the
+bundle's project id, install reports a conflict and writes no catalog.
 
 ## Project-world install
 
@@ -106,8 +110,12 @@ an explicit install whose `install.skills` is empty clears it. This keeps
 
 ## Work-install project selection
 
-`rig context work-install` picks one project from `workspace.yaml`, in this
-order:
+`rig context work-install` picks one project from the catalog at
+`workspace.catalog_path` (default `workspace.yaml`), in the order below. Without a
+catalog, the workspace root itself is the project (`selectedBy: workspace`), and
+`--project` must match its `project.yaml` id. Operating posture uses steps 3-5
+the same way when a queue row names no project (see
+[scoped operating posture](scoped-operating-posture.md)).
 
 1. `--project <id>`;
 2. the only declared project;
@@ -129,8 +137,9 @@ projects:
     rigs: [openrig-dev]
 ```
 
-`rigs` is optional. An entry whose `rigs` isn't a list of rig names is ignored
-with a warning. A rig listed under two projects, or two projects sharing the
+`rigs` is optional. A `rigs` value that isn't a list of rig names is ignored
+with a warning; the entry can still be chosen by `--project`, as the only entry
+or by working directory, but never counts as unclaimed in step 5. A rig listed under two projects, or two projects sharing the
 deepest root, leave the choice to `--project`. Step 3 reads the seat's
 `OPENRIG_SESSION_NAME`, so a plain shell skips it. `--json` reports the step
 that chose the project as `position.selectedBy`.
@@ -178,14 +187,19 @@ ambiguity.
 
 ## Queue Mapping
 
-Queue items attach to a slice when their body or tags mention one of:
+A `slice:<id>` tag is the authoritative way to attach a queue item to a slice;
+with a project selected, typed rows also need the `project:<id>` tag. As a
+fallback, for slices with no typed rows, items attach when their body or tags
+mention one of:
 
 - the slice id;
 - the mission id;
 - the legacy `rail-item` value in slice frontmatter.
 
-For new work, include both mission and slice ids in the queue item body or
-tags. Example:
+Once any slice in a mission has typed rows, the fallback stops matching on the
+mission id (and on a `rail-item` defaulted from it) for that mission's other
+slices too. For new work, tag rows with `slice:<id>` (and `project:<id>`), and
+include the mission and slice ids in the body as well. Example:
 
 ```text
 Mission: idea-ledger

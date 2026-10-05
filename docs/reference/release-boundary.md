@@ -88,7 +88,11 @@ naming that exact delta AND a distinct successor delta file existing. A header a
 does not expire it; missing or unreadable inputs remain unknown/live. At the actual
 boundary, verify the event before recording expiry, then stop citing the expired
 delta. Do not create a successor merely to make the condition true. Candidate
-absorption is not proof of publication or served production adoption.
+absorption is not proof of publication or served production adoption. The delta is
+`CAPABILITY-DELTA-v<version>.md` in the release mission folder (scaffolded by
+`rig scope mission create release-X.Y.Z`); its `expiry.canon_path` and
+`expiry.successor_path` name the two inputs, and `rig scope audit --mission <name>`
+reports `expired_capability_delta` once both hold.
 
 Private project topology, host practice, and release ownership go to the versioned
 project world instead of leaking into the public package. The new release's delta
@@ -107,8 +111,8 @@ obligations start at ITS cut.
   packaged result, repairs any missed absorption as explicit debt, absorbs private
   project truth, re-primes, and observes whether a clean world-installed agent
   reaches the capability from its situation without being told its name.
-- A missing route is a release finding. Repair the smallest existing seam or deposit
-  the evidenced gap into the derivable-context mission; do not create a second
+- A missing route is a release finding. Repair the smallest existing seam or record
+  the evidenced gap as scoped follow-up work in the project; do not create a second
   capability registry, search service, or world store at the boundary.
 
 ## 8. What deliberately does NOT happen at the boundary

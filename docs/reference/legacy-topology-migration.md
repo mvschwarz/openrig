@@ -3,8 +3,10 @@
 For rigs whose hand-authored context predates the chain-file convention and
 lives at the legacy location (`~/.openrig/shared-docs/rigs/<rig>/`, or
 `$OPENRIG_SHARED_DOCS_ROOT/rigs/<rig>/`). Nothing here is destructive: the
-legacy tree is left in place, reads keep working throughout (the walker's
-advisory-emitting fallback), and every copy is no-clobber.
+legacy tree is left in place, `rig context trace` keeps reading it at the rig and
+seat levels throughout (with an advisory), and every copy is no-clobber. The refocus
+trace, `seat:` profile atoms and handover priming read only `topology.root`, so
+they see these files only after migration.
 
 ## The path, with exact commands
 

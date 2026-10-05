@@ -1,8 +1,8 @@
 # SDLC conventions — the markdown control plane
 
 > **Source of truth:** this repo document is the living SSOT for the SDLC
-> conventions. Scaffold templates, the advisory scope audit, the
-> `mission-slice-sop` skill, and the shipped bootstrap overlay all point HERE —
+> conventions. Scaffold templates, the advisory scope audit and the
+> `mission-slice-sop` skill all point HERE —
 > they must not restate this document in full (restatement is how drift is born).
 
 OpenRig is a software factory the human steers from a high altitude. The human
@@ -37,7 +37,7 @@ one does not deprecate the others. Nothing below deletes or overrides an existin
 | **PRODUCT / MISSION PREPARATION** | **The product-management pass** — the layer above planning, run by the advisor/PM seat before planners touch a mission. The build is a lossy compression pipeline (PM intent → planner spec → builder code); nothing leaks downward by proximity, so this pass grounds in the raw sources, synthesizes ONE scope of record, presents owner decisions decision-ready, mints slices at plan time, deposits the full design contract INLINE in each design-bearing spec (owner words verbatim, settled decisions, evidence, shape of done, anti-goals), routes the complete reading list and internet-research assignments from the spec itself, frames each slice's planning-dial rung with its reason, and rereads every spec as the narrow downstream reader. The measuring stick: SPEC.md alone, plus what it explicitly routes to, reproduces the intent in a reader with none of the author's context. Full reference: `product-management-pass.md`. |
 | **PLAN** | **The planning dial** — planning rigor is a spectrum chosen per piece: P0 mini-requirements and pointers (simple, reversible work) · P1 an authored spec with a proof contract (the default) · P2 plus a research round before the spec freezes, run BEFORE build dispatch · P3 plus an adversarial pass by a non-author, judged against product goals, landing amendments with proof-contract teeth · P4 plus a blind from-scratch design diffed against priors before proceeding. Dial up by what the piece is, exactly as build care is priced below. Full reference: `planning-dial.md`. |
 | **BUILD** | **Part A, the simple flow** (below — the default) · **product-journey components** — a mission-selectable menu for greenfield work, drift recovery, public journey probes, one evidence-gated look at the layer below, minimal repair, independent QA/review, integration, and installed smoke; compose only what the work needs in mission/slice YAML, never as a new mode or mandatory pipeline. Full reference: `product-journey-sdlc.md` · **the wave model** — slices build in parallel in disjoint file territories, an integrator merges serially, and independent review fires once per wave (two reviewers with different vantages, never the writers; fix rounds re-earn verdicts at one final revision; per-slice discipline stays failing-test-first and verify-by-effect). The wave IS the care dial: what shares a wave decides how much review each piece gets · **Part B, the rigorous overlay** (below — only when assigned). These combine: a wave can carry one Part-B piece. Full wave reference: `wave-sdlc.md`. |
-| **DISPATCH DATA** | **The execution-data conventions (S27)** — three tiny data disciplines that make execution state derivable instead of hand-tabulated, consumed by `rig view show execution`. **EC-1, edges in frontmatter:** every open slice carries its hard edges in `depends_on:` (an inline JSON array; an explicit `[]` is a statement, absence is INDETERMINATE); soft/serialization edges are one machine-readable Territory line, exactly `SOFT-AFTER: [ids] — reason`. **EC-2, wave-as-data:** wave composition + review model live on a durable queue row tagged `wave-map` + `format:wave-map-v1` whose body carries one fenced ```json block (`{format:"wave-map-v1", mission, waves:[{id, slices, serialized_order?, review_model?}]}`) — composition only, never status labels (status derives at read time); the planning dial recorded at lock surfaces as the frontmatter field `approved-spec-dial:` beside the approve stamp. **EC-3, dispatch names the worktree:** build batons carry the exact body line `worktree_path=<path>` from dispatch onward — it is Q1's join key; batons without it join by naming only and the view marks them `fragile_join`. Existing batons are never rewritten. |
+| **DISPATCH DATA** | **The execution-data conventions (S27)** — three tiny data disciplines that make execution state derivable instead of hand-tabulated, consumed by `rig view show execution`. **EC-1, edges in frontmatter:** every open slice carries its hard edges in `depends_on:` (an inline JSON array; an explicit `[]` is a statement, absence is INDETERMINATE; when the slice's `slice.yaml` carries `execution.depends_on`, that list takes precedence); soft/serialization edges are one machine-readable Territory line, exactly `SOFT-AFTER: [ids] — reason`. **EC-2, wave-as-data:** wave composition + review model live in `mission.yaml` `arrangement.waves` (`{id, slices, review_model?}`; a slice may also name its wave in `slice.yaml` `execution.wave`). Only when the mission has no `mission.yaml`, or it is malformed, does the view fall back to the legacy form: the newest queue row tagged `format:wave-map-v1` and `mission:<mission>` whose body carries one fenced ```json block (`{format:"wave-map-v1", mission, waves:[{id, slices, serialized_order?, review_model?}]}`) — composition only, never status labels (status derives at read time); the planning dial recorded at lock surfaces as the frontmatter field `approved-spec-dial:` beside the approve stamp. **EC-3, dispatch names the worktree:** build batons carry the exact body line `worktree_path=<path>` from dispatch onward — it is Q1's join key; batons without it join by naming only and the view marks them `fragile_join`. Existing batons are never rewritten. |
 | **RELEASE** | The release ceremony conventions (publication identity, honest release notes) and the CAPABILITY-DELTA LIFECYCLE LAW: each release's delta is authored at the fence and bound to the exact candidate, then reconciled to the published cut. Expiry requires both the canon header naming the absorbed delta and a distinct successor delta existing; a draft header alone is insufficient. Verify the actual boundary event and stop citing an expired delta. Full statement: `release-boundary.md` §6. |
 | **BOUNDARY** | **The release boundary** — housekeeping run once per fence so the next release starts clean: seats reset or re-primed per their continuity needs, memory distilled (keep what changed a decision recently), every queue swept by destination and dispositioned, substrate torn down, boards frozen as records, a clean-box baseline captured. A checklist of judgment guides, not gates. Full reference: `release-boundary.md`. |
 
@@ -46,7 +46,7 @@ one does not deprecate the others. Nothing below deletes or overrides an existin
 > planning dial — `planning-dial.md` · the product-journey component catalog —
 > `product-journey-sdlc.md` · the wave model — `wave-sdlc.md` · the release
 > boundary (including the capability-delta lifecycle law) — `release-boundary.md` ·
-> the mission install — `mission-install.md` (lands with its own slice). The
+> the mission install — `mission-install.md`. The
 > summaries above remain the one-glance description; this document remains the SSOT
 > pointer for the whole menu.
 
@@ -99,17 +99,17 @@ Each slice directory carries:
     (numbered list). This is the human operator's first structured catchpoint;
     approval starts here.
   - **`## Proof contract`** — a checkbox list of promised deliverables (see
-    §3). The UI's DELIVERED section pairs each item with its proof.
+    B1). The UI's DELIVERED section pairs each item with its proof.
 - **`PROGRESS.md`** — the slice's current delivery state and retained outcome
   log. Record material changes with links to proof; historical checkboxes are
   testimony, not current acceptance authority. For a selected proof policy,
-  `rig proof show <slice>` derives current readiness from the proof contract
+  `rig proof show <mission>/slices/<slice>` derives current readiness from the proof contract
   and attributed judgments. In-process steps stay in the working agent's
   own todo tool.
 - **`PROOF.md`** — the retained proof summary, explicitly paired to the
   `SPEC.md` proof contract.
 - **`proof/`** — the proof-artifact directory. Curated canonical evidence
-  lands here via `rig proof` with valid C1 headers (§5).
+  lands here via `rig proof` with valid C1 headers (B3).
 
 Legacy `README.md`, `IMPLEMENTATION-PRD.md`, and pre-convention trees remain
 readable indefinitely. New scaffolds do not create or mirror them, and repair
@@ -128,7 +128,9 @@ Part B or add a mandatory review gate.
 
 The three sections project into the UI's one review structure: a vertical
 stack of **INTENT → PLAN → DELIVERED**. A slice missing a section still
-renders (the projection degrades to a muted "—", never invents content) —
+renders (a missing Intent or Delivered source shows a muted "—", missing
+mini-requirements show "Not compliant · mini-requirements not authored";
+nothing is invented) —
 but it does not carry its weight in review.
 
 ## A3. Honesty rails (public surfaces + cited hashes)
@@ -209,24 +211,29 @@ are losslessness checks on the decompression from intent to delivery, not
 paperwork. Scaffolding emits the sections; it must never mint ceremony.
 ## A6. The audit (advisory, fail-open — always)
 
-`rig scope audit` (and the advisory rows in `rig workspace validate` /
-`doctor`) checks these conventions: the section headings present, the proof
-contract well-formed, `proof/` artifacts carrying valid C1 headers, UI slices
-referencing a mockup. Every finding **records and advises — it never blocks a
-write path and never changes exit semantics into a gate**. Unknown is
+`rig scope audit --mission <name>` (and the advisory `sdlc_convention_sections`
+row in `rig workspace doctor`) checks these conventions: the section headings
+present, the proof contract well-formed, `proof/` artifacts carrying valid C1
+headers, UI slices referencing a mockup. Every convention finding is low or
+info severity: it **records and advises — it never blocks a write path and
+never changes the exit code**. (`rig scope audit` exits 1 only on high-severity
+structural findings, such as a missing `PROGRESS.md` or id.) Unknown is
 reported as unknown, not failure.
 ## A7. Where the knowledge lives (the four pointers)
 
 - **This document** — the SSOT.
-- **Scaffold**: `rig scope slice create` emits `SPEC.md` + `PROGRESS.md` +
-  `PROOF.md` + `proof/` for every template kind; `rig scope mission create`
-  emits an intent-bearing `SPEC.md` + `NOTES.md`. Core emits only this
+- **Scaffold**: `rig scope slice create` emits `SPEC.md` + `slice.yaml` +
+  `PROGRESS.md` + `PROOF.md` + `proof/` for every template kind (and registers
+  the slice in `mission.yaml`); `rig scope mission create` emits an
+  intent-bearing `SPEC.md` + `mission.yaml` + `PROGRESS.md` + `NOTES.md` +
+  `slices/` (plus `CAPABILITY-DELTA-v<version>.md` for a `release-X.Y.Z`
+  mission). Core emits only this
   mode-neutral shape; mode plugins add richer material through the extension
   seam rather than teaching core a mode.
 - **Skill**: `mission-slice-sop` teaches **Part A**, the light default. **Part B**
   is defined below and applies only when assigned — never self-selected.
-- **Bootstrap**: the shipped agent overlay points fresh seats at the skill
-  and this document at boot.
+- **Bootstrap**: the shipped pm-team rig culture points its seats at the skill
+  and this document; the generic `openrig-start.md` overlay no longer does.
 
 # PART B — THE RIGOROUS OVERLAY (assigned only)
 
@@ -266,7 +273,8 @@ deliverable, written as an observable outcome:
   that evidence it — that pairing is what the DELIVERED section renders, so
   the human never hunts through dozens of artifacts to find which one proves
   what.
-- **UI deliverables carry a planned mockup** (`plannedRef`): the planning
+- **UI deliverables carry a planned mockup** (`plannedRef`, written as an
+  inline image on the checkbox line, e.g. `- [ ] … ![mockup](mockups/review.png)`): the planning
   agent produces the mockup and attaches it to the locked set. A UI slice
   with no mockup in its locked set is an incomplete plan. Non-UI slices
   (backend, skills, markdown) have no mockup and no `plannedRef` — that is
@@ -283,14 +291,18 @@ append-only audit row land together):
 - **Plan-lock:** `rig scope slice approve <slice> --scope spec` — "the spec
   matches my intent; THIS artifact set is what gets built." Pins `SPEC.md`
   (and planned mockups, when present) out of everything else in the folder.
+  `--locked-artifacts "SPEC.md,…"` names the set explicitly instead; a
+  plan-lock on an unedited scaffold `SPEC.md` with nothing else to pin refuses.
 - **Proof-lock:** `rig scope slice approve <slice> --scope delivery`
-  (the default scope) — the terminal "this is done" sign-off; fires the
-  freeze.
+  (the default scope) — the terminal "this is done" sign-off. (It does not
+  render the frozen export; the approve result reports `freezeFired: false`.)
 
 Approval is freeze/sign-off — **never** proven-green. Proven-green requires a
-recorded verdict (a C1 proof artifact, §5); presence of an approval stamp does
+recorded verdict (a C1 proof artifact, B3); presence of an approval stamp does
 not assert the work was proven. `--on-behalf-of` records delegation honestly
-(the actor stays the real invoking session).
+(the actor stays the real invoking session). A second approve of the same
+scope refuses; `--re-approve --reason "<why>"` supersedes the stamp and keeps
+the prior one in the audit log.
 
 ## B3. Proof drops and the C1 header (closed sets)
 
@@ -323,9 +335,9 @@ that it LOOKED at the evidence. `--media` names the curated media files
 (relative to the slice's `proof/` dir — co-located, never absolute) this
 drop stands behind; the composer projects them into the DELIVERED items'
 proof set. Validation happens at drop time; the audit
-(§6) backstops artifacts that arrived by other paths. **Hand-placing files
+(A6) backstops artifacts that arrived by other paths. **Hand-placing files
 in `proof/` without a drop is the anti-pattern**: the deliverable stays
-unpaired and `unverified` in the DELIVERED view — always attach media via
+unpaired and shows as `missing` in the DELIVERED view — always attach media via
 `--media` on a drop.
 
 ## B4. Role contracts (what makes the structure self-enforcing)
