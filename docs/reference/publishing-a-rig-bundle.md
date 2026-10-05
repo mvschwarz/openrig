@@ -82,7 +82,8 @@ rest say **"Not tested by OpenRig"**, which means exactly that. You're welcome t
 Open a pull request to the `registry/` folder of
 [mvschwarz/openrig-world](https://github.com/mvschwarz/openrig-world) that adds one entry with three things: your
 repository, the folder path, and a branch, tag or commit. No pull requests? Open an issue there with the same three
-things. The full entry format is `registry-entry.v1`, described in that folder's README; a maintainer completes the
+things. The full entry format is `registry-entry.v1`, defined in the [bundle formats reference](bundle-formats.md); a
+maintainer completes the
 parts only a review can produce, such as the pinned commit and each configuration's package digest.
 
 What happens next:
