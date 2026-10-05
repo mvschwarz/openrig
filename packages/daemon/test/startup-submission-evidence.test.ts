@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { inspectStartupStagedText } from "../src/domain/startup-submission-evidence.js";
+import { inspectStartupStagedText, startupOwnCollapsedPaste } from "../src/domain/startup-submission-evidence.js";
 
 // Composer-only crops from Claude Code 2.1.289; no transcript or seat identity.
 const frames = JSON.parse(readFileSync(new URL("./fixtures/claude-startup-paste-2.1.289.json", import.meta.url), "utf8")) as Array<{
@@ -47,5 +47,36 @@ describe("Claude transient startup composer", () => {
 
   it("still identifies the complete expected prompt as staged", () => {
     expect(inspectStartupStagedText(composer(expected), expected)).toBe("staged");
+  });
+});
+
+// Claude 2.1.289's label counts the pasted text's newlines: the four startup prompts of one native run read +95,
+// +70, +84 and +61 with exactly that many newlines, and a 29-newline file ending in one read +29.
+describe("our own collapsed startup paste", () => {
+  const prompt = Array.from({ length: 96 }, (_, i) => `line ${i}`).join("\n"); // 95 newlines, none trailing
+  const file = `${Array.from({ length: 29 }, (_, i) => `line ${i}`).join("\n")}\n`; // 29 newlines, one trailing
+
+  it.each([
+    ["the live composer's no-break space", `\u276f\u00a0[Pasted text #1 +95 lines]\n${"\u2500".repeat(80)}\n  paste again to expand\n`],
+    ["a plain space and the effort hint", composer("[Pasted text #1 +95 lines]", "paste again to expand  \u25d0 medium \u00b7 /effort")],
+    ["the mode bar", composer("[Pasted text #3 +95 lines]", "\u23f5\u23f5 bypass permissions on (shift+tab to cycle)")],
+  ])("recognizes the label for a paste with the prompt's newline count (%s)", (_name, pane) => {
+    expect(startupOwnCollapsedPaste(pane, prompt)).toBe(true);
+  });
+
+  it("counts a trailing newline, as Claude does", () => {
+    expect(startupOwnCollapsedPaste(composer("[Pasted text #2 +29 lines]"), file)).toBe(true);
+    expect(startupOwnCollapsedPaste(composer("[Pasted text #2 +28 lines]"), file)).toBe(false);
+  });
+
+  it.each([
+    "[Pasted text #1 +94 lines]", "[Pasted text #1 +96 lines]", "[Pasted text #1]", "[Pasted text +95 lines]",
+    "a person's draft [Pasted text #1 +95 lines]", "[Pasted text #1 +95 lines] and more", "a person's draft", "",
+  ])("does not treat %j as our pending paste", body => {
+    expect(startupOwnCollapsedPaste(composer(body), prompt)).toBe(false);
+  });
+
+  it.each([null, "", "\u276f [Pasted text #1 +95 lines]\n"])("needs a recognized composer: %j", pane => {
+    expect(startupOwnCollapsedPaste(pane, prompt)).toBe(false);
   });
 });

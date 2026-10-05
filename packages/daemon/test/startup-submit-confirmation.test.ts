@@ -160,12 +160,7 @@ describe("startup prompt submission", () => {
     it.each(["null", "throw", "different"])("retains earlier %s uncertainty after a successful file without claiming staging", async mode => {
       const f = fixture(0, "claude-code", false, true);
       if (mode === "throw") f.tmux.capturePaneContent.mockRejectedValueOnce(new Error("capture unavailable"));
-      else if (mode === "null") f.tmux.capturePaneContent.mockResolvedValueOnce(null);
-      else { // the different body stays through the first file's bounded re-looks
-        const capture = f.tmux.capturePaneContent.getMockImplementation()!;
-        f.tmux.capturePaneContent.mockImplementation(async (...args) => f.tmux.sendText.mock.calls.length === 1
-          ? "❯ a different body\n────────────────────\n? for shortcuts" : capture(...args));
-      }
+      else f.tmux.capturePaneContent.mockResolvedValueOnce(mode === "null" ? null : "❯ a different body\n────────────────────\n? for shortcuts");
       const result = await f.start({ startupActions: [], resolvedStartupFiles: [file("first.md"), file("second.md")] });
       expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified" } });
       expect(result.warnings).toEqual([expect.stringContaining("Startup submission unverified")]);
@@ -329,17 +324,21 @@ describe("startup prompt submission", () => {
     expect(f.submitted.includes(STARTUP_PROOF_INSTRUCTION_LINE)).toBe(frame.expected === "clear");
     if (frame.expected === "unverified") expect(result).toMatchObject({ submission: { status: "unverified" } });
   });
-  // Claude Code 2.1.289 can accept Enter after the first look: in an all-claude native run every seat's first
-  // look showed its startup prompt still collapsed ("[Pasted text #1 +95 lines]" on one seat), and each seat
-  // accepted that prompt moments later with no second Enter. Composer crops in 2.1.289's shape.
+  // Claude Code 2.1.289 can take Enter after the first look: in an all-claude native run every seat's first look
+  // showed its startup prompt still collapsed ("[Pasted text #1 +95 lines]" on one seat, +M counting the prompt's
+  // newlines), and each seat accepted that prompt moments later with no second Enter. Composer crops in 2.1.289's
+  // shape, with the live composer's no-break space after the marker.
   const pasteHint = "  paste again to expand                                     ◐ medium · /effort";
-  const composerCrop = (body: string) => `❯ ${body}\n${"─".repeat(80)}\n${pasteHint}\n`;
-  const collapsedPaste = composerCrop("[Pasted text #1 +95 lines]");
+  const composerCrop = (body: string) => `❯ ${body}\n${"─".repeat(80)}\n${pasteHint}\n`;
+  const newlines = (text: string) => text.split("\n").length - 1;
+  const ownPaste = (sent: string) => composerCrop(`[Pasted text #1 +${newlines(sent)} lines]`);
+  const sentPrompt = (f: ReturnType<typeof fixture>) => f.tmux.sendText.mock.calls[0]![1];
   for (const identity of [false, true]) {
     const path = identity ? "identity" : "challenge-only";
     it(`confirms a ${path} prompt that Claude accepts after the first look, then sends the proof line`, async () => {
       const f = fixture(0, "claude-code", !identity);
-      f.tmux.capturePaneContent.mockResolvedValueOnce(collapsedPaste).mockResolvedValueOnce(composerCrop("Press up to edit queued messages"));
+      f.tmux.capturePaneContent.mockImplementationOnce(async () => ownPaste(sentPrompt(f)))
+        .mockResolvedValueOnce(composerCrop("Press up to edit queued messages"));
       const result = await f.start({ startupActions: proofActions(identity) });
       expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
       expect(result.ok && result.submission).toBeUndefined();
@@ -350,7 +349,6 @@ describe("startup prompt submission", () => {
   }
   // Only our own collapsed paste earns another look. Anything else keeps its first-look verdict even if the
   // composer clears a moment later, because a person may have cleared it (review-r2's constructed controls).
-  const newlines = (text: string) => text.split("\n").length - 1;
   const foreignFirstLooks: Array<[string, (sent: string) => string]> = [
     ["a person's draft", () => composerCrop("a person's draft")],
     ["a collapsed paste of another length", sent => composerCrop(`[Pasted text #1 +${newlines(sent) + 1} lines]`)],
@@ -358,17 +356,18 @@ describe("startup prompt submission", () => {
   ];
   it.each(foreignFirstLooks)("keeps %s unverified with no second look, even if the composer then clears", async (_name, firstLook) => {
     const f = fixture(0, "claude-code", true);
-    f.tmux.capturePaneContent.mockImplementationOnce(async () => firstLook(f.tmux.sendText.mock.calls[0]![1]));
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => firstLook(sentPrompt(f)));
     const result = await f.start({ startupActions: proofActions(false) });
     expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified" } });
     expect(f.submitted.includes(STARTUP_PROOF_INSTRUCTION_LINE)).toBe(false);
     expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(1);
   });
-  // A recognized composer holding something else is looked at again, 200 ms apart, this many times.
+  // Our collapsed paste is looked at again, 200 ms apart, at most this many times per send.
   const SETTLE_LOOKS = 25;
-  it("keeps a collapsed paste that never clears unverified after the bounded looks, without another Enter", async () => {
+  const labelBytes = (sent: string) => ({ bytes: `[Pastedtext#1+${newlines(sent)}lines]`.length });
+  it("keeps our collapsed paste unverified if it never clears, with both ends of the wait in the diagnostic", async () => {
     const f = fixture(0, "claude-code", true);
-    f.tmux.capturePaneContent.mockResolvedValue(collapsedPaste);
+    f.tmux.capturePaneContent.mockImplementation(async () => ownPaste(sentPrompt(f)));
     const result = await f.start({ startupActions: proofActions(false) });
     expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified", reasons: [
       "Startup submission is unverified: the current composer does not positively match the complete prompt.",
@@ -377,42 +376,50 @@ describe("startup prompt submission", () => {
     expect(f.submitted.includes(STARTUP_PROOF_INSTRUCTION_LINE)).toBe(false);
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
     expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(1 + SETTLE_LOOKS);
-    // paste to Enter, Enter to the first look, then the re-looks: about 5 s in all, never unbounded
+    // paste to Enter, Enter to the first look, then the re-looks: about 5 s per send, never unbounded
     expect(f.sleep.mock.calls).toEqual(Array.from({ length: 2 + SETTLE_LOOKS }, () => [200]));
+    expect(result.ok && result.submission?.diagnostics).toMatchObject([{ retry: "not_run", observations: [
+      { phase: "initial", look: 0, reason: "extracted_text_mismatch", observed: labelBytes(sentPrompt(f)) },
+      { phase: "initial", look: SETTLE_LOOKS, reason: "extracted_text_mismatch", observed: labelBytes(sentPrompt(f)) },
+    ] }]);
   });
-  it("hands a composer that settles to the staged prompt to the guarded Enter-only retry", async () => {
+  it("hands our collapsed paste that settles to the staged prompt to the guarded Enter-only retry", async () => {
     const f = fixture(1);
-    f.tmux.capturePaneContent.mockResolvedValueOnce(collapsedPaste);
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => ownPaste(sentPrompt(f)));
     const result = await f.start();
     expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
     expect(result.ok && result.submission).toBeUndefined();
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2);
-    expect(f.submitted).toEqual([f.tmux.sendText.mock.calls[0]![1]]);
+    expect(f.submitted).toEqual([sentPrompt(f)]);
   });
-  it("looks again after the guarded retry too", async () => {
+  it("does not look again after the guarded retry", async () => {
     const f = fixture(1);
     const capture = f.tmux.capturePaneContent.getMockImplementation()!;
-    f.tmux.capturePaneContent.mockImplementationOnce(capture).mockImplementationOnce(capture).mockResolvedValueOnce(collapsedPaste);
-    const result = await f.start();
-    expect(result).toMatchObject({ ok: true, startupStatus: "ready" });
-    expect(result.ok && result.submission).toBeUndefined();
+    f.tmux.capturePaneContent.mockImplementationOnce(capture).mockImplementationOnce(capture)
+      .mockImplementationOnce(async () => ownPaste(sentPrompt(f)));
+    expect(await f.start()).toMatchObject({ ok: true, submission: { status: "unverified",
+      reasons: ["Startup submission is unverified after the guarded retry: the current composer is ambiguous."] } });
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2);
-    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(4);
+    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(3);
   });
-  it("stops looking when the composer gives way to a screen it cannot read", async () => {
+  it("stops looking when our collapsed paste gives way to a screen it cannot read", async () => {
     const f = fixture(Infinity);
-    f.tmux.capturePaneContent.mockResolvedValueOnce(collapsedPaste).mockResolvedValue("A different question\n❯ 1. Continue\n  2. Cancel\n");
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => ownPaste(sentPrompt(f)))
+      .mockResolvedValue("A different question\n❯ 1. Continue\n  2. Cancel\n");
     expect(await f.start()).toMatchObject({ ok: true, submission: { status: "unverified",
       reasons: ["Startup submission is unverified: the current composer boundary was not recognized."] } });
     expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(2);
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
   });
-  it("keeps the last usable observation when a re-look fails", async () => {
+  it("keeps the first observation when a re-look fails", async () => {
     const f = fixture(0);
-    f.tmux.capturePaneContent.mockResolvedValueOnce(collapsedPaste).mockRejectedValueOnce(new Error("capture unavailable"));
-    expect(await f.start()).toMatchObject({ ok: true, submission: { status: "unverified",
-      reasons: ["Startup submission is unverified: the current composer does not positively match the complete prompt."],
-      diagnostics: [{ retry: "not_run", observations: [{ phase: "initial", reason: "extracted_text_mismatch", observed: { bytes: 22 } }] }] } });
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => ownPaste(sentPrompt(f))).mockRejectedValueOnce(new Error("capture unavailable"));
+    const result = await f.start();
+    expect(result).toMatchObject({ ok: true, submission: { status: "unverified",
+      reasons: ["Startup submission is unverified: the current composer does not positively match the complete prompt."] } });
+    const observations = result.ok ? result.submission?.diagnostics?.[0]?.observations : undefined;
+    expect(observations).toMatchObject([{ phase: "initial", reason: "extracted_text_mismatch", observed: labelBytes(sentPrompt(f)) }]);
+    expect(observations?.[0]).not.toHaveProperty("look");
     expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(2);
   });
   for (const identity of [false, true]) {
@@ -497,7 +504,7 @@ describe("startup prompt submission", () => {
     expect(f.submitted).toHaveLength(1);
   });
 
-  it("persists exact synthetic mismatch evidence after the bounded re-looks, without another Enter", async () => {
+  it("persists exact synthetic mismatch evidence without another Enter or capture", async () => {
     const f = fixture(Infinity);
     f.tmux.capturePaneContent.mockResolvedValue(screen("X ä\n b"));
     const result = await f.start();
@@ -512,7 +519,7 @@ describe("startup prompt submission", () => {
         firstDifferenceByte: 0, markerLine: 2, closingRuleLine: 4, capturedLines: 5,
         captureScrollbackLines: 200, windowsOmitted: "unclassified-startup-text" }],
     }]);
-    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(1 + SETTLE_LOOKS);
+    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(1);
     expect(f.tmux.sendText).toHaveBeenCalledTimes(1);
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
   });
@@ -621,7 +628,7 @@ describe("startup prompt submission", () => {
     vi.spyOn(crypto, "createHash").mockImplementation(() => { throw new Error("diagnostic failure"); });
     expect(await f.start()).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified" } });
     expect(f.tmux.sendKeys).toHaveBeenCalledTimes(1);
-    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(1 + SETTLE_LOOKS);
+    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(1);
   });
 
 });
