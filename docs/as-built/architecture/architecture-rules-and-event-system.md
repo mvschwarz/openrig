@@ -11,7 +11,7 @@ applies-when: |
   compatibility limits that still describe the shipped system.
 siblings: [daemon-core.md, coordination-primitive.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
 last-updated: 2026-10-05
 ---
 
@@ -21,7 +21,7 @@ This module collects the cross-cutting invariants that do not belong to any
 single subsystem: the architecture rules the codebase holds itself to, the
 event-system shape, and the intentional compatibility limits.
 
-> Verified against source at main `a350c59b5a5fb37ee4a21b1026b595068b603df1`. Each count below sits beside the
+> Verified against source at main `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -61,7 +61,7 @@ system-level invariants.
     `monotonicFactory()`. Restore does not pick the newest session by max
     ULID; it resolves the active occupant recorded in the snapshot
     (`resolveActiveSnapshotSession`, `active-occupant.ts:74`, called at
-    `restore-orchestrator.ts:768` and `:965`).
+    `restore-orchestrator.ts:767` and `:964`).
 13. Readiness checking is a retry loop with exponential backoff and
     configurable timeout, using adapter-specific probes (Claude TUI
     indicator, Codex ready message, terminal immediate).
@@ -73,9 +73,9 @@ system-level invariants.
     new process assembled from artifacts.
 15. Restore honesty: a failed resume stops loudly as `awaiting-decision`, with
     the blank session rolled back and no session running
-    (`restore-orchestrator.ts:1049`). No automatic fresh fallback. Fresh launch
+    (`restore-orchestrator.ts:1048`). No automatic fresh fallback. Fresh launch
     is explicit follow-up only (`rig up --fresh <seats...>`,
-    `packages/cli/src/commands/up.ts:92`).
+    `packages/cli/src/commands/up.ts:93`).
 16. Post-command handoff required on `up`, `down`, `restore`,
     `snapshot create`: what happened + current state + next action.
 17. Session naming: `{pod}-{member}@{rig}` — human-authored,
@@ -136,7 +136,7 @@ comments:
   caller's opt-in to wait, and a failed wait returns without sending. Otherwise
   only positive evidence of an open
   picker or approval prompt refuses a send; a busy or unknown seat gets the
-  message with an advisory warning (`session-transport.ts:1403`–`1409`). The
+  message with an advisory warning (`session-transport.ts:1410`–`1409`). The
   audited `--dangerously-interact` override is the only way past an open prompt.
 - **Non-interruptive mode is per-launch flags only.** It never changes
   permissions or native settings files, applies only to full-bypass Claude Code
@@ -268,7 +268,7 @@ Intentional limits that still describe the shipped system:
 6. Chat is rig-scoped only — no cross-rig channels or DMs.
 7. `--verify` on `rig send` checks pane content for message visibility, not
    agent acknowledgement: it compares occurrences of the message's first 40
-   characters before and after the send (`session-transport.ts:1581`–`1584`).
+   characters before and after the send (`session-transport.ts:1588`–`1584`).
 8. Terminal node readiness is shell-ready only — no service health probes.
 9. Managed-app service surfaces are descriptive only — OpenRig does not
    auto-inject service URLs/tokens into agent prompts beyond authored

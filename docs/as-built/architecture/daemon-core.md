@@ -9,7 +9,7 @@ applies-when: |
   graph, the SQLite schema/migration set, or the route-mount surface.
 siblings: [coordination-primitive.md, agent-spec-and-startup.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md]
-last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
 last-updated: 2026-10-05
 ---
 
@@ -20,7 +20,7 @@ OpenRig is a local control plane for multi-agent coding topologies. The daemon
 (`@openrig/cli`), the terminal UI (`@openrig/tui`), the web UI (`@openrig/ui`)
 and the MCP server all sit on top of.
 
-> Verified against source at main `a350c59b5a5fb37ee4a21b1026b595068b603df1`. Each count below sits beside the
+> Verified against source at main `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -29,7 +29,7 @@ and the MCP server all sit on top of.
 For what OpenRig is and how its packages fit together, read `ARCHITECTURE.md` at
 the repository root. This module covers the daemon's own wiring.
 
-### Source footprint at `a350c59b5a5fb37ee4a21b1026b595068b603df1`
+### Source footprint at `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`
 
 The footprint counts use non-test TypeScript files under each package's `src/`
 (tests live in separate `packages/*/test/` directories):
@@ -37,9 +37,9 @@ The footprint counts use non-test TypeScript files under each package's `src/`
 
 | Metric | Count | Directory or command |
 |---|---|---|
-| All packages | **1186** | `packages/*/src` |
-| Daemon | **650** (**426** under `domain/`, **27** under `adapters/`) | `packages/daemon/src`, `…/src/domain`, `…/src/adapters` |
-| CLI | **169** | `packages/cli/src` |
+| All packages | **1188** | `packages/*/src` |
+| Daemon | **651** (**426** under `domain/`, **28** under `adapters/`) | `packages/daemon/src`, `…/src/domain`, `…/src/adapters` |
+| CLI | **170** | `packages/cli/src` |
 | Web UI | **304** | `packages/ui/src` |
 | TUI | **63** | `packages/tui/src` |
 | Database migrations | **94** (`001_core_schema.ts` … `095_rig_non_interruptive.ts`; no `093`) | `git ls-files packages/daemon/src/db/migrations \| wc -l` |
@@ -223,9 +223,9 @@ The daemon entrypoint `packages/daemon/src/index.ts:306` calls
 
 ## 5. Test files
 
-A static count of tracked test files at `a350c59b5a5fb37ee4a21b1026b595068b603df1` (no pass counts are claimed
-here; CI runs the suites in `.github/workflows/tests.yml`): daemon **891**,
-CLI **242**, web UI **198**, TUI **98**
+A static count of tracked test files at `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d` (no pass counts are claimed
+here; CI runs the suites in `.github/workflows/tests.yml`): daemon **894**,
+CLI **243**, web UI **198**, TUI **98**
 (`git ls-files 'packages/<package>/**/*.test.ts' 'packages/<package>/**/*.test.tsx' | wc -l`).
 
 ## See also

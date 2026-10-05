@@ -9,13 +9,13 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
 last-updated: 2026-10-05
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `a350c59b5a5fb37ee4a21b1026b595068b603df1`.
+Verified against source commit `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.

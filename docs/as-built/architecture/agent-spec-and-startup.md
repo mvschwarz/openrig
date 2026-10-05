@@ -11,7 +11,7 @@ applies-when: |
   resolve and preserve identity.
 siblings: [daemon-core.md, adapters-and-runtimes.md, lifecycle-snapshot-restore.md, packaging-bootstrap-bundles.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
 last-updated: 2026-10-05
 ---
 
@@ -22,7 +22,7 @@ and identity-addressable topology. The spec-and-startup contract: parse →
 resolve → project → deliver pre-launch files → persist replay context → launch
 → wait → deliver post-launch files.
 
-> Verified against source at main `a350c59b5a5fb37ee4a21b1026b595068b603df1`. `domain/…` and `routes/…` paths
+> Verified against source at main `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. `domain/…` and `routes/…` paths
 > are under `packages/daemon/src/`; a bare file name such as
 > `rigspec-schema.ts:115` is in `packages/daemon/src/domain/`. Each count sits
 > beside the command that produces it; run the command from the repository
@@ -65,7 +65,7 @@ resolve → project → deliver pre-launch files → persist replay context → 
 Restore/snapshot types are detailed in `lifecycle-snapshot-restore.md`; the
 spec/projection types live here.
 
-- **ResolvedNodeConfig** (`profile-resolver.ts:32`) — output of profile
+- **ResolvedNodeConfig** (`profile-resolver.ts:33`) — output of profile
   resolution. Carries effective runtime/model/effort/cwd, narrowed restore policy,
   selected resources, layered startup block, resolved spec identity, and the
   resolved compaction strategy, continuity mechanic, lifecycle, activity and
@@ -73,19 +73,19 @@ spec/projection types live here.
 - **ProjectionPlan** (`projection-planner.ts:42`) — runtime projection plan for
   a node: runtime, cwd, projection entries, startup block, diagnostics,
   conflict/no-op classifications.
-- **RuntimeAdapter** (`runtime-adapter.ts:139`) — the five-method contract
+- **RuntimeAdapter** (`runtime-adapter.ts:141`) — the five-method contract
   (adapter detail in `adapters-and-runtimes.md`): `listInstalled(binding)`
-  (`runtime-adapter.ts:149`), `project(plan, binding)` (`:152`),
-  `deliverStartup(files, binding, sendInteractiveText?)` (`:156`),
-  `launchHarness(binding, opts)` (`:166`), `checkReady(binding)` (`:172`). The
-  interface also declares an optional `claudeManagedLaunch` property (`:141`)
-  and an optional method, `skillTargetPath?(...)` (`:146`). Required methods:
+  (`runtime-adapter.ts:151`), `project(plan, binding)` (`:154`),
+  `deliverStartup(files, binding, sendInteractiveText?)` (`:158`),
+  `launchHarness(binding, opts)` (`:168`), `checkReady(binding)` (`:174`). The
+  interface also declares an optional `claudeManagedLaunch` property (`:143`)
+  and an optional method, `skillTargetPath?(...)` (`:148`). Required methods:
   **5**
   (`sed -n '/^export interface RuntimeAdapter /,/^}/p' packages/daemon/src/domain/runtime-adapter.ts | grep -c -E '^  [a-zA-Z]+\('`).
-- **HarnessLaunchResult** (`runtime-adapter.ts:93`) — returned by
+- **HarnessLaunchResult** (`runtime-adapter.ts:95`) — returned by
   `launchHarness`: either `{ ok: true, resumeToken?, resumeType?,
   appliedLaunch? }` or `{ ok: false, error, recovery?, evidence? }`, where
-  `recovery` is `"retry_fresh"` or `"attention_required"` (`:91`).
+  `recovery` is `"retry_fresh"` or `"attention_required"` (`:93`).
 - **StartupOrchestrator** (`startup-orchestrator.ts:140`) — drives the full
   startup sequence (§4 below).
 
@@ -143,7 +143,7 @@ startup context before the harness launch.
   (`startup-orchestrator.ts:130`; held for post-launch and delivered after
   readiness at `:473`). Rebuild artifacts are put in front of these files.
 - **Fresh launch:** the builtin `session_identity` action
-  (`rigspec-instantiator.ts:2628`) is sent as one turn together with the first
+  (`rigspec-instantiator.ts:2654`) is sent as one turn together with the first
   `send_text` file (`deliverInitialSessionPrompt`, `startup-orchestrator.ts:663`).
 - **Resume, fork or rebuild:** applicable `after_ready` `send_text` actions are
   sent ahead of the first `send_text` file as one turn.
@@ -210,11 +210,11 @@ invariant; the cross-cutting architecture rules are collected in
 
 The launch path takes only the actions from `resolveStartup`. It builds the
 startup *file* chain itself (`buildResolvedStartupFiles`,
-`rigspec-instantiator.ts:2491`), in this order: agent base, profile, the shipped
+`rigspec-instantiator.ts:2517`), in this order: agent base, profile, the shipped
 `CULTURE-default.md` floor (`:327`), the rig `culture_file`, rig, pod, member,
-the shipped `openrig-start.md` (`:2545`), and, for fresh launches when enabled,
-the onboarding files (`:2555`). Managed-block guidance is deduplicated, and a
-`starter_ref` layer is put in front when a member names one (`:2216`).
+the shipped `openrig-start.md` (`:2571`), and, for fresh launches when enabled,
+the onboarding files (`:2581`). Managed-block guidance is deduplicated, and a
+`starter_ref` layer is put in front when a member names one (`:2242`).
 
 **Startup action constraints** (`startup-validation.ts`): startup entries must
 be files (`:22`); no shell startup actions (`:65`); action types are
@@ -240,7 +240,7 @@ sources remain unsupported: RigSpec validation rejects them
 
 - `runtime-adapter.ts` — adapter contract + bridge types.
 - `rigspec-preflight.ts` — dual-stack legacy preflight (`RigSpecPreflight`,
-  `rigspec-preflight.ts:25`) plus rebooted `rigPreflight(...)` (`:242`).
+  `rigspec-preflight.ts:25`) plus rebooted `rigPreflight(...)` (`:244`).
 - `rigspec-instantiator.ts` — dual-stack `RigInstantiator`
   (`rigspec-instantiator.ts:33`) plus `PodRigInstantiator` (`:475`).
 - `rigspec-exporter.ts` — dual-format live rig export to YAML/JSON.
@@ -257,7 +257,7 @@ preflight (`rigPreflight({ rigSpecYaml, rigRoot, … })` vs
 `rigspec-exporter.ts:105`).
 
 The import validation route delegates to `validateRigSpecImport`
-(`routes/rigspec.ts:213–221`, `spec-validation-service.ts:10–19`). The same
+(`routes/rigspec.ts:215–223`, `spec-validation-service.ts:10–19`). The same
 helper powers local `rig spec validate` without contacting the daemon
 (`packages/cli/src/commands/rig.ts:204–207`); it selects the pod-aware or legacy
 validator and distinguishes YAML parse failures from validator exceptions.
@@ -292,8 +292,8 @@ session-name fallback.
   different prefix, `rig_*` (`packages/cli/src/mcp-server.ts`).
 
 **Materialize / bind / adopt**: `POST /api/rigs/import/materialize`
-(`routes/rigspec.ts:174`) creates a pod-aware topology without launching
-sessions and refuses a legacy spec (`routes/rigspec.ts:187`);
+(`routes/rigspec.ts:176`) creates a pod-aware topology without launching
+sessions and refuses a legacy spec (`routes/rigspec.ts:189`);
 `POST /api/discovery/:id/bind` (`routes/discovery.ts:77`) attaches a
 discovered live session to an existing logical node (`logicalId`), or creates
 a member in a pod (`podNamespace` + `memberName`) and binds it;

@@ -9,14 +9,14 @@ applies-when: |
   agent-image capture/fork/protection, or Claude guided-compaction behavior.
 siblings: [packaging-bootstrap-bundles.md, agent-spec-and-startup.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
 last-updated: 2026-10-05
 ---
 
 # Content libraries and compaction
 
 This module describes source at main commit
-`a350c59b5a5fb37ee4a21b1026b595068b603df1`. Source paths below are repository-relative.
+`82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. Source paths below are repository-relative.
 Context packs, plugins and agent images have filesystem-backed content and daemon-side
 discovery. Their consumers can read database identity, mutate files, deliver messages or
 launch sessions; the whole layer is not a read-only catalog.
@@ -129,6 +129,15 @@ topology and project selections. It projects skills into `<cwd>/.claude/skills` 
 `shadowed`, `stale` or `conflicting`. `rig skill loadout --runtime <runtime>` inspects the
 composed projection and reconciles it only with `--apply`; `rig skill audit` is a separate
 read-only provenance and freshness audit. Launch applies the selected loadout per seat.
+
+For a Claude Code or Codex seat, the profile resolver also adds each selected plugin's skills to
+that loadout (`packages/daemon/src/domain/profile-resolver.ts:287–308`, with
+`resolvePluginSkills()` at `skill-catalog.ts:368`). Neither runtime reads skills from the plugin
+folder projected into the working directory. The skills are projected under their plain names,
+and a skill the profile already selects keeps its source. A kept plugin copy (an edited or
+user-owned one) gives a `plugin_skill_kept` warning, and an unreadable one gives
+`plugin_skill_skipped`. If plugin skills can't be projected at all, the seat starts without them
+and gets a `plugin_skills_not_projected` warning (`rigspec-instantiator.ts:2044`).
 
 ## Agent images and forks
 
