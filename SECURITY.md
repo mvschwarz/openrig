@@ -9,7 +9,11 @@ Include the affected version even when reporting a problem in an older installat
 ## What OpenRig touches
 
 OpenRig runs a local daemon, drives coding agents in tmux sessions on your machine, and writes
-configuration for those harnesses (for example under `~/.claude` and `~/.codex`). The README
+configuration for those harnesses, including workspace trust records and executable hooks: for
+example `~/.claude.json`, skills under `~/.claude`, `$CODEX_HOME/config.toml` (default `~/.codex`),
+and, in the project, `.claude/settings.local.json`, `.mcp.json` and managed blocks in `CLAUDE.md`,
+`CLAUDE.local.md` or `AGENTS.md`. `rig setup` also edits `~/.tmux.conf` and, on macOS, cmux's
+settings. OpenRig's own state lives under `$OPENRIG_HOME` (default `~/.openrig`). The README
 section [What OpenRig changes on your machine](README.md#what-openrig-changes-on-your-machine)
 describes these effects and the trust/permission choices. Unexpected access, disclosure or
 permission changes are useful reports; include what you expected and what you observed.
