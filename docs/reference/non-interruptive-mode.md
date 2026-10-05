@@ -9,6 +9,7 @@ This must be declared through `builtin:yolo`, a `full_bypass` flag policy, or an
 ambient `OPENRIG_YOLO` alone without an attached policy is not covered.
 
 - Claude Code receives `--settings '{"skipDangerousModePermissionPrompt":true}'`, accepting its bypass-permissions warning.
+  A seat with an explicitly selected native permission mode other than `bypassPermissions` doesn't get it.
 - Codex receives per-launch `-c notice.…=true` overrides for the full-access and GPT-5.1 migration notices.
   The separate GPT-5.1-Codex-Max migration notice is not suppressed.
 - Pi's existing launch flags are unchanged.
@@ -18,11 +19,23 @@ when the option is omitted. To turn it off, first stop the rig with `rig down <r
 `rig up <rig-name> --existing --no-non-interruptive`. The choice is cleared for this and subsequent
 launches. If the rig is still running, the command is refused before the choice changes. `--plan`
 changes nothing. Disabling the mode does not erase acceptance that a person previously saved in the harness.
+Turning it on for an existing rig works the same way: `rig down <rig-name>`, then
+`rig up <rig-name> --existing --non-interruptive`. Rigs created before this option existed start with it off.
 
-For an operator default on **new rigs**, use `rig config set launch.non_interruptive true`.
+For an operator default on **new rigs**, use `rig config set launch.non_interruptive true`, or set
+`OPENRIG_LAUNCH_NON_INTERRUPTIVE` in the daemon's environment (it overrides the config file).
 The default is false; an explicit positive or negative command-line flag overrides it. Existing rigs
 keep their saved choice when the operator default changes. On a remote install the receiving daemon's
 default applies.
+
+`rig up` and `rig bundle install` print what happened as warnings: "Non-interruptive mode is saved for this rig…"
+when it is on (also on each restore), "Non-interruptive mode is off for this rig's launches…" when you turn it off,
+and, for each affected seat, "Non-interruptive: OpenRig accepted Claude's bypass-permissions warning" or "…hid
+Codex's full-access and GPT-5.1 migration notices… no warning-acceptance settings were written."
+
+A bundle's before-install view (`rig bundle inspect`) says when this option is available for its full-bypass
+Claude and Codex seats, and that Claude Code asks once to accept its warning otherwise. See
+[bundle formats](bundle-formats.md).
 
 This feature writes no warning-acceptance settings to Claude or Codex files. It uses the launch-flag
 surfaces checked in Claude Code 2.1.282 and Codex 0.153.4. Other notices introduced by later harness

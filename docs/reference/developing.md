@@ -9,6 +9,10 @@ external network, and an installed-package scenario (`scripts/run-pr-scenarios.s
 with one difference: `npm test` does not include the UI suite, which CI runs as
 `package-tests (ui)`. Run `npm run test:ui` for it.
 
+**In a fresh clone or worktree, run `npm ci`, then `npm run build`,** as CI does in every job and
+before each package suite (see `CONTRIBUTING.md` and [worktree builds](worktree-builds.md)).
+Locally, `npm test` builds only the daemon, and `test:workspaces` and `test:ui` build nothing.
+
 ## Blocking gates (must pass before a candidate moves)
 
 | Gate | Command | Covers |
@@ -18,6 +22,8 @@ with one difference: `npm test` does not include the UI suite, which CI runs as
 | Repo scripts | `npm run test:repo` | daemon build, script self-tests, docs guard, skill mirror check, context-pack generation check |
 | Unit tests | `npm run test:workspaces` | `packages/daemon` + `packages/cli` + `packages/tui` |
 | UI unit tests | `npm run test:ui` | `packages/ui` vitest. NOT part of `npm test`, but every pull request runs it as `package-tests (ui)` (the `package-tests` matrix in `.github/workflows/tests.yml`) |
+| Installed-package scenario | CI only: `scripts/run-pr-scenarios.sh` | the installed package, a daemon restart and a seeded durability failure. The script refuses to run outside GitHub Actions unless given `--remote` with `DOCKER_HOST=ssh://…` |
+| Package file lists | CI only | records each package's published file list (`npm pack --dry-run`) |
 
 `npm test` runs `test:repo` and `test:workspaces`; `npm run test:ui` is the separate UI
 suite. Both sets are readable in the root `package.json` scripts.

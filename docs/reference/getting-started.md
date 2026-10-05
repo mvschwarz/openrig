@@ -8,8 +8,9 @@ you already have. Terminal-provider support does not change the harness or login
 You need Node.js 22 or 24 and tmux, on macOS or Linux. On a Mac with Apple
 silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). Native
-Windows is not supported yet, and WSL2 has not been tested. Node 20 is no longer
-supported; Node 26 and other versions are untested.
+Windows is not supported yet, and WSL2 has not been tested. Node 20 and
+odd-numbered releases (23, 25 and so on) are not supported; Node 26 and later
+even-numbered releases are untested.
 
 **Choose permissions before starting the team.** Ordinary OpenRig launches use
 Codex's `-s workspace-write`, with approval policy from your native configuration,
@@ -63,7 +64,8 @@ but does not resume that history. Authentication or runtime failures require
 repair of that prerequisite. **o** opens the existing native terminal here; detach
 to return (tmux defaults to Ctrl-b, then d). Decide native trust/auth prompts
 there. If a fresh start paused before context delivery, **c** finishes that
-delivery to the same occupant. **r** reads actual state again; **d** expands details.
+delivery to the same occupant (from a shell, `rig seat continue <seat>` does the
+same). **r** reads actual state again; **d** expands details.
 
 ### Choose your providers
 
@@ -84,7 +86,7 @@ command before proceeding. Confirm account access to any pin; if unavailable,
 ask for a supported model choice rather than silently substituting a model or
 provider. After launch, confirm the actual native model before assigning work.
 
-Install OpenRig and check `tmux -V`. Check **only the selected providers**:
+Install OpenRig (`npm install -g @openrig/cli`) and check `tmux -V`. Check **only the selected providers**:
 
 - Claude Code: `claude --version` and `claude auth status`. If sign-in is missing,
   ask once: “Please run `claude auth login` in your launch environment.”
@@ -95,8 +97,11 @@ Install a missing selected CLI using its provider's installation instructions.
 The other provider's CLI/login and Herdr/cmux are optional. Do not copy credentials
 or start repeated sign-in attempts. Recheck the selected login after the user
 completes it. `rig setup --dry-run` previews the broader setup; applying
-`rig setup` installs/checks **both** harnesses and cmux, so it is optional for
-this selected-provider path, not a requirement to fix an unused provider.
+`rig setup` installs/checks **both** harnesses and, on macOS, Homebrew and cmux
+(off macOS those steps are skipped, and tmux isn't installed for you). It also
+writes an OpenRig-managed block (mouse on, a longer history) into `~/.tmux.conf`.
+It is optional for this selected-provider path, not a requirement to fix an unused
+provider.
 
 ### Kernel startup stays automatic
 
@@ -127,7 +132,12 @@ Preview the selected seats, models and resources. Plan checks resolution and
 preflight for the working directory. Launch starts the daemon if needed, with
 the kernel behavior above. Read readiness for the project seats, not only daemon
 health. Resolve a named authentication, trust or permission prompt before giving
-that seat work. No new team is needed when returning to an existing project.
+that seat work. When a seat stops at such a prompt, `rig up` reports
+`Status: partial`, prints `Startup attention (<seat>): <reason>` and exits 1;
+`rig ps --nodes` repeats it as "Startup details". The reason ends with the command
+to run once the prompt is answered: `rig seat continue <seat>`, which delivers the
+seat's startup context in the same conversation. No new team is needed when
+returning to an existing project.
 
 When a seat pauses, open its existing terminal with **o** in the startup view.
 Read the proposed command, working directory and target instance. For an intended
@@ -141,13 +151,17 @@ After answering, watch for the command's result and the agent continuing. Read
 the corresponding queue row and transition from your ordinary terminal. If an
 operation timed out, read its result before asking for another attempt: it may
 already have taken effect. A delivered message or disappearing prompt alone is
-not progress. If startup is still waiting for context delivery, use **c** for the
-same occupant, then **r** to refresh. Do not start another seat to clear a prompt.
+not progress. If startup is still waiting for context delivery, use **c** (or
+`rig seat continue <seat>`) for the same occupant, then **r** to refresh. If the
+command times out, check `rig seat status <seat>` before trying again. Do not
+start another seat to clear a prompt.
 
 These starters are deliberately small starting points, not universal teams.
 For a different installed runtime or team shape, inspect `rig specs ls --kind
 rig` and `rig specs preview <name>` before selecting it. A seven-seat showcase
-is optional and consumes more concurrent capacity.
+is optional and consumes more concurrent capacity. A team published on GitHub
+installs from its folder link with `rig up <link>` (see
+[publishing a rig bundle](publishing-a-rig-bundle.md)).
 
 ## Give the owner an outcome
 
@@ -208,6 +222,10 @@ Return to the same owner with the next outcome, citing the earlier result.
 The seat address and durable queue survive closing your viewing terminal.
 Keep intent, acceptance and evidence in the repository's existing project,
 mission and slice artifacts; the starter reads those before inventing a path.
+`rig context work-install` lists what the project declares (intent, context files,
+skills). Without `--project` it picks the project by the seat's rig, then by the
+working directory, and stops with `project_required` and the exact `--project`
+commands only if several still match.
 
 If the project has no work tree, start with `rig workspace doctor` and
 `rig scope mission create --help`, then `rig scope slice create --help`. Set
@@ -234,6 +252,8 @@ This guide remains the short first-use path.
 | Observation | Next action |
 | --- | --- |
 | Tool missing or login fails | Use the specific setup/auth hint; recheck that executable in the launch shell. Do not send work to an unready seat. |
+| "Startup attention" or "Startup details" names a prompt | Answer the login, trust or bypass prompt in that seat's terminal, then run the `rig seat continue <seat>` it shows. |
+| "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
 | Shared terminal is absent | Inspect the existing kernel binding and recovery state; use standalone `rig tui` while resolving it. |
 | Viewing terminal was closed | Reattach with `rig tui --shared`; do not relaunch the team. |
@@ -248,7 +268,8 @@ missing or ambiguous source instead of selecting an arbitrary historical row.
 Repair the named source, retry, or leave the seat stopped. Check the retained
 queue, project notes and observed result before continuing work.
 
-`rig setup` prints the short form of this path; `rig status` points back here.
+`rig setup` prints the short form of this path once setup is ready; `rig status`
+points back here while no rigs are registered.
 
 ## Kernel framing (what `rig setup` does and does not do)
 
@@ -281,7 +302,7 @@ Two related primitives, often confused by new operators:
 
 Scope files retain what the work is; workflow instances and their queue packets
 retain who acts next. Creating or editing a mission does not start work. You can
-instantiate a named workflow with `rig workflow instantiate <name>`, or explicitly
+instantiate a named workflow with `rig workflow instantiate <name> --root-objective <text> --created-by <session>` (both options are needed), or explicitly
 inspect an authored lifecycle with `rig workflow compile` and create its runtime
 with `rig workflow instantiate-lifecycle`. Compilation alone does not start work.
 [OpenRig Software Factory](../../packages/daemon/specs/agents/shared/skills/core/openrig-software-factory/SKILL.md)
@@ -383,6 +404,9 @@ the named-profile argument. The profile recipe above remains useful when you
 want to maintain those choices in native configuration. The legacy
 environment-only `OPENRIG_YOLO=1` path remains sandbox-only when no resolved
 policy is present. A standalone `codex --yolo` command is not an OpenRig setting.
+At full access, Codex can show its full-access and GPT-5.1 migration notices at
+first launch; `rig up <spec> --non-interruptive` hides them with per-launch `-c`
+overrides (see [non-interruptive mode](non-interruptive-mode.md)).
 
 To return to a restricted next launch, change the selected profile to:
 
@@ -400,8 +424,8 @@ Permission mode is the native execution choice; work posture is project guidance
 For an existing managed seat, select future-launch permissions explicitly:
 
 ```sh
-rig seat set-permissions owner@first-project --mode full_bypass --reason "Operator selected broader access"
-rig seat status owner@first-project --json
+rig seat set-permissions dev-owner@first-project --mode full_bypass --reason "Operator selected broader access"
+rig seat status dev-owner@first-project --json
 ```
 
 This records the actor, reason and old/new choice on that seat. It does not
@@ -458,7 +482,21 @@ rig policy current --spec ./my-claude-rig/rig.yaml
 ```
 
 This records `permission_policy: builtin:yolo`; the next managed launch passes
-`--dangerously-skip-permissions`. Member-level policies take precedence. To return
+`--dangerously-skip-permissions`. Member-level policies take precedence.
+
+On a machine where nobody has accepted it yet, Claude Code then shows its
+bypass-permissions warning in each new seat, and OpenRig reports the seat as
+needing attention without sending its startup context. Either accept the warning
+once beforehand (run `claude --dangerously-skip-permissions` in your repository,
+accept, then `/exit`; Claude Code remembers it), or accept it in the seat and run
+`rig seat continue <seat>`. Or launch with `rig up <spec> --non-interruptive`,
+which accepts it with a launch flag and writes nothing to your settings; see
+[non-interruptive mode](non-interruptive-mode.md).
+
+`rig policy apply auto --spec ./my-claude-rig/rig.yaml` (also `rig setup --policy
+auto`) records `builtin:auto` instead: Claude seats launch with
+`--permission-mode auto`, and Codex and Pi seats, which have no auto mode, launch
+at the floor. To return
 future launches to OpenRig's `acceptEdits` mode, use `rig policy apply none --spec
 ./my-claude-rig/rig.yaml` and remove any member-level bypass override. Native rules
 and managed restrictions still matter; this flag is not a promise about sandbox

@@ -1,13 +1,14 @@
 # Help your user get unstuck
 
 This page is for an agent whose user says OpenRig isn't working. It is the one place OpenRig keeps this guidance. The
-copy installed with OpenRig matches that installed version. Read it with `rig context get help`. If `rig` won't run,
-open `daemon/docs/reference/help.md` inside the installed `@openrig/cli` package (under `npm root -g`); in the source
+copy installed with OpenRig matches that installed version. Read it with `rig context get help`, which needs a running
+daemon. If `rig` won't run or the daemon is down, open `daemon/docs/reference/help.md` inside the installed
+`@openrig/cli` package (under `npm root -g`); in the source
 repository the same file is `docs/reference/help.md`. The same text is online at
 [openrig.dev/help/agents](https://www.openrig.dev/help/agents), next to the ways people can contact OpenRig support.
 
 Each guide this page links to is installed too. Load one only when you need it, with the `rig context get` address
-shown beside its link; the same files sit beside this one in `daemon/docs/reference/`.
+shown beside its link where there is one; every linked file also sits beside this one in `daemon/docs/reference/`.
 
 Start with what your user was trying to do. Try the next useful step, check the result, and if you can't finish,
 prepare a message to OpenRig support at **hello@openrig.dev**. Your user doesn't need a GitHub account.
@@ -23,7 +24,8 @@ rig doctor --json
 ```
 
 Use the installed command's `--help` if an option is unavailable. Read the diagnostic findings; don't treat them as
-instructions to reset the machine.
+instructions to reset the machine. If the daemon is involved, `rig daemon status` and `rig daemon logs` show its state
+and recent output.
 
 **If OpenRig won't install or `rig` won't run, start here anyway.** Record the attempted package version, install
 command and error. Leave unknown values unknown. A working daemon or a passing diagnostic is not required to ask for
@@ -33,8 +35,9 @@ help.
 
 The reference documents beside this file describe the version they were installed with. GitHub's default branch can
 contain changes that haven't reached your user's version. For release notes and known limitations, open
-`https://github.com/mvschwarz/openrig/blob/v<version>/docs/releases/v<version>.md`, using the version from
-`rig --version`. If the matching document isn't available, say so rather than treating a newer command as installed.
+`https://github.com/mvschwarz/openrig/blob/v<version>/docs/releases/v<version>.md`, using the version number from
+`rig --version` (without the commit it may show in parentheses). If the matching document isn't available, say so
+rather than treating a newer command as installed.
 
 ## Find your next step
 
@@ -67,6 +70,14 @@ and `rig ps --nodes --rig <rig-name>`, then compare the reported state with what
 A waiting prompt, a failed launch and an agent working behind a stale status need different next steps. Repeatedly
 clearing attention doesn't fix an underlying readiness problem.
 
+A fresh seat stopped at a native prompt (Claude's bypass-permissions warning, a login or a folder-trust question)
+keeps its startup context. `rig up`, `rig bundle install` and `rig ps --nodes` print "Startup attention" or "Startup
+details" for it, ending with the command to run. Once your user has answered the prompt in that seat's terminal,
+`rig seat continue <seat>` delivers the context in the same conversation, without relaunching. If it reports an
+unknown outcome, check `rig seat status <seat>` before trying again. For a rig whose seats bypass permissions,
+`--non-interruptive` on `rig up` or `rig bundle install` avoids Claude's warning and Codex's notices in the first
+place; see `non-interruptive-mode.md` beside this file.
+
 ### You can't tell which instance or configuration is involved
 
 Read [instance layout](instance-layout.md) (`rig context get reference/instance-layout.md`) and
@@ -87,8 +98,6 @@ issue's current status; a similar symptom alone is not a diagnosis.
 - A Codex seat on the default `workspace-write` sandbox starts without network access, so it can't reach the local
   daemon, when its Codex configuration sets network access off, a managed requirement could restrict it, or Codex
   doesn't answer OpenRig's configuration read in time: [#275](https://github.com/mvschwarz/openrig/issues/275).
-- Stopping the daemon can report a timeout while closing connections:
-  [#166](https://github.com/mvschwarz/openrig/issues/166).
 
 For everything else, search [open issues](https://github.com/mvschwarz/openrig/issues).
 
