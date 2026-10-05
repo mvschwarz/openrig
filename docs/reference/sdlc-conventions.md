@@ -214,9 +214,10 @@ paperwork. Scaffolding emits the sections; it must never mint ceremony.
 `rig scope audit --mission <name>` (and the advisory `sdlc_convention_sections`
 row in `rig workspace doctor`) checks these conventions: the section headings
 present, the proof contract well-formed, `proof/` artifacts carrying valid C1
-headers, UI slices referencing a mockup. Every convention finding is low or
-info severity: it **records and advises — it never blocks a write path and
-never changes the exit code**. (`rig scope audit` exits 1 only on high-severity
+headers, UI slices referencing a mockup. Convention findings are low or info
+severity, except an invalid C1 header on a `proof/` artifact, which is medium.
+All of them **record and advise — they never block a write path and never
+change the exit code**. (`rig scope audit` exits 1 only on high-severity
 structural findings, such as a missing `PROGRESS.md` or id.) Unknown is
 reported as unknown, not failure.
 ## A7. Where the knowledge lives (the four pointers)
@@ -224,7 +225,8 @@ reported as unknown, not failure.
 - **This document** — the SSOT.
 - **Scaffold**: `rig scope slice create` emits `SPEC.md` + `slice.yaml` +
   `PROGRESS.md` + `PROOF.md` + `proof/` for every template kind (and registers
-  the slice in `mission.yaml`); `rig scope mission create` emits an
+  the slice in `mission.yaml` when that manifest exists; legacy missions
+  without one remain supported); `rig scope mission create` emits an
   intent-bearing `SPEC.md` + `mission.yaml` + `PROGRESS.md` + `NOTES.md` +
   `slices/` (plus `CAPABILITY-DELTA-v<version>.md` for a `release-X.Y.Z`
   mission). Core emits only this
@@ -336,8 +338,10 @@ that it LOOKED at the evidence. `--media` names the curated media files
 drop stands behind; the composer projects them into the DELIVERED items'
 proof set. Validation happens at drop time; the audit
 (A6) backstops artifacts that arrived by other paths. **Hand-placing files
-in `proof/` without a drop is the anti-pattern**: the deliverable stays
-unpaired and shows as `missing` in the DELIVERED view — always attach media via
+in `proof/` without a drop is the anti-pattern**: media alone pairs with
+nothing, so a deliverable with no covering proof artifact (one whose
+`evidences` names it) shows as `missing` in the DELIVERED view, or as current
+acceptance absent under a selected proof policy — always attach media via
 `--media` on a drop.
 
 ## B4. Role contracts (what makes the structure self-enforcing)
