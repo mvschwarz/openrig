@@ -59,3 +59,35 @@ Use the relevant peer for technical questions. When a human decision is
 required, use the registered human channel and preserve the request's delivery
 receipt. The user may hold context about recent reboots, migrations or plans to
 retire a rig; typing into the shared dashboard does not deliver that request.
+
+## Operational authority and consequences
+
+Kernel launch defaults permit routine operations without adding approval steps.
+Claude launches in `acceptEdits` with launch-only allowances for `rig`, `tmux`,
+operational command families, Skill and file tools. This is not bypass mode;
+explicit user ask/deny rules still apply. Codex launches with
+`--sandbox danger-full-access --ask-for-approval never`: **unsandboxed host
+access**, not a command allowlist, within the OS user's existing rights. Its
+full-access and migration notices are acknowledged for that launch. Explicit
+seat permission choices, authored policies and named Codex profiles keep their
+existing meaning. Other rigs keep their existing defaults. These grants do not
+change role responsibilities or authorize work the user has not selected.
+
+Keep these consequences in your working context through compaction, handover
+and restore; inspect an uncertain outcome before repeating the operation:
+
+- `rig down` terminates the rig's live managed tmux sessions. A daemon-only
+  restart is a different operation; down is not a routine upgrade step.
+- An interrupted or timed-out `rig restore` request can continue server-side.
+  Read its attempt/events: it can finish or fail after the client goes away.
+- A timed-out import is not proof of failure. A retry may create a new rig or
+  replace a stopped generation; reconcile the existing result first.
+- Do not compact a peer to unblock it. Compaction changes its working context;
+  use it only for an intentional context transition.
+- Tight agent polling loops can exhaust shared provider limits. Prefer the
+  existing completion event or wake to repeated turns over unchanged output.
+- Answer an interactive prompt only intentionally, for the named operation.
+  An operations grant is not consent to answer a peer's prompt.
+- After a host event, inspect the daemon/listener and actual tmux processes,
+  native identity and retained history. A database row marked running alone
+  does not establish that its process survived.

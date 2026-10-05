@@ -19,6 +19,8 @@ export interface NodeBinding extends Binding {
   permissionMode?: string;
   /** Persisted rig opt-in to per-launch warning acceptance, only at full_bypass. */
   nonInterruptive?: boolean;
+  /** Launch-only operational default, derived from the persisted kernel rig and explicit selections. */
+  kernelAuthority?: boolean;
   /** Reserved successor generation; current tenure remains the input fence until commit. */
   launchGeneration?: string;
   /** #25: the rig's `managed_blocks.claude-code` file. Absent = CLAUDE.md. Only the Claude adapter reads it. */

@@ -165,6 +165,7 @@ function printHuman(status: SeatStatusResponse): void {
     const formatSource = (source: string): string => {
       if (source === "member_spec") return "from the member's permission_policy";
       if (source === "rig_spec") return "from the rig's permission_policy";
+      if (source === "kernel_default") return "kernel operational default";
       if (source === "system_default") return "OpenRig default";
       return source;
     };

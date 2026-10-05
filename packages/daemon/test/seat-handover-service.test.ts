@@ -122,15 +122,15 @@ describe("SeatHandoverService", () => {
     });
   }
 
-  function seedSeat(opts?: { runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string; effort?: string }) {
-    const rig = rigRepo.createRig("seat-rig");
+  function seedSeat(opts?: { rigName?: string; runtime?: string; withSession?: boolean; model?: string; codexConfigProfile?: string; effort?: string }) {
+    const rig = rigRepo.createRig(opts?.rigName ?? "seat-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: opts?.runtime ?? "codex", cwd: "/project", model: opts?.model, codexConfigProfile: opts?.codexConfigProfile, effort: opts?.effort });
     let sessionId: string | null = null;
     if (opts?.withSession !== false) {
-      const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
+      const session = sessionRegistry.registerSession(node.id, `dev-impl@${rig.name}`);
       sessionRegistry.updateStatus(session.id, "running");
       sessionRegistry.updateStartupStatus(session.id, "ready", "2026-04-20T12:00:00Z");
-      sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@seat-rig", tmuxPane: "%0" });
+      sessionRegistry.updateBinding(node.id, { tmuxSession: `dev-impl@${rig.name}`, tmuxPane: "%0" });
       sessionId = session.id;
     }
     return { rig, node, sessionId };
@@ -377,6 +377,14 @@ describe("SeatHandoverService", () => {
 
     expect.soft(activeRoleJobs.filter((job) => job.targetSession === retiredSession)).toEqual([]);
     expect.soft(deliveries.filter((delivery) => delivery.targetSession === retiredSession)).toEqual([]);
+  });
+
+  it("kernel handover recomputes operational authority from the persisted rig", async () => {
+    seedSeat({ runtime: "codex", rigName: "kernel" });
+    const result = await service.handover({ seatRef: "dev-impl@kernel", reason: "context-wall",
+      source: "fresh", operator: "operator@kernel" });
+    expect(result.ok).toBe(true);
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ kernelAuthority: true, launchPosture: "full_bypass" });
   });
 
   it("keeps dry-run side-effect free", async () => {

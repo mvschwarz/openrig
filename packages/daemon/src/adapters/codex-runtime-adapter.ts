@@ -1,4 +1,4 @@
-import { nonInterruptiveArg } from "./non-interruptive.js";
+import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
@@ -357,7 +357,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     const profileArg = profile ? ` -p ${shellQuote(profile)}` : "";
     const posture = codexPostureArg(profileArg, process.env, binding.launchPosture);
     const appliedLaunch = observeCodexSandbox(posture);
-    const postureArg = posture + nonInterruptiveArg(this.runtime, binding);
+    const postureArg = posture + operationalLaunchArg(this.runtime, binding);
 
     // OPR.0.3.4.7 — profile-LOAD probe before launch/resume. A legacy
     // [profiles.<name>] table or invalid TOML must fail BEFORE the opaque

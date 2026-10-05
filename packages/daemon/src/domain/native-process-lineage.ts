@@ -110,8 +110,8 @@ function claudeSessionToken(args: string[]): string | null {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
-    if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
-    if (/^--(?:permission-mode|model|name|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    if (["--permission-mode", "--model", "--name", "--settings", "--effort"].includes(arg)) { index += 1; continue; }
+    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
     const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
     const value = identity[1] ?? args[++index];
@@ -121,8 +121,8 @@ function claudeSessionToken(args: string[]): string | null {
   return token;
 }
 
-// Delivery-only reading of a Claude argv, which also accepts --settings (the
-// strict selector above does not). null: the argv parsed and names no session.
+// Delivery-only reading of a Claude argv. Like the strict selector, it accepts
+// launch-only --settings. null: the argv parsed and names no session.
 // "unparsed": an argument was not recognised, so the argv proves nothing.
 function claudeSessionIdentity(args: string[]): string | null | { unparsed: true } {
   const unparsed = { unparsed: true } as const;
