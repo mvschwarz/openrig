@@ -12,6 +12,14 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 // Native Claude 2.1.289 at 160x40 and 100x40; only setup/history before the
 // question or dismissed result is omitted. All combinations below are constructed.
 const native = JSON.parse(readFileSync(new URL("./fixtures/claude-question-picker-2.1.289.json", import.meta.url), "utf8")) as Record<string, string>;
+// Reporter capture and explicitly constructed variant from issue #728. Only the
+// excerpt was posted; fixture metadata records its position in the 160x50 pane.
+const reporter = JSON.parse(readFileSync(new URL("./fixtures/claude-question-picker-issue728.json", import.meta.url), "utf8")) as {
+  rows: number;
+  excerptStartLine: number;
+  capturedExcerpt: string;
+  constructedWrappedDescriptionExcerpt: string;
+};
 const footer = "Enter to select · ↑/↓ to navigate · Esc to cancel";
 const border = "────────────────────────────────────────────";
 const framed = (prompt: string) => ["● The earlier question is answered.", border, prompt, border,
@@ -50,6 +58,23 @@ const hooks = [
 ] as const;
 
 describe("current Claude question picker", () => {
+  it.each([
+    ["reporter's real macOS capture", reporter.capturedExcerpt, 12],
+    ["reporter's constructed wrapped-description variant", reporter.constructedWrappedDescriptionExcerpt, 13],
+  ] as const)("recognizes %s at its original pane position", (_name, excerpt, distance) => {
+    // Unprovided banner/history above line 17 is blank padding, not invented
+    // capture text. The reporter says the rows below the excerpt were blank.
+    const before = reporter.excerptStartLine - 1;
+    const lines = excerpt.split("\n");
+    const pane = [...Array<string>(before).fill(""), ...lines,
+      ...Array<string>(reporter.rows - before - lines.length).fill("")].join("\n");
+    const nonblank = lines.filter(line => line.trim());
+    expect(nonblank.length - nonblank.findIndex(line => line.startsWith("❯ 1."))).toBe(distance);
+    expect(classifyPaneActivity(pane)).toEqual({
+      state: "attention", reason: "selection_prompt", evidence: "❯ 1. us-east",
+    });
+  });
+
   it.each(Object.entries(shapes))("classifies %s", (_name, { content, state }) => {
     expect(classifyPaneActivity(content).state).toBe(state);
   });
