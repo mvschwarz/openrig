@@ -27,13 +27,19 @@ export class NativePermissionStore {
    * Authored policies and named Codex profiles keep their existing meaning. */
   private hasKernelDefault(nodeId: string, runtime: string): boolean {
     if (runtime !== "claude-code" && runtime !== "codex") return false;
-    const row = this.db.prepare(`SELECT r.name, n.permission_policy AS member_policy,
-      r.permission_policy AS rig_policy, n.codex_config_profile AS profile
-      FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?`).get(nodeId) as {
-        name: string; member_policy: string | null; rig_policy: string | null; profile: string | null;
-      } | undefined;
-    return row?.name === "kernel" && row.member_policy == null && row.rig_policy == null
-      && !(runtime === "codex" && row.profile?.trim());
+    try {
+      const row = this.db.prepare(`SELECT r.name, n.permission_policy AS member_policy,
+        r.permission_policy AS rig_policy, n.codex_config_profile AS profile
+        FROM nodes n JOIN rigs r ON r.id = n.rig_id WHERE n.id = ?`).get(nodeId) as {
+          name: string; member_policy: string | null; rig_policy: string | null; profile: string | null;
+        } | undefined;
+      return row?.name === "kernel" && row.member_policy == null && row.rig_policy == null
+        && !(runtime === "codex" && row.profile?.trim());
+    } catch {
+      // This optional default must not block otherwise supported launches when
+      // its metadata lookup is unavailable. Keep the existing permission path.
+      return false;
+    }
   }
 
   /** One decision shared by fresh/continue, legacy restore and same-seat handover. */

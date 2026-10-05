@@ -56,8 +56,10 @@ the person expresses as trust grows; the kernel culture describes that responsib
 
 Kernel launch defaults permit routine operations without adding approval steps.
 Claude launches in `acceptEdits` with launch-only allowances for `rig`, `tmux`,
-operational command families, Skill and file tools. This is not bypass mode;
-explicit user ask/deny rules still apply. Codex launches with
+operational command families, Skill and file tools. The file-tool grants are not
+limited to the workspace: Claude can read and write outside it without prompts
+within the OS user's rights, with an explicit read allowance for the user's home.
+This is not bypass mode; explicit user ask/deny rules still apply. Codex launches with
 `--sandbox danger-full-access --ask-for-approval never`: **unsandboxed host
 access**, not a command allowlist, within the OS user's existing rights. Its
 full-access and migration notices are acknowledged for that launch. Explicit

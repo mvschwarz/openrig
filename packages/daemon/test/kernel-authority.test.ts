@@ -48,6 +48,7 @@ function assertGrant(command: string, runtime: string) {
     expect(json).toBeDefined();
     expect(Object.keys(JSON.parse(json!))).toEqual(["permissions"]);
     expect(Object.keys(JSON.parse(json!).permissions)).toEqual(["allow"]); // no reset of user ask/deny
+    expect(JSON.parse(json!).permissions.allow).toContain("Read(~/**)");
   } else {
     expect(command).toContain("-s danger-full-access -a never");
     expect(command).toContain("notice.hide_full_access_warning=true");
@@ -97,6 +98,18 @@ describe("kernel operational launch default", () => {
     f.db.prepare("UPDATE nodes SET permission_policy=NULL WHERE id=?").run(f.node.id);
     expect(f.store.apply(f.binding, runtime).kernelAuthority).toBe(true);
   });
+  it.each(["claude-code", "codex"])("%s unavailable kernel lookup keeps the floor without a kernel grant", runtime => {
+    const f = fixture(runtime);
+    const prepare = f.db.prepare.bind(f.db);
+    const lookup = vi.spyOn(f.db, "prepare").mockImplementation((sql: string) => {
+      if (sql.includes("SELECT r.name")) throw new Error("kernel metadata unavailable");
+      return prepare(sql);
+    });
+    try {
+      expect(f.store.apply(f.binding, runtime)).toMatchObject({ kernelAuthority: false, launchPosture: "floor" });
+      expect(f.store.resolve(f.node.id, runtime)).toMatchObject({ source: "system_default", launchPosture: "floor" });
+    } finally { lookup.mockRestore(); }
+  });
   it("named Codex profiles remain selected and terminal/Pi never receive a kernel native grant", () => {
     const f = fixture("codex");
     f.db.prepare("UPDATE nodes SET codex_config_profile='operator-choice' WHERE id=?").run(f.node.id);
@@ -127,6 +140,12 @@ describe("kernel operational launch default", () => {
       claudeResume: { canResume: () => runtime === "claude-code", resume }, codexResume: { canResume: () => runtime === "codex", resume } };
     await (RestoreOrchestrator.prototype as any).attemptResume.call(ctx, f.node.id, "seat", runtime === "codex" ? "codex_id" : "claude_id", "original", "/inert", null, "model", "floor");
     assertGrant(t.send.mock.calls[0]![1], runtime);
+  });
+  it.each(["--settings", "--settings --unknown"])("strict identity rejects malformed settings value: %s", async settings => {
+    const row = { pid: 10, ppid: 1, pgid: 10, tpgid: 10, executableName: "claude", startedAt: "start",
+      command: `claude --session-id native-id ${settings}` };
+    expect(await observeClaudePaneProcess({ target: "seat", tmux: { getPanePid: async () => 10 },
+      expectedToken: "native-id", listProcesses: async () => [row] })).toBeNull();
   });
   it("launch-only settings do not obscure exact Claude process identity; unrelated args still fail", async () => {
     const root = { pid: 10, ppid: 1, pgid: 10, tpgid: 10, executableName: "claude", startedAt: "start" };

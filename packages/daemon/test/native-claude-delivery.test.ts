@@ -139,7 +139,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     expect(observation !== null).toBe([
       "npm-name", "versioned", "pane-command-unavailable", "versioned-direct-pane", "missing-metadata",
       "ambiguous-pane", "changed-binding", "onboarding", "changed-after-paste",
-      "effort-separated", "effort-equals",
+      "effort-separated", "effort-equals", "settings-single",
     ].includes(mode));
     if (expectedSend && ["unavailable", "unknown-both", "missing-token", "missing-metadata", "background", "other-semver", "versioned-argv-only", "versioned-comm-only", "launcher-shim", "launcher-shim-child-unparsed", "launcher-shim-child-two-sessions", "unknown-value-flag"].includes(mode)) {
       expect(sent.warning).toContain("without verified native identity");
@@ -149,7 +149,7 @@ it.each(modes)("selector and ordinary transport: %s", async (mode) => {
     if (mode.startsWith("wrong-token") || mode === "launcher-shim-shims-differ") {
       expect(sent.warning).toContain("without verified native identity");
     }
-    // --settings is delivery-only: the strict selector above still rejects it (observation === null).
+    // A well-formed settings value is accepted by both strict and delivery identity readers.
     if (mode.startsWith("launcher-shim-match") || mode === "settings-single") expect(sent.warning ?? "").not.toContain("without verified native identity");
     if (mode.startsWith("effort-")) expect(sent.warning ?? "").not.toContain("without verified native identity");
     if (mode.startsWith("launcher-shim-child-differs")) expect(sent.error).toContain("name different conversations");

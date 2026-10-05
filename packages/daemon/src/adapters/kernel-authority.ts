@@ -10,6 +10,7 @@ export const KERNEL_CLAUDE_ALLOW = [
     "uname", "ps", "pgrep", "lsof", "df", "du", "ls", "cat", "head", "tail", "rg", "grep",
     "find", "stat", "date", "sleep", "mkdir", "cp", "mv", "chmod", "tar", "shasum"]
     .map(command => `Bash(${command}:*)`),
+  "Read(~/**)",
 ];
 
 type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "nonInterruptive" | "launchPosture" | "permissionMode">;
