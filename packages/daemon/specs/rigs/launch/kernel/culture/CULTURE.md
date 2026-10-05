@@ -101,8 +101,8 @@ and restore; inspect an uncertain outcome before repeating the operation:
   restart is a different operation; down is not a routine upgrade step.
 - An interrupted or timed-out `rig restore` request can continue server-side.
   Read its attempt/events: it can finish or fail after the client goes away.
-- A timed-out import is not proof of failure. A retry may create a new rig or
-  replace a stopped generation; reconcile the existing result first.
+- A timed-out import is not proof of failure. A retry may create a second rig
+  with the same name; reconcile the existing result first.
 - Do not compact a peer to unblock it. Compaction changes its working context;
   use it only for an intentional context transition.
 - Tight agent polling loops can exhaust shared provider limits. Prefer the
