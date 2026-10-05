@@ -187,6 +187,61 @@ describe("Claude composer below noninteractive status warnings", () => {
   });
 });
 
+// #808: Claude's other permission-mode footers above the same warning rows. The bypass and
+// background-shell rows are native captures from Claude seats on 2026-10-05; the auto rows are
+// quoted from the #808 report (Claude 2.1.289, the second with vim's insert prefix).
+const modeBars = [
+  ["bypass, background shell (native)", "⏵⏵ bypass permissions on · 1 shell · ← for agents"],
+  ["bypass (native)", "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"],
+  ["accept edits, background shell (native)", "⏵⏵ accept edits on · 1 shell · ← for agents"],
+  ["auto", "⏵⏵ auto mode on (shift+tab to cycle)"],
+  ["auto, vim insert prefix", "-- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle)"],
+  ["plan", "⏸ plan mode on (shift+tab to cycle)"],
+  ["default", "? for shortcuts"],
+] as const;
+const warningSets = [[update], [focus], [weekly], [update, focus]];
+function modePane(hint: string, trailers: string[], composer = "❯ ", before = "● Ready.\n\n✻ Crunched for 2s") {
+  return pane(trailers, composer, before).replace(bar, hint);
+}
+
+describe("#808: Claude permission-mode footers below status warnings", () => {
+  it.each(modeBars)("reads an empty framed composer as idle: %s", async (_name, hint) => {
+    for (const trailers of warningSets) {
+      const content = modePane(hint, trailers);
+      expect(classifyPaneActivity(content)).toMatchObject({ state: "agent_idle", reason: "idle_prompt", evidence: "❯" });
+      const service = new SeatStructuralActivityService({ capturePaneContent: async () => content });
+      expect(await service.pollSeat("seat@rig")).toMatchObject({ state: "agent_idle", reason: "idle_prompt" });
+    }
+  });
+
+  it.each(modeBars)("keeps current work active: %s", (_name, hint) => {
+    for (const trailers of [[], ...warningSets]) for (const row of workingRows) {
+      expect(classifyPaneActivity(modePane(hint, trailers, "❯ ", row)))
+        .toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+    }
+  });
+
+  it.each(modeBars)("keeps a question as attention: %s", (_name, hint) => {
+    for (const trailers of [[], ...warningSets]) {
+      expect(classifyPaneActivity(modePane(hint, trailers, "❯ ", "Do you want to proceed?\n❯ 1. Yes\n  2. No")).state)
+        .toBe("attention");
+    }
+  });
+
+  // A warning-suffixed draft stays unknown: reporting it as attention (needs_input) would be a new
+  // send refusal for these modes. Only the exact accept-edits footer keeps its existing attention.
+  it.each(modeBars)("never reads a warning-suffixed draft as idle and adds no refusal: %s", (_name, hint) => {
+    for (const trailers of warningSets) {
+      expect(classifyPaneActivity(modePane(hint, trailers, "❯ unfinished message")).state).toBe("unknown");
+      expect(classifyPaneActivity(modePane(hint, trailers, "❯ \n  unfinished second line")).state).toBe("unknown");
+    }
+  });
+
+  it.each(modeBars)("still requires the complete input frame: %s", (_name, hint) => {
+    expect(classifyPaneActivity(modePane(hint, [update, focus]).replaceAll(border, "")).state).toBe("unknown");
+  });
+});
+
 describe("first guarded Claude send with retained warning-shaped composer", () => {
   let db: Database.Database | undefined;
   afterEach(() => { db?.close(); db = undefined; });
@@ -286,6 +341,25 @@ describe("first guarded Claude send with retained warning-shaped composer", () =
     expect(result).toMatchObject({ ok: false, sent: false });
     expect(f.sendText).not.toHaveBeenCalled();
     expect(f.sendKeys).not.toHaveBeenCalled();
+  });
+
+  it.each(modeBars)("#808: explicit wait sends once into an idle composer: %s", async (_name, hint) => {
+    const f = setup(modePane(hint, [update, focus]));
+    const result = await f.transport.send(f.name, "ordinary marker", { waitForIdleMs: 200 });
+    expect(result).toMatchObject({ ok: true, sent: true, activity: { state: "idle", evidenceSource: "pane_heuristic" } });
+    expect(f.sendText).toHaveBeenCalledTimes(1);
+    expect(f.sendKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(modeBars)("#808: explicit wait leaves a draft and current work untouched: %s", async (_name, hint) => {
+    for (const content of [modePane(hint, [update, focus], "❯ unfinished message"), modePane(hint, [update, focus], "❯ ", workingRows[0])]) {
+      const f = setup(content);
+      const result = await f.transport.send(f.name, "ordinary marker", { waitForIdleMs: 20 });
+      expect(result).toMatchObject({ ok: false, sent: false });
+      expect(f.sendText).not.toHaveBeenCalled();
+      expect(f.sendKeys).not.toHaveBeenCalled();
+      db?.close(); db = undefined;
+    }
   });
 
   it("ordinary send still advises and proceeds on an incomplete status block", async () => {
