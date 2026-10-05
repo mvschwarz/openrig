@@ -605,6 +605,7 @@ test("HELP ADDRESSES: every guide address taught in help.md resolves through the
     assert.deepEqual(addresses.sort(), [
       "reference/getting-started.md#have-your-agent-configure-permissions",
       "reference/getting-started.md#incomplete-setup-and-restart",
+      "reference/getting-started.md#open-the-kernel-conversations",
       "reference/instance-layout.md",
       "reference/rig-spec.md",
     ]);
