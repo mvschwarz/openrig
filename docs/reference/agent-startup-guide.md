@@ -217,10 +217,12 @@ applies to the next launch. A recognized prompt (the attention codes above) ends
 `attention_required`. A timeout ends startup as `failed` ("Readiness timeout after Ns — harness did not become
 interactive"), and the post-launch files aren't sent.
 
-**Claude submission check.** For every startup message to a Claude seat, OpenRig confirms the prompt was submitted. If
-the text is still sitting in the input, it presses Enter once more; if it's still there, it warns "Startup prompt still
-staged in <session>; press Enter in that pane." The seat still ends `ready`. After each send, readiness is checked
-again, so a prompt that appears at that point gives `attention_required`.
+**Claude submission check.** For each startup message to a Claude seat, OpenRig makes a bounded check that the prompt
+was submitted. When the capture can't tell, it records the submission as unverified and carries on. When it sees the
+same prompt still sitting in the input, it presses Enter once more; if it's still there, it warns "Startup prompt still
+staged in <session>; press Enter in that pane." The seat can still end `ready` with its submission `unverified` or
+`staged`, so `ready` doesn't prove the prompt was submitted. After all files and actions are delivered, readiness is
+checked once more, so a prompt that appears by then gives `attention_required`.
 
 **Startup proof.** A `startup_proof` action selects `authenticated` or `none` (the default is none; the last applicable
 one wins, and it needs `idempotent: true`). With `authenticated`, a fresh launch of an agent seat includes a challenge,
@@ -230,7 +232,9 @@ the result in the ORIENTED column: `verified`, `missing`, `rejected` or `n-a`. A
 **After a failure.** Delivery, launch and action failures, and readiness timeouts, give `failed`. Every 30 seconds the
 context monitor marks a `failed` or `attention_required` seat `ready` once its pane reads ready, unless fresh context
 is still pending for `rig seat continue`. A seat that timed out can therefore read `ready` without having received its
-post-launch files; relaunch it with `rig seat launch <seat> --fresh` if it needs them.
+post-launch files. If it needs them, first look at what that occupant has done; then
+`rig seat launch <seat> --fresh --reason <text>` starts a blank conversation for the seat. If the occupant is still
+live, the command refuses with `session_live` unless you also pass `--stop`, which replaces that occupant deliberately.
 
 ### The `applies_on` Field
 

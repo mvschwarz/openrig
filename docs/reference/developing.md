@@ -9,8 +9,9 @@ external network, and an installed-package scenario (`scripts/run-pr-scenarios.s
 with one difference: `npm test` does not include the UI suite, which CI runs as
 `package-tests (ui)`. Run `npm run test:ui` for it.
 
-**In a fresh clone or worktree, run `npm ci`, then `npm run build`,** as CI does in every job and
-before each package suite (see `CONTRIBUTING.md` and [worktree builds](worktree-builds.md)).
+**In a fresh clone or worktree, run `npm ci`, then `npm run build`,** as CI's build-and-package and
+package-test jobs do (typecheck and repo-checks build only the daemon, through their scripts; see
+`CONTRIBUTING.md` and [worktree builds](worktree-builds.md)).
 Locally, `npm test` builds only the daemon, and `test:workspaces` and `test:ui` build nothing.
 
 ## Blocking gates (must pass before a candidate moves)

@@ -405,8 +405,11 @@ want to maintain those choices in native configuration. The legacy
 environment-only `OPENRIG_YOLO=1` path remains sandbox-only when no resolved
 policy is present. A standalone `codex --yolo` command is not an OpenRig setting.
 At full access, Codex can show its full-access and GPT-5.1 migration notices at
-first launch; `rig up <spec> --non-interruptive` hides them with per-launch `-c`
-overrides (see [non-interruptive mode](non-interruptive-mode.md)).
+first launch. When OpenRig itself selects full bypass for the seat (`builtin:yolo`,
+or an explicit seat `full_bypass`), `rig up <spec> --non-interruptive` hides them
+with per-launch `-c` overrides (see [non-interruptive mode](non-interruptive-mode.md)).
+Full access chosen inside a native Codex profile, with `permission_policy` absent or
+`none`, doesn't qualify.
 
 To return to a restricted next launch, change the selected profile to:
 
