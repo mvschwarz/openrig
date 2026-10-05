@@ -200,7 +200,9 @@ const modeBars = [
   ["default", "? for shortcuts"],
 ] as const;
 const warningSets = [[update], [focus], [weekly], [update, focus]];
-function modePane(hint: string, trailers: string[], composer = "❯ ", before = "● Ready.\n\n✻ Crunched for 2s") {
+// Native, from a Claude seat running a hook mid-turn (2026-10-05): the timer follows a hook label.
+const hookRow = "✽ Sketching… (running PostToolUse hook · 3m 12s · ↓ 7.9k tokens)";
+function modePane(hint: string, trailers: string[], composer = "❯\u00a0", before = "● Ready.\n\n✻ Crunched for 2s") {
   return pane(trailers, composer, before).replace(bar, hint);
 }
 
@@ -214,16 +216,22 @@ describe("#808: Claude permission-mode footers below status warnings", () => {
     }
   });
 
+  it("keeps a hook-running turn active under the accept-edits footer", () => {
+    for (const trailers of [[], ...warningSets]) {
+      expect(classifyPaneActivity(pane(trailers, "❯\u00a0", hookRow))).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+    }
+  });
+
   it.each(modeBars)("keeps current work active: %s", (_name, hint) => {
-    for (const trailers of [[], ...warningSets]) for (const row of workingRows) {
-      expect(classifyPaneActivity(modePane(hint, trailers, "❯ ", row)))
+    for (const trailers of [[], ...warningSets]) for (const row of [...workingRows, hookRow]) {
+      expect(classifyPaneActivity(modePane(hint, trailers, "❯\u00a0", row)))
         .toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
     }
   });
 
   it.each(modeBars)("keeps a question as attention: %s", (_name, hint) => {
     for (const trailers of [[], ...warningSets]) {
-      expect(classifyPaneActivity(modePane(hint, trailers, "❯ ", "Do you want to proceed?\n❯ 1. Yes\n  2. No")).state)
+      expect(classifyPaneActivity(modePane(hint, trailers, "❯\u00a0", "Do you want to proceed?\n❯ 1. Yes\n  2. No")).state)
         .toBe("attention");
     }
   });
@@ -233,7 +241,7 @@ describe("#808: Claude permission-mode footers below status warnings", () => {
   it.each(modeBars)("never reads a warning-suffixed draft as idle and adds no refusal: %s", (_name, hint) => {
     for (const trailers of warningSets) {
       expect(classifyPaneActivity(modePane(hint, trailers, "❯ unfinished message")).state).toBe("unknown");
-      expect(classifyPaneActivity(modePane(hint, trailers, "❯ \n  unfinished second line")).state).toBe("unknown");
+      expect(classifyPaneActivity(modePane(hint, trailers, "❯\u00a0\n  unfinished second line")).state).toBe("unknown");
     }
   });
 
@@ -352,7 +360,8 @@ describe("first guarded Claude send with retained warning-shaped composer", () =
   });
 
   it.each(modeBars)("#808: explicit wait leaves a draft and current work untouched: %s", async (_name, hint) => {
-    for (const content of [modePane(hint, [update, focus], "❯ unfinished message"), modePane(hint, [update, focus], "❯ ", workingRows[0])]) {
+    for (const content of [modePane(hint, [update, focus], "❯ unfinished message"), modePane(hint, [update, focus], "❯\u00a0", workingRows[0]),
+      modePane(hint, [update, focus], "❯\u00a0", hookRow)]) {
       const f = setup(content);
       const result = await f.transport.send(f.name, "ordinary marker", { waitForIdleMs: 20 });
       expect(result).toMatchObject({ ok: false, sent: false });
