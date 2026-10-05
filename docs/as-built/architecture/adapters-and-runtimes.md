@@ -130,8 +130,8 @@ preview of the same mapping for an unopened bundle (see
 - **Codex** (`codexPostureArg`, `:62`): `full_bypass` becomes
   `-s danger-full-access -a never` (`:67`); for a seat with no resolved
   posture, `OPENRIG_YOLO=1` becomes `-s danger-full-access`; otherwise the
-  seat's `-p <profile>` or `-s workspace-write`. Codex with `auto` launches at
-  the floor.
+  seat's `-p <profile>` or `-s workspace-write`. Codex with `auto` gets the
+  same: its selected profile, or the `-s workspace-write` floor without one.
 
 **Non-interruptive mode** (`nonInterruptiveArgs()` in
 `packages/daemon/src/adapters/non-interruptive.ts:12`) adds per-launch

@@ -126,7 +126,8 @@ select the startup proof (`:210`) → project resources (`:224`) → deliver
 pre-launch files (`:266`) → persist startup context (`:282`) → launch harness,
 recording any resume token (`:301`, `:313`) → wait for ready (`:384`) → deliver
 the session identity prompt and interactive files (`:420`, `:473`) → execute
-`after_files` then `after_ready` actions (`:495`, `:502`) → check readiness
+`after_files` then the remaining `after_ready` actions (`:495`, `:502`; see
+the resume preload below) → check readiness
 again and, for a Claude resume, that the launched session agrees with the
 requested token (`:507`–`535`) → mark ready (`:538`). The class doc comment
 (`startup-orchestrator.ts:120`–`139`) lists ten steps; the code persists the

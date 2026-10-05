@@ -60,7 +60,7 @@ All under `packages/daemon/src/domain/`:
   and mid-work detection), honest error reporting, and list/pod/rig/global
   targeting.
 - `transcript-store.ts` — transcript file management: path convention, ANSI
-  stripping on read, boundary markers, `readTail`, `readFull`, `grep`.
+  stripping for tail and grep reads, boundary markers, `readTail`, `readFull`, `grep`.
   Filesystem-backed, NOT SQLite. The capture that writes the files is
   `transcript-rotation.ts` (§4).
 - `history-query.ts` — transcript + chat search. Prefers `rg`, falls back to
@@ -99,7 +99,9 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
 3. Classify send readiness. Only a positive interactive-prompt reading
    (`needs_input`) refuses, with `target_needs_input`
    (`session-transport.ts:1458`), unless the caller passes
-   `--dangerously-interact --reason`. A mid-work reading (`running`, from a
+   `--dangerously-interact --reason`; that override persists an audit record
+   before sending and refuses the send if it can't
+   (`prompt_override_audit_unavailable`, `:1447`). A mid-work reading (`running`, from a
    fresh runtime hook or the pane's mid-work patterns,
    `findPatternEvidence(recentLines, [...MID_WORK_PATTERNS, CLAUDE_LIVE_STATUS_PATTERN])`,
    `:291`) or an `unknown` one proceeds with an advisory `warning` (`:1471`,
@@ -221,7 +223,8 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
    or the matching `transcripts.*` settings. This bounded capture replaced the
    earlier `tmux pipe-pane` stream (`transcript-rotation.ts:3`), so the file
    holds a trailing window, not the whole session.
-3. `TranscriptStore` owns path convention, ANSI stripping on read, boundary
+3. `TranscriptStore` owns path convention, ANSI stripping for `readTail` and
+   `grep`, boundary
    markers, `readTail`, `readFull`, `grep`. `readFull` returns the raw bytes
    (`transcript-store.ts:366`); the `/full` route redacts them. The transcript
    routes check capture health first and can start capture lazily for a seat
@@ -237,7 +240,7 @@ remote daemon's ordinary local routes; the cross-host logic is in the CLI.
    insufficiency state, and guidance.
 
 Architecture rule 19, as the code implements it: transcripts are a bounded
-`capture-pane` snapshot (not pipe-pane), ANSI-stripped on read; `rg`
+`capture-pane` snapshot (not pipe-pane), ANSI-stripped on tail and grep reads; `rg`
 preferred, `grep -E` fallback. Rule 22: the daemon's `rig ask` is context
 engineering — it gathers evidence and does NOT call an external LLM; the
 agent IS the LLM. The one exception is the explicit CLI flag `rig ask --wake`
