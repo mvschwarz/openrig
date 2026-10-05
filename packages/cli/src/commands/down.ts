@@ -133,6 +133,11 @@ export function downCommand(depsOverride?: StatusDeps): Command {
           console.error(`Error on host ${opts.host}: ${result.error}`);
           process.exitCode = 1;
         }
+        if (result.ok) {
+          const teardown = result.data as Partial<TeardownResult> | undefined;
+          if (teardown?.errors && teardown.errors.length > 0) process.exitCode = 2;
+          else if (teardown?.alreadyStopped && !teardown.deleted) process.exitCode = 1;
+        }
         return;
       }
 
