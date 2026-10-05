@@ -9,14 +9,14 @@ applies-when: |
   agent-image capture/fork/protection, or Claude guided-compaction behavior.
 siblings: [packaging-bootstrap-bundles.md, agent-spec-and-startup.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
-last-updated: 2026-10-03
+last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-updated: 2026-10-05
 ---
 
 # Content libraries and compaction
 
 This module describes source at main commit
-`254122872cf477511514979a4300b695d77cd1f7`. Source paths below are repository-relative.
+`a350c59b5a5fb37ee4a21b1026b595068b603df1`. Source paths below are repository-relative.
 Context packs, plugins and agent images have filesystem-backed content and daemon-side
 discovery. Their consumers can read database identity, mutate files, deliver messages or
 launch sessions; the whole layer is not a read-only catalog.
@@ -30,10 +30,13 @@ the entry ID is `context-pack:<ref>`.
 
 ### Discovery and mutation
 
-Startup in `packages/daemon/src/startup.ts` configures the shipped context-pack root,
-the resolved `context.root` and its system root, followed by an existing workspace-local
-`.openrig/context-packs` root. The library scans recursively, stops descending when it
-finds a pack manifest, and does not follow directory symlinks.
+Startup in `packages/daemon/src/startup.ts` configures the shipped context-pack root (when
+it exists), the resolved `context.root` and its `system` root, followed by the
+workspace-local `.openrig/context-packs` root. The workspace root is registered even before
+it exists, so a folder created later is found by the next sync; it is left out only when it
+is the same path as one of the other two. The library scans recursively, stops descending
+when it finds a pack manifest, skips `.tmp-add-*` staging folders, and does not follow
+directory symlinks.
 
 The first configured root to encounter a physical pack owns that directory. For distinct
 physical packs with the same ref, the later root wins. This distinction prevents overlapping
@@ -66,7 +69,9 @@ Situation composition selects fresh atoms for `fresh`, fresh plus handover atoms
 selection is Claude or Codex, with `any` atoms applicable to either. Required atoms join
 the selection; missing dependencies or runtime-incompatible dependencies fail composition.
 The output is ordered by atom order, then ID. Profile-only atoms are excluded from ordinary
-situation selection.
+situation selection, but the dependency closure doesn't check that flag, so one can still join
+as a dependency of a selected atom. Post-compaction composition skips an absent
+`seat:RECAP.md` and reports it as skipped instead of failing.
 
 The profile route resolves configured tree sources through
 `packages/daemon/src/domain/context-packs/profile-source-resolver.ts`.
@@ -85,11 +90,42 @@ reports overage and drop candidates without silently truncating the profile. Ato
 `/api/context-packs`. Its library handlers cover list, sync, compose, read/delete by ref,
 preview, pieces, addressed reads and profile composition.
 
-`packages/cli/src/commands/context.ts` implements `rig context`, including
-`get`, `profile`, `compose`, `add`, `rm` and `sync`, plus work-install,
-trace, source and recap operations. The library read/compose routes do not themselves send
-a pack to a running seat. Delivery and installation consumers have their own behavior;
-inspect the selected CLI verb before treating a context command as read-only.
+`packages/cli/src/commands/context.ts` implements `rig context`, including `list`, `show`,
+`preview`, `get`, `profile`, `compose`, `add`, `rm` and `sync`, plus `work-install`, `trace`,
+`source inspect|update` and `recap-write`. The library read/compose routes do not themselves
+send a pack to a running seat. Several verbs write: `add` installs into `context.root` (from
+a folder, a URL, or Git with `--git`), `source update` fetches and merges a Git-installed pack
+and resyncs, `work-install --apply-skills` reconciles skill projections, and `recap-write`
+writes a seat recap. Inspect the selected CLI verb before treating a context command as
+read-only. `rig context work-install` resolves a project position and its declared context
+without the daemon; [workspace-primitive.md](workspace-primitive.md) covers project
+resolution.
+
+On a profile read, the route adds each piece's `sha256` and provenance, with a warning when a
+piece's bytes come from outside the granted folder. When rig and seat are given, it adds the
+seat's `LEARNED.md` as an implicit atom.
+
+### System World, seat recaps and skill loadouts
+
+`packages/daemon/src/domain/system-world.ts` reads the System World manifest (schema
+`openrig.system-world/v0alpha1`): an id, a version, the context packs every seat starts from,
+and system skills. The `context.system_world` setting selects the default manifest at
+`system/system-world.yaml` under `context.root`, disables it, or names another manifest file.
+The default (`openrig-default`) names the `onboarding-width` and `world-public` packs and no
+skills; it is seeded when missing.
+
+`rig context recap-write --rig <rig> --seat <seat> --file <file>` writes the seat's
+`RECAP.md` through `packages/daemon/src/domain/context-packs/seat-recap-store.ts`. The previous
+recap is kept byte-for-byte under `recap-superseded/`. A recap that isn't addressable Markdown
+is refused; the other content checks are advisory.
+
+`packages/daemon/src/domain/skill-catalog.ts` resolves a seat's skill loadout from the
+catalog at `skills.root` (`catalog.yaml`, schema `openrig.skill-catalog/v1`) and the system,
+topology and project selections. It projects skills into `<cwd>/.claude/skills` or
+`<cwd>/.agents/skills` and tracks what it owns in
+`<cwd>/.openrig/skill-loadouts/<runtime>.json`. Each projection reports `current`, `missing`,
+`shadowed`, `stale` or `conflicting`. `rig skill loadout|audit` reads and reconciles it, and
+launch applies it per seat.
 
 ## Agent images and forks
 
@@ -128,9 +164,18 @@ contribute protection reasons. The route applies the guard to deletion/pruning u
 `force` is explicit. Prune defaults to dry-run. Its protection view depends on the supplied
 spec roots; it is not an inventory of every reference anywhere on the host.
 
+The guard keys its result by image name, not version: every version of one name gets the
+status computed for the last-listed version, carrying that version's image ID. The delete
+route looks up by image ID, so on delete only that last-listed version of a name is matched,
+and its other versions are deleted without `force` even when pinned. `rig agent-image prune`
+sends a dry run unless `--force` is given, and `--force` also overrides the guard, so a
+guarded real prune is reachable only through the HTTP route.
+
 The routes mount at `/api/agent-images` and expose list/sync, snapshot/fork,
 entry/preview, pin/unpin, delete and prune.
-`packages/cli/src/commands/agent-image.ts` owns the image library commands.
+`packages/cli/src/commands/agent-image.ts` owns the image library commands. The top-level
+`rig fork` verb (`packages/cli/src/commands/fork.ts`) drives `POST /fork`; `--keep-image`
+also captures a pinned image.
 
 ## Plugins
 
@@ -153,7 +198,9 @@ harness loading a plugin.
 
 The service constructor is not read-only: it retires obsolete refocus hook registrations
 from the older bundled plugin and rejects duplicate vendored hook registrations across
-providers. Cached plugin versions are excluded from that duplicate-provider check.
+providers. Cached plugin versions are excluded from that duplicate-provider check. Startup
+constructs the service while building the daemon's dependencies and doesn't catch that
+rejection, so a duplicate vendored hook stops daemon creation.
 
 `packages/daemon/src/routes/plugins.ts` exposes GET-only inspection at `/api/plugins`:
 list, detail, used-by and file list/read. The file routes use the discovered plugin root as
@@ -167,11 +214,14 @@ At this pin, the route's source filter accepts vendored, Claude-cache and Codex-
 `ensureVendored()` seeds absent plugins or advances an older numeric manifest version.
 Equal/newer installed versions preserve installed bytes; equal versions can reconcile file
 modes on byte-identical files. Missing target version authority is preserved rather than
-overwritten; invalid or conflicting manifest versions are errors.
+overwritten; invalid or conflicting manifest versions are errors. Advancing a version writes
+changed files but never deletes files the new version dropped.
 
 `ensureSkillGlobally()` projects a named plugin skill using a vendor-version marker.
 An existing unversioned global skill remains externally owned. Startup wires this service
-and its filesystem implementation; inspect that wiring when changing projection roots.
+and its filesystem implementation; inspect that wiring when changing projection roots. At
+startup only `openrig-core` is vendored, and it is projected globally as `openrig-skills` into
+`~/.claude/skills` and `~/.agents/skills`.
 
 `ensureLatest()` performs local vendoring before `attemptAutoFetch()`. The latter
 requests a release asset with a bounded timeout and logs failures; even its successful
@@ -190,11 +240,40 @@ and the manual-compaction route consumers.
 `packages/daemon/src/domain/user-settings/settings-store.ts` resolves the
 `policies.claude_compaction.*` settings; automatic compaction defaults to disabled.
 
-`maybeAutoCompact()` applies the delivery guard when available. Its implementation
-requires Claude Code, observed usage and a valid integer threshold. Above-threshold
-automatic work additionally checks enablement, deduplication, cooldown and the
-already-triggered latch. It sends prep, then compact, and queues the below-threshold
-continuation: turn boundary, restore prompt, then compliance prompt.
+`maybeAutoCompact()` applies the delivery guard when one exists and the runtime is Claude
+Code. Its implementation requires Claude Code, observed usage and a valid integer threshold
+(default 80). Above-threshold automatic work additionally checks enablement, the
+post-restore cooldown (10 minutes), the deduplication window (60 seconds) and the
+already-triggered latch; an active manual attempt also blocks it.
+
+`/compact` is held behind a preparation attempt:
+
+1. The first above-threshold tick starts an attempt with its own ID, the seat's occupant
+   generation, a restore-map path and a completion marker, then sends only the prep prompt.
+   An unknown occupant generation stops the attempt at once.
+2. Later ticks return `preparation_pending` until the attempt's `RESTORE-MAP.md` exists and
+   ends with that exact marker. The map path is under the seat's working directory
+   (`.openrig/compaction/preparation/<session>/<attempt>/`, with a `.gitignore` of `*`) when
+   that is writable, otherwise under `compaction/preparation/` in the OpenRig home.
+3. Only then is `/compact` sent, with the map path appended to the compact instruction.
+4. The continuation then runs below the threshold: turn boundary, restore prompt, then a
+   read-depth audit prompt (each item marked `FULL`, `PARTIAL` or `NOT_READ`).
+
+An automatic attempt has a 25-minute ceiling that starts once the prep is delivered. A stale
+occupant generation, the policy becoming disabled, or the deadline passing stops it. A prep
+that clearly wasn't sent is retried at most three times; an uncertain prep or `/compact` is
+never replayed.
+
+The restore prompt names a restore-pending marker at
+`compaction/restore-pending/<session>.json` in the OpenRig home, which the `openrig-core`
+PreCompact hook writes. A per-seat `compaction/post-compact-extra/<session>.md` is preferred
+over the global extra file, and an extra file that declares a different seat is refused.
+
+`rig compact <session>` (`packages/cli/src/commands/compact.ts`) runs the same sequence
+manually through `/api/compaction/trigger`, `cancel` and `state`, behind the bearer token.
+`--skip-map` skips the map requirement once, `--cancel` ends the preparation, and `--state`
+shows the attempt, its expected map and its deadline. A manual attempt has 120 seconds for
+preparation and the idle wait.
 
 The below-threshold continuation checks policy enablement too, except for an explicitly
 operator-initiated manual sequence. A known occupant-generation mismatch invalidates the
@@ -202,7 +281,8 @@ queued stages; an unknown generation does not prove a match. Failed or retained 
 do not advance the stage. The manual trigger shares this continuation while having its
 own initiation checks.
 
-Stage, deduplication and cooldown maps are in memory. Startup supplies live generation
+Stage, deduplication, cooldown and preparation-attempt maps are in memory; the restore maps
+are files. Startup supplies live generation
 resolution and a post-restore callback that records a managed-width receipt, so the wider
 operation also has persistent effects. Do not infer durable lifecycle completion from
 a library read or one successfully queued message.
