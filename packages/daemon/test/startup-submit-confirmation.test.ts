@@ -348,6 +348,22 @@ describe("startup prompt submission", () => {
       expect(f.tmux.sendKeys).toHaveBeenCalledTimes(2); // one Enter per submission; the startup prompt's is not repeated
     });
   }
+  // Only our own collapsed paste earns another look. Anything else keeps its first-look verdict even if the
+  // composer clears a moment later, because a person may have cleared it (review-r2's constructed controls).
+  const newlines = (text: string) => text.split("\n").length - 1;
+  const foreignFirstLooks: Array<[string, (sent: string) => string]> = [
+    ["a person's draft", () => composerCrop("a person's draft")],
+    ["a collapsed paste of another length", sent => composerCrop(`[Pasted text #1 +${newlines(sent) + 1} lines]`)],
+    ["our paste inside a person's draft", sent => composerCrop(`a person's draft [Pasted text #1 +${newlines(sent)} lines]`)],
+  ];
+  it.each(foreignFirstLooks)("keeps %s unverified with no second look, even if the composer then clears", async (_name, firstLook) => {
+    const f = fixture(0, "claude-code", true);
+    f.tmux.capturePaneContent.mockImplementationOnce(async () => firstLook(f.tmux.sendText.mock.calls[0]![1]));
+    const result = await f.start({ startupActions: proofActions(false) });
+    expect(result).toMatchObject({ ok: true, startupStatus: "ready", submission: { status: "unverified" } });
+    expect(f.submitted.includes(STARTUP_PROOF_INSTRUCTION_LINE)).toBe(false);
+    expect(f.tmux.capturePaneContent).toHaveBeenCalledTimes(1);
+  });
   // A recognized composer holding something else is looked at again, 200 ms apart, this many times.
   const SETTLE_LOOKS = 25;
   it("keeps a collapsed paste that never clears unverified after the bounded looks, without another Enter", async () => {
