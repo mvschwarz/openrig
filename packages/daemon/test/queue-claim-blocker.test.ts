@@ -55,6 +55,7 @@ describe.each(["current", "without generation stamps"])("claim park exit (%s sch
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "in-progress", blockedOn: null });
     expect(repo.list().find((item) => item.qitemId === row.qitemId)?.blockedOn).toBeNull();
     expect(repo.waitingView(row.qitemId)).toMatchObject({ blocker: null, liveness: { subject: "worker@rig" } });
+    expect(repo.listTransitions(row.qitemId).at(-1)).toMatchObject({ transitionNote: "claimed", closureTarget: blocker.qitemId });
     expect(repo.waitingView(sibling.qitemId)).toMatchObject({ blocker: { ref: blocker.qitemId }, liveness: { subject: "gate@rig" } });
     if (schema === "current") expect(db.prepare("SELECT claimed_by_generation_uuid AS generation FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual({ generation: "owned-generation" });
   });
@@ -73,8 +74,32 @@ describe.each(["current", "without generation stamps"])("claim park exit (%s sch
     expect(repo.waitingView(row.qitemId)).toMatchObject({ blocker: null, liveness: { subject: "worker@rig" } });
     expect(jobs.getById(timer)).toMatchObject({ state: "terminal", terminalReason: "park_ended:claimed" });
     expect(jobs.getById(siblingTimer)?.state).toBe("active");
+    expect(repo.listTransitions(row.qitemId).at(-1)).toMatchObject({ transitionNote: "claimed", closureTarget: "external:owned-window" });
     repo.unclaim(row.qitemId, "worker@rig", "owned release");
     expect(repo.getById(row.qitemId)).toMatchObject({ state: "pending", blockedOn: null });
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked" });
+    expect(repo.getById(row.qitemId)?.blockedOn).toBeNull();
+  });
+
+  it("keeps a custom-note park blocker in claim history and reuses it on a human re-park", async () => {
+    const row = await create();
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "human-review@kernel", transitionNote: "custom continuation",
+      summary: "Review requested", evidenceRef: "evidence:before" });
+    await claim(row.qitemId);
+    expect(repo.getById(row.qitemId)?.blockedOn).toBeNull();
+    expect(repo.listTransitions(row.qitemId).at(-1)).toMatchObject({
+      transitionNote: "claimed", closureTarget: "human-review@kernel", closureReason: null,
+    });
+    const response = await app.request(`/api/queue/${row.qitemId}/update`, {
+      method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "worker@rig" },
+      body: JSON.stringify({ state: "blocked", summary: "Still awaiting review", evidenceRef: "evidence:after" }),
+    });
+    expect(response.status).toBe(200);
+    expect(repo.getById(row.qitemId)).toMatchObject({ blockedOn: "human-review@kernel", summary: "Still awaiting review", evidenceRef: "evidence:after" });
+    await claim(row.qitemId);
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "external:new-gate" });
+    expect(repo.getById(row.qitemId)?.blockedOn).toBe("external:new-gate");
   });
 
   it("rolls back the complete park exit if recording the claim fails", async () => {

@@ -2218,6 +2218,9 @@ export class QueueRepository {
         state: "in-progress",
         actorSession: input.destinationSession,
         transitionNote: "claimed",
+        // Preserve the former gate as an audit pointer without marking a closure
+        // or changing the note execution-view uses to exclude claim activity.
+        closureTarget: qitem.state === "blocked" ? qitem.blockedOn ?? undefined : undefined,
         identityProvenance: input.identityProvenance ?? null, // P21 §4 era-stamp
       });
 
@@ -2521,7 +2524,14 @@ export class QueueRepository {
     // enforcement is here at the write path — the `rig queue block` verb and
     // raw `update --state blocked` hit the same validator (no verb-only
     // enforcement). Blocking on another qitem requires nothing new (BR-1).
-    const effectiveBlockedOn = input.blockedOn ?? qitem.blockedOn;
+    // A claimed item has no current gate, but re-parking without --blocked-on
+    // retains the previous park's gate, as it did before claim cleared the row.
+    const previousClaimBlocker = input.state === "blocked" && qitem.state === "in-progress"
+      && input.blockedOn == null && qitem.blockedOn == null
+      ? this.transitionLog.listForQitem(input.qitemId).reverse().find((transition) =>
+          transition.state === "in-progress" && transition.transitionNote === "claimed")?.closureTarget
+      : null;
+    const effectiveBlockedOn = input.blockedOn ?? qitem.blockedOn ?? previousClaimBlocker ?? null;
     if (input.state === "blocked" && effectiveBlockedOn && this.getById(effectiveBlockedOn)?.humanIntent === "update") {
       throw new QueueRepositoryError("invalid_human_notification", "An informational update is not an approval dependency. Create a separate decision request if a human decision is needed.");
     }
