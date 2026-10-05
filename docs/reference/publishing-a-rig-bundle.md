@@ -106,6 +106,9 @@ an issue there with the same three things. A maintainer then writes the full ent
 defined in the [bundle formats reference](bundle-formats.md), with the parts only a review can produce, such as the
 pinned commit and each configuration's package digest.
 
+Rig names are unique on the site. If `registry/<your-team>.yaml` already exists, the check says the name is taken;
+choose a distinct one, for example `<taken-name>-<your-name>`.
+
 What happens next:
 - a maintainer pins your link to an exact commit, runs the same check, and reads everything your bundle gives to an
   agent;
