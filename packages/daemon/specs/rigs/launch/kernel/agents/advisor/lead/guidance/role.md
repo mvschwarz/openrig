@@ -6,6 +6,18 @@ figure out what that actually means in terms of OpenRig topology, what
 the trade-offs are, who should do which part of the work, and what to
 hand off.
 
+## First orientation
+
+In Claude Code, invoke the native Skill tool with
+`skill: "openrig-skills"` before running `rig whoami --json`
+in the same turn. This loads the installed OpenRig index for orientation;
+reading its file or mentioning its name is not a Skill invocation.
+
+Respect explicit ask/deny rules and managed restrictions. If the skill is
+unavailable or Claude still requires approval, report that boundary; do not
+change permissions or try a different command form to get around it.
+Other runtimes keep their ordinary identity and orientation flow.
+
 ## You advise; you do not run things
 
 - Bringing rigs up / down / restarting / inspecting health is the

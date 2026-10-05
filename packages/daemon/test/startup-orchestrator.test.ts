@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
+import { parse } from "yaml";
+import { RigSpecSchema } from "../src/domain/rigspec-schema.js";
+import { resolveAgentRef } from "../src/domain/agent-resolver.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
@@ -717,6 +722,45 @@ describe("StartupOrchestrator", () => {
     expect(firstPrompt).toContain("Role instructions go here.");
     expect(sendText).toHaveBeenNthCalledWith(2, "r01-impl", "/rename impl");
     expect(deliverStartup).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["rig.yaml", "rig-claude-only.yaml"])("delivers native skill orientation in the advisor's first turn (%s)", async rigFile => {
+    const kernel = path.resolve(import.meta.dirname, "../specs/rigs/launch/kernel");
+    const readFile = (p: string) => fs.readFileSync(p, "utf8");
+    const rig = RigSpecSchema.normalize(parse(readFile(path.join(kernel, rigFile))));
+    const advisor = rig.pods.find(p => p.id === "advisor")!.members.find(m => m.id === "lead")!;
+    expect(advisor.runtime).toBe("claude-code");
+    const resolved = resolveAgentRef(advisor.agentRef, kernel, { readFile, exists: fs.existsSync });
+    if (!resolved.ok) throw Error(JSON.stringify(resolved));
+    const { spec, sourcePath } = resolved.resolved;
+    const files = spec.startup.files.map(file => ({ ...file,
+      absolutePath: path.resolve(sourcePath, file.path), ownerRoot: sourcePath }));
+    const deliverStartup = vi.fn(async (_files: ResolvedStartupFile[]) => ({ delivered: 0, failed: [] }));
+    const seed = seedSession();
+    const result = await createOrchestrator({ readFile }).startNode(makeInput(seed, {
+      adapter: mockAdapter({ deliverStartup }), resolvedStartupFiles: files,
+      startupActions: [makeIdentityAction()],
+    }));
+    expect(result.ok).toBe(true);
+    const firstPrompt = vi.mocked(tmux.sendText).mock.calls[0][1];
+    expect(firstPrompt).toContain(makeIdentityAction().value);
+    expect(firstPrompt).toContain("In Claude Code, invoke the native Skill tool");
+    expect(firstPrompt).toContain('skill: "openrig-skills"');
+    expect(firstPrompt.indexOf('skill: "openrig-skills"')).toBeLessThan(firstPrompt.indexOf("rig whoami --json"));
+    expect(firstPrompt).toContain("in the same turn");
+    expect(firstPrompt).toContain("explicit ask/deny rules and managed restrictions");
+    // Context is a later message. It must retain the same-turn invocation rule,
+    // rather than relying on the previous turn's skill grant.
+    // The adapter first provisions pre-launch files, even when that list is empty.
+    expect(deliverStartup).toHaveBeenCalledTimes(2);
+    expect(deliverStartup.mock.calls[0][0]).toEqual([]);
+    const later = deliverStartup.mock.calls[1][0];
+    expect(later.map(f => f.path)).toEqual(["startup/context.md"]);
+    const context = readFile(later[0].absolutePath);
+    expect(context).toContain("invoke the native Skill tool again");
+    expect(context).toContain('skill: "openrig-skills"');
+    expect(context.indexOf("invoke the native Skill tool again")).toBeLessThan(context.indexOf("rig whoami --json"));
+    // This checks delivered instructions, not native Skill execution or permission effects.
   });
 
   it("does not replay the session identity on a resumed restore", async () => {
