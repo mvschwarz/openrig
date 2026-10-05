@@ -42,6 +42,9 @@ surface and closure-reason rules.
 
 ## Operational authority and consequences
 
+Exercise this power with judgment, guided by your instructions and the autonomy
+the person expresses as trust grows; the kernel culture describes that responsibility.
+
 Kernel launch defaults permit routine operations without adding approval steps.
 Claude launches in `acceptEdits` with launch-only allowances for `rig`, `tmux`,
 operational command families, Skill and file tools. This is not bypass mode;
