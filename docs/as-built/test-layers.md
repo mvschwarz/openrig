@@ -8,7 +8,7 @@ applies-when: |
   read it before claiming a stub-agent scenario covers a behaviour.
 siblings: [arteries.md, README.md, codemap.md]
 last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
-last-updated: 2026-10-02
+last-updated: 2026-10-05
 ---
 
 # Test layers: what to run before you push, and what each layer proves
@@ -65,9 +65,15 @@ are not yet runnable checks.
 ### Gotchas that cost people time
 
 - **Running inside a seat.** The root `vitest.config.ts` makes a root-level file run use its
-  package's config. The cli suite then scrubs `OPENRIG_URL`/`OPENRIG_PORT`/`OPENRIG_HOST` and
-  forces a scratch `OPENRIG_HOME` before every module (`packages/cli/test/hermetic-env.setup.ts`).
-  The daemon and TUI suites have no such setup file and rely on each test's own scaffold.
+  package's config. This bullet reflects #780 (`33eaeda3`, after this page's stamp): the cli,
+  daemon and TUI configs all run the shared root `test/hermetic-env.setup.ts` before any test
+  file. It clears the inherited `OPENRIG_*` and `RIGGED_*` instance selectors (connection,
+  database, workspace and topology roots, seat identity, bearer tokens), forces a fixture
+  `OPENRIG_HOME` and fails if the home is not fixture-scoped. It also wraps `fetch`, so a real
+  request to anything other than a loopback ephemeral-port fixture or a registered target fails.
+  Unless `OPENRIG_E2E_REAL_CODEX=1`, it points `HOME` and the XDG directories at a fixture user
+  home and clears `CODEX_HOME`; that opt-in keeps the real homes. A test can still set its own
+  overrides after setup. The UI suite (jsdom) uses its own `packages/ui/test/setup.ts`.
 
 - **Stale vendored daemon.** `npm run build:package` leaves an assembled copy of the daemon at
   `packages/cli/daemon/` (gitignored). If you change daemon source afterwards,
