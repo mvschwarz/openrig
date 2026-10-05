@@ -7,13 +7,13 @@ applies-when: |
   request, what each check actually proves, and what CI will run for you. Also
   read it before claiming a stub-agent scenario covers a behaviour.
 siblings: [arteries.md, README.md, codemap.md]
-last-verified-against-source: 1347d825
+last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
 last-updated: 2026-10-02
 ---
 
 # Test layers: what to run before you push, and what each layer proves
 
-> **This page is a map, not the territory.** It was checked against source at `1347d825`
+> **This page is a map, not the territory.** It was checked against source at `fcaf1f8e`
 > and it will drift. It is also incomplete on purpose. Before you rely on a command or a
 > claim here, read the script it names or run it. If a behaviour is missing from this page
 > (or from [arteries.md](arteries.md)), that tells you nothing about whether a change to it
@@ -50,7 +50,24 @@ to `main`. In the PR description, say which layers you ran and which you could n
 | Live-model evals | `npm run eval -w packages/daemon -- --provider rig …` | Whether a real Claude Code seat runs the expected `rig context get <entry>` for natural prompts | Determinism. Codex. Anything without a case. | Changes to shipped skills or context entries meant to steer agents. **Uses provider credits.** |
 | Testbed runbooks | `docker/testbed/runbooks/` (manual) | The testbed image itself works as a test environment | Product behaviour | Only when you change the testbed image or the container plumbing |
 
+Some package tests are gated. `OPENRIG_E2E_REAL_CODEX=1` runs two daemon e2e tests against a
+real Codex (they also need tmux, `codex` and `~/.codex/auth.json`, and they use provider
+credits). `OPENRIG_REAL_CLAUDE_INTEGRATION=1` with `OPENRIG_PARENT_NATIVE_ID` runs one
+real-Claude fork test. Tests that need tmux skip when it is absent, and the CLI's release-tag
+tests skip without local tags unless `CI=true`. A green local run without tmux or tags has
+skipped these; CI installs tmux and fetches full history.
+
+The TUI has its own vitest suite (`npm run test -w packages/tui`, which builds the TUI first)
+and runs in the `tui` leg of `package-tests`; `npm run test:tui-package` launches the packed
+TUI in demo mode. The `tui_socket` scenario surface exists, but the only scenarios that use it
+are not yet runnable checks.
+
 ### Gotchas that cost people time
+
+- **Running inside a seat.** The root `vitest.config.ts` makes a root-level file run use its
+  package's config. The cli suite then scrubs `OPENRIG_URL`/`OPENRIG_PORT`/`OPENRIG_HOST` and
+  forces a scratch `OPENRIG_HOME` before every module (`packages/cli/test/hermetic-env.setup.ts`).
+  The daemon and TUI suites have no such setup file and rely on each test's own scaffold.
 
 - **Stale vendored daemon.** `npm run build:package` leaves an assembled copy of the daemon at
   `packages/cli/daemon/` (gitignored). If you change daemon source afterwards,
@@ -99,8 +116,8 @@ repository.
 - refuses a dirty worktree. Refuses a `node_modules` that is a symlink, or `@openrig/*`
   workspace links that resolve outside this worktree. Both are common with shared git worktrees.
 - deletes the stale vendored daemon bundle at `packages/cli/daemon/` before the legs run.
-- writes `gate-lane-verdict.json` at the repo root (or wherever `OPENRIG_GATE_VERDICT`
-  points). The file holds the `HEAD` SHA, per-leg results and durations, and a note of other
+- writes `gate-lane-verdict.json` at the repo root, or at `OPENRIG_GATE_VERDICT`, which must
+  point inside the current worktree (a path outside it exits 3 before the legs run). The file holds the `HEAD` SHA, per-leg results and durations, and a note of other
   `node`/`vitest`/`tsc` processes running at the time. It fails if `HEAD` changes during the
   run. The file is not gitignored, so don't commit it.
 
@@ -163,7 +180,8 @@ DOCKER_HOST=ssh://<your-host> bash scripts/run-pr-scenarios.sh \
 - Options: `--case fixture|library|transcript|capture` (default: all four), `--mode
   healthy|lost-baton` (default: healthy, lost-baton, healthy) and `--out <dir>` (default
   `dist/pr-scenarios`). `--mode` applies to `fixture` and `library`; `transcript` and `capture`
-  always run once, healthy, and `--mode lost-baton` leaves them out. Use a fresh `--out`
+  always run once, healthy. `--mode lost-baton` leaves them out of a full run, and
+  `--case transcript|capture --mode lost-baton` is refused with exit 2. Use a fresh `--out`
   directory for each run you want to keep.
 - `--remote` accepts only `ssh://` values for `DOCKER_HOST`, and it refuses if
   `DOCKER_CONTEXT` is set. The engine must be Linux on amd64 or arm64. The script reads the
@@ -221,11 +239,11 @@ The stub does not fabricate product outputs. It runs the real daemon, tmux and C
 not Claude Code or Codex, and it differs from them in ways that decide what a stub green
 means:
 
-| Area | What the stub does at `1347d825` | What that means for your test |
+| Area | What the stub does at `fcaf1f8e` | What that means for your test |
 |---|---|---|
 | Consuming a message | `stub-runner.ts` runs its launch script once and then idles. It has no stdin reader, socket or other input channel. The default script prints `[stub] scripted reply: acknowledged` at boot, before anything has been sent. | A pane showing a reply, or your echoed text, does not prove the message was consumed. No stub scenario can currently prove "delivered and answered". Separately, `rig send --verify` means "appeared in the pane", not acknowledgement (see `rig send --help`), and the scenario `send` step doesn't pass `--verify` at all. |
-| Launch path | `StubRuntimeAdapter` types `node <stub-runner> …` into the pane (`tmux.sendText`, then Enter). Claude Code with an explicit permission mode launches through a managed launch (`ClaudeManagedLaunch.prepare`, `tmux.sendShellCommand`); without one it uses `sendText`. The shell-foreground check in `session-transport.ts` (`unverifiedShellForeground`) runs for every runtime except `terminal`, but its native-process proof is limited to `codex` and `claude-code`. | A stub seat doesn't exercise wrapper, managed-launch or native-process-identity behaviour (the class behind #197). Wrapping the stub in a shell wouldn't change that. |
-| Permissions | `validateNativePermissionSelection` accepts only `codex` and `claude-code`. The stub models only the `floor` / `full_bypass` launch posture. | Testing Claude permission modes or per-seat permission selection needs a real runtime. |
+| Launch path | `StubRuntimeAdapter` types `node <stub-runner> …` into the pane (`tmux.sendText`, then Enter). Claude Code with an explicit permission mode launches through a managed launch (`ClaudeManagedLaunch.prepare`, `tmux.sendShellCommand`). Otherwise Claude Code, Codex and Pi launch through `SeatLaunchEnvironment.command` and `tmux.sendShellCommand`; the stub adapter does not get that environment. The shell-foreground check in `session-transport.ts` (`unverifiedShellForeground`) runs for every runtime except `terminal` and `claude-code`, and only `codex` has a native-process proof; Claude Code ordinary delivery applies its own uncertainty policy at the input boundary. | A stub seat doesn't exercise the seat launch environment, managed launch, wrappers or native-process identity (the class behind #197). Wrapping the stub in a shell wouldn't change that. |
+| Permissions | `validateNativePermissionSelection` accepts only `codex` and `claude-code`. The stub models only the `floor` / `full_bypass` launch posture. Non-interruptive launches and declarative `permission_policy` postures change the Claude and Codex launch arguments; the stub ignores both. | Testing Claude permission modes or per-seat permission selection needs a real runtime. |
 | Queue pickup and wake | No stub worker reacts to a nudge by claiming an item, working on it and handing it back. | The baton scenarios prove the claim *survives a restart*. They don't prove delivery, pickup or wake. |
 | Reboot / tmux reset | `daemon: {op: restart}` restarts only the scenario daemon, and the tmux server keeps running. No step resets tmux. | Recycled pane IDs and stale bindings after a real reboot (the class behind #141) are not covered by a daemon restart. |
 | Multi-rig and same-name identities | The `up` step always uses the scenario's top-level `topology` and ignores a per-step override. No step archives or removes a rig. | Cross-rig scope, same-name generations and archive/remove routing (the class behind #174) need runner work before they can be tested. |
@@ -238,7 +256,10 @@ The most useful next pieces of harness work, roughly in dependency order:
 
 1. A stub that consumes input and answers a fresh nonce.
 2. A model-free test entry point shaped like a provider, that goes through the real native
-   adapter and managed launch.
+   adapter and managed launch. Package tests such as `claude-interactive-launch.test.ts` and
+   the `*-native.test.ts` files already drive the real adapters through tmux against an
+   offline recorder; they prove command resolution and arguments, not readiness, history or
+   answers.
 3. Lifecycle and identity steps (tmux reset, archive/remove).
 4. Then pickup, wake and restore scenarios.
 
@@ -355,8 +376,8 @@ not as current status.
 ## Help wanted: command families without a behavioural scenario
 
 > This list may be stale. It was taken from the `rig --help` tree of 0.6.3: 85 visible
-> top-level families. At `1347d825`, `packages/cli/src/index.ts` registers 85 top-level
-> commands. Before picking one up, check `packages/test-system/scenarios/`, the cases in
+> top-level families. At `fcaf1f8e`, `packages/cli/src/index.ts` registers 87 top-level
+> commands; `roster` and `telemetry` were added since and have no row yet. Before picking one up, check `packages/test-system/scenarios/`, the cases in
 > `scripts/run-pr-scenarios.sh`, and the current `rig --help`.
 > One scenario doesn't cover a family's every option, sequence or platform. A `--help`
 > check only proves the command is discoverable. Existing unit tests are not counted here.
@@ -393,10 +414,11 @@ Before you start, two honest constraints:
   `contains` is a substring, so "the sibling received nothing", "the panes are gone" or "no
   duplicates" can't be asserted yet. An exact field value, such as `runningCount: 0` on the
   `ps` surface, is the closest available form.
-- The `restart` step runs `rig launch <rig> <node>` with no flags, and the node is the logical
-  ID (for example `dev.qa`). A stub seat has no resume token, so relaunching it after `down`
-  stops at `awaiting-decision` and asks for `--fresh`. The `launch` row needs that flag passed
-  through first.
+- The `restart` step runs `rig launch <rig> <node> --json` and passes no other flag; the node
+  is the logical ID (for example `dev.qa`). A stub seat has no resume token. `rig launch` has
+  no `--fresh` option: a deliberate fresh start of a stub seat after `down` goes through
+  `rig up --existing <rig> --fresh <seat>` or `rig seat launch <seat> --fresh`, so the
+  `launch` row needs a runner binding to one of those first.
 
 | Group | Family | Proposed first check (observable result) |
 |---|---|---|
@@ -502,18 +524,16 @@ How to make a case useful:
 
 Read these with care. This page notes them and proposes no changes.
 
-- `packages/test-system/README.md`: says the scenarios "DO NOT run" until a runner lands.
-  The runner exists, and three library scenarios run in CI. Its layout lists `fixtures/*.yaml`,
-  a directory that no longer exists (the topologies live in `scenarios/`). It also says the
-  emit behaviours don't exist yet. Launch-script `emit` now exists, but step-time `emit` is
-  still unbound. `packages/test-system/ci/README.md` is the current description of the CI
-  scenario job.
+- `packages/test-system/README.md`: counts eleven scenarios and says only
+  `queue-baton-survives-restart` runs in CI. The library now holds fifteen, and
+  `transcript-reads-addressed-seat` and `capture-returns-addressed-seat` also run in CI in
+  passing form. `packages/test-system/ci/README.md` describes the CI scenario job, except its
+  "Run one case" section, which still says both cases and six runs; the script runs four cases
+  and eight containers by default.
+- The headers of `transcript-reads-addressed-seat.yaml` and `capture-returns-addressed-seat.yaml`
+  say "host mode only". Both run in the CI container job, which executes the host-mode pipeline
+  inside the image.
 - `packages/test-system/scripts/README.md` and `packages/test-system/ROUTING.md` are
   dependency-routing notes from when the scenarios were first written. Several of the items
   they list have since landed. Treat them as history.
-- `packages/test-system/evals/README.md`: says cases are `cases/*.ts`. They are
-  `cases/selection.yaml` and `cases/loading.yaml`. Its "build in progress" status line is old.
-- `docs/reference/developing.md`: says "There is no external CI at this tip". In fact
-  `.github/workflows/tests.yml` runs on every PR to `main`, and its `package-tests` matrix
-  includes `ui`. Its description of `test:repo` leaves out the `generate-context-packs --check` step.
 - `docker/testbed/runbooks/`: see above. They are manual procedures that predate the CI job.
