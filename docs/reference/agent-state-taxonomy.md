@@ -20,8 +20,8 @@ truth is `packages/daemon/src/domain/activity-taxonomy.ts`.
 | resumability | `live` · `resumable` · `context-walled` | what a non-present agent can come back as |
 
 Only the activity axis is served today. The session and resumability values are declared in
-`activity-taxonomy.ts` but no surface reads them: `rig ps` shows the raw session STATUS and a
-LIFECYCLE of `running`, `detached`, `recoverable` or `attention_required` (`run`, `det`, `rec`,
+`activity-taxonomy.ts` but no surface reads them: `rig ps --nodes --full` shows the raw session
+STATUS, both node views show a LIFECYCLE of `running`, `detached`, `recoverable` or `attention_required` (`run`, `det`, `rec`,
 `att`), and node inventory serves `occupantLifecycle` (`active`, `retiring`, `retired`,
 `context_walled`, `compacted`, `crashed`, `unknown`).
 
@@ -105,8 +105,9 @@ authority (hooks live in occupant config while the pane is seat-persistent).
 
 ## Other state on the same surfaces
 
-These are separate vocabularies, not activity values. `rig ps --nodes` shows them in its
-STARTUP, ORIENTED, LIFECYCLE and RESTORE columns; see the
+These are separate vocabularies, not activity values. `rig ps --nodes --full` shows them in
+its STARTUP, ORIENTED, LIFECYCLE and RESTORE columns (the default compact view shows only
+LIFECYCLE); see the
 [startup guide](agent-startup-guide.md) for how each arises.
 
 - **Startup status:** `pending`, `ready`, `attention_required`, `failed`. `ready` means

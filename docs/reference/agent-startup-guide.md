@@ -226,8 +226,8 @@ checked once more, so a prompt that appears by then gives `attention_required`.
 
 **Startup proof.** A `startup_proof` action selects `authenticated` or `none` (the default is none; the last applicable
 one wins, and it needs `idempotent: true`). With `authenticated`, a fresh launch of an agent seat includes a challenge,
-and the seat answers it with `rig startup-proof submit --challenge-id <id> --answer <answer>`. `rig ps --nodes` shows
-the result in the ORIENTED column: `verified`, `missing`, `rejected` or `n-a`. A missing proof doesn't block startup.
+and the seat answers it with `rig startup-proof submit --challenge-id <id> --answer <answer>`. `rig ps --nodes --full`
+shows the result in the ORIENTED column: `verified`, `missing`, `rejected` or `n-a`. A missing proof doesn't block startup.
 
 **After a failure.** Delivery, launch and action failures, and readiness timeouts, give `failed`. Every 30 seconds the
 context monitor marks a `failed` or `attention_required` seat `ready` once its pane reads ready, unless fresh context

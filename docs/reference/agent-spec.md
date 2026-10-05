@@ -285,10 +285,11 @@ Each array contains resource IDs. These can be:
 The `uses` categories are: `skills`, `guidance`, `subagents`, `plugins`, `runtime_resources`. A `uses.hooks` key, even an
 empty list, is refused: hooks ship inside plugins.
 
-**Skills resolve more widely than other resources.** A skill ID that no declared resource provides is looked up at
-launch in the seat's runtime skill folder (`<cwd>/.claude/skills` or `<cwd>/.agents/skills`), then the spec folder's
-`skills/`, then the home skill folder, then the managed skills root; Pi looks only in the spec folder's `skills/`. A
-discovered skill's ID is its `SKILL.md` frontmatter `name`, and a declared resource wins over a discovered skill with the
+**Skills resolve more widely than other resources.** For Claude Code and Codex seats, a skill ID that no declared
+resource provides is looked up at launch in the seat's runtime skill folder (`<cwd>/.claude/skills` or
+`<cwd>/.agents/skills`), then the `skills/` folder beside the RigSpec, then the home skill folder, then the managed
+skills root. Pi looks only in the `skills/` folder beside the RigSpec. OMP does no filesystem discovery, so its
+`uses.skills` references need declared resources. A discovered skill's ID is its `SKILL.md` frontmatter `name`, and a declared resource wins over a discovered skill with the
 same ID. When a profile selects a skill from inside the spec's own folder and the managed catalog holds a different
 copy, the spec's copy is used and launch warns `skill_bundle_precedence`. Any other differing copy fails launch with
 `skill_identity_conflict`.
@@ -456,7 +457,7 @@ restore behavior, and the distinction between readiness and verified proof.
 
 | Hint | When Delivered | Mechanism |
 |------|---------------|-----------|
-| `auto` | Depends on the file | A `SKILL.md` is `skill_install`, any other `.md` is `guidance_merge`, and any other file is `send_text` |
+| `auto` | Depends on the file | A path ending in `SKILL.md`, or content beginning with `# SKILL`, is `skill_install`; otherwise a `.md` file is `guidance_merge`, and any other file is `send_text` |
 | `guidance_merge` | Before harness boot | Merged into CLAUDE.md/AGENTS.md as managed block |
 | `skill_install` | Before harness boot | Installed to runtime skill directory |
 | `send_text` | After harness is ready | Sent as text to agent terminal via tmux |

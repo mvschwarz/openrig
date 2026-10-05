@@ -95,7 +95,7 @@ using a published package, since repository guidance can be ahead of npm.
 | **`rig setup`** | Attempts missing tools and writes an OpenRig block in `~/.tmux.conf` for mouse support and scrollback. On macOS it can install cmux and enable its automation socket control in `~/.config/cmux/settings.json`; cmux defaults `automation.socketControlMode` to `cmuxOnly`, which only accepts processes started inside cmux and so blocks OpenRig's control, so setup switches it to `automation`. `--full` adds workstation tools. `--dry-run` shows setup's plan without applying it. |
 | **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. With `runtime.codex.hooks_enabled` enabled (the default), writes Codex hook configuration and trust records as described below—even before a rig launches. |
 | **Rig/seat launch and attachment** | Creates tmux sessions, supplies seat identity and daemon connection environment, and projects selected guidance, skills, plugins and runtime resources into the workspace. Managed startup pre-trusts the workspace. Claude context collection can also be provisioned for attached sessions and refreshed during monitoring. In a Git repository, newly created files under `.codex/plugins/openrig-core/` are added to the repository's Git `info/exclude` inside an `# BEGIN OpenRig generated files` block; new `AGENTS.md`, `CLAUDE.md` and `CLAUDE.local.md` files stay visible with a warning. |
-| **Bundle install** (`rig bundle install`, or `rig up` with a `.rigbundle` or GitHub link) | Writes the bundle's files into the install target (`--target`, or the current directory) and routes its declared skills, plugins and context packs into your libraries. A GitHub link's archive is kept under `OPENRIG_HOME/bundle-imports/`, and installs are recorded in `OPENRIG_HOME/bundle-audit.jsonl`. A bundle that carries a project creates it under `workspace.projects_root` and records it, with the rig's association, in the workspace catalog. |
+| **Bundle install** (`rig bundle install`, or `rig up` with a `.rigbundle` or GitHub link) | Writes the bundle's files into the install target: `--target`, or the current directory for `rig up` and for a GitHub link. `rig bundle install` with a local archive needs `--target`. Routes its declared skills, plugins and context packs into your libraries. A GitHub link's archive is kept under `OPENRIG_HOME/bundle-imports/`, and installs are recorded in `OPENRIG_HOME/bundle-audit.jsonl`. A bundle that carries a project creates it under `workspace.projects_root` and records it, with the rig's association, in the workspace catalog. |
 | **Explicit permission configuration** | The built-in bootstrap does **not** add `rig` command allow rules. Agent-guided setup recommends Yes and requires your actual answer before the agent [adds rules at your chosen scope](docs/reference/getting-started.md#have-your-agent-configure-permissions). No/no answer preserves settings; existing choices and stricter rules remain relevant. Broader access is separate. |
 
 The provider files are separate from instance state. Here `~` means the daemon
@@ -134,9 +134,10 @@ variables. Claude uses `--permission-mode acceptEdits` and defaults to the class
 renderer for terminal scrollback. Codex uses `-s workspace-write` unless a named
 profile governs its sandbox; the default does not force an approval-policy flag.
 On that plain launch OpenRig first asks Codex for its own configuration and adds
-`-c sandbox_workspace_write.network_access=true` unless a configuration layer sets
-network access or a managed requirement could restrict it, so the seat can reach
-the local daemon.
+`-c sandbox_workspace_write.network_access=true` only when Codex answers that no
+configuration layer sets network access and no managed requirement could restrict
+it, so the seat can reach the local daemon. If Codex can't be asked or doesn't
+answer in time, the launch is left unchanged.
 Fresh Codex launches also add writable access to the workspace's `.git` and the
 pod's shared queue-state directory with `--add-dir`; the shared root comes from
 `OPENRIG_SHARED_DOCS_ROOT` or `~/.openrig/shared-docs`.
@@ -146,7 +147,9 @@ Claude's `--dangerously-skip-permissions` or Codex's
 path, with no policy attached, selects Claude's bypass flag, Pi's `--approve` and
 Codex's `-s danger-full-access` without `-a never`; a resolved policy overrides
 that environment setting. The `builtin:auto` policy launches Claude with
-`--permission-mode auto`; Codex and Pi seats stay at the floor.
+`--permission-mode auto`; Codex and Pi seats launch as they do without a policy (a
+named Codex profile still governs its sandbox, and Pi keeps its configured
+resource trust).
 `--non-interruptive` on `rig up` or `rig bundle install` additionally passes
 per-launch flags to full-bypass seats so Claude's bypass warning and Codex's
 full-access and GPT-5.1 migration notices don't stop startup; it writes nothing to

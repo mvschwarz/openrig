@@ -85,7 +85,8 @@ line so attribution remains visible when the resolver returns only that section.
 ## Addressing and composition
 
 Lore uses the existing `seat:` grammar and an explicit rig-and-seat read grant
-(`rig context profile <pack> --rig <rig> --seat <seat>`, which needs both flags).
+(`rig context profile <pack> --situation <fresh|handover|post-compaction> --rig <rig> --seat <seat>`,
+where the grant needs both `--rig` and `--seat`).
 The address says which file or section to read; the grant says whose seat tree
 the address is relative to. No grant means no read.
 

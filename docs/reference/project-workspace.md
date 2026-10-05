@@ -112,8 +112,9 @@ an explicit install whose `install.skills` is empty clears it. This keeps
 
 `rig context work-install` picks one project from the catalog at
 `workspace.catalog_path` (default `workspace.yaml`), in the order below. Without a
-catalog, the workspace root itself is the project (`selectedBy: workspace`), and
-`--project` must match its `project.yaml` id. Operating posture uses steps 3-5
+catalog, the workspace root itself is the project (`selectedBy: workspace`, or
+`explicit` with a matching `--project`), and `--project` must match its
+`project.yaml` id. Operating posture uses steps 3-5
 the same way when a queue row names no project (see
 [scoped operating posture](scoped-operating-posture.md)).
 
