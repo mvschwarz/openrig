@@ -24,6 +24,7 @@ describe("context add local auto-start", () => {
     vi.stubEnv("OPENRIG_TRANSCRIPTS_PATH", join(root, "transcripts"));
     vi.stubEnv("OPENRIG_PORT", "42761");
     vi.stubEnv("OPENRIG_HOST", "127.0.0.1");
+    vi.stubEnv("RIGGED_HOST", "");
     previousExit = process.exitCode;
     process.exitCode = undefined;
     vi.spyOn(console, "log").mockImplementation(() => {});
@@ -36,9 +37,16 @@ describe("context add local auto-start", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  function fixture(initial: "stopped" | "running" | "unknown" = "stopped") {
+  function fixture(initial: "stopped" | "running" | "unknown" = "stopped", stale = false) {
     let started = initial === "running";
-    let state: string | null = null;
+    let state: string | null = stale
+      ? JSON.stringify({ pid: 900001, port: 42760, host: "127.0.0.1", db: "fixture.sqlite", startedAt: "2026-01-01T00:00:00Z" })
+      : null;
+    const statePath = join(root, "state", "daemon.json");
+    if (state) {
+      mkdirSync(join(root, "state"), { recursive: true });
+      writeFileSync(statePath, state);
+    }
     const lifecycleDeps: LifecycleDeps = {
       acquireStartLock: () => ({ recordChild: vi.fn(), release: vi.fn() }),
       spawn: vi.fn(() => {
@@ -101,12 +109,24 @@ describe("context add local auto-start", () => {
     expect(f.post).not.toHaveBeenCalled();
   });
 
-  it("does not start a local daemon for a configured remote host", async () => {
-    vi.stubEnv("OPENRIG_HOST", "daemon.example.invalid");
-    const f = fixture();
+  it.each([
+    ["OPENRIG_HOST", false], ["OPENRIG_HOST", true],
+    ["RIGGED_HOST", false], ["RIGGED_HOST", true],
+    ["config-file", false], ["config-file", true],
+  ] as const)("remote selection %s with stale state=%s does not spawn locally", async (source, stale) => {
+    vi.stubEnv("OPENRIG_HOST", "");
+    if (source === "config-file") {
+      mkdirSync(join(root, "state"), { recursive: true });
+      writeFileSync(join(root, "state", "config.json"), JSON.stringify({ daemon: { host: "remote.example.invalid" } }));
+    } else {
+      vi.stubEnv(source, "remote.example.invalid");
+    }
+    const f = fixture("stopped", stale);
     await f.add();
-    expect(process.exitCode).toBe(1);
     expect(f.lifecycleDeps.spawn).not.toHaveBeenCalled();
+    expect(f.preflightExec).not.toHaveBeenCalled();
+    expect(f.post).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
   });
 
   it("preserves an unverified daemon result without spawning a replacement", async () => {

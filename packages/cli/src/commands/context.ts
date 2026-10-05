@@ -395,15 +395,22 @@ Examples:
     const deps = getDeps();
     let status = await getDaemonStatus(deps.lifecycleDeps);
     if (autoStartLocal && (status.state === "stopped" || status.state === "stale")
-      && !readOpenRigEnv("OPENRIG_URL", "RIGGED_URL")
-      && ["127.0.0.1", "localhost", "[::1]"].includes(new URL(new DaemonClient().baseUrl).hostname)) {
-      const prepared = await prepareDaemonAutoStart(deps.lifecycleDeps, depsOverride?.preflightExec);
-      if (!prepared.preflight.ready) {
-        throw new Error(prepared.preflight.checks.filter((check) => !check.ok)
-          .map((check) => `${check.name}: ${check.error}${check.fix ? ` Fix: ${check.fix}` : ""}`).join("\n"));
+      && !readOpenRigEnv("OPENRIG_URL", "RIGGED_URL")) {
+      // Startup uses current config. A retained endpoint must not mask an
+      // explicitly selected host when deciding whether startup is local.
+      const selection = new ConfigStore().resolveWithSource("daemon.host");
+      const host = selection.source === "default"
+        ? new URL(new DaemonClient().baseUrl).hostname
+        : String(selection.value);
+      if (["127.0.0.1", "localhost", "::1", "[::1]"].includes(host)) {
+        const prepared = await prepareDaemonAutoStart(deps.lifecycleDeps, depsOverride?.preflightExec);
+        if (!prepared.preflight.ready) {
+          throw new Error(prepared.preflight.checks.filter((check) => !check.ok)
+            .map((check) => `${check.name}: ${check.error}${check.fix ? ` Fix: ${check.fix}` : ""}`).join("\n"));
+        }
+        await startDaemon(prepared.options, deps.lifecycleDeps);
+        status = await getDaemonStatus(deps.lifecycleDeps);
       }
-      await startDaemon(prepared.options, deps.lifecycleDeps);
-      status = await getDaemonStatus(deps.lifecycleDeps);
     }
     if (status.state !== "running" || status.healthy === false) {
       // B8-1b: epistemic-matched language via the one helper (down ≠ busy).
