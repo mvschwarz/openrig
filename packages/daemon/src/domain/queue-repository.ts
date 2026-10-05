@@ -2600,7 +2600,7 @@ export class QueueRepository {
         if (!blocker) {
           throw new QueueRepositoryError(
             "blocker_not_found",
-            `blocked_on names a qitem that does not exist: ${effectiveBlockedOn}. A park must name a real, live blocker — a nonexistent blocker can never complete, so the row could never unpark.`,
+            `blocked_on names a qitem that does not exist on this daemon: ${effectiveBlockedOn}. A qitem absent from this daemon cannot be a live blocker here. If it is stored on another host, use a typed gate such as external:<host>/<id> with --wake-watchdog or --wake-after.`,
             // F1 (error-honesty): the rejected value is named rejectedBlocker — an error payload
             // never carries the success-shaped blockedOn field (the field-filtered-misread class).
             { rejectedBlocker: effectiveBlockedOn },
@@ -3347,6 +3347,58 @@ export class QueueRepository {
     }
     const rows = this.db.prepare(sql).all(...params) as QueueItemRow[];
     return rows.map((r) => this.rowToItem(r, !opts?.compact));
+  }
+
+  /**
+   * Record that an in-progress queue item has exceeded its closure_required_at
+   * deadline, appending a transition note and emitting `qitem.closure_overdue`.
+   *
+   * Deduplicated: if this obligation has already recorded `closure-overdue`
+   * since it was claimed (or created), no duplicate event or transition is emitted.
+   */
+  recordClosureOverdue(qitemId: string, opts?: { now?: string }): PersistedEvent | null {
+    const qitem = this.getById(qitemId);
+    if (!qitem || qitem.state !== "in-progress" || !qitem.closureRequiredAt) return null;
+    const cutoff = opts?.now ?? new Date().toISOString();
+    if (qitem.closureRequiredAt > cutoff) return null;
+    const claimSince = qitem.claimedAt ?? qitem.tsCreated;
+    if (this.hasQueueTransitionsTable) {
+      const alreadyRecorded = this.db.prepare(
+        `SELECT 1 FROM queue_transitions WHERE qitem_id = ? AND transition_note = 'closure-overdue' AND ts >= ? LIMIT 1`,
+      ).get(qitemId, claimSince);
+      if (alreadyRecorded) return null;
+      if (detectTable(this.db, "queue_transitions_archive")) {
+        const alreadyRecordedArchive = this.db.prepare(
+          `SELECT 1 FROM queue_transitions_archive WHERE qitem_id = ? AND transition_note = 'closure-overdue' AND ts >= ? LIMIT 1`,
+        ).get(qitemId, claimSince);
+        if (alreadyRecordedArchive) return null;
+      }
+    } else {
+      const alreadyRecorded = this.db.prepare(
+        `SELECT 1 FROM events WHERE type = 'qitem.closure_overdue' AND json_extract(payload, '$.qitemId') = ? AND julianday(created_at) >= julianday(?) LIMIT 1`,
+      ).get(qitemId, claimSince);
+      if (alreadyRecorded) return null;
+    }
+    const txn = this.db.transaction(() => {
+      if (this.hasQueueTransitionsTable) {
+        this.transitionLog.append({
+          qitemId,
+          state: qitem.state,
+          actorSession: "daemon@system",
+          transitionNote: "closure-overdue",
+        });
+      }
+      return this.eventBus.persistWithinTransaction({
+        type: "qitem.closure_overdue",
+        qitemId,
+        destinationSession: qitem.destinationSession,
+        closureRequiredAt: qitem.closureRequiredAt!,
+        overdueSince: qitem.closureRequiredAt!,
+      });
+    });
+    const persisted = txn();
+    this.eventBus.notifySubscribers(persisted);
+    return persisted;
   }
 
   /**

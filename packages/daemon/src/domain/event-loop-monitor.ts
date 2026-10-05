@@ -102,6 +102,9 @@ export interface EventLoopMonitorOptions {
    * false to drive `recordTick()` + an injected clock deterministically.
    */
   autoStart?: boolean;
+  /** Optional diagnostic observation on the existing tick; never a new timer. */
+  onTick?: (at: number, previous: number) => void;
+  monotonicNow?: () => number;
 }
 
 const NS_PER_MS = 1_000_000;
@@ -114,9 +117,15 @@ export class EventLoopMonitor {
   private lastTickAt: number;
   private eluBaseline: EventLoopUtilization;
   private started = false;
+  private monotonicTick: number;
+  private readonly monotonicNow: () => number;
+  private readonly onTick?: (at: number, previous: number) => void;
 
   constructor(opts: EventLoopMonitorOptions = {}) {
     this.now = opts.now ?? Date.now;
+    this.monotonicNow = opts.monotonicNow ?? (() => performance.now());
+    this.monotonicTick = this.monotonicNow();
+    this.onTick = opts.onTick;
     this.tickIntervalMs = opts.tickIntervalMs ?? EVENT_LOOP_TICK_INTERVAL_MS;
     this.histogram = monitorEventLoopDelay({
       resolution: opts.resolutionMs ?? EVENT_LOOP_DELAY_RESOLUTION_MS,
@@ -133,6 +142,7 @@ export class EventLoopMonitor {
     this.histogram.enable();
     this.eluBaseline = performance.eventLoopUtilization();
     this.lastTickAt = this.now();
+    this.monotonicTick = this.monotonicNow();
     this.timer = setInterval(() => this.recordTick(), this.tickIntervalMs);
     // A monitor tick must never keep the daemon alive on its own.
     this.timer.unref?.();
@@ -141,6 +151,9 @@ export class EventLoopMonitor {
   /** Refresh the last-tick timestamp. Exposed for deterministic tests. */
   recordTick(): void {
     this.lastTickAt = this.now();
+    const previous = this.monotonicTick;
+    this.monotonicTick = this.monotonicNow();
+    try { this.onTick?.(this.monotonicTick, previous); } catch { /* Health never depends on diagnostics. */ }
   }
 
   snapshot(): EventLoopSnapshot {

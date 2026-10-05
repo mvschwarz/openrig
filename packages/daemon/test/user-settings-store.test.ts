@@ -46,6 +46,7 @@ function clearEnv(): () => void {
     "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED", "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS",
     "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG",
     "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED",
+    "OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS",
     // Slice 27 — Claude auto-compaction policy env-map.
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
@@ -108,6 +109,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "context.system_world",
       "skills.root",
       "onboarding.default_pack.enabled",
+      "launch.non_interruptive",
       "health.context_pressure.warning_percent",
       "health.context_pressure.critical_percent",
       "files.allowlist", "progress.scan_roots",
@@ -131,6 +133,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "feed.subscriptions.audit_log",
       // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
       "runtime.codex.hooks_enabled",
+      "runtime.readiness_timeout_seconds",
       // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10.
       "policies.claude_compaction.enabled",
       "policies.claude_compaction.threshold_percent",
@@ -238,6 +241,32 @@ describe("SettingsStore (User Settings v0)", () => {
       .toMatchObject({ value: 60, source: "default", defaultValue: 60 });
     expect(store.resolveOne("policies.idle_gate_qitem.active_wake_interval_seconds"))
       .toMatchObject({ value: 900, source: "default", defaultValue: 900 });
+  });
+
+  it("resolves the launch readiness window from default, file, and env", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("runtime.readiness_timeout_seconds")).toMatchObject({ value: 30, source: "default" });
+    store.set("runtime.readiness_timeout_seconds", "45");
+    expect(store.resolveOne("runtime.readiness_timeout_seconds")).toMatchObject({ value: 45, source: "file" });
+    process.env["OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS"] = "60";
+    expect(store.resolveOne("runtime.readiness_timeout_seconds")).toMatchObject({ value: 60, source: "env" });
+    for (const value of ["0", "601", "2.5", "45junk"]) {
+      expect(() => store.set("runtime.readiness_timeout_seconds", value)).toThrow(/integer in \[1, 600\]/);
+    }
+  });
+
+  it("falls back from an invalid readiness env value to the file value, then the default", () => {
+    const store = new SettingsStore(configPath);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      process.env["OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS"] = "0";
+      expect(store.resolveOne("runtime.readiness_timeout_seconds")).toMatchObject({ value: 30, source: "default" });
+      store.set("runtime.readiness_timeout_seconds", "45");
+      expect(store.resolveOne("runtime.readiness_timeout_seconds")).toMatchObject({ value: 45, source: "file" });
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining("env override for runtime.readiness_timeout_seconds rejected"));
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it("queue integer settings reject partial and fractional strings", () => {

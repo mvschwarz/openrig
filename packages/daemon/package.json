@@ -1,14 +1,16 @@
 {
   "name": "@openrig/daemon",
-  "version": "0.6.3",
+  "version": "0.6.6",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "exports": {
+    "./bundle-behaviour": { "types": "./dist/bundle-behaviour-surface.d.ts", "import": "./dist/bundle-behaviour-surface.js" },
     "./spec-validation": {
       "types": "./dist/spec-validation-surface.d.ts",
       "import": "./dist/spec-validation-surface.js"
     },
+    "./bundle-identity": { "types": "./dist/bundle-identity-surface.d.ts", "import": "./dist/bundle-identity-surface.js" },
     "./stream-classifier": { "types": "./dist/stream-classifier-surface.d.ts", "import": "./dist/stream-classifier-surface.js" },
     "./attention": { "types": "./dist/attention-surface.d.ts", "import": "./dist/attention-surface.js" },
     "./project-catalog": { "types": "./dist/project-catalog-surface.d.ts", "import": "./dist/project-catalog-surface.js" },

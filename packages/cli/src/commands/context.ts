@@ -67,6 +67,18 @@ interface ContextPackEntryWire {
   }>;
 }
 
+/** Exact retry commands for a failed project selection, one per candidate id. */
+function projectRetryCommands(
+  code: string,
+  candidates: string[] | undefined,
+  opts: { mission?: string; slice?: string },
+): string[] | undefined {
+  if (!candidates || (code !== "project_required" && code !== "project_not_found")) return undefined;
+  const word = (value: string) => /^[A-Za-z0-9._\/-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+  const narrowing = `${opts.mission !== undefined ? ` --mission ${word(opts.mission)}` : ""}${opts.slice !== undefined ? ` --slice ${word(opts.slice)}` : ""}`;
+  return candidates.map((id) => `rig context work-install --project ${word(id)}${narrowing}`);
+}
+
 function selectedIds(ids: string[], none: string): string {
   return ids.length > 0 ? ids.join(", ") : none;
 }
@@ -76,12 +88,12 @@ function printWorkInstallSelectors(result: WorkInstallPlan, topologySkills: stri
   const identity = world.id ? ` ${world.id}@${world.version}` : "";
   const path = world.manifestPath ? ` ${world.manifestPath}` : "";
   console.log(`system  ${world.state} [${world.source}]${identity}${path}`);
-  for (const selection of world.context) {
-    const profiles = selection.profiles
-      ? ` (${Object.entries(selection.profiles).map(([runtime, profile]) => `${runtime}=${profile}`).join(", ")})`
-      : "";
-    console.log(`context system ${selection.ref}${profiles}`);
-  }
+  const profiles = (selection: { profiles?: Record<string, string | undefined> }) => selection.profiles
+    ? ` (${Object.entries(selection.profiles).map(([runtime, profile]) => `${runtime}=${profile}`).join(", ")})`
+    : "";
+  for (const selection of world.context) console.log(`context system ${selection.ref}${profiles(selection)}`);
+  for (const selection of result.worlds ?? []) console.log(`context world ${selection.ref}${profiles(selection)}`);
+  if ((result.worlds ?? []).length > 0) console.log("worlds  read each with: rig context get <ref>");
   console.log(`skills  system=${selectedIds(world.skills, "(none)")}`);
   console.log(`skills  topology=${selectedIds(topologySkills, "(none)")}`);
   console.log(`skills  project=${selectedIds(result.skills, "(none)")}`);
@@ -274,13 +286,24 @@ Examples:
         contextRoot,
         systemWorldSelection: String(systemWorldSetting.value),
         systemWorldSource: systemWorldSetting.source,
+        cwd: resolve(opts.cwd ?? process.cwd()),
+        ...(process.env["OPENRIG_SESSION_NAME"] ? { sessionName: process.env["OPENRIG_SESSION_NAME"] } : {}),
         ...(opts.project !== undefined ? { project: opts.project } : {}),
         ...(opts.mission !== undefined ? { mission: opts.mission } : {}),
         ...(opts.slice !== undefined ? { slice: opts.slice } : {}),
       });
       if ("error" in result) {
-        if (opts.json) console.log(JSON.stringify({ ok: false, ...result }));
-        else console.error(`${result.error.code}: ${result.error.message}`);
+        const commands = projectRetryCommands(result.error.code, result.error.candidates, opts);
+        if (opts.json) {
+          console.log(JSON.stringify({ ok: false, error: { ...result.error, ...(commands ? { commands } : {}) } }));
+        } else {
+          console.error(`${result.error.code}: ${result.error.message}`);
+          const choices = commands ?? result.error.candidates ?? [];
+          if (choices.length > 0) {
+            console.error(commands ? "Run one of:" : "Candidates:");
+            for (const choice of choices) console.error(`  ${choice}`);
+          }
+        }
         process.exitCode = 1;
         return;
       }
@@ -344,7 +367,13 @@ Examples:
         for (const warning of result.warnings) console.error(`Warning: ${warning}`);
         return;
       }
-      console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}`);
+      const selectedByLabels: Record<string, string> = {
+        rig: " (selected by this rig's catalog entry)",
+        cwd: " (selected by the working directory)",
+        unclaimed: " (the only project no rig claims)",
+      };
+      const selectedBy = selectedByLabels[result.position.selectedBy] ?? "";
+      console.log(`project ${result.position.projectId ?? "(unmanifested)"}: ${result.position.projectRoot}${selectedBy}`);
       printWorkInstallSelectors(result, (opts.topology ?? "").split(",").map((id) => id.trim()).filter(Boolean));
       for (const planned of result.pieces) {
         console.log(`${planned.altitude.padEnd(7)} ${planned.address} [${planned.source}] ${planned.exists ? planned.path : `(absent: ${planned.path})`}`);
@@ -672,9 +701,10 @@ Examples:
         const res = await client.get<{
           profileId?: string;
           phases?: Array<{ id: string; kind: string; sources?: string[]; estimatedTokens: number }>;
-          pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number }>;
+          pieces?: Array<{ atomId: string; address: string; sourceKind: string; text: string; estimatedTokens: number; writtenAt?: string }>;
           totalEstimatedTokens?: number;
           budget?: { limitTokens: number; overageTokens: number; dropCandidates: Array<{ atomId: string; priority: string; estimatedTokens: number }> };
+          warnings?: string[];
           provenanceWarnings?: string[];
           message?: string;
           error?: string;
@@ -696,6 +726,7 @@ Examples:
         }
         // Warnings and the budget report ride stderr so stdout is exactly the
         // composed walk an agent consumes.
+        for (const w of profile.warnings ?? []) console.error(`WARNING ${w}`);
         for (const w of profile.provenanceWarnings ?? []) console.error(`PROVENANCE ${w}`);
         if (profile.budget) {
           console.error(
@@ -709,7 +740,8 @@ Examples:
           // outside its root — self-describing payload, zero composed bytes
           // touched.
           const escaped = (p as { provenance?: { escapesRoot?: boolean } }).provenance?.escapesRoot ? " !ESCAPED-ROOT" : "";
-          console.log(`=== ${p.atomId} [${p.sourceKind}${escaped}] ${p.address} (~${p.estimatedTokens} tokens)`);
+          const written = p.writtenAt ? ` written ${p.writtenAt}` : "";
+          console.log(`=== ${p.atomId} [${p.sourceKind}${escaped}] ${p.address} (~${p.estimatedTokens} tokens)${written}`);
           console.log(p.text);
           console.log("");
         }

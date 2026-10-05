@@ -121,7 +121,11 @@ describe("S03 future native permission selections (offline; no native effect cla
     expect(new SeatStatusService({ rigRepo: f.rigRepo }).getStatus(input("").seatRef)).toMatchObject({ ok: true, status: { permissions: { selectionState: "unknown", nativeEffect: "unverified" } } });
     expect(() => f.store.apply(binding(f.node.id), "codex")).toThrow();
   });
-  it("real HTTP route requires sender and audits that sender, ignoring an actor body override", async () => {
+  it.each([
+    { sender: undefined, operator: " human@example.test ", expected: "human@example.test" },
+    { sender: "real-operator", operator: " human@example.test ", expected: "real-operator" },
+    { sender: "real-operator", operator: undefined, expected: "real-operator" },
+  ])("real HTTP route audits header or fallback: %j", async ({ sender, operator, expected }) => {
     const f = fixture(); const app = new Hono();
     app.use("*", async (c, next) => {
       for (const [key, value] of Object.entries({ rigRepo: f.rigRepo, sessionRegistry: f.registry, eventBus: f.eventBus, tmuxAdapter: {} })) c.set(key as never, value as never);
@@ -129,17 +133,40 @@ describe("S03 future native permission selections (offline; no native effect cla
     });
     app.route("/api/seat", seatRoutes);
     const url = "/api/seat/set-permissions/dev-owner%40permissions";
-    const request = { method: "POST", body: JSON.stringify({ mode: "full_bypass", reason: "explicit choice", actor: "spoof" }), headers: { "content-type": "application/json" } };
-    expect((await app.request(url, request)).status).toBe(400);
-    expect((await app.request(url, { ...request, body: "null", headers: { ...request.headers, "x-openrig-session": "real-operator" } })).status).toBe(400);
-    const response = await app.request(url, { ...request, headers: { ...request.headers, "x-openrig-session": "real-operator" } });
+    const request = { method: "POST", body: JSON.stringify({ mode: "full_bypass", reason: "explicit choice", operator, actor: "ignored" }),
+      headers: { "content-type": "application/json", ...(sender ? { "x-openrig-session": sender } : {}) } };
+    const before = lineage(f.db);
+    const response = await app.request(url, request);
     expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ ok: true, changed: true });
-    expect(f.store.read(f.node.id)?.actor).toBe("real-operator");
+    expect(f.store.read(f.node.id)?.actor).toBe(expected);
+    const event = f.db.prepare("SELECT payload FROM events WHERE type = 'node.permissions_changed'").get() as { payload: string };
+    expect(JSON.parse(event.payload)).toMatchObject({ actor: expected, reason: "explicit choice", effect: "future_launches_only" });
+    expect(lineage(f.db)).toBe(before);
+  });
+  it.each([
+    [{ mode: "floor", reason: "choice", actor: "not-the-operator-field" }, "Sender identity is required; pass --operator <address> when running outside a managed seat."],
+    [{ operator: "human@example.test", reason: "choice" }, "mode is required"],
+    [{ operator: "human@example.test", mode: "floor" }, "reason is required"],
+  ])("names the missing set-permissions field for %j", async (body, error) => {
+    const app = new Hono(); app.route("/api/seat", seatRoutes);
+    const response = await app.request("/api/seat/set-permissions/dev-owner%40permissions", {
+      method: "POST", body: JSON.stringify(body), headers: { "content-type": "application/json" },
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error });
+  });
+  it.each(["null", "[]", "{"])("keeps malformed or non-object body %s a missing-mode error with a sender", async (body) => {
+    const app = new Hono(); app.route("/api/seat", seatRoutes);
+    const response = await app.request("/api/seat/set-permissions/dev-owner%40permissions", {
+      method: "POST", body, headers: { "content-type": "application/json", "x-openrig-session": "operator" },
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "mode is required" });
   });
   it.each(["codex", "claude-code"])("legacy restore resolves current stored selection for %s", async runtime => {
     const f = fixture(runtime); await f.service.setPermissions(input(runtime === "codex" ? "full_bypass" : "auto"));
     const resume = vi.fn(async () => ({ ok: false, code: "offline", message: "stop" }));
-    const ctx = { db: f.db, sessionRegistry: f.registry, appliedLaunchStore: new AppliedLaunchObservationStore(f.db),
+    const ctx = { db: f.db, rigRepo: f.rigRepo, sessionRegistry: f.registry, appliedLaunchStore: new AppliedLaunchObservationStore(f.db),
       claudeResume: { canResume: () => runtime === "claude-code", resume }, codexResume: { canResume: () => runtime === "codex", resume } };
     await (RestoreOrchestrator.prototype as any).attemptResume.call(ctx, f.node.id, "seat", runtime === "codex" ? "codex_id" : "claude_id", "original", "/inert", null, "model", "floor");
     expect(resume).toHaveBeenCalledWith(...(runtime === "codex"

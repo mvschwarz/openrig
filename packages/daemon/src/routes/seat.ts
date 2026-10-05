@@ -255,10 +255,10 @@ function seatLifecycleStatus(code: SeatRefusal["code"]): 400 | 404 | 409 | 500 |
 
 seatRoutes.post("/set-permissions/:seatRef", async (c) => {
   const body = await c.req.json<Record<string, unknown>>().catch(() => ({} as Record<string, unknown>));
-  const actor = transportSenderSession(c);
-  if (!actor || !body || Array.isArray(body) || typeof body.mode !== "string" || typeof body.reason !== "string") {
-    return c.json({ error: "Sender identity, mode and reason are required" }, 400);
-  }
+  const actor = transportSenderSession(c) ?? (typeof body?.operator === "string" ? body.operator.trim() : undefined);
+  if (!actor) return c.json({ error: "Sender identity is required; pass --operator <address> when running outside a managed seat." }, 400);
+  if (!body || Array.isArray(body) || typeof body.mode !== "string") return c.json({ error: "mode is required" }, 400);
+  if (typeof body.reason !== "string") return c.json({ error: "reason is required" }, 400);
   const result = await seatLifecycleService(c).setPermissions({
     seatRef: decodeURIComponent(c.req.param("seatRef")), mode: body.mode, reason: body.reason, actor,
   });
@@ -288,6 +288,11 @@ seatRoutes.post("/launch/:seatRef", async (c) => {
   });
   if (result.ok) return c.json(result);
   return c.json(result, seatLifecycleStatus(result.code));
+});
+
+seatRoutes.post("/continue/:seatRef", async (c) => {
+  const result = await seatLifecycleService(c).continueFreshStartup(decodeURIComponent(c.req.param("seatRef")));
+  return c.json(result, result.ok ? 200 : 409);
 });
 
 seatRoutes.post("/stop/:seatRef", async (c) => {

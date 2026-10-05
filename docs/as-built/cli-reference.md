@@ -9,20 +9,20 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
+last-verified-against-source: 30bf2ca06375680f1f8cbe68cc757e212d23dec6
 last-updated: 2026-10-03
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `254122872cf477511514979a4300b695d77cd1f7`.
+Verified against source commit `30bf2ca06375680f1f8cbe68cc757e212d23dec6`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
 There are **85 top-level registrations**, **341 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,023 explicitly registered option objects**, including the root version
+**1,026 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
 These are source counts, not a claim about a deployed release.
@@ -264,9 +264,9 @@ Root: `rig`; declared option: `-V, --version`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig bundle` | — | — |
-| `rig bundle create <spec>` | — | `-o, --output <path>` **required**<br>`--name <name>`<br>`--bundle-version <ver>`<br>`--include-packages <refs...>`<br>`--rig-root <root>`<br>`--notes <text>`<br>`--min-daemon-version <ver>`<br>`--min-cli-version <ver>`<br>`--allow-drift`<br>`--json` |
+| `rig bundle create <spec>` | — | `-o, --output <path>` **required**<br>`--name <name>`<br>`--bundle-version <ver>`<br>`--include-packages <refs...>`<br>`--rig-root <root>`<br>`--context-pack <dir>` (repeatable)<br>`--project-dir <dir>`<br>`--notes <text>`<br>`--min-daemon-version <ver>`<br>`--min-cli-version <ver>`<br>`--allow-drift`<br>`--json` |
 | `rig bundle inspect <path>` | — | `--json` |
-| `rig bundle install <path>` | — | `--plan`<br>`--yes`<br>`--target <root>`<br>`--skip-version-check`<br>`--force`<br>`--json` |
+| `rig bundle install <path>` | — | `--plan`<br>`--yes`<br>`--target <root>`<br>`--cwd <path>`<br>`--skip-version-check`<br>`--force`<br>`--json` |
 | `rig bundle history` | — | `--rig <name>`<br>`--since <iso>`<br>`--json` |
 
 ### up
@@ -412,8 +412,8 @@ Root: `rig`; declared option: `-V, --version`.
 | `rig project candidates` | — | `--project <id>` **required**<br>`--taxonomy <file>` **required**<br>`--classifier-version <version>` **required**<br>`--evidence-epoch <epoch>` **required**<br>`--decisions <file>`<br>`--experiment <file>`<br>`--limit <count>`<br>`--json` |
 | `rig project wake` | — | `--project <id>` **required**<br>`--taxonomy <file>` **required**<br>`--classifier-version <version>` **required**<br>`--evidence-epoch <epoch>` **required**<br>`--decisions <file>`<br>`--experiment <file>`<br>`--limit <count>`<br>`--json` |
 | `rig project shadow-status` | — | — |
-| `rig project shadow-drain` | — | — |
-| `rig project shadow-stop` | — | — |
+| `rig project shadow-drain` | — | `--actor <name>` |
+| `rig project shadow-stop` | — | `--actor <name>` |
 | `rig project lease-acquire` | — | `--session <session>` **required**<br>`--evaluate-deadness-first`<br>`--json` |
 | `rig project lease-heartbeat` | — | `--lease-id <id>` **required**<br>`--session <session>` **required**<br>`--json` |
 | `rig project lease-show` | — | `--json` |
@@ -814,7 +814,7 @@ Root: `rig`; declared option: `-V, --version`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig compact <session>` | — | `--json` |
+| `rig compact <session>` | — | `--json`<br>`--skip-map`<br>`--cancel`<br>`--state` |
 
 ### heartbeat
 

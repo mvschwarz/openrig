@@ -85,9 +85,7 @@ export class RigTeardownOrchestrator {
     const archived = this.db.prepare("SELECT archived_at FROM rigs WHERE id = ?").get(rigId) as { archived_at: string | null };
     // A live seat can create its guidance while teardown awaits tmux. Resolve
     // file identities only after those waits, immediately before each cleanup.
-    const currentLiveGuidanceTargets = () => archived.archived_at !== null
-      ? this.liveGuidanceTargets(rigId)
-      : new Set<string>();
+    const currentLiveGuidanceTargets = () => this.liveGuidanceTargets(rigId);
 
     // 2. Get latest session per node
     const liveSessions = this.getLatestLiveSessions(rigId);
@@ -119,7 +117,13 @@ export class RigTeardownOrchestrator {
     // 4. Auto-snapshot before teardown (always, best-effort)
     try {
       if (this.deps.resumeMetadataRefresher) {
-        await this.deps.resumeMetadataRefresher.refresh(liveSessions);
+        // A live namesake cannot supply resume metadata for an archived row.
+        // Keep that row's own token in the snapshot, just as the kill below
+        // leaves the other owner's session alone.
+        const refreshableSessions = archived.archived_at === null ? liveSessions : liveSessions.filter(
+          session => findOtherSessionOwner(this.db, session.sessionName, session.nodeId, { ignoreArchived: true }) === null,
+        );
+        await this.deps.resumeMetadataRefresher.refresh(refreshableSessions);
       }
       const snap = this.deps.snapshotCapture.captureSnapshot(rigId, "auto-pre-down");
       result.snapshotId = snap.id;
@@ -250,6 +254,12 @@ export class RigTeardownOrchestrator {
     const targets = new Set<string>();
     for (const row of rows) {
       const target = this.guidanceTargetPath(row.rig_id, row.runtime, row.cwd);
+      if (target) targets.add(this.guidancePathKey(target));
+    }
+    // A failed kill or inconclusive probe leaves this rig's session live.
+    // Its file may also be shared with a sibling that stopped successfully.
+    for (const session of this.getLatestLiveSessions(rigId)) {
+      const target = this.guidanceTargetPath(rigId, session.runtime, session.cwd);
       if (target) targets.add(this.guidancePathKey(target));
     }
     return targets;

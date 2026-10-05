@@ -113,6 +113,36 @@ describe("env routes", () => {
     expect(receipt["capturedAt"]).toBe("2026-04-09T11:00:00Z");
   });
 
+  it("refreshes a malformed cached receipt instead of failing before the fresh probe", async () => {
+    let probes = 0;
+    const fresh = { kind: "compose", services: [], capturedAt: "2026-10-04T00:00:00Z" };
+    const app = createApp({
+      getServicesRecord: () => ({ ...SERVICE_RECORD, latestReceiptJson: "{torn" }),
+      captureReceipt: () => {
+        probes++;
+        return fresh;
+      },
+    });
+    const res = await app.request("/api/rigs/rig-1/env");
+    expect(res.status).toBe(200);
+    expect(probes).toBe(1);
+    expect(await res.json()).toMatchObject({ receipt: fresh, probeStatus: "fresh" });
+  });
+
+  it("reports unavailable cached receipt without hiding service configuration", async () => {
+    const app = createApp({
+      getServicesRecord: () => ({ ...SERVICE_RECORD, latestReceiptJson: "{torn" }),
+    });
+    const res = await app.request("/api/rigs/rig-1/env");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      hasServices: true,
+      receipt: null,
+      probeStatus: "no_orchestrator",
+      probeError: "Cached service receipt could not be parsed",
+    });
+  });
+
   it("GET /env returns probeStatus=fresh when captureReceipt succeeds", async () => {
     const freshReceipt = { kind: "compose", services: [{ name: "vault", status: "running", health: "healthy" }], capturedAt: "2026-04-09T12:00:00Z" };
     const app = createApp({
@@ -168,6 +198,42 @@ describe("env routes", () => {
     expect(receipt["capturedAt"]).toBe("2026-04-09T11:00:00Z");
   });
 
+  it.each(["false", "true", 1, 0, "", [], {}, null])("tears down normally for non-boolean volumes %j", async (volumes) => {
+    let capturedOpts: unknown = "not called";
+    const app = createApp({
+      getServicesRecord: () => SERVICE_RECORD,
+      teardown: (_rigId: string, opts?: unknown) => {
+        capturedOpts = opts;
+        return { ok: true };
+      },
+    });
+    const res = await app.request("/api/rigs/rig-1/env/down", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ volumes }),
+    });
+    expect(res.status).toBe(200);
+    expect(capturedOpts).toBeUndefined();
+  });
+
+  it.each([undefined, "null", "[]", "{", "false"])("tears down normally for malformed or absent envelope %s", async (body) => {
+    let capturedOpts: unknown = "not called";
+    const app = createApp({
+      getServicesRecord: () => SERVICE_RECORD,
+      teardown: (_rigId: string, opts?: unknown) => {
+        capturedOpts = opts;
+        return { ok: true };
+      },
+    });
+    const res = await app.request("/api/rigs/rig-1/env/down", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    expect(res.status).toBe(200);
+    expect(capturedOpts).toBeUndefined();
+  });
+
   it("POST /env/down with volumes=true passes policyOverride=down_and_volumes to teardown", async () => {
     let capturedOpts: unknown = undefined;
     const app = createApp({
@@ -190,7 +256,7 @@ describe("env routes", () => {
     expect((capturedOpts as Record<string, unknown>)["policyOverride"]).toBe("down_and_volumes");
   });
 
-  it("POST /env/down without volumes does not pass policyOverride", async () => {
+  it.each([{}, { volumes: false }])("POST /env/down with %j does not pass policyOverride", async (input) => {
     let capturedOpts: unknown = undefined;
     const app = createApp({
       getServicesRecord: () => SERVICE_RECORD,
@@ -203,7 +269,7 @@ describe("env routes", () => {
     const res = await app.request("/api/rigs/rig-1/env/down", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify(input),
     });
     expect(res.status).toBe(200);
     expect(capturedOpts).toBeUndefined();

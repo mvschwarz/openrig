@@ -25,7 +25,8 @@ import { createDb } from "../src/db/connection.js";
 //
 // D15 isolation ([[real-run-e2e-daemon-isolation-doctrine]], [[tmux-kill-server-from-seat-reaps-fleet]]):
 // a per-run `-L` socket on EVERY tmux command (overrides $TMUX), full env MINUS $TMUX/$TMUX_TMPDIR,
-// verify-isolation-first, teardown by SESSION NAME — never kill-server. Skips when tmux/codex/auth absent.
+// verify-isolation-first, teardown by session name, then kill-server on this run's own -L socket only.
+// Opt-in: skips unless OPENRIG_E2E_REAL_CODEX=1, and when tmux/codex/auth are absent.
 
 const pexec = promisify(execFile);
 const SOCK = `openrig-mf-e2e-${process.pid}`;
@@ -49,7 +50,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const SPEC_MODEL = "gpt-5.6-luna"; // valid, distinct from the default; footer shows it verbatim
 const DEFAULT_MODEL = "gpt-5.6-sol"; // the no-flag runtime default — the reverted-handover failure mode
 
+// Opt-in only: this test drives the codex CLI with whatever account is signed in
+// on the host (~/.codex/auth.json), so it never runs unless OPENRIG_E2E_REAL_CODEX=1.
+const REAL_CODEX_OPT_IN = process.env.OPENRIG_E2E_REAL_CODEX === "1";
+
 function preflightOk(): boolean {
+  if (!REAL_CODEX_OPT_IN) return false;
   try {
     execFileSync("sh", ["-c", "command -v tmux"], { env: cleanEnv, stdio: "ignore" });
     execFileSync("sh", ["-c", "command -v codex"], { env: cleanEnv, stdio: "ignore" });
@@ -72,7 +78,11 @@ function realFsOps() {
 
 const seats: string[] = [];
 afterAll(async () => {
-  for (const s of seats) await tmux(`kill-session -t ${q(s)}`).catch(() => {}); // BY NAME, never kill-server
+  if (!REAL_CODEX_OPT_IN) return; // a skipped run starts no tmux at all
+  for (const s of seats) await tmux(`kill-session -t ${q(s)}`).catch(() => {}); // by name first
+  // Then end this run's private server. SOCK is unique to this process (-L), so
+  // kill-server here can never reach the fleet's tmux server.
+  await tmux("kill-server").catch(() => {});
 });
 
 describe("seat-handover model-fidelity money-proof (real codex, isolated tmux)", () => {

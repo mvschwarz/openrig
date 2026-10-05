@@ -26,6 +26,9 @@ the complete node and notes bodies. The script resolves `topology.root` and `wor
 `rig config get`. When a current node cannot be derived, set `OPENRIG_REFOCUS_TOPOLOGY_NODE` or
 `OPENRIG_REFOCUS_WORK_NODE`, or pass the matching `--*-start` option.
 
+The trace walks the topology and work trees. For the project's own declared context (intent, context files,
+skills), `rig context work-install` lists it; read what the next action needs.
+
 Read [references/refocus.md](references/refocus.md) when changing the automatic hook or its content
 ladder. A missing chain file is evidence: report the gap and continue; never follow pointers to invent
 a second parent.

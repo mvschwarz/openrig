@@ -75,6 +75,12 @@ describe("permission_policy — restart-stable attachment resolution (Guard ruli
     expect(a.resolvedTarget).toBe("policies/builtin/yolo.policy.md");
   });
 
+  it("builtin:auto → auto, origin=builtin, flag surface, package-copy target", () => {
+    const a = resolvePermissionPolicyAttachment("builtin:auto", "/rig", noFile);
+    expect(a).toMatchObject({ ref: "builtin:auto", origin: "builtin", builtinName: "auto", surface: "flag", launchPosture: "auto" });
+    expect(a.resolvedTarget).toBe("policies/builtin/auto.policy.md");
+  });
+
   it("Policy-Mode built-ins resolve to the floor with the PM-ruled package-copy target", () => {
     for (const name of ["locked", "standard", "open"]) {
       const a = resolvePermissionPolicyAttachment(`builtin:${name}`, "/rig", noFile);
@@ -98,6 +104,17 @@ describe("permission_policy — restart-stable attachment resolution (Guard ruli
     expect(a.resolvedTarget).toBe("/rig/spec/policies/operator.md"); // restart-stable absolute target
     expect(a.declaringDir).toBe("/rig/spec"); // restart-stable provenance
     expect(a.ref).toBe("policies/operator.md"); // raw ref preserved for export
+  });
+
+  it("CUSTOM flag policy CAN be auto — content resolved relative to the declaring dir", () => {
+    const FLAG_AUTO = `---\nsource: custom\nname: my-auto\nsurface: flag\nlaunch_posture: auto\npolicy_schema_version: 1\ndescription: custom auto policy\n---\nbody\n`;
+    const a = resolvePermissionPolicyAttachment("policies/auto.md", "/rig/spec", { readFile: () => FLAG_AUTO });
+    expect(a.origin).toBe("custom");
+    expect(a.surface).toBe("flag");
+    expect(a.launchPosture).toBe("auto");
+    expect(a.resolvedTarget).toBe("/rig/spec/policies/auto.md");
+    expect(a.declaringDir).toBe("/rig/spec");
+    expect(a.ref).toBe("policies/auto.md");
   });
 
   it("CUSTOM config policy resolves to the floor (config-surface content deferred; no config write)", () => {

@@ -1,10 +1,65 @@
 # RigBundle Reference
 
 Version: 2 (pod-aware)
-Last validated against code: 2026-09-29 (install paths and `--target` only; other sections last checked 2026-04-11)
+Last validated against code: 2026-10-04 (GitHub source input, author check and identity fields; install paths and `--target` checked 2026-09-29; other sections last checked 2026-04-11)
 Source of truth: `packages/daemon/src/domain/bundle-types.ts`, `packages/daemon/src/domain/bundle-archive.ts`, `packages/daemon/src/domain/pod-bundle-assembler.ts`
 
 A `.rigbundle` is a self-contained distributable archive that packages a rig spec, all referenced agent specs, their resources (skills, guidance, startup files), culture file, documentation, and an integrity manifest into a single file. The recipient can install and launch the rig without needing the original source tree.
+
+## GitHub folder links
+
+`rig bundle create`, `inspect`, `install`, and `rig up` accept a public HTTPS GitHub folder link:
+
+```sh
+rig bundle create https://github.com/example/teams/tree/main/rigs/team -o team.rigbundle
+rig bundle inspect https://github.com/example/teams/tree/v1/rigs/team --json
+rig up https://github.com/example/teams/tree/COMMIT/rigs/team --target ./project
+```
+
+Replace `COMMIT` with a full commit ID. Branches and tags are also accepted, including names containing `/`: they
+resolve once to a full commit before fetching. Each result names the resolved source, configuration ID, package digest
+and assembler. Save the printed commit-pinned URL to repeat the same source selection. `--preset` and repeatable
+`--seat pod.member=runtime` select only configurations the folder declares.
+
+Link import needs a running, verified local daemon and a credential-free, publicly readable GitHub URL. It does not
+upload files to remote daemons. For a remote target, run the link command on that host, or create an archive, transfer
+it with its sibling digest, and use the existing path command there. Existing local path/name commands keep their
+dispatch. Importing does not install dependencies or execute repository scripts. Before packaging a link, it checks
+the checkout's symlinks (excluding Git metadata), member agent refs, agent imports and legacy package refs (including
+additional `--include-packages` entries): every target must resolve inside the fetched checkout. Shared agents and
+legacy packages outside the selected folder are allowed within that repository. Preset staging
+preserves that directory layout. Unresolved or escaping references stop the import and remove its temporary source.
+
+The selected source is packaged through the existing bundler once. Link `up`/`install` then use the existing bundle
+install path, including compatibility and target-conflict checks. For a link, the default install target is the current
+directory; `--cwd` separately overrides seat working directories. Imported archives and source/build receipts remain
+under the selected OpenRig home's `bundle-imports/` directory for install history. If a response is lost, inputs stay
+available and the outcome is reported as unknown; inspect `rig ps` and `rig bundle history` before retrying.
+
+An author's root `bundle.yaml` can declare `compatibility.min_cli_version` and `compatibility.min_daemon_version`.
+Link import passes these into create; explicit create minimum-version flags override them. No implicit minimum is
+added to existing local-path builds.
+
+The package digest covers the packaged `integrity.files` entries, excluding `bundle.yaml`, ignored junk basenames,
+and file modes. It does not cover resources resolved on the installing host or prove what ran. The archive hash is
+separate. See [bundle formats](bundle-formats.md) for the exact coverage and identity definitions. Older archives can
+have unknown source, configuration or assembler; inspection does not fill those gaps with the inspecting daemon's
+identity.
+
+## Advisory author check
+
+```sh
+rig bundle check ./my-team --json
+```
+
+This local, read-only check reports `openrig.bundle-standard/v1` with `pass`, `finding` or `not_checked` per rule. It
+checks pod-aware rig validity, README inclusion in `docs`, readable declared files, in-folder agent refs/imports,
+minimum-version shape, declared preset consistency and known sensitive filenames. It does not contact a daemon,
+build an archive, run preflight or launch anything. Findings give exit status 1; they are never an install gate.
+
+README completeness and arbitrary embedded secrets need human review and are reported as `not_checked`. A bounded
+or unreadable scan is also `not_checked`, never a clean scan. The check is advice for authors, not a security audit or
+listing approval.
 
 ---
 
@@ -34,7 +89,7 @@ The packer produces deterministic output:
 - Portable mode normalizes uid/gid/mode
 - Maximum gzip compression (level 9)
 
-This means the same inputs always produce the same archive hash.
+Identical staged bytes (including manifest timestamps and provenance) produce the same archive hash. Use the package digest to compare packaged file content independently of manifest metadata.
 
 ---
 
@@ -169,12 +224,14 @@ Future enhancement: cryptographic signing (Ed25519) for author authentication.
 The unpacker enforces these safety rules before extraction:
 
 1. **No symlinks or hardlinks** — `SymbolicLink` and `Link` entries are rejected
-2. **No absolute paths** — entries starting with `/` are rejected
-3. **No path traversal** — entries containing `..` segments are rejected
+2. **No absolute paths** — entries starting with `/`, or carrying a Windows drive letter such as `C:\`, are rejected
+3. **No path traversal** — entries containing `..` segments are rejected, on either slash direction (`..` or `..\`)
 4. **Digest verification** — archive SHA-256 must match the sibling `.sha256` file
 5. **Content integrity** — after extraction, per-file hashes are verified against the manifest
 
 If any check fails, extraction is aborted and an error is thrown.
+
+`rig bundle inspect` applies the same unsafe-entry scan (rules 1-3) before it extracts into its temporary directory, so an archive the installer refuses for an unsafe entry is never reported as inspectable. Digest and content-integrity failures are a different case: inspect reports those in its result (`digestValid`, `integrityResult`) instead of refusing, which is what lets it describe a broken bundle rather than throw.
 
 ---
 
@@ -190,7 +247,7 @@ where the daemon runs.
 ### Create a bundle
 
 ```bash
-rig bundle create <spec-path> -o <output.rigbundle> [--rig-root <dir>] [--name <name>] [--bundle-version <ver>]
+rig bundle create <spec-path> -o <output.rigbundle> [--rig-root <dir>] [--context-pack <dir>]... [--project-dir <dir>] [--name <name>] [--bundle-version <ver>]
 ```
 
 | Flag | Required | Default | Description |
@@ -198,6 +255,12 @@ rig bundle create <spec-path> -o <output.rigbundle> [--rig-root <dir>] [--name <
 | `<spec-path>` | yes | — | Path to the rig spec YAML file. |
 | `-o, --output` | yes | — | Output path. Must end with `.rigbundle`. |
 | `--rig-root` | no | spec directory | Root directory for resolving `agent_ref` and other relative paths. |
+| `--preset <name>` | no | — | Build one of the configurations the bundle declares in `configurations.yaml` beside `rig.yaml` (see [bundle-formats.md](bundle-formats.md)). The chosen runtimes and profiles are applied to an owned copy of the rig folder, never to yours. |
+| `--seat <pod.member=runtime>` | no | — | Use this runtime for one seat, within what `configurations.yaml` allows. Repeatable; applied after `--preset`. An undeclared choice is refused with the allowed set, and nothing is built. |
+| `--context-pack <dir>` | no | — | Carry the context pack in `<dir>`. Repeatable. The directory may be outside the rig folder, for example a world pack whose `manifest.yaml` is at its repository root. Only `manifest.yaml` and the files it declares are carried, the same set `rig context add --git` installs, and the pack lands in the bundle at `context-packs/<manifest name>/`. Needs a pod-aware spec. |
+| `--project-dir <dir>` | no | — | Carry the project the rig works in: the folder holding its `project.yaml` (which must declare an `id`) and files beside it, such as `SPEC.md`. On install the project is registered in the workspace catalog and the rig is associated with it, before any seat launches (see [project-workspace.md](project-workspace.md)). Needs a pod-aware spec. |
+| `--preset <name>` | no | — | Build one of the configurations the bundle declares in `configurations.yaml` beside `rig.yaml` (see [bundle-formats.md](bundle-formats.md)). The chosen runtimes and profiles are applied to an owned copy of the rig folder, never to yours. |
+| `--seat <pod.member=runtime>` | no | — | Use this runtime for one seat, within what `configurations.yaml` allows. Repeatable; applied after `--preset`. An undeclared choice is refused with the allowed set, and nothing is built. |
 | `--name` | no | `my-bundle` | Bundle name in the manifest. |
 | `--bundle-version` | no | `0.1.0` | Bundle version in the manifest. |
 
@@ -212,6 +275,23 @@ The create command:
 8. Packs into a deterministic `.tar.gz`
 9. Writes the sibling `.sha256` digest
 
+### List a bundle's configurations
+
+```bash
+rig bundle configurations <spec-path> [--json]
+```
+
+Lists the presets that `configurations.yaml` declares, each with its configuration ID, which one is recommended, and which one matches `rig.yaml` as written.
+On install, a carried pack is routed into `context.root` under its manifest name. If a pack of that name is already installed, install never merges into it: an identical pack is reported as `already_installed`, and a different one (for example a `rig context add --git` install at another revision) is kept unchanged and reported as `kept_existing`, with the `rig context rm <name>` command to use the bundle's copy instead.
+
+### List a bundle's configurations
+
+```bash
+rig bundle configurations <spec-path> [--json]
+```
+
+Lists the presets that `configurations.yaml` declares, each with its configuration ID, which one is recommended, and which one matches `rig.yaml` as written.
+
 ### Inspect a bundle
 
 ```bash
@@ -220,10 +300,33 @@ rig bundle inspect <bundle-path> [--json]
 
 Shows the manifest, digest validity, and integrity verification result. Inspect extracts the archive into a temporary directory for safe validation, then cleans that directory up. It does not install or launch anything.
 
+The behaviour view describes the selected archive: its team and configured models, declared permission posture,
+files agents receive, startup actions and hooks, managed writes, literal outside domains, prerequisites and what
+remains unknown until launch. It reads packaged declarations; it does not run scripts, contact providers, probe
+runtimes or create a bootstrap run. Source and assembler identity come from the archive, separately from the view
+generator. Configured models are not observations of a running model, and literal domains are not predicted traffic.
+
+`rig bundle install` and bundle-form `rig up` print this same view to stderr before the existing action, including
+`--plan`. With `--json`, stdout remains one result; its optional `behaviour` field carries the structured view.
+GitHub links reuse the single prepared archive. The header is informational: missing views and inspection errors
+print a diagnostic, then the original installation checks and result determine success. Legacy schema-1 archives
+report `not_generated`, rather than an empty team. A local archive can change between inspection and installation;
+the header does not bind a later action atomically to those bytes.
+
+Agents can run shell commands as the launching user, subject to runtime and host policy. Explicit permission bypass
+is distinguished from conditional launch floors; Pi resource trust is separate from native permission policy.
+Host settings, accounts, plugins, runtime support and effective permissions remain unknown. Text scanning is bounded
+and reports unread members; dynamically computed commands and addresses cannot be predicted. Installation targets,
+`--cwd` and configured library roots resolve separately from the archive's declarations. See
+[bundle formats](bundle-formats.md) for the structured view and digest coverage.
+
+**Integrity means the archive is self-consistent, not who made it. Provenance is stated by the bundle and not verified.**
+
+
 ### Install a bundle
 
 ```bash
-rig bundle install <bundle-path> [--plan] [--yes] [--target <root>] [--json]
+rig bundle install <bundle-path> [--plan] [--yes] [--target <root>] [--cwd <dir>] [--json]
 ```
 
 | Flag | Required | Default | Description |
@@ -232,6 +335,7 @@ rig bundle install <bundle-path> [--plan] [--yes] [--target <root>] [--json]
 | `--plan` | no | `false` | Preview without installing or launching. Not side-effect free: it runs the preflight, which executes the members' runtime `--version` probes, and it records a bootstrap run. It writes nothing to the target. |
 | `--yes` | no | `false` | Auto-approve trusted actions during apply mode. |
 | `--target <root>` | yes in apply mode | — | Directory the bundle is installed into and launched from. Required unless `--plan` is used. |
+| `--cwd <dir>` | no | — | Working directory for every launched member, for this install only (for example, the repository the rig works on). Does not change the install target. |
 | `--json` | no | `false` | Emit machine-readable JSON. |
 
 Install **launches the rig**; it does not just unpack it. It extracts the bundle to a temporary directory, validates integrity, and bootstraps the rig. In apply mode, the daemon requires `targetRoot`, so `rig bundle install` must be given `--target <root>` unless you are running with `--plan`.
@@ -239,10 +343,37 @@ Install **launches the rig**; it does not just unpack it. It extracts the bundle
 For a pod-aware (schema version 2) bundle, apply copies the extracted contents (`bundle.yaml`, `rig.yaml`, `agents/`, culture and docs files) into the target and launches from there, then removes the temporary extraction. So:
 
 - the target becomes the rig root: `agent_ref` paths resolve inside it, and a member with `cwd: "."` (or no `cwd`) starts in the target;
-- an absolute member `cwd` stays as authored, and `rig up --cwd <dir>` still overrides every member's cwd;
+- an absolute member `cwd` stays as authored, and `--cwd <dir>` (on `rig bundle install` or `rig up`) still overrides every member's cwd;
 - if the target already has a file with **different** content at any bundle path (for example its own `rig.yaml`), install refuses with `target_conflict` and writes nothing. Identical files are accepted, so reinstalling the same bundle into the same target works. Use an empty or dedicated directory as the target.
 
-Legacy (schema version 1) bundles keep their old behavior: `--target` is only where packages are installed.
+The bundle's declared skills, plugins, workflow specs, context packs and agent images are routed into your libraries **before any member launches**, and the context-pack library is rescanned, so a member's first turn can already read a pack the bundle carried. A routing failure does not stop the install: it is printed as a warning, returned in `routingFailures`, and recorded in the install audit. The human output lists what each declared kind routed and any entry that was not routed.
+
+### Skills shared by bundle profiles
+
+For skills shared by several agents, place each complete skill directory at
+`skills/<name>/` beside the rig spec and declare its entry point in the source
+`bundle.yaml`:
+
+```yaml
+skills:
+  - skills/review-work/SKILL.md
+```
+
+`rig bundle create` includes that directory's helper scripts and references as
+well as `SKILL.md`. The skill needs valid `name` and `description` frontmatter;
+the name is the ID a profile selects with `uses.skills: [review-work]`.
+Undeclared sibling directories are not bundled. Other declared skill file paths
+retain their single-file behavior.
+
+Claude, Codex and Pi profiles can select this installed bundle pool even when
+their working directory is elsewhere. Explicit AgentSpec resources keep priority
+over a discovered skill with the same ID. Pi projects selected skills into its
+seat's agent directory; it does not scan Claude or Codex home/workspace pools.
+Installing the bundle does not add these skills to the operator's managed
+`skills.root` catalog. Profiles that already get a skill from a plugin should not
+also select its bundle copy.
+
+Legacy (schema version 1) bundles keep their old behavior: `--target` is only where packages are installed, and their declared contents are routed after a completed install.
 
 ### Launch directly
 
@@ -252,10 +383,17 @@ rig up <bundle-path> [--target <root>] [--cwd <dir>]
 
 `rig up` auto-detects `.rigbundle` files and routes them through the bundle bootstrap path.
 
+`rig bootstrap <bundle-path>` also accepts archives and uses the ordinary bundle
+install path, including compatibility checks and the install audit. Use `--plan`
+to preview, or `--target <root>` to choose the persistent install directory. Its
+default target is the caller's current directory; `--cwd` only changes the agents'
+working directory. YAML files and library spec names keep the spec bootstrap path.
+
 - `--target <root>` is the install target described above (for a schema-version-2 bundle, the directory the bundle is copied into and launched from)
 - if `--target` is omitted for a `.rigbundle`, the CLI defaults the install target to the current working directory, so the bundle's files are written there
 - `rig up` resolves a relative `--target` against your current directory before sending it, like `rig bundle install`; with `--host`, `--target` is sent as given and must be a path that exists on that host
 - `--cwd <dir>` does **not** change the install target; it only overrides the launched members' working directory for that run
+- a schema-version-2 bundle's declared contents are routed before any member launches, as with `rig bundle install`
 
 ---
 
@@ -360,11 +498,13 @@ Bundle created: my-team.rigbundle
 rig bundle inspect my-team.rigbundle
 ```
 
-Output:
+The manifest summary is followed by the behaviour view:
 ```
 Bundle: my-team v1.0.0
 Digest valid: true
 Integrity: PASS
+What this bundle declares before installation:
+...
 ```
 
 ### Install and launch

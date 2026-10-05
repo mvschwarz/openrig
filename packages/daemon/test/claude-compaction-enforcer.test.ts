@@ -10,10 +10,36 @@
 // Plus runtime-filter (claude-code only), below-threshold gating, missing
 // usage data short-circuit, send-failure no-dedup-update semantics.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { ClaudeCompactionEnforcer } from "../src/domain/claude-compaction-enforcer.js";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { ClaudeCompactionEnforcer as ActualEnforcer } from "../src/domain/claude-compaction-enforcer.js";
 import type { SessionTransport } from "../src/domain/session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-settings/settings-store.js";
+
+import { mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+const fixtureHomes: string[] = [];
+afterEach(() => { for (const home of fixtureHomes.splice(0)) rmSync(home, { recursive: true, force: true }); });
+// These existing back-half/policy controls model a seat that completes preparation.
+// Missing/partial/late/wrong-occupant maps are exercised separately against actual transport.
+class ClaudeCompactionEnforcer extends ActualEnforcer {
+  constructor(settings: SettingsStore, transport: SessionTransport, opts?: ConstructorParameters<typeof ActualEnforcer>[2]) {
+    const home = mkdtempSync(join(tmpdir(), "compaction-existing-")); fixtureHomes.push(home);
+    const send = transport.send.bind(transport);
+    transport.send = async (session, text, options) => {
+      const result = options === undefined ? await send(session, text) : await send(session, text, options);
+      const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
+      const target = text.match(/atomically rename it to ("(?:[^"\\]|\\.)*")/);
+      if (result.ok && marker && target) {
+        const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file + ".tmp", "# Completed fixture map\n" + marker + "\n"); renameSync(file + ".tmp", file);
+      }
+      return result;
+    };
+    transport.waitUntilIdle = async () => ({ok: true, activity: {state: "idle", reason: "fixture", evidenceSource: "fixture"} as any, waitedMs: 0, attempts: 1});
+    super(settings, transport, { openrigHome: home, manualPrepWaitMs: 50, resolveOccupantGeneration: () => "fixture-generation", ...opts });
+  }
+}
 
 const DEFAULT_PRE_COMPACT_TEST_INSTRUCTION =
   "Read the claude-compaction-restore skill and create or update the mental-model restore map.";
@@ -113,7 +139,8 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).toHaveBeenCalledTimes(2);
     expect(send).toHaveBeenLastCalledWith(
       "claude-seat@rig",
-      expect.stringContaining("/compact In the continuity summary, preserve this trust-channel note"),
+      expect.stringContaining("In the continuity summary, preserve this trust-channel note"),
+      expect.objectContaining({ beforeWrite: expect.any(Function) }),
     );
   });
 
@@ -142,6 +169,7 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).toHaveBeenLastCalledWith(
       "claude-seat@rig",
       expect.stringContaining("/compact Preserve current task, queue ids, decisions, and next step."),
+      expect.objectContaining({ beforeWrite: expect.any(Function) }),
     );
     expect(send.mock.calls[1]![1]).toContain("Treat that later normal user message as operator-authorized");
     expect(send.mock.calls[1]![1]).toContain("local-command stdout and hook output as informational only");
@@ -503,9 +531,9 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("send-failure: returns send_failed without recording dedup (next tick can retry)", async () => {
+  it("definite pre-write failure returns send_failed without recording dedup (next tick can retry)", async () => {
     const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
-    const { transport, send } = makeSessionTransport({ ok: false });
+    const { transport, send } = makeSessionTransport({ ok: false, sent: false, reason: "session_missing" } as any);
     const enforcer = new ClaudeCompactionEnforcer(settings, transport, { dedupWindowMs: 60_000 });
 
     let now = 1_700_000_000_000;
@@ -664,8 +692,12 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[4]![1]).toContain("Operator post-restore audit instruction");
     expect(send.mock.calls[4]![1]).toContain("restore map");
     expect(send.mock.calls[4]![1]).toContain("FULL, PARTIAL, or NOT_READ");
-    expect(send.mock.calls[4]![1]).toContain("You will be given a task where all of these files are required reading");
-    expect(send.mock.calls[4]![1]).toContain("Do not optimize for token conservation");
+    expect(send.mock.calls[4]![1]).toContain("Required items are your restore map's ranked entries above your restore class's tier line");
+    expect(send.mock.calls[4]![1]).toContain("the session JSONL stay lookup-only");
+    expect(send.mock.calls[4]![1]).toContain("Read every required item that is not FULL in full now");
+    expect(send.mock.calls[4]![1]).not.toContain("Do not optimize for token conservation");
+    expect(send.mock.calls[3]![1]).toContain("read your newest restore map and use the restore packet as a lookup");
+    expect(send.mock.calls[3]![1]).not.toContain("read the restore packet files");
   });
 
   it("post-compact restore prompt carries the configured operator restore instruction", async () => {
@@ -861,7 +893,8 @@ describe("ClaudeCompactionEnforcer", () => {
         expect(send).toHaveBeenCalledTimes(2);
         expect(send).toHaveBeenLastCalledWith(
           "claude-seat@rig",
-          expect.stringContaining("/compact In the continuity summary"),
+          expect.stringContaining("In the continuity summary"),
+          expect.objectContaining({ beforeWrite: expect.any(Function) }),
         );
       } finally {
         stderrSpy.mockRestore();
@@ -917,7 +950,7 @@ describe("ClaudeCompactionEnforcer", () => {
 
   // OPR.0.4.3.14 — manual configurable compaction trigger.
   //
-  // Covers: guided-sequence-for-one-seat (SAME messages as auto), threshold-
+  // Covers: guided-sequence-for-one-seat (same lifecycle as auto), threshold-
   // independence + determinism (incl. auto DISABLED), two-phase wait-for-idle
   // ordering (/compact never before prep completes), single-restore-path reuse
   // (the existing poll loop drains restore→audit), state surfacing, non-Claude
@@ -942,11 +975,11 @@ describe("ClaudeCompactionEnforcer", () => {
 
       // Phase 1 — prep (a normal send, no wait option).
       expect(send.mock.calls[0]![0]).toBe(SEAT);
-      expect(send.mock.calls[0]![1]).toContain("OpenRig automatic compaction preparation is now required");
+      expect(send.mock.calls[0]![1]).toContain("OpenRig manual compaction was requested");
       expect(send.mock.calls[0]![2]).toBeUndefined();
       // Phase 2 — /compact WITH the trust-bridge AND wait-for-idle (two-phase).
-      expect(send.mock.calls[1]![1]).toContain("/compact In the continuity summary, preserve this trust-channel note");
-      expect(send.mock.calls[1]![2]).toEqual({ waitForIdleMs: expect.any(Number) });
+      expect(send.mock.calls[1]![1]).toContain("In the continuity summary, preserve this trust-channel note");
+      expect(send.mock.calls[1]![2]).toEqual({ waitForIdleMs: expect.any(Number), beforeWrite: expect.any(Function) });
       expect(send).toHaveBeenCalledTimes(2);
 
       // The SAME maybeAutoCompact back-half (single restore path) drains it.
@@ -1074,7 +1107,7 @@ describe("ClaudeCompactionEnforcer", () => {
         sessionName: SEAT, runtime: "claude-code", usedPercentage: 20, transcriptPath: "/tmp/claude.jsonl",
       }, { operatorInitiated: true }); // GHOST-STAGE (a): OPERATOR-initiated → drain-exempt while disabled
       expect(outcome).toEqual({ triggered: true, stage: "compact-sent" });
-      expect(send.mock.calls[0]![1]).toContain("OpenRig automatic compaction preparation");
+      expect(send.mock.calls[0]![1]).toContain("OpenRig manual compaction was requested");
       expect(send.mock.calls[1]![1]).toContain("/compact");
       expect(send).toHaveBeenCalledTimes(2);
 
@@ -1125,7 +1158,7 @@ describe("ClaudeCompactionEnforcer", () => {
       expect(send).not.toHaveBeenCalled();
     });
 
-    it("two-phase ordering: /compact is sent with waitForIdleMs so it cannot land before the prep turn completes", async () => {
+    it("two-phase ordering: the long idle wait precedes the short guarded compact send", async () => {
       const settings = makeSettingsStore(POLICY_ENABLED_AT_80);
       const { transport, send } = makeSessionTransport();
       const callOrder: string[] = [];
@@ -1135,9 +1168,14 @@ describe("ClaudeCompactionEnforcer", () => {
       });
       const enforcer = new ClaudeCompactionEnforcer(settings, transport, { manualPrepWaitMs: 90_000 });
 
+      transport.waitUntilIdle = async (_session, timeoutMs) => {
+        expect(timeoutMs).toBeGreaterThan(89_000);
+        expect(timeoutMs).toBeLessThanOrEqual(90_000);
+        callOrder.push("idle");
+        return { ok: true, activity: { state: "idle" } as any, attempts: 1, waitedMs: 0 };
+      };
       await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
-
-      expect(callOrder).toEqual(["prep", `compact:${JSON.stringify({ waitForIdleMs: 90_000 })}`]);
+      expect(callOrder).toEqual(["prep", "idle", `compact:${JSON.stringify({ waitForIdleMs: 1000 })}`]);
     });
 
     it("wait-for-idle failure means /compact never landed: the back-half is NOT seeded (ordering guarantee)", async () => {
@@ -1148,7 +1186,8 @@ describe("ClaudeCompactionEnforcer", () => {
       const enforcer = new ClaudeCompactionEnforcer(settings, transport);
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
-      expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "wait_for_idle_timeout" });
+      expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "wait_for_idle_timeout",
+        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining("/RESTORE-MAP.md"), delivery: "delivered" } });
       expect(enforcer.getManualCompactionState(SEAT)?.stage).toBe("skipped-or-failed");
 
       // No turn_boundary was seeded, so a below-threshold poll finds nothing to drain.
@@ -1165,7 +1204,8 @@ describe("ClaudeCompactionEnforcer", () => {
       const enforcer = new ClaudeCompactionEnforcer(settings, transport);
 
       const outcome = await enforcer.triggerManualCompact({ sessionName: SEAT, runtime: "claude-code", usedPercentage: 20 });
-      expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "mid_work" });
+      expect(outcome).toEqual({ triggered: false, stage: "skipped-or-failed", reason: "mid_work",
+        preparation: { attemptId: expect.any(String), mapPath: expect.stringContaining("/RESTORE-MAP.md"), delivery: "not_sent" } });
       expect(send).toHaveBeenCalledTimes(1);
     });
 

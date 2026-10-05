@@ -1,7 +1,6 @@
 import path from "node:path";
 import type { ResolvedPackage, FsOps } from "./package-resolver.js";
 import { resolveExports, type ResolvedExports, type DeferredExport } from "./role-resolver.js";
-import { roleHookWarnings } from "./package-manifest.js";
 
 // --- Types ---
 
@@ -32,7 +31,6 @@ export interface InstallPlanEntry {
 }
 
 export interface InstallPlan {
-  warnings?: string[];
   packageId?: string; // Set by caller when persisting to DB
   packageName: string;
   packageVersion: string;
@@ -45,6 +43,22 @@ export interface InstallPlan {
 
 export interface PlanOptions {
   roleName?: string;
+}
+
+/**
+ * Refuse a planned destination that would land outside the install target.
+ *
+ * Export names are joined with `path.join`, so a name can only leave the target
+ * by climbing above it with enough `..` segments; a leading `/`, a drive-letter
+ * like `a:b`, a backslash and a shallow `..` are ordinary segments that stay
+ * inside on POSIX. Check the joined path the same way the planner built it,
+ * relative to the target, so the refusal matches what would actually be written.
+ */
+function assertInsideTarget(targetRoot: string, targetPath: string, label: string): void {
+  const relative = path.relative(targetRoot, targetPath);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`${label} would write outside the install target: '${targetPath}'`);
+  }
 }
 
 // --- Planner ---
@@ -94,6 +108,7 @@ export class InstallPlanner {
         const targetPath = runtime === "claude-code"
           ? path.join(targetRoot, ".claude", "skills", skill.name, file)
           : path.join(targetRoot, ".agents", "skills", skill.name, file);
+        assertInsideTarget(targetRoot, targetPath, `Skill '${skill.name}/${file}'`);
 
         const exists = this.fs.exists(targetPath);
         const entry: InstallPlanEntry = {
@@ -236,6 +251,7 @@ export class InstallPlanner {
       const targetPath = runtime === "claude-code"
         ? path.join(targetRoot, ".claude", "agents", `${agentName}.yaml`)
         : path.join(targetRoot, ".agents", `${agentName}.yaml`);
+      assertInsideTarget(targetRoot, targetPath, `Agent '${agentName}'`);
 
       const agentSourcePath = path.join(resolved.sourceRef, agent.source);
 
@@ -312,7 +328,6 @@ export class InstallPlanner {
     const conflicts = entries.filter((e) => !!e.conflict && !e.deferred);
 
     return {
-      warnings: roleHookWarnings(resolved.manifest),
       // packageId is undefined until caller persists to DB
       packageName: resolved.manifest.name,
       packageVersion: resolved.manifest.version,

@@ -60,6 +60,30 @@ function fixture(token: string | null = null) {
 }
 
 describe("Claude wrapper manual attention recovery", () => {
+  it.each(["valid", "no token", "wrong token", "missing path", "background", "unrelated", "ambiguous", "PID reused", "unavailable"])("numeric Claude pane identity clear: %s", async mode => {
+    const f = fixture(mode === "no token" ? null : "review-token");
+    f.tmux.getPaneCommand.mockResolvedValue("2.1.289");
+    const native = { ...child, executableName: "2.1.289", command: `claude --session-id ${mode === "wrong token" ? "other" : "review-token"}`,
+      executablePath: mode === "missing path" ? undefined : "/fixture/.local/share/claude/versions/2.1.289" };
+    f.listProcesses.mockImplementation(async () => {
+      if (mode === "unavailable") throw new Error("process observation unavailable");
+      return [root, { ...native,
+        ...(mode === "background" ? { pgid: 200 } : {}),
+        ...(mode === "unrelated" ? { ppid: 1 } : {}),
+        ...(mode === "PID reused" && f.listProcesses.mock.calls.length === 2 ? { startedAt: "later" } : {}),
+      }, ...(mode === "ambiguous" ? [{ ...native, pid: 102 }] : [])];
+    });
+    const result = await f.post();
+    expect(result.status).toBe(mode === "valid" ? 200 : 422);
+    expect(f.startup()).toBe(mode === "valid" ? "ready" : "attention_required");
+    expect(f.store.getForNode(f.node.id)?.verdict).toBe(mode === "valid" ? "verified" : "mismatch");
+    if (mode === "valid") {
+      expect(result.body.evidence.kind).toBe("pane_identity_reverified");
+      expect(f.listProcesses).toHaveBeenCalledTimes(2);
+    }
+    expect(f.sendVerify).not.toHaveBeenCalled();
+  });
+
   it.each([null, "review-token", "different-token"])("batched wrapper proof retains saved-token semantics (%s)", async token => {
     const f = fixture(token);
     const batch = vi.fn(async () => new Map([[f.pane, { pid: 100, command: "bash" }]]));

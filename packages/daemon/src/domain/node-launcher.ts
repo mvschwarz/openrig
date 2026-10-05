@@ -183,6 +183,7 @@ export class NodeLauncher {
           sessionName,
           transcriptPath,
           getTranscriptRotationOptionsFromEnv(),
+          getTranscriptRotationOptionsFromEnv,
         );
       } else {
         launchWarnings.push(`Transcript directory creation failed for rig ${rig.rig.name}`);

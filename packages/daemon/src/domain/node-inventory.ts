@@ -249,18 +249,20 @@ function deriveOccupantLifecycle(
 
 function deriveContinuityOutcome(
   row: InventoryRow,
-  restoreOutcome: NodeRestoreOutcome,
+  restore: RestoreProjection | undefined,
 ): NodeInventoryEntry["continuityOutcome"] {
   if (row.continuity_outcome) {
     return row.continuity_outcome as NodeInventoryEntry["continuityOutcome"];
   }
+  const restoreOutcome = restore?.outcome ?? "n-a";
   if (restoreOutcome === "n-a") return null;
-  // L3: `attention_required` and `operator_recovered` are restore-attempt
-  // outcomes that don't map onto the ContinuityOutcome vocabulary
-  // ("resumed"|"rebuilt"|"forked"|"fresh"|"failed"). Surface as null here;
-  // the lifecycleState projection picks them up via restoreOutcome directly.
+  // Acknowledgment and responsiveness clear attention, not conversation lineage.
+  // Only the winning reconciliation's bound strict proof can infer a resume.
+  // Explicit stored outcomes above remain historical facts, not fresh probes.
   if (restoreOutcome === "attention_required") return null;
-  if (restoreOutcome === "operator_recovered") return "resumed";
+  if (restoreOutcome === "operator_recovered") {
+    return restore?.resumedRuntime === row.runtime ? "resumed" : null;
+  }
   // OPR.0.3.4.2: a deliberate fresh-prime IS fresh continuity; awaiting-decision
   // means zero session, so no continuity outcome exists — null (the
   // restoreOutcome field carries the distinct term).
@@ -269,43 +271,95 @@ function deriveContinuityOutcome(
   return restoreOutcome;
 }
 
-// FS-1 W1.3 S1 — hoist restore-outcome derivation to ONCE-PER-RIG.
-// Prior shape: deriveRestoreOutcome(db, rigId, nodeId) fetched + JSON-parsed the
-// rig's ENTIRE restore-event set once PER NODE inside buildInventoryEntry (K
-// nodes x E events per rig per poll = the dominant W3 residual). This builds a
-// nodeId->outcome map in ONE seq-DESC pass and buildInventoryEntry does an O(1)
-// lookup.
-//   OPR.0.3.4.11 + 0.4.0.16: per-node-latest across restore.completed,
-//   restore.subset_completed, AND restore.outcome_reconciled. reconciled has a
-//   different shape (top-level nodeId/to, not result.nodes[]).
-// BYTE-IDENTICAL BY CONSTRUCTION: the prior per-node reader returned the FIRST
-// event in seq-DESC order that referenced the node. This single seq-DESC pass
-// sets a node's outcome ONLY IF ABSENT — so the first (highest-seq) event
-// referencing a node wins, reproducing exactly that (incl.
-// newer-reconcile-overrides-older-failure). rigId given -> WHERE rig_id=? (the
-// prior single-rig filter); rigId omitted -> all rigs in one pass (a nodeId is
-// referenced only by its own rig's events, so the per-node value is identical).
-// [GUARD AT CODE REVIEW: the only-if-absent set is the one load-bearing
-//  semantics cell — it is what preserves first/newest-wins.]
-function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<string, NodeRestoreOutcome> {
-  const stmt = db.prepare(
-    `SELECT type, payload, seq FROM events WHERE type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled')${rigId ? " AND rig_id = ?" : ""} ORDER BY seq DESC`
-  );
-  const rows = (rigId ? stmt.all(rigId) : stmt.all()) as { type: string; payload: string; seq: number }[];
-  const map = new Map<string, NodeRestoreOutcome>();
+interface RestoreProjection {
+  outcome: NodeRestoreOutcome;
+  resumedRuntime?: "claude-code" | "codex";
+}
+
+function restoreKey(rigId: string, nodeId: string): string {
+  return JSON.stringify([rigId, nodeId]);
+}
+
+function eventObject(value: unknown): Record<string, any> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, any> : undefined;
+}
+
+// One batch for either the selected rig or the fleet. Keep the outcome arm's
+// existing partial indexes; exclude the rig-only index for starts (NULL node_id)
+// so the node/type index can select them, with a scan fallback if it is absent.
+// UNION ALL adds attempt boundaries without a per-node receipt query.
+// Ascending seq with overwrites preserves the former newest-node, first-wins
+// fold. Evidence is never borrowed
+// from an older reconciliation when a newer acknowledgment wins.
+function buildRestoreOutcomeMap(db: Database.Database, rigId?: string): Map<string, RestoreProjection> {
+  const filter = rigId ? " AND rig_id = ?" : "";
+  const startsFilter = rigId ? " AND +rig_id = ?" : "";
+  const rows = db.prepare(`
+    SELECT type, payload, seq, rig_id, node_id FROM events
+      WHERE type IN ('restore.completed', 'restore.subset_completed', 'restore.outcome_reconciled')${filter}
+    UNION ALL
+    SELECT type, payload, seq, rig_id, node_id FROM events
+      WHERE node_id IS NULL AND type = 'restore.started'${startsFilter}
+    ORDER BY seq ASC
+  `).all(...(rigId ? [rigId, rigId] : [])) as {
+    type: string; payload: string; seq: number; rig_id: string; node_id: string | null;
+  }[];
+  const map = new Map<string, RestoreProjection>();
+  const attempts = new Map<string, {
+    seq: number;
+    start?: Record<string, any>;
+    completed: boolean;
+    outcomes: Map<string, string>;
+  }>();
   for (const row of rows) {
-    try {
-      if (row.type === "restore.outcome_reconciled") {
-        const event = JSON.parse(row.payload) as { nodeId: string; to: string };
-        if (!map.has(event.nodeId)) map.set(event.nodeId, mapStatus(event.to));
-        continue;
-      }
-      const event = JSON.parse(row.payload) as { result: RestoreResult };
-      for (const nodeResult of event.result.nodes) {
-        if (!map.has(nodeResult.nodeId)) map.set(nodeResult.nodeId, mapStatus(nodeResult.status));
-      }
-    } catch {
+    let event: Record<string, any> | undefined;
+    try { event = eventObject(JSON.parse(row.payload)); } catch { /* Unknown evidence. */ }
+    if (row.type === "restore.started") {
+      // Even an unreadable new attempt prevents reuse of an earlier receipt.
+      attempts.set(row.rig_id, { seq: row.seq, start: event, completed: false, outcomes: new Map() });
       continue;
+    }
+    const attempt = attempts.get(row.rig_id);
+    if (row.type === "restore.completed" && attempt && !attempt.completed) {
+      // Match the first completion within this attempt, as the receipt reader
+      // does. Missing/corrupt receipts cannot become continuity proof.
+      attempt.completed = true;
+      const start = attempt.start;
+      const result = eventObject(event?.result);
+      const roster = start?.intendedRoster ?? result?.intendedRoster ?? result?.nodes;
+      if (start?.rigId === row.rig_id && event?.rigId === row.rig_id
+        && typeof start?.snapshotId === "string"
+        && event?.snapshotId === start.snapshotId && result?.snapshotId === start.snapshotId
+        && Array.isArray(result?.nodes) && Array.isArray(roster)) {
+        const intended = new Set(roster.map((node: any) => node?.nodeId));
+        for (const node of result.nodes) {
+          if (typeof node?.nodeId === "string" && intended.has(node.nodeId)) {
+            attempt.outcomes.set(node.nodeId, node.status);
+          }
+        }
+      }
+    }
+    if (!event) continue;
+    if (row.type === "restore.outcome_reconciled") {
+      if (typeof event.nodeId !== "string") continue;
+      const evidence = eventObject(event.evidence);
+      const strict = event.rigId === row.rig_id && event.nodeId === row.node_id
+        && event.to === "operator_recovered" && (event.from === "failed" || event.from === "attention_required")
+        && !!attempt && attempt.seq === event.attemptId && attempt.outcomes.get(event.nodeId) === event.from
+        && evidence?.tmux === true && evidence.resumeTokenUsed === true && evidence.paneState === "usable"
+        && (evidence.fgProcess === "claude" || evidence.fgProcess === "codex");
+      map.set(restoreKey(row.rig_id, event.nodeId), {
+        outcome: mapStatus(event.to),
+        ...(strict ? { resumedRuntime: evidence!.fgProcess === "claude" ? "claude-code" : "codex" } : {}),
+      });
+      continue;
+    }
+    if (!Array.isArray(event.result?.nodes)) continue;
+    for (const node of [...event.result.nodes].reverse()) {
+      if (typeof node?.nodeId === "string") {
+        map.set(restoreKey(row.rig_id, node.nodeId), { outcome: mapStatus(node.status) });
+      }
     }
   }
   return map;
@@ -536,7 +590,7 @@ interface InventoryBuildContext {
   // FS-1 W1.3 S1/S2 — the once-per-rig-batched per-node reads, keyed by node_id.
   // Built ONCE per projection (rig-scoped for single-rig, all-rigs for the
   // batched path) and looked up O(1) here instead of a query per node.
-  restoreOutcomes: Map<string, NodeRestoreOutcome>;
+  restoreOutcomes: Map<string, RestoreProjection>;
   orienteds: Map<string, NodeOriented>;
 }
 
@@ -549,7 +603,8 @@ function buildInventoryEntry(
   // FS-1 W1.3 S1 — O(1) lookup into the once-per-rig restore-outcome map
   // (byte-identical to the prior per-node deriveRestoreOutcome; "n-a" when a node
   // is referenced by no restore event, matching the prior fall-through).
-  const restoreOutcome = restoreOutcomes.get(row.node_id) ?? "n-a";
+  const restore = restoreOutcomes.get(restoreKey(row.rig_id, row.node_id));
+  const restoreOutcome = restore?.outcome ?? "n-a";
   // OPR.0.4.3.19 rev1-r2 B1 — a durable verdict is keyed only by node_id, so
   // after a rebind/relaunch (same node, NEW session + NEW pane) a stale
   // `verified` verdict for the OLD pane would otherwise be served for the new
@@ -594,7 +649,7 @@ function buildInventoryEntry(
     oriented: orienteds.get(row.node_id) ?? "n-a",
     lifecycleState,
     occupantLifecycle: deriveOccupantLifecycle(row, identityVerdict?.verdict ?? null),
-    continuityOutcome: deriveContinuityOutcome(row, restoreOutcome),
+    continuityOutcome: deriveContinuityOutcome(row, restore),
     handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
@@ -1285,10 +1340,12 @@ export async function attachAgentActivity(
 
     // No positive hook and no structural verdict. A stale/unknown hook, if one exists, is delivered
     // HONESTLY as-is (unknown/stale) — never upgraded to a quiet-seat verdict on arrival age alone.
-    // Live motion DOES upgrade it, and on this fleet that is the common case rather than the exotic
-    // one: every seat's hook currently arrives and is then demoted to unknown because the occupant
-    // generation cannot be resolved, so a demoted hook — not a positive idle one — is what stands
-    // between a working seat and a truthful label.
+    // Live motion DOES upgrade it. A demoted hook is not exotic: a seat whose agent process lacks the
+    // relay's launch environment (for example, relaunched outside the product launcher without
+    // OPENRIG_RUNTIME or an occupant generation) posts no new hooks, so its newest stored hook can be
+    // an old one from a prior tenure, read as generation_mismatch. Product-launched seats carry the
+    // generation and post resolvable hooks. Where a hook is demoted, it — not a positive idle one —
+    // is what stands between a working seat and a truthful label.
     if (hookActivity) {
       return {
         ...entry,

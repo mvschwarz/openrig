@@ -116,6 +116,13 @@ const CORE_STEP_IDS = [
   "verify",
 ];
 const FULL_EXTRA_STEP_IDS = ["jq_install", "gh_install"];
+const BREW_PLATFORM_SKIP = "Skipped: Homebrew setup path is only used on macOS.";
+const BREW_UNAVAILABLE_SKIP = "Skipped: Homebrew not available.";
+/** Steps the real run skips off macOS, with the message it gives (cmux is a macOS app installed via Homebrew). */
+const NON_DARWIN_DRY_RUN_SKIPS: Record<string, string> = {
+  brew: BREW_PLATFORM_SKIP,
+  cmux_install: BREW_UNAVAILABLE_SKIP,
+};
 const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   // OPR.0.4.8.2 agnostic rip-out: OpenRig no longer writes ~/.claude/settings.json — the global
   // permission allow-list (C2) is removed, so that global file is no longer touched at all.
@@ -141,7 +148,7 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   {
     scope: "global",
     runtime: "codex",
-    path: "~/.codex/config.toml",
+    path: "$CODEX_HOME/config.toml (default: ~/.codex/config.toml)",
     purpose: "Pre-trust managed workspaces and apply selected Codex config runtime-resource fragments.",
   },
 ];
@@ -268,7 +275,7 @@ async function probeDaemonCmuxStatus(doctorDeps?: DoctorDeps): Promise<"availabl
 //   deliberate-none  -> permission_policy: none             (origin deliberate_none; floor==absent)
 // P3: the record runs ONLY on an explicit --policy selection, NEVER on skip/quit/timeout (no flag =>
 // no step => bare setup byte-unchanged). P1: no path here upgrades an absent spec to deliberate_none.
-export const POLICY_CHOICES = ["locked", "standard", "open", "yolo", "none"] as const;
+export const POLICY_CHOICES = ["locked", "standard", "open", "yolo", "auto", "none"] as const;
 export type PolicyChoice = (typeof POLICY_CHOICES)[number];
 
 // Root-spec filenames, matching the CLI's established file-or-directory spec convention
@@ -362,7 +369,8 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
 
   if (opts.dryRun) {
     for (const id of stepIds) {
-      steps.push({ id, status: "skipped", message: `Dry run: ${id} would be attempted.` });
+      const platformSkip = platform !== "darwin" ? NON_DARWIN_DRY_RUN_SKIPS[id] : undefined;
+      steps.push({ id, status: "skipped", message: platformSkip ?? `Dry run: ${id} would be attempted.` });
     }
     if (opts.policy !== undefined) {
       steps.push({ id: "policy_record", status: "skipped", message: `Dry run: would record permission_policy for '${opts.policy}'.` });
@@ -377,7 +385,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     steps.push({
       id: "brew",
       status: "skipped",
-      message: "Skipped: Homebrew setup path is only used on macOS.",
+      message: BREW_PLATFORM_SKIP,
     });
   } else {
     try {
@@ -505,7 +513,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
       }
     } catch {
       if (!brewOk) {
-        steps.push({ id: "cmux_install", status: "skipped", message: "Skipped: Homebrew not available." });
+        steps.push({ id: "cmux_install", status: "skipped", message: BREW_UNAVAILABLE_SKIP });
       } else {
         try {
           installCommand(deps, "brew install --cask cmux");

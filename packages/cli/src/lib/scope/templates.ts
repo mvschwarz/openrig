@@ -106,6 +106,7 @@ export interface NotesRenderOpts {
 function applyNotesPlaceholders(content: string, opts: NotesRenderOpts): string {
   return content
     .replace(/\{\{mission_id\}\}/g, opts.mission_id)
+    .replace(/\{\{mission_name_yaml\}\}/g, JSON.stringify(opts.mission_name))
     .replace(/\{\{mission_name\}\}/g, opts.mission_name)
     .replace(/\{\{created_date\}\}/g, opts.created_date);
 }

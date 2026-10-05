@@ -436,6 +436,25 @@ describe("capture --host (http branch)", () => {
   });
 });
 
+describe("capture --host outcome status", () => {
+  it.each([false, true])("preserves HTTP-200 rig capture status with expected unavailable target and json=%s", async (json) => {
+    const h = mockClient(() => ({ status: 200, data: { results: [
+      { ok: true, sessionName: "one@rig", content: "kept bytes" },
+      { ok: false, sessionName: "two@rig", error: "external CLI capture is not available" },
+    ] } }));
+    await captureCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--rig", "rig", ...(json ? ["--json"] : [])], { from: "user" });
+    expect(captured.stdoutLines.join("\n")).toContain("kept bytes");
+    expect(captured.stdoutLines.join("\n")).toContain("external CLI capture is not available");
+    expect(process.exitCode).toBeUndefined();
+  });
+  it("does not turn successful empty capture bytes into an error", async () => {
+    const h = mockClient(() => ({ status: 200, data: { results: [{ ok: true, sessionName: "empty@rig", content: "" }] } }));
+    await captureCommand(httpDeps(h)).parseAsync(["--host", "vps-b", "--rig", "rig"], { from: "user" });
+    expect(captured.stdoutLines.join("\n")).not.toContain("error:");
+    expect(process.exitCode).toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // transcript — net-new cross-host observe (http-only)
 // ---------------------------------------------------------------------------

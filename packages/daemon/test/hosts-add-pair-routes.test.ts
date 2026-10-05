@@ -10,7 +10,7 @@
 //        qitem via the shipped machinery); approval hands the bearer over
 //        exactly once; deny/expiry persists nothing.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
 import http from "node:http";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
@@ -275,25 +275,41 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     expect(second.status).toBe(404);
   });
 
-  it("flooding protection: refuses issuance when MAX_PENDING_PAIRS is reached (429)", async () => {
-    // Fill up to the limit of 20
-    for (let i = 0; i < 20; i++) {
-      const res = await app.request("/api/hosts/pair-request", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ requester: `flood-${i}` }),
-      });
-      expect(res.status).toBe(200);
+  it("issues more than 20 pending requests, each with its own approval", async () => {
+    const issued = [];
+    for (let i = 0; i < 21; i++) issued.push(await issue());
+    expect(new Set(issued.map((r) => r.pairId)).size).toBe(21);
+    expect(new Set(issued.map((r) => r.approvalQitemId)).size).toBe(21);
+    for (const r of issued) {
+      expect(repo.getById(r.approvalQitemId)?.state).toBe("pending");
+      expect(await (await app.request(`/api/hosts/pair-request/${r.pairId}`)).json())
+        .toEqual({ status: "pending", code: r.code });
     }
-    // 21st request should be rejected with 429
-    const rejected = await app.request("/api/hosts/pair-request", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ requester: "flood-overflow" }),
+  });
+
+  it("prunes requests older than the grace window when issuing another request", async () => {
+    const { pairId } = await issue();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 61 * 60 * 1000);
+    try {
+      await issue();
+      expect((await app.request(`/api/hosts/pair-request/${pairId}`)).status).toBe(404);
+    } finally { clock.mockRestore(); }
+  });
+
+  it("removes the pending request if approval creation fails", async () => {
+    let pairId = "";
+    const create = vi.spyOn(repo, "create").mockImplementation(async (input) => {
+      pairId = input.evidenceRef!.slice("pair-request:".length);
+      throw new Error("fixture queue unavailable");
     });
-    expect(rejected.status).toBe(429);
-    const body = (await rejected.json()) as { error: string };
-    expect(body.error).toBe("too_many_pending_pair_requests");
+    try {
+      const response = await app.request("/api/hosts/pair-request", { method: "POST", body: "{}" });
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({ error: "pair_approval_item_failed" });
+      expect(pairId).not.toBe("");
+      expect((await app.request(`/api/hosts/pair-request/${pairId}`)).status).toBe(404);
+      expect(repo.list({ limit: 100 })).toHaveLength(0);
+    } finally { create.mockRestore(); }
   });
 
   it("sanitizes requester input to prevent control-character injection in approval summaries", async () => {
@@ -353,7 +369,7 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
     }
   });
 
-  it("enforces MAX_PENDING_PAIRS capacity under concurrent parallel requests", async () => {
+  it("issues more than 20 concurrent requests without a fixed capacity refusal", async () => {
     // Fire 25 concurrent requests in parallel
     const requests = Array.from({ length: 25 }, (_, i) =>
       app.request("/api/hosts/pair-request", {
@@ -365,10 +381,9 @@ describe("pair-request — the target-side issuance handshake (FR-6)", () => {
 
     const responses = await Promise.all(requests);
     const successCount = responses.filter((r) => r.status === 200).length;
-    const rateLimitedCount = responses.filter((r) => r.status === 429).length;
-
-    expect(successCount).toBe(20);
-    expect(rateLimitedCount).toBe(5);
+    expect(successCount).toBe(25);
+    const issued = await Promise.all(responses.map((r) => r.json() as Promise<{ pairId: string }>));
+    expect(new Set(issued.map((r) => r.pairId)).size).toBe(25);
   });
 });
 
@@ -417,6 +432,48 @@ describe("local pair-client seam — POST /pair + GET /pair/:id (the browser's w
   });
 
   const auth = { Authorization: `Bearer ${BEARER}`, "Content-Type": "application/json" };
+
+  it("keeps more than 20 concurrent local pairs pending without persisting credentials", async () => {
+    const responses = await Promise.all(Array.from({ length: 25 }, (_, i) => app.request("/api/hosts/pair", {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ url: `127.0.0.1:${targetPort}`, id: `peer-${i}` }),
+    })));
+    expect(responses.every((r) => r.status === 200)).toBe(true);
+    expect(targetRequests).toBe(25);
+    const pairs = await Promise.all(responses.map((r) => r.json() as Promise<{ pairId: string }>));
+    expect(new Set(pairs.map((r) => r.pairId)).size).toBe(25);
+    for (const pair of pairs) {
+      expect(await (await app.request(`/api/hosts/pair/${pair.pairId}`, { headers: auth })).json())
+        .toEqual({ status: "pending", code: "123456" });
+    }
+    expect(existsSync(join(home, "hosts.yaml"))).toBe(false);
+    expect(existsSync(join(home, "secrets"))).toBe(false);
+  });
+
+  it("requires the local bearer for starting and polling a pair", async () => {
+    for (const path of ["/api/hosts/pair", "/api/hosts/pair/unknown"]) {
+      const response = await app.request(path, { method: path.endsWith("unknown") ? "GET" : "POST" });
+      expect(response.status).toBe(401);
+    }
+    expect(targetRequests).toBe(0);
+  });
+
+  it.each([15, 61])("retains client TTL and grace pruning at %i minutes", async (minutes) => {
+    const start = () => app.request("/api/hosts/pair", {
+      method: "POST", headers: auth, body: JSON.stringify({ url: `127.0.0.1:${targetPort}` }),
+    });
+    const { pairId } = await (await start()).json() as { pairId: string };
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + minutes * 60 * 1000);
+    try {
+      expect((await start()).status).toBe(200);
+      const calls = targetRequests;
+      const poll = await app.request(`/api/hosts/pair/${pairId}`, { headers: auth });
+      expect(poll.status).toBe(minutes === 15 ? 200 : 404);
+      expect(await poll.json()).toMatchObject(minutes === 15 ? { status: "expired" } : { error: "pair_unknown" });
+      expect(targetRequests).toBe(calls);
+      expect(existsSync(join(home, "secrets"))).toBe(false);
+    } finally { clock.mockRestore(); }
+  });
 
   it("approved walk: token file lands 0600 + registry entry via the writer twin", async () => {
     const started = await app.request("/api/hosts/pair", {

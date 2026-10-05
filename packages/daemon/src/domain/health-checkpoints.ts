@@ -33,6 +33,8 @@ function scope(value: unknown): asserts value is HealthScope {
   const s = object(value, ["type", ...fields]); fields.forEach((f) => text(s[f]));
 }
 export class HealthCheckpointSource implements HealthObservationSource {
+  readonly name = "health-checkpoints";
+  readonly detectors = ["process.ceremony-amplification"];
   private readonly dir: string;
   constructor(home: string, private readonly queue: QueueRepository, private readonly policy: HealthPolicyStore, private readonly now = () => new Date().toISOString(), private readonly workspace = join(home, "workspace")) {
     this.dir = join(home, "health", "checkpoints");

@@ -113,7 +113,8 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
 }
 
 function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewState {
-  const next: ViewState = { ...state, lastError: null, notice: action.type === "notice" || action.type === "act" ? state.notice : null };
+  const readingNotice = state.notice?.includes("\n") && (["layout", "content-scroll", "content-select", "focus", "copy-mode"].includes(action.type) || (action.type === "select" && action.origin === "refresh"));
+  const next: ViewState = { ...state, lastError: null, notice: action.type === "notice" || action.type === "act" || readingNotice ? state.notice : null };
   switch (action.type) {
     case "terminal-result":
       return { ...next, terminalResult: { view: action.view, message: action.message } };
@@ -279,7 +280,9 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       // mutations — the view is untouched; the loop reports via 'notice'.
       return next;
     case "notice":
-      return { ...next, notice: action.message };
+      return action.message.includes("\n")
+        ? { ...resetContent(next), notice: action.message, focusedPane: "content" }
+        : { ...next, notice: action.message };
     case "filter":
       return state.section === "config"
         ? syncSelection({ ...resetContent({ ...next, filter: action.text, configKey: null, configCategory: "all" }), focusedPane: "content" }, snap)

@@ -191,6 +191,19 @@ export class RigRepository {
     }
   }
 
+  setRigNonInterruptive(rigId: string, enabled: boolean): void {
+    if (!this.hasRigColumn("non_interruptive")) return;
+    this.db.prepare("UPDATE rigs SET non_interruptive = ?, updated_at = ? WHERE id = ?")
+      .run(enabled ? 1 : 0, new Date().toISOString(), rigId);
+  }
+
+  getRigNonInterruptive(rigId: string): boolean {
+    if (!this.hasRigColumn("non_interruptive")) return false;
+    const row = this.db.prepare("SELECT non_interruptive FROM rigs WHERE id = ?")
+      .get(rigId) as { non_interruptive: number } | undefined;
+    return row?.non_interruptive === 1;
+  }
+
   /** OPR.0.4.8.3 Seam B — persist a rig's attached permission_policy REF (builtin:<name> or a
    *  spec-relative custom path), or null to clear. Mirrors setRigWorkspace (migration 056). */
   setRigPermissionPolicy(rigId: string, permissionPolicy: string | null): void {
@@ -232,7 +245,7 @@ export class RigRepository {
       origin: "builtin" | "custom" | "deliberate_none";
       resolvedTarget: string | null;
       declaringDir: string | null;
-      launchPosture: "floor" | "full_bypass";
+      launchPosture: "floor" | "full_bypass" | "auto";
     },
   ): void {
     if (!this.hasRigColumn("rig_policy_launch_posture")) return;
@@ -246,7 +259,7 @@ export class RigRepository {
     origin: "builtin" | "custom" | "deliberate_none";
     resolvedTarget: string | null;
     declaringDir: string | null;
-    launchPosture: "floor" | "full_bypass";
+    launchPosture: "floor" | "full_bypass" | "auto";
     /** the raw rig ref (056) alongside, for re-validation */
     rigRef: string | null;
   } | null {
@@ -265,7 +278,7 @@ export class RigRepository {
       origin: row.rig_policy_origin as "builtin" | "custom" | "deliberate_none",
       resolvedTarget: row.rig_policy_resolved_target,
       declaringDir: row.rig_policy_declaring_dir,
-      launchPosture: row.rig_policy_launch_posture as "floor" | "full_bypass",
+      launchPosture: row.rig_policy_launch_posture as "floor" | "full_bypass" | "auto",
       rigRef: row.permission_policy,
     };
   }
@@ -280,7 +293,7 @@ export class RigRepository {
       origin: "builtin" | "custom" | "deliberate_none";
       resolvedTarget: string | null;
       declaringDir: string | null;
-      launchPosture: "floor" | "full_bypass";
+      launchPosture: "floor" | "full_bypass" | "auto";
     },
   ): void {
     if (!this.hasNodeColumn("policy_launch_posture")) return;
@@ -295,7 +308,7 @@ export class RigRepository {
     origin: "builtin" | "custom" | "deliberate_none";
     resolvedTarget: string | null;
     declaringDir: string | null;
-    launchPosture: "floor" | "full_bypass";
+    launchPosture: "floor" | "full_bypass" | "auto";
     /** The node's own raw ref (member-level; null when the attachment came from the rig). */
     nodeRef: string | null;
   } | null {
@@ -314,7 +327,7 @@ export class RigRepository {
       origin: row.policy_origin as "builtin" | "custom" | "deliberate_none",
       resolvedTarget: row.policy_resolved_target,
       declaringDir: row.policy_declaring_dir,
-      launchPosture: row.policy_launch_posture as "floor" | "full_bypass",
+      launchPosture: row.policy_launch_posture as "floor" | "full_bypass" | "auto",
       nodeRef: row.permission_policy,
     };
   }
@@ -514,12 +527,18 @@ export class RigRepository {
     };
   }
 
-  listRigs(filter?: RigArchiveFilter): Rig[] {
+  listRigs(filter?: RigArchiveFilter, observe?: import("./request-phase-observer.js").QueryObservation): Rig[] {
     const cond = archiveWhereClause("archived_at", filter);
     const where = cond ? `WHERE ${cond}` : "";
-    const rows = this.db
-      .prepare(`SELECT * FROM rigs ${where} ORDER BY created_at`)
-      .all() as RigRow[];
+    let rows: RigRow[];
+    try { observe?.("begin"); } catch { /* Best-effort measurement only. */ }
+    try {
+      rows = this.db.prepare(`SELECT * FROM rigs ${where} ORDER BY created_at`).all() as RigRow[];
+    } catch (error) {
+      try { observe?.("end", true); } catch { /* Preserve the actual query error. */ }
+      throw error;
+    }
+    try { observe?.("end", false); } catch { /* Preserve the query result. */ }
     return rows.map((r) => this.rowToRig(r));
   }
 

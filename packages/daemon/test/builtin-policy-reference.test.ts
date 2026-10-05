@@ -16,9 +16,10 @@ const REPO_BUILTIN_DIR = resolve(import.meta.dirname, "../policies/builtin");
 /** the four authoritative content pins (workspace/incoming/slice03-core-authoritative,
  * PM inline builtin ruling) — full 64-hex, copied VERBATIM into the repo source */
 const AUTHORITY_SHA256: Record<string, string> = {
+  "auto.policy.md": "ffd0347af4bc5d5fdb4e5f8208577ca72dcc085883ea4fa0b10e9c6ac3022bde",
   "locked.policy.md": "dcb38c372def7fe58ddfc9f1f3e97b9ba391ae79a99ef486e44f017cb39e57fe",
-  "standard.policy.md": "737d3f56e6d8275fe548a3a06e9b02ede8f328207ec2e6223cea6a83f40f5148",
   "open.policy.md": "bb5fbb18e1f3706bd0676a9e709e29b5754bb6b41b6f304453dd6d73e7a4d62b",
+  "standard.policy.md": "737d3f56e6d8275fe548a3a06e9b02ede8f328207ec2e6223cea6a83f40f5148",
   // 0.6.0 (#109): accepted Codex full_bypass now includes approval policy never.
   "yolo.policy.md": "1c34fff0b385426689fd26e20b8b431de6b688028d584924e7d5384fe5ff6d42",
 };
@@ -29,10 +30,10 @@ function tempTarget(): string {
   return mkdtempSync(join(tmpdir(), "builtin-policy-ref-"));
 }
 
-describe("T1/T2 — canonical repo source: exact known-four inventory, verbatim bytes", () => {
-  it("packages/daemon/policies/builtin contains EXACTLY the four built-in policy files", () => {
+describe("T1/T2 — canonical repo source: exact known-five inventory, verbatim bytes", () => {
+  it("packages/daemon/policies/builtin contains EXACTLY the five built-in policy files", () => {
     const files = readdirSync(REPO_BUILTIN_DIR).sort();
-    expect(files).toEqual(["locked.policy.md", "open.policy.md", "standard.policy.md", "yolo.policy.md"]);
+    expect(files).toEqual(["auto.policy.md", "locked.policy.md", "open.policy.md", "standard.policy.md", "yolo.policy.md"]);
   });
 
   it("every repo-source file is byte-identical to its authority (full sha256 pins)", () => {
@@ -43,18 +44,18 @@ describe("T1/T2 — canonical repo source: exact known-four inventory, verbatim 
 });
 
 describe("T3/T4/T5 — materializer: byte-identical 0444 inspection copies, idempotent, allowlisted", () => {
-  it("T3: copies the known four byte-identical into the target with mode 0444", () => {
+  it("T3: copies the known five byte-identical into the target with mode 0444", () => {
     const target = tempTarget();
     try {
       const result = materializeBuiltinPolicyReference({ bundledDir: REPO_BUILTIN_DIR, targetDir: target });
-      expect(result.written.sort()).toEqual(["locked.policy.md", "open.policy.md", "standard.policy.md", "yolo.policy.md"]);
+      expect(result.written.sort()).toEqual(["auto.policy.md", "locked.policy.md", "open.policy.md", "standard.policy.md", "yolo.policy.md"]);
       expect(result.skipped).toEqual([]);
       for (const [file, hash] of Object.entries(AUTHORITY_SHA256)) {
         const p = join(target, file);
         expect(sha256(p), file).toBe(hash);
         expect(statSync(p).mode & 0o777, `${file} mode`).toBe(0o444);
       }
-      expect(readdirSync(target)).toHaveLength(4); // nothing extra materialized
+      expect(readdirSync(target)).toHaveLength(5); // nothing extra materialized
     } finally {
       rmSync(target, { recursive: true, force: true });
     }
@@ -84,13 +85,13 @@ describe("T3/T4/T5 — materializer: byte-identical 0444 inspection copies, idem
     const bundled = tempTarget();
     const target = tempTarget();
     try {
-      for (const file of ["locked.policy.md", "standard.policy.md", "open.policy.md"])
+      for (const file of ["auto.policy.md", "locked.policy.md", "standard.policy.md", "open.policy.md"])
         writeFileSync(join(bundled, file), readFileSync(join(REPO_BUILTIN_DIR, file)));
       writeFileSync(join(bundled, "rogue.policy.md"), "not a built-in\n"); // stranger
       const result = materializeBuiltinPolicyReference({ bundledDir: bundled, targetDir: target });
-      expect(result.written.sort()).toEqual(["locked.policy.md", "open.policy.md", "standard.policy.md"]);
+      expect(result.written.sort()).toEqual(["auto.policy.md", "locked.policy.md", "open.policy.md", "standard.policy.md"]);
       expect(result.skipped).toEqual(["yolo.policy.md"]); // missing source named, never thrown
-      expect(readdirSync(target).sort()).toEqual(["locked.policy.md", "open.policy.md", "standard.policy.md"]);
+      expect(readdirSync(target).sort()).toEqual(["auto.policy.md", "locked.policy.md", "open.policy.md", "standard.policy.md"]);
     } finally {
       rmSync(bundled, { recursive: true, force: true });
       rmSync(target, { recursive: true, force: true });

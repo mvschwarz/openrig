@@ -1,3 +1,4 @@
+import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -24,14 +25,12 @@ import type {
   RestoreOutcome,
   RestoreRigResult,
   RestoreResult,
-  RestoreValidationBlocker,
   RestoreNodeResult,
   SnapshotData,
   NodeWithBinding,
   Edge,
   Session,
   Checkpoint,
-  RigServicesRecord,
   RestoreSnapshotSelection,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
@@ -39,6 +38,7 @@ import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
+import { validatePreRestore } from "./restore-preconditions.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
 
 // L3: result shape for runtime-truth reconciliation. A reconciliation that
@@ -220,6 +220,8 @@ export class RestoreOrchestrator {
      * resume-policy seats STOP as `awaiting-decision` instead.
      */
     freshLogicalIds?: string[];
+    /** Explicit rig launch choice; persisted only after restore preconditions pass. */
+    nonInterruptive?: boolean;
     /** Selection evidence from an automatic caller. Direct restore defaults
      * to explicit because its public door names the snapshot id. */
     snapshotSelection?: RestoreSnapshotSelection;
@@ -267,7 +269,7 @@ export class RestoreOrchestrator {
     this.activeRestores.add(rigId);
 
     try {
-      const validation = this.validatePreRestore(snapshot.data, {
+      const validation = validatePreRestore(snapshot.data, {
         fsOps: opts?.fsOps,
         servicesRecord: this.rigRepo.getServicesRecord(rigId),
         freshLogicalIds: opts?.freshLogicalIds,
@@ -296,6 +298,8 @@ export class RestoreOrchestrator {
       // 2. Capture pre-restore snapshot BEFORE any DB mutations —
       // DB still reflects original session state (running for stale sessions)
       const preRestoreSnapshot = this.snapshotCapture.captureSnapshot(rigId, "pre_restore");
+
+      if (opts?.nonInterruptive !== undefined) this.rigRepo.setRigNonInterruptive(rigId, opts.nonInterruptive);
 
       // 2b. NOW mark stale sessions as detached (safe: we've captured the
       // pre-restore snapshot and confirmed no live/unknown sessions remain)
@@ -353,6 +357,8 @@ export class RestoreOrchestrator {
       // 5. Execute restore with compensating pattern per node
       const nodeResults: RestoreNodeResult[] = [];
       const restoreWarnings: string[] = [...validation.warnings];
+      if (this.rigRepo.getRigNonInterruptive(rigId)) restoreWarnings.push(nonInterruptiveSummary(true));
+      else if (opts?.nonInterruptive === false) restoreWarnings.push(nonInterruptiveSummary(false));
       for (const entry of plan) {
         const result = await this.restoreNodeWithCompensation(entry, rigId, snapshotId, snapshot.data, opts, restoreWarnings);
         nodeResults.push(result);
@@ -580,218 +586,6 @@ export class RestoreOrchestrator {
         affected: held,
       },
     };
-  }
-
-  private validatePreRestore(
-    data: SnapshotData,
-    opts: {
-      fsOps?: { exists(path: string): boolean };
-      servicesRecord?: RigServicesRecord | null;
-      freshLogicalIds?: string[];
-    },
-  ): { blockers: RestoreValidationBlocker[]; warnings: string[] } {
-    const blockers: RestoreValidationBlocker[] = [];
-    const warnings: string[] = [];
-    const exists = opts.fsOps?.exists ?? (() => true);
-
-    const add = (blocker: RestoreValidationBlocker) => blockers.push(blocker);
-    const nodes = Array.isArray(data.nodes) ? data.nodes : null;
-    const sessions = Array.isArray(data.sessions) ? data.sessions : null;
-    const edges = Array.isArray(data.edges) ? data.edges : null;
-    const checkpoints = data.checkpoints && typeof data.checkpoints === "object" ? data.checkpoints : null;
-
-    if (!data.rig || typeof data.rig.id !== "string") {
-      add({
-        code: "invalid_snapshot_data",
-        severity: "critical",
-        target: "snapshot.rig",
-        message: "Snapshot is missing the rig record needed for restore.",
-        remediation: "Capture a new snapshot or restore from a structurally valid snapshot.",
-      });
-    }
-    if (!nodes) {
-      add({
-        code: "invalid_snapshot_data",
-        severity: "critical",
-        target: "snapshot.nodes",
-        message: "Snapshot is missing the node list needed for restore.",
-        remediation: "Capture a new snapshot or restore from a structurally valid snapshot.",
-      });
-    }
-    if (!sessions) {
-      add({
-        code: "invalid_snapshot_data",
-        severity: "critical",
-        target: "snapshot.sessions",
-        message: "Snapshot is missing session records needed for restore.",
-        remediation: "Capture a new snapshot or restore from a structurally valid snapshot.",
-      });
-    }
-    if (!edges) {
-      add({
-        code: "invalid_snapshot_data",
-        severity: "critical",
-        target: "snapshot.edges",
-        message: "Snapshot is missing topology edges needed for restore planning.",
-        remediation: "Capture a new snapshot or restore from a structurally valid snapshot.",
-      });
-    }
-    if (!checkpoints) {
-      add({
-        code: "invalid_snapshot_data",
-        severity: "critical",
-        target: "snapshot.checkpoints",
-        message: "Snapshot is missing the checkpoint map needed for restore.",
-        remediation: "Capture a new snapshot or restore from a structurally valid snapshot.",
-      });
-    }
-
-    if (!nodes || !checkpoints) {
-      return { blockers, warnings };
-    }
-
-    const topology = resolveSnapshotRestoreTopology(data);
-    for (const invalidNodeId of topology.invalidRosterIds) {
-      add({
-        code: "invalid_topology_roster",
-        severity: "critical",
-        nodeId: invalidNodeId,
-        target: "snapshot.topologyRoster",
-        message: `Intended topology roster names node ${invalidNodeId}, which is absent from snapshot.nodes.`,
-        remediation: "Capture a new snapshot from the authoritative materialized topology.",
-      });
-    }
-
-    for (const node of topology.intendedNodes) {
-      const checkpoint = checkpoints[node.id] ?? null;
-      if (checkpoint && !node.cwd) {
-        add({
-          code: "checkpoint_missing_node_cwd",
-          severity: "critical",
-          nodeId: node.id,
-          logicalId: node.logicalId,
-          target: "checkpoint",
-          message: `Checkpoint exists for ${node.logicalId}, but the node has no cwd to receive it.`,
-          remediation: "Update the rig spec to include a cwd for this node, then capture a new snapshot or restore manually.",
-        });
-      }
-
-      const startupCtx = data.nodeStartupContext?.[node.id] ?? null;
-      if (!startupCtx) continue;
-
-      // OPR.0.5.7.1 D6a — validate replay files IFF the node will CONSUME
-      // replay (desk static ruling on e42420990): none => fresh path,
-      // validate; ambiguity => the node stops loudly and consumes nothing,
-      // skip; explicit fresh or a non-resume policy => deliberate fresh,
-      // validate; resume_if_possible with no token => stop-and-ask, consumes
-      // nothing, skip; usable type + token => exact resume, skip; a token
-      // WITHOUT a usable resume type follows the current fresh path,
-      // validate.
-      const resolution = resolveActiveSnapshotSession(data, node.id);
-      const freshListed = opts.freshLogicalIds?.includes(node.logicalId) ?? false;
-      let consumesReplay: boolean;
-      if (resolution.kind === "ambiguous") {
-        consumesReplay = false;
-      } else if (resolution.kind === "none") {
-        consumesReplay = true;
-      } else {
-        const sess = resolution.session;
-        const policy = sess.restorePolicy ?? "resume_if_possible";
-        if (freshListed || policy !== "resume_if_possible") consumesReplay = true;
-        else if (!sess.resumeToken) consumesReplay = false;
-        else if (!!sess.resumeType && sess.resumeType !== "none") consumesReplay = false;
-        else consumesReplay = true;
-      }
-
-      for (const storedFile of consumesReplay ? startupCtx.resolvedStartupFiles ?? [] : []) {
-        // Validate the file replay will actually deliver (#261: built-ins follow the running install).
-        const file = reanchorBuiltinStartupFile(storedFile, undefined, undefined, exists);
-        if (!file.required) {
-          if (this.pathLike(file.absolutePath) && !exists(file.absolutePath)) {
-            warnings.push(`Restore pre-validation: optional startup file missing for ${node.logicalId}: ${file.absolutePath}`);
-          }
-          continue;
-        }
-        if (this.pathLike(file.ownerRoot) && !exists(file.ownerRoot)) {
-          add({
-            code: "startup_owner_root_missing",
-            severity: "critical",
-            nodeId: node.id,
-            logicalId: node.logicalId,
-            target: file.path,
-            path: file.ownerRoot,
-            message: `Required startup file owner root is missing for ${node.logicalId}: ${file.ownerRoot}`,
-            remediation: "Restore the agent/source root or capture a new snapshot with reachable startup context.",
-          });
-        }
-        if (this.pathLike(file.absolutePath) && !exists(file.absolutePath)) {
-          add({
-            code: "required_startup_file_missing",
-            severity: "critical",
-            nodeId: node.id,
-            logicalId: node.logicalId,
-            target: file.path,
-            path: file.absolutePath,
-            message: `Required startup file is missing for ${node.logicalId}: ${file.absolutePath}`,
-            remediation: "Restore the missing startup file or capture a new snapshot before retrying restore.",
-          });
-        }
-      }
-
-      // OPR.0.3.4.5 (behavior 09): projection-validity != session continuity.
-      // A stale/missing projected skill/artifact must NOT abort a restore that
-      // has a valid native resume. Demoted from critical blockers to warnings
-      // flagged as projection_drift (compose slice-03's drift reporting shape).
-      // The existing post-launch filter (:855-885) already skips missing
-      // entries with a "(skipped)" warning; here we prevent the pre-restore
-      // gate from blocking the attempt entirely. Missing REQUIRED startup
-      // files and genuinely-fatal blockers (malformed snapshot, missing nodes)
-      // stay critical above.
-      for (const storedEntry of startupCtx.projectionEntries ?? []) {
-        const entry = reanchorShippedProjectionEntry(storedEntry, undefined, exists);
-        if (this.pathLike(entry.sourcePath) && !exists(entry.sourcePath)) {
-          warnings.push(`projection_drift: source root missing for ${node.logicalId}: ${entry.sourcePath} (projection will be skipped at startup; session continuity is unaffected)`);
-        }
-        if (this.pathLike(entry.absolutePath) && !exists(entry.absolutePath)) {
-          warnings.push(`projection_drift: entry missing for ${node.logicalId}: ${entry.absolutePath} (projection will be skipped at startup; session continuity is unaffected)`);
-        }
-      }
-    }
-
-    const servicesRecord = opts.servicesRecord ?? null;
-    if (servicesRecord) {
-      if (this.pathLike(servicesRecord.rigRoot) && !exists(servicesRecord.rigRoot)) {
-        add({
-          code: "service_rig_root_missing",
-          severity: "critical",
-          target: "services.rigRoot",
-          path: servicesRecord.rigRoot,
-          message: `Service rig root is missing: ${servicesRecord.rigRoot}`,
-          remediation: "Restore the service rig root or update the services record before retrying restore.",
-        });
-      }
-      if (this.pathLike(servicesRecord.composeFile) && !exists(servicesRecord.composeFile)) {
-        add({
-          code: "service_compose_file_missing",
-          severity: "critical",
-          target: "services.composeFile",
-          path: servicesRecord.composeFile,
-          message: `Service compose file is missing: ${servicesRecord.composeFile}`,
-          remediation: "Restore the compose file or update the services record before retrying restore.",
-        });
-      }
-    }
-
-    return { blockers, warnings };
-  }
-
-  private pathLike(value: unknown): value is string {
-    return typeof value === "string" && value.trim().length > 0 && (
-      value.startsWith("/")
-      || value.startsWith("./")
-      || value.startsWith("../")
-      || value.startsWith("~")
-    );
   }
 
   private captureNodeState(nodeId: string, rigId: string): { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] } {
@@ -1197,6 +991,31 @@ export class RestoreOrchestrator {
     // Legacy nodes: resume via old claude-resume/codex-resume helpers
     const isPodAware = !!node.podId;
 
+    const startupCtx = data.nodeStartupContext?.[node.id] ?? null;
+    // Restore only the saved activity selection before either native resume path.
+    // This also heals settings stripped by older restores. The entry is a marker:
+    // the adapter uses its current relay/manifest, not the old install's path.
+    // No current profile resolution, guidance, skills or startup replay belongs here.
+    const activityAdapter = opts?.adapters?.["claude-code"];
+    if (resumeRequested && resumeToken && launchResult && startupCtx?.runtime === "claude-code" && activityAdapter) {
+      const entries = startupCtx.projectionEntries.filter(e =>
+        e.category === "runtime_resource" && e.resourceType === "claude_activity_hooks");
+      if (entries.length > 0) try {
+        const result = await activityAdapter.project({
+          runtime: "claude-code", cwd: node.cwd ?? ".",
+          entries: entries.map(e => ({ ...e, category: "runtime_resource" as const, classification: "safe_projection" as const,
+            mergeStrategy: e.mergeStrategy as import("./projection-planner.js").ProjectionEntry["mergeStrategy"] })),
+          startup: { files: [], actions: [] }, conflicts: [], noOps: [], diagnostics: [],
+        }, { ...launchResult.binding, cwd: node.cwd ?? "." });
+        warnings?.push(...(result.warnings ?? []));
+        for (const skipped of result.skipped) warnings?.push(`Restore activity hooks: skipped ${skipped}; saved hooks could not be reapplied.`);
+        for (const failure of result.failed) warnings?.push(`Restore activity hooks: ${failure.error}`);
+      } catch (error) {
+        // Activity delivery remains best-effort, as on an ordinary fresh launch.
+        warnings?.push(`Restore activity hooks: ${(error as Error).message}`);
+      }
+    }
+
     if (resumeRequested && !isPodAware) {
       // Legacy resume path
       if (!resumeToken) {
@@ -1207,7 +1026,7 @@ export class RestoreOrchestrator {
         await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
         return { nodeId: node.id, logicalId: node.logicalId, status: "awaiting-decision", error: `Original session unresumable: resume requested but no token available. No session is running. Re-run with --fresh ${node.logicalId} for a deliberate fresh-primed seat, or restore the original session manually.` };
       } else {
-        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), node.effort);
+        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", node.codexConfigProfile, node.model, this.resolveRestorePosture(node.id, rigId), node.effort, warnings);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
         } else if (resumeOutcome.kind === "attention_required") {
@@ -1279,14 +1098,14 @@ export class RestoreOrchestrator {
     // returns to an EXISTING history: replaying startup/onboarding content
     // into it is the ghost-prompt source (the incident's live specimen:
     // managed CLAUDE.md blocks rewritten mid-"resume"). A resumed history
-    // replays NOTHING — the launch leg survives untouched (the D2
+    // replays no startup content — the saved activity resource was reconciled
+    // above before native resume. The launch leg survives untouched (the D2
     // discriminator proved an empty runtime-correct plan resumes fine).
     // There is deliberately NO replay opt-in surface here: D6b restores the
     // explicit+versioned+durable+idempotent contract in the D4 operation-id
     // phase, where its durability primitives live. Deliberate fresh-primed
     // launches are new histories and keep their replay.
     const replayContained = resumeRequested && !!resumeToken;
-    const startupCtx = data.nodeStartupContext?.[node.id] ?? null;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = startupRuntime ? opts?.adapters?.[startupRuntime] : undefined;
 
@@ -1398,6 +1217,7 @@ export class RestoreOrchestrator {
               sessionName: sessionName,
               allowFreshFallback: !(isPodAware && resumeRequested),
             });
+            warnings?.push(...(startupResult.warnings ?? []));
             if (startupResult.ok) {
               const nativeContinuityProved = isPodAware
                 && resumeRequested
@@ -1587,7 +1407,7 @@ export class RestoreOrchestrator {
    *   3. Nothing attached (or a resolution error) → EXPLICIT "floor" — the locked
    *      minimum-floor absence contract; never undefined/env-delegation for managed seats.
    */
-  private resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" {
+  private resolveRestorePosture(nodeId: string, rigId: string): "floor" | "full_bypass" | "auto" {
     try {
       const prov = this.rigRepo.getNodePolicyProvenance(nodeId);
       if (prov) {
@@ -1649,8 +1469,9 @@ export class RestoreOrchestrator {
     model?: string | null,
     // OPR.0.4.8.3 Seam B: the seat's restored launch posture (persisted provenance,
     // custom policies re-validated when readable). Absent = env decision.
-    resolvedPosture?: "floor" | "full_bypass",
+    resolvedPosture?: "floor" | "full_bypass" | "auto",
     effort?: string | null,
+    warnings?: string[],
   ): Promise<
     | { kind: "resumed" }
     | { kind: "retry_fresh" }
@@ -1658,19 +1479,24 @@ export class RestoreOrchestrator {
     | { kind: "attention_required"; message: string; evidence?: string }
   > {
     const launchGeneration = this.sessionRegistry.currentOccupantTenure(nodeId)?.generationUuid;
+    const node = this.db.prepare("SELECT rig_id FROM nodes WHERE id = ?").get(nodeId) as { rig_id: string } | undefined;
+    const nonInterruptive = node ? this.rigRepo.getRigNonInterruptive(node.rig_id) : false;
+    const launchTail: [effort?: string | null, nonInterruptive?: boolean] = nonInterruptive ? [effort, true] : effort !== undefined ? [effort] : [];
     let permissionMode: string | undefined;
     try {
-      const selection = new NativePermissionStore(this.db).read(nodeId);
       const runtime = this.claudeResume.canResume(resumeType, resumeToken) ? "claude-code"
         : this.codexResume.canResume(resumeType, resumeToken) ? "codex" : "pi";
+      const selection = new NativePermissionStore(this.db).read(nodeId);
       if (selection && selection.runtime !== runtime) throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
       const override = permissionBindingOverride(selection);
       resolvedPosture = override.launchPosture ?? resolvedPosture;
-      permissionMode = override.permissionMode;
+      permissionMode = override.permissionMode ?? (resolvedPosture === "auto" && runtime === "claude-code" ? "auto" : undefined);
     } catch (error) { return { kind: "failed", message: `Permission selection: ${(error as Error).message}` }; }
     if (this.claudeResume.canResume(resumeType, resumeToken)) {
-      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId, ...(effort !== undefined ? [effort] : []));
+      const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId, ...launchTail);
       if (result.ok) {
+        const notice = nonInterruptiveNotice("claude-code", { nonInterruptive, launchPosture: resolvedPosture, permissionMode });
+        if (notice) warnings?.push(`${sessionName}: ${notice}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
       }
@@ -1687,8 +1513,10 @@ export class RestoreOrchestrator {
     }
 
     if (this.codexResume.canResume(resumeType, resumeToken)) {
-      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model, ...(effort !== undefined ? [effort] : []));
+      const result = await this.codexResume.resume(sessionName, resumeType, resumeToken, cwd, codexConfigProfile, resolvedPosture, model, ...launchTail);
       if (result.ok) {
+        const notice = nonInterruptiveNotice("codex", { nonInterruptive, launchPosture: resolvedPosture, permissionMode });
+        if (notice) warnings?.push(`${sessionName}: ${notice}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
       }

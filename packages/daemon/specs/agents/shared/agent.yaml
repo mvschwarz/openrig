@@ -47,7 +47,7 @@ resources:
     - id: openrig-core
       source:
         kind: local
-        path: ~/.openrig/plugins/openrig-core
+        path: openrig-home:plugins/openrig-core
   runtime_resources:
     - id: claude-default-settings
       path: runtime/claude-settings.fragment.json

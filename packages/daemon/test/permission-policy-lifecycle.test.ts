@@ -121,6 +121,7 @@ describe("F1 — rig-level custom provenance is RESTART-COMPLETE", () => {
     db1.prepare("UPDATE sessions SET resume_type = 'claude_id', resume_token = 'tok-123' WHERE id = ?").run(session.id);
     const intendedNodeIds = setup1.rigRepo.getRig(rigId)!.nodes.map((node) => node.id);
     const snap = setup1.snapshotCapture.captureSnapshot(rigId, "manual", { intendedNodeIds });
+    setup1.rigRepo.setRigNonInterruptive(rigId, true);
     db1.close(); // ── restart boundary ──
 
     const db2 = createDb(dbFile);
@@ -153,6 +154,7 @@ describe("F1 — rig-level custom provenance is RESTART-COMPLETE", () => {
     const call = (claudeResume.resume as ReturnType<typeof vi.fn>).mock.calls.find((c) => c[2] === "tok-123");
     expect(call, "organic seat resume should have been attempted").toBeDefined();
     expect(call![4]).toBe("full_bypass"); // 5th arg = resolvedPosture from RIG provenance
+    expect(call![9]).toBe(true); // saved launch choice survives the database reopen
     expect(new AppliedLaunchObservationStore(db2).readCurrent(organic.id)).toMatchObject({
       runtime: "claude-code",
       axis: "permission",

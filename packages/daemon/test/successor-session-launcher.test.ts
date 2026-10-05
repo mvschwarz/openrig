@@ -6,6 +6,7 @@ import { SuccessorSessionLauncher } from "../src/domain/successor-session-launch
 import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import type { RuntimeAdapter } from "../src/domain/runtime-adapter.js";
 import type { TmuxOptionDefaultsApplier } from "../src/domain/tmux-option-defaults.js";
+import type { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
 describe("SuccessorSessionLauncher", () => {
   let db: Database.Database;
@@ -75,6 +76,16 @@ describe("SuccessorSessionLauncher", () => {
     expect(launchHarness).toHaveBeenCalledTimes(1);
     const binding = launchHarness.mock.calls[0]![0] as { model?: string };
     expect(binding.model).toBe("gpt-5.4-cheap");
+  });
+
+  it("the successor keeps the saved non-interruptive rig choice", async () => {
+    listPanes.mockResolvedValue([{ id: "%42", index: 0, cwd: "/w", width: 80, height: 24, active: true }]);
+    const res = await launcher().createSuccessor({
+      node: { id: "node-1", runtime: "codex", cwd: "/w", nonInterruptive: true, launchPosture: "full_bypass" },
+      departingSessionName: "dev-impl@rig",
+    });
+    expect(res.ok).toBe(true);
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ nonInterruptive: true, launchPosture: "full_bypass" });
   });
 
   it("#75: the successor's launch binding carries the configured effort", async () => {
@@ -282,14 +293,49 @@ describe("SuccessorSessionLauncher", () => {
 
     afterEach(() => vi.useRealTimers());
 
-    function timedLauncher(timeoutMs = 30_000): SuccessorSessionLauncher {
+    function timedLauncher(timeoutMs?: number, readinessSettings?: Pick<SettingsStore, "resolveOne">): SuccessorSessionLauncher {
       const tmux = { createSession, listPanes, killSession, respawnPane, setRemainOnExit, signalPaneProcess, isPaneDead, getDefaultShell, getPaneCommand } as unknown as TmuxAdapter;
       return new SuccessorSessionLauncher(tmux, discoveryRepo, {
         runtimeAdapters: { codex: fakeAdapter("codex") },
-        readinessTimeoutMs: timeoutMs,
+        readinessTimeoutMs: timeoutMs ?? (readinessSettings ? undefined : 30_000),
+        readinessSettings,
         sleep: async (ms) => { vi.setSystemTime(Date.now() + ms); },
       });
     }
+
+    it("uses the configured window for successor readiness", async () => {
+      checkReady.mockImplementation(async () => ({ ready: Date.now() >= 40_000 }));
+      const readinessSettings = {
+        resolveOne: () => ({ value: 45, source: "file", defaultValue: 30 }),
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+
+      const res = await timedLauncher(undefined, readinessSettings).createSuccessor({
+        node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r",
+      });
+
+      expect(res.ok).toBe(true);
+      expect(Date.now()).toBe(45_000);
+    });
+
+    it("falls back to the 30-second window with a warning when the settings read throws", async () => {
+      checkReady.mockImplementation(async () => ({ ready: Date.now() >= 20_000 }));
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      const readinessSettings = {
+        resolveOne: () => { throw new Error("config.json is not valid JSON"); },
+      } as unknown as Pick<SettingsStore, "resolveOne">;
+
+      try {
+        const res = await timedLauncher(undefined, readinessSettings).createSuccessor({
+          node: { id: "n", runtime: "codex", cwd: "/w" }, departingSessionName: "a@r",
+        });
+
+        expect(res.ok).toBe(true);
+        expect(Date.now()).toBe(30_000);
+        expect(stderr).toHaveBeenCalledWith(expect.stringContaining("falling back to 30s default"));
+      } finally {
+        stderr.mockRestore();
+      }
+    });
 
     it("accepts a successor ready after 20 seconds within the 30-second allowance", async () => {
       checkReady.mockImplementation(async () => ({ ready: Date.now() >= 20_000 }));
@@ -313,7 +359,7 @@ describe("SuccessorSessionLauncher", () => {
 
       expect(Date.now()).toBe(30_000);
       expect(probeTimes).toEqual([0, 1000, 3000, 7000, 15_000, 30_000]);
-      expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_not_ready", message: "Successor did not become a ready agent: still starting at deadline" });
+      expect(res).toMatchObject({ ok: false, step: "start_agent", code: "successor_not_ready", message: "Successor did not become a ready agent: readiness timeout after 30s: still starting at deadline" });
       expect(discoveryRepo.listDiscovered()).toHaveLength(0);
       expect(killSession).not.toHaveBeenCalled();
     });

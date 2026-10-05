@@ -8,6 +8,24 @@ This guide teaches you how to think about what goes into an agent's startup expe
 
 ---
 
+## Continue after a native consent prompt
+
+If a fresh Claude seat is waiting at its bypass-permissions warning, review and
+answer that warning in the seat's native pane. OpenRig does not accept it for you
+or send configured startup context into the active dialog. The seat reports
+`attention_required` and retains that context for the same occupant.
+
+After accepting, run `rig seat continue <seat>` (or use **continue** in the
+TUI's startup actions). This delivers the pending context without relaunching
+Claude. It does not replay a delivery that already started. A timeout reports
+an unknown outcome; inspect `rig seat status <seat>` before taking another action.
+Runtime readiness, startup delivery, and orientation proof remain separate;
+a missing proof does not block this continuation.
+
+Other fresh-launch prerequisites, such as login or workspace trust, use the same
+continuation: resolve the prerequisite in the native pane, then run the displayed
+`rig seat continue <seat>` command to deliver its pending startup context.
+
 ## Two Categories of Startup
 
 Everything an agent receives at boot time falls into one of two categories:
@@ -257,7 +275,7 @@ OpenRig performs best-effort deterministic runtime configuration for managed ses
   Purpose: apply context collector/activity hooks and selected `claude_settings_fragment` resources inside the project without committing them to git.
 - Claude project-local MCP config: `.mcp.json`
   Purpose: apply selected `claude_mcp_fragment` resources for Claude in that project.
-- Codex global config: `~/.codex/config.toml`
+- Codex global config: `$CODEX_HOME/config.toml`, or `~/.codex/config.toml` when unset
   Purpose: pre-trust managed workspaces and apply selected `codex_config_fragment` resources. Codex currently has no equivalent project-local MCP config path for global profile settings.
 
 Two important caveats:
@@ -268,6 +286,39 @@ Permission mode and runtime resource projection are separate. A selected fragmen
 can affect native configuration, but OpenRig's launch flags can override those
 values. Recording a config-surface `permission_policy` is not proof that its
 rules were translated or applied. See [permission precedence and limits](getting-started.md#custom-settings-and-precedence).
+
+### Separate Codex homes for separate installations
+
+Set an **absolute `CODEX_HOME` in the environment that starts the daemon** when
+you want a separate Codex configuration and state root. OpenRig uses that root
+for its startup hook setup/removal and trust records, feature flag, workspace
+trust and selected config fragments. Startup can write those files even when
+the daemon has no seats.
+
+The explicit selection also applies to future managed Codex fresh, resume and
+fork launches, their capability/profile/configuration probes, native thread and
+context reads, and plugin-cache discovery. Launch commands reassert it after
+pane shell startup, so an rc file cannot silently switch that launch to another
+Codex home. Executable and PATH selection stay the same. Existing running
+sessions are not moved or restarted; a thread in another home is not searched
+as a fallback for an explicitly selected home.
+
+**With `CODEX_HOME` unset, a second install still shares `~/.codex`.** Setting only
+`OPENRIG_HOME` separates OpenRig state, not provider configuration. The default
+launch behavior is unchanged, including existing pane-shell overrides.
+
+OpenRig does not copy or migrate authentication, history, rules, trust or
+settings into the selected home. A separate file-backed home needs its intended
+authentication provisioned if absent; OS credential stores and other config
+layers can behave differently, so a new login is not universally required.
+Explicit Codex auth commands resolve their **caller's** `CODEX_HOME`, otherwise
+`$HOME/.codex`; contacting a daemon with `OPENRIG_URL` does not retarget auth
+save/switch/registry writes to that daemon's selection. Set the intended root
+on those commands as well.
+
+This separates provider files, not OS users or accounts. Project-local resources
+still use the selected project directory; shared project and system settings
+remain shared.
 
 ### Runtime Differences
 
@@ -286,6 +337,14 @@ rules were translated or applied. See [permission precedence and limits](getting
 - Approval policy and sandbox access are separate controls. OpenRig's default
   `-s workspace-write` selects the sandbox; it does not force `-a`. A member's
   `codex_config_profile` selects native `-p`, distinct from the AgentSpec `profile`.
+- On that plain `-s workspace-write` launch (fresh, resume, fork or restore), a
+  short-lived `codex app-server` first reads Codex's own configuration with the
+  seat's executable, home and working directory. OpenRig adds
+  `-c sandbox_workspace_write.network_access=true` only when no configuration
+  layer sets network access and no managed requirement could restrict it. A
+  timeout, error or unrecognized answer adds nothing. Named profiles and full
+  bypass are not read. The read may write Codex's own state files in
+  `CODEX_HOME`, read its login and fetch managed policy, as a Codex start does.
 - Can self-install dependencies from instructions but timer/recurring behavior is not reliably available
 
 When authoring startup content, note which instructions are runtime-specific. For example, an orchestrator that needs a monitoring loop should include instructions like: "If running Claude Code, use `/loop 3m` to periodically check rig health. If running Codex, check rig health at the start of each task cycle instead."

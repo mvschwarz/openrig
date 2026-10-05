@@ -647,7 +647,7 @@ describe("rig scope mission create (HG-14 + HG-15)", () => {
     expect(content).toMatch(/mission: OPR\.0\.6\.0/);
     // titleFromSlug("0.6.0") → "0.6.0" (no separators to titlecase); the
     // bare version string is what lands in mission_name.
-    expect(content).toMatch(/name: 0\.6\.0/);
+    expect(content).toMatch(/name: "0\.6\.0"/);
     expect(content).toMatch(/# Notes — 0\.6\.0/);
     expect(content).toContain("`SPEC.md` contract");
   });

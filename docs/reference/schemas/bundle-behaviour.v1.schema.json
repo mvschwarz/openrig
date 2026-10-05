@@ -1,0 +1,542 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openrig.dev/schemas/bundle-behaviour.v1.json",
+  "title": "Before-install behaviour view (openrig.bundle-behaviour/v1)",
+  "description": "Derived from the archive's files alone, for one configuration and one assembler version; kept outside the archive, so it never feeds the package digest. A view, never a gate; carries no tested status. Consumers ignore unknown properties; producers add only optional properties within v1. An empty list means none are known; something unknown goes in unknownBeforeLaunch.",
+  "$defs": {
+    "sourceRef": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "field": {
+          "type": "string"
+        }
+      },
+      "description": "Archive-relative file, and optionally the field within it."
+    }
+  },
+  "type": "object",
+  "required": [
+    "schema",
+    "state",
+    "identity"
+  ],
+  "properties": {
+    "schema": {
+      "const": "openrig.bundle-behaviour/v1"
+    },
+    "state": {
+      "enum": [
+        "generated",
+        "not_generated"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "localInspectCommand": {
+      "type": "string",
+      "description": "For not_generated: the existing command that shows this view locally, for example rig bundle inspect <archive> --json."
+    },
+    "identity": {
+      "type": "object",
+      "required": [
+        "configurationId",
+        "packageDigest",
+        "assembler",
+        "generator"
+      ],
+      "properties": {
+        "source": {
+          "oneOf": [
+            {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/source"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configurationId": {
+          "oneOf": [
+            {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/configurationId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "null when the archive doesn't state it (a local or legacy archive)."
+        },
+        "packageDigest": {
+          "oneOf": [
+            {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/packageDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assembler": {
+          "oneOf": [
+            {
+              "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/assembler"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The OpenRig that built the archive, as the archive states it; null when unstated. Never the inspecting OpenRig."
+        },
+        "generator": {
+          "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/assembler",
+          "description": "The OpenRig that produced this view."
+        },
+        "compatibility": {
+          "type": "object",
+          "properties": {
+            "minDaemonVersion": {
+              "type": "string"
+            },
+            "minCliVersion": {
+              "type": "string"
+            }
+          }
+        },
+        "statedProvenance": {
+          "type": "object",
+          "description": "As the bundle states it; not verified."
+        },
+        "integrity": {
+          "type": "object",
+          "required": [
+            "digestValid",
+            "filesVerified"
+          ],
+          "properties": {
+            "digestValid": {
+              "type": "boolean"
+            },
+            "filesVerified": {
+              "type": "boolean"
+            }
+          },
+          "description": "Self-consistency of the archive; not authorship."
+        }
+      }
+    },
+    "team": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "seat",
+          "pod",
+          "member",
+          "agentRef",
+          "runtime",
+          "cwd"
+        ],
+        "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
+          "pod": {
+            "type": "string",
+            "minLength": 1
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1
+          },
+          "agentRef": {
+            "type": "string",
+            "minLength": 1
+          },
+          "profile": {
+            "type": "string"
+          },
+          "runtime": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/runtime"
+          },
+          "model": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "posture": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "seat",
+          "shellAccess",
+          "selection",
+          "basis",
+          "nativeEffect"
+        ],
+        "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
+          "shellAccess": {
+            "type": "string",
+            "minLength": 1
+          },
+          "selection": {
+            "type": "string",
+            "minLength": 1
+          },
+          "basis": {
+            "enum": [
+              "explicit",
+              "product_default",
+              "unresolved"
+            ],
+            "description": "Declared in the archive, the product's conditional default, or not resolvable before launch."
+          },
+          "nativeEffect": {
+            "const": "unknown",
+            "description": "Host settings (for example OPENRIG_YOLO, persisted or native settings) decide the effective permission at launch."
+          },
+          "permissionPrompts": {
+            "enum": ["off", "on", "default"],
+            "description": "Archive declaration per seat: off for full_bypass (including builtin:yolo) on any runtime; on for a Claude/Codex flag-surface floor policy, or Codex under auto; default for Claude/Codex with no declared policy. Omitted for Claude under auto, config-surface policies, host-resolved Codex profiles, and Pi except declared full bypass. Absent means not stated, never on. Host settings may differ; nativeEffect remains unknown."
+          },
+          "sourceRefs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceRef"
+            }
+          },
+          "firstRunWarnings": {
+            "type": "object",
+            "properties": {
+              "claudeBypass": {
+                "const": "harness_asks_once"
+              }
+            },
+            "description": "Declared full-bypass Claude seat: the harness asks for bypass-warning acceptance if it has not been remembered. No host acceptance state is read; nativeEffect stays unknown."
+          },
+          "nonInterruptive": {
+            "const": "available",
+            "description": "This declared full-bypass Claude/Codex seat can use --non-interruptive launch flags. Availability is not the operator choice or proof that no prompt will appear. Omitted for other postures, unresolved policies and runtimes with no such flags."
+          }
+        }
+      }
+    },
+    "toldFiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "pathOrRef",
+          "resolution"
+        ],
+        "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pathOrRef": {
+            "type": "string",
+            "minLength": 1
+          },
+          "delivery": {
+            "type": "string"
+          },
+          "resolution": {
+            "enum": [
+              "archive",
+              "host_at_launch",
+              "unresolved"
+            ]
+          },
+          "sourceRefs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceRef"
+            }
+          }
+        }
+      }
+    },
+    "alsoRuns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "pathOrRef",
+          "resolution"
+        ],
+        "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pathOrRef": {
+            "type": "string",
+            "minLength": 1
+          },
+          "trigger": {
+            "type": "string"
+          },
+          "resolution": {
+            "enum": [
+              "archive",
+              "host_at_launch",
+              "unresolved"
+            ]
+          },
+          "sourceRefs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceRef"
+            }
+          }
+        }
+      }
+    },
+    "writes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "destinationBase",
+          "path",
+          "operation",
+          "phase"
+        ],
+        "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "destinationBase": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "operation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "phase": {
+            "type": "string",
+            "minLength": 1
+          },
+          "condition": {
+            "type": "string"
+          },
+          "sourceRefs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceRef"
+            }
+          }
+        }
+      }
+    },
+    "outsideAddresses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "domain",
+          "sourceRefs"
+        ],
+        "properties": {
+          "domain": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceRefs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceRef"
+            }
+          }
+        }
+      }
+    },
+    "needs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "status"
+        ],
+        "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "versionConstraint": {
+            "type": "string"
+          },
+          "commands": {
+            "type": "array",
+            "description": "Unexecuted author setup lines, in order in one shell; the install command follows in the resulting working directory.",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "status": {
+            "const": "not_checked"
+          },
+          "sourceRefs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceRef"
+            }
+          }
+        }
+      }
+    },
+    "unknownBeforeLaunch": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "subject",
+          "reason"
+        ],
+        "properties": {
+          "seat": {
+            "$ref": "https://openrig.dev/schemas/bundle-common.v1.json#/$defs/member"
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceRefs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/sourceRef"
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "not_generated"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "reason",
+          "localInspectCommand"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "team"
+              ]
+            },
+            {
+              "required": [
+                "posture"
+              ]
+            },
+            {
+              "required": [
+                "toldFiles"
+              ]
+            },
+            {
+              "required": [
+                "alsoRuns"
+              ]
+            },
+            {
+              "required": [
+                "writes"
+              ]
+            },
+            {
+              "required": [
+                "outsideAddresses"
+              ]
+            },
+            {
+              "required": [
+                "needs"
+              ]
+            },
+            {
+              "required": [
+                "unknownBeforeLaunch"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "generated"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "team",
+          "posture",
+          "toldFiles",
+          "alsoRuns",
+          "writes",
+          "outsideAddresses",
+          "needs",
+          "unknownBeforeLaunch"
+        ]
+      }
+    }
+  ]
+}

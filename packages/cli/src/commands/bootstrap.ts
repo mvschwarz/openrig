@@ -4,6 +4,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { bundleRoutingSummary, getCliVersion } from "./bundle.js";
 
 const LONG_RUNNING_BOOTSTRAP_TIMEOUT_MS = 120_000;
 
@@ -24,7 +25,7 @@ function logStageDetailErrors(data: Record<string, unknown>) {
 }
 
 export function bootstrapCommand(depsOverride?: StatusDeps): Command {
-  const cmd = new Command("bootstrap").description("Bootstrap a rig from a spec file");
+  const cmd = new Command("bootstrap").description("Bootstrap a rig from a spec file or bundle");
   const getDeps = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   async function getClient(deps: StatusDeps): Promise<DaemonClient | null> {
@@ -34,12 +35,15 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
   }
 
   cmd
-    .argument("<spec>", "Path to rig spec YAML file")
+    .argument("<spec>", "Path to rig spec YAML file or .rigbundle archive")
     .option("--plan", "Plan mode — show reviewed plan without executing")
     .option("--yes", "Auto-approve trusted deterministic actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")
+    .option("--target <path>", "Bundle install directory (defaults to current directory)")
+    .option("--skip-version-check", "Override the archive install compatibility check")
+    .option("--force", "Override archive install conflicts (may produce partial install state)")
     .option("--json", "Output as parseable JSON")
-    .action(async (spec: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; json?: boolean }) => {
+    .action(async (spec: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; skipVersionCheck?: boolean; force?: boolean; json?: boolean }) => {
       const deps = getDeps();
       const client = await getClient(deps);
       if (!client) { process.exitCode = 1; return; }
@@ -62,12 +66,25 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
         }
       }
 
+      // Reuse bundle install's source-kind, compatibility checks, audit and
+      // stable materialization. The archive's extraction directory is temporary.
+      const bundleRequest = /\.rigbundle$/i.test(sourceRef) ? {
+        bundlePath: nodePath.resolve(sourceRef),
+        plan: opts.plan ?? false,
+        autoApprove: opts.yes ?? false,
+        targetRoot: nodePath.resolve(opts.target ?? process.cwd()),
+        cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
+        cliVersion: getCliVersion(),
+        skipVersionCheck: opts.skipVersionCheck ?? false,
+        force: opts.force ?? false,
+      } : undefined;
+
       if (opts.plan) {
         // Plan mode
-        const res = await client.post<Record<string, unknown>>("/api/bootstrap/plan", {
+        const res = await client.post<Record<string, unknown>>(bundleRequest ? "/api/bundles/install" : "/api/bootstrap/plan", bundleRequest ?? {
           sourceRef,
           cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
-        });
+        }, bundleRequest ? { timeoutMs: LONG_RUNNING_BOOTSTRAP_TIMEOUT_MS } : undefined);
 
         if (opts.json) {
           console.log(JSON.stringify(res.data));
@@ -102,7 +119,7 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
       }
 
       // Apply mode
-      const res = await client.post<Record<string, unknown>>("/api/bootstrap/apply", {
+      const res = await client.post<Record<string, unknown>>(bundleRequest ? "/api/bundles/install" : "/api/bootstrap/apply", bundleRequest ?? {
         sourceRef,
         cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
         autoApprove: opts.yes ?? false,
@@ -125,8 +142,14 @@ export function bootstrapCommand(depsOverride?: StatusDeps): Command {
           for (const e of errors) {
             console.error(`  ERROR: ${e}`);
           }
+        } else if (typeof res.data["error"] === "string") {
+          console.error(`  ERROR: ${res.data["error"]}`);
         }
         logStageDetailErrors(res.data);
+        if (bundleRequest) {
+          for (const line of bundleRoutingSummary(res.data)) console.log(line);
+        }
+        for (const warning of (res.data["warnings"] as string[] | undefined) ?? []) console.log(`Warning: ${warning}`);
       }
 
       const resultStatus = (res.data["status"] as string) ?? "";

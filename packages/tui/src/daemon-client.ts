@@ -13,7 +13,9 @@ export interface DaemonClientOptions {
 
 export class StartupRequestError extends Error {
   constructor(readonly status: number, readonly result: Record<string, unknown>) {
-    super(String(result.message ?? result.error ?? `Startup request returned HTTP ${status}`));
+    super([String(result.message ?? result.error ?? `Startup request returned HTTP ${status}`),
+      ...(Array.isArray(result.warnings) ? result.warnings.filter((w): w is string => typeof w === "string") : []),
+    ].join("\n"));
   }
 }
 
@@ -47,12 +49,14 @@ export interface LaunchNodeResult {
   code?: string;
   launched?: Array<{ logicalId?: string }>;
   alreadyRunning?: Array<{ logicalId?: string }>;
+  warnings?: string[];
 }
 
 export function launchNodeNotice(agent: string, result: LaunchNodeResult): string {
-  return result.code === "already_running"
+  const notice = result.code === "already_running"
     ? `agent already running: ${agent}`
     : `agent run requested: ${agent}`;
+  return [notice, ...(result.warnings ?? [])].join("\n");
 }
 
 export class DaemonClient {

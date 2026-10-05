@@ -97,5 +97,4 @@ every workflow a daemon feature.**
 - `extension-and-user-workspace` skill — sibling primitive for user-owned behavior added to runtime; bundle vs extension boundary
 - `specification-system` skill — rig specs / agent specs / workflow specs that bundles package
 - `agent-starters` skill — bundles can include or reference Agent Starters
-- `composable-priming-packs` skill — bundles can package priming packs
 - `openrig-user` skill — `rig bundle create / inspect / install` CLI surface

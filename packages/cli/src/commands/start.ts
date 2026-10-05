@@ -212,8 +212,6 @@ Examples:
             db: resolvedConfig.db.path,
             transcriptsEnabled: resolvedConfig.transcripts.enabled,
             transcriptsPath: resolvedConfig.transcripts.path,
-            transcriptsLines: resolvedConfig.transcripts.lines,
-            transcriptsPollIntervalSeconds: resolvedConfig.transcripts.pollIntervalSeconds,
             workspaceRoot: resolvedConfig.workspace.root,
             contextRoot: resolvedConfig.context.root,
             skillsRoot: resolvedConfig.skills.root,

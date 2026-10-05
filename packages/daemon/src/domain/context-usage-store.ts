@@ -17,6 +17,8 @@ export const FRESHNESS_THRESHOLD_MS = 600_000; // 10 minutes per PM spec
 export interface ContextUsageStoreOpts {
   stateDir: string;
   codexHomeDir?: string | null;
+  /** Explicit CODEX_HOME. codexHomeDir above is the legacy OS-home input. */
+  codexHome?: string;
   // GHOST-STAGE (c-id): resolve the LIVE occupant's boot time (atom-B tenure) for a node, so a
   // reading sampled BEFORE the current occupant booted (a prior generation) is rejected instead of
   // driving the threshold. null = UNKNOWN → the gate is inert (note-2).
@@ -85,12 +87,14 @@ export class ContextUsageStore {
   readonly db: Database.Database;
   private stateDir: string;
   private codexHomeDir: string | null;
+  private codexHome?: string;
 
   private readonly resolveOccupantBootAt?: (nodeId: string) => string | null;
   constructor(db: Database.Database, opts: ContextUsageStoreOpts) {
     this.db = db;
     this.stateDir = opts.stateDir;
     this.codexHomeDir = opts.codexHomeDir ?? safeHomeDir();
+    this.codexHome = opts.codexHome;
     this.resolveOccupantBootAt = opts.resolveOccupantBootAt;
   }
 
@@ -452,7 +456,7 @@ export class ContextUsageStore {
   }
 
   private resolveCodexStateDbPaths(): string[] {
-    return this.codexHomeDir ? resolveCodexDbPaths(this.codexHomeDir, "state") : [];
+    return this.codexHome || this.codexHomeDir ? resolveCodexDbPaths(this.codexHomeDir ?? "", "state", undefined, this.codexHome) : [];
   }
 
   private readLatestCodexTokenCount(rolloutPath: string): CodexTokenCountEvent | null {

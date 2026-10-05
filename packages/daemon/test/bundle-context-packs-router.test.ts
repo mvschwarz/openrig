@@ -337,4 +337,35 @@ describe("routeContextPacks", () => {
     // CRUCIAL: no copyDir fires (operator-invisible pack must not route)
     expect(fs._copyCalls).toHaveLength(0);
   });
+
+  it("an identical pack already installed under the same name is reused, not rewritten", () => {
+    const src = `${BUNDLE_ROOT}/context-packs/world`;
+    const installed = `${TARGET}/world`;
+    const fs = mockFs({
+      dirs: [src, installed],
+      files: [`${src}/manifest.yaml`, `${src}/intro.md`, `${installed}/manifest.yaml`, `${installed}/intro.md`],
+      contents: {
+        [`${src}/manifest.yaml`]: "name: world", [`${installed}/manifest.yaml`]: "name: world",
+        [`${src}/intro.md`]: "# World", [`${installed}/intro.md`]: "# World",
+      },
+    });
+    const result = routeContextPacks(makeInput({ declaredContextPacks: ["context-packs/world/manifest.yaml"] }), fs);
+    expect(result.records[0]).toMatchObject({ status: "already_installed", installedAt: installed });
+    expect(fs._copyCalls).toEqual([]);
+  });
+
+  it("a different pack already installed under the same name (a --git install) is kept untouched", () => {
+    const src = `${BUNDLE_ROOT}/context-packs/world`;
+    const installed = `${TARGET}/world`;
+    const fs = mockFs({
+      dirs: [src, installed],
+      files: [`${src}/manifest.yaml`, `${installed}/manifest.yaml`, `${installed}/.openrig-git-source.json`],
+      contents: { [`${src}/manifest.yaml`]: "name: world\nversion: 0.2.0", [`${installed}/manifest.yaml`]: "name: world\nversion: 0.1.0" },
+    });
+    const result = routeContextPacks(makeInput({ declaredContextPacks: ["context-packs/world/manifest.yaml"] }), fs);
+    expect(result.records[0]?.status).toBe("kept_existing");
+    expect(result.records[0]?.detail).toMatch(/rig context rm world/);
+    expect(result.routedCount).toBe(0);
+    expect(fs._copyCalls).toEqual([]);
+  });
 });

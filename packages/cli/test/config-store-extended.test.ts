@@ -64,6 +64,7 @@ function clearEnv(): () => void {
     "OPENRIG_FEED_SUBSCRIPTIONS_SHIPPED", "OPENRIG_FEED_SUBSCRIPTIONS_PROGRESS",
     "OPENRIG_FEED_SUBSCRIPTIONS_AUDIT_LOG",
     "OPENRIG_RUNTIME_CODEX_HOOKS_ENABLED",
+    "OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT",
     "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION",
@@ -128,6 +129,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "context.system_world",
       "skills.root",
       "onboarding.default_pack.enabled",
+      "launch.non_interruptive",
       "health.context_pressure.warning_percent",
       "health.context_pressure.critical_percent",
       "files.allowlist", "progress.scan_roots",
@@ -149,6 +151,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "feed.subscriptions.audit_log",
       // plugin-primitive Phase 3a slice 3.5 — Codex feature flag.
       "runtime.codex.hooks_enabled",
+      "runtime.readiness_timeout_seconds",
       // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10.
       "policies.claude_compaction.enabled",
       "policies.claude_compaction.threshold_percent",
@@ -237,6 +240,18 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "queue.pickup_stall_threshold_minutes" as never,
     );
     expect(setting).toMatchObject({ value: 3, source: "default", defaultValue: 3 });
+  });
+
+  it("configures the launch readiness window with strict bounds and env precedence", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("runtime.readiness_timeout_seconds")).toMatchObject({ value: 30, source: "default" });
+    store.set("runtime.readiness_timeout_seconds", "45");
+    expect(store.resolve().runtime.readinessTimeoutSeconds).toBe(45);
+    process.env["OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS"] = "60";
+    expect(store.resolveWithSource("runtime.readiness_timeout_seconds")).toMatchObject({ value: 60, source: "env" });
+    for (const value of ["0", "601", "2.5", "45junk"]) {
+      expect(() => store.set("runtime.readiness_timeout_seconds", value)).toThrow(/integer in \[1, 600\]/);
+    }
   });
 
   it("exposes mutable 95/99 context-pressure thresholds with strict ordering and provenance", () => {

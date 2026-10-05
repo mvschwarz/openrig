@@ -164,6 +164,25 @@ describe("Up API route", () => {
     expect(body.nodes[0].status).toBe("fresh-primed");
   });
 
+  it.each([[false, true, true], [true, undefined, true], [true, false, false], [false, undefined, false]] as const)("non-interruptive stored %s / option %s restores as %s; plan does not write", async (stored, option, expected) => {
+    const rig = rigRepo.createRig("saved-choice");
+    rigRepo.setRigNonInterruptive(rig.id, stored);
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "worker@saved-choice");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "retained", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
+    const request = (plan: boolean) => app.request("/api/up", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceRef: "saved-choice", nonInterruptive: option, plan }) });
+    expect((await request(true)).status).toBe(200);
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(stored);
+    const response = await request(false);
+    expect(response.status).toBe(200);
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(expected);
+    if (expected) expect((await response.json()).warnings.join(" ")).toContain("saved for this rig");
+  });
+
   it("POST /api/up restoring an existing rig name returns validation blockers", async () => {
     const rig = rigRepo.createRig("restore-blocked");
     const fixtureNode = rigRepo.addNode(rig.id, "worker", { role: "worker" });
@@ -194,7 +213,7 @@ describe("Up API route", () => {
     const res = await app.request("/api/up", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceRef: "restore-blocked" }),
+      body: JSON.stringify({ sourceRef: "restore-blocked", nonInterruptive: true }),
     });
 
     expect(res.status).toBe(409);
@@ -203,6 +222,7 @@ describe("Up API route", () => {
     expect(body.code).toBe("pre_restore_validation_failed");
     expect(body.rigResult).toBe("not_attempted");
     expect(body.blockers[0].path).toBe(missingPath);
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(false);
   });
 
   // L3b: rig-name path falls back to manual snapshot when no auto-pre-down exists.

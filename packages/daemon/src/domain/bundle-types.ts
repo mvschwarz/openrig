@@ -2,6 +2,52 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 // -- Shared types --
 
+/** Author-declared setup, for display only. OpenRig never executes or checks it. */
+export interface BundlePrecondition {
+  name: string;
+  commands?: string[];
+}
+
+export function normalizePreconditionsBlock(raw: unknown, onMalformed?: (reason: string) => void): BundlePrecondition[] | undefined {
+  const invalid = (reason: string) => { onMalformed?.(reason); return undefined; };
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return invalid("preconditions must be an array");
+  const result: BundlePrecondition[] = [];
+  for (const [index, entry] of (raw as unknown[]).entries()) {
+    const p = entry as Partial<BundlePrecondition> | null;
+    if (!p || typeof p !== "object" || Array.isArray(p) || typeof p.name !== "string" || !p.name.trim()) {
+      return invalid(`preconditions[${index}].name must be non-empty text`);
+    }
+    if (p.commands !== undefined && (!Array.isArray(p.commands) || p.commands.some(command =>
+      typeof command !== "string" || !command.trim() || /[\r\n]/.test(command)))) {
+      return invalid(`preconditions[${index}].commands must be an array of non-empty, single-line strings`);
+    }
+    result.push({ name: p.name, ...(p.commands !== undefined ? { commands: [...p.commands] } : {}) });
+  }
+  return result;
+}
+
+export interface BundleSourceIdentity {
+  repository: string;
+  folder: string;
+  requestedRef: string;
+  resolvedCommit: string;
+  canonicalUrl: string;
+}
+
+/** Shared source-format spelling. Attribution only, not proof of authorship. */
+export function normalizeBundleSource(raw: unknown): BundleSourceIdentity | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const s = raw as Record<string, unknown>;
+  if (typeof s.repository !== "string" || !/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/.test(s.repository)
+    || typeof s.folder !== "string" || /[\x00-\x1f\x7f]/.test(s.folder) || (s.folder !== "." && !isRelativeSafePath(s.folder))
+    || typeof s.requestedRef !== "string" || !s.requestedRef || /[\x00-\x1f\x7f]/.test(s.requestedRef)
+    || typeof s.resolvedCommit !== "string" || !/^[a-f0-9]{40}$/.test(s.resolvedCommit)) return undefined;
+  const expected = `${s.repository}/tree/${s.resolvedCommit}${s.folder === "." ? "" : "/" + s.folder.split("/").map(encodeURIComponent).join("/")}`;
+  if (s.canonicalUrl !== expected) return undefined;
+  return { repository: s.repository, folder: s.folder, requestedRef: s.requestedRef, resolvedCommit: s.resolvedCommit, canonicalUrl: expected };
+}
+
 /**
  * Provenance block — attribution metadata for a bundle artifact. All fields
  * optional for backward compat; bundles without provenance install unchanged.
@@ -9,6 +55,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
  * and audit-trail records. Not cryptographically signed at this stage.
  */
 export interface BundleProvenance {
+  source?: BundleSourceIdentity;
   /** ISO timestamp; mirrors root createdAt at create time. */
   createdAt?: string;
   /** os.hostname() of the host that ran rig bundle create. */
@@ -51,11 +98,13 @@ function validateProvenanceBlock(raw: unknown, errors: string[]): void {
       errors.push(`provenance.${field} must be a string`);
     }
   }
+  if (p.source !== undefined && !normalizeBundleSource(p.source)) errors.push("provenance.source must name a credential-free GitHub folder at a full commit");
 }
 
 /** Serialize a typed BundleProvenance to the snake_case YAML record shape. */
 function provenanceToYamlRecord(p: BundleProvenance): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  if (p.source) out.source = p.source;
   if (p.createdAt !== undefined) out["created_at"] = p.createdAt;
   if (p.sourceHost !== undefined) out["source_host"] = p.sourceHost;
   if (p.authorSession !== undefined) out["author_session"] = p.authorSession;
@@ -343,6 +392,8 @@ export function normalizeProvenanceBlock(raw: unknown): BundleProvenance | undef
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const p = raw as Record<string, unknown>;
   const result: BundleProvenance = {};
+  const source = normalizeBundleSource(p.source);
+  if (source) result.source = source;
   if (typeof p["created_at"] === "string") result.createdAt = p["created_at"];
   if (typeof p["source_host"] === "string") result.sourceHost = p["source_host"];
   if (typeof p["author_session"] === "string") result.authorSession = p["author_session"];
@@ -383,7 +434,9 @@ export interface PodBundleManifest {
   cultureFile?: string;
   integrity?: BundleIntegrity;
   provenance?: BundleProvenance;
+  assembler?: { openrigVersion: string; commit?: string };
   compatibility?: BundleCompatibility;
+  preconditions?: BundlePrecondition[];
   /** Item 6 cross-primitive bundling: skill paths to route to the operator skills library on install. */
   skills?: string[];
   /** Item 6 cross-primitive bundling: plugin references to install via the plugin primitive (HYBRID-mode bundles reference existing plugins rather than forking content). */
@@ -394,6 +447,26 @@ export interface PodBundleManifest {
   contextPacks?: string[];
   /** Item 6 cross-primitive bundling: paths to agent-image DIRECTORIES (per PRD §Item 6 line 197); router copies the declared directory to the operator agent-images library on install. Consumer requires manifest.yaml inside each image dir. (Checkpoint 7.3g) */
   agentImages?: string[];
+  /** The project this rig works in: its id and the bundle folder holding project.yaml. Install registers it in the workspace catalog and associates the rig with it. */
+  project?: BundleProjectReference;
+  /** The configuration this archive was built in (configuration ID, and the preset when it matches one). Outside the package digest. */
+  configuration?: { id: string; preset?: string };
+}
+
+export interface BundleProjectReference {
+  id: string;
+  path: string;
+}
+
+function validateProjectBlock(raw: unknown, errors: string[]): void {
+  if (raw === undefined) return;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    errors.push("project must be an object with id and path");
+    return;
+  }
+  const p = raw as Record<string, unknown>;
+  if (typeof p["id"] !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(p["id"])) errors.push("project.id must be a simple name (letters, digits, '.', '_', '-')");
+  if (typeof p["path"] !== "string" || !isRelativeSafePath(p["path"])) errors.push("project.path must be a safe relative path");
 }
 
 export function validatePodBundleManifest(raw: unknown): { valid: boolean; errors: string[] } {
@@ -427,6 +500,7 @@ export function validatePodBundleManifest(raw: unknown): { valid: boolean; error
   validateWorkflowSpecsBlock(m["workflow_specs"], errors);
   validateContextPacksBlock(m["context_packs"], errors);
   validateAgentImagesBlock(m["agent_images"], errors);
+  validateProjectBlock(m["project"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -455,13 +529,17 @@ export function serializePodBundleManifest(manifest: PodBundleManifest): string 
   };
   if (manifest.cultureFile) doc["culture_file"] = manifest.cultureFile;
   if (manifest.integrity) doc["integrity"] = { algorithm: manifest.integrity.algorithm, files: manifest.integrity.files };
+  if (manifest.assembler) doc["assembler"] = manifest.assembler;
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);
+  if (manifest.preconditions) doc["preconditions"] = manifest.preconditions;
   if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
   if (manifest.plugins && manifest.plugins.length > 0) doc["plugins"] = manifest.plugins.map((p) => ({ id: p.id, source: { kind: p.source.kind, path: p.source.path } }));
   if (manifest.workflowSpecs && manifest.workflowSpecs.length > 0) doc["workflow_specs"] = manifest.workflowSpecs;
   if (manifest.contextPacks && manifest.contextPacks.length > 0) doc["context_packs"] = manifest.contextPacks;
   if (manifest.agentImages && manifest.agentImages.length > 0) doc["agent_images"] = manifest.agentImages;
+  if (manifest.project) doc["project"] = { id: manifest.project.id, path: manifest.project.path };
+  if (manifest.configuration) doc["configuration"] = manifest.configuration.preset ? { id: manifest.configuration.id, preset: manifest.configuration.preset } : { id: manifest.configuration.id };
   return stringifyYaml(doc);
 }
 
@@ -498,7 +576,9 @@ export interface LegacyBundleManifest {
   packages: LegacyBundlePackageEntry[];
   integrity?: BundleIntegrity;
   provenance?: BundleProvenance;
+  assembler?: { openrigVersion: string; commit?: string };
   compatibility?: BundleCompatibility;
+  preconditions?: BundlePrecondition[];
   /** Item 6 cross-primitive bundling: skill paths to route to the operator skills library on install. */
   skills?: string[];
   /** Item 6 cross-primitive bundling: plugin references to install via the plugin primitive (HYBRID-mode bundles reference existing plugins rather than forking content). */
@@ -606,6 +686,11 @@ export function validateLegacyBundleManifest(
   validateWorkflowSpecsBlock(m["workflow_specs"], errors);
   validateContextPacksBlock(m["context_packs"], errors);
   validateAgentImagesBlock(m["agent_images"], errors);
+  // A bundle's project block is read on install by routeBundleContents, which joins project.id
+  // onto workspace.projects_root and project.path onto the extracted bundle root. The pod-aware
+  // (v2) validator already enforces containment here; the legacy (v1) validator must too, or a v1
+  // bundle can escape the projects root (write) or the bundle root (read).
+  validateProjectBlock(m["project"], errors);
 
   return { valid: errors.length === 0, errors };
 }
@@ -648,11 +733,15 @@ export function normalizeLegacyBundleManifest(raw: unknown): LegacyBundleManifes
     };
   }
 
+  const assembler = m["assembler"] as { openrigVersion?: unknown; commit?: unknown } | undefined;
+  if (assembler && typeof assembler.openrigVersion === "string") result.assembler = { openrigVersion: assembler.openrigVersion, ...(typeof assembler.commit === "string" ? { commit: assembler.commit } : {}) };
   const provenance = normalizeProvenanceBlock(m["provenance"]);
   if (provenance) result.provenance = provenance;
 
   const compatibility = normalizeCompatibilityBlock(m["compatibility"]);
   if (compatibility) result.compatibility = compatibility;
+  const preconditions = normalizePreconditionsBlock(m["preconditions"]);
+  if (preconditions) result.preconditions = preconditions;
 
   const skills = normalizeSkillsBlock(m["skills"]);
   if (skills) result.skills = skills;
@@ -696,9 +785,12 @@ export function serializeLegacyBundleManifest(manifest: LegacyBundleManifest): s
     };
   }
 
+  if (manifest.assembler) doc["assembler"] = manifest.assembler;
   if (manifest.provenance) doc["provenance"] = provenanceToYamlRecord(manifest.provenance);
 
   if (manifest.compatibility) doc["compatibility"] = compatibilityToYamlRecord(manifest.compatibility);
+
+  if (manifest.preconditions) doc["preconditions"] = manifest.preconditions;
 
   if (manifest.skills && manifest.skills.length > 0) doc["skills"] = manifest.skills;
   if (manifest.plugins && manifest.plugins.length > 0) doc["plugins"] = manifest.plugins.map((p) => ({ id: p.id, source: { kind: p.source.kind, path: p.source.path } }));

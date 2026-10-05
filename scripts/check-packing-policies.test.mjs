@@ -17,9 +17,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const AUTHORITY_SHA256 = {
+  "auto.policy.md": "ffd0347af4bc5d5fdb4e5f8208577ca72dcc085883ea4fa0b10e9c6ac3022bde",
   "locked.policy.md": "dcb38c372def7fe58ddfc9f1f3e97b9ba391ae79a99ef486e44f017cb39e57fe",
-  "standard.policy.md": "737d3f56e6d8275fe548a3a06e9b02ede8f328207ec2e6223cea6a83f40f5148",
   "open.policy.md": "bb5fbb18e1f3706bd0676a9e709e29b5754bb6b41b6f304453dd6d73e7a4d62b",
+  "standard.policy.md": "737d3f56e6d8275fe548a3a06e9b02ede8f328207ec2e6223cea6a83f40f5148",
   // 0.6.0 (#109): accepted Codex full_bypass now includes approval policy never.
   "yolo.policy.md": "1c34fff0b385426689fd26e20b8b431de6b688028d584924e7d5384fe5ff6d42",
 };
@@ -36,11 +37,11 @@ test("T6: build-package.sh stages daemon policies into the assembled package", (
   );
 });
 
-test("T7: the canonical repo-source built-ins are exactly the known four, byte-equal to authority", () => {
+test("T7: the canonical repo-source built-ins are exactly the known five, byte-equal to authority", () => {
   const dir = "packages/daemon/policies/builtin";
   const files = readdirSync(dir).sort();
-  assert.deepEqual(files, ["locked.policy.md", "open.policy.md", "standard.policy.md", "yolo.policy.md"],
-    "the built-in policy inventory must be EXACTLY locked|standard|open|yolo");
+  assert.deepEqual(files, ["auto.policy.md", "locked.policy.md", "open.policy.md", "standard.policy.md", "yolo.policy.md"],
+    "the built-in policy inventory must be EXACTLY locked|standard|open|yolo|auto");
   for (const [file, expected] of Object.entries(AUTHORITY_SHA256)) {
     const actual = createHash("sha256").update(readFileSync(`${dir}/${file}`)).digest("hex");
     assert.equal(actual, expected, `${file} diverged from the authoritative verbatim content`);

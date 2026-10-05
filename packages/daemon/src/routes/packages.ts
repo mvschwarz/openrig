@@ -12,7 +12,6 @@ import type { FsOps } from "../domain/package-resolver.js";
 import type { EngineFsOps } from "../domain/install-engine.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { resolvePackage } from "../domain/package-resolve-helper.js";
-import { roleHookWarnings } from "../domain/package-manifest.js";
 
 export const packagesRoutes = new Hono();
 
@@ -81,7 +80,6 @@ packagesRoutes.post("/validate", async (c) => {
   eventBus.emit({ type: "package.validated", packageName: m.name, valid: true });
 
   return c.json({
-    warnings: roleHookWarnings(m),
     valid: true,
     manifest: {
       name: m.name,
@@ -171,7 +169,6 @@ packagesRoutes.post("/plan", async (c) => {
   return c.json({
     packageName: refined.packageName,
     packageVersion: refined.packageVersion,
-    warnings: plan.warnings ?? [],
     entries: annotatedEntries,
     actionable: policyResult.approved.length,
     deferred: refined.deferred.length,

@@ -309,11 +309,14 @@ describe("rig package", () => {
   });
 
   // Test 2: validate invalid manifest → errors[] + exitCode 1
-  it("validate and plan print warnings without changing successful exit status", async () => {
+  it("validate and plan omit obsolete role-hook warnings while keeping deferred reporting", async () => {
     for (const action of ["validate", "plan"]) {
       const { logs, exitCode } = await captureLogs(() => makeProgram().parseAsync(["node", "rig", "package", action, "/warning/path"]));
-      expect(logs.join("\n")).toContain("Warning: Role 'stale' references hook 'hooks/old.yaml'");
-      expect(logs.join("\n")).toContain("deferred, not installed");
+      expect(logs.join("\n")).not.toContain("Warning:");
+      if (action === "plan") {
+        expect(logs.join("\n")).toContain("Deferred: 1");
+        expect(logs.join("\n")).toContain("pre-commit");
+      }
       expect(exitCode).toBeUndefined();
     }
   });

@@ -1,4 +1,7 @@
 import nodePath from "node:path";
+import { isGitHubBundleLink, importGitHubBundle, bundleIdentityLines, printBundleLinkError } from "../lib/bundle-source.js";
+import { getCliVersion, bundleRoutingSummary, bundleInstallError, startupAttentionSummary } from "./bundle.js";
+import { showBundleBehaviourBeforeAction } from "../bundle-behaviour.js";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYamlDoc } from "yaml";
@@ -76,16 +79,20 @@ Examples:
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
   cmd
-    .argument("<source>", "Path to a .yaml rig spec or .rigbundle, or a library name such as secrets-manager")
+    .argument("<source>", "GitHub bundle link, path to a .yaml rig spec or .rigbundle, or a library name such as secrets-manager")
+    .option("--non-interruptive", "Accept harness first-launch warnings for this rig at full bypass; saved for later launches")
+    .option("--no-non-interruptive", "Turn off this rig's saved warning-acceptance choice (stop an existing rig with rig down first)")
     .option("--plan", "Plan mode — preview without executing")
     .option("--yes", "Auto-approve trusted actions")
     .option("--cwd <path>", "Override launch working directory for all members for this run only")
     .option("--target <root>", "Install target for a .rigbundle (default: current directory). A v2 bundle is materialized there and relative member cwds resolve against it; --cwd still overrides launch cwd")
+    .option("--preset <name>", "For a GitHub bundle link, choose a declared configuration")
+    .option("--seat <member=runtime>", "For a GitHub bundle link, choose a declared seat runtime; repeatable", (v: string, all: string[]) => [...all, v], [] as string[])
     .option("--existing", "Treat <source> as an existing rig name; bypass library-spec name resolution")
     .option("--fresh <seats...>", "Deliberately fresh-prime the named seats (logical ids) instead of resuming their original sessions (operation B; reported as fresh-primed)")
     .option("--json", "JSON output for agents")
     .option("--host <id>", "Run on a remote host declared in ~/.openrig/hosts.yaml")
-    .action(async (source: string, opts: { plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string }) => {
+    .action(async (source: string, opts: { nonInterruptive?: boolean; plan?: boolean; yes?: boolean; cwd?: string; target?: string; existing?: boolean; fresh?: string[]; json?: boolean; host?: string; preset?: string; seat?: string[] }) => {
       // OPR.0.4.6.MH1 FR-2: selected-host routing — explicit --host wins;
       // else the persisted selection feeds the SHIPPED --host path; no
       // selection = today exactly. Topology
@@ -94,6 +101,46 @@ Examples:
       // topology up into the rejected --host form.
       if (!sourceLooksLikeTopology(source)) opts.host = resolveEffectiveHost(opts.host);
       const deps = getDepsF();
+
+      // Link preparation verifies the effective endpoint before fetch or local auto-start.
+      // Existing path/name dispatch below is unchanged.
+      if (isGitHubBundleLink(source)) {
+        try {
+          const imported = await importGitHubBundle(source, deps, opts);
+          if (imported.res.status >= 400) {
+            if (opts.json) console.log(JSON.stringify(imported.res.data)); else console.error(imported.res.data.error ?? "Create failed");
+            process.exitCode = 2; return;
+          }
+          const behaviour = await showBundleBehaviourBeforeAction(() => imported.client.post<Record<string, unknown>>(
+            "/api/bundles/inspect", { bundlePath: imported.bundlePath },
+          ));
+          let installed: { status: number; data: Record<string, unknown> };
+          try {
+            installed = await imported.client.post<Record<string, unknown>>("/api/bundles/install", {
+              bundlePath: imported.bundlePath, plan: opts.plan ?? false, autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
+              targetRoot: opts.target ? nodePath.resolve(opts.target) : process.cwd(),
+              cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : undefined,
+              cliVersion: getCliVersion(),
+            }, { timeoutMs: LONG_RUNNING_UP_TIMEOUT_MS });
+          } catch {
+            throw new Error(`Bundle install outcome is unknown. Archive retained at ${imported.bundlePath}; check rig ps and rig bundle history before retrying.`);
+          }
+          const { source: builtSource, configurationId, packageDigest, archiveHash, assembler } = imported.res.data;
+          const data = { ...installed.data, source: builtSource, configurationId, packageDigest, archiveHash, assembler, ...(behaviour ? { behaviour } : {}) };
+          if (opts.json) console.log(JSON.stringify(data));
+          else {
+            for (const line of bundleIdentityLines(data)) console.log(line);
+            console.log(`Status: ${installed.data.status ?? "unknown"}`);
+            for (const line of startupAttentionSummary(installed.data)) console.log(line);
+            if (installed.data.rigId) console.log(`Rig: ${installed.data.rigId}`);
+            for (const line of bundleRoutingSummary(installed.data)) console.log(line);
+            for (const warning of (installed.data.warnings as string[] | undefined) ?? []) console.warn(warning);
+            if (installed.status >= 400) console.error(bundleInstallError(installed.data));
+          }
+          if (installed.status >= 400 || ["failed", "partial", "partially_restored", "not_attempted"].includes(String(installed.data.status ?? installed.data.rigResult))) process.exitCode = installed.status === 409 ? 1 : 2;
+        } catch (err) { printBundleLinkError(err, opts.json); }
+        return;
+      }
 
       if (opts.host) {
         // OPR.0.4.4.11 R11-2: --host + topology source is REJECTED before
@@ -113,13 +160,19 @@ Examples:
         const body = {
           sourceRef: source,
           plan: opts.plan,
-          autoApprove: opts.yes,
+          autoApprove: opts.yes, nonInterruptive: opts.nonInterruptive,
           cwdOverride: opts.cwd,
           targetRoot: opts.target,
           existing: opts.existing,
           freshLogicalIds: opts.fresh,
         };
+        const behaviour = /\.rigbundle$/i.test(source) && !opts.existing
+          ? await showBundleBehaviourBeforeAction(async () => {
+            const inspected = await runRemoteHttpOp(opts.host!, "POST", "/api/bundles/inspect", { bundlePath: source }, deps, opts);
+            return { status: inspected.ok ? 200 : 500, data: (inspected.data ?? { error: inspected.error }) as Record<string, unknown> };
+          }) : undefined;
         const result = await runRemoteHttpOp(opts.host, "POST", "/api/up", body, deps, { ...opts, timeoutMs: opts.plan ? undefined : LONG_RUNNING_UP_TIMEOUT_MS });
+        if (behaviour) result.data = { ...(result.data as Record<string, unknown> | undefined), behaviour };
         if (opts.json) {
           console.log(JSON.stringify(result));
           if (!result.ok) process.exitCode = 1;
@@ -193,8 +246,6 @@ Examples:
             db: resolvedConfig?.db.path,
             transcriptsEnabled: resolvedConfig?.transcripts.enabled,
             transcriptsPath: resolvedConfig?.transcripts.path,
-            transcriptsLines: resolvedConfig?.transcripts.lines,
-            transcriptsPollIntervalSeconds: resolvedConfig?.transcripts.pollIntervalSeconds,
             workspaceRoot: resolvedConfig?.workspace.root,
             contextRoot: resolvedConfig?.context.root,
             skillsRoot: resolvedConfig?.skills.root,
@@ -395,12 +446,15 @@ Examples:
         process.exitCode = 1;
       };
 
+      const behaviour = isRigBundle ? await showBundleBehaviourBeforeAction(() => client.post<Record<string, unknown>>(
+        "/api/bundles/inspect", { bundlePath: sourceRef },
+      )) : undefined;
       let res: { status: number; data: Record<string, unknown> };
       try {
         res = await client.post<Record<string, unknown>>("/api/up", {
           sourceRef,
           plan: opts.plan ?? false,
-          autoApprove: opts.yes ?? false,
+          autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
           cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : defaultLibraryCwdOverride,
           targetRoot,
           // OPR.0.3.4.2 — operation B opt-in seats (deliberate fresh-prime).
@@ -413,6 +467,8 @@ Examples:
         }
         throw err;
       }
+
+      if (behaviour) res.data = { ...res.data, behaviour };
 
       if (opts.json) {
         console.log(JSON.stringify(res.data));
@@ -581,7 +637,7 @@ Examples:
                 freshRes = await client.post<Record<string, unknown>>("/api/up", {
                   sourceRef,
                   plan: false,
-                  autoApprove: opts.yes ?? false,
+                  autoApprove: opts.yes ?? false, nonInterruptive: opts.nonInterruptive,
                   cwdOverride: opts.cwd ? nodePath.resolve(opts.cwd) : defaultLibraryCwdOverride,
                   targetRoot,
                   freshLogicalIds: accepted,
@@ -624,6 +680,7 @@ Examples:
           console.log(`Dashboard: rig ui open`);
         }
         console.log(`Status: ${resStatus}`);
+        for (const line of startupAttentionSummary(res.data)) console.log(line);
 
         // Surface warnings (e.g. transcript attach failures)
         const warnings = (res.data["warnings"] as string[]) ?? [];

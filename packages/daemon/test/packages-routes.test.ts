@@ -112,7 +112,7 @@ describe("Package API routes", () => {
   }
 
   // --- Test 1: POST /validate valid manifest → 200 ---
-  it("stale role hooks warn in validate/plan and do not block either role's installation", async () => {
+  it("stale role hooks produce no warning and do not block either role's installation", async () => {
     const yaml = VALID_MANIFEST_YAML + `
 roles:
   - name: stale
@@ -129,15 +129,14 @@ roles:
     });
     const validation = await request("validate", {});
     expect(validation.status).toBe(200);
-    const warning = "Role 'stale' references hook 'hooks/old.yaml' absent from exports.hooks; hooks in this package path are deferred, not installed";
-    expect((await validation.json()).warnings).toEqual([warning]);
+    expect(await validation.json()).not.toHaveProperty("warnings");
     for (const roleName of ["stale", "current"]) {
       const root = path.join(targetDir, roleName);
       fs.mkdirSync(root);
       const plan = await request("plan", { targetRoot: root, roleName });
       expect(plan.status).toBe(200);
       const planned = await plan.json();
-      expect(planned.warnings).toEqual([warning]);
+      expect(planned).not.toHaveProperty("warnings");
       expect(planned.actionable).toBe(1);
       const installed = await request("install", { targetRoot: root, roleName });
       expect(installed.status).toBe(201);

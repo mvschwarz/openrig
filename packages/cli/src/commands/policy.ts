@@ -34,6 +34,7 @@ import {
 } from "./setup.js";
 import {
   BUILTIN_POLICY_NAMES,
+  builtinLaunchPosture,
   validatePermissionPolicyRef,
   resolvePermissionPolicyAttachment,
   type ResolvedPolicyAttachment,
@@ -49,6 +50,7 @@ const BUILTIN_DESCRIPTIONS: Record<string, string> = {
   standard: "the packaged default posture for managed working seats",
   open: "a permissive packaged posture for trusted, high-autonomy seats",
   yolo: "the operator/no-guardrails posture — everything the harness allows (launch posture: full_bypass)",
+  auto: "Claude runs with --permission-mode auto; Codex and Pi launch at the floor (launch posture: auto)",
   none: "the RESERVED deliberate-none choice: recorded as permission_policy: none — posture identical to absent (the floor), but the absence is chosen and visible",
 };
 
@@ -191,7 +193,7 @@ function registerPermissionCommands(cmd: Command): void {
           origin: nameOrRef === "none" ? "deliberate_none" : "builtin",
           description: BUILTIN_DESCRIPTIONS[nameOrRef] ?? "",
           recordedAs: `permission_policy: ${refFor(nameOrRef)}`,
-          launchPosture: nameOrRef === "yolo" ? "full_bypass" : "floor",
+          launchPosture: builtinLaunchPosture(nameOrRef),
           enforcement: HONESTY_PIN,
         };
         if (opts.json) console.log(JSON.stringify(out));

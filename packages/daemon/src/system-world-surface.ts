@@ -4,6 +4,7 @@ export {
   DEFAULT_SYSTEM_WORLD_SELECTION,
   DISABLED_SYSTEM_WORLD_SELECTION,
   SYSTEM_WORLD_SCHEMA,
+  parseContextSelection,
   parseSystemWorldManifest,
   resolveSystemWorld,
   type SystemWorldContextSelection,

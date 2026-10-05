@@ -19,7 +19,7 @@ import {
   statusGuardMessage,
 } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
-import { resolveIdentitySource } from "./whoami.js";
+import { identityRoutingHint, resolveIdentitySource } from "./whoami.js";
 import type { StatusDeps } from "./status.js";
 import { shellQuote } from "../cross-host-executor.js";
 import { omittedReadField, readView } from "../read-view.js";
@@ -100,6 +100,7 @@ interface HealthCliError {
   message: string;
   nextInspection: string;
   details?: unknown;
+  hint?: string;
 }
 
 function defaultDeps(): HealthDeps {
@@ -124,6 +125,7 @@ function emitError(error: HealthCliError, json: boolean): void {
   } else {
     console.error(`Error: ${error.message}`);
     console.error(`  Next inspection: ${error.nextInspection}`);
+    if (error.hint) console.error(`  ${error.hint}`);
   }
   process.exitCode = 1;
 }
@@ -219,6 +221,7 @@ async function readSelfSeatId(client: DaemonClient, deps: HealthDeps, json: bool
       message: "The daemon could not resolve the current seat identity.",
       nextInspection: "rig whoami --json",
       details: response.data,
+      ...(response.status === 404 ? { hint: await identityRoutingHint(client) } : {}),
     }, json);
     return null;
   }
@@ -254,6 +257,10 @@ function renderList(projection: HealthListProjection): void {
   console.log(`Fleet health — evaluated=${evaluated} findings=${projection.total} limit=${projection.limit}`);
   for (const c of projection.coverage ?? []) {
     if (!c.partial) continue;
+    if (c.status === "unavailable") {
+      console.log(`UNAVAILABLE: ${c.source}: ${c.reason}. This source was not assessed; the result is partial.`);
+      continue;
+    }
     console.log(`PARTIAL: ${c.source} evaluated ${c.evaluated} of ${c.total} ${c.unit} (limit ${c.limit}; ${c.omitted} omitted; order: ${c.order}). Omitted ${c.unit} were not evaluated and are not healthy.`);
   }
   if (projection.records.length === 0) {

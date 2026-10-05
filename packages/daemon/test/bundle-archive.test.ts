@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import { createHash } from "node:crypto";
 import * as tar from "tar";
-import { pack, unpack, verifyArchiveDigest } from "../src/domain/bundle-archive.js";
+import { pack, unpack, verifyArchiveDigest, unsafeArchiveEntryReason, collectUnsafeArchiveEntries } from "../src/domain/bundle-archive.js";
 // TODO: AS-T12 — migrate to pod-aware bundle types
 import { serializeLegacyBundleManifest as serializeBundleManifest, type LegacyBundleManifest as BundleManifest } from "../src/domain/bundle-types.js";
 import { computeIntegrity, writeIntegrity, type IntegrityFsOps } from "../src/domain/bundle-integrity.js";
@@ -339,5 +339,40 @@ describe("Bundle archive", () => {
 
     expect(hash1).toBe(hash2);
     expect(fs.readFileSync(out1).equals(fs.readFileSync(out2))).toBe(true);
+  });
+
+  // S1: the shared unsafe-entry verdict used by both unpack() and /inspect.
+  describe("unsafeArchiveEntryReason (shared safety verdict)", () => {
+    it("rejects a POSIX absolute path", () => {
+      expect(unsafeArchiveEntryReason("/etc/passwd")).toMatch(/absolute path/);
+    });
+    it("rejects a Windows drive-letter path", () => {
+      expect(unsafeArchiveEntryReason("C:\\windows\\temp")).toMatch(/absolute path/);
+    });
+    it("rejects forward-slash traversal", () => {
+      expect(unsafeArchiveEntryReason("../../escape")).toMatch(/path traversal/);
+    });
+    it("rejects backslash traversal", () => {
+      expect(unsafeArchiveEntryReason("..\\escape")).toMatch(/path traversal/);
+    });
+    it("rejects symlink and hardlink entries", () => {
+      expect(unsafeArchiveEntryReason("link", "SymbolicLink")).toMatch(/SymbolicLink/);
+      expect(unsafeArchiveEntryReason("link", "Link")).toMatch(/Link/);
+    });
+    it("accepts an ordinary in-tree path", () => {
+      expect(unsafeArchiveEntryReason("packages/pkg/SKILL.md")).toBeNull();
+      // A filename that merely contains dots is not a traversal segment.
+      expect(unsafeArchiveEntryReason("packages/pkg/foo..bar.md")).toBeNull();
+    });
+  });
+
+  it("collectUnsafeArchiveEntries flags a backslash-traversal archive", async () => {
+    const malDir = path.join(tmpDir, "mal-scan-staging");
+    fs.mkdirSync(malDir, { recursive: true });
+    fs.writeFileSync(path.join(malDir, "evil.txt"), "escape!");
+    const malArchive = path.join(tmpDir, "mal-scan.rigbundle");
+    await tar.create({ gzip: true, file: malArchive, cwd: malDir, prefix: "..\\escape" }, ["evil.txt"]);
+    const entries = await collectUnsafeArchiveEntries(malArchive);
+    expect(entries.some((e) => /path traversal/.test(e))).toBe(true);
   });
 });

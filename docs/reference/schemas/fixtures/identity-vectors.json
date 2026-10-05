@@ -1,0 +1,80 @@
+{
+  "configurationId": [
+    {
+      "mapping": {
+        "check.review": "codex",
+        "build.lead": "claude-code",
+        "check.qa": "codex",
+        "build.impl": "claude-code"
+      },
+      "expected": "build.impl=claude-code,build.lead=claude-code,check.qa=codex,check.review=codex"
+    },
+    {
+      "mapping": {
+        "b.x": "pi",
+        "B.y": "codex",
+        "a.z": "claude-code"
+      },
+      "expected": "B.y=codex,a.z=claude-code,b.x=pi"
+    },
+    {
+      "mapping": {
+        "a.b-c": "pi",
+        "a.b": "codex"
+      },
+      "expected": "a.b=codex,a.b-c=pi"
+    }
+  ],
+  "packageDigest": [
+    {
+      "integrityFiles": {
+        "rig.yaml": "1111111111111111111111111111111111111111111111111111111111111111",
+        "agents/openrig-dev/agent.yaml": "2222222222222222222222222222222222222222222222222222222222222222",
+        "README.md": "3333333333333333333333333333333333333333333333333333333333333333",
+        "agents/openrig-dev/guidance/lead.md": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "expected": {
+        "algorithm": "sha256",
+        "value": "cda24a7d4904e89e29c9513fc1e4916bee782a57b2b6ee43b859a84f4b94fb6a",
+        "coverage": "openrig.package-digest/v1"
+      }
+    },
+    {
+      "note": "Two files, x and y. Unquoted, their lines were the same bytes as the next vector's one file, whose name holds a tab and a newline.",
+      "integrityFiles": {
+        "x": "1111111111111111111111111111111111111111111111111111111111111111",
+        "y": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "expected": {
+        "algorithm": "sha256",
+        "value": "7ba71a4097dae6dbfb358af6b0b601a438f748eec578756f97144fe9f7fadaea",
+        "coverage": "openrig.package-digest/v1"
+      }
+    },
+    {
+      "note": "One file whose name holds a tab and a newline; quoting keeps it apart from the two-file vector above.",
+      "integrityFiles": {
+        "x\t1111111111111111111111111111111111111111111111111111111111111111\ny": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "expected": {
+        "algorithm": "sha256",
+        "value": "413a88836f2b10561d9272a6d272e5c610a122d76d327d16bc2a6f1af44a0826",
+        "coverage": "openrig.package-digest/v1"
+      }
+    },
+    {
+      "note": "Escaping: a double quote, a backslash, a control character (\\u0001) and a non-ASCII letter written as itself.",
+      "integrityFiles": {
+        "docs/a \"quoted\" name.md": "1111111111111111111111111111111111111111111111111111111111111111",
+        "docs/back\\slash.md": "2222222222222222222222222222222222222222222222222222222222222222",
+        "docs/control\u0001char.md": "3333333333333333333333333333333333333333333333333333333333333333",
+        "docs/café.md": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "expected": {
+        "algorithm": "sha256",
+        "value": "9055bef9907afbafec3401bbba55625ed0ddf1924390259c6dd95a128b3d50e8",
+        "coverage": "openrig.package-digest/v1"
+      }
+    }
+  ]
+}

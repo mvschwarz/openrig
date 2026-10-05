@@ -150,8 +150,8 @@ export function filesRoutes(): Hono {
       let contentType = inferContentType(resolved);
       // OPR.0.4.4.20 FR-11: .html renders as text/html ONLY under the explicit
       // ?render=1 opt-in (text/plain stays the default for every other read).
-      // First-party operator mockups open in a new tab; CSP here is a
-      // documented advisory posture, deliberately NOT a deny-by-default gate.
+      // Explicit HTML previews and direct SVG previews may run scripts in the
+      // daemon origin; ordinary HTML reads stay text/plain.
       if (c.req.query("render") === "1" && path.extname(resolved).toLowerCase() === ".html") {
         contentType = "text/html; charset=utf-8";
       }

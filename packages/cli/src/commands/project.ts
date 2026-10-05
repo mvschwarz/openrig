@@ -134,11 +134,12 @@ export function projectCommand(depsOverride?: ProjectDeps): Command {
       });
   }
   for (const verb of ["shadow-status", "shadow-drain", "shadow-stop"] as const) {
-    cmd.command(verb).description("Inspect, drain or stop an explicitly configured private shadow sink; never enables capture")
-      .action(async () => withClient(getDeps(), async client => {
-        const result = verb === "shadow-status" ? await client.get("/api/projects/shadow") : await client.post(`/api/projects/shadow/${verb === "shadow-stop" ? "stop" : "drain"}`);
-        printResult(true, result.data, result.status);
-      }));
+    const sub = cmd.command(verb).description("Inspect, drain or stop an explicitly configured private shadow sink; never enables capture");
+    if (verb !== "shadow-status") sub.option("--actor <name>", "Attribute the request when operating outside a managed seat");
+    sub.action(async (opts: { actor?: string }) => withClient(getDeps(), async client => {
+      const result = verb === "shadow-status" ? await client.get("/api/projects/shadow") : await client.post(`/api/projects/shadow/${verb === "shadow-stop" ? "stop" : "drain"}`, opts.actor === undefined ? undefined : { actor: opts.actor });
+      printResult(true, result.data, result.status);
+    }));
   }
 
   // ---- Lease lifecycle ----

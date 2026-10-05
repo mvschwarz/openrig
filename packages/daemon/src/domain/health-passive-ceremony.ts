@@ -19,6 +19,8 @@ const tagged = (tags: string[], prefix: string) => tags.filter((t) => t.startsWi
 /** A read-only question generator. Proof files, closures and acceptance receipts
  * are material for the diagnosing agent, never an automatic outcome counter. */
 export class PassiveCeremonySource implements HealthObservationSource {
+  readonly name = "passive-ceremony";
+  readonly detectors = ["process.ceremony-amplification"];
   constructor(private readonly workspace: string, private readonly queue: QueueRepository, private readonly policy: HealthPolicyStore,
     private readonly now = () => new Date().toISOString(), private readonly checkpoints?: HealthCheckpointSource,
     private readonly posture?: { reader: OperatingPostureService; instanceId: string }) {}

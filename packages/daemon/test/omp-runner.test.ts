@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RunnerCore, parseRunnerArgs, resolveRuntimeExecutable, type ExecutableResolverOps, type RunnerIo } from "../src/adapters/pi-runner.js";
-import { buildPiChildArgs, buildPiChildEnv, buildPiRunnerCommand, OMP_PROVIDER_ENV_VARS, type PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
+import { buildPiChildArgs, buildPiChildEnv, buildPiRunnerCommand, OMP_PROVIDER_ENV_VARS, OMP_PROVIDER_EXTRA_ENV_VARS, type PiRunnerState } from "../src/adapters/pi-runner-protocol.js";
 import { collectAllowlistedProviderAuthEnv } from "../src/startup.js";
 
 const sessionName = "omp-worker@rig";
@@ -78,6 +78,94 @@ describe("OMP runner command and child isolation", () => {
     // Every other runtime keeps main's set: OMP-only names are not admitted.
     expect(collectAllowlistedProviderAuthEnv("MISTRAL_API_KEY,ANTHROPIC_API_KEY", { MISTRAL_API_KEY: "m", ANTHROPIC_API_KEY: "a" })).toEqual({ ANTHROPIC_API_KEY: "a" });
     expect(collectAllowlistedProviderAuthEnv("AWS_SECRET_ACCESS_KEY", { AWS_SECRET_ACCESS_KEY: "x" }, "omp")).toEqual({});
+  });
+
+  it("admits a paired provider endpoint alongside its key, for OMP seats only", () => {
+    const env = { LITELLM_API_KEY: "proxy-key", LITELLM_BASE_URL: "https://llm.internal/v1" };
+    expect(collectAllowlistedProviderAuthEnv("LITELLM_API_KEY,LITELLM_BASE_URL", env, "omp")).toEqual(env);
+    // Still double opt-in: an unnamed endpoint stays behind.
+    expect(collectAllowlistedProviderAuthEnv("LITELLM_API_KEY", env, "omp")).toEqual({ LITELLM_API_KEY: "proxy-key" });
+    expect(collectAllowlistedProviderAuthEnv("LITELLM_API_KEY,LITELLM_BASE_URL", env)).toEqual({});
+  });
+
+  it("forwards the declared provider's endpoint into an OMP child, and no other provider's", () => {
+    const source = {
+      PATH: "/usr/bin",
+      HOME: "/operator",
+      LITELLM_API_KEY: "proxy-key",
+      LITELLM_BASE_URL: "https://llm.internal/v1",
+    };
+    const opts = { agentDir: "/openrig/state/omp/seat/agent", sessionsDir: "/openrig/state/omp/seat/sessions", sessionName };
+    expect(buildPiChildEnv(source, { ...opts, runtime: "omp", model: "litellm/gpt-oss:120b" })).toMatchObject({
+      LITELLM_API_KEY: "proxy-key",
+      LITELLM_BASE_URL: "https://llm.internal/v1",
+    });
+    // A different declared provider carries neither half of the pair.
+    expect(buildPiChildEnv(source, { ...opts, runtime: "omp", model: "anthropic/claude-sonnet-4-5" }))
+      .not.toHaveProperty("LITELLM_BASE_URL");
+    // Pi keeps its own narrower map: no OMP endpoint crosses.
+    expect(buildPiChildEnv(source, { ...opts, runtime: "pi", model: "litellm/gpt-oss:120b" }))
+      .not.toHaveProperty("LITELLM_BASE_URL");
+  });
+
+  it("keeps every paired endpoint attached to a provider the runner can declare", () => {
+    for (const provider of Object.keys(OMP_PROVIDER_EXTRA_ENV_VARS)) {
+      expect(OMP_PROVIDER_ENV_VARS[provider]).toBeDefined();
+    }
+  });
+
+  it("names every paired endpoint after its own provider's key variable", () => {
+    // A typo here would silently forward another provider's endpoint, or none.
+    for (const [provider, extras] of Object.entries(OMP_PROVIDER_EXTRA_ENV_VARS)) {
+      const keyVar = OMP_PROVIDER_ENV_VARS[provider]!;
+      expect(keyVar).toMatch(/_API_KEY$/);
+      expect(extras).toEqual([keyVar.replace(/_API_KEY$/, "_BASE_URL")]);
+    }
+  });
+
+  it("carries each paired provider's endpoint, and only that provider's", () => {
+    const source: Record<string, string> = { PATH: "/usr/bin", HOME: "/operator" };
+    for (const extras of Object.values(OMP_PROVIDER_EXTRA_ENV_VARS)) {
+      for (const name of extras) source[name] = `endpoint-of-${name}`;
+    }
+    for (const [provider, keyVar] of Object.entries(OMP_PROVIDER_ENV_VARS)) {
+      source[keyVar] = `key-of-${keyVar}`;
+    }
+    for (const provider of Object.keys(OMP_PROVIDER_ENV_VARS)) {
+      const env = buildPiChildEnv(source, {
+        runtime: "omp", agentDir: "/s/agent", sessionsDir: "/s/sessions", sessionName,
+        model: `${provider}/some-model`,
+      });
+      const mine = OMP_PROVIDER_EXTRA_ENV_VARS[provider] ?? [];
+      for (const name of mine) expect(env[name]).toBe(`endpoint-of-${name}`);
+      // No other provider's endpoint rides along.
+      const others = Object.entries(OMP_PROVIDER_EXTRA_ENV_VARS)
+        .filter(([p]) => p !== provider).flatMap(([, v]) => v)
+        .filter((name) => !mine.includes(name));
+      for (const name of others) expect(env).not.toHaveProperty(name);
+    }
+  });
+
+  it("admits an endpoint named without its key, for a keyless local proxy", () => {
+    // Each allowlisted name stands alone; the pair is a convention, not a coupling.
+    expect(collectAllowlistedProviderAuthEnv("LITELLM_BASE_URL", { LITELLM_BASE_URL: "http://localhost:4000/v1" }, "omp"))
+      .toEqual({ LITELLM_BASE_URL: "http://localhost:4000/v1" });
+    const env = buildPiChildEnv(
+      { PATH: "/usr/bin", HOME: "/operator", LITELLM_BASE_URL: "http://localhost:4000/v1" },
+      { runtime: "omp", agentDir: "/s/agent", sessionsDir: "/s/sessions", sessionName, model: "litellm/local" },
+    );
+    expect(env.LITELLM_BASE_URL).toBe("http://localhost:4000/v1");
+    expect(env).not.toHaveProperty("LITELLM_API_KEY");
+  });
+
+  it("admits every paired endpoint through the OMP allowlist gate, and no other runtime's", () => {
+    const names = Object.values(OMP_PROVIDER_EXTRA_ENV_VARS).flat();
+    const env = Object.fromEntries(names.map((name) => [name, `value-of-${name}`]));
+    expect(collectAllowlistedProviderAuthEnv(names.join(","), env, "omp")).toEqual(env);
+    // Pi/Claude/Codex seats keep main's set: only the two already in
+    // KNOWN_PROVIDER_AUTH_ENV cross, the OMP-only endpoints do not.
+    const nonOmp = collectAllowlistedProviderAuthEnv(names.join(","), env);
+    expect(Object.keys(nonOmp).sort()).toEqual(["ANTHROPIC_BASE_URL", "OPENAI_BASE_URL"]);
   });
 });
 

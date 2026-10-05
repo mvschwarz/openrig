@@ -73,6 +73,82 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("#729 startup warnings", () => {
+  it.each([[200, false], [200, true], [409, false], [409, true]] as const)("seat launch retains warnings and HTTP %s (json=%s)", async (status, json) => {
+    const warning = "Startup submission unverified: capture unavailable";
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const deps = makeDeps({ status, data: { ok: status === 200, message: "Identity needs attention", warnings: [warning] } }, calls);
+    const { logs, exitCode } = await captureLogs(() => makeCommand(deps).parseAsync([
+      "node", "rig", "seat", "launch", "dev@fixture", "--fresh", "--reason", "requested", ...(json ? ["--json"] : []),
+    ]));
+    expect(exitCode).toBe(status === 200 ? undefined : 1);
+    if (json) {
+      expect(logs).toHaveLength(1);
+      expect(JSON.parse(logs[0]!).warnings).toEqual([warning]);
+      expect(warn).not.toHaveBeenCalled();
+    } else expect(warn).toHaveBeenCalledWith(`Warning: ${warning}`);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe("default-path rig seat continue", () => {
+  it.each([false, true])("names CLI inspection for an ambiguous continuation refusal (json=%s)", async json => {
+    const data = { ok: false, code: "continuation_unavailable", message: "No verified pending fresh-context delivery exists for this occupant. Refresh to inspect its actual state." };
+    const original = structuredClone(data);
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const { logs, errors, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status: 409, data }, calls)).parseAsync([
+      "node", "rig", "seat", "continue", "dev@fixture", ...(json ? ["--json"] : []),
+    ]).then(() => {}));
+    expect(exitCode).toBe(1);
+    expect(calls).toEqual([{ path: "/api/seat/continue/dev%40fixture", body: {} }]);
+    expect(data).toEqual(original);
+    if (json) {
+      expect(logs).toHaveLength(1);
+      expect(JSON.parse(logs[0]!)).toEqual(original);
+      expect(errors).toEqual([]);
+    } else {
+      expect(errors.join("\n")).toContain("No verified pending fresh-context delivery exists");
+      expect(errors.join("\n")).toContain("unknown whether context was already delivered or was never pending");
+      expect(errors.join("\n")).toContain("rig seat status 'dev@fixture'");
+      expect(errors.join("\n")).not.toContain("Refresh");
+    }
+  });
+  it.each([[200, false], [200, true], [409, false], [409, true]] as const)("preserves response and warnings (HTTP %s, json=%s)", async (status, json) => {
+    const data = { ok: status === 200, message: "Configured context delivered to the existing fresh conversation.", warnings: ["Submission unverified"] };
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { logs, exitCode } = await captureLogs(() => makeCommand(makeDeps({ status, data }, calls)).parseAsync([
+      "node", "rig", "seat", "continue", "dev@fixture", ...(json ? ["--json"] : []),
+    ]).then(() => {}));
+    expect(calls).toEqual([{ path: "/api/seat/continue/dev%40fixture", body: {} }]);
+    expect(exitCode).toBe(status === 200 ? undefined : 1);
+    if (json) {
+      expect(logs).toHaveLength(1);
+      expect(JSON.parse(logs[0]!)).toEqual(data);
+      expect(warn).not.toHaveBeenCalled();
+    } else {
+      expect(warn).toHaveBeenCalledWith("Warning: Submission unverified");
+      if (status === 200) expect(logs).toEqual([data.message]);
+    }
+  });
+});
+
+describe("rig seat set-permissions", () => {
+  it("posts the explicit operator with the existing mode and reason", async () => {
+    const calls: Array<{ path: string; body: unknown }> = [];
+    const deps = makeDeps({ status: 200, data: { ok: true, changed: true, to: { mode: "floor" }, effect: "Future managed launches only." } }, calls);
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "set-permissions", "dev-impl@seat-rig",
+        "--mode", "floor", "--reason", "future launch choice", "--operator", "human@example.test"]);
+    });
+    expect(calls).toEqual([{ path: "/api/seat/set-permissions/dev-impl%40seat-rig",
+      body: { mode: "floor", reason: "future launch choice", operator: "human@example.test" } }]);
+    expect(logs.join("\n")).toContain("Permission mode: floor");
+    expect(exitCode).toBeUndefined();
+  });
+});
+
 describe("rig seat set-model", () => {
   it("posts model/reason/operator to /api/seat/set-model/<seat> and prints the from->to summary", async () => {
     const calls: Array<{ path: string; body: unknown }> = [];

@@ -45,6 +45,20 @@ async function render(data: Record<string, unknown>, status = 409, json = false)
 }
 
 describe("startup attention guidance", () => {
+  it("shows pending startup guidance on a partial fresh up and preserves JSON and exits", async () => {
+    const reason = "Permission consent needs attention; After resolving it in dev-owner@first, run: rig seat continue 'dev-owner@first'";
+    const data = { status: "partial", rigId: "first", stages: [{ stage: "import_rig", status: "blocked", detail: {
+      attentionNodes: [{ logicalId: "dev.owner", sessionName: "dev-owner@first", reason }],
+    } }] };
+    const human = await render(data, 200);
+    expect(human.out).toContain(`Startup attention (dev-owner@first): ${reason}`);
+    expect(human.out).toContain("Status: partial");
+    expect(human.exit).toBe(1);
+    const json = await render(data, 200, true);
+    expect(json.out).toBe(JSON.stringify(data));
+    expect(json.err).toBe("");
+    expect(json.exit).toBeUndefined();
+  });
   it("renders actual structured response and all affected members without spec advice", async () => {
     const body = attentionBody();
     const r = await render(body);

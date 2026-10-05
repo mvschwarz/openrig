@@ -148,8 +148,8 @@ only this table.
   nor Tailscale (a hostname is resolved first), and no bearer token is set
   (`assertBindAuthInvariant`, `auth-bearer-token.ts:240`, called at
   `index.ts:288`). Bearer enforced on the write routes:
-  `app.post("/action", requireAuth)` (`routes/mission-control.ts:308`) and
-  `app.post("/notifications/test", requireAuth)` (`:309`). Reads are not
+  `app.post("/action", requireAuth)` (`routes/mission-control.ts:307`) and
+  `app.post("/notifications/test", requireAuth)` (`:308`). Reads are not
   gated. It is one static token; no OAuth/SSO/per-user model
   (`auth-bearer-token.ts:11–14`).
 - **Notification dispatcher** — two adapters
@@ -165,39 +165,39 @@ only this table.
   Adapters: **2** — `git grep -l 'implements NotificationAdapter' -- packages/daemon/src | wc -l`
 - **Read-only audit-history browse** — `MissionControlAuditBrowse.query`
   (`audit-browse.ts:78`) over `mission_control_actions`, exposed at
-  `GET /api/mission-control/audit` (`routes/mission-control.ts:442`) with
+  `GET /api/mission-control/audit` (`routes/mission-control.ts:441`) with
   filters and `(limit, before_id)` pagination cursored on SQLite `rowid`
   (`audit-browse.ts:134`).
 
 ## 5. Mission Control events
 
-The `RigEvent` union starts at `domain/types.ts:106`; its five
-`mission_control.*` members are at `domain/types.ts:308–314`.
+The `RigEvent` union starts at `domain/types.ts:106`; its four
+`mission_control.*` members are at `domain/types.ts:306–311`.
 
-`RigEvent` members: **99** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "'`
+`RigEvent` members: **98** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "'`
 
-`mission_control.*` members: **5** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "mission_control\.'`
+`mission_control.*` members: **4** — `sed -n '/^export type RigEvent =/,/^export type PersistedEvent/p' packages/daemon/src/domain/types.ts | grep -c 'type: "mission_control\.'`
 
 - `mission_control.action_executed` — written by the write contract
   (`mission-control-write-contract.ts:225`).
 - `mission_control.cli_drift_detected` — emitted by the fleet capability
   probe (`mission-control-fleet-cli-capability.ts:171`).
-- `mission_control.view_refreshed` — declared, and forwarded by the SSE
-  route, but nothing in `packages/daemon/src` constructs it.
 - `mission_control.notification_sent` / `mission_control.notification_failed`
   — emitted by the notification dispatcher (`notification-dispatcher.ts:174`,
   `:184`).
+- *(retired)* `mission_control.view_refreshed` — retired per #490; views are
+  read-on-demand queries without background refresh caching.
 
 ## 6. Route surface
 
 `missionControlRoutes({ bearerToken })` is mounted at `/api/mission-control`
 (`server.ts:791–794`). Routes (`routes/mission-control.ts`): `GET /views`
 (`:259`), `GET /cli-capabilities` (`:264`), `GET /destinations` (`:276`),
-`GET /sse` and its alias `GET /watch` (`:304–305`; they forward
-`action_executed`, `cli_drift_detected` and `view_refreshed` events,
-`:289–292`), `POST /action` (`:315`, auth-gated), `GET /audit` (`:442`),
-`POST /notifications/test` (`:482`, auth-gated), and `GET /views/:view-name`
-(`:510`).
+`GET /sse` and its alias `GET /watch` (`:303–304`; they forward
+`action_executed` and `cli_drift_detected` events,
+`:289–291`), `POST /action` (`:314`, auth-gated), `GET /audit` (`:441`),
+`POST /notifications/test` (`:481`, auth-gated), and `GET /views/:view-name`
+(`:509`).
 
 In the web UI (`packages/ui/src/routes.tsx`), `/mission-control` is a
 redirect to `/for-you` (`:495–500`). `/for-you` renders the For You `Feed`

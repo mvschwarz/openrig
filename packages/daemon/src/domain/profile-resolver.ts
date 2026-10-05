@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { readFileSync, realpathSync } from "node:fs";
 import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agent-manifest.js";
 import { homedir as osHomedir } from "node:os";
 import type {
@@ -8,7 +9,7 @@ import type {
 } from "./types.js";
 import type { ResolvedAgentSpec, ResourceCollision } from "./agent-resolver.js";
 import { resolveStartup } from "./startup-resolver.js";
-import { discoverSkillsForRuntime, type SkillRuntime } from "./skill-discovery.js";
+import { discoverSkillsForRuntime, parseSkillFrontmatter, type SkillRuntime } from "./skill-discovery.js";
 import { inspectSkillDirectory, resolveSkillLoadout, type SkillLoadout } from "./skill-catalog.js";
 
 // -- Types --
@@ -51,9 +52,10 @@ export interface ResolvedNodeConfig {
    * read per-seat windows. Retained for a future per-seat decision.
    */
   activity?: { silenceWindowSeconds?: number };
-  /** The catalog-owned portion of the effective skill selection. Runtime
-   *  projection uses this for exact-byte ownership reconciliation. */
+  /** Effective managed sources, including explicitly selected bundle overrides.
+   *  Runtime projection uses these for exact-byte ownership reconciliation. */
   skillLoadout?: SkillLoadout;
+  skillWarnings?: string[];
 }
 
 export interface ResolutionContext {
@@ -164,7 +166,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   // skill-discovery.listScanRoots; here we only enforce that
   // rig-local declarations are not overwritten by discovery.
   let rejectedSkillsByBasename: Map<string, { path: string; reason: string }> = new Map();
-  if (runtime === "claude-code" || runtime === "codex") {
+  if (runtime === "claude-code" || runtime === "codex" || runtime === "pi") {
     const discovery = discoverSkillsForRuntime({
       runtime: runtime as SkillRuntime,
       homedir: ctx.homedir ?? osHomedir(),
@@ -224,6 +226,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
   if (!catalogResult.ok) {
     return { ok: false, errors: catalogResult.errors.map((error) => `${error.code}: ${error.message}`) };
   }
+  const skillWarnings: string[] = [];
   for (const managed of catalogResult.loadout.entries) {
     const qualified: QualifiedResource = {
       effectiveId: managed.id,
@@ -231,10 +234,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       sourcePath: managed.sourceRoot,
       resource: { id: managed.id, path: nodePath.relative(managed.sourceRoot, managed.sourceDir) },
     };
-    const index = selectedResult!.skills.findIndex((entry) => {
-      const resource = entry.resource as SkillResource;
-      return entry.effectiveId === managed.id || resource.id === managed.id;
-    });
+    const index = selectedResult!.skills.findIndex((entry) => entry.effectiveId === managed.id);
     if (index >= 0) {
       const existing = selectedResult!.skills[index]!;
       const resource = existing.resource as SkillResource;
@@ -242,8 +242,28 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
         ? resource.path
         : nodePath.resolve(existing.sourcePath, resource.path);
       try {
-        const existingDigest = inspectSkillDirectory(existingPath).digest;
-        if (existingDigest !== managed.digest) {
+        const tree = inspectSkillDirectory(existingPath);
+        const bundleRoot = selectedBundleRoot(ctx, existing, existingPath);
+        if (bundleRoot) {
+          const parsed = parseSkillFrontmatter(readFileSync(nodePath.join(existingPath, "SKILL.md"), "utf8"));
+          if (!parsed.ok) throw new Error(parsed.reason);
+          if (parsed.frontmatter.name !== resource.id) {
+            throw new Error(`skill frontmatter name '${parsed.frontmatter.name}' does not match selected identity '${resource.id}'`);
+          }
+          if (tree.digest !== managed.digest) {
+            skillWarnings.push(`skill_bundle_precedence: selected '${existing.effectiveId}' from ${existingPath} instead of differing managed catalog ${managed.sourceDir}; the managed catalog was not changed`);
+          }
+          // Keep the adapter source and the pre-launch reconciler on the same bytes.
+          // The existing ownership rules still protect edits in the target workspace.
+          const sourceSpec = [baseSpec, ...importedSpecs].find((item) => item.sourcePath === existing.sourcePath) ?? baseSpec;
+          Object.assign(managed, {
+            sourceDir: existingPath, sourceRoot: bundleRoot,
+            revision: `agent-spec:${sourceSpec.hash}`, digest: tree.digest, files: tree.files,
+            selectedBy: [...new Set([...managed.selectedBy, "topology" as const])],
+          });
+          continue;
+        }
+        if (tree.digest !== managed.digest) {
           return {
             ok: false,
             errors: [
@@ -314,8 +334,26 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       // default 3s when this is missing.
       activity: profile.activity,
       skillLoadout: catalogResult.loadout,
+      ...(skillWarnings.length ? { skillWarnings } : {}),
     },
   };
+}
+
+/** Only profile-selected resources reach this check. Ambient cwd/home discovery
+ * does not gain precedence merely because a profile mentions its identity. */
+function selectedBundleRoot(ctx: ResolutionContext, entry: QualifiedResource, source: string): string | null {
+  const within = (root: string, child: string): boolean => {
+    const rel = nodePath.relative(root, child);
+    return rel !== "" && rel !== ".." && !rel.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(rel);
+  };
+  const roots = entry.sourceSpec === "discovered"
+    ? (ctx.specRoot && within(nodePath.join(ctx.specRoot, "skills"), source) ? [ctx.specRoot] : [])
+    : [ctx.specRoot, entry.sourcePath].filter((root): root is string => !!root && within(root, source));
+  for (const root of roots) {
+    const canonicalRoot = realpathSync(root);
+    if (within(canonicalRoot, realpathSync(source))) return nodePath.resolve(root);
+  }
+  return null;
 }
 
 // -- Resource pool --

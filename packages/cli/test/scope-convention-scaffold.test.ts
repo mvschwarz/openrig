@@ -22,6 +22,7 @@ import {
   renderSliceTemplate,
 } from "../src/lib/scope/templates.js";
 import { MISSION_TEMPLATE_KINDS, SLICE_TEMPLATE_KINDS } from "../src/lib/scope/types.js";
+import { validateWorkspaceFrontmatter } from "../../daemon/src/domain/workspace/frontmatter-validator.js";
 import { renderMissionTemplate } from "../src/lib/scope/templates.js";
 
 const CONVENTION_SECTIONS = ["## Intent", "## Mini-requirements", "## Proof contract"] as const;
@@ -241,6 +242,16 @@ describe("scope create — the mode-neutral SPEC/NOTES convention lands on disk"
         composition: { mission_markdown: { spec: "SPEC.md" }, slices: [] },
       });
     }
+  });
+
+  it("quotes a YAML-hostile mission title in NOTES.md so it round-trips and validates clean", async () => {
+    const title = 'Release 9.9.9: a "test" # title';
+    const r = await run(["mission", "create", "release-9.9.9", "--title", title, "--json"], substrate.missionsRoot);
+    expect(r.exitCode).toBe(0);
+    const missionPath = JSON.parse(r.stdout).mission.path as string;
+
+    expect(readFrontmatter(path.join(missionPath, "NOTES.md"))).toMatchObject({ name: title });
+    expect(validateWorkspaceFrontmatter({ root: missionPath }).gaps).toEqual([]);
   });
 });
 

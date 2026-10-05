@@ -891,7 +891,11 @@ describe("rig queue CLI", () => {
     const { deps } = makeDeps();
     const program = createProgram({ queueDeps: deps });
     const block = program.commands.find((c) => c.name() === "queue")?.commands.find((c) => c.name() === "block");
-    const help = block?.helpInformation() ?? "";
+    let help = "";
+    block?.configureOutput({ writeOut: (text) => { help += text; } });
+    block?.outputHelp();
+    expect(block?.description()).toContain("Requires --on <blocker>");
+    expect(help).toContain("--on <blocker> is always required; a wake option does not replace it.");
     expect(help).toMatch(/watchdog id/i);
     expect(help).toMatch(/timer/i);
     expect(help).toMatch(/live blocker/i);
@@ -1281,6 +1285,25 @@ describe("rig queue CLI", () => {
       if (saved === undefined) delete process.env.OPENRIG_SESSION_NAME;
       else process.env.OPENRIG_SESSION_NAME = saved;
     }
+  });
+
+  it("recipe command 'rig queue list --destination <seat>' parses successfully and rejects --session", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ queueDeps: deps });
+    program.exitOverride();
+
+    // The generated recipe from queue-stuck-sweep uses --destination <seat>
+    await program.parseAsync(["node", "rig", "queue", "list", "--destination", "next@r"]);
+    const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/queue/list"));
+    expect(call).toBeDefined();
+    expect(call!.path).toContain("destinationSession=next%40r");
+
+    // --session is not an option on queue list and must fail parsing
+    const failProgram = createProgram({ queueDeps: deps });
+    failProgram.exitOverride();
+    await expect(
+      failProgram.parseAsync(["node", "rig", "queue", "list", "--session", "next@r"])
+    ).rejects.toThrow();
   });
 
   it("list --mine scopes to caller session", async () => {

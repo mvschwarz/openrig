@@ -152,6 +152,26 @@ export const OMP_PROVIDER_ENV_VARS: Record<string, string> = {
   litellm: "LITELLM_API_KEY",
 };
 
+/** Providers whose credential is a (key, endpoint) PAIR. A gateway, proxy or
+ *  compatible endpoint issues a key that is only valid against one base URL, so
+ *  sending the key alone hands the seat an unusable credential. startup's
+ *  KNOWN_PROVIDER_AUTH_ENV already makes this pairing for ANTHROPIC_BASE_URL and
+ *  OPENAI_BASE_URL; those reach a seat's launch env but die at the child
+ *  boundary below without an entry here.
+ *
+ *  Each entry is the provider's key variable with _API_KEY swapped for _BASE_URL
+ *  (asserted in omp-runner tests). The bar for an entry is that OMP's CHAT
+ *  provider reads that variable as an endpoint override: a base URL OMP holds
+ *  as a fixed constant, or reads only in another package, earns none —
+ *  forwarding it would do nothing, or would mislead someone pointing chat at a
+ *  proxy. Extending this map is a reviewed change, never a convenience edit,
+ *  and the other OMP providers deliberately have none. */
+export const OMP_PROVIDER_EXTRA_ENV_VARS: Record<string, readonly string[]> = {
+  anthropic: ["ANTHROPIC_BASE_URL"],
+  openai: ["OPENAI_BASE_URL"],
+  litellm: ["LITELLM_BASE_URL"],
+};
+
 // Baseline process needs. No host credential families or shell customization.
 export const PI_ENV_BASELINE_VARS = ["PATH", "HOME", "USER", "LOGNAME", "TERM", "LANG", "LC_ALL", "SHELL", "TMPDIR"] as const;
 
@@ -191,6 +211,13 @@ export function buildPiChildEnv(
   const providerVar = provider ? (opts.runtime === "omp" ? OMP_PROVIDER_ENV_VARS : PI_PROVIDER_ENV_VARS)[provider] : undefined;
   if (providerVar && source[providerVar] !== undefined) {
     env[providerVar] = source[providerVar]!;
+  }
+  // The declared provider's endpoint, for the providers whose key is scoped to one.
+  if (opts.runtime === "omp" && provider) {
+    for (const extra of OMP_PROVIDER_EXTRA_ENV_VARS[provider] ?? []) {
+      const value = source[extra];
+      if (value !== undefined) env[extra] = value;
+    }
   }
   if (opts.runtime === "omp") {
     // The per-seat HOME prevents OMP from consulting the operator's ~/.omp

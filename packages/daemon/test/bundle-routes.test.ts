@@ -9,6 +9,8 @@ import { coreSchema } from "../src/db/migrations/001_core_schema.js";
 import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { createTestApp } from "./helpers/test-app.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
+import * as tar from "tar";
+import { createHash } from "node:crypto";
 
 
 const VALID_SPEC = `
@@ -192,6 +194,51 @@ describe("Bundle API routes", () => {
     expect(body.manifest.name).toBe("test");
     expect(body.digestValid).toBe(true);
     expect(body.integrityResult.passed).toBe(true);
+  });
+
+  // S1: /inspect must apply the SAME unsafe-entry safety pre-scan that unpack() does.
+  // unpack() rejects Windows drive-letter entries and backslash traversals; /inspect
+  // previously hand-rolled a weaker pre-scan that only caught POSIX "/" absolutes and
+  // forward-slash ".." segments, so it reported such an archive as inspectable.
+  async function writeArchiveWithEntry(entryName: string): Promise<string> {
+    const staging = path.join(tmpDir, "unsafe-staging");
+    fs.mkdirSync(staging, { recursive: true });
+    fs.writeFileSync(path.join(staging, "payload.txt"), "escape!");
+    const archivePath = path.join(tmpDir, `unsafe-${entryName.replace(/[^a-z0-9]/gi, "_")}.rigbundle`);
+    await tar.create({ gzip: true, file: archivePath, cwd: staging, prefix: entryName }, ["payload.txt"]);
+    const digest = createHash("sha256").update(fs.readFileSync(archivePath)).digest("hex");
+    fs.writeFileSync(`${archivePath}.sha256`, digest);
+    return archivePath;
+  }
+
+  it("POST /api/bundles/inspect refuses a Windows drive-letter archive entry", async () => {
+    const bundlePath = await writeArchiveWithEntry("C:\\windows\\temp");
+
+    const res = await app.request("/api/bundles/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.error).toMatch(/Unsafe archive entr/i);
+    expect(body.manifest).toBeUndefined();
+  });
+
+  it("POST /api/bundles/inspect refuses a backslash traversal archive entry", async () => {
+    const bundlePath = await writeArchiveWithEntry("..\\escape");
+
+    const res = await app.request("/api/bundles/inspect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundlePath }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.error).toMatch(/Unsafe archive entr/i);
+    expect(body.manifest).toBeUndefined();
   });
 
   // T6: Create emits bundle.created event
@@ -3156,5 +3203,259 @@ files: []
 
     expect(res.status).toBe(409);
     setup.bootstrapOrchestrator.release("/tmp/locked.rigbundle");
+  });
+});
+
+describe("POST /api/bundles/install: pre-launch routing report", () => {
+  let db: Database.Database;
+  let setup: ReturnType<typeof createTestApp>;
+  let home: string;
+  let origHome: string | undefined;
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-install-routing-"));
+    origHome = process.env.OPENRIG_HOME;
+    process.env.OPENRIG_HOME = home;
+    setup = createTestApp(db);
+  });
+
+  afterEach(() => {
+    db.close();
+    if (origHome === undefined) delete process.env.OPENRIG_HOME;
+    else process.env.OPENRIG_HOME = origHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  function install(body: Record<string, unknown>) {
+    return setup.app.request("/api/bundles/install", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // skipVersionCheck + force: no pre-check extraction, so the stubbed bootstrap is the whole install
+      body: JSON.stringify({ bundlePath: path.join(home, "b.rigbundle"), targetRoot: home, autoApprove: true, skipVersionCheck: true, force: true, ...body }),
+    });
+  }
+
+  it("passes --cwd to bootstrap and returns the hook's routing without routing again", async () => {
+    const bootstrap = vi.fn().mockResolvedValue({
+      status: "completed", runId: "run-cwd", rigId: "rig-cwd", stages: [], errors: [], warnings: [],
+      bundleRouting: { contextPacksRouting: { records: [], routedCount: 1, rejectedCount: 0 } },
+    });
+    const orchestrator = setup.bootstrapOrchestrator as unknown as { bootstrap: typeof bootstrap; routeBundleContents: (p: string) => unknown };
+    orchestrator.bootstrap = bootstrap;
+    const reroute = vi.spyOn(orchestrator, "routeBundleContents");
+
+    const res = await install({ cwdOverride: "/work/openrig" });
+    const body = await res.json();
+
+    expect(res.status).toBe(201);
+    expect(bootstrap).toHaveBeenCalledWith(expect.objectContaining({ cwdOverride: "/work/openrig" }));
+    expect(reroute).not.toHaveBeenCalled();
+    expect(body.contextPacksRouting.routedCount).toBe(1);
+    expect(body.bundleRouting).toBeUndefined();
+  });
+
+  it("--plan forwards --cwd to the preflight", async () => {
+    const bootstrap = vi.fn().mockResolvedValue({ status: "planned", runId: "run-plan", stages: [], errors: [], warnings: [] });
+    (setup.bootstrapOrchestrator as unknown as { bootstrap: typeof bootstrap }).bootstrap = bootstrap;
+
+    const res = await install({ plan: true, cwdOverride: "/work/openrig" });
+
+    expect(res.status).toBe(200);
+    expect(bootstrap).toHaveBeenCalledWith(expect.objectContaining({ mode: "plan", cwdOverride: "/work/openrig" }));
+  });
+
+  it("a partial install reports its routing failures in the response and the audit", async () => {
+    const failure = { kind: "contextPacks", error: "no space left on device" };
+    (setup.bootstrapOrchestrator as unknown as { bootstrap: unknown }).bootstrap = vi.fn().mockResolvedValue({
+      status: "partial", runId: "run-partial", rigId: "rig-partial",
+      stages: [{ stage: "route_bundle_contents", status: "failed" }],
+      errors: [], warnings: ["Bundle contextPacks routing failed: no space left on device"],
+      bundleRouting: { routingFailures: [failure] },
+    });
+
+    const res = await install({});
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.routingFailures).toEqual([failure]);
+    expect(body.warnings).toEqual(["Bundle contextPacks routing failed: no space left on device"]);
+    const audit = fs.readFileSync(path.join(home, "bundle-audit.jsonl"), "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(audit.at(-1)).toMatchObject({ outcome: "partial", routingFailures: [failure] });
+  });
+});
+
+describe("bundle create --context-pack: a world pack outside the rig folder", () => {
+  let db: Database.Database;
+  let setup: ReturnType<typeof createTestApp>;
+  let work: string;
+  let worldRepo: string;
+  let contextRoot: string;
+  let savedContextRoot: string | undefined;
+
+  const WORLD_MANIFEST = [
+    "name: demo-world",
+    "version: 0.1.0",
+    "taxonomy: world",
+    "files:",
+    "  - path: identity/who.md",
+    "    role: identity",
+  ].join("\n") + "\n";
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    setup = createTestApp(db);
+    work = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-carried-world-"));
+    contextRoot = path.join(work, "context");
+    savedContextRoot = process.env["OPENRIG_CONTEXT_ROOT"];
+    process.env["OPENRIG_CONTEXT_ROOT"] = contextRoot;
+    // The openrig-world layout: the pack manifest at the repository root, the rig in rigs/dev/
+    worldRepo = path.join(work, "world");
+    const rigDir = path.join(worldRepo, "rigs", "dev");
+    fs.mkdirSync(path.join(rigDir, "agents", "impl"), { recursive: true });
+    fs.mkdirSync(path.join(worldRepo, "identity"), { recursive: true });
+    fs.writeFileSync(path.join(worldRepo, "manifest.yaml"), WORLD_MANIFEST);
+    fs.writeFileSync(path.join(worldRepo, "identity", "who.md"), "# Who we are\n");
+    fs.writeFileSync(path.join(worldRepo, "README.md"), "# Repository readme, not part of the pack\n");
+    fs.writeFileSync(path.join(rigDir, "agents", "impl", "agent.yaml"),
+      ['name: impl-agent', 'version: "1.0.0"', 'resources:', '  skills: []', 'profiles:', '  default:', '    uses:', '      skills: []'].join("\n"));
+    fs.writeFileSync(path.join(rigDir, "rig.yaml"), [
+      'version: "0.2"', 'name: carried-world-rig', 'pods:', '  - id: dev', '    label: Dev', '    members:',
+      '      - id: impl', '        agent_ref: "local:agents/impl"', '        profile: default', '        runtime: claude-code', '        cwd: .',
+      '    edges: []', 'edges: []',
+    ].join("\n"));
+  });
+
+  afterEach(() => {
+    db.close();
+    if (savedContextRoot === undefined) delete process.env["OPENRIG_CONTEXT_ROOT"];
+    else process.env["OPENRIG_CONTEXT_ROOT"] = savedContextRoot;
+    fs.rmSync(work, { recursive: true, force: true });
+  });
+
+  async function create(extra: Record<string, unknown>) {
+    const outputPath = path.join(work, "carried.rigbundle");
+    const res = await setup.app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath: path.join(worldRepo, "rigs", "dev", "rig.yaml"), bundleName: "carried", bundleVersion: "0.1.0", outputPath, ...extra }),
+    });
+    return { res, outputPath };
+  }
+
+  it("carries the root-level pack by name, with only its declared files, and install routes it by that name", async () => {
+    const { res, outputPath } = await create({ contextPackDirs: [worldRepo] });
+    expect(res.status).toBe(201);
+
+    const { unpack } = await import("../src/domain/bundle-archive.js");
+    const extracted = path.join(work, "extracted");
+    fs.mkdirSync(extracted);
+    await unpack(outputPath, extracted);
+    expect(fs.readdirSync(path.join(extracted, "context-packs", "demo-world")).sort()).toEqual(["identity", "manifest.yaml"]);
+    expect(fs.readFileSync(path.join(extracted, "bundle.yaml"), "utf-8")).toContain("context-packs/demo-world/manifest.yaml");
+
+    const { routeBundleContents } = await import("../src/domain/bundle-content-routing.js");
+    const routing = await routeBundleContents(outputPath);
+    expect(routing.contextPacksRouting?.records[0]).toMatchObject({ status: "routed" });
+    expect(fs.readFileSync(path.join(contextRoot, "demo-world", "identity", "who.md"), "utf-8")).toBe("# Who we are\n");
+    expect(fs.existsSync(path.join(contextRoot, "demo-world", "README.md"))).toBe(false);
+  });
+
+  it("install leaves an existing different install of the same pack byte-for-byte untouched", async () => {
+    const { outputPath } = await create({ contextPackDirs: [worldRepo] });
+    const installed = path.join(contextRoot, "demo-world");
+    fs.mkdirSync(path.join(installed, "identity"), { recursive: true });
+    const gitManifest = WORLD_MANIFEST.replace("0.1.0", "0.0.9");
+    fs.writeFileSync(path.join(installed, "manifest.yaml"), gitManifest);
+    fs.writeFileSync(path.join(installed, "identity", "who.md"), "# Older text\n");
+    fs.writeFileSync(path.join(installed, ".openrig-git-source.json"), '{"pack":"."}\n');
+
+    const { routeBundleContents } = await import("../src/domain/bundle-content-routing.js");
+    const routing = await routeBundleContents(outputPath);
+
+    expect(routing.contextPacksRouting?.records[0]?.status).toBe("kept_existing");
+    expect(fs.readFileSync(path.join(installed, "manifest.yaml"), "utf-8")).toBe(gitManifest);
+    expect(fs.readFileSync(path.join(installed, "identity", "who.md"), "utf-8")).toBe("# Older text\n");
+    expect(fs.readFileSync(path.join(installed, ".openrig-git-source.json"), "utf-8")).toBe('{"pack":"."}\n');
+  });
+
+  it("a legacy (non-pod) spec cannot carry a pack", async () => {
+    const legacySpec = path.join(work, "legacy-rig.yaml");
+    fs.writeFileSync(legacySpec, ['schema_version: 1', 'name: legacy-rig', 'version: "1.0"', 'nodes:', '  - id: a', '    runtime: claude-code'].join("\n"));
+    const res = await setup.app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath: legacySpec, bundleName: "legacy", bundleVersion: "0.1.0", outputPath: path.join(work, "legacy.rigbundle"), contextPackDirs: [worldRepo] }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/--context-pack needs a pod-aware rig spec/);
+  });
+});
+
+describe("bundle create --project-dir: install registers the project and associates the rig", () => {
+  let db: Database.Database;
+  let setup: ReturnType<typeof createTestApp>;
+  let work: string;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    db = createDb();
+    migrate(db, ALL_MIGRATIONS);
+    setup = createTestApp(db);
+    work = fs.mkdtempSync(path.join(os.tmpdir(), "bundle-project-"));
+    for (const key of ["OPENRIG_WORKSPACE_PROJECTS_ROOT", "OPENRIG_WORKSPACE_CATALOG_PATH"]) saved[key] = process.env[key];
+    process.env["OPENRIG_WORKSPACE_PROJECTS_ROOT"] = path.join(work, "workspace", "projects");
+    process.env["OPENRIG_WORKSPACE_CATALOG_PATH"] = path.join(work, "workspace", "workspace.yaml");
+    const rigDir = path.join(work, "src", "rigs", "dev");
+    fs.mkdirSync(path.join(rigDir, "agents", "impl"), { recursive: true });
+    fs.mkdirSync(path.join(work, "src", "project"), { recursive: true });
+    fs.writeFileSync(path.join(work, "src", "project", "project.yaml"), "schema: openrig.project/v0alpha1\nid: openrig\n");
+    fs.writeFileSync(path.join(work, "src", "project", "SPEC.md"), "# Contributing to OpenRig\n");
+    fs.writeFileSync(path.join(rigDir, "agents", "impl", "agent.yaml"),
+      ['name: impl-agent', 'version: "1.0.0"', 'resources:', '  skills: []', 'profiles:', '  default:', '    uses:', '      skills: []'].join("\n"));
+    fs.writeFileSync(path.join(rigDir, "rig.yaml"), [
+      'version: "0.2"', 'name: openrig-dev', 'pods:', '  - id: dev', '    label: Dev', '    members:',
+      '      - id: impl', '        agent_ref: "local:agents/impl"', '        profile: default', '        runtime: claude-code', '        cwd: .',
+      '    edges: []', 'edges: []',
+    ].join("\n"));
+    fs.mkdirSync(path.join(work, "workspace"), { recursive: true });
+    fs.writeFileSync(path.join(work, "workspace", "workspace.yaml"), "schema: openrig.workspace/v0alpha1\nprojects:\n  - id: default\n    root: .\n");
+  });
+
+  afterEach(() => {
+    db.close();
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    fs.rmSync(work, { recursive: true, force: true });
+  });
+
+  it("carries the project, and install registers it with the rig associated, beside the workspace's own project", async () => {
+    const outputPath = path.join(work, "dev.rigbundle");
+    const res = await setup.app.request("/api/bundles/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ specPath: path.join(work, "src", "rigs", "dev", "rig.yaml"), bundleName: "dev", bundleVersion: "0.1.0", outputPath, projectDir: path.join(work, "src", "project") }),
+    });
+    expect(res.status).toBe(201);
+
+    const { routeBundleContents } = await import("../src/domain/bundle-content-routing.js");
+    const routing = await routeBundleContents(outputPath);
+
+    expect(routing.routingFailures).toBeUndefined();
+    expect(routing.projectRegistration).toMatchObject({ status: "registered", projectId: "openrig", rigName: "openrig-dev" });
+    const { readProjectCatalog } = await import("../src/domain/workspace/project-catalog.js");
+    expect(readProjectCatalog(path.join(work, "workspace", "workspace.yaml"))).toEqual([
+      { id: "default", root: "." },
+      { id: "openrig", root: "projects/openrig" },
+    ]);
+    expect(fs.readFileSync(path.join(work, "workspace", "projects", "openrig", "SPEC.md"), "utf-8")).toBe("# Contributing to OpenRig\n");
+
+    const inspect = await setup.app.request("/api/bundles/inspect", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ bundlePath: outputPath }),
+    });
+    expect((await inspect.json()).manifest.project).toEqual({ id: "openrig", path: "project" });
   });
 });

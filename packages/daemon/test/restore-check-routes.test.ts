@@ -9,6 +9,7 @@ import { createApp } from "../src/server.js";
 import type { RigRepository } from "../src/domain/rig-repository.js";
 import type { SessionRegistry } from "../src/domain/session-registry.js";
 import type { SnapshotRepository } from "../src/domain/snapshot-repository.js";
+import { createRestoreCheckService } from "../src/routes/restore-check.js";
 import {
   RestoreCheckService,
 } from "../src/domain/restore-check-service.js";
@@ -115,6 +116,91 @@ describe("Restore check routes", () => {
     fs.rmSync(openRigHome, { recursive: true, force: true });
   });
 
+  // These fixtures isolate other diagnostics from snapshot-availability/occupant failures.
+  function seedCurrentSnapshot(rigId: string) {
+    const rig = rigRepo.getRig(rigId)!;
+    const sessions = sessionRegistry.getSessionsForRig(rigId);
+    return snapshotRepo.createSnapshot(rigId, "auto-pre-down", {
+      rig: rig.rig, nodes: rig.nodes, edges: rig.edges, sessions, checkpoints: {},
+      activeSessionIdByNode: Object.fromEntries(sessions.map((s) => [s.nodeId, s.id])),
+    });
+  }
+
+  it("uses restore's ranked snapshot and reports missing service inputs in compact output", async () => {
+    const rig = rigRepo.createRig("service-rig");
+    const selected = snapshotRepo.createSnapshot(rig.id, "auto-pre-down", minimalSnapshotData(rig.id, rig.name) as never);
+    snapshotRepo.createSnapshot(rig.id, "manual", minimalSnapshotData(rig.id, rig.name) as never);
+    rigRepo.setServicesRecord(rig.id, {
+      kind: "compose", specJson: "{}", rigRoot: path.join(openRigHome, "missing-service"),
+      composeFile: path.join(openRigHome, "missing-compose.yaml"),
+    });
+    const before = db.prepare("SELECT COUNT(*) AS n FROM snapshots").get();
+    const response = await app.request("/api/restore-check?rig=service-rig&compact=1&noQueue=true&noHooks=true");
+    const body = await response.json();
+    const check = body.checks.find((c: { check: string }) => c.check === "rig.service-rig.restore-preconditions");
+    expect(response.status).toBe(200);
+    expect(check.status).toBe("red");
+    expect(check.evidence).toContain(`Snapshot ${selected.id}`);
+    expect(check.evidence).toContain("service_rig_root_missing");
+    expect(check.evidence).toContain("service_compose_file_missing");
+    expect(body.recovery.status).toBe("blocked");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM snapshots").get()).toEqual(before);
+  });
+
+  it("reports eligible current-state recovery for an older-occupant snapshot without capture", async () => {
+    const rig = rigRepo.createRig("changed-occupant");
+    const node = rigRepo.addNode(rig.id, "seat", { runtime: "terminal" });
+    sessionRegistry.registerSession(node.id, "seat@changed-occupant");
+    insertStartupContextRow(db, node.id, { runtime: "terminal" });
+    snapshotRepo.createSnapshot(rig.id, "auto-pre-down", minimalSnapshotData(rig.id, rig.name) as never);
+    const before = db.prepare("SELECT COUNT(*) AS n FROM snapshots").get();
+    const body = await (await app.request("/api/restore-check?rig=changed-occupant&noQueue=true&noHooks=true")).json();
+    expect(body.recovery.status).toBe("actionable");
+    const input = body.checks.find((c: { check: string }) => c.check.endsWith(".restore-preconditions"));
+    expect(input.status).toBe("yellow");
+    expect(input.evidence).toContain("older occupant");
+    expect(body.recovery.actions[0].command).toBe("rig up --existing changed-occupant");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM snapshots").get()).toEqual(before);
+  });
+
+  it("isolates a real factory snapshot read error to its rig", () => {
+    const broken = rigRepo.createRig("broken-read");
+    const good = rigRepo.createRig("good-read");
+    snapshotRepo.createSnapshot(good.id, "manual", minimalSnapshotData(good.id, good.name) as never);
+    const original = snapshotRepo.selectRestoreUsable.bind(snapshotRepo);
+    const selection = vi.spyOn(snapshotRepo, "selectRestoreUsable").mockImplementation((id) => {
+      if (id === broken.id) throw new Error("fixture snapshot read failure");
+      return original(id);
+    });
+    try {
+      const result = createRestoreCheckService(rigRepo, snapshotRepo).check({ noQueue: true, noHooks: true });
+      expect(result.rigs.find((r) => r.rigId === broken.id)?.status).toBe("unknown");
+      expect(result.checks.find((c) => c.check === "rig.good-read.restore-preconditions")?.status).toBe("green");
+      expect(result.recovery.unknown[0]?.reason).toContain("fixture snapshot read failure");
+    } finally {
+      selection.mockRestore();
+    }
+  });
+
+  it("does not add snapshot selection to a running-ready composed status poll", async () => {
+    const rig = rigRepo.createRig("ready-poll");
+    const node = rigRepo.addNode(rig.id, "seat", { runtime: "terminal" });
+    const session = sessionRegistry.registerSession(node.id, "seat@ready-poll");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    insertStartupContextRow(db, node.id, { runtime: "terminal" });
+    seedCurrentSnapshot(rig.id);
+    const selection = vi.spyOn(snapshotRepo, "selectRestoreUsable");
+    try {
+      expect((await app.request(`/api/rigs/${rig.id}/status`)).status).toBe(200);
+      expect(selection).not.toHaveBeenCalled();
+      await app.request("/api/restore-check?rig=ready-poll&noQueue=true&noHooks=true");
+      expect(selection).toHaveBeenCalledTimes(1);
+    } finally {
+      selection.mockRestore();
+    }
+  });
+
   it.each(["configured", "legacy"])("resolves the spec root and probes the SQLite queue store for %s shared-docs", async (layout) => {
     const home = path.join(openRigHome, "isolated-home");
     const sharedDocs = layout === "configured"
@@ -140,6 +226,28 @@ describe("Restore check routes", () => {
           evidence: "Daemon SQLite queue_items store is queryable; an empty queue is valid",
         }),
       ]));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reports a rig launched from a spec outside the shared-docs root as not checked, not red (#130)", async () => {
+    const sharedDocs = path.join(openRigHome, "empty shared-docs");
+    fs.mkdirSync(sharedDocs, { recursive: true });
+    vi.stubEnv("OPENRIG_SHARED_DOCS_ROOT", sharedDocs);
+    try {
+      const rig = rigRepo.createRig("outside-rig");
+      seedCurrentSnapshot(rig.id);
+
+      const res = await app.request("/api/restore-check?rig=outside-rig&noQueue=true&noHooks=true");
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      const spec = body.checks.find((c: { check: string }) => c.check === "rig.outside-rig.spec-present");
+      expect(spec).toEqual(expect.objectContaining({ status: "yellow", remediationSafe: true }));
+      expect(spec.evidence).toContain("Not checked: no launch spec location could be established");
+      expect(spec.evidence).toContain(path.join(sharedDocs, "rigs", "outside-rig", "rig.yaml"));
+      expect(body.counts.red).toBe(0);
+      expect(body.verdict).toBe("restorable_with_caveats");
     } finally {
       vi.unstubAllEnvs();
     }
@@ -272,7 +380,7 @@ describe("Restore check routes", () => {
     sessionRegistry.updateStatus(session.id, "stopped");
     sessionRegistry.updateStartupStatus(session.id, "failed");
     insertStartupContextRow(db, node.id);
-    snapshotRepo.createSnapshot(rig.id, "auto-pre-down", minimalSnapshotData(rig.id, rig.name) as never);
+    seedCurrentSnapshot(rig.id);
 
     const res = await app.request("/api/restore-check?rig=recoverable-rig&noQueue=true&noHooks=true");
     expect(res.status).toBe(200);
@@ -302,7 +410,7 @@ describe("Restore check routes", () => {
     const session = sessionRegistry.registerSession(node.id, "dev-impl@recoverable-rig");
     sessionRegistry.updateStatus(session.id, "stopped");
     sessionRegistry.updateStartupStatus(session.id, "failed");
-    snapshotRepo.createSnapshot(rig.id, "auto-pre-down", minimalSnapshotData(rig.id, rig.name) as never);
+    seedCurrentSnapshot(rig.id);
 
     const res = await app.request("/api/restore-check?rig=recoverable-rig&noQueue=true&noHooks=true");
     expect(res.status).toBe(200);
@@ -339,6 +447,7 @@ describe("Restore check routes", () => {
     insertStartupContextRow(db, node.id, {
       resolvedFilesJson: "{",
     });
+    seedCurrentSnapshot(rig.id);
 
     const res = await app.request("/api/restore-check?rig=malformed-startup-rig&noQueue=true&noHooks=true");
     expect(res.status).toBe(200);
@@ -384,6 +493,7 @@ describe("Restore check routes", () => {
     insertStartupContextRow(db, node.id, {
       startupActionsJson: "{",
     });
+    seedCurrentSnapshot(rig.id);
 
     const res = await app.request("/api/restore-check?rig=malformed-startup-actions-rig&noQueue=true&noHooks=true");
     expect(res.status).toBe(200);

@@ -103,6 +103,11 @@ stay durable-substrate-first (the packet/artifacts are the truth; the CLI is the
 3. **A runtime resume is mistaken for a seat handover or fork.** These have different continuity outcomes and provenance — don't conflate.
 4. **A rebuilt seat starts with stale instructions that conflict with current workflow mode.** Restore must include current state, not just historical state.
 
+**Re-entering project context, on any runtime.** A restore packet carries the work in flight, not the project's
+declared intent and context files. `rig context work-install` lists what the project declares; read the pieces the
+restored task needs. `--deliver` prints them all, and when several projects are declared (`--json` lists the
+ids), select one with `--project <id>` instead of guessing.
+
 ## Proof standard
 
 Proof should include a deliberate compaction/restart of a seat with

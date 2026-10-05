@@ -476,7 +476,7 @@ describe("rig compact-plan", () => {
     expect(output).toContain("orch-lead@test-rig");
     expect(output).toContain("authorization");
     expect(output).toContain("checkpoint/restore");
-    expect(output).toContain("claude-compact-in-place");
+    expect(output).toContain("claude-compaction-restore");
     expect(output).toContain("No automatic compaction has been run");
   });
 });

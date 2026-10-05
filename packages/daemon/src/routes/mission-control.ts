@@ -288,8 +288,7 @@ export function missionControlRoutes(opts?: MissionControlRoutesOpts): Hono {
       const unsubscribe = eventBus.subscribe((event) => {
         if (
           event.type !== "mission_control.action_executed" &&
-          event.type !== "mission_control.cli_drift_detected" &&
-          event.type !== "mission_control.view_refreshed"
+          event.type !== "mission_control.cli_drift_detected"
         ) return;
         const sse = { id: String(event.seq), data: JSON.stringify(event) };
         stream.writeSSE(sse).catch(() => {});

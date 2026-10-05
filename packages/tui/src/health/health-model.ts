@@ -143,8 +143,8 @@ function emptyLine(scope: HealthDisplayScope, width: number, snap: FleetSnapshot
   return fitLine([
     { text: "HEALTH  ", token: "bright", bold: true },
     { text: scopedEmptyLabel(scope), token: "dim", bold: true },
-    { text: " · no findings served; not a healthy verdict", token: "dim" },
     ...(partialCoverage(snap).length ? [{ text: " · PARTIAL", token: "warn" as const, bold: true }] : []),
+    { text: " · no findings served; not a healthy verdict", token: "dim" },
   ], width);
 }
 
@@ -213,7 +213,12 @@ export function healthListLines(snap: FleetSnapshot, scope: HealthDisplayScope, 
   if (unavailable) return wrapDetailLines([{ text: `HEALTH  Unknown · ${unavailable}` }], width);
   const records = healthRecordsForScope(snap, scope);
   // Wrap the complete page explanation; compact summary callers still fit one line.
-  if (records.length === 0) return wrapDetailLines([emptyLine(scope, Infinity, snap)], width);
+  const coverageLines = wrapDetailLines(partialCoverage(snap).map((c) => ({
+    text: c.status === "unavailable"
+      ? `UNAVAILABLE · ${c.source}: ${c.reason}. This source was not assessed; the result is partial.`
+      : `PARTIAL · ${c.source} evaluated ${c.evaluated} of ${c.total} ${c.unit}; ${c.omitted} omitted were not evaluated and are not healthy`,
+  })), width).map(line => ({ ...line, segs: [{ text: line.text, token: "warn" as const, bold: true }] }));
+  if (records.length === 0) return wrapDetailLines([emptyLine(scope, Infinity, snap), ...coverageLines], width);
   const { wide, sevWidth, signalWidth, scopeWidth, ageWidth, confWidth, evidenceWidth } = healthColumnWidths(width);
   const columns = [
     cell("SEV", sevWidth),
@@ -226,7 +231,7 @@ export function healthListLines(snap: FleetSnapshot, scope: HealthDisplayScope, 
   const lines: ContentLine[] = [sectionRule(`HEALTH · ${scope.kind} · canonical findings`, width), heading, { text: "─".repeat(Math.min(width, Math.max(1, heading.text.length))) }];
   lines.push(...records.map((record) => healthTableRow(record, snap, width)));
   if (snap.health?.truncated) lines.push(fitLine([{ text: "PARTIAL · daemon result limit reached", token: "warn", bold: true }], width));
-  for (const c of partialCoverage(snap)) lines.push(fitLine([{ text: `PARTIAL · ${c.source} evaluated ${c.evaluated} of ${c.total} ${c.unit}; ${c.omitted} omitted were not evaluated and are not healthy`, token: "warn", bold: true }], width));
+  lines.push(...coverageLines);
   lines.push(fitLine([{ text: "Enter opens explanation and typed evidence · Escape returns", token: "dim" }], width));
   return lines;
 }

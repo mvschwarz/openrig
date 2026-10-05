@@ -11,6 +11,8 @@ interface TmuxShellCommandOptions {
   stageIfLong?: boolean;
   /** A staged single-executable runner must replace the staging shell. */
   execInScript?: boolean;
+  /** Preserve rc aliases/functions in POSIX or fish panes; other shells use /bin/sh. */
+  sourceInPane?: boolean;
 }
 
 /**
@@ -214,6 +216,18 @@ const CAPTURE_BATCH = 24;
 function shellQuote(s: string): string {
   // Replace each ' with '"'"' (end quote, double-quote the apostrophe, resume quote)
   return "'" + s.replace(/'/g, "'\"'\"'") + "'";
+}
+
+/**
+ * An exact tmux target for a session name. tmux resolves a bare name by prefix when no session has that exact name,
+ * so a read or pipe for a session that just ended would act on another (`dev-impl@my-rig` on `dev-impl@my-rig2`).
+ * Pane, window and session ids (`%3`, `@1`, `$2`) and `session:window.pane` targets pass through unchanged (tmux
+ * turns `:` in a session name into `_`, so a `:` always means an explicit target). A pane or window command gets
+ * `=name:` (as the batched capture uses); a session command gets `=name`.
+ */
+function exactTarget(target: string, kind: "pane" | "window" | "session"): string {
+  if (/^[%@$]\d+$/.test(target) || target.includes(":")) return target;
+  return kind === "session" ? `=${target}` : `=${target}:`;
 }
 
 /** Elements safe to leave bare in a POSIX shell word list. */
@@ -571,7 +585,7 @@ export class TmuxAdapter {
   }
 
   /**
-   * Paste text at every size. Unbracketed input can be consumed as individual
+   * Bracketed paste by default, at every size. Unbracketed input can be consumed as individual
    * keystrokes by agent TUIs, losing text even below the old 8 KiB cutoff.
    * A file keeps payload bytes out of shell/tmux argv and its size limits.
    *   `-p`  bracket the paste when the receiving application enables that mode.
@@ -579,17 +593,19 @@ export class TmuxAdapter {
    *         CR, and CR is SUBMIT in the Claude/Codex TUIs - a
    *         default paste of a multi-line pack would submit on every newline.
    *   `-d`  drop the buffer after a successful paste.
-   * The single trailing submit stays the caller's separate `sendKeys(["Enter"])`.
+   * `options.bracketed: false` omits `-p` for explicit prompt answers: bytes
+   * then act as keystrokes, including menu shortcuts and control keys.
+   * Any trailing submit stays the caller's separate `sendKeys(["Enter"])`.
    * Cleanup unlinks the temp file in `finally`; if the buffer was loaded but the
    * paste failed (e.g. missing target), an explicit `delete-buffer` runs so no
    * buffer leaks. Unique temp + buffer names per call keep parallel `rig up`
    * seats from colliding.
    */
-  async sendText(target: string, text: string): Promise<TmuxResult> {
-    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, beforeWrite));
+  async sendText(target: string, text: string, beforeInput?: () => void, options?: { bracketed?: boolean }): Promise<TmuxResult> {
+    return this.guardedInput(target, (pane, beforeWrite) => this.sendTextUnchecked(pane, text, () => { beforeWrite(); beforeInput?.(); }, options?.bracketed));
   }
 
-  private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void): Promise<TmuxResult> {
+  private async sendTextUnchecked(target: string, text: string, beforeWrite: () => void, bracketed = true): Promise<TmuxResult> {
     const path = this.fileOps.tmpName();
     const buffer = this.fileOps.bufferName();
     let bufferLoaded = false;
@@ -601,8 +617,11 @@ export class TmuxAdapter {
         `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
       bufferLoaded = true;
       beforeWrite();
-      await this.run(["tmux", "paste-buffer", "-t", target, "-b", buffer, "-d", "-r", "-p"],
-        `tmux paste-buffer -t ${shellQuote(target)} -b ${shellQuote(buffer)} -d -r -p`);
+      // Explicit prompt answers need key input, not bracketed-paste framing.
+      // Keep their bytes in the file: tmux command parsing and argv limits must
+      // not alter semicolons or reject long answers (#519, #602).
+      await this.run(["tmux", "paste-buffer", "-t", target, "-b", buffer, "-d", "-r", ...(bracketed ? ["-p"] : [])],
+        `tmux paste-buffer -t ${shellQuote(target)} -b ${shellQuote(buffer)} -d -r${bracketed ? " -p" : ""}`);
       return { ok: true };
     } catch (err) {
       if (bufferLoaded) {
@@ -641,8 +660,24 @@ export class TmuxAdapter {
 
   private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
     const commandBytes = Buffer.byteLength(command, "utf8");
+    // POSIX shells retain subshell isolation; unknown/unreadable panes use sh.
+    const paneShell = options.sourceInPane ? (await this.getPaneCommand(target) ?? "").replace(/^-/, "") : "";
+    const sourceInPane = ["bash", "zsh", "sh", "dash", "ksh"].includes(paneShell);
     let path = options.stageIfLong && commandBytes <= 512 ? undefined : this.fileOps.tmpName();
-    let invocation = path ? `/bin/sh ${shellQuote(path)}` : command;
+    let invocation = path ? sourceInPane ? `( . ${shellQuote(path)} )` : `/bin/sh ${shellQuote(path)}` : command;
+    if (path && paneShell === "fish") {
+      const quotedPath = shellQuote(path);
+      invocation = `/bin/sh ${quotedPath}`;
+      // Fish single quotes reinterpret POSIX backslashes. Keep those payloads
+      // (and paths) on sh, preserving existing executable launches byte-for-byte.
+      if (!command.includes("\\") && !path.includes("\\")) {
+        // Probe fixed syntax in the pane before sourcing, not the launch's exit
+        // status: even failed cleanup must not turn a later exit into a retry.
+        const sourced = `if eval 'OPENRIG_FISH_ASSIGNMENT_PROBE=1 /bin/sh -c :'; source ${quotedPath}; else; /bin/sh ${quotedPath}; end`;
+        // Repeating the path must not add a refusal for previously valid TMPDIRs.
+        if (Buffer.byteLength(sourced, "utf8") <= 512) invocation = sourced;
+      }
+    }
     if (Buffer.byteLength(invocation, "utf8") > 512) {
       // Pi commands below the canonical tty limit still fit when staging cannot.
       if (options.stageIfLong && commandBytes < 1024) {
@@ -679,8 +714,8 @@ export class TmuxAdapter {
     }
   }
 
-  async sendKeys(target: string, keys: string[]): Promise<TmuxResult> {
-    return this.guardedInput(target, pane => this.sendKeysUnchecked(pane, keys));
+  async sendKeys(target: string, keys: string[], beforeInput?: () => void): Promise<TmuxResult> {
+    return this.guardedInput(target, (pane, beforeWrite) => { beforeWrite(); beforeInput?.(); return this.sendKeysUnchecked(pane, keys); });
   }
 
   private async sendKeysUnchecked(target: string, keys: string[]): Promise<TmuxResult> {
@@ -694,9 +729,10 @@ export class TmuxAdapter {
   }
 
   async setWindowOption(target: string, option: string, value: string): Promise<TmuxResult> {
+    const window = exactTarget(target, "window");
     try {
-      await this.run(["tmux", "set-option", "-w", "-t", target, option, value],
-        `tmux set-option -w -t ${shellQuote(target)} ${shellQuote(option)} ${shellQuote(value)}`);
+      await this.run(["tmux", "set-option", "-w", "-t", window, option, value],
+        `tmux set-option -w -t ${shellQuote(window)} ${shellQuote(option)} ${shellQuote(value)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -711,7 +747,7 @@ export class TmuxAdapter {
       return { ok: false, code: "validation_error", message: `resizeWindow: rows must be a positive integer, got ${rows}` };
     }
     try {
-      await this.run(["tmux", "resize-window", "-t", target, "-x", String(cols), "-y", String(rows)]);
+      await this.run(["tmux", "resize-window", "-t", exactTarget(target, "window"), "-x", String(cols), "-y", String(rows)]);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -737,18 +773,20 @@ export class TmuxAdapter {
   }
 
   private async killSessionUnchecked(name: string): Promise<TmuxResult> {
+    // The guarded path passes the immutable `$N` id, which stays as it is; a bare name is made exact.
+    const session = exactTarget(name, "session");
     // Detach first so `detach-on-destroy off` cannot switch views onto another session.
     try {
-      await this.run(["tmux", "detach-client", "-s", name],
-        `tmux detach-client -s ${shellQuote(name)}`);
+      await this.run(["tmux", "detach-client", "-s", session],
+        `tmux detach-client -s ${shellQuote(session)}`);
     } catch (err) {
       // tmux 3.7 says "no current client" when nothing is attached (and for a missing session, which the kill classifies).
       const message = err instanceof Error ? err.message : String(err);
       if (!message.toLowerCase().includes("no current client")) return classifyWriteError(err);
     }
     try {
-      await this.run(["tmux", "kill-session", "-t", name],
-        `tmux kill-session -t ${shellQuote(name)}`);
+      await this.run(["tmux", "kill-session", "-t", session],
+        `tmux kill-session -t ${shellQuote(session)}`);
       const pane = this.freshProbes.get(name);
       this.freshProbes.delete(name);
       if (pane) this.freshProbes.delete(pane);
@@ -785,12 +823,13 @@ export class TmuxAdapter {
   }
 
   private async respawnPaneUnchecked(paneTarget: string, command?: string, opts?: { cwd?: string; env?: Record<string, string> }): Promise<TmuxResult> {
-    const argv = ["tmux", "respawn-pane", "-t", paneTarget];
+    const exact = exactTarget(paneTarget, "pane");
+    const argv = ["tmux", "respawn-pane", "-t", exact];
     if (opts?.cwd != null) argv.push("-c", opts.cwd);
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) argv.push("-e", `${k}=${v}`);
     // The respawn command is ONE argv unit: tmux runs it via the shell.
     if (command != null && command.length > 0) argv.push(command);
-    const legacyRespawn = ["tmux", "respawn-pane", "-t", shellQuote(paneTarget)];
+    const legacyRespawn = ["tmux", "respawn-pane", "-t", shellQuote(exact)];
     if (opts?.cwd != null) legacyRespawn.push("-c", shellQuote(opts.cwd));
     if (opts?.env) for (const [k, v] of Object.entries(opts.env)) legacyRespawn.push("-e", shellQuote(`${k}=${v}`));
     if (command != null && command.length > 0) legacyRespawn.push(shellQuote(command));
@@ -807,9 +846,10 @@ export class TmuxAdapter {
    *  Set to `on` BEFORE the retiree is signalled to exit (else the pane is destroyed on exit and there
    *  is nothing to respawn into). */
   async setRemainOnExit(paneTarget: string, on: boolean): Promise<TmuxResult> {
+    const exact = exactTarget(paneTarget, "pane");
     try {
-      await this.run(["tmux", "set-option", "-p", "-t", paneTarget, "remain-on-exit", on ? "on" : "off"],
-        `tmux set-option -p -t ${shellQuote(paneTarget)} remain-on-exit ${on ? "on" : "off"}`);
+      await this.run(["tmux", "set-option", "-p", "-t", exact, "remain-on-exit", on ? "on" : "off"],
+        `tmux set-option -p -t ${shellQuote(exact)} remain-on-exit ${on ? "on" : "off"}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -819,9 +859,10 @@ export class TmuxAdapter {
   /** Seat-handover cutover: is the pane's process dead (the retiree exited; the pane held by
    *  remain-on-exit)? A known-missing pane also proves physical cutover; unknown probe errors stay false. */
   async isPaneDead(paneId: string): Promise<boolean> {
+    const exact = exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_dead}"],
-        `tmux display-message -p -t ${shellQuote(paneId)} "#{pane_dead}"`);
+      const output = await this.run(["tmux", "display-message", "-p", "-t", exact, "#{pane_dead}"],
+        `tmux display-message -p -t ${shellQuote(exact)} "#{pane_dead}"`);
       return output.trim() === "1";
     } catch (error) {
       return isNoServerError(error) || isPaneAbsenceError(error);
@@ -853,9 +894,10 @@ export class TmuxAdapter {
 
   /** Get the PID of the foreground process in a pane. Returns null if unavailable. */
   async getPanePid(paneId: string): Promise<number | null> {
+    const target = exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_pid}"],
-        `tmux display-message -p -t ${shellQuote(paneId)} "#{pane_pid}"`);
+      const output = await this.run(["tmux", "display-message", "-p", "-t", target, "#{pane_pid}"],
+        `tmux display-message -p -t ${shellQuote(target)} "#{pane_pid}"`);
       const trimmed = output.trim();
       const parsed = parseInt(trimmed, 10);
       return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
@@ -879,13 +921,29 @@ export class TmuxAdapter {
 
   /** Get the current foreground command in a pane. Returns null if unavailable. */
   async getPaneCommand(paneId: string): Promise<string | null> {
+    const target = exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "display-message", "-p", "-t", paneId, "#{pane_current_command}"],
-        `tmux display-message -p -t ${shellQuote(paneId)} "#{pane_current_command}"`);
+      const output = await this.run(["tmux", "display-message", "-p", "-t", target, "#{pane_current_command}"],
+        `tmux display-message -p -t ${shellQuote(target)} "#{pane_current_command}"`);
       const trimmed = output.trim();
       return trimmed || null;
     } catch {
       return null;
+    }
+  }
+
+  /** A launch metadata read. Callers must never put credential values in terminal input. */
+  async getSessionEnv(session: string, key: string): Promise<string | undefined> {
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
+    try {
+      const output = await this.run(["tmux", "show-environment", "-t", session, key],
+        `tmux show-environment -t ${shellQuote(session)} ${shellQuote(key)}`);
+      if (output.trim() === `-${key}`) return undefined;
+      if (!output.startsWith(`${key}=`)) throw new Error("Unexpected session environment response.");
+      return output.slice(key.length + 1).replace(/\r?\n$/, "");
+    } catch (error) {
+      if (error instanceof Error && error.message.includes(`unknown variable: ${key}`)) return undefined;
+      throw new Error("Cannot read the session's launch environment.");
     }
   }
 
@@ -895,9 +953,10 @@ export class TmuxAdapter {
    *  distinguishes a genuinely absent var from `tmux show-environment <var>`'s
    *  nonzero lookup exit. */
   async hasSessionEnv(sessionName: string, varName: string): Promise<boolean | null> {
+    const target = exactTarget(sessionName, "session");
     try {
-      const output = await this.run(["tmux", "show-environment", "-t", sessionName],
-        `tmux show-environment -t ${shellQuote(sessionName)}`);
+      const output = await this.run(["tmux", "show-environment", "-t", target],
+        `tmux show-environment -t ${shellQuote(target)}`);
       const prefix = `${varName}=`;
       return output.split(/\r?\n/).some(
         (line) => line.startsWith(prefix) && line.slice(prefix.length).trim().length > 0,
@@ -916,9 +975,10 @@ export class TmuxAdapter {
     // shell, so its inner quoting stays POSIX here (psmux documents the same
     // `cat >` server-side form for its own path).
     const sink = "cat >> " + shellQuote(outputPath);
+    const target = exactTarget(sessionName, "pane");
     try {
-      await this.run(["tmux", "pipe-pane", "-t", sessionName, sink],
-        `tmux pipe-pane -t ${shellQuote(sessionName)} ${shellQuote(sink)}`);
+      await this.run(["tmux", "pipe-pane", "-t", target, sink],
+        `tmux pipe-pane -t ${shellQuote(target)} ${shellQuote(sink)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -927,9 +987,10 @@ export class TmuxAdapter {
 
   /** Stop pipe-pane on a session. */
   async stopPipePane(sessionName: string): Promise<TmuxResult> {
+    const target = exactTarget(sessionName, "pane");
     try {
-      await this.run(["tmux", "pipe-pane", "-t", sessionName],
-        `tmux pipe-pane -t ${shellQuote(sessionName)}`);
+      await this.run(["tmux", "pipe-pane", "-t", target],
+        `tmux pipe-pane -t ${shellQuote(target)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -1016,9 +1077,10 @@ export class TmuxAdapter {
   }
 
   async capturePaneContent(paneId: string, lines: number = 20): Promise<string | null> {
+    const target = exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "capture-pane", "-p", "-t", paneId, "-S", `-${lines}`],
-        `tmux capture-pane -p -t ${shellQuote(paneId)} -S -${lines}`);
+      const output = await this.run(["tmux", "capture-pane", "-p", "-t", target, "-S", `-${lines}`],
+        `tmux capture-pane -p -t ${shellQuote(target)} -S -${lines}`);
       return output || null;
     } catch {
       return null;
@@ -1032,9 +1094,10 @@ export class TmuxAdapter {
    * the absolute-paint seed exists to eliminate.
    */
   async capturePaneScreen(paneId: string): Promise<string | null> {
+    const target = exactTarget(paneId, "pane");
     try {
-      const output = await this.run(["tmux", "capture-pane", "-p", "-t", paneId],
-        `tmux capture-pane -p -t ${shellQuote(paneId)}`);
+      const output = await this.run(["tmux", "capture-pane", "-p", "-t", target],
+        `tmux capture-pane -p -t ${shellQuote(target)}`);
       return output || null;
     } catch {
       return null;
@@ -1048,10 +1111,11 @@ export class TmuxAdapter {
    * produces a garbage seed.
    */
   async getPaneCursorPosition(paneId: string): Promise<TmuxCursorPosition | null> {
+    const exact = exactTarget(paneId, "pane");
     try {
       const output = await this.run(
-        ["tmux", "display-message", "-p", "-t", paneId, CURSOR_FORMAT],
-        `tmux display-message -p -t ${shellQuote(paneId)} "${CURSOR_FORMAT}"`,
+        ["tmux", "display-message", "-p", "-t", exact, CURSOR_FORMAT],
+        `tmux display-message -p -t ${shellQuote(exact)} "${CURSOR_FORMAT}"`,
       );
       const [xRaw, yRaw, widthRaw, heightRaw] = output.trim().split(TMUX_FIELD_SEPARATOR);
       const x = Number.parseInt(xRaw ?? "", 10);
@@ -1075,9 +1139,11 @@ export class TmuxAdapter {
    * scopes are never crossed (guard b2).
    */
   async setSessionOption(sessionName: string, key: string, value: string): Promise<TmuxResult> {
+    // set/show-option take a target-pane even when the option is session-scoped.
+    const exact = exactTarget(sessionName, "pane");
     try {
-      await this.run(["tmux", "set-option", "-t", sessionName, key, value],
-        `tmux set-option -t ${shellQuote(sessionName)} ${shellQuote(key)} ${shellQuote(value)}`);
+      await this.run(["tmux", "set-option", "-t", exact, key, value],
+        `tmux set-option -t ${shellQuote(exact)} ${shellQuote(key)} ${shellQuote(value)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);
@@ -1119,9 +1185,11 @@ export class TmuxAdapter {
 
   /** Get a session-scoped user option value. Returns null if not set or error. */
   async getSessionOption(sessionName: string, key: string): Promise<string | null> {
+    // set/show-option take a target-pane even when the option is session-scoped.
+    const exact = exactTarget(sessionName, "pane");
     try {
-      const output = await this.run(["tmux", "show-option", "-v", "-t", sessionName, key],
-        `tmux show-option -v -t ${shellQuote(sessionName)} ${shellQuote(key)}`);
+      const output = await this.run(["tmux", "show-option", "-v", "-t", exact, key],
+        `tmux show-option -v -t ${shellQuote(exact)} ${shellQuote(key)}`);
       return output.trim() || null;
     } catch {
       return null;
@@ -1194,10 +1262,11 @@ export class TmuxAdapter {
   }
 
   async readPaneLastActivity(paneId: string): Promise<number | null> {
+    const exact = exactTarget(paneId, "pane");
     try {
       const output = await this.run(
-        ["tmux", "display-message", "-p", "-t", paneId, "#{window_activity}"],
-        `tmux display-message -p -t ${shellQuote(paneId)} '#{window_activity}'`,
+        ["tmux", "display-message", "-p", "-t", exact, "#{window_activity}"],
+        `tmux display-message -p -t ${shellQuote(exact)} '#{window_activity}'`,
       );
       const trimmed = output.trim();
       if (!/^\d+$/.test(trimmed)) return null;
@@ -1235,9 +1304,10 @@ export class TmuxAdapter {
    * kills, or rebinds a session and never touches OpenRig routing/identity.
    */
   async switchClient(client: string, target: string): Promise<TmuxResult> {
+    const exact = exactTarget(target, "session");
     try {
-      await this.run(["tmux", "switch-client", "-c", client, "-t", target],
-        `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(target)}`);
+      await this.run(["tmux", "switch-client", "-c", client, "-t", exact],
+        `tmux switch-client -c ${shellQuote(client)} -t ${shellQuote(exact)}`);
       return { ok: true };
     } catch (err) {
       return classifyWriteError(err);

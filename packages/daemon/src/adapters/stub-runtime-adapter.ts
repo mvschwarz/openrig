@@ -92,6 +92,7 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
 
   async project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult> {
     const projected: string[] = [];
+    const warnings: string[] = [];
     const skipped: string[] = [];
     const failed: Array<{ effectiveId: string; error: string }> = [];
 
@@ -101,17 +102,18 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
         continue;
       }
       try {
-        if (this.projectEntry(entry, binding)) projected.push(entry.effectiveId);
+        if (this.projectEntry(entry, binding, warnings)) projected.push(entry.effectiveId);
         else skipped.push(entry.effectiveId);
       } catch (err) {
         failed.push({ effectiveId: entry.effectiveId, error: (err as Error).message });
       }
     }
 
-    return { projected, skipped, failed };
+    return { projected, skipped, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
   async deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult> {
+    const warnings: string[] = [];
     let delivered = 0;
     const failed: Array<{ path: string; error: string }> = [];
 
@@ -124,7 +126,7 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
         switch (hint) {
           case "guidance_merge": {
             const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
-            if (!this.mergeGuidance(targetPath, file.path, content)) continue; // rig-role skip
+            if (!this.mergeGuidance(targetPath, file.path, content, warnings)) continue; // rig-role skip
             break;
           }
           case "skill_install": {
@@ -150,7 +152,7 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
       }
     }
 
-    return { delivered, failed };
+    return { delivered, failed, ...(warnings.length ? { warnings } : {}) };
   }
 
   async launchHarness(
@@ -284,11 +286,11 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
     };
   }
 
-  private projectEntry(entry: ProjectionEntry, binding: NodeBinding): boolean {
+  private projectEntry(entry: ProjectionEntry, binding: NodeBinding, warnings: string[]): boolean {
     if (!this.fsOps) return false;
     if (entry.category === "guidance" && entry.mergeStrategy === "managed_block") {
       const targetPath = nodePath.join(binding.cwd, "AGENTS.md");
-      return this.mergeGuidance(targetPath, entry.effectiveId, this.fsOps.readFile(entry.absolutePath));
+      return this.mergeGuidance(targetPath, entry.effectiveId, this.fsOps.readFile(entry.absolutePath), warnings);
     }
     if (entry.category === "skill") {
       const targetDir = nodePath.join(binding.cwd, ".openrig", "stub", "skills", entry.effectiveId);
@@ -318,12 +320,13 @@ export class StubRuntimeAdapter implements RuntimeAdapter {
     return false;
   }
 
-  private mergeGuidance(targetPath: string, blockId: string, content: string): boolean {
+  private mergeGuidance(targetPath: string, blockId: string, content: string, warnings: string[]): boolean {
     if (!this.fsOps) return false;
     // Per-seat rig-role content collides across pod-mates when merged into a shared
     // cwd file; it is delivered via send_text instead (mirrors the other adapters).
     if (blockId === "rig-role") return false;
     mergeManagedBlock(this.fsOps, targetPath, blockId, content, {
+      warnings,
       replaceBlockIds: blockId === "openrig-start.md" ? ["using-openrig.md"] : [],
     });
     return true;

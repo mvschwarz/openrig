@@ -174,7 +174,7 @@ edges:
 | `name` | string | yes | — | Rig name. Used in session naming (`{pod}-{member}@{name}`), snapshot identification, and spec library lookup. |
 | `summary` | string | no | — | Human-readable description. Shown in spec library, review surfaces, and `rig specs show`. |
 | `culture_file` | string | no | — | Relative path to a rig-wide culture/constitution file. Must be a safe relative path (no `..`, no absolute). |
-| `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute). Absent leaves the default floor. A member may set its own `permission_policy`, which takes precedence over the rig-level one. See "Attaching a permission policy" below. |
+| `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute). Absent leaves the default floor. A member may set its own `permission_policy`, which takes precedence over the rig-level one. See "Attaching a permission policy" below. |
 | `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex members always use `AGENTS.md`. See "Choosing the Claude instruction file" below. |
 | `docs` | Doc[] | no | — | Documentation files that should travel with the rig. Included in rig bundles. Each entry has a `path` field (safe relative path). The engine does not consume these — they are for humans and agents setting up the environment before launch. |
 | `startup` | StartupBlock | no | — | Rig-level startup files and actions. Applied to all members via the startup layering model. |
@@ -194,7 +194,7 @@ permission_policy: builtin:standard
 permission_policy: policies/my-cautious-dev.policy.md
 ```
 
-Built-in policies (`locked` / `standard` / `open` / `yolo`) are read-only and are
+Built-in policies (`locked` / `standard` / `open` / `yolo` / `auto`) are read-only and are
 referenced as `builtin:<name>`. A custom policy lives in your own project and is
 referenced by a safe relative path (no `..`, no absolute). A shipped example of the
 custom shape is `packages/daemon/policies/examples/my-cautious-dev.policy.md` — copy it
@@ -210,6 +210,55 @@ An explicit `rig seat set-permissions` choice overrides member/rig policy for
 future managed launches of that stable seat; it does not rewrite this spec or
 its inherited policy provenance. `inherit` removes that override. See
 [per-seat permission mode](getting-started.md#per-seat-permission-mode).
+
+### Built-in permission policies
+
+The five built-ins live in `packages/daemon/policies/builtin/`. Action names are the
+policies' own semantic classes.
+
+| Policy | Surface | Runs without asking | Asks a person | Denied |
+|--------|---------|---------------------|---------------|--------|
+| `builtin:locked` | config | `run_toolchain` (npm, node, tsc, tests, lint), `rig_up`, `rig_down` | nothing | everything else (`default_posture: deny`) |
+| `builtin:standard` | config | everything not listed, including `push_to_remote` (`default_posture: allow`) | `create_pr`, `publish_package`, `merge_or_release`, `force_push`, and the destructive class | nothing |
+| `builtin:open` | config | everything, including PRs, publishing, merges and force pushes (`default_posture: allow`) | the destructive class only | nothing |
+| `builtin:yolo` | flag (`launch_posture: full_bypass`) | everything; the runtime's permission prompts are bypassed at launch | nothing | nothing |
+| `builtin:auto` | flag (`launch_posture: auto`) | Claude runs with `--permission-mode auto`; Codex and Pi launch at the floor | Claude: decided by auto mode; Codex and Pi: as at the floor | Claude: decided by auto mode; Codex and Pi: as at the floor |
+
+The destructive class is `delete_everything`, `drop_persistent_store` and
+`reset_or_discard_vcs`.
+
+**At launch.** `builtin:yolo` selects Claude `--dangerously-skip-permissions`, Codex
+`-s danger-full-access -a never`, and Pi `--approve`. `builtin:auto` selects Claude
+`--permission-mode auto`, while Codex and Pi do not have an auto mode and launch at the floor.
+Every other seat launches at the floor:
+- Claude `--permission-mode acceptEdits`;
+- Codex `-s workspace-write`, or `-p <profile>` when the member sets
+  `codex_config_profile`, in which case the profile governs its own sandbox;
+- Pi `--no-approve` by default.
+
+**Config-surface policies are recorded, not applied at launch.** The seat still starts at
+the floor. The `allow`, `ask` and `deny` rules take effect once they are translated into the
+runtime's native settings. The `applying-a-permission-policy` skill in `openrig-core` does
+that translation, with per-runtime limits. For example, Claude's prefix rules can't
+reliably tell `git push --force` from `git push`. An `ask` waits for a person, so it pauses
+an autonomous seat. Standard suits interactive work, and the policy files point
+autonomous teams to Open or YOLO.
+
+**Pi has no permission policy.** `--approve` and `--no-approve` set Pi's resource trust. The
+OMP variant maps that trust to its approval mode: `yolo` under `--approve`, otherwise
+`always-ask`.
+
+**A custom policy file** is Markdown with frontmatter: `policy_schema_version: 1`, `name`,
+`source: custom`, `description`, and `surface`.
+- `surface: flag` adds `launch_posture` (`floor`, `full_bypass` or `auto`).
+- `surface: config` adds `default_posture` (`allow`, `ask` or `deny`) and the `allow`, `ask`,
+  `deny` and `destructive_class` lists (`[]` for none).
+
+**Claude Code's own checks.** The first time Claude Code starts an interactive session
+with permissions bypassed, it shows a warning dialog asking you to accept responsibility;
+declining exits. On Linux and macOS it refuses that mode when run as root or under `sudo`,
+except inside a recognized sandbox. See Claude Code's
+[Choose a permission mode](https://code.claude.com/docs/en/permission-modes#skip-all-checks-with-bypasspermissions-mode).
 
 ### Choosing the Claude instruction file
 
@@ -293,7 +342,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 `runtime: omp` launches Oh My Pi through OpenRig's RPC runner. It is separate from `runtime: pi`; OMP does not use Pi's `--name` or `--approve` flags.
 
 - **State:** Each seat uses `$OPENRIG_HOME/state/omp/<seat>/agent` and `sessions/` instead of your default `~/.omp` profile, and runs with that seat directory as `HOME`. OpenRig does not copy OMP credentials. The runner finds the real `omp` binary before switching `HOME`, so a version-manager shim such as mise on the daemon's `PATH` still works.
-- **Credentials:** Provision each seat separately, or put the provider's key variable in `recovery.provider_auth_env_allowlist` (for example `ANTHROPIC_API_KEY` or `MISTRAL_API_KEY`). The allowlist accepts the key variable of every provider in OpenRig's OMP provider map, from `anthropic` through `litellm`. A seat receives a key only when its `model` is written as `provider/id`, such as `anthropic/claude-sonnet-4-5`. Short names such as `opus` pass no key. OMP also reads the launch directory's `.env`, so use a trusted working directory.
+- **Credentials:** Provision each seat separately, or put the provider's key variable in `recovery.provider_auth_env_allowlist` (for example `ANTHROPIC_API_KEY` or `MISTRAL_API_KEY`). The allowlist accepts the key variable of every provider in OpenRig's OMP provider map, from `anthropic` through `litellm`. A seat receives a key only when its `model` is written as `provider/id`, such as `anthropic/claude-sonnet-4-5`. Short names such as `opus` pass no key. A provider whose key is scoped to one endpoint also accepts that endpoint's variable: `anthropic`, `openai` and `litellm` each take their `<PROVIDER>_BASE_URL` — `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `LITELLM_BASE_URL`. The allowlist admits each variable on its own, so an endpoint named without its key is admitted too, which suits a keyless local proxy. The launch gate admits these endpoint names for OMP seats; the match against the seat's declared `provider/id` happens at the OMP child, which forwards a matching endpoint already in the runner's environment just as it forwards a key. OMP also reads the launch directory's `.env`, so use a trusted working directory.
 - **Approval posture:** The default floor is `--approval-mode always-ask`. Because the runner is headless, OMP approval requests are cancelled and the seat stays in needing-attention after the turn ends, until the next agent run starts. A `full_bypass` permission policy selects `--approval-mode yolo`.
 - **Model errors:** A rejected prompt, a provider or authentication error during a turn, or exhausted automatic retries is printed in the pane and keeps the seat in needing-attention until the next agent run starts.
 - **Restore:** OMP creates its session file after the first persisted turn. A new seat with no persisted turn has no resume token; restoring it requires `rig up --existing <rig> --fresh <seat>`. After that file exists, OpenRig restores that exact session file. If a full rig restore leaves an OMP seat in `attention_required` or `failed`, `rig seat clear-attention` cannot yet reconcile it to `operator_recovered`, even with `--reason`, because restore reconciliation only verifies Claude Code and Codex processes ([#41](https://github.com/mvschwarz/openrig/issues/41)). Relaunch that seat with `rig up --existing <rig> --fresh <seat>`, or restore it manually.
@@ -453,6 +502,13 @@ retain the preceding proof. A replacement that fails to launch does not retire
 the current proof; resume/adoption also preserves existing proof history.
 The effective selection is recorded on `node.startup_pending`; actions are
 persisted in startup context for restore and fresh relaunch.
+
+The harness readiness window defaults to 30 seconds. On a loaded machine, set
+`rig config set runtime.readiness_timeout_seconds 60` to give new seats and
+handover successors longer to become interactive. The setting accepts 1–600
+seconds, applies to the next launch without a daemon restart, and can also be
+set with `OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS`. It does not change the
+time spent by the runtime adapter before readiness polling starts.
 
 ---
 

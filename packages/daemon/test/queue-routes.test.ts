@@ -1652,6 +1652,17 @@ describe("queue routes", () => {
       const res = await app.request("/api/queue/whoami");
       expect(res.status).toBe(400);
     });
+
+    it("GET /api/queue/whoami returns 400 for a recentLimit that is not a number", async () => {
+      const res = await app.request("/api/queue/whoami?session=bob@r&recentLimit=abc");
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "recentLimit must be a number" });
+      // Everything parseInt reads keeps working as before, clamped by whoami.
+      for (const value of ["5", "1.5", "2x", "-1"]) {
+        const ok = await app.request(`/api/queue/whoami?session=bob@r&recentLimit=${value}`);
+        expect(ok.status, value).toBe(200);
+      }
+    });
   });
 
   describe("R1 SSE route — live GET reaches the SSE handler (not shadowed by /:qitemId)", () => {

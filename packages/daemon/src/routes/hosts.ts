@@ -51,7 +51,6 @@ import { loadHumanRegistry, type LoadResult } from "../domain/gateway/human-regi
 const PAIR_TTL_MS = 10 * 60 * 1000;
 const PAIR_PRUNE_GRACE_MS = 60 * 60 * 1000;
 const PAIR_HTTP_TIMEOUT_MS = 10_000;
-const MAX_PENDING_PAIRS = 20;
 
 const PAIR_SOURCE_SESSION = "host-pair@kernel";
 
@@ -177,21 +176,12 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         issued.delete(id);
       }
     }
-    const activeCount = Array.from(issued.values()).filter((rec) => now - rec.createdAt <= PAIR_TTL_MS).length;
-    if (activeCount >= MAX_PENDING_PAIRS) {
-      return c.json({
-        error: "too_many_pending_pair_requests",
-        message: "Maximum pending pairing requests reached. Please wait for an existing request to be approved, denied, or expire.",
-      }, 429);
-    }
-
     const rawRequester = (typeof body.requester === "string" ? body.requester : "").trim();
     const requester = rawRequester.slice(0, 128).replace(/[\r\n\t\u2028\u2029]/g, " ").trim() || "unknown requester";
     const pairId = randomUUID();
     const code = String(randomInt(100000, 1000000));
 
-    // Reserve capacity synchronously before the async queue creation so concurrent
-    // requests cannot race past the MAX_PENDING_PAIRS limit.
+    // Retain the request while its approval item is being created; remove it on failure.
     issued.set(pairId, { code, qitemId: "", requester, createdAt: Date.now() });
 
     let qitemId: string;
@@ -322,17 +312,8 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
         clientPairs.delete(id);
       }
     }
-    const activeClients = Array.from(clientPairs.values()).filter((rec) => now - rec.createdAt <= PAIR_TTL_MS).length;
-    if (activeClients >= MAX_PENDING_PAIRS) {
-      return c.json({
-        error: "too_many_pending_pair_requests",
-        message: "Maximum pending pairing operations reached. Please wait for existing operations to complete.",
-      }, 429);
-    }
-
     const localPairId = randomUUID();
-    // Reserve capacity synchronously before the outbound network call so concurrent
-    // requests cannot race past the MAX_PENDING_PAIRS limit.
+    // Retain the operation while contacting the target; remove it on failure.
     clientPairs.set(localPairId, {
       url: targetBase,
       remotePairId: "",

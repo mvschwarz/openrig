@@ -74,7 +74,7 @@ function expectRuntimeConfigDisclosure(result: SetupResult): void {
     {
       scope: "global",
       runtime: "codex",
-      path: "~/.codex/config.toml",
+      path: "$CODEX_HOME/config.toml (default: ~/.codex/config.toml)",
       purpose: "Pre-trust managed workspaces and apply selected Codex config runtime-resource fragments.",
     },
     {
@@ -167,6 +167,28 @@ describe("rig setup", () => {
     const deps = makeDeps({ exec: execSpy });
     await runSetup(deps, { dryRun: true });
     expect(execSpy).not.toHaveBeenCalled();
+  });
+
+  it("--dry-run on linux reports the macOS-only steps as skipped with the real run's reasons", async () => {
+    const dry = await runSetup(makeDeps({ platform: "linux" }), { dryRun: true });
+    const real = await runSetup(makeDeps({ platform: "linux", exec: (cmd: string) => {
+      if (cmd === "tmux -V") return "tmux 3.4\n";
+      throw new Error(`not found: ${cmd}`);
+    } }), {});
+
+    for (const id of ["brew", "cmux_install"]) {
+      const dryStep = dry.steps.find((s) => s.id === id);
+      expect(dryStep?.status).toBe("skipped");
+      expect(dryStep?.message).toBe(real.steps.find((s) => s.id === id)?.message);
+    }
+    expect(dry.steps.find((s) => s.id === "brew")?.message).toBe("Skipped: Homebrew setup path is only used on macOS.");
+    expect(dry.steps.find((s) => s.id === "tmux_install")?.message).toBe("Dry run: tmux_install would be attempted.");
+  });
+
+  it("--dry-run on darwin still reports brew and cmux_install as would be attempted", async () => {
+    const dry = await runSetup(makeDeps({ platform: "darwin" }), { dryRun: true });
+    expect(dry.steps.find((s) => s.id === "brew")).toEqual({ id: "brew", status: "skipped", message: "Dry run: brew would be attempted." });
+    expect(dry.steps.find((s) => s.id === "cmux_install")).toEqual({ id: "cmux_install", status: "skipped", message: "Dry run: cmux_install would be attempted." });
   });
 
   it("core profile execution with all tools present returns pass/applied steps and ready=true", async () => {
@@ -867,7 +889,7 @@ describe("rig setup --policy (onboarding record)", () => {
     const step = result.steps.find((s) => s.id === "policy_record");
     expect(step?.status).toBe("fail");
     // The rejection surfaces the valid set to the operator (message + reason are what they see).
-    expect(`${step?.message ?? ""} ${step?.reason ?? ""}`).toMatch(/locked, standard, open, yolo, none/);
+    expect(`${step?.message ?? ""} ${step?.reason ?? ""}`).toMatch(/locked, standard, open, yolo, auto, none/);
     expect(sink[SPEC]).toBeUndefined();
   });
 

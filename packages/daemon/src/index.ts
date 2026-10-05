@@ -10,11 +10,13 @@ import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
 import {
   createStuckSweepStatus,
+  resolveSessionNodeId,
   resolveStuckSweepIntervalSeconds,
   runStuckSweep,
 } from "./domain/queue-stuck-sweep.js";
 import {
   createWakeLadderStatus,
+  classifyPromptAfterRefusal,
   resolveWakeRetryIntervalSeconds,
   runWakeLadderTick,
   WakeLadderScheduler,
@@ -186,7 +188,8 @@ export function startWakeLadderScheduler(deps: {
   wakeLadderStatus?: import("./domain/queue-wake-ladder.js").WakeLadderStatus;
   providerService?: Pick<ProviderService, "getReadModel">;
   usageLimitJitterSeconds?: number;
-  gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown) => { ok: boolean; error?: string } };
+  seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
+  gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
 }): WakeLadderScheduler | null {
   const queueRepo = deps.queueRepo;
   if (!queueRepo) return null;
@@ -201,7 +204,7 @@ export function startWakeLadderScheduler(deps: {
     ? makeOperatorDeliveryEngine({
         home: OPENRIG_HOME,
         queueRepo,
-        dispatch: (op, ref, payload) => deps.gatewaySubsystem!.dispatch(op, ref, payload),
+        dispatch: (op, ref, payload, opts) => deps.gatewaySubsystem!.dispatch(op, ref, payload, opts),
       })
     : undefined;
   const scheduler = new WakeLadderScheduler({
@@ -210,6 +213,11 @@ export function startWakeLadderScheduler(deps: {
       queueRepo,
       status,
       ...(deliveryEngine ? { deliveryEngine } : {}),
+      readPromptState: (destination, refusedAt) => {
+        const nodeId = resolveSessionNodeId(db, destination);
+        const state = nodeId ? deps.seatActivityService?.getSeatState(nodeId) : null;
+        return classifyPromptAfterRefusal(state, refusedAt);
+      },
       ...(deps.providerService
         ? { getProviderReadModel: () => deps.providerService!.getReadModel() }
         : {}),
@@ -362,7 +370,7 @@ export async function startServer(port?: number) {
       }
     });
     injectWebSocket(srv);
-    trackHttpServerResponses(srv);
+    trackHttpServerResponses(srv, deps.requestPhaseObserver?.observeRequest);
     servers.push(srv);
   }
 
@@ -390,6 +398,7 @@ export async function startServer(port?: number) {
       ["event-loop-monitor", () => eventLoopMonitor.stop()],
       ["connections", () => Promise.all(servers.map((srv) => closeHttpServer(srv)))],
       ["recorder", async () => {
+        deps.requestPhaseObserver?.close();
         if (await drainSlowOpRecorderOnShutdown(deps.slowOpRecorder) !== 0) {
           throw new Error("slow-operation recorder drain incomplete; records may be lost");
         }

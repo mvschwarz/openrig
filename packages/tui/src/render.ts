@@ -1570,6 +1570,7 @@ export function renderScreen(state: ViewState, snap: FleetSnapshot, options: Ren
 
 function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOptions = {}, inputLine = ""): Screen {
   const { cols = 120, rows = 32, nowMs = 0 } = options;
+  const noticeDetail = state.notice?.includes("\n") ? state.notice : null;
   const fullReading = !options.startup?.open && (!!state.file || !!state.externalUrl || (cols <= 90 && state.section === "specs" && state.drill.length > 0));
   const explW = fullReading ? 0 : explorerWidth(cols);
   if (options.startup?.open) {
@@ -1637,7 +1638,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   // PULSE (founder Option-B): a content-pane view inside the NORMAL explorer│
   // content chrome — renderPulseScreen builds its own split (sidebar + lanes)
   // and rides the same segRows paint path, so it returns before the table layout.
-  if (state.viewTab === "pulse" && options.load?.settled !== false) return renderPulseScreen(state, snap, options, inputLine);
+  if (!noticeDetail && state.viewTab === "pulse" && options.load?.settled !== false) return renderPulseScreen(state, snap, options, inputLine);
   // S19 round-5 (guard): one spinner frame per render pass from caller time;
   // `loading` comes from the refresh OWNER (omitted = settled — demo/fixture
   // data IS the answer); reduced-motion kills all of it
@@ -1667,7 +1668,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   const sectionTitle = { topology: "TOPOLOGY", specs: "SPECS", scopes: "PROJECTS", needs: "FEED", system: "SYSTEM · HEALTH", config: "SYSTEM · CONFIGURATION", connections: "SYSTEM · CONNECTIONS" }[state.section] ?? state.section.toUpperCase();
   // active-pane emphasis (k9s-class chrome): the focused pane's title is bracketed
   const explorerTitle = state.focusedPane === "explorer" ? "{ EXPLORER }" : "EXPLORER";
-  const contentTitle = state.focusedPane === "content" ? `{ ${sectionTitle} }` : sectionTitle;
+  const contentTitle = noticeDetail ? "{ ACTION RESULT }" : state.focusedPane === "content" ? `{ ${sectionTitle} }` : sectionTitle;
   lines.push(fullReading ? pad(`━ ${state.file ? "READ" : state.externalUrl ? "EXTERNAL URL" : "SPECS"} · Esc / ← Back `, cols) : paneRule(cols, explW, "top", explorerTitle, contentTitle));
 
   const explorer = fullReading ? [] : computeExplorerRows(state, snap);
@@ -1676,7 +1677,9 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   const { labels: explorerDisplay, metas: explorerMetas } = navigatorDisplay(explorer, snap, explW - 1);
   const contentWidth = Math.max(cols - explW - (fullReading ? 1 : 2), 0);
   const previous = !load.settled && !state.externalUrl ? options.previousPage : undefined;
-  const content: ContentLine[] = previous
+  const content: ContentLine[] = noticeDetail
+    ? wrapContentLines(noticeDetail.split(/\r?\n/).map(text => ({ text })), contentWidth)
+    : previous
     ? [...wrapDetailLines([{ text: `Previous: ${previous.state.section} · ${previous.state.file ? `${previous.state.file.root}/${previous.state.file.path}` : previous.state.drill.map(d => d.name).join(" / ") || [previous.state.project?.id, previous.state.scopesMission, previous.state.terminalView].filter(Boolean).join(" / ") || "overview"}` }], contentWidth),
        { text: `Opening ${sectionTitle.toLowerCase()}… · Explorer remains available` },
        ...contentLines(previous.state, previous.snapshot, contentWidth, { ...motion, loading: false }).map(line => ({ text: line.text }))]
@@ -1783,7 +1786,7 @@ function renderBody(state: ViewState, snap: FleetSnapshot, options: RenderOption
   lines.push(pad(fullReading ? "↑↓ scroll / links · → links · Enter open · Esc Back · refresh · v copy" : keybindHints(state), cols));
   lines.push(
     pad(
-      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${state.notice ? "  ▸ " + state.notice : ""}${readWarn}${state.timeZoneWarning ? " · ⚠ timezone; run timezone" : ""}`,
+      `[${state.instanceId}] ${state.section}${drillPath ? " · " + drillPath : ""}${state.lastError ? "  ✗ " + state.lastError : ""}${noticeDetail ? "  ▸ action result above" : state.notice ? "  ▸ " + state.notice : ""}${readWarn}${state.timeZoneWarning ? " · ⚠ timezone; run timezone" : ""}`,
       cols,
     ),
   );

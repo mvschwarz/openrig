@@ -55,7 +55,7 @@ describe("POST /api/seat/switch-client/:seatRef", () => {
       mutated: false,
       retargeted: true,
     });
-    expect(tmux().switchClient).toHaveBeenCalledWith("/dev/ttys003", "dev-impl@seat-rig:0");
+    expect(tmux().switchClient).toHaveBeenCalledWith("/dev/ttys003", "=dev-impl@seat-rig:0");
   });
 
   it("404 for an unknown seat", async () => {

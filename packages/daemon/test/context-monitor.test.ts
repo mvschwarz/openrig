@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import BetterSqlite3, { type Database } from "better-sqlite3";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -13,6 +13,7 @@ import { ClaudeCompactionEnforcer } from "../src/domain/claude-compaction-enforc
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import type { SessionTransport } from "../src/domain/session-transport.js";
 import type { ReadinessResult } from "../src/domain/runtime-adapter.js";
+import { EventBus } from "../src/domain/event-bus.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 
 
@@ -152,9 +153,17 @@ describe("ContextMonitor", () => {
     const settings = new SettingsStore(join(tmpDir, "settings.json"));
     settings.set("policies.claude_compaction.enabled", "true");
     settings.set("policies.claude_compaction.threshold_percent", "80");
-    const send = vi.fn(async (_session: string, _text: string) => ({ ok: true }));
+    const send = vi.fn(async (_session: string, text: string) => {
+      const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
+      const target = text.match(/atomically rename it to ("(?:[^"\\]|\\.)*")/);
+      if (marker && target) {
+        const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(file + ".tmp", "# Completed fixture map\n" + marker + "\n"); renameSync(file + ".tmp", file);
+      }
+      return { ok: true };
+    });
     const transport = { send } as unknown as SessionTransport;
-    const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: tmpDir });
+    const enforcer = new ClaudeCompactionEnforcer(settings, transport, { openrigHome: tmpDir, resolveOccupantGeneration: () => "fixture-generation" });
     monitor = new ContextMonitor(db, store, undefined, enforcer);
     return send;
   }
@@ -361,6 +370,29 @@ describe("ContextMonitor", () => {
     const usage = store.getForNode(node.id, "orch-lead@test");
     expect(usage.availability).toBe("unknown");
     expect(usage.reason).toBe("no_data");
+  });
+
+  it.each(["before", "during", "delivering", "other occupant"])("default-path consent protects pending context (%s)", async timing => {
+    const { rig, node, sessionName } = seedClaudeNode();
+    const session = sessionRegistry.getSessionsForRig(rig.id)[0]!;
+    db.prepare("UPDATE sessions SET startup_status='attention_required' WHERE id=?").run(session.id);
+    const events = new EventBus(db);
+    const pending = () => events.emit({ type: "node.startup_failed", rigId: rig.id, nodeId: node.id,
+      error: "consent", sessionId: timing === "other occupant" ? "old-occupant" : session.id, freshContextPending: true });
+    if (timing === "before" || timing === "other occupant") pending();
+    checkReadySpy.mockImplementation(async () => {
+      if (timing === "during") pending();
+      if (timing === "delivering") {
+        events.emit({ type: "node.startup_pending", rigId: rig.id, nodeId: node.id });
+        db.prepare("UPDATE sessions SET startup_status='pending' WHERE id=?").run(session.id);
+      }
+      return { ready: true };
+    });
+    // No sidecar or orientation telemetry: it must not become a prerequisite.
+    await monitor.pollOnce();
+    const row = db.prepare("SELECT startup_status FROM sessions WHERE id=?").get(session.id);
+    expect(row).toEqual({ startup_status: timing === "other occupant" ? "ready" : timing === "delivering" ? "pending" : "attention_required" });
+    expect(checkReadySpy).toHaveBeenCalledWith(expect.objectContaining({ tmuxSession: sessionName }));
   });
 
   it("pollOnce normalizes stale Claude startup failures back to ready when the runtime is live", async () => {

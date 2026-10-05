@@ -54,6 +54,15 @@ export function computeExpectedAnswer(challengeId: string, contractHash: string)
   return createHash("sha256").update(`${challengeId}:${contractHash}`).digest("hex").slice(0, 32);
 }
 
+/**
+ * Claude Code shows a long paste as pasted content and won't act on an instruction found only there.
+ * This short line arrives as the person's own turn and asks the seat to run the command from the
+ * challenge in its startup text. It carries no challenge id or answer, so a proof still shows the
+ * startup text was read.
+ */
+export const STARTUP_PROOF_INSTRUCTION_LINE =
+  "OpenRig, which launched this seat: please read your startup text above and run the startup-proof command from its orientation challenge.";
+
 function buildProofSubmissionCommand(challengeId: string, expectedAnswer: string): string {
   return `rig startup-proof submit --challenge-id ${challengeId} --answer ${expectedAnswer}`;
 }

@@ -6,7 +6,13 @@ import { lastMeaningfulTransition } from "./queue-waiting.js";
  * Both deadline and delivery detectors consult the same recovery disposition. */
 export const recoveryTag = (qitemId: string): string => `recovery-for:${qitemId}`;
 function failedAttempt(db: Database.Database, qitemId: string): string | null {
-  return (db.prepare("SELECT last_nudge_attempt AS at FROM queue_items WHERE qitem_id = ? AND last_nudge_result LIKE 'failed:%'").get(qitemId) as { at: string | null } | undefined)?.at ?? null;
+  // A typing-guard refusal (retained:) is newer evidence about the original
+  // obligation exactly like a failed nudge: a wake WAS offered after the
+  // recovery disposition was written (#344). Without this arm the refusal was
+  // invisible here — ladder attempt markers never count as meaningful
+  // transitions — so a terminal recovery stayed fresh forever and suppressed
+  // the unclaimed baton's retry path.
+  return (db.prepare("SELECT last_nudge_attempt AS at FROM queue_items WHERE qitem_id = ? AND (last_nudge_result LIKE 'failed:%' OR last_nudge_result LIKE 'retained:%')").get(qitemId) as { at: string | null } | undefined)?.at ?? null;
 }
 export function recoveryId(db: Database.Database, qitemId: string): string {
   return `qitem-recovery-${createHash("sha256").update(JSON.stringify([qitemId, lastMeaningfulTransition(db, qitemId)?.id ?? null, failedAttempt(db, qitemId)])).digest("hex").slice(0, 16)}`;

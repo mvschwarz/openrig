@@ -1,5 +1,6 @@
 import { inventoryCaptureOptions, type ShadowCapture } from "../domain/shadow-capture.js";
 import { Hono } from "hono";
+import { observeInventoryHandler } from "../domain/request-phase-observer.js";
 import { getSelfHostId } from "../domain/hosts/fanout-contract.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
@@ -40,7 +41,7 @@ import { SeatIdentityStore } from "../domain/seat-identity-store.js";
 import { parseSqliteUtcMs } from "../domain/sqlite-time.js";
 
 const generationCensus = new ProcessCensus({ freshnessMs: 0 }); // coalesce concurrent receipts; recheck each later read
-const generationThreadIds = new CodexThreadIdResolver();
+const generationThreadIds = new CodexThreadIdResolver({ codexHome: process.env.CODEX_HOME || undefined });
 
 function terminalAuthGuard(): MiddlewareHandler {
   return async (c, next) => {
@@ -99,7 +100,7 @@ sessionsRoutes.get("/", (c) => {
 
 // GET /api/rigs/:rigId/nodes — node inventory projection
 // ?refresh=true triggers a context-monitor re-sample before responding
-nodesRoutes.get("/", async (c) => {
+nodesRoutes.get("/", observeInventoryHandler, async (c) => {
   const rigId = c.req.param("rigId")!;
   const deps = getDeps(c);
   const rig = deps.rigRepo.getRig(rigId);

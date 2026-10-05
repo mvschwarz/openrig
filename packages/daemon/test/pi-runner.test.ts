@@ -364,6 +364,50 @@ describe("RunnerCore terminal assistant failures", () => {
   });
   const errors = (lines: string[]) => lines.filter(line => line.startsWith("[pi-runner] ERROR"));
 
+  it.each([
+    ["openrouter", "OPENROUTER_API_KEY"], ["zai", "ZAI_API_KEY"], ["kimi-coding", "KIMI_API_KEY"],
+  ])("explains the existing %s credential route at RPC and model failure", (provider, key) => {
+    const { core, lines } = readyCore();
+    const detail = `No API key found for ${provider}.`;
+    core.handlePiLine(JSON.stringify({ type: "response", command: "prompt", success: false, error: detail }));
+    core.handlePiLine(JSON.stringify(failure(detail)));
+    const notices = errors(lines);
+    expect(notices).toHaveLength(2);
+    for (const notice of notices) {
+      expect(notice).toContain(detail);
+      expect(notice).toContain(`set ${key} in the daemon environment`);
+      expect(notice).toContain(`add ${key} to recovery.provider_auth_env_allowlist`);
+      expect(notice).toContain(`model ${provider}/<id>`);
+      expect(notice).toContain("restart the daemon and relaunch the seat");
+      expect(notice).toContain("Default Pi logins are not automatically shared");
+    }
+  });
+
+  it("keeps missing-credentials get_state unready while giving the same route", () => {
+    const { core, lines, sidecars } = readyCore();
+    core.handlePiLine(JSON.stringify({ type: "response", id: "pi-runner-get-state", success: false, error: "No API key found for openrouter." }));
+    expect(errors(lines)[0]).toContain("recovery.provider_auth_env_allowlist");
+    expect(core.isReady()).toBe(false);
+    expect(sidecars.at(-1)?.ready).toBe(false);
+  });
+
+  it("does not suggest an unsupported provider environment key", () => {
+    const { core, lines } = readyCore();
+    core.handlePiLine(JSON.stringify(failure("No API key found for custom-provider.")));
+    expect(errors(lines)[0]).toContain("PI_CODING_AGENT_DIR (auth.json or models.json)");
+    expect(errors(lines)[0]).not.toContain("provider_auth_env_allowlist");
+    expect(errors(lines)[0]).not.toContain("CUSTOM_PROVIDER_API_KEY");
+  });
+
+  it("keeps unrelated errors, OMP diagnostics and successful Pi replies unchanged", () => {
+    for (const detail of ["401 Unauthorized", "No model found", "Network unavailable", "API key rejected"]) {
+      expect(mapPiEvent(failure(detail)).errorNotice).toBe(`[pi-runner] ERROR ${detail}`);
+    }
+    const detail = "No API key found for openrouter.";
+    expect(mapPiEvent(failure(detail), "omp").errorNotice).toBe(`[omp-runner] ERROR ${detail}`);
+    expect(mapPiEvent({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: detail }] } }).errorNotice).toBeUndefined();
+  });
+
   it("shows an empty native error and ends partial text without replaying its content", () => {
     const { core, lines, appends } = readyCore();
     core.handlePiLine(JSON.stringify(failure('400 "field_not_allowed"')));

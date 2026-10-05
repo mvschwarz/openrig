@@ -6,7 +6,7 @@ import { rigPreflight } from "../src/domain/rigspec-preflight.js";
 import { RigSpecSchema as PodRigSpecSchema } from "../src/domain/rigspec-schema.js";
 import type { AgentResolverFsOps } from "../src/domain/agent-resolver.js";
 import type { NodeBinding, RuntimeAdapter } from "../src/domain/runtime-adapter.js";
-import { createFullTestDb, createTestApp } from "./helpers/test-app.js";
+import { createFullTestDb, createTestApp as createBaseTestApp } from "./helpers/test-app.js";
 import { SystemPreflight } from "../../cli/src/system-preflight.js";
 
 const RIG_ROOT = "/project/rigs/policy-discovery";
@@ -96,6 +96,14 @@ edges: []
 }
 
 const policyLines = (warnings: string[]) => warnings.filter((warning) => warning.includes("permission_policy"));
+
+function createTestApp(...args: Parameters<typeof createBaseTestApp>) {
+  const setup = createBaseTestApp(...args);
+  // These controls isolate policy/preflight warning order. Model the completed
+  // startup send explicitly instead of adding missing-capture fixture warnings.
+  setup.tmuxAdapter.capturePaneContent = vi.fn(async () => "Previous turn\n────────────────────\n❯ \n────────────────────\n⏵⏵ accept edits on (shift+tab to cycle)\n");
+  return setup;
+}
 
 describe("Seam C permission-policy discovery", () => {
   const tempDirs: string[] = [];

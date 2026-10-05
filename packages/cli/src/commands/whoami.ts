@@ -192,6 +192,26 @@ export function resolveIdentitySource(
   return null;
 }
 
+/** Enrich an identity miss using only the client that returned it; never discover or retry another daemon. */
+export async function identityRoutingHint(client: DaemonClient): Promise<string> {
+  let selfHostId: string | undefined;
+  try {
+    const health = await client.get<{ selfHostId?: unknown }>("/healthz", { timeoutMs: 1_000 });
+    if (health.status === 200 && typeof health.data?.selfHostId === "string" && health.data.selfHostId.trim()) {
+      selfHostId = health.data.selfHostId;
+    }
+  } catch { /* A failed identity read must not replace the original error. */ }
+  let location = "";
+  try {
+    const url = new URL(client.baseUrl);
+    url.username = ""; url.password = ""; url.search = ""; url.hash = "";
+    location = ` at ${JSON.stringify(url.href)}`;
+  } catch { /* Do not echo an unparseable URL that may contain credentials. */ }
+  const daemon = selfHostId ? `daemon ${JSON.stringify(selfHostId)}` : "daemon (host ID unavailable)";
+  return `Reached ${daemon}${location}. Seat routing may point to a different OpenRig install. `
+    + "Compare OPENRIG_URL and OPENRIG_HOME in this shell with the daemon that launched this seat.";
+}
+
 export function whoamiCommand(depsOverride?: WhoamiDeps): Command {
   const cmd = new Command("whoami").description("Show current managed identity in an OpenRig topology");
   const getDeps = (): WhoamiDeps => depsOverride ?? {
@@ -265,11 +285,12 @@ workspace block). The compact form omits the Context line; use 'rig context' or
       if (!full) params.set("compact", "1");
 
       const res = await client.get<Record<string, unknown>>(`/api/whoami?${params.toString()}`);
+      const hint = res.status === 404 ? await identityRoutingHint(client) : undefined;
 
       if (opts.json) {
         if (full || res.status >= 400) {
-          // --full: today's complete payload (parity). Errors: pass through.
-          console.log(JSON.stringify(res.data, null, 2));
+          // Preserve the complete payload and original error; the routing hint is additive.
+          console.log(JSON.stringify(hint ? { ...res.data, hint } : res.data, null, 2));
         } else {
           // Compact default: the identity-recovery ALLOWLIST projection.
           console.log(JSON.stringify(projectCompactWhoami(res.data)));
@@ -281,6 +302,7 @@ workspace block). The compact form omits the Context line; use 'rig context' or
       if (res.status === 404) {
         const error = (res.data as Record<string, unknown>)["error"] as string | undefined;
         console.error(error ?? "Session not found in any managed rig. Check: rig ps --nodes");
+        if (hint) console.error(hint);
         process.exitCode = 1;
         return;
       }

@@ -14,9 +14,11 @@ export interface NodeBinding extends Binding {
    * attachment (member > rig precedence, resolved by the core resolver at materialize /
    * restore). Absent = no policy attached → the env-driven floor/YOLO decision stands.
    * Present = authoritative for this seat (overrides the env read in BOTH directions). */
-  launchPosture?: "floor" | "full_bypass";
+  launchPosture?: "floor" | "full_bypass" | "auto";
   /** Explicit Claude native mode; checked against the bound managed executable. */
   permissionMode?: string;
+  /** Persisted rig opt-in to per-launch warning acceptance, only at full_bypass. */
+  nonInterruptive?: boolean;
   /** Reserved successor generation; current tenure remains the input fence until commit. */
   launchGeneration?: string;
   /** #25: the rig's `managed_blocks.claude-code` file. Absent = CLAUDE.md. Only the Claude adapter reads it. */
@@ -47,12 +49,14 @@ export interface InstalledResource {
 }
 
 export interface ProjectionResult {
+  warnings?: string[];
   projected: string[];
   skipped: string[];
   failed: Array<{ effectiveId: string; error: string }>;
 }
 
 export interface StartupDeliveryResult {
+  warnings?: string[];
   delivered: number;
   failed: Array<{ path: string; error: string }>;
 }
@@ -69,6 +73,7 @@ export const ATTENTION_REQUIRED_READINESS_CODES = new Set([
   "update_gate",
   "login_required",
   "mcp_gate",
+  "bypass_consent_gate",
   // Codex auth refusal (stored OAuth token can no longer be refreshed).
   // Defensive: row 6's verifyResumeLaunch patch propagates attention_required
   // through the launch path so the readiness fallback shouldn't see this code,
@@ -146,8 +151,9 @@ export interface RuntimeAdapter {
   /** Project resources from a projection plan to the runtime target locations. */
   project(plan: ProjectionPlan, binding: NodeBinding): Promise<ProjectionResult>;
 
-  /** Deliver startup files to the runtime. */
-  deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding): Promise<StartupDeliveryResult>;
+  /** Deliver startup files. Claude's post-launch path can reuse the orchestrator's checked send.
+   * The adapter still owns file reads, ordering, provisioning and required/optional errors. */
+  deliverStartup(files: ResolvedStartupFile[], binding: NodeBinding, sendInteractiveText?: (text: string) => Promise<void>): Promise<StartupDeliveryResult>;
 
   /**
    * Launch the harness (claude/codex/terminal) inside the tmux session.
