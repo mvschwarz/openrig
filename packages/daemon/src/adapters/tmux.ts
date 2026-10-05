@@ -935,9 +935,10 @@ export class TmuxAdapter {
   /** A launch metadata read. Callers must never put credential values in terminal input. */
   async getSessionEnv(session: string, key: string): Promise<string | undefined> {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error("Invalid session environment key.");
+    const target = exactTarget(session, "session");
     try {
-      const output = await this.run(["tmux", "show-environment", "-t", session, key],
-        `tmux show-environment -t ${shellQuote(session)} ${shellQuote(key)}`);
+      const output = await this.run(["tmux", "show-environment", "-t", target, key],
+        `tmux show-environment -t ${shellQuote(target)} ${shellQuote(key)}`);
       if (output.trim() === `-${key}`) return undefined;
       if (!output.startsWith(`${key}=`)) throw new Error("Unexpected session environment response.");
       return output.slice(key.length + 1).replace(/\r?\n$/, "");
