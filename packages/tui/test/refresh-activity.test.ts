@@ -92,14 +92,10 @@ esac
     child.stderr.on("data", (chunk: string) => { stderr += chunk; });
 
     try {
-      await until(() => stdout.includes("Daemon connected.") || child.exitCode != null);
+      // A connected empty catalog enters ordinary work without a startup keypress.
+      await until(() => stdout.includes("no rigs served — proven empty") || child.exitCode != null);
       expect(child.exitCode, stderr).toBeNull();
-      expect(stdout).toContain("Daemon connected.");
-      // S05 opens startup first. Enter ordinary work before measuring its cadence.
-      const startupReads = requests.length;
-      child.stdin.write("w");
-      await until(() => requests.length > startupReads || child.exitCode != null);
-      expect(child.exitCode, stderr).toBeNull();
+      expect(stdout).toContain("no rigs served — proven empty");
       // Wait for the initial hydration to finish before taking the idle sample.
       await new Promise((resolve) => setTimeout(resolve, 100));
       const initialReads = requests.length;
