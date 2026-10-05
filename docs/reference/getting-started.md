@@ -163,6 +163,168 @@ is optional and consumes more concurrent capacity. A team published on GitHub
 installs from its folder link with `rig up <link>` (see
 [publishing a rig bundle](publishing-a-rig-bundle.md)).
 
+## Open the kernel conversations
+
+Once OpenRig and the existing kernel are available, the installing agent tells
+you: **“I'll open a new terminal space so you can see and talk to the kernel
+agents, with the OpenRig TUI beside them.”** It then opens that space using
+existing tools, even when installation is being performed from an agent's own
+terminal. It must not attach in that terminal, switch an existing tmux client,
+or replace another window's contents.
+
+Use **herdr first**, **cmux second**, and otherwise a **new plain terminal
+window**. The first view contains the advisor, operator agent and TUI for a
+dual-runtime kernel, or the advisor and TUI for a single-runtime kernel.
+The queue worker stays out of this view; it remains reachable through the TUI.
+This selects what you see, not which kernel seats run. Keep the current kernel,
+accounts and conversations; opening a view is not a reason to start or restore
+seats. If the kernel is absent or not ready, report that and follow
+[Incomplete setup and restart](#incomplete-setup-and-restart).
+
+### Confirm the existing seats
+
+Run these on the daemon's machine, in the installation environment:
+
+```sh
+rig status
+rig ps --nodes --rig kernel --json --fields logicalId,runtime,canonicalSessionName,tmuxAttachCommand
+rig terminal status --json
+```
+
+Use the returned bindings, not the library preview. The examples below use the
+standard `advisor-lead@kernel`, `operator-agent@kernel` and
+`operator-human@kernel` bindings. If the inventory reports different names,
+the installing agent substitutes those exact names in the file and commands
+before giving them to you. Missing bindings stay named missing. Compare the
+advisor and operator runtimes to choose the dual- or single-runtime view.
+
+### Herdr or cmux: one new workspace
+
+Both providers can open the same saved view. On the daemon's machine, add the
+following entry to `terminal-views.yaml` in its OpenRig home (normally
+`~/.openrig`; `OPENRIG_HOME`, or the legacy `RIGGED_HOME`, selects another home).
+If the file already has views, keep them and add only this entry; choose a fresh
+id if `kernel-conversation` already means something else. A new file is:
+
+```yaml
+version: 1
+views:
+  - id: kernel-conversation
+    name: Kernel conversation
+    members:
+      - seat: advisor-lead@kernel
+        label: Advisor
+      - seat: operator-agent@kernel
+        label: Operator
+      - seat: operator-human@kernel
+        label: OpenRig TUI
+```
+
+For a **single-runtime kernel**, omit the Operator member and keep Advisor and
+OpenRig TUI. The saved view is read when opened; no daemon restart is needed.
+If you chose a different view id, substitute it in the commands below. Preserve
+unrelated saved views.
+
+Check `rig terminal status --json` for provider availability and liveness. If
+herdr is installed but closed, open the app normally and check again. When it
+is available:
+
+```sh
+rig terminal views --json
+rig terminal open saved:kernel-conversation --provider herdr --json
+```
+
+If herdr is unavailable, use a running cmux:
+
+```sh
+rig terminal open saved:kernel-conversation --provider cmux --json
+```
+
+These view opens create a fresh provider workspace. Inspect `opened`, `absent`,
+`degraded` and any notes, then confirm the new workspace actually shows the
+intended conversations and TUI. A partial result is not a complete handoff.
+Do not use `rig terminal open kernel` for this first view: it also includes the
+queue worker. A failed or uncertain open is not evidence that nothing opened;
+inspect the provider before retrying or falling back. If the shared TUI tile
+shows a shell, run `rig tui` **in that new tile**, not in the installing agent's
+terminal.
+
+### Plain terminal: a new viewing session
+
+If neither provider is available, compose existing tmux attachments. These
+commands create only a new viewing session; they do not move or recreate the
+kernel's panes. Run them once on the kernel host after checking the bindings
+above:
+
+```sh
+kernel_view="openrig-kernel-$(date +%s)-$$"
+kernel_pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$kernel_view" -n kernel 'env -u TMUX tmux attach-session -t =advisor-lead@kernel')
+tmux split-window -h -t "$kernel_pane" 'env -u TMUX tmux attach-session -t =operator-human@kernel'
+```
+
+For a dual-runtime kernel, add the operator beside the advisor:
+
+```sh
+tmux split-window -h -t "$kernel_pane" 'env -u TMUX tmux attach-session -t =operator-agent@kernel'
+```
+
+Then arrange the view and print its exact attach command:
+
+```sh
+tmux select-layout -t "$kernel_view:" even-horizontal
+printf 'env -u TMUX tmux attach-session -t =%s\n' "$kernel_view"
+```
+
+**On macOS**, the installer can open a new Terminal window with that view:
+
+```sh
+osascript - "$kernel_view" <<'APPLESCRIPT'
+on run argv
+  tell application "Terminal"
+    do script "env -u TMUX tmux attach-session -t " & quoted form of ("=" & item 1 of argv)
+    activate
+  end tell
+end run
+APPLESCRIPT
+```
+
+**On a Linux desktop with GNOME Terminal**, use its explicit new-window action:
+
+```sh
+gnome-terminal --window -- env -u TMUX tmux attach-session -t "=$kernel_view"
+```
+
+For another terminal app, use its **New Window** action and run the attach
+command printed above in that window. The installing agent should perform the
+available new-window action, not stop at printing advice when it can open it.
+If desktop automation is unavailable or denied, say so and give the printed
+command to the person for a new terminal. Never silently reuse an existing
+window. Close the viewing window or use **Ctrl-b, then d** to detach; don't
+quit the native agents. A standalone `rig tui` in another new terminal is also
+available if the shared TUI binding is missing, with that limitation stated.
+
+### Headless or SSH handoff
+
+A provider running on the server does not establish a window on your desktop.
+When there is no display, say **“No visible terminal was opened here.”** Keep
+the exact attach command printed above. From a new terminal on your own
+machine, connect to the same host/account used for installation, then run that
+command. For example, this asks for the actual SSH destination and the viewing
+session name printed above; neither value is guessed:
+
+```sh
+printf 'Existing SSH destination (user@host): '; read -r kernel_host
+printf 'Viewing session name (openrig-kernel-... printed above): '; read -r kernel_view
+ssh -t "$kernel_host" "env -u TMUX tmux attach-session -t '=$kernel_view'"
+```
+
+The installing agent gives you the **fully resolved** connection and attach
+command from the known installation host and created viewing session. If only
+an HTTP daemon address is known, ask for the SSH connection details instead of
+inventing them. No new account or credential provisioning is part of this
+handoff. Report which provider or fallback ran, which conversations and TUI
+were visible, and any headless or unverified branch.
+
 ## Give the owner an outcome
 
 For example, in a project that imports CSV files:
@@ -210,7 +372,8 @@ guidance rather than creating a second kernel.
 
 Herdr users follow the same launch and task path. To place the managed team in
 Herdr, use `rig terminal open "$starter" --provider herdr`; for the shared
-dashboard, use `rig terminal open kernel --provider herdr`. The equivalent
+dashboard together with the kernel conversations, use the
+[saved first view](#open-the-kernel-conversations). The equivalent
 cmux provider is also available. Read the opened/absent/degraded result: a
 partial terminal view is not a healthy team. Repeated terminal-open calls can
 create another provider workspace; return to the one already open when you

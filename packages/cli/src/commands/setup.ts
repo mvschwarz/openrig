@@ -784,7 +784,11 @@ export function goldenPathNextSteps(): string[] {
     "     Preview rig up <starter> --cwd . --plan, then rig up <starter> --cwd .; daemon and kernel start automatically",
     "  3. rig status                       Check daemon/kernel readiness; rig ps --nodes --rig <starter> checks the team",
     "  4. rig send dev-owner@<starter> '<one useful change, boundaries, and how to check it>'",
-    "  5. rig tui --shared                  Join the kernel dashboard; plain rig tui opens your own view",
+    "  5. Open a NEW kernel conversation space: herdr, otherwise cmux, otherwise a new terminal window",
+    "     rig context get reference/getting-started.md#open-the-kernel-conversations",
+    "     Installing agent: tell the person, then open it; keep your own terminal and existing spaces intact",
+    "     Manual: the guide gives exact provider/tmux commands; headless/SSH: report no window and give the connection/attach step",
+    "     rig tui --shared joins the existing kernel TUI from a new terminal; plain rig tui opens an independent view",
     "  Next: rig queue list --destination dev-owner@<starter>; rig workspace doctor; rig scope ...; rig workflow specs",
   ];
 }

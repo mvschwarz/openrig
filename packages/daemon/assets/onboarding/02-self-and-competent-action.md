@@ -42,6 +42,19 @@ looked like. State scoped absences honestly: “not represented on the surface c
 than a global absence you did not establish. If another seat must act, transfer durable work rather
 than printing a summary and disappearing.
 
+## When you are installing OpenRig for someone
+
+Once OpenRig and its kernel are available, tell the person you will open a new terminal space so they can talk to
+the agents. Then use the existing tools to open it: herdr first, otherwise cmux, otherwise a new plain terminal window.
+Do this even from an agent's installation session; never attach into your own terminal or take over an existing space.
+Show advisor, operator agent and TUI for a dual-runtime kernel, or advisor and TUI for a single-runtime kernel.
+Keep the queue worker off the first view and accessible through the TUI. Reuse the existing conversations and accounts.
+
+Read `rig context get reference/getting-started.md#open-the-kernel-conversations` for the commands and manual
+path. Without a working daemon, the same guide is `daemon/docs/reference/getting-started.md` in the installed
+`@openrig/cli` package. Confirm what actually opened; on a headless host or unavailable display, say so and give the
+person the exact connection/attach step. Opening a terminal is not permission to start or reset seats or provision accounts.
+
 ## When you need more
 
 When you need to know what OpenRig can do, run `rig context get onboarding-width`: its

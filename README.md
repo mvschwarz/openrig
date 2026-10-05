@@ -56,8 +56,9 @@ starter=first-project  # or first-project-claude or first-project-mixed
 rig specs preview "$starter" --kind rig
 rig up "$starter" --cwd . --plan
 rig up "$starter" --cwd .
-rig tui --shared
 ```
+
+After installation, your agent should [open a **new kernel conversation space**](docs/reference/getting-started.md#open-the-kernel-conversations): herdr first, then cmux, then a plain terminal. It tells you before opening it and keeps its own terminal and your existing spaces intact. The guide also gives the manual and SSH commands.
 
 The kernel provides separate operational support and the shared dashboard. To detach without stopping the dashboard, press Ctrl-b then d; `rig tui --shared` returns to that view. Plain `rig tui` opens an independent view. Closing a viewing terminal does not mean you should relaunch the team.
 
