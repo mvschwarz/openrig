@@ -28,7 +28,7 @@ import { parse as parseYaml } from "yaml";
 import { assertSafeInstallRef, assertTreeHasNoSymlinks, assertDestinationNamespaceContained, validateContextPackManifestForInstall } from "../lib/context-install.js";
 import { addGitContext, inspectGitContext, updateGitContext } from "../lib/context-git.js";
 import { ConfigStore } from "../config-store.js";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, formatDaemonHostForUrl } from "../client.js";
 import { enumArg } from "../cli-error.js";
 import { getDaemonStatus, getDaemonUrl, startDaemon, statusGuardMessage} from "../daemon-lifecycle.js";
 import { resolveWorkPosition, type WorkInstallPlan } from "../lib/work-install.js";
@@ -401,8 +401,8 @@ Examples:
       const selection = new ConfigStore().resolveWithSource("daemon.host");
       const host = selection.source === "default"
         ? new URL(new DaemonClient().baseUrl).hostname
-        : String(selection.value);
-      if (["127.0.0.1", "localhost", "::1", "[::1]"].includes(host)) {
+        : new URL(`http://${formatDaemonHostForUrl(String(selection.value))}`).hostname;
+      if (["127.0.0.1", "localhost", "[::1]"].includes(host)) {
         const prepared = await prepareDaemonAutoStart(deps.lifecycleDeps, depsOverride?.preflightExec);
         if (!prepared.preflight.ready) {
           throw new Error(prepared.preflight.checks.filter((check) => !check.ok)

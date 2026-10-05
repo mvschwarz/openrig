@@ -129,6 +129,27 @@ describe("context add local auto-start", () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it.each([
+    ["OPENRIG_HOST", "LOCALHOST"], ["config-file", "LOCALHOST"],
+    ["OPENRIG_HOST", "::1"], ["config-file", "[::1]"],
+    ["RIGGED_HOST", "0:0:0:0:0:0:0:1"],
+  ] as const)("selected loopback %s=%s retains local startup", async (source, host) => {
+    vi.stubEnv("OPENRIG_HOST", "");
+    if (source === "config-file") {
+      mkdirSync(join(root, "state"), { recursive: true });
+      writeFileSync(join(root, "state", "config.json"), JSON.stringify({ daemon: { host } }));
+    } else {
+      vi.stubEnv(source, host);
+    }
+    const f = fixture();
+    await f.add();
+    expect(process.exitCode).toBeUndefined();
+    expect(f.lifecycleDeps.spawn).toHaveBeenCalledOnce();
+    expect(f.post).toHaveBeenCalledWith("/api/context-packs/library/sync");
+    const options = vi.mocked(f.lifecycleDeps.spawn).mock.calls[0]![2];
+    expect(options.env.OPENRIG_HOST).toBe(source === "config-file" ? host : undefined);
+  });
+
   it("preserves an unverified daemon result without spawning a replacement", async () => {
     const f = fixture("unknown");
     await f.add();
