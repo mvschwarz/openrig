@@ -7,13 +7,13 @@ domains: [engineering-advisor, operating-advisor]
 applies-when: |
   Tracing allowlisted file access, conflict-checked writes, progress indexing,
   steering composition, or the daemon health-summary endpoints.
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
-last-updated: 2026-10-03
+last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
+last-updated: 2026-10-05
 ---
 
 # Content Surfaces — Files, Progress, Steering, and Health
 
-Source snapshot: `254122872cf477511514979a4300b695d77cd1f7`. This describes the source at that commit;
+Source snapshot: `fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05`. This describes the source at that commit;
 it does not establish the version or behavior of a running daemon.
 
 The daemon exposes filesystem content through the files, progress, and
@@ -34,8 +34,10 @@ resolves environment overrides, then settings-file values, then defaults.
 `files.allowlist` and `progress.scan_roots` both default to
 `workspace:<resolved-workspace-root>`. Their environment overrides are
 `OPENRIG_FILES_ALLOWLIST` and `OPENRIG_PROGRESS_SCAN_ROOTS`. Thus, an unset
-environment variable does **not** imply an empty allowlist in normal daemon
-startup. The standalone `readAllowlistFromEnv` helper has different inputs
+or empty environment variable, or an empty settings-file value, does **not**
+imply an empty allowlist in normal daemon startup (an invalid environment value
+is dropped with a warning). Some source comments and route hints still say
+otherwise or point only at the environment variable. The standalone `readAllowlistFromEnv` helper has different inputs
 and retains its legacy environment fallback.
 
 Roots use comma-separated `name:/absolute/path` pairs. The decoders skip
@@ -58,7 +60,11 @@ is shared by the HTTP reader and the local TUI reader. It returns content,
 absolute and root-relative resolved paths, mtime, full-file SHA-256, size,
 binary classification, and truncation metadata. The returned text is capped
 at **1,048,576 bytes**, but the full file is read and hashed. The cap limits
-the response, not the memory required to read the file.
+the response, not the memory required to read the file. The TUI's local
+reader runs as a CLI subprocess without the daemon: it resolves
+`files.allowlist` from the CLI configuration, offers four fixed workspace
+targets as roots, and hides dot-prefixed entries in listings
+(`packages/cli/src/local-reading.ts`).
 
 ## Writes and audit
 
@@ -73,6 +79,9 @@ the read/compare/replace sequence.
 `createAtomic` handles new files. It creates and fsyncs a temporary file, then
 uses an exclusive hard link to establish the target. If the target already
 exists, it returns the `target_exists` error instead of overwriting it.
+`createAtomic` is used by the Living Notes freeze export, and `writeAtomic`
+also backs the freeze-time `MISSION_BRIEF.md` spine update; both append to the
+same audit file.
 
 Both operations append a JSONL audit record containing actor/provenance,
 paths, timestamps, hashes, and byte-count delta. An audit append failure
@@ -84,6 +93,10 @@ daemon startup overrides it with the active OpenRig home as described above.
 ## HTTP surface
 
 [`server.ts`](../../../packages/daemon/src/server.ts) mounts these families.
+All of them sit behind the daemon's `/api/*` browser boundary
+(`middleware/browser-boundary.ts`), which accepts only known host names, and
+browser `Origin`s only from the daemon's own UI or `OPENRIG_ALLOWED_ORIGINS`;
+the file allowlist is a separate check.
 [`filesRoutes`](../../../packages/daemon/src/routes/files.ts) implements:
 
 | Method and path | Result / important behavior |
@@ -91,13 +104,17 @@ daemon startup overrides it with the active OpenRig home as described above.
 | `GET /api/files/roots` | Configured roots; an empty list carries a setup hint. |
 | `GET /api/files/list?root=…&path=…` | Directory entries with metadata, including dotfiles. |
 | `GET /api/files/read?root=…&path=…` | `readAllowedFile` result. |
-| `GET /api/files/asset?root=…&path=…` | Raw asset; single byte-range support (`206`, invalid range `416`), five-minute cache. HTML defaults to plain text; `render=1` opts into HTML rendering. |
+| `GET /api/files/asset?root=…&path=…` | Raw asset; single byte-range support (`206`, invalid range `416`), five-minute cache. HTML and source files default to plain text and unknown types to `application/octet-stream`; `render=1` opts into HTML rendering. SVG is served as `image/svg+xml`. A `render=1` HTML preview or an SVG is served with no content-security or frame headers, so it can run script in the daemon's origin (`routes/files.ts:153–157`). |
 | `POST /api/files/write` | Requires root, path, string content, expected mtime and hash. Stale reads return `409 write_conflict`; an absent write service returns `503`. |
 
 Writes resolve actor/provenance through `resolveActorWithDeferral`. Missing
 route dependencies return `503`; unknown roots and invalid paths return
-`400`, and failed file stats return `404`. An audit failure can return `500`
-even though the file write succeeded, so an error is not proof of no effect.
+`400`. A failed stat returns `404` on reads, lists and assets; on a write, a
+missing or unreadable target returns `500 stat_failed`, because
+`POST /api/files/write` only replaces existing files
+(`domain/files/file-write-service.ts:120–128`; `routes/files.ts:264–265`). An
+audit failure can return `500` even though the file write succeeded, so an
+error is not proof of no effect.
 
 ## Progress indexing
 
@@ -127,13 +144,17 @@ combines resolved workspace settings with `OPENRIG_STEERING_WORKSPACE`,
 | Field | Source and selection |
 |---|---|
 | `priorityStack` | Verbatim `STEERING.md`, mtime, and byte count. |
-| `roadmapRail` | `roadmap/PROGRESS.md` checkbox rows; the first unchecked row is marked next. |
-| `laneRails` | Progress files under `delivery-ready`, using a depth-3 `ProgressIndexer`; first non-done/non-blocked checkbox is next pull. Default top 3 prefers non-done rows, then fills with done rows. |
+| `roadmapRail` | `roadmap/PROGRESS.md` `[ ]`/`[x]` rows (`[~]` rows are not read); the first unchecked row is marked next. |
+| `laneRails` | Every `PROGRESS.md` and `STEERING.md` under `delivery-ready`, using a depth-3 `ProgressIndexer` (lane ID `mode-N` for `mode-N/PROGRESS.md`, else the relative path); first non-done/non-blocked checkbox is next pull. Default top 3 prefers non-done rows, then fills with done rows. |
 
 Missing/unreadable sections become `unavailableSources`. `isReady` means at
 least one path resolves; it does not guarantee that every read succeeds.
 [`GET /api/steering`](../../../packages/daemon/src/routes/steering.ts)
-returns `503` when the composer is absent or no source path resolves.
+returns `503` when the composer is absent or no source path resolves. Because
+`workspace.steering_path` always has a value (default
+`<workspace.root>/STEERING.md`), the daemon's composer is normally ready, and
+a missing `STEERING.md` appears as a `priorityStack` read failure in
+`unavailableSources` with a `200`, not a `503`.
 Queue and health state are fetched through their own endpoints.
 
 ## Health summaries
@@ -145,12 +166,17 @@ exposes four reads under `/api/health-summary`:
 |---|---|
 | `/nodes` | `computeNodeHealthSummary`: node inventory aggregated across rigs, grouped by session/lifecycle status, with an attention-required count. |
 | `/context` | `computeContextHealthSummary`: `context_usage` rows grouped by urgency and sample freshness. |
-| `/version` | `getDaemonVersion`: the running daemon's version, or `unknown` on read failure. |
+| `/version` | `getDaemonVersion`: the build-stamped version, else the daemon package version, else `unknown`; always `200`. |
 | `/gateway` | The injected gateway subsystem's `status()`; `503` if unavailable. |
+
+`/nodes` and `/context` return `503 health_summary_unavailable` when the rig
+repository is not wired.
 
 The [context aggregation](../../../packages/daemon/src/domain/steering/health-summary.ts)
 uses **80%** for critical, **60%** for warning, and **300 seconds** for
-freshness. A missing usage value is unknown; a missing timestamp has no
+freshness. These are constants in this module: they do not follow the
+`health.context_pressure.*` settings (defaults 95% and 99%) that the health
+detectors use, so the two surfaces can disagree about the same session. A missing usage value is unknown; a missing timestamp has no
 freshness sample. The SQL read catches errors and falls back to an empty
 sample set, so zero counts alone are not a database-health guarantee.
 

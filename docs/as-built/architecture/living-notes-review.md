@@ -7,13 +7,13 @@ domains: [engineering-advisor, operating-advisor]
 applies-when: |
   Tracing slice, mission, rig, or fleet review data back to scope documents,
   proof artifacts, judgments, queue state, or frozen exports.
-last-verified-against-source: 254122872cf477511514979a4300b695d77cd1f7
-last-updated: 2026-10-03
+last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
+last-updated: 2026-10-05
 ---
 
 # Living Notes — Composed Review and Frozen Exports
 
-Source snapshot: `254122872cf477511514979a4300b695d77cd1f7`. This describes the source at that commit;
+Source snapshot: `fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05`. This describes the source at that commit;
 it does not establish the version or behavior of a running daemon.
 
 Living Notes builds review payloads from existing documents and recorded
@@ -47,6 +47,11 @@ possible evidence was discovered follows from that read.
 and composes a mission board, completion ledger, attention union, agents,
 and brief spine. `composeRig` reads queue/activity state and reports current
 holders, recent holders, overdue work, settled work, and workflow exceptions.
+"Recent" is the current UTC day; overdue is in-progress slice-tagged work past
+`closure_required_at`; settled is today's `handed_off_to` transitions; and
+attention is any active item that is `human-gate`, addressed to a `human…`
+session, or blocked on one (`gather.ts`). The TUI reads `/agents`, `/rig` and
+`/fleet`.
 
 ## Slice source selection and phase
 
@@ -101,11 +106,15 @@ stamps are also not a substitute for the delivered-item join.
 `ReviewGatherer.gatherApproval` reads `approved-spec-by`/`approved-spec-at`
 and `approved-by`/`approved-at`, alongside matching `mission_control_actions`
 approval audit records. The resulting locks preserve who/when/audit facts.
-The approval writer is the separate
+A frontmatter stamp with no matching `approve` audit row still locks the
+phase, but carries `auditVerified: false`, and the frozen export shows it as
+an UNVERIFIED stamp. The approval writer is the separate
 [`scope-approve` route](../../../packages/daemon/src/routes/scope-approve.ts).
 
 `composeNeedsYou` combines recorded queue attention with derived exceptions;
-`deriveWorkflowExceptions` adds workflow-specific observations. Mission
+`deriveWorkflowExceptions` adds workflow-specific observations. When
+readiness is not configured, a slice whose `PROOF.md` claims PASS without a
+recorded green verdict also gets a `confirm-faithful` needs-you item. Mission
 composition deduplicates attention identities across slice and mission views.
 Media references outside the slice's relative-path contract produce defect
 entries instead of disappearing silently.
@@ -113,14 +122,18 @@ entries instead of disappearing silently.
 Git facts are optional. [`startup.ts`](../../../packages/daemon/src/startup.ts)
 passes `OPENRIG_REVIEW_GIT_REPO` to the gatherer. The gatherer reads that
 repository's `HEAD`, searches merge messages keyed by scope ID, and computes
-ancestry/behind facts when possible. Unavailable facts remain unknown; this
-is not a fresh remote GitHub merge-status query.
+ancestry/behind facts when possible. Each git read has a 4-second timeout; the
+merge search looks for `Merge <id>` in `HEAD` history and needs the scope's
+frontmatter `id`; the behind-tip count is computed only for unmerged slices
+with a candidate SHA. Unavailable facts remain unknown; this is not a fresh
+remote GitHub merge-status query.
 
 `composeMissionReview` derives `cutComplete` from a nonempty ledger in which
 every slice is green, has a merge SHA, and has no needs-human items. Configured
 slice readiness supplies the green predicate; otherwise recorded verdicts
-do. That computed field is not itself a publication or higher-level outcome
-decision.
+do. With configured readiness, a slice's board cell also shows the proof
+readiness state and revision. That computed field is not itself a
+publication or higher-level outcome decision.
 
 ## HTTP routes
 
@@ -142,11 +155,21 @@ of the agents-scope parameter.
 
 ## Freeze and media
 
+Nothing invokes the freeze automatically: `POST /api/scope/approve` writes
+the stamp and audit row and always returns `freezeFired: false`
+(`domain/scope/scope-approve.ts:326`), and the route comment that says the
+approve flow invokes the freeze describes wiring that does not exist. A
+frozen export exists only after something calls `POST /api/review/freeze`.
+
 [`freezeSliceExport`](../../../packages/daemon/src/domain/review/freeze.ts)
 requires a delivery lock and an allowlisted slice directory. It writes
 `REVIEW-<scope-id-or-name>-<approval-date>.html` through
 `FileWriteService.createAtomic`. An existing target is treated as already
-frozen; it is not rewritten. A failed export does not undo approval.
+frozen; it is not rewritten. A failed export does not undo approval. The
+route needs the file write service (a non-empty `files.allowlist`; otherwise
+503) and returns 409 `stamp_missing` without a delivery stamp, 403
+`allowlist_missing` outside every allowlist root, and 500 otherwise; success
+returns `{ ok, path, alreadyFrozen, briefWrite }` (`routes/review.ts`).
 
 The export embeds contained images as data URIs and links videos with an
 optional poster. `containedMediaPath` checks both resolved paths and existing
@@ -167,6 +190,11 @@ composes local data in-process and reads registered hosts' composed rig
 payloads. Its default fan-out concurrency is **4**, with a shared
 **4-second** read budget. Synchronous local work cannot be preempted by that
 timer; elapsed local work reduces the remaining remote budget.
+
+Each remote host is read through its own `GET /api/review/rig`: SSH-only
+registry entries report `unsupported-transport`, auth refusals report
+`auth-failed`, and timeouts, malformed payloads and other errors report
+`unreachable`.
 
 `unionFleet` keys attention by host plus item identity and retains host
 status. Unavailable hosts have absent counts, not synthetic zeros. A missing
