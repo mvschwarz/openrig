@@ -10,7 +10,8 @@ other change is a v2. The schemas are open to new properties, with three closed 
 value), a run record's subject (a harness check can never carry a team's identity), and the public status file, where
 nothing outside the schema may appear, so a private field can't leak in. A new property in a closed part is a v2. The
 status schema also rejects labels that contradict their evidence: a tested label needs records and a package, tested
-with help needs its count, tested can't carry one, and an unreadable listing carries only Status unavailable.
+with help needs its count, tested can't carry a count above zero, and an unreadable listing carries only Status
+unavailable.
 
 ## Three identities, kept apart
 
@@ -28,7 +29,8 @@ packaged.
 A bundle on GitHub is named by `repository` (`https://github.com/<owner>/<repo>`, no credentials), `folder` (the
 repo-relative path of the folder holding `rig.yaml`, or `.` for the repository root) and `resolvedCommit` (40 lowercase
 hex).
-- `requestedRef` (the branch, tag or commit someone gave) and `canonicalUrl` (`…/tree/<resolvedCommit>/<folder>`)
+- `requestedRef` (the branch, tag or commit someone gave, or `HEAD` for a link without `/tree/…`) and `canonicalUrl`
+  (`…/tree/<resolvedCommit>/<folder>`, with each folder segment percent-encoded and no folder part for the root)
   explain it, and aren't part of it.
 - A built bundle records its source in its manifest's provenance, which is outside the package digest.
 
@@ -62,8 +64,10 @@ Preset names such as `recommended` or `all-claude` are aliases shown beside the 
 - anything resolved on the installing machine at launch, for example an `openrig-home:` plugin, catalog skills, or a
   model or effort nothing declares.
 
-**A build result** carries `configurationId`, `packageDigest`, `archiveHash` and `assembler` (`openrigVersion`, plus
-`commit` when known). `configurationId()` and `packageDigest()` are exported from `@openrig/daemon/bundle-identity`.
+**A build result** carries `source` (`null` unless the bundle was built from a GitHub link), `configurationId`,
+`packageDigest`, `archiveHash` and `assembler`. `rig bundle inspect` reports the same fields for an archive, and any the
+archive doesn't state are `null`. `assembler` is `{ openrigVersion }`: the format also allows a `commit`, which this
+OpenRig doesn't write. `configurationId()` and `packageDigest()` are exported from `@openrig/daemon/bundle-identity`.
 Shared test vectors are in `schemas/fixtures/identity-vectors.json`.
 
 ## The formats
@@ -71,26 +75,35 @@ Shared test vectors are in `schemas/fixtures/identity-vectors.json`.
 | Format | Schema | Lives | Written by |
 |---|---|---|---|
 | Declared configurations | `bundle-configurations.v1` | `configurations.yaml` beside `rig.yaml` | the bundle's author |
-| Before-install view | `bundle-behaviour.v1` (`openrig.bundle-behaviour/v1`) | the registry, one file per configuration and assembler version; never inside the archive | `rig bundle inspect` |
+| Before-install view | `bundle-behaviour.v1` (`openrig.bundle-behaviour/v1`) | the registry, one file per configuration and assembler version; never inside the archive | the daemon's inspect: `rig bundle inspect`, under `behaviour` with `--json` |
 | Run record | `run-record.v1` | beside its receipt, private | Fleet, Dev QA, and maintainers for community reports |
 | Public status | `bundle-status.v1` | `openrig-world` status, generated | the status generator only |
 | Registry entry | `registry-entry.v1` | `openrig-world/registry/<slug>.yaml` | maintainers, through review |
 
 ### Declared configurations
 
-`seats` gives each `pod.member` the runtimes it may use, and the profile each runtime uses. `presets` names full
-mappings, and `recommended` names one of them. A combination the file doesn't declare can't be built.
+`seats` gives a `pod.member` the runtimes it may use, and the profile each runtime uses. A member it doesn't list keeps
+the runtime `rig.yaml` gives it. `presets` names full mappings, and `recommended` names one of them, which must be
+`rig.yaml` as written. `rig bundle create`, `rig bundle configurations` and `rig bundle check` refuse a file that breaks
+these rules.
+
+`--preset` and `--seat` choose a configuration (see the [rig bundle reference](rig-bundle.md)). Any mix of each seat's
+declared runtimes can be built, not only the presets; a runtime a seat doesn't declare is refused, and nothing is built.
+Without either flag, create builds `rig.yaml` as written. The built archive's manifest records
+`configuration: { id, preset }` outside the package digest; `preset` is there only when `--preset` or `--seat` chose a
+mapping that matches a declared preset.
 
 ### Before-install view
 
 It's derived from the archive's files alone. Nothing is launched, probed or fetched. It's a view, never a gate, and
 carries no tested status.
 - **`identity`:** source, configuration ID, package digest, the archive's assembler, the generator that made the view,
-  stated compatibility, stated provenance (not verified), and integrity (self-consistency, not authorship). A field the
-  archive doesn't state is `null`. It's never filled from the inspecting OpenRig.
+  stated compatibility, stated provenance (not verified), and integrity (self-consistency, not authorship). A source,
+  configuration ID, package digest or assembler the archive doesn't state is `null`; unstated compatibility and
+  provenance are empty objects. None of it is filled from the inspecting OpenRig.
 - **`team`, `posture`, `toldFiles`, `alsoRuns`, `writes`, `outsideAddresses`, `needs` and `unknownBeforeLaunch`**, in
-  that order. Each fact cites the archive file it comes from (`sourceRefs`) and how it resolves: `archive`,
-  `host_at_launch` or `unresolved`.
+  that order. Facts cite the archive file they come from (`sourceRefs`), except `team` entries and the bundle-wide
+  unknowns. `toldFiles` and `alsoRuns` also say how each resolves: `archive`, `host_at_launch` or `unresolved`.
   - Posture separates what the archive declares from the product's default. Its effect on the host is `unknown`,
     because host settings decide it.
     Optional `posture[].permissionPrompts` is `off` for declared `full_bypass` (including rig- or member-level
@@ -98,7 +111,8 @@ carries no tested status.
     no policy is declared (prompts on unless the installing machine's settings turn them off); for Codex, `on` for
     declared `auto`. Omit it for Claude under auto (naming auto mode in `selection`), config-surface policies
     (`builtin:locked`, `builtin:standard`, `builtin:open` or an archived `surface: config` policy), host-resolved
-    Codex profiles, and Pi except declared full bypass. `selection` names the declared policy.
+    Codex profiles, `permission_policy: none`, a policy the archive can't resolve, and every runtime other than Claude
+    and Codex (Pi, terminal) except declared full bypass. `selection` names the declared policy.
     An absent field means not stated, never `on`. For `off`, Claude
     bypasses permissions, Codex runs with full access and never asks, and Pi gets full resource trust (`--approve`,
     not a permission mode). These are archive facts; `nativeEffect` remains `unknown`.
@@ -109,10 +123,13 @@ carries no tested status.
     state or prove a prompt-free launch. Both fields are omitted where inapplicable or unresolved; older v1 views
     remain valid without them. Pi has no additional warning-suppression flag. `nativeEffect` stays `unknown`.
   - An empty list means none are known. Something unknown goes in `unknownBeforeLaunch`.
-  - Per-seat facts carry `seat` (`pod.member`) and human output labels them with that identity. On `needs` and
-    `unknownBeforeLaunch`, it is optional: bundle-wide facts omit it, and older generators may not have stated it.
-- **`not_generated`:** a combination without a generated view. It carries a reason and the local command that shows it,
-  and no sections.
+  - Per-seat facts carry `seat` (`pod.member`) and human output labels them with that identity. It's required on
+    `team` and `posture`. Elsewhere it's optional: bundle-wide facts (services, library and project writes, setup and
+    version needs) omit it, and older generators may not have stated it.
+- **`not_generated`:** a combination without a generated view, or an archive the generator can't describe: schema 1, no
+  readable pod-aware rig spec, a member missing its pod, id or agent reference, a runtime that depends on an AgentSpec
+  the archive can't read, or an error while reading. It carries a reason and the local command that shows it, and no
+  sections.
 
 ### Declared setup preconditions
 

@@ -5,7 +5,8 @@ instructions and skills, and its documentation. This guide walks through buildin
 link, installing from a link, and submitting it to openrig.dev/rigs. The last section is a block of instructions you can
 give your agent to build one for you.
 
-For the file formats and every flag, see the [rig bundle reference](rig-bundle.md). This guide doesn't repeat them.
+For every flag, see the [rig bundle reference](rig-bundle.md); for the file formats, see
+[bundle formats](bundle-formats.md). This guide doesn't repeat them.
 
 ## 1. Lay out the folder
 
@@ -20,23 +21,35 @@ Two rules matter most for strangers:
 - **Never put credentials in it.** No tokens, keys or `.env` files. `rig bundle create` refuses well-known sensitive
   file names (such as `.env`, `.pem` and `.key`) anyway.
 
+Two optional files sit beside `rig.yaml`:
+- **`bundle.yaml`** declares what people need before installing: setup steps (`preconditions`, shown before install
+  and never run), the oldest OpenRig that works (`compatibility.min_cli_version`), and skills shared by several
+  agents.
+- **`configurations.yaml`** offers other harness mixes (for example all-Claude), as presets. The recommended preset
+  must be `rig.yaml` as written. `rig bundle configurations ./my-team/rig.yaml` lists them with their configuration
+  IDs.
+
 ## 2. Check it
 
 ```sh
 rig bundle check ./my-team                     # checks the folder against the standard; launches nothing
 ```
 
-Fix what it reports, or say in your README why a finding doesn't apply.
+Fix what it reports, or say in your README why a finding doesn't apply. Any finding exits 1, and `--json` names the file
+each finding is about. It checks the folder on disk, including files you haven't committed, so check again at the
+commit you share. README completeness and embedded secrets always read `not_checked`: those are yours to review.
 
 You can also build and look inside the archive:
 
 ```sh
-rig bundle create ./my-team/rig.yaml -o my-team.rigbundle
+rig bundle create ./my-team/rig.yaml -o my-team.rigbundle --name my-team
 rig bundle inspect my-team.rigbundle
 ```
 
-`create` and `inspect` don't launch anything. To preview what installing would do, `rig bundle install my-team.rigbundle
---plan` writes nothing to a target, but it isn't free of side effects: it runs each runtime's `--version`.
+`create` and `inspect` don't launch anything. A local build like this packages a minimum OpenRig version only from
+`--min-cli-version`; a build from your link reads it from your `bundle.yaml`. To preview what installing would do,
+`rig bundle install my-team.rigbundle --plan` writes nothing to a target, but it isn't free of side effects: it records
+a planned run, and it can run harness checks such as `pi --version` for Pi seats.
 
 ## 3. Share it as a link
 
@@ -46,7 +59,9 @@ Share a link to the folder **at a full commit**, so everyone gets exactly the ve
 https://github.com/<you>/<repo>/tree/<commit>/<path-to-folder>
 ```
 
-A branch name moves when you push again; a commit doesn't.
+A branch name moves when you push again; a commit doesn't. `rig bundle inspect` on a branch link prints the
+commit-pinned link to share (`Source:`). Use the full 40-character commit ID: a shorter one is looked up as a branch or
+tag name and isn't found.
 
 ## 4. Install from a link
 
@@ -56,8 +71,13 @@ rig up https://github.com/<you>/<repo>/tree/<commit>/<path> --target <an empty f
 ```
 
 Look before you run. `inspect` shows which agents start and with what access, what they're told, what gets written
-where, and what the bundle needs. Its integrity check tells you the archive is self-consistent; it doesn't tell you
-who made it.
+where, and what the bundle needs, including the author's setup steps. Its integrity check tells you the archive is
+self-consistent; it doesn't tell you who made it. `rig up` prints the same view before it installs, but doesn't stop to
+ask.
+
+Links need `git`, a running local OpenRig daemon, and a public GitHub link without credentials; they don't work with
+`--host`. If the team uses `permission_policy: builtin:yolo` (no permission prompts), `--non-interruptive` lets OpenRig accept the harnesses'
+first-launch warnings for you (see [non-interruptive mode](non-interruptive-mode.md)).
 
 Installing writes the bundle's files into the install target (`--target`, the current directory if you leave it
 out) and launches the team from there, with the seats working in `--cwd`. If the target already
@@ -74,8 +94,8 @@ rig up <link> --seat build.lead=pi --seat check.qa=codex
 On openrig.dev/rigs, pick a configuration and the page gives you one command to paste, which fetches exactly that
 configuration from GitHub. Every run prints the configuration it used, as its configuration ID.
 
-The page also shows how much each configuration has been tested. Bundles OpenRig has tested carry a tested badge; the
-rest say **"Not tested by OpenRig"**, which means exactly that. You're welcome to run it and tell us how it went.
+The page also shows how much each configuration has been tested, with a label such as Tested by OpenRig, Partly tested
+or **"Not tested by OpenRig"**, which means exactly that. You're welcome to run it and tell us how it went.
 
 ## 6. Submit it to openrig.dev/rigs
 
@@ -117,5 +137,5 @@ commit until the update is merged.
 > Preview with `rig bundle create <folder>/rig.yaml -o <scratch>/team.rigbundle`, then `rig bundle install
 > <scratch>/team.rigbundle --plan`. Don't launch the team for real unless I say so.
 >
-> When it's clean, show me the check output, the folder tree, and the README's "Before you start" and "Permissions"
-> sections. I decide whether to push it and submit it.
+> When it's clean, show me the check output, the folder tree, and the README's sections on what to do before
+> installing and on permissions. I decide whether to push it and submit it.
