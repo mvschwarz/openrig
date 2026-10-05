@@ -79,12 +79,12 @@ rest say **"Not tested by OpenRig"**, which means exactly that. You're welcome t
 
 ## 6. Submit it to openrig.dev/rigs
 
-Open a pull request to the `registry/` folder of
-[mvschwarz/openrig-world](https://github.com/mvschwarz/openrig-world) that adds one entry with three things: your
-repository, the folder path, and a branch, tag or commit. No pull requests? Open an issue there with the same three
-things. The full entry format is `registry-entry.v1`, defined in the [bundle formats reference](bundle-formats.md); a
-maintainer completes the
-parts only a review can produce, such as the pinned commit and each configuration's package digest.
+Open a pull request to [mvschwarz/openrig-world](https://github.com/mvschwarz/openrig-world) that adds one file,
+`registry/submissions/<your-team>.yaml`, with three fields: `repository` (your GitHub repository URL), `folder` (the
+folder holding `rig.yaml`, or `.` for the repository root) and `ref` (a branch, tag or commit). No pull requests? Open
+an issue there with the same three things. A maintainer then writes the full entry, in the `registry-entry.v1` format
+defined in the [bundle formats reference](bundle-formats.md), with the parts only a review can produce, such as the
+pinned commit and each configuration's package digest.
 
 What happens next:
 - a maintainer pins your link to an exact commit, runs the same check, and reads everything your bundle gives to an
