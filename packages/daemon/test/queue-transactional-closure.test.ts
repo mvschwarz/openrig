@@ -119,7 +119,7 @@ describe("W1 MF2 — the atomic seam is mandatory and single-DB", () => {
     const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
     repo.attachTransport(transport);
     // deliberately NO attachOutbox
-    const source = await repo.create({
+    const source = await repo.create({ nudge: false,
       sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x",
     });
     await expect(
@@ -134,7 +134,7 @@ describe("W1 MF2 — the atomic seam is mandatory and single-DB", () => {
     const db = createDb();
     migrate(db, ALL_MIGRATIONS);
     const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
-    const source = await repo.create({
+    const source = await repo.create({ nudge: false,
       sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x",
     });
     const { closed } = await repo.handoff({
@@ -150,10 +150,10 @@ describe("W1 transactional closure — W1-a: the durable intent row joins the te
   beforeEach(() => {
     h = makeHarness();
   });
-  afterEach(() => h.db.close());
+  afterEach(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); h.db.close(); });
 
   it("a handoff commits close + successor + wake intent atomically (intent row present, pending)", async () => {
-    const source = await h.repo.create({
+    const source = await h.repo.create({ nudge: false,
       sourceSession: "planner@rig",
       destinationSession: "driver@rig",
       body: "do the thing",
@@ -179,7 +179,7 @@ describe("W1 transactional closure — W1-a: the durable intent row joins the te
   });
 
   it("handoffAndComplete also stages the durable wake intent (symmetric)", async () => {
-    const source = await h.repo.create({
+    const source = await h.repo.create({ nudge: false,
       sourceSession: "planner@rig",
       destinationSession: "driver@rig",
       body: "do the thing",
@@ -202,7 +202,7 @@ describe("W1 transactional closure — W1-a: the durable intent row joins the te
   // intent. This is what distinguishes an atom from "three writes in a row": the
   // close is not observable without its intent.
   it("demo2 — failure INSIDE the txn persists NOTHING (no close, no successor, no intent)", async () => {
-    const source = await h.repo.create({
+    const source = await h.repo.create({ nudge: false,
       sourceSession: "planner@rig",
       destinationSession: "driver@rig",
       body: "do the thing",
@@ -237,7 +237,7 @@ describe("W1 transactional closure — W1-a: the durable intent row joins the te
   });
 
   it("nudge:false stages NO wake intent (no wake intended ⇒ no durable intent, nothing to drain)", async () => {
-    const source = await h.repo.create({
+    const source = await h.repo.create({ nudge: false,
       sourceSession: "planner@rig",
       destinationSession: "driver@rig",
       body: "do the thing",
@@ -258,23 +258,23 @@ describe("W1 transactional closure — W1-b: the drain, with indeterminate-outco
   beforeEach(() => {
     h = makeHarness();
   });
-  afterEach(() => h.db.close());
+  afterEach(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); h.db.close(); });
 
   async function doHandoff() {
-    const source = await h.repo.create({
+    const source = await h.repo.create({ nudge: false,
       sourceSession: "planner@rig",
       destinationSession: "driver@rig",
       body: "do the thing",
     });
-    // The create() above fires its own nudge to driver@rig — clear so the counts
-    // below measure ONLY the handoff's wake delivery to the successor.
-    h.calls.length = 0;
-    return h.repo.handoff({
+    // The source fixture is wake-free; count only the successor's delivery.
+    const result = await h.repo.handoff({
       qitemId: source.qitemId,
       fromSession: "driver@rig",
       toSession: "reviewer@rig",
       body: "review the thing",
     });
+    await vi.waitFor(() => expect(h.outbox.getById(`wake-intent-${result.created.qitemId}`)?.deliveryState).not.toMatch(/^(pending|sending)$/));
+    return result;
   }
 
   it("immediate post-commit delivery marks the intent DELIVERED on a verified nudge", async () => {
@@ -310,7 +310,7 @@ describe("W1 transactional closure — W1-b: the drain, with indeterminate-outco
     // commits the durable intent but skips the immediate deliver — exactly a crash
     // after commit / before drain. Then the recovery sweep delivers it, once.
     const g = makeHarness({ deferTransport: true });
-    const source = await g.repo.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
+    const source = await g.repo.create({ nudge: false, sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
     const { created } = await g.repo.handoff({
       qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y",
     });
@@ -338,7 +338,7 @@ describe("W1 transactional closure — W1-c: the seam guard (a terminal close ca
   beforeEach(() => {
     h = makeHarness();
   });
-  afterEach(() => h.db.close());
+  afterEach(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); h.db.close(); });
 
   // demo3 → W1-c: the guard shown FIRING. We drive the REAL handoff chokepoint —
   // the same path production traverses — but neuter the in-txn intent stage,
@@ -347,7 +347,7 @@ describe("W1 transactional closure — W1-c: the seam guard (a terminal close ca
   // review. A guard merely present but never demonstrated firing is the
   // assert-the-effect-not-the-indicator class.
   it("demo3 — a terminal close that SKIPS intent staging FAILS AT THE SEAM (guard throws, txn rolls back)", async () => {
-    const source = await h.repo.create({
+    const source = await h.repo.create({ nudge: false,
       sourceSession: "planner@rig",
       destinationSession: "driver@rig",
       body: "do the thing",
@@ -376,7 +376,7 @@ describe("W1 transactional closure — W1-c: the seam guard (a terminal close ca
   });
 
   it("nudge:false does NOT trip the guard (no wake intended ⇒ no intent required)", async () => {
-    const source = await h.repo.create({
+    const source = await h.repo.create({ nudge: false,
       sourceSession: "planner@rig",
       destinationSession: "driver@rig",
       body: "do the thing",
@@ -410,16 +410,18 @@ describe("W1 transactional closure — W1-c: the seam guard (a terminal close ca
 describe("W1 MF6 — timeout classifies as indeterminate; retry policy is honest", () => {
   let h: ReturnType<typeof makeHarness>;
   beforeEach(() => { h = makeHarness(); });
-  afterEach(() => h.db.close());
+  afterEach(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); h.db.close(); });
 
   async function doHandoff() {
-    const source = await h.repo.create({
+    const source = await h.repo.create({ nudge: false,
       sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x",
     });
     h.calls.length = 0;
-    return h.repo.handoff({
+    const result = await h.repo.handoff({
       qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y",
     });
+    await vi.waitFor(() => expect(h.outbox.getById(`wake-intent-${result.created.qitemId}`)?.deliveryState).not.toMatch(/^(pending|sending)$/));
+    return result;
   }
 
   it("a transport TIMEOUT (ok:false, timeout reason) records INDETERMINATE, not failed", async () => {
@@ -460,11 +462,11 @@ describe("W1 MF6 — timeout classifies as indeterminate; retry policy is honest
 describe("W1 MF3 — overlapping drains send the external wake exactly once", () => {
   let h: ReturnType<typeof makeHarness>;
   beforeEach(() => { h = makeHarness(); });
-  afterEach(() => h.db.close());
+  afterEach(async () => { await new Promise<void>((resolve) => setImmediate(resolve)); h.db.close(); });
 
   it("two concurrent drains of the same crash-orphaned intent: ONE send, honest tallies", async () => {
     const g = makeHarness({ deferTransport: true });
-    const source = await g.repo.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
+    const source = await g.repo.create({ nudge: false, sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
     const { created } = await g.repo.handoff({
       qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y",
     });
@@ -496,12 +498,13 @@ describe("W1 MF4 — the intent freezes its emitting generation/envelope", () =>
     repo.attachTransport(transport);
     const outbox = new OutboxHandler(db);
     repo.attachOutbox(outbox);
-    const source = await repo.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
+    const source = await repo.create({ nudge: false, sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
     const { created } = await repo.handoff({
       qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y",
     });
     const intent = outbox.getById(`wake-intent-${created.qitemId}`);
     expect(intent!.body).toContain("gen 11111111"); // frozen at stage
+    await vi.waitFor(() => expect(outbox.getById(intent!.outboxId)?.deliveryState).toBe("delivered"));
     db.close();
   });
 
@@ -517,7 +520,7 @@ describe("W1 MF4 — the intent freezes its emitting generation/envelope", () =>
     const outbox = new OutboxHandler(db);
     repo.attachOutbox(outbox);
     // A REAL successor qitem so the intent references an existing target (MF5).
-    const successor = await repo.create({ sourceSession: "driver@rig", destinationSession: "reviewer@rig", body: "z" });
+    const successor = await repo.create({ nudge: false, sourceSession: "driver@rig", destinationSession: "reviewer@rig", body: "z" });
     // A committed-but-undelivered intent whose frozen envelope carries the ORIGINAL gen.
     const FROZEN =
       `From: driver@rig\nTo: reviewer@rig\nSent: 08-08 19:44Z · gen 11111111\n---\nQueue handoff: ${successor.qitemId} - check your queue.\n---\n↩ Reply: rig send driver@rig \"...\"`;
@@ -561,7 +564,7 @@ describe("W1 — the drain never sends a wake for a nonexistent qitem", () => {
 describe("W1 re-seal BLOCKING 1 — abandoned `sending` claims reconcile to indeterminate", () => {
   it("a claimed intent left `sending` by a crash becomes `indeterminate` on recovery, never re-sent", async () => {
     const g = makeHarness({ deferTransport: true });
-    const source = await g.repo.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
+    const source = await g.repo.create({ nudge: false, sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
     const { created } = await g.repo.handoff({
       qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y",
     });
@@ -595,7 +598,7 @@ describe("W1 re-seal BLOCKING 1 — abandoned `sending` claims reconcile to inde
 describe("W1 — the executable drain selector is exact-case", () => {
   it("a WAKE-INTENT- case variant is NOT selected by the drain (never executed)", async () => {
     const h = makeHarness();
-    const q = await h.repo.create({ sourceSession: "driver@rig", destinationSession: "reviewer@rig", body: "z" });
+    const q = await h.repo.create({ nudge: false, sourceSession: "driver@rig", destinationSession: "reviewer@rig", body: "z" });
     h.calls.length = 0; // ignore the create-time nudge; count only drain sends
     const variantId = `WAKE-INTENT-${q.qitemId}`; // uppercase variant, real target qitem
     h.outbox.record({ outboxId: variantId, senderSession: "attacker@rig", destinationSession: "victim@rig", body: "variant", auditPointer: q.qitemId });
@@ -652,6 +655,60 @@ describe("W1 re-seal #3 — real file-backed close/reopen crash boundary", () =>
       for (const suffix of ["", "-journal", "-wal", "-shm"]) {
         try { rmSync(`${dbPath}${suffix}`, { force: true }); } catch { /* best effort */ }
       }
+    }
+  });
+});
+
+
+describe("ordinary create wake durability", () => {
+  it("rolls back the queue row and event if create intent staging fails", async () => {
+    const h = makeHarness();
+    try {
+      vi.spyOn(h.outbox, "record").mockImplementationOnce(() => { throw new Error("create intent fault"); });
+      await expect(h.repo.create({ sourceSession: "writer@rig", destinationSession: "reader@rig", body: "work" })).rejects.toThrow("create intent fault");
+      expect(h.db.prepare("SELECT * FROM queue_items").all()).toEqual([]);
+      expect(h.db.prepare("SELECT * FROM queue_transitions").all()).toEqual([]);
+      expect(h.db.prepare("SELECT * FROM events").all()).toEqual([]);
+      expect(h.outbox.listForSender("writer@rig")).toEqual([]);
+      expect(h.calls).toEqual([]);
+    } finally { h.db.close(); }
+  });
+
+  it("no-nudge create commits without an intent or send", async () => {
+    const h = makeHarness();
+    try {
+      const row = await h.repo.create({ sourceSession: "writer@rig", destinationSession: "reader@rig", body: "work", nudge: false });
+      expect(h.repo.getById(row.qitemId)?.body).toBe("work");
+      expect(h.outbox.listForSender("writer@rig")).toEqual([]);
+      expect(h.calls).toEqual([]);
+    } finally { h.db.close(); }
+  });
+
+  it("a pending create wake survives file close/reopen and drains once", async () => {
+    const dbPath = join(tmpdir(), `create-wake-reopen-${Date.now()}-${process.pid}.sqlite`);
+    let db: ReturnType<typeof createDb> | undefined;
+    try {
+      db = createDb(dbPath);
+      migrate(db, ALL_MIGRATIONS);
+      const outbox = new OutboxHandler(db);
+      const repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+      repo.attachOutbox(outbox); // no transport: retain pending work for startup
+      const row = await repo.create({ sourceSession: "writer@rig", destinationSession: "reader@rig", body: "retained work" });
+      expect(outbox.getById(`wake-intent-${row.qitemId}`)?.deliveryState).toBe("pending");
+      db.close(); db = undefined;
+      db = createDb(dbPath);
+      const reopened = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+      const { transport, calls } = makeMockTransport();
+      reopened.attachOutbox(new OutboxHandler(db));
+      reopened.attachTransport(transport);
+      expect(reopened.getById(row.qitemId)?.body).toBe("retained work");
+      expect(reopened.reconcileAbandonedWakeIntents()).toBe(0);
+      expect((await reopened.drainPendingWakeIntents()).delivered).toBe(1);
+      expect((await reopened.drainPendingWakeIntents()).delivered).toBe(0);
+      expect(calls).toHaveLength(1);
+    } finally {
+      db?.close();
+      for (const suffix of ["", "-journal", "-wal", "-shm"]) rmSync(`${dbPath}${suffix}`, { force: true });
     }
   });
 });

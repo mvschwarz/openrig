@@ -109,6 +109,7 @@ describe("queue unknown-write reconciliation", () => {
   });
   afterEach(async () => {
     await Promise.all(h.pending);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     h.db.close();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
@@ -139,14 +140,14 @@ describe("queue unknown-write reconciliation", () => {
     } finally { gate.resolve(); }
   });
 
-  it("retains one row and one wake when commit precedes a timed-out wake response and same-ID retry", async () => {
+  it("returns the committed create while its wake is held; same-ID retry adds no wake", async () => {
     const wake = deferred();
     const send = vi.fn(async () => { await wake.promise; return { ok: true, verified: true }; });
     h.repo.attachTransport({ send });
     try {
       const first = await h.run([...createArgs, "--id", "qitem-explicit"]);
-      expect(first.code).not.toBe(0);
-      expect(h.rows()).toHaveLength(1); // already committed before HTTP deadline
+      expect(first.code).toBe(0);
+      expect(h.rows()).toHaveLength(1); // receipt precedes wake completion
       expect(send).toHaveBeenCalledTimes(1);
       const retry = await h.run([...createArgs, "--id", "qitem-explicit"]);
       expect(retry.code).toBe(0);
@@ -156,6 +157,61 @@ describe("queue unknown-write reconciliation", () => {
     } finally { wake.resolve(); }
     await Promise.all(h.pending);
     expect(h.rows()).toHaveLength(1);
+  });
+
+  it.each(["create", "handoff", "handoff-and-complete"])("%s returns an HTTP persistence receipt while wake delivery is held", async (verb) => {
+    if (verb !== "create") {
+      await h.repo.create({ qitemId: "qitem-source", sourceSession: "origin@fixture", destinationSession: "writer@fixture", body: BODY, nudge: false });
+      h.repo.claim({ qitemId: "qitem-source", destinationSession: "writer@fixture" });
+    }
+    const wake = deferred();
+    let released = false;
+    const send = vi.fn(async () => { await wake.promise; return { ok: true, verified: true }; });
+    h.repo.attachTransport({ send });
+    const requests: Promise<void>[] = [];
+    const server = createServer((req, res) => {
+      const request = (async () => {
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        const response = await h.app.request(`http://queue.invalid${req.url}`, {
+          method: req.method, headers: req.headers as Record<string, string>, body,
+        });
+        res.writeHead(response.status, { "content-type": "application/json" });
+        res.end(await response.text());
+      })();
+      requests.push(request);
+      void request.catch((err) => res.destroy(err));
+    });
+    let recipientId: string | undefined;
+    try {
+      server.listen(0, "127.0.0.1");
+      await once(server, "listening");
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("missing fixture address");
+      h.networkEndpoint(`http://127.0.0.1:${address.port}`);
+      const receipt = await h.run(verb === "create" ? [...createArgs, "--id", "qitem-http"]
+        : [verb, "qitem-source", "--to", "reader@fixture", "--summary", "Retain assignment"]);
+      expect(receipt.code).toBe(0); // actual HTTP response, before the client's deadline
+      expect(released).toBe(false);
+      expect(send).toHaveBeenCalledTimes(1);
+      const row = h.rows().find((r) => verb === "create" ? r.qitem_id === "qitem-http" : r.handed_off_from === "qitem-source")!;
+      recipientId = row.qitem_id;
+      expect(row).toMatchObject({ body: BODY, state: "pending" });
+      expect(JSON.stringify(receipt.data)).toContain(recipientId);
+      expect(h.repo.getById(recipientId)?.lastNudgeResult).toBeNull();
+      expect(h.db.prepare("SELECT delivery_state, audit_pointer FROM outbox_entries WHERE outbox_id = ?").get(`wake-intent-${recipientId}`))
+        .toEqual({ delivery_state: "sending", audit_pointer: recipientId });
+      if (verb !== "create") expect(h.repo.getById("qitem-source")?.state).toBe(verb === "handoff" ? "handed-off" : "done");
+    } finally {
+      released = true;
+      wake.resolve();
+      await Promise.all(requests);
+      // Delivery can finish after the response; keep the fixture DB open for it.
+      const deliveredId = recipientId ?? h.rows().find((r) => r.qitem_id !== "qitem-source")?.qitem_id;
+      if (deliveredId) await vi.waitFor(() => expect(h.repo.getById(deliveredId)?.lastNudgeResult).toBe("verified"));
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("keeps the ID in an unreadable-response JSON error and reconciles the full stored body", async () => {
@@ -188,7 +244,9 @@ describe("queue unknown-write reconciliation", () => {
     const events = h.db.prepare("SELECT * FROM events").all();
     const retry = await h.run([...createArgs, "--id", "qitem-same-body"]);
     expect(retry.code).toBe(0);
-    expect(retry.data).toEqual(first.data);
+    expect(retry.data).toEqual({ ...first.data,
+      lastNudgeAttempt: retry.data.lastNudgeAttempt, lastNudgeResult: retry.data.lastNudgeResult,
+    }); // delivery may settle between persistence receipts
     expect(retry.data.createWarning).toBeUndefined();
     expect(retry.stderr.join("\n")).not.toContain("not saved");
     expect(h.rows()).toHaveLength(1);
@@ -306,7 +364,7 @@ describe("queue unknown-write reconciliation", () => {
     const args = [verb, "qitem-source", "--to", "reader@fixture", "--summary", "Retain assignment"];
     try {
       const first = await h.run(args);
-      expect(first.code).not.toBe(0);
+      expect(first.code).toBe(0);
       expect(h.rows()).toHaveLength(2);
       const [source, successor] = h.rows();
       expect(source).toMatchObject({ qitem_id: "qitem-source", body: BODY, state: verb === "handoff" ? "handed-off" : "done" });
