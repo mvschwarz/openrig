@@ -178,6 +178,25 @@ export class CodexResumeAdapter {
       paneContent: finalContent,
     });
 
+    // The final native observation can carry the same positive evidence as a
+    // loop observation. Preserve it before the generic shell/timeout fallback.
+    if (finalProbe.code === "no_saved_session") {
+      return {
+        ok: false,
+        code: "retry_fresh",
+        message: "Codex resume failed: no saved session found for the requested token",
+      };
+    }
+
+    if (finalProbe.status === "attention_required") {
+      return {
+        ok: false,
+        code: "attention_required",
+        message: finalProbe.detail,
+        evidence: finalContent.split("\n").slice(-12).join("\n"),
+      };
+    }
+
     if (finalProbe.status === "resumed") {
       return { ok: true };
     }
