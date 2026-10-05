@@ -39,7 +39,7 @@ describe("remote down operation outcomes", () => {
       { label: "clean stop", errors: [], alreadyStopped: false, deleted: false, expected: undefined },
       { label: "snapshot failure", errors: ["Snapshot failed: disk full"], alreadyStopped: false, deleted: false, expected: 2 },
       { label: "failed session kill", errors: ["Kill failed for session 'owned-rig-agent': timeout"], alreadyStopped: false, deleted: false, expected: 2 },
-      { label: "already stopped", errors: [], alreadyStopped: true, deleted: false, expected: 1 },
+      { label: "already stopped", errors: [], alreadyStopped: true, deleted: false, expected: undefined },
       { label: "already stopped and deleted", errors: [], alreadyStopped: true, deleted: true, expected: undefined },
     ]) {
       it(`${testCase.label} reports the operation exit code (${json ? "JSON" : "human"})`, async () => {

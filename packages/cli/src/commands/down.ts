@@ -136,7 +136,6 @@ export function downCommand(depsOverride?: StatusDeps): Command {
         if (result.ok) {
           const teardown = result.data as Partial<TeardownResult> | undefined;
           if (teardown?.errors && teardown.errors.length > 0) process.exitCode = 2;
-          else if (teardown?.alreadyStopped && !teardown.deleted) process.exitCode = 1;
         }
         return;
       }
