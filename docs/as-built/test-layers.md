@@ -52,10 +52,11 @@ to `main`. In the PR description, say which layers you ran and which you could n
 
 Some package tests are gated. `OPENRIG_E2E_REAL_CODEX=1` runs two daemon e2e tests against a
 real Codex (they also need tmux, `codex` and `~/.codex/auth.json`, and they use provider
-credits). `OPENRIG_REAL_CLAUDE_INTEGRATION=1` with `OPENRIG_PARENT_NATIVE_ID` runs one
-real-Claude fork test. Tests that need tmux skip when it is absent, and the CLI's release-tag
-tests skip without local tags unless `CI=true`. A green local run without tmux or tags has
-skipped these; CI installs tmux and fetches full history.
+credits). `OPENRIG_REAL_CLAUDE_INTEGRATION=1` enables only a placeholder: it requires
+`OPENRIG_PARENT_NATIVE_ID` and checks its format, and no real-Claude fork test exists yet.
+Without tmux, some tmux tests skip and others (such as `transcript-seat-env-native.test.ts`)
+fail. The CLI's release-tag tests skip without local tags unless `CI=true`, so a green local
+run without tags has skipped them. CI installs tmux and fetches full history.
 
 The TUI has its own vitest suite (`npm run test -w packages/tui`, which builds the TUI first)
 and runs in the `tui` leg of `package-tests`; `npm run test:tui-package` launches the packed
@@ -249,7 +250,7 @@ means:
 |---|---|---|
 | Consuming a message | `stub-runner.ts` runs its launch script once and then idles. It has no stdin reader, socket or other input channel. The default script prints `[stub] scripted reply: acknowledged` at boot, before anything has been sent. | A pane showing a reply, or your echoed text, does not prove the message was consumed. No stub scenario can currently prove "delivered and answered". Separately, `rig send --verify` means "appeared in the pane", not acknowledgement (see `rig send --help`), and the scenario `send` step doesn't pass `--verify` at all. |
 | Launch path | `StubRuntimeAdapter` types `node <stub-runner> …` into the pane (`tmux.sendText`, then Enter). Claude Code with an explicit permission mode launches through a managed launch (`ClaudeManagedLaunch.prepare`, `tmux.sendShellCommand`). Otherwise Claude Code, Codex and Pi launch through `SeatLaunchEnvironment.command` and `tmux.sendShellCommand`; the stub adapter does not get that environment. The shell-foreground check in `session-transport.ts` (`unverifiedShellForeground`) runs for every runtime except `terminal` and `claude-code`, and only `codex` has a native-process proof; Claude Code ordinary delivery applies its own uncertainty policy at the input boundary. | A stub seat doesn't exercise the seat launch environment, managed launch, wrappers or native-process identity (the class behind #197). Wrapping the stub in a shell wouldn't change that. |
-| Permissions | `validateNativePermissionSelection` accepts only `codex` and `claude-code`. The stub models only the `floor` / `full_bypass` launch posture. Non-interruptive launches and declarative `permission_policy` postures change the Claude and Codex launch arguments; the stub ignores both. | Testing Claude permission modes or per-seat permission selection needs a real runtime. |
+| Permissions | `validateNativePermissionSelection` accepts only `codex` and `claude-code`. The stub carries the resolved `floor` / `full_bypass` posture, including one set by a declarative `permission_policy`, into its runner's `--posture` argument and READY line. It ignores non-interruptive launches, and it doesn't exercise Claude or Codex native permission behaviour. | Testing Claude permission modes or per-seat permission selection needs a real runtime. |
 | Queue pickup and wake | No stub worker reacts to a nudge by claiming an item, working on it and handing it back. | The baton scenarios prove the claim *survives a restart*. They don't prove delivery, pickup or wake. |
 | Reboot / tmux reset | `daemon: {op: restart}` restarts only the scenario daemon, and the tmux server keeps running. No step resets tmux. | Recycled pane IDs and stale bindings after a real reboot (the class behind #141) are not covered by a daemon restart. |
 | Multi-rig and same-name identities | The `up` step always uses the scenario's top-level `topology` and ignores a per-step override. No step archives or removes a rig. | Cross-rig scope, same-name generations and archive/remove routing (the class behind #174) need runner work before they can be tested. |
@@ -423,7 +424,7 @@ Before you start, two honest constraints:
 - The `restart` step runs `rig launch <rig> <node> --json` and passes no other flag; the node
   is the logical ID (for example `dev.qa`). A stub seat has no resume token. `rig launch` has
   no `--fresh` option: a deliberate fresh start of a stub seat after `down` goes through
-  `rig up --existing <rig> --fresh <seat>` or `rig seat launch <seat> --fresh`, so the
+  `rig up --existing <rig> --fresh <seat>` or `rig seat launch <seat> --fresh --reason "<why>"`, so the
   `launch` row needs a runner binding to one of those first.
 
 | Group | Family | Proposed first check (observable result) |
