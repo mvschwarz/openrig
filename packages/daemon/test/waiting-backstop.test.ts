@@ -27,7 +27,11 @@ describe("waiting face names the next action the existing ladder can actually ta
   afterEach(() => { db.close(); vi.useRealTimers(); vi.unstubAllEnvs(); });
   async function handoff(target = "worker@rig") {
     const source = await queue.create({ sourceSession: "owner@rig", destinationSession: "owner@rig", body: "Prepare result", nudge: false });
-    return (await queue.handoff({ qitemId: source.qitemId, fromSession: "owner@rig", toSession: target, body: "Continue exact work", nudge: true })).created.qitemId;
+    const id = (await queue.handoff({ qitemId: source.qitemId, fromSession: "owner@rig", toSession: target, body: "Continue exact work", nudge: true })).created.qitemId;
+    // Backstop assertions describe a completed wake attempt, not the earlier persistence receipt.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(queue.getByIdOrThrow(id).lastNudgeResult).not.toBeNull();
+    return id;
   }
   const view = (id: string) => queue.getByIdOrThrow(id).waiting!;
   const tick = () => runWakeLadderTick({ db, queueRepo: queue, now: new Date(), resolveOrchestrator: () => null, log: () => {} });

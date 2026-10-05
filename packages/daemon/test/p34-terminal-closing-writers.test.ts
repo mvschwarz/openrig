@@ -296,6 +296,7 @@ describe("P34 RED 4 — NO-FALSE-POSITIVE: a PARK is not a closure and requires 
       sourceSession: "src@rig",
       destinationSession: "dst@rig",
       body: "work",
+      nudge: false, // Isolate the hold action from the setup create's wake intent.
     });
     await h.mc.act({
       verb: "hold",
@@ -335,6 +336,7 @@ describe("P34 RED 4b — NO-FALSE-POSITIVE: a TERMINAL CLOSE with NO SUCCESSOR r
       sourceSession: "src@rig",
       destinationSession: "dst@rig",
       body: "work",
+      nudge: false, // Isolate the closure from the setup create's wake intent.
     });
     // This is THE THIRD STATE. Not a park (it IS terminal) and not a paired
     // closure (there is no successor). A guard keyed on "terminal close" alone —

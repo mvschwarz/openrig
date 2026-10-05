@@ -272,6 +272,7 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     repo.attachOutbox(new OutboxHandler(db));
     const source = await repo.create({ sourceSession: "orch@my-rig", destinationSession: "dev-owner@my-rig", body: "review", nudge: false });
     const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "dev-owner@my-rig", toSession: "dev-check@my-rig" });
+    await vi.waitFor(() => expect(repo.getById(created.qitemId)!.lastNudgeAttempt).not.toBeNull());
     const stored = repo.getById(created.qitemId)!;
     expect(stored.lastNudgeAttempt).not.toBeNull();
     if (identity !== "different-runtime") {

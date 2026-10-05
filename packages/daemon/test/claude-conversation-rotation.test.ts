@@ -130,7 +130,7 @@ async function sendAfterHook(mode: Mode, consumer: "send" | "wake" | "handoff" =
         const source = await queue.create({ sourceSession: "orch@rotation", destinationSession: "owner@rotation", body: "review", nudge: false });
         const { created } = await queue.handoff({ qitemId: source.qitemId, fromSession: "owner@rotation", toSession: name });
         expect(queue.getById(source.qitemId)?.state).toBe("handed-off");
-        expect(queue.getById(created.qitemId)?.lastNudgeResult).toBe("delivered-ack-pending");
+        await vi.waitFor(() => expect(queue.getById(created.qitemId)?.lastNudgeResult).toBe("delivered-ack-pending"));
       }
     }
     expect(send).toHaveBeenCalledTimes(1);
