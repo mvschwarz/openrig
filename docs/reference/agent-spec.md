@@ -1,8 +1,8 @@
 # AgentSpec Reference
 
 Version: 1.0
-Last validated against code: 2026-04-11
-Source of truth: `packages/daemon/src/domain/agent-manifest.ts`, `packages/daemon/src/domain/types.ts`
+Last validated against code: 2026-10-05, at main `fcaf1f8e`
+Source of truth: `packages/daemon/src/domain/agent-manifest.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/agent-resolver.ts`, `packages/daemon/src/domain/profile-resolver.ts`
 
 This is the canonical reference for the AgentSpec YAML format (`agent.yaml`). Every field, validation rule, and default documented here was traced from the actual parser and validator code.
 
@@ -20,7 +20,7 @@ profiles:
       skills: []
       guidance: []
       subagents: []
-      hooks: []
+      plugins: []
       runtime_resources: []
 
 resources: {}
@@ -46,11 +46,11 @@ imports:
 profiles:
   default:
     uses:
-      skills: [openrig-user, development-team, test-driven-development, systematic-debugging]
+      skills: [development-team, test-driven-development, systematic-debugging, verification-before-completion]
       guidance: []
       subagents: []
-      hooks: []
-      runtime_resources: []
+      plugins: [shared:openrig-core]
+      runtime_resources: [shared:claude-default-settings, shared:claude-default-mcp, shared:codex-default-config, shared:claude-activity-hooks]
 
 resources:
   guidance:
@@ -75,6 +75,7 @@ description: Vault specialist agent — manages HashiCorp Vault for this managed
 defaults:
   runtime: claude-code
   model: claude-opus-4-6
+  effort: high
   lifecycle:
     execution_mode: interactive_resident
     compaction_strategy: default-compaction
@@ -91,11 +92,11 @@ profiles:
     preferences:
       runtime: claude-code
     uses:
-      skills: [openrig-user, systematic-debugging, vault-user]
+      skills: [systematic-debugging, vault-user]
       guidance: []
       subagents: []
-      hooks: []
-      runtime_resources: []
+      plugins: [shared:openrig-core, vault-tools]
+      runtime_resources: [claude-settings]
     startup:
       files:
         - path: guidance/profile-specific.md
@@ -111,10 +112,11 @@ resources:
   guidance:
     - id: role
       path: guidance/role.md
-  hooks:
-    - id: pre-commit
-      path: hooks/pre-commit.sh
-      runtimes: [claude-code]
+  plugins:
+    - id: vault-tools
+      source:
+        kind: local
+        path: plugins/vault-tools
   runtime_resources:
     - id: claude-settings
       path: runtime/claude-settings.fragment.json
@@ -147,12 +149,12 @@ startup:
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `name` | string | yes | — | Agent name. Used in spec library identification and validation messages. |
-| `version` | string | yes | — | Spec version. Informational — not used for compatibility gating. |
+| `version` | string | yes | — | Spec version. Quote it (`"1.0"`): an unquoted number fails as a non-string. An importing spec that pins `imports[].version` must match it exactly. |
 | `description` | string | no | — | Human-readable description. Shown in spec library and review surfaces. |
 | `defaults` | Defaults | no | — | Default runtime, model, and lifecycle settings. Applied when not overridden by the rig spec or profile. |
 | `imports` | Import[] | no | `[]` | Other AgentSpecs to import. Resources from imported specs become available for profile `uses` references. |
 | `profiles` | map<string, Profile> | no | `{}` | Named profiles. Each profile selects resources and can override startup/lifecycle. The rig spec member's `profile` field selects which profile to use. |
-| `resources` | Resources | no | all empty | Declared resources (skills, guidance, subagents, hooks, runtime resources). These are the available pool that profiles select from via `uses`. |
+| `resources` | Resources | no | all empty | Declared resources (skills, guidance, subagents, plugins, runtime resources). These are the available pool that profiles select from via `uses`. |
 | `startup` | StartupBlock | no | `{ files: [], actions: [] }` | Agent-level startup files and actions. Applied to all profiles via the startup layering model. |
 
 ---
@@ -163,6 +165,7 @@ startup:
 defaults:
   runtime: claude-code
   model: claude-opus-4-6
+  effort: high
   lifecycle:
     execution_mode: interactive_resident
     compaction_strategy: default-compaction
@@ -171,8 +174,9 @@ defaults:
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `runtime` | string | no | — | Default runtime for this agent. Can be overridden by the rig spec member's `runtime` field. |
-| `model` | string | no | — | Default model. Can be overridden by the rig spec member's `model` field. |
+| `runtime` | string | no | — | Default runtime for this agent. Precedence: the rig spec member's `runtime`, then the profile's `preferences.runtime`, then this, then `claude-code`. |
+| `model` | string | no | — | Default model, with the same precedence. |
+| `effort` | string | no | — | Default reasoning effort, with the same precedence. Claude gets `--effort`, Codex `-c model_reasoning_effort=…`. A blank or non-string value is ignored with an advisory. |
 | `lifecycle` | Lifecycle | no | see below | Lifecycle behavior defaults. |
 
 ### Lifecycle Defaults
@@ -182,6 +186,7 @@ defaults:
 | `execution_mode` | string | `interactive_resident` | `interactive_resident` (only value in v1; `wake_on_demand` is explicitly rejected) |
 | `compaction_strategy` | string | `default-compaction` | `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover`; deprecated aliases accepted with a validation advisory: `harness_native` → `default-compaction`, `pod_continuity` → `handover` (`custom_prompt` is explicitly rejected in v1) |
 | `restore_policy` | string | `resume_if_possible` | `resume_if_possible`, `relaunch_fresh`, `checkpoint_only` |
+| `mechanic` | string | — | A canonical `seat@rig` session address; needed by `apprentice-handover` |
 
 ---
 
@@ -197,15 +202,18 @@ imports:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `ref` | string | yes | Reference to another AgentSpec directory. Must start with `local:` (relative) or `path:` (absolute). The referenced directory must contain an `agent.yaml`. |
-| `version` | string | no | Optional version constraint. Must be an exact version — no ranges (`~`, `^`, `>=`, etc.). |
+| `version` | string | no | Optional version constraint. Must be an exact version — no ranges (`~`, `^`, `>=`, etc.). When set, the imported spec's `version` must equal it, or resolution fails with `version_mismatch`. |
 
 ### Import Resolution
 
 - `local:` paths resolve relative to the importing spec's directory
 - `path:` paths are absolute filesystem paths
 - Imported resources become available for `uses` references in profiles
-- When referencing imported resources in `uses`, use qualified `namespace:id` format (e.g., `shared:openrig-user`)
-- Unqualified references (just `id`) resolve against the spec's own local resources first
+- A qualified reference `namespace:id` (e.g., `shared:openrig-core`) names the imported spec by its `name` field
+- An unqualified reference (just `id`) resolves against the spec's own resources first, then against the one import that
+  declares it. If two imports declare it, the reference is ambiguous and fails: qualify it
+- An imported spec may not have imports of its own, and its `name` may not contain `:`. Two imports that resolve to the
+  same spec name are refused, and import cycles are detected
 
 ### The Shared Import Pattern
 
@@ -216,7 +224,11 @@ imports:
   - ref: local:../../shared
 ```
 
-This gives access to the full pool of shared skills (openrig-user, systematic-debugging, development-team, etc.) and agents select the ones they need via profile `uses`.
+This gives access to the shared pool: skills such as `systematic-debugging`, `verification-before-completion`,
+`development-team` and `test-driven-development`; the `openrig-core` plugin, which carries `openrig-user` and OpenRig's
+other skills; and runtime resources such as `claude-default-settings`, `claude-default-mcp`, `codex-default-config` and
+`claude-activity-hooks`. Agents select the ones they need via profile `uses`, for example
+`plugins: [shared:openrig-core]`.
 
 ---
 
@@ -230,10 +242,10 @@ profiles:
       runtime: claude-code
       model: claude-opus-4-6
     uses:
-      skills: [openrig-user, systematic-debugging, vault-user]
+      skills: [systematic-debugging, vault-user]
       guidance: [role]
       subagents: []
-      hooks: []
+      plugins: [shared:openrig-core]
       runtime_resources: []
     startup:
       files: []
@@ -244,13 +256,14 @@ profiles:
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `summary` | string | no | — | Profile description. |
-| `preferences` | object | no | — | Runtime/model preferences for this profile. |
+| `summary` | string | no | — | Profile description. Spec review surfaces read a profile `description` instead. |
+| `preferences` | object | no | — | Runtime/model/effort preferences for this profile. |
 | `preferences.runtime` | string | no | — | Preferred runtime. |
 | `preferences.model` | string | no | — | Preferred model. |
+| `preferences.effort` | string | no | — | Preferred reasoning effort. |
 | `uses` | Uses | no | all empty | Selects which declared resources are active for this profile. |
 | `startup` | StartupBlock | no | — | Profile-level startup files and actions. Merged with agent-level startup via layering. |
-| `lifecycle` | Lifecycle | no | — | Profile-level lifecycle overrides. |
+| `lifecycle` | Lifecycle | no | — | Profile-level lifecycle overrides. `restore_policy` can only narrow (`resume_if_possible` → `relaunch_fresh` → `checkpoint_only`); `compaction_strategy` and `mechanic` take the most specific value (defaults, then profile, then member). |
 
 ### Uses
 
@@ -258,18 +271,27 @@ The `uses` block selects which resources from the `resources` pool (including im
 
 ```yaml
 uses:
-  skills: [openrig-user, systematic-debugging, vault-user]
+  skills: [systematic-debugging, vault-user]
   guidance: [role]
   subagents: []
-  hooks: [pre-commit]
+  plugins: [shared:openrig-core]
   runtime_resources: [claude-settings]
 ```
 
 Each array contains resource IDs. These can be:
 - **Unqualified** (`vault-user`) — resolves against the spec's own `resources` first, then imported specs
-- **Qualified** (`shared:openrig-user`) — resolves against a specific imported spec's resources
+- **Qualified** (`shared:systematic-debugging`) — resolves against a specific imported spec's resources
 
-The `uses` categories are: `skills`, `guidance`, `subagents`, `plugins`, `hooks`, `runtime_resources`.
+The `uses` categories are: `skills`, `guidance`, `subagents`, `plugins`, `runtime_resources`. A `uses.hooks` key, even an
+empty list, is refused: hooks ship inside plugins.
+
+**Skills resolve more widely than other resources.** A skill ID that no declared resource provides is looked up at
+launch in the seat's runtime skill folder (`<cwd>/.claude/skills` or `<cwd>/.agents/skills`), then the spec folder's
+`skills/`, then the home skill folder, then the managed skills root; Pi looks only in the spec folder's `skills/`. A
+discovered skill's ID is its `SKILL.md` frontmatter `name`, and a declared resource wins over a discovered skill with the
+same ID. When a profile selects a skill from inside the spec's own folder and the managed catalog holds a different
+copy, the spec's copy is used and launch warns `skill_bundle_precedence`. Any other differing copy fails launch with
+`skill_identity_conflict`.
 
 ---
 
@@ -286,10 +308,12 @@ resources:
   subagents:
     - id: helper
       path: subagents/helper
-  hooks:
-    - id: pre-commit
-      path: hooks/pre-commit.sh
-      runtimes: [claude-code]
+  plugins:
+    - id: vault-tools
+      source:
+        kind: local
+        path: plugins/vault-tools
+      plugin_type: auto
   runtime_resources:
     - id: claude-settings
       path: runtime/claude-settings.fragment.json
@@ -297,7 +321,11 @@ resources:
       type: claude_settings_fragment
 ```
 
-Resources are the available pool. They are NOT automatically delivered to agents — profiles select them via `uses`. The only resources delivered are those that the active profile's `uses` block references.
+Resources are the available pool. They are NOT automatically delivered to agents — profiles select them via `uses`.
+The only declared resources delivered are those that the active profile's `uses` block references. Two sources add
+skills outside `uses`: the managed skill catalog's system selection and a project's `install.skills`.
+
+`resources.hooks` is refused at validation: hooks now ship inside plugins, declared under `resources.plugins`.
 
 ### Plugin paths
 
@@ -330,28 +358,28 @@ profiles:
 not shell interpolation and does not consult a seat's shell startup files. Its
 suffix must be relative. Existing absolute, tilde and spec-relative paths keep
 their meaning; `~user` is still a literal relative segment, not a user lookup.
-This form requires a daemon version that supports it; keep bundles using it
-pinned to such a version.
+This form needs OpenRig 0.6.5 or later; keep bundles using it pinned to such a
+version.
 
 ### Resource Categories
 
 | Category | Fields | Description |
 |----------|--------|-------------|
-| `skills` | `id`, `path` | Skill directories containing a SKILL.md. Delivered via `skill_install`. |
-| `guidance` | `id`, `path`, `target`*, `merge`* | Guidance files. Delivered via `guidance_merge` into CLAUDE.md/AGENTS.md. |
-| `subagents` | `id`, `path` | Subagent definitions. |
-| `plugins` | `id`, `source` | Local plugin directories; selected with `uses.plugins`. |
-| `hooks` | `id`, `path`, `runtimes`* | Hook scripts. Optional `runtimes` array restricts to specific runtimes. |
-| `runtime_resources` | `id`, `path`, `runtime`, `type` | Runtime-specific resources. `runtime` and `type` are required. |
+| `skills` | `id`, `path` | Skill directories containing a SKILL.md. Projected by the runtime adapter: Claude to `<cwd>/.claude/skills/<id>`, Codex to `<cwd>/.agents/skills/<id>`, Pi and OMP to the seat's own agent directory under OpenRig's state. |
+| `guidance` | `id`, `path`, `target`*, `merge`* | Guidance files, merged as a managed block (see "Guidance Resources"). |
+| `subagents` | `id`, `path` | Subagent definitions. Claude copies them to `<cwd>/.claude/agents/`, Codex to `<cwd>/.agents/`; Pi and OMP don't project them. |
+| `plugins` | `id`, `source`, `plugin_type`* | Local plugin directories; selected with `uses.plugins`. `source.kind` must be `local`. `plugin_type` is `claude`, `codex` or `auto` (default): Claude projects a plugin to `<cwd>/.claude/plugins/<id>` when it is `claude`, or `auto` with a `.claude-plugin/plugin.json`; Codex projects to `<cwd>/.codex/plugins/<id>` when it is `codex`, or `auto` with a `.codex-plugin/plugin.json`. Pi and OMP don't project plugins. Hooks ship inside plugins. |
+| `runtime_resources` | `id`, `path`, `runtime`, `type` | Runtime-specific resources. `runtime` and `type` are required. An entry whose `runtime` isn't the seat's runtime is skipped. Pi and OMP project none. |
 
 *Fields marked with `*` are optional.
 
 Recognized runtime resource types:
 - `claude_settings_fragment` — merge a JSON object into `<cwd>/.claude/settings.local.json`.
 - `claude_mcp_fragment` — merge a JSON object into `<cwd>/.mcp.json`.
-- `codex_config_fragment` — upsert a TOML fragment into `~/.codex/config.toml` inside an OpenRig-managed block.
+- `claude_activity_hooks` — reconcile OpenRig's activity hooks into `<cwd>/.claude/settings.local.json`.
+- `codex_config_fragment` — upsert a TOML fragment into `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) inside an OpenRig-managed block.
 
-Unknown runtime resource types are still copied to the runtime extension directory for agent-visible context.
+Unknown runtime resource types are still copied to the Claude or Codex runtime extension directory for agent-visible context.
 
 #### Writing a `codex_config_fragment`
 
@@ -388,7 +416,8 @@ overwritten, and the rest of the fragment still applies.
 
 ### Resource Path Rules
 
-- All resource paths must be safe relative paths (no `..` traversal, no absolute paths)
+- All resource paths must be safe relative paths (no `..` traversal, no absolute paths), except a plugin's
+  `source.path`, which takes the forms under "Plugin paths"
 - Paths resolve relative to the agent spec's directory
 - Resource IDs must be unique within their category
 - Resource IDs are the identifiers used in `uses` references
@@ -399,16 +428,15 @@ overwritten, and the rest of the fragment still applies.
 guidance:
   - id: role
     path: guidance/role.md
-    target: CLAUDE.md      # optional — where to merge
-    merge: managed_block   # optional — how to merge (default: managed_block)
+    merge: managed_block   # optional — the only strategy applied
 ```
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `id` | string | yes | — | Resource identifier. |
+| `id` | string | yes | — | Resource identifier. A `rig-role` guidance resource is never merged; deliver a role with a `send_text` startup file. |
 | `path` | string | yes | — | Relative path to the guidance file. |
-| `target` | string | no | — | Target file for merging (e.g., `CLAUDE.md`). |
-| `merge` | string | no | `managed_block` | Merge strategy. One of: `managed_block`, `append`. |
+| `target` | string | no | — | Parsed but not used: the runtime decides the file. Claude merges into the rig's `managed_blocks` file (`CLAUDE.md` by default, or `CLAUDE.local.md`); Codex, Pi and OMP merge into `<cwd>/AGENTS.md`. |
+| `merge` | string | no | `managed_block` | Only `managed_block` is applied. Any other value, such as `append`, merges nothing. |
 
 ---
 
@@ -428,7 +456,7 @@ restore behavior, and the distinction between readiness and verified proof.
 
 | Hint | When Delivered | Mechanism |
 |------|---------------|-----------|
-| `auto` | Before harness boot | System chooses based on file type |
+| `auto` | Depends on the file | A `SKILL.md` is `skill_install`, any other `.md` is `guidance_merge`, and any other file is `send_text` |
 | `guidance_merge` | Before harness boot | Merged into CLAUDE.md/AGENTS.md as managed block |
 | `skill_install` | Before harness boot | Installed to runtime skill directory |
 | `send_text` | After harness is ready | Sent as text to agent terminal via tmux |
@@ -442,16 +470,25 @@ restore behavior, and the distinction between readiness and verified proof.
 3. Import `ref` must start with `local:` (relative) or `path:` (absolute).
 4. Import `version` must be an exact version (no ranges).
 5. `profiles` must be a map (object), not an array.
-6. Profile `uses` references must resolve to declared resources (local or imported).
+6. Profile `uses` references other than skills must resolve to declared resources (local or imported). Skill
+   references are checked at launch, not at validation (see "Uses").
 7. Unqualified `uses` references that don't resolve to local resources require imports to be present.
 8. Qualified `uses` references must be in `namespace:id` format.
-9. All resource paths must be safe relative paths.
-10. Resource IDs must be unique within their category.
-11. `runtime_resources` entries require `runtime` field.
+9. All resource paths must be safe relative paths (a plugin's `source.path` excepted).
+10. Resource IDs must be unique within their category, and each `resources.<category>` must be an array.
+11. `runtime_resources` entries require `runtime` and `type` fields.
+12a. `resources.hooks` and `profiles.<name>.uses.hooks` are refused: "removed in plugin-primitive (Phase 3a)". Declare
+   a plugin instead.
+12b. A plugin needs a unique non-empty `id`, a `source` object with `kind: local` and a non-empty `path`, and a
+   `plugin_type` of `claude`, `codex` or `auto` when given.
+12c. Lifecycle `mechanic` must be a canonical `seat@rig` session address.
 12. Lifecycle `execution_mode` must be `interactive_resident`.
 13. Lifecycle `compaction_strategy` must be one of `default-compaction`, `managed-compaction`, `handover`, `apprentice-handover` — or a deprecated alias (`harness_native`, `pod_continuity`), which validates with a deprecation advisory and normalizes to its canonical value (OPR.0.5.6.20).
 14. Lifecycle `restore_policy` must be `resume_if_possible`, `relaunch_fresh`, or `checkpoint_only`.
 15. Startup files and actions follow the same validation rules as in RigSpec.
+
+Unknown keys are ignored, not refused. `rig agent validate <path> [--json]` runs these syntax checks through the running
+daemon; it doesn't resolve imports, find skills or check that files exist, so a missing skill shows up only at launch.
 
 ---
 
@@ -469,8 +506,8 @@ my-agent/
   skills/
     my-skill/
       SKILL.md            # skill content
-  hooks/
-    pre-commit.sh         # hook script
+  plugins/
+    my-plugin/            # plugin (skills, hooks) with .claude-plugin/ and/or .codex-plugin/
   runtime/
     claude-settings.fragment.json  # runtime-specific resource
 ```
@@ -481,12 +518,20 @@ The only required file is `agent.yaml`. Everything else is referenced by paths i
 
 ## Shipped Examples
 
-| Agent | Location | Imports | Profile Skills | Purpose |
-|-------|----------|---------|---------------|---------|
-| `shared` | `specs/agents/shared/` | none | — (resource pool only) | Shared skill pool for all built-in agents |
-| `implementer` | `specs/agents/development/implementer/` | `shared` | openrig-user, development-team, test-driven-development, systematic-debugging, etc. | TDD implementation agent |
-| `qa` | `specs/agents/development/qa/` | `shared` | openrig-user, development-team, etc. | Quality assurance agent |
-| `orchestrator` | `specs/agents/orchestration/orchestrator/` | `shared` | openrig-user, orchestration-team, etc. | Rig orchestration lead |
-| `independent-reviewer` | `specs/agents/review/independent-reviewer/` | `shared` | review-team, systematic-debugging, verification-before-completion | Independent code reviewer |
-| `vault-specialist` | `specs/agents/apps/vault-specialist/` | `shared` | openrig-user, systematic-debugging, vault-user | Vault domain specialist |
-| `design` | `specs/agents/design/` | none | — | Product designer |
+Every agent below except `shared` imports `shared` and selects `plugins: [shared:openrig-core]`, which carries
+`openrig-user`. Paths are under `packages/daemon/specs/agents/`; the kernel's own agents are under
+`packages/daemon/specs/rigs/launch/kernel/agents/`.
+
+| Agent | Location | Default runtime | Profile skills | Purpose |
+|-------|----------|-----------------|----------------|---------|
+| `shared` | `shared/` | — | — (resource pool only) | Shared skills, the `openrig-core` plugin and runtime resources |
+| `implementer` | `development/implementer/` | claude-code | development-team, test-driven-development, systematic-debugging, verification-before-completion | TDD implementation agent |
+| `qa` | `development/qa/` | codex | test-driven-development, development-team, systematic-debugging, verification-before-completion, agent-browser, dogfood | Quality assurance agent |
+| `orchestrator` | `orchestration/orchestrator/` | claude-code | orchestration-team, systematic-debugging, verification-before-completion | Rig orchestration lead |
+| `independent-reviewer` | `review/independent-reviewer/` | claude-code | review-team, systematic-debugging, verification-before-completion | Independent code reviewer |
+| `vault-specialist` | `apps/vault-specialist/` | claude-code | systematic-debugging, verification-before-completion, vault-user | Vault domain specialist |
+| `product-designer` | `design/product-designer/` | claude-code | development-team, frontend-design, verification-before-completion | Product designer |
+| `pm` | `product-management/pm/` | claude-code | office-hours, context-builder, requirements-writer, ui-mockup, plan-review, exec-summary, backlog-capture | Product manager |
+| `analyst`, `synthesizer` | `research/analyst/`, `research/synthesizer/` | claude-code, codex | — | Research team |
+| `conveyor-lead`, `-planner`, `-builder`, `-reviewer` | `conveyor/` | claude-code, codex, claude-code, codex | per role | Conveyor team |
+| `factory-rsi-release-manager`, `factory-rsi-dogfood` | `factory-rsi/` | claude-code | per role | Factory team |
