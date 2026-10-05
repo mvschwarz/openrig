@@ -54,9 +54,10 @@ Specs separates authored declarations from observed consumers. Open a consumer
 to inspect its served runtime and seat binding; missing source stays explicit.
 The selected source is re-read on refresh even if the library revision did not
 change. `back` or Escape returns to the previous selection, tab and scroll.
-Escape first cancels command editing. On a spec detail page or an open file it
-then goes back, and the list keeps its filter; elsewhere it clears an active
-filter before going back. On long spec pages,
+During ordinary browsing, Escape clears typed command text first. With
+history, it returns from a spec detail, an open file or an external link and
+restores the previous filter; otherwise it closes an open health view, then
+clears a filter, then goes back. On long spec pages,
 Up/Down scroll by default; Right enters links, then Up/Down and Enter follow them.
 `rig tui commands --json` lists the shared command registry.
 
