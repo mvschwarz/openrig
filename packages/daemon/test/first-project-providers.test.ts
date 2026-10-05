@@ -92,6 +92,20 @@ describe("first-project provider choices", () => {
     });
   }
 
+  // Regression: `rig up first-project-claude` from a shell at '/' defaults cwdOverride to '/',
+  // which used to pass preflight and then fail every projection under the filesystem root.
+  it("refuses the filesystem root as launch cwd, even when it arrives as the cwd override", async () => {
+    const root = join(specs, "rigs/launch/first-project-claude");
+    const preflight = await rigPreflight({
+      rigSpecYaml: readFileSync(join(root, "rig.yaml"), "utf8"), rigRoot: root, cwdOverride: "/", fsOps,
+    });
+    expect(preflight.ready).toBe(false);
+    expect(preflight.errors).toEqual([
+      expect.stringContaining("dev.owner: Resolved cwd '/' is the filesystem root"),
+      expect.stringContaining("dev.check: Resolved cwd '/' is the filesystem root"),
+    ]);
+  });
+
   it("an absent unused provider selects the matching kernel, while both available select mixed", () => {
     expect(selectVariant({ claudeCode: "ok", codex: "unavailable" })).toBe("rig-claude-only.yaml");
     expect(selectVariant({ claudeCode: "unavailable", codex: "ok" })).toBe("rig-codex-only.yaml");
