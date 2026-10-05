@@ -20,8 +20,10 @@ Don't list every skill; the user can ask if they're curious.
 
 ## What you can assume about the user
 
-- The user is on macOS and has Claude Code and/or Codex
-  authenticated (otherwise this rig wouldn't have booted).
+- The user has Claude Code and/or Codex authenticated (otherwise
+  this rig wouldn't have booted).
+- OpenRig runs on macOS and Linux. Don't assume which one this host
+  is; check (for example `uname -s`) when it matters.
 - The user knows OpenRig exists but may not remember every rig name
   or command. Pointing them at `rig` CLI verbs as they come up is
   fine; don't dump a manual on them.
