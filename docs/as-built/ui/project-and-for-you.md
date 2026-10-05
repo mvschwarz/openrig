@@ -22,9 +22,11 @@ last-updated: 2026-10-05
 The three operator-facing destination surfaces: **For You** (`/for-you`,
 the attention feed), **Project** (`/project*`, the workspace/mission/slice
 scope pages), and the **Dashboard** (`/`, the launcher). All read live
-daemon state. UI-local persistence is limited to the For You dismissals
-(two localStorage sets) and the theme choice (see
-[`library-specs-and-design-system.md`](library-specs-and-design-system.md)).
+daemon state. For You persists two dismissal sets in localStorage; shared
+shell preferences include the theme choice (see
+[`library-specs-and-design-system.md`](library-specs-and-design-system.md))
+and the maintenance-notice dismissal (see
+[`shell-and-routing.md`](shell-and-routing.md)).
 
 > Paths are relative to `packages/ui/src/` unless prefixed `docs/` or
 > `packages/`. Verified at `104b78ee` (package version 0.6.6). The web UI
@@ -113,7 +115,9 @@ shipped; otherwise progress. A human-seat destination forces
    `GET /api/queue/list?attention=1…`, or `GET /api/queue/attention-aggregate`
    when a remote host subscription is on) and needs-input seats
    (`useNeedsInputSeats`) become cards, and `mergeAttentionIntoFeed` lets a
-   queue-derived card supersede an event card with the same qitem.
+   queue-derived card supersede a matching event-derived **action-required
+   or approval** card; shipped, progress and observation event cards for the
+   same qitem remain.
 3. **Decision-band sort:** `sortFeedByDecisionBand` lifts every
    action-required and approval card above the rest, newest-first within
    each band.
@@ -227,8 +231,9 @@ remain for the `/lab/card-previews` gallery. No UI code calls
 > `:112-123`, `TabNav`, `ScopeShell`; defaults `useState` at `:698`,
 > `:798`, `:1226`.
 
-Off the local host, scope pages show an `ON <host>` chip, the Review tab is
-local-only, and file-backed sections explain why local files are not shown.
+Off the local host, the workspace and mission headers show an `ON <host>`
+chip (the slice header does not), the Review tab is local-only, and
+file-backed sections explain why local files are not shown.
 
 ### 3.1 WorkspaceScopePage (`/project`)
 
@@ -348,8 +353,9 @@ The vellum barrel `dashboard/vellum/index.ts` still exports
 ## 5. Cross-cutting properties
 
 - **Live daemon state** — every surface reads daemon hooks. UI-local state
-  is the two For You dismissal sets (localStorage), the lens, host filter
-  and optimistic-outcome map (transient), and each scope page's tab state.
+  on these surfaces is the two For You dismissal sets (localStorage), the
+  lens, host filter and optimistic-outcome map (transient), and each scope
+  page's tab state.
 - **Honest empty/error states** — `WorkspaceScopePage` no-workspace and
   `SliceScopePage` not-available surface the cause and a remediation
   pointer, never a blank screen.
