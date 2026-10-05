@@ -109,6 +109,15 @@ describe("context add local auto-start", () => {
     expect(f.post).not.toHaveBeenCalled();
   });
 
+  it("default host selection retains recorded local startup", async () => {
+    vi.stubEnv("OPENRIG_HOST", "");
+    const f = fixture("stopped", true);
+    await f.add();
+    expect(process.exitCode).toBeUndefined();
+    expect(f.lifecycleDeps.spawn).toHaveBeenCalledOnce();
+    expect(f.post).toHaveBeenCalledWith("/api/context-packs/library/sync");
+  });
+
   it.each([
     ["OPENRIG_HOST", false], ["OPENRIG_HOST", true],
     ["RIGGED_HOST", false], ["RIGGED_HOST", true],
