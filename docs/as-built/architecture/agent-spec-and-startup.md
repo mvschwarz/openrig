@@ -11,8 +11,8 @@ applies-when: |
   resolve and preserve identity.
 siblings: [daemon-core.md, adapters-and-runtimes.md, lifecycle-snapshot-restore.md, packaging-bootstrap-bundles.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: b6d37bfadcc189be8fd61e35abfc09676437bf48
-last-updated: 2026-10-03
+last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-updated: 2026-10-05
 ---
 
 # Agent/Rig Spec, Resolution, Startup, Identity
@@ -22,7 +22,7 @@ and identity-addressable topology. The spec-and-startup contract: parse →
 resolve → project → deliver pre-launch files → persist replay context → launch
 → wait → deliver post-launch files.
 
-> Verified against source at main `b6d37bfadcc189be8fd61e35abfc09676437bf48`. `domain/…` and `routes/…` paths
+> Verified against source at main `a350c59b5a5fb37ee4a21b1026b595068b603df1`. `domain/…` and `routes/…` paths
 > are under `packages/daemon/src/`; a bare file name such as
 > `rigspec-schema.ts:115` is in `packages/daemon/src/domain/`. Each count sits
 > beside the command that produces it; run the command from the repository
@@ -30,10 +30,10 @@ resolve → project → deliver pre-launch files → persist replay context → 
 
 ## 1. Canonical spec and topology types
 
-- **AgentSpec** (`types.ts:938`) — parsed from `agent.yaml`
+- **AgentSpec** (`types.ts:937`) — parsed from `agent.yaml`
   (`agent-resolver.ts:150`). Owns imports, defaults, startup, resources, and
   profiles. Canonical parse/normalize/validate is `domain/agent-manifest.ts`.
-- **RigSpec** (`types.ts:1169`) — canonical pod-aware rig topology. Uses
+- **RigSpec** (`types.ts:1168`) — canonical pod-aware rig topology. Uses
   `version: "0.2"` and `pods[]`; owns cross-pod `edges[]`, rig-level startup
   overlays, and `cultureFile`, plus the optional `summary`, `permissionPolicy`,
   `managedBlocks`, `docs`, `services` and `workspace` fields.
@@ -44,19 +44,19 @@ resolve → project → deliver pre-launch files → persist replay context → 
   value through (`rigspec-schema.ts:243`). `"0.2"` is the canonical authored
   value, and the pod-aware exporter writes it (`rigspec-exporter.ts:223`).
 
-- **RigServicesSpec** (`types.ts:1216`) — optional `services` block on a
+- **RigServicesSpec** (`types.ts:1215`) — optional `services` block on a
   pod-aware RigSpec. Shipped kind is Compose-backed env management
   (`kind: "compose"`) with `composeFile`, `projectName?`, `profiles?`,
   `downPolicy?`, `waitFor?`, `surfaces?`, `checkpoints?`.
-- **RigSpecPod** (`types.ts:1125`) — pod-local bounded context with
+- **RigSpecPod** (`types.ts:1124`) — pod-local bounded context with
   `members[]`, pod-local `edges[]`, pod startup, optional continuity policy.
-- **RigSpecPodMember** (`types.ts:1069`) — member-level runtime/startup
+- **RigSpecPodMember** (`types.ts:1068`) — member-level runtime/startup
   surface: `agentRef`, `profile`, `runtime`, `model?`, `effort?`, `cwd`, `restorePolicy?`,
   member startup overlays (`startup?`), plus `label?`, `codexConfigProfile?`,
   `role?`, `permissionPolicy?`, `compactionStrategy?`, `mechanic?`,
   `sessionSource?` and `starterRef?`.
-- **Pod** (`types.ts:8`) — persisted DB entity for a pod.
-- **ContinuityState** (`types.ts:18`) — persisted live continuity row keyed by
+- **Pod** (`types.ts:10`) — persisted DB entity for a pod.
+- **ContinuityState** (`types.ts:20`) — persisted live continuity row keyed by
   `podId + nodeId` (`PRIMARY KEY (pod_id, node_id)`,
   `packages/daemon/src/db/migrations/014_agentspec_reboot.ts:24`).
 
@@ -65,24 +65,28 @@ resolve → project → deliver pre-launch files → persist replay context → 
 Restore/snapshot types are detailed in `lifecycle-snapshot-restore.md`; the
 spec/projection types live here.
 
-- **ResolvedNodeConfig** (`profile-resolver.ts:31`) — output of profile
+- **ResolvedNodeConfig** (`profile-resolver.ts:32`) — output of profile
   resolution. Carries effective runtime/model/effort/cwd, narrowed restore policy,
-  selected resources, layered startup block, resolved spec identity.
-- **ProjectionPlan** (`projection-planner.ts:41`) — runtime projection plan for
+  selected resources, layered startup block, resolved spec identity, and the
+  resolved compaction strategy, continuity mechanic, lifecycle, activity and
+  skill loadout.
+- **ProjectionPlan** (`projection-planner.ts:42`) — runtime projection plan for
   a node: runtime, cwd, projection entries, startup block, diagnostics,
   conflict/no-op classifications.
-- **RuntimeAdapter** (`runtime-adapter.ts:134`) — the five-method contract
+- **RuntimeAdapter** (`runtime-adapter.ts:139`) — the five-method contract
   (adapter detail in `adapters-and-runtimes.md`): `listInstalled(binding)`
-  (`runtime-adapter.ts:144`), `project(plan, binding)` (`:147`),
-  `deliverStartup(files, binding)` (`:150`), `launchHarness(binding, opts)`
-  (`:160`), `checkReady(binding)` (`:166`). The interface also declares one
-  optional method, `skillTargetPath?(...)` (`:141`). Required methods: **5**
+  (`runtime-adapter.ts:149`), `project(plan, binding)` (`:152`),
+  `deliverStartup(files, binding, sendInteractiveText?)` (`:156`),
+  `launchHarness(binding, opts)` (`:166`), `checkReady(binding)` (`:172`). The
+  interface also declares an optional `claudeManagedLaunch` property (`:141`)
+  and an optional method, `skillTargetPath?(...)` (`:146`). Required methods:
+  **5**
   (`sed -n '/^export interface RuntimeAdapter /,/^}/p' packages/daemon/src/domain/runtime-adapter.ts | grep -c -E '^  [a-zA-Z]+\('`).
-- **HarnessLaunchResult** (`runtime-adapter.ts:88`) — returned by
+- **HarnessLaunchResult** (`runtime-adapter.ts:93`) — returned by
   `launchHarness`: either `{ ok: true, resumeToken?, resumeType?,
   appliedLaunch? }` or `{ ok: false, error, recovery?, evidence? }`, where
-  `recovery` is `"retry_fresh"` or `"attention_required"` (`:86`).
-- **StartupOrchestrator** (`startup-orchestrator.ts:107`) — drives the full
+  `recovery` is `"retry_fresh"` or `"attention_required"` (`:91`).
+- **StartupOrchestrator** (`startup-orchestrator.ts:140`) — drives the full
   startup sequence (§4 below).
 
 ## 3. Parsing, validation, resolution pipeline
@@ -114,30 +118,84 @@ them imports Hono: **0**
 
 ## 4. Startup orchestration (the spec-startup contract)
 
-`StartupOrchestrator.startNode` (`startup-orchestrator.ts:129`) drives, in
-source order: mark pending (`:156`) → project resources (`:167`) → deliver
-pre-launch files (`:207`) → persist startup context (`:222`) → launch harness,
-recording any resume token (`:237`) → wait for ready (`:322`) → deliver
-interactive files (`:403`) → execute `after_files` then `after_ready` actions
-(`:426`, `:432`) → mark ready (`:466`). The class doc comment
-(`startup-orchestrator.ts:90`–`101`) still lists persistence as step 9, after
-the actions; the code persists the startup context before the harness launch.
+`StartupOrchestrator.startNode` (`startup-orchestrator.ts:172`, a thin wrapper
+over `startNodeWithWarnings`, `:178`) drives, in source order: apply the seat's
+permission selection and the rig's non-interruptive setting to the binding
+(`NativePermissionStore.apply`, `:183`; `:193`) → mark pending (`:209`) and
+select the startup proof (`:210`) → project resources (`:224`) → deliver
+pre-launch files (`:266`) → persist startup context (`:282`) → launch harness,
+recording any resume token (`:301`, `:313`) → wait for ready (`:384`) → deliver
+the session identity prompt and interactive files (`:420`, `:473`) → execute
+`after_files` then `after_ready` actions (`:495`, `:502`) → check readiness
+again and, for a Claude resume, that the launched session agrees with the
+requested token (`:507`–`535`) → mark ready (`:538`). The class doc comment
+(`startup-orchestrator.ts:120`–`139`) lists ten steps; the code persists the
+startup context before the harness launch.
 
 **Pre-launch vs interactive delivery split** — the load-bearing seam:
 
 - Pre-launch (filesystem, before harness boot): `guidance_merge`,
-  `skill_install` (`startup-orchestrator.ts:93` — "Deliver pre-launch files
-  (guidance_merge, skill_install → filesystem)"; delivered at `:207`).
+  `skill_install` (`startup-orchestrator.ts:126` — "Deliver pre-launch files
+  (guidance_merge, skill_install → filesystem)"; delivered at `:266`). Any
+  file that is not `send_text` is delivered here.
 - Post-launch (TUI, after harness is ready): `send_text`
-  (`startup-orchestrator.ts:97`; partition by concrete hint at `:182`,
-  `send_text` files held for post-launch at `:200`, delivered after readiness
-  at `:403`).
+  (`startup-orchestrator.ts:130`; held for post-launch and delivered after
+  readiness at `:473`). Rebuild artifacts are put in front of these files.
+- **Fresh launch:** the builtin `session_identity` action
+  (`rigspec-instantiator.ts:2628`) is sent as one turn together with the first
+  `send_text` file (`deliverInitialSessionPrompt`, `startup-orchestrator.ts:663`).
+- **Resume, fork or rebuild:** applicable `after_ready` `send_text` actions are
+  sent ahead of the first `send_text` file as one turn.
 
 The orchestrator persists replay context for future restores (consumed by
 `lifecycle-snapshot-restore.md`): the projection entries, resolved startup
-files and startup actions go to `node_startup_context`
-(`startup-orchestrator.ts:225`), and a resume token returned by the launch is
-written to the session row (`updateResumeToken`, `:254`).
+files, startup actions and runtime go to `node_startup_context`
+(`startup-orchestrator.ts:282`), and a resume token returned by the launch is
+written to the session row (`updateResumeToken`, `:313`).
+
+**Checked startup text (Claude Code).** Interactive text for a Claude seat goes
+through `sendInteractiveText` (`:777`): paste, wait 200 ms, press Enter, wait
+200 ms, then read 200 lines of the pane. `inspectStartupStagedText`
+(`startup-submission-evidence.ts:36`) classifies the composer as clear, staged
+or unverified. While the composer shows Claude's own collapsed-paste label for
+this text (`startupOwnCollapsedPaste`, `:49`), `settleOwnPaste`
+(`startup-orchestrator.ts:867`) looks again, up to 25 times 200 ms apart,
+without pressing anything. Text still staged gets one guarded Enter-only retry
+(`:823`), and then a "press Enter in that pane" warning (`:836`). An
+unverified or staged result is a warning, never a startup failure, and is
+reported in a `submission` block on `node.startup_ready` and on the result.
+
+**Startup proof.** A seat can be `ready` without being oriented.
+`resolveStartupProof` (`startup-resolver.ts:81`) selects the last applicable
+authored `startup_proof` action; the default is none. For a fresh launch on a
+non-terminal runtime in `authenticated` mode, the orchestrator issues a
+challenge after readiness (`issueStartupChallenge`, `startup-proof.ts:90`),
+recorded as `node.startup_challenged` with a hash of the resolved startup files.
+The expected answer is derived from the challenge and that hash
+(`computeExpectedAnswer`, `:53`) and is never stored. The challenge text is
+appended to the identity prompt, or sent on its own when there is no identity
+action (`startup-orchestrator.ts:487`). On Claude, a short proof instruction
+line (`STARTUP_PROOF_INSTRUCTION_LINE`, `startup-proof.ts:63`) is sent only
+after the startup prompt was confirmed submitted (`sendProofInstruction`,
+`startup-orchestrator.ts:760`). The seat answers with
+`rig startup-proof submit --challenge-id … --answer …`
+(`packages/cli/src/commands/startup-proof.ts:99`), which posts to the activity
+hook route (`routes/activity.ts:239`); `verifyStartupProof`
+(`startup-proof.ts:133`) records `node.startup_proof_verified` or
+`node.startup_proof_rejected`. Orientation status is derived from those events
+(`startup-proof.ts:239`), never from `startup_status`. Other launches record
+`node.startup_proof_skipped`.
+
+**Fresh context pending and `rig seat continue`.** When a fresh launch stops at
+a native prompt before its context is delivered, `fail()` (`:592`) marks the
+failure `freshContextPending` and adds "run: rig seat continue <session>".
+`canContinueFresh` (`:554`, using `hasPendingFreshStartup`, `:35`) allows
+continuation only while that failure is the occupant's latest startup event.
+`continueFreshStartup` (`seat-lifecycle-service.ts:395`) re-checks the binding,
+pane and runtime, then runs startup again on the same conversation without
+relaunching the harness. It is reached by `rig seat continue`,
+`POST /api/seat/continue/:seatRef` and the per-seat startup route's `continue`
+action (`routes/startup.ts:148`).
 
 **Startup layering is additive and ordered** (`resolveStartup`,
 `startup-resolver.ts:15`–`22`): (1) agent base, (2) profile, (3) rig culture
@@ -147,13 +205,23 @@ deduplication (`startup-resolver.ts:24`). This is the spec-startup contract's
 invariant; the cross-cutting architecture rules are collected in
 `architecture-rules-and-event-system.md`.
 
-**Startup action constraints** (`startup-validation.ts`): no shell startup
-actions (`:65`); action types are `slash_command`, `send_text` and
-`startup_proof` (`:7`); non-idempotent actions must not apply on restore
-(`:100`). Retrying a failed startup is handled as a restore, which is why the
-orchestrator skips non-idempotent actions on restore
-(`startup-orchestrator.ts:556`, "retry-as-restore safety"). The exception is
-`PodRigInstantiator.retryFirstStart` (`rigspec-instantiator.ts:1146`), which
+The launch path takes only the actions from `resolveStartup`. It builds the
+startup *file* chain itself (`buildResolvedStartupFiles`,
+`rigspec-instantiator.ts:2491`), in this order: agent base, profile, the shipped
+`CULTURE-default.md` floor (`:327`), the rig `culture_file`, rig, pod, member,
+the shipped `openrig-start.md` (`:2545`), and, for fresh launches when enabled,
+the onboarding files (`:2555`). Managed-block guidance is deduplicated, and a
+`starter_ref` layer is put in front when a member names one (`:2216`).
+
+**Startup action constraints** (`startup-validation.ts`): startup entries must
+be files (`:22`); no shell startup actions (`:65`); action types are
+`slash_command`, `send_text` and `startup_proof` (`:7`), and a `startup_proof`
+action must be idempotent with a value of `authenticated` or `none` (`:73`);
+non-idempotent actions must not apply on restore (`:100`). Retrying a failed
+startup is handled as a restore, which is why the orchestrator skips
+non-idempotent actions on restore (`startup-orchestrator.ts:634`,
+"retry-as-restore safety"). The exception is
+`PodRigInstantiator.retryFirstStart` (`rigspec-instantiator.ts:1147`), which
 re-runs a first start that failed at projection, before any harness launch.
 
 **Remote import constraints**: `agent_ref` and AgentSpec imports accept
@@ -162,16 +230,16 @@ re-runs a first start that failed at projection, before any harness launch.
 `builtin:terminal` sentinel (`rigspec-schema.ts:519`). Remote `agent_ref`
 sources remain unsupported: RigSpec validation rejects them
 (`rigspec-schema.ts:550`), `rigPreflight` runs that validation
-(`rigspec-preflight.ts:249`), and the resolver refuses a remote import again
+(`rigspec-preflight.ts:250`), and the resolver refuses a remote import again
 (`agent-resolver.ts:203`).
 
 ## 5. Instantiation, preflight, export
 
 - `runtime-adapter.ts` — adapter contract + bridge types.
 - `rigspec-preflight.ts` — dual-stack legacy preflight (`RigSpecPreflight`,
-  `rigspec-preflight.ts:25`) plus rebooted `rigPreflight(...)` (`:241`).
+  `rigspec-preflight.ts:25`) plus rebooted `rigPreflight(...)` (`:242`).
 - `rigspec-instantiator.ts` — dual-stack `RigInstantiator`
-  (`rigspec-instantiator.ts:33`) plus `PodRigInstantiator` (`:474`).
+  (`rigspec-instantiator.ts:33`) plus `PodRigInstantiator` (`:475`).
 - `rigspec-exporter.ts` — dual-format live rig export to YAML/JSON.
 - `pod-repository.ts` — pod CRUD plus live continuity-state CRUD.
 
@@ -186,7 +254,7 @@ preflight (`rigPreflight({ rigSpecYaml, rigRoot, … })` vs
 `rigspec-exporter.ts:105`).
 
 The import validation route delegates to `validateRigSpecImport`
-(`routes/rigspec.ts:214–222`, `spec-validation-service.ts:10–19`). The same
+(`routes/rigspec.ts:213–221`, `spec-validation-service.ts:10–19`). The same
 helper powers local `rig spec validate` without contacting the daemon
 (`packages/cli/src/commands/rig.ts:204–207`); it selects the pod-aware or legacy
 validator and distinguishes YAML parse failures from validator exceptions.
@@ -199,7 +267,9 @@ anchor, not sovereign truth. `whoami-service.ts:8` declares
 `resolvedBy: "node_id" | "session_name"`. The route requires `nodeId` or
 `sessionName` (`routes/whoami.ts:19`–`23`). The CLI resolves identity
 (`packages/cli/src/commands/whoami.ts:142`–`148`) in this order: explicit
-`--node-id` → explicit `--session` → env vars → tmux metadata → raw tmux
+`--node-id` → explicit `--session` → env vars (`OPENRIG_NODE_ID` /
+`OPENRIG_SESSION_NAME`, or the legacy `RIGGED_NODE_ID` /
+`RIGGED_SESSION_NAME`, `whoami.ts:158`) → tmux metadata → raw tmux
 session-name fallback.
 
 - Managed sessions prefer projected `OPENRIG_NODE_ID` /
@@ -233,6 +303,20 @@ topology and then calls the bind route for each session
 preserved through adoption so logical ids stay `${podNamespace}.${memberName}`
 (`claim-service.ts:661`). Adopted-session parity is tmux-metadata parity, not
 fake env-var parity.
+
+## 7. Specialist rosters
+
+A roster is an authored list of recommended specialist seats, kept outside the
+specs. `rig roster list`, `show <id>` and `find <query>`
+(`packages/cli/src/commands/roster.ts`) read version-1 roster JSON files from
+`<workspace.root>/rosters/` (or `--folder`); they are read-only and need no
+daemon route. Each roster names a purpose and a curator, and each member names
+a seat, host, capabilities, engagement, `use_when` and `why`. `show` and
+`find` add current observations of each member by matching host and seat
+against `rig ps --nodes`, read from the configured daemon and again across
+registered hosts, and report a gap rather than guessing when no node matches. A roster is a
+recommendation, not an assignment or an authority. It is unrelated to the
+topology roster a snapshot records (see `lifecycle-snapshot-restore.md`).
 
 ## See also
 
