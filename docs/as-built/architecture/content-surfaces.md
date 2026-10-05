@@ -35,8 +35,9 @@ resolves environment overrides, then settings-file values, then defaults.
 `workspace:<resolved-workspace-root>`. Their environment overrides are
 `OPENRIG_FILES_ALLOWLIST` and `OPENRIG_PROGRESS_SCAN_ROOTS`. Thus, an unset
 or empty environment variable, or an empty settings-file value, does **not**
-imply an empty allowlist in normal daemon startup (an invalid environment value
-is dropped with a warning). Some source comments and route hints still say
+imply an empty allowlist in normal daemon startup. A non-empty value is not
+validated: the decoders silently skip malformed entries (no `name:` prefix, or
+a relative path), so a malformed value can leave no configured roots. Some source comments and route hints still say
 otherwise or point only at the environment variable. The standalone `readAllowlistFromEnv` helper has different inputs
 and retains its legacy environment fallback.
 

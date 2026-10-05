@@ -50,8 +50,10 @@ holders, recent holders, overdue work, settled work, and workflow exceptions.
 "Recent" is the current UTC day; overdue is in-progress slice-tagged work past
 `closure_required_at`; settled is today's `handed_off_to` transitions; and
 attention is any active item that is `human-gate`, addressed to a `human…`
-session, or blocked on one (`gather.ts`). The TUI reads `/agents`, `/rig` and
-`/fleet`.
+session, or blocked on one (`gather.ts`). Of the three review reads, the TUI
+calls only `/fleet`, from its broad hydration (`packages/tui/src/hydrate.ts`);
+its client also defines methods for `/agents` and `/rig`, which nothing in the
+TUI calls.
 
 ## Slice source selection and phase
 

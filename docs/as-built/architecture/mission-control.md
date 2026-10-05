@@ -107,9 +107,15 @@ Verbs: **8** — `sed -n '/^export const MISSION_CONTROL_VERBS = \[/,/\] as cons
 
 `annotate` requires `annotation`, `hold` and `drop` require `reason`, `route`
 and `handoff` require `destinationSession`, and `resolve` requires a non-empty
-`decision` (all 400). Items already `done` or `handed-off` are refused with
-409 `qitem_already_terminal`, and an unknown item returns 404
-`qitem_not_found` (`routes/mission-control.ts:240–248`, `:330–341`).
+`decision`. A missing `annotation`, `destinationSession` or `decision` returns
+400. A `drop` without `reason` passes the queue closure check and is refused by
+the audit record instead; the wrapped `reason_required` error has no status
+mapping, so it returns 500 (`mission-control-action-log.ts:128–133`,
+`mission-control-write-contract.ts:245–248`). Items already `done` or
+`handed-off` are refused with 409 `qitem_already_terminal`, except under
+`resolve`, which answers 409 `qitem_not_leg1_parked` for any item not parked on
+a human seat. An unknown item returns 404 `qitem_not_found`
+(`routes/mission-control.ts:240–251`, `:330–341`).
 
 Each verb is one atomic daemon transaction: the queue mutation via
 `QueueRepository.updateWithinTransaction()` (`domain/queue-repository.ts:2358`,

@@ -341,7 +341,11 @@ a daemon route or reconnect policy.
 
 Every write route derives its actor through `requireSenderIdentity`
 (`routes/require-sender-identity.ts:76`): the `X-OpenRig-Session` header wins
-over a body actor and is recorded as `transport:v1`; without the header, the
+over a body actor. On a direct request from a known origin it is recorded as
+`transport:v1`; `resolveRecordedProvenance` (`:199`) instead records
+`origin-unknown:v1` when the origin-unknown marker is set, `relay:v1` for a
+relayed request that carried `transport:v1`, and `claimed:v1` for other relayed
+requests. Without the header, the
 body actor is recorded as `claimed:v1`; with neither (or, for inbox drop,
 without the header) the route answers 400 `actor_required`. The stamp lands in
 `identity_provenance` on transitions, inbox, outbox and stream rows

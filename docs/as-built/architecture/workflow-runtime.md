@@ -244,8 +244,10 @@ Inspection reports `current`, `source-only`, `compatible`, `incompatible`,
 are explicit dependency graphs without `next_hop.on` can be revised; a
 revision may add steps and change unstarted ones, but may not remove steps,
 touch a step with completed, live or failed work, drop a required obligation
-or its order, change workflow-wide fields, or add an unstarted step with no
-outstanding prerequisite. Applying needs the inspected version and digest, an
+or its order, change workflow-wide fields other than `exception_routing`, or
+add an unstarted step with no outstanding prerequisite. A changed
+`exception_routing` applies to future occurrences only; existing obligations
+keep their owners. Applying needs the inspected version and digest, an
 operation key, an actor and a reason; the receipt is kept in the instance's
 `revisionHistory`, and replaying the same key with a different decision is
 refused with `lifecycle_revision_conflict` (`workflow-reconciliation.ts:12`,
