@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -618,8 +618,7 @@ describe("QueueRepository", () => {
       });
       expect(sends).toHaveLength(1);
       expect(sends[0]!.session).toBe("carol@rig");
-      const fresh = nudgingRepo.getById(result.created.qitemId)!;
-      expect(fresh.lastNudgeResult).toBe("verified");
+      await vi.waitFor(() => expect(nudgingRepo.getById(result.created.qitemId)!.lastNudgeResult).toBe("verified"));
     });
 
     it("attachTransport() works after construction (post-hoc wiring path)", async () => {

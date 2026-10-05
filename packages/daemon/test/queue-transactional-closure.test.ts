@@ -627,7 +627,7 @@ describe("W1 re-seal #3 — real file-backed close/reopen crash boundary", () =>
       const outbox1 = new OutboxHandler(db1);
       const repo1 = new QueueRepository(db1, new EventBus(db1), { validateRig: () => true });
       repo1.attachOutbox(outbox1); // no transport ⇒ immediate deliver skipped ⇒ intent pending
-      const source = await repo1.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x" });
+      const source = await repo1.create({ sourceSession: "planner@rig", destinationSession: "driver@rig", body: "x", nudge: false });
       const { created } = await repo1.handoff({ qitemId: source.qitemId, fromSession: "driver@rig", toSession: "reviewer@rig", body: "y" });
       const intentId = `wake-intent-${created.qitemId}`;
       outbox1.claimForDelivery(intentId); // claim, then die before finalize

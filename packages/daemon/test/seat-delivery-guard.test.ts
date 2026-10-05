@@ -239,7 +239,8 @@ describe("real queue transaction and retained delivery",()=>{
     const f=queueFixture();const source=await f.repo.create({sourceSession:"sender@test",destinationSession:"relay@test",body:"work",nudge:false});
     await f.guard.set("a",true,"person","draft");
     const {created,closed}=await f.repo.handoff({qitemId:source.qitemId,fromSession:"relay@test",toSession:"worker@test"});
-    expect(closed.state).toBe("handed-off");expect(created.state).toBe("pending");expect(created.lastNudgeResult).toBe("retained:typing_guard");
+    expect(closed.state).toBe("handed-off");expect(created.state).toBe("pending");
+    await vi.waitFor(()=>expect(f.repo.getById(created.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
     const held=f.outbox.heldForNode("a");expect(held.total).toBe(1);
     expect(held.items[0]).toMatchObject({outboxId:`wake-intent-${created.qitemId}`,auditPointer:created.qitemId,deliveryState:"retained",deliveredAt:null,guardBinding:{nodeId:"a",occupant:"g1",pane:"%1"}});
     expect(held.items[0]!.body).toContain(created.qitemId);
@@ -255,7 +256,8 @@ describe("real queue transaction and retained delivery",()=>{
     let activation:Promise<unknown>|undefined;
     const off=f.bus.subscribe(event=>{if(event.type==="queue.handed_off") activation=f.guard.set("a",true,"person","postcommit");});
     const {created,closed}=await f.repo.handoff({qitemId:source.qitemId,fromSession:"relay@test",toSession:"worker@test"});
-    await activation;off();expect(closed.state).toBe("handed-off");expect(created.lastNudgeResult).toBe("retained:typing_guard");
+    await activation;off();expect(closed.state).toBe("handed-off");
+    await vi.waitFor(()=>expect(f.repo.getById(created.qitemId)!.lastNudgeResult).toBe("retained:typing_guard"));
     expect(f.outbox.heldForNode("a").total).toBe(101);expect(f.outbox.getById(`wake-intent-${created.qitemId}`)!.body).toContain(created.qitemId);
     expect(f.writes).toEqual([]);f.db.close();
   });
