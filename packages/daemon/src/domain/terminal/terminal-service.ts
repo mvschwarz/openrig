@@ -209,6 +209,13 @@ export class TerminalService {
       saved: this.deps.viewsStore.list(),
       rigs: await this.deps.listRigNames(),
     };
+    if (!result.saved.some(view => view.id === "kernel") && result.rigs.includes("kernel")) {
+      const members = await this.defaultKernelMembers();
+      if (members) result.saved = [...result.saved, {
+        id: "kernel", name: "Kernel conversations",
+        members: members.map(({ seat, label, tmuxSession }) => ({ seat, label, tmuxSession: tmuxSession ?? undefined })),
+      }];
+    }
     if (detail) {
       result.catalog = [];
       const entries = [
@@ -250,7 +257,12 @@ export class TerminalService {
   private async resolveView(view: string): Promise<ResolvedView> {
     if (view.startsWith("saved:")) {
       const saved = this.deps.viewsStore.get(view.slice(6));
-      return saved ? { id: saved.id, members: saved.members.map(savedMemberToInput) } : { code: "view_not_found", error: `unknown saved view '${view.slice(6)}'` };
+      if (saved) return { id: saved.id, members: saved.members.map(savedMemberToInput) };
+      if (view === "saved:kernel") {
+        const members = await this.defaultKernelMembers();
+        if (members) return { id: "kernel", members };
+      }
+      return { code: "view_not_found", error: `unknown saved view '${view.slice(6)}'` };
     }
     // 1. derived scope prefixes → live, read-only, never persisted.
     if (view.startsWith("mission:") || view.startsWith("slice:")) {
@@ -306,6 +318,19 @@ export class TerminalService {
       code: "view_not_found",
       error: `unknown view '${view}' — not a known rig, a mission:/slice: scope, or a saved-view id`,
     };
+  }
+
+  /** An in-memory default; a user's saved kernel view always takes precedence. */
+  private async defaultKernelMembers(): Promise<ViewMemberInput[] | null> {
+    const rows = await this.deps.listRigSeats("kernel");
+    if (rows == null) return null;
+    const advisor = rows.find(row => row.logicalId === "advisor.lead");
+    const operator = rows.find(row => row.logicalId === "operator.agent");
+    const tui = rows.find(row => row.logicalId === "operator.human");
+    const dualRuntime = advisor?.runtime && operator?.runtime && advisor.runtime !== operator.runtime;
+    const selected = [advisor, ...(dualRuntime ? [operator] : []), tui]
+      .filter((row): row is LiveSeatRow => row !== undefined);
+    return deriveViewMembers(selected);
   }
 
   /** Refine local members' liveness with a real has-session probe (a dead seat → absent, honest-partial). */

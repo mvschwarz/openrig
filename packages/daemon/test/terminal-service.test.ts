@@ -228,3 +228,74 @@ describe("one terminal catalog inventory", () => {
     expect(batched.herdr.lastView).toBeNull();
   });
 });
+
+describe("default saved kernel conversations", () => {
+  function kernel(operatorRuntime = "codex"): LiveSeatRow[] {
+    // Bindings deliberately differ from the logical IDs and inventory order.
+    return [
+      { logicalId: "queue.worker", runtime: "codex", canonicalSessionName: "queue-bound", attachmentType: "tmux" },
+      { logicalId: "operator.human", runtime: "terminal", canonicalSessionName: "tui-bound", tmuxSession: "actual-tui", attachmentType: "tmux" },
+      { logicalId: "operator.agent", runtime: operatorRuntime, canonicalSessionName: "operator-bound", attachmentType: "tmux" },
+      { logicalId: "advisor.lead", runtime: "claude-code", canonicalSessionName: "advisor-bound", attachmentType: "tmux" },
+    ];
+  }
+  function makeKernel(rows: LiveSeatRow[], saved: SavedView[] = []) {
+    return makeDeps({
+      viewsStore: { list: () => saved, get: id => saved.find(view => view.id === id) ?? null },
+      listRigNames: () => ["kernel"], listRigSeats: name => name === "kernel" ? rows : null,
+    });
+  }
+
+  it.each(["codex", "claude-code"])("resolves the %s operator layout from installed bindings without saving it", async runtime => {
+    const saved: SavedView[] = [];
+    const { deps, herdr } = makeKernel(kernel(runtime), saved);
+    const service = new TerminalService(deps);
+    const expected = ["advisor-bound", ...(runtime === "codex" ? ["operator-bound"] : []), "tui-bound"];
+    expect((await service.listViews()).saved[0]?.members.map(member => member.seat)).toEqual(expected);
+    expect(herdr.lastView).toBeNull();
+    const preview = await service.previewView({ view: "saved:kernel" });
+    expect("composed" in preview && preview.composed.opened.map(member => member.seat)).toEqual(expected);
+    expect(herdr.lastView).toBeNull();
+    expect((await service.openView({ view: "saved:kernel" })).opened).toEqual(expected);
+    expect(herdr.lastView?.opened.at(-1)?.paneCommand).toContain("'actual-tui'");
+    expect(herdr.lastView?.opened[0]?.runtime).toBe("claude-code");
+    expect(saved).toEqual([]);
+  });
+
+  it("preserves a user kernel override, including remote membership and read-only flags", async () => {
+    const custom = { id: "kernel", name: "My view", members: [{ seat: "custom", host: "elsewhere", readOnly: true }] };
+    const views = [savedView, custom];
+    const { deps } = makeKernel(kernel(), views);
+    deps.listRigSeats = () => { throw new Error("must not resolve the default for an override"); };
+    const service = new TerminalService(deps);
+    expect((await service.listViews()).saved).toEqual(views);
+    const result = await service.openView({ view: "saved:kernel" });
+    expect(result.degraded).toEqual([{ seat: "custom", host: "elsewhere", reason: "host elsewhere is not in the hosts registry" }]);
+    expect(views).toEqual([savedView, custom]);
+  });
+
+  it("leaves unrelated custom views and the full rig view unchanged", async () => {
+    const { deps } = makeKernel(kernel(), [savedView]);
+    const service = new TerminalService(deps);
+    expect((await service.listViews()).saved[0]).toEqual(savedView);
+    expect((await service.openView({ view: "saved:watchtower" })).opened).toEqual(["lead@acme-ops", "builder@acme-ops"]);
+    expect((await service.openView({ view: "kernel" })).opened).toContain("queue-bound");
+    expect((await service.openView({ view: "rig:kernel" })).opened).toContain("queue-bound");
+  });
+
+  it("reports dead bound seats and never invents an unbound session", async () => {
+    const rows = kernel(); rows[1]!.canonicalSessionName = null;
+    const { deps } = makeKernel(rows);
+    deps.hasSession = name => name !== "advisor-bound";
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
+    expect(result.opened).toEqual(["operator-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["advisor-bound"]);
+  });
+
+  it("does not add the default when no kernel is installed", async () => {
+    const { deps } = makeDeps();
+    const service = new TerminalService(deps);
+    expect((await service.listViews()).saved).toEqual([savedView]);
+    expect((await service.openView({ view: "saved:kernel" })).code).toBe("view_not_found");
+  });
+});

@@ -785,6 +785,7 @@ export function goldenPathNextSteps(): string[] {
     "  3. rig status                       Check daemon/kernel readiness; rig ps --nodes --rig <starter> checks the team",
     "  4. rig send dev-owner@<starter> '<one useful change, boundaries, and how to check it>'",
     "  5. Open a NEW kernel conversation space: herdr, otherwise cmux, otherwise a new terminal window",
+    "     rig terminal open saved:kernel --provider herdr --json (default view; no YAML edit)",
     "     rig context get reference/getting-started.md#open-the-kernel-conversations",
     "     Installing agent: tell the person, then open it; keep your own terminal and existing spaces intact",
     "     Manual: the guide gives exact provider/tmux commands; headless/SSH: report no window and give the connection/attach step",

@@ -196,38 +196,20 @@ rig terminal status --json
 Use the returned bindings, not the library preview. Find the rows whose
 `logicalId` is `advisor.lead`, `operator.agent` and `operator.human` (the TUI).
 For each, take its `canonicalSessionName`; a logical ID is not a tmux session
-name. The installing agent fills in those exact values before opening the
-view or handing commands to you. Missing bindings stay named missing. Compare
+name. The default provider view resolves these values itself; use them directly for
+the plain-terminal commands below. Missing bindings stay named missing. Compare
 the advisor and operator runtimes to choose the dual- or single-runtime view.
 
 ### Herdr or cmux: one new workspace
 
-Both providers can open the same saved view. On the daemon's machine, add the
-following entry to `terminal-views.yaml` in its OpenRig home (normally
-`~/.openrig`; `OPENRIG_HOME`, or the legacy `RIGGED_HOME`, selects another home).
-If the file already has views, keep them and add only this entry; choose a fresh
-id if `kernel-conversation` already means something else. In this template,
-replace each `SESSION_FOR_...` value with the `canonicalSessionName` from the
-matching logical-ID row above; these are placeholders, not literal targets:
+OpenRig supplies `saved:kernel` automatically from the installed kernel's current
+bindings: advisor | operator | TUI for dual-runtime kernels, advisor | TUI for
+single-runtime kernels. No YAML edit or daemon restart is needed. It excludes
+the queue worker and uses the existing conversations.
 
-```yaml
-version: 1
-views:
-  - id: kernel-conversation
-    name: Kernel conversation
-    members:
-      - seat: SESSION_FOR_ADVISOR_LEAD
-        label: Advisor
-      - seat: SESSION_FOR_OPERATOR_AGENT
-        label: Operator
-      - seat: SESSION_FOR_OPERATOR_HUMAN
-        label: OpenRig TUI
-```
-
-For a **single-runtime kernel**, omit the Operator member and keep Advisor and
-OpenRig TUI. The saved view is read when opened; no daemon restart is needed.
-If you chose a different view id, substitute it in the commands below. Preserve
-unrelated saved views.
+If you already saved a view with id `kernel` in `terminal-views.yaml`, your view
+wins unchanged. Other saved views are preserved. Check the listed membership
+before opening a custom view.
 
 Check `rig terminal status --json` for provider availability and liveness. If
 herdr is installed but closed, open the app normally and check again. When it
@@ -235,13 +217,13 @@ is available:
 
 ```sh
 rig terminal views --json
-rig terminal open saved:kernel-conversation --provider herdr --json
+rig terminal open saved:kernel --provider herdr --json
 ```
 
 If herdr is unavailable, use a running cmux:
 
 ```sh
-rig terminal open saved:kernel-conversation --provider cmux --json
+rig terminal open saved:kernel --provider cmux --json
 ```
 
 These view opens create a fresh provider workspace. Inspect `opened`, `absent`,

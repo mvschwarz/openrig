@@ -58,7 +58,7 @@ rig up "$starter" --cwd . --plan
 rig up "$starter" --cwd .
 ```
 
-After installation, your agent should [open a **new kernel conversation space**](docs/reference/getting-started.md#open-the-kernel-conversations): herdr first, then cmux, then a plain terminal. It tells you before opening it and keeps its own terminal and your existing spaces intact. The guide also gives the manual and SSH commands.
+After installation, your agent should [open a **new kernel conversation space**](docs/reference/getting-started.md#open-the-kernel-conversations): `rig terminal open saved:kernel --provider herdr`, then cmux or a plain terminal if unavailable. The default view needs no YAML edit. The agent tells you before opening it and keeps its own terminal and your existing spaces intact. The guide also gives the manual and SSH commands.
 
 The kernel provides separate operational support and the shared dashboard. To detach without stopping the dashboard, press Ctrl-b then d; `rig tui --shared` returns to that view. Plain `rig tui` opens an independent view. Closing a viewing terminal does not mean you should relaunch the team.
 

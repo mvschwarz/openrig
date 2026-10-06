@@ -50,7 +50,8 @@ Windows-related pull request fixes it.
 ### Installation finished, but there is nobody to talk to
 
 Follow [Open the kernel conversations](getting-started.md#open-the-kernel-conversations)
-(`rig context get reference/getting-started.md#open-the-kernel-conversations`). Once the existing kernel is available,
+(`rig context get reference/getting-started.md#open-the-kernel-conversations`). The default
+`rig terminal open saved:kernel --provider herdr` needs no saved-view YAML. Once the existing kernel is available,
 tell the person you will open a new terminal space, then do it: herdr, otherwise cmux, otherwise a new plain terminal
 window. Show advisor, operator agent and TUI for a dual-runtime kernel, or advisor and TUI for a single-runtime
 kernel. Leave the queue worker accessible through the TUI. Being an installing agent is not a reason to skip this;
