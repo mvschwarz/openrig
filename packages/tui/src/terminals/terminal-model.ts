@@ -115,6 +115,7 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
     lines.push({ text: `Herdr unavailable on the selected daemon (${read.daemonTarget ?? "address unreported"}). Start/connect Herdr there and refresh, or use the plain-terminal commands below. Nothing opens automatically.` });
     if (page.length) {
       lines.push({ text: `Plain terminal · ${preview.view}: open a NEW terminal on the machine running that daemon, then run one of these commands. Use a separate terminal for each seat; do not run in an agent's terminal.` });
+      lines.push({ text: "If a command wraps, widen this terminal until it fits on one line before copying." });
       for (const member of page) {
         // A plain SSH terminal needs a remote PTY; keep the composer's quoted host and target.
         const command = member.paneCommand.replace(/^ssh /, "ssh -t ");

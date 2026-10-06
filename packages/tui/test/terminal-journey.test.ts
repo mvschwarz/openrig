@@ -106,6 +106,10 @@ describe("terminal browser → preview → explicit Open", () => {
     expect(lines.map(l => l.text).join("\n")).toContain("Herdr unavailable");
     expect(lines.some(l => l.action?.type === "act")).toBe(false);
     expect(lines.some(l => l.action?.type === "back")).toBe(true);
+    const narrow = terminalLines(view.get(), snap, 54).map(line => line.text).join(" ").replace(/\s+/g, " ");
+    expect(narrow).toContain("If a command wraps, widen this terminal until it fits on one line before copying.");
+    const wide = terminalLines(view.get(), snap, 1000).map(line => line.text);
+    expect(wide).toContain("env -u TMUX tmux attach -t 'member-2'");
     expect(effects).toEqual([]);
   });
 
