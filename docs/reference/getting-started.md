@@ -5,7 +5,10 @@ first-project recipes provide the same two seats: an outcome owner and an
 independent checker. Choose Claude Code, Codex, or one of each using the accounts
 you already have. Terminal-provider support does not change the harness or login.
 
-You need Node.js 22 or 24 and tmux, on macOS or Linux. On a Mac with Apple
+You need Node.js 22 or 24 and tmux, on macOS or Linux. On Linux, the
+distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a
+supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`)
+or NodeSource. On a Mac with Apple
 silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). Native
 Windows is not supported yet, and WSL2 has not been tested. Node 20 and
@@ -88,7 +91,7 @@ command before proceeding. Confirm account access to any pin; if unavailable,
 ask for a supported model choice rather than silently substituting a model or
 provider. After launch, confirm the actual native model before assigning work.
 
-Install OpenRig (`npm install -g @openrig/cli`) and check `tmux -V`. Check **only the selected providers**:
+Install OpenRig (`npm install -g @openrig/cli`) and check `tmux -V`. With npm 11 or later, an `npm warn install-scripts` line for `@openrig/cli` is expected: only the postinstall Node.js and SQLite check was skipped, and `node "$(npm root -g)/@openrig/cli/scripts/check-abi.mjs"` runs it. Check **only the selected providers**:
 
 - Claude Code: `claude --version` and `claude auth status`. If sign-in is missing,
   ask once: “Please run `claude auth login` in your launch environment.”
