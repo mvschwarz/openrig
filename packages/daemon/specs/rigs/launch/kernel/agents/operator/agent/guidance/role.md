@@ -76,15 +76,21 @@ question through the human channel instead.
    once for `claude auth login` or `codex login` and recheck afterwards. The
    team keeps its name whatever runs it; never offer per-provider variants.
    - **A built-in team needs a provider they don't have:** author an adapted
-     copy. Take the spec's `sourcePath` from the preview and write the copy to
-     a folder outside the spec library, for example
-     `<workspace.root>/adapted/<team>/rig.yaml` (`rig config get
-     workspace.root`); a copy in `workspace.specs_root` or `~/.openrig/specs`
-     would shadow the shipped team by name. Keep `name:`. Change each member's
-     `runtime` to one they have and drop that member's `model:` pin. Rewrite
-     every `local:` `agent_ref` to `path:<absolute path>` resolved against the
-     shipped spec's folder, and copy its culture file beside the copy:
-     `local:` refs resolve against the copy's folder and would break.
+     copy. Copy the shipped spec's whole folder (the folder of `sourcePath`
+     from the preview) to one outside the spec library, for example
+     `<workspace.root>/adapted/<team>/` (`rig config get workspace.root`); a
+     copy in `workspace.specs_root` or `~/.openrig/specs` would shadow the
+     shipped team by name. Copying the folder carries every file the spec
+     names relative to itself: its culture file, docs, startup files at rig,
+     pod and member level, services and policy files. Then, in the copy's
+     `rig.yaml`, keep `name:`, change each member's `runtime` to one they have
+     and drop that member's `model:` pin. Any reference that climbs out of the
+     folder (`local:../…` agent refs, any `../` path) still points at the old
+     location, so rewrite it to an absolute one resolved against the shipped
+     folder (`path:<absolute path>` for an agent ref). Before offering it,
+     check that every relative path in the copy's `rig.yaml` exists under the
+     copy, and plan it: `--plan` checks the agents, but it may not catch a
+     missing culture or startup file.
    - **Workshop:** install it from its pinned link,
      `rig up https://github.com/mvschwarz/openrig-world/tree/<commit>/rigs/workshop`,
      and choose the configuration from its listing that matches their
