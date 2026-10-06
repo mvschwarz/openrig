@@ -200,7 +200,7 @@ with that row's `canonicalSessionName`, then run this in a **new terminal on the
 same host, as the same user**:
 
 ```sh
-tmux attach-session -t '=<canonicalSessionName>'
+env -u TMUX tmux attach-session -t '=<canonicalSessionName>'
 ```
 
 This shows the operator's existing conversation and lets you type your answer.

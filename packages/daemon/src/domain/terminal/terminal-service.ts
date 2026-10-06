@@ -189,7 +189,7 @@ export class TerminalService {
     const result = await provider.openView(composed);
     if (result.opened.length === 0 && composed.opened.length > 0) {
       notes.push("In a new terminal on the daemon's host, attach directly using one of these commands:");
-      for (const pane of composed.opened) notes.push(`${pane.label}: ${pane.paneCommand}`);
+      for (const pane of composed.opened) notes.push(`${pane.label}: env -u TMUX ${pane.paneCommand}`);
     }
     return notes.length ? { ...result, notes: [...notes, ...(result.notes ?? [])] } : result;
   }

@@ -795,7 +795,7 @@ export function goldenPathNextSteps(): string[] {
     "     Keep the current terminal and existing spaces intact; opening this view needs no new provider install",
     "     rig tui --shared is the team dashboard, not the operator's conversation",
     "     Without herdr or cmux, find operator.agent with rig ps --nodes --rig kernel --json",
-    "     Use its canonicalSessionName in: tmux attach-session -t '=<canonicalSessionName>'",
+    "     Use its canonicalSessionName in: env -u TMUX tmux attach-session -t '=<canonicalSessionName>'",
     "     Give the person that command with the name filled in, to run in a new terminal on the kernel host",
     "  5. Installing agent: ask the person's goal and project folder, then hand them to the ready operator",
     "     Find operator.agent with rig ps --nodes --rig kernel --json; use its canonicalSessionName with rig send",

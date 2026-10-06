@@ -260,8 +260,8 @@ describe("default saved kernel conversations", () => {
     const result = await new TerminalService(deps).openView({ view: "saved:kernel", provider: providerName });
     expect(result).toMatchObject({ ok: false, opened: [], code: `${providerName}_unavailable` });
     expect(result.absent.map(member => member.seat)).toContain("advisor-bound");
-    expect(result.notes).toContain("operator.agent: tmux attach -t 'operator-bound'");
-    expect(result.notes).toContain("operator.human: tmux attach -t 'actual-tui'");
+    expect(result.notes).toContain("operator.agent: env -u TMUX tmux attach -t 'operator-bound'");
+    expect(result.notes).toContain("operator.human: env -u TMUX tmux attach -t 'actual-tui'");
     expect(result.notes).toContain("Original provider detail");
     expect(result.notes!.join("\n")).not.toContain("attach -t 'advisor-bound'");
     expect(result.notes!.join("\n")).not.toContain("queue-bound");

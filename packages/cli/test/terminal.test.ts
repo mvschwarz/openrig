@@ -116,7 +116,7 @@ describe("rig terminal CLI", () => {
   });
 
   it.each([false, true])("preserves fallback attach commands on a failed open (json=%s)", async json => {
-    const command = "operator.agent: tmux attach -t 'operator-bound'";
+    const command = "operator.agent: env -u TMUX tmux attach -t 'operator-bound'";
     const result = opened([], { code: "herdr_unavailable", error: "no binary", notes: [command] });
     const { deps } = makeDeps({ routes: { "POST /api/terminal/open": { status: 200, data: result } } });
     const program = createProgram({ terminalDeps: deps });

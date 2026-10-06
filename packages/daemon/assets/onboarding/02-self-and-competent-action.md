@@ -60,7 +60,7 @@ Show TUI | advisor | operator in that order for Claude-only, Codex-only and mixe
 Keep the queue worker off the first view and accessible through the TUI. Reuse the existing conversations and accounts.
 `rig tui --shared` is the team dashboard, not the operator's conversation. Without herdr or cmux, find the
 `operator.agent` row with `rig ps --nodes --rig kernel --json`. Give the person
-`tmux attach-session -t '=<canonicalSessionName>'`, with that row's actual name filled in, for a new terminal on
+`env -u TMUX tmux attach-session -t '=<canonicalSessionName>'`, with that row's actual name filled in, for a new terminal on
 the same host and user (over SSH, connect there first). This shows the existing operator conversation and accepts
 their answers; Ctrl-b, then d detaches without stopping it. Do not attach in your own terminal.
 Ask the person's goal and project folder, then hand them to the ready operator; do not implement the project yourself.
