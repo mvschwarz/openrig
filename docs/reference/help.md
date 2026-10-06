@@ -51,12 +51,17 @@ Windows-related pull request fixes it.
 
 Follow [Open the kernel conversations](getting-started.md#open-the-kernel-conversations)
 (`rig context get reference/getting-started.md#open-the-kernel-conversations`). The default
-`rig terminal open saved:kernel --provider herdr` needs no saved-view YAML. Once the existing kernel is available,
-tell the person you will open a new terminal space, then do it: herdr, otherwise cmux, otherwise a new plain terminal
-window. Show TUI | advisor | operator in that order for Claude-only, Codex-only and mixed kernels.
-Leave the queue worker accessible through the TUI. Being an installing agent is not a reason to skip this;
-keep your own terminal and existing user spaces intact. If no display can be opened, report that and supply the exact
-connection/attach command. The guide uses existing views and tmux; it does not call for another kernel or new accounts.
+`rig terminal open saved:kernel --provider herdr` needs no saved-view YAML or starter team. After the selected login
+works, start the daemon if stopped, then read `rig status` and `rig ps --nodes --rig kernel`. Started is not ready;
+the view can open while the agents finish starting, with that state reported honestly.
+Ask **“Open the OpenRig view now?”** Yes opens a new space using installed herdr, else cmux, else the guide's exact
+new-terminal command. No gives the command to open it later. Over SSH or without a display, give the exact
+connection/attach command. Keep your own terminal and existing user spaces intact; no new view provider is needed.
+No, SSH and headless use are valid background outcomes. For herdr, open or attach the actual session and check the
+visible view; a created workspace or a CLI running in a new OS window is not visual proof.
+Show TUI | advisor | operator for Claude-only, Codex-only and mixed kernels; the queue worker stays accessible through
+the TUI. Talk to the operator about your goal before choosing and launching a first project team.
+Use the existing recovery routes for unavailable seats; opening a view does not create another kernel or new accounts.
 
 ### The team did not start, or a terminal is missing
 

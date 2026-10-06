@@ -44,12 +44,18 @@ than printing a summary and disappearing.
 
 ## When you are installing OpenRig for someone
 
-Once OpenRig and its kernel are available, tell the person you will open a new terminal space so they can talk to
-the agents. Then use the existing tools to open it: herdr first, otherwise cmux, otherwise a new plain terminal window.
-Do this even from an agent's installation session; never attach into your own terminal or take over an existing space.
+After setup and a working selected login, start the daemon if stopped. On a fresh instance it starts the kernel
+without a starter team. Read `rig status` and `rig ps --nodes --rig kernel`: started is not ready. The view may open
+while agents finish starting; report their actual state and use the guide's existing recovery routes when needed.
+Ask the person: **“Open the OpenRig view now?”** Yes opens a new terminal space using installed herdr, else cmux,
+else the guide's exact new-terminal command. No gives the command to open it later. Over SSH, give the exact
+connection/attach command. Never attach into your own terminal or take over an existing space; no new provider install.
+No, SSH and headless use are valid background outcomes. For herdr, open or attach the actual session and check what
+the person sees; creating a workspace or running the CLI in a new OS window is not proof that its view is visible.
 Use `rig terminal open saved:kernel --provider herdr` (or `--provider cmux`); the default view needs no YAML edit.
 Show TUI | advisor | operator in that order for Claude-only, Codex-only and mixed kernels.
 Keep the queue worker off the first view and accessible through the TUI. Reuse the existing conversations and accounts.
+Let the person tell the operator their goal and choose a first project team before any starter launch.
 
 Read `rig context get reference/getting-started.md#open-the-kernel-conversations` for the commands and manual
 path. Without a working daemon, the same guide is `daemon/docs/reference/getting-started.md` in the installed
