@@ -319,6 +319,10 @@ Tell the kernel operator what you want to do. It asks about your goal, presents
 three teams with one recommendation, and fits the team to the providers you have.
 Review that choice before launching it.
 
+`rig specs preview starter --kind rig` and the factory preview include the three
+choices and their uses, in text and JSON. The reminder respects a team you already
+picked; previewing a spec does not launch it.
+
 | Team | Agents and runtimes | For |
 | --- | --- | --- |
 | `starter` | `dev-build` (Claude Code) and `dev-review` (Codex, pinned `gpt-6-astra`) | One bounded change |
@@ -435,6 +439,11 @@ cmux provider is also available. Read the opened/absent/degraded result: a
 partial terminal view is not a healthy team. Repeated terminal-open calls can
 create another provider workspace; return to the one already open when you
 want to preserve it. This is terminal integration, not native plugin enrollment.
+
+The open result also distinguishes the dashboard overview from the team's lead
+conversation and asks whether you can see the team. If the provider cannot open,
+each labelled fallback command joins a different seat. Keep all returned commands
+complete when sharing them; a created workspace alone does not confirm visibility.
 
 ## Continue real project work
 

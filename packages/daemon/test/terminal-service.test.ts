@@ -89,6 +89,38 @@ function makeDeps(overrides: Partial<TerminalServiceDeps> = {}): {
 }
 
 describe("TerminalService — view resolution + one-shape result", () => {
+  it.each([false, true])("keeps the view outcome and puts the human handoff beside it (provider unavailable=%s)", async unavailable => {
+    const { deps, herdr } = makeDeps({ resolveLocalTmux: () => "/opt/tools/tmux" });
+    let calls = 0;
+    herdr.openView = async view => {
+      calls++;
+      return {
+        provider: "herdr", ok: !unavailable,
+        opened: unavailable ? [] : view.opened.map(pane => pane.seat),
+        absent: view.absent, degraded: view.degraded, pages: unavailable ? 0 : 1,
+        ...(unavailable ? { code: "herdr_unavailable", error: "not running" } : {}),
+        notes: ["Original provider detail"],
+      };
+    };
+    const result = await new TerminalService(deps).openView({ view: "acme-build" });
+    expect(calls).toBe(1);
+    expect(result).toMatchObject({ ok: !unavailable, opened: unavailable ? [] : rigRows.map(row => row.canonicalSessionName), absent: [], degraded: [] });
+    expect(result.code).toBe(unavailable ? "herdr_unavailable" : undefined);
+    expect(result.notes).toContain("Original provider detail");
+    const notes = result.notes!.join("\n");
+    expect(notes).toContain("shared dashboard is the overview");
+    expect(notes).toContain("lead pane");
+    expect(notes).toContain("Can you see the team?");
+    expect(notes).toContain("does not confirm");
+    if (unavailable) {
+      expect(result.notes).toContain("dev.driver: env -u TMUX '/opt/tools/tmux' attach -t 'dev-driver@acme-build'");
+      expect(result.notes).toContain("rev.r1: env -u TMUX '/opt/tools/tmux' attach -t 'rev-r1@acme-build'");
+      expect(notes).toContain("include every command in full, unchanged");
+    } else {
+      expect(notes).not.toContain("attach -t");
+    }
+  });
+
   it("opens a rig NAME as an interactive derived view (read-write panes)", async () => {
     const { deps, herdr } = makeDeps();
     const svc = new TerminalService(deps);
