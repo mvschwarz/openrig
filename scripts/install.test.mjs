@@ -45,11 +45,13 @@ esac`);
 }
 
 test("dry run needs no tools and only prints the complete plan", t => {
+  const syntax = spawnSync("/bin/sh", ["-n", script], { encoding: "utf8" });
+  assert.equal(syntax.status, 0, syntax.stderr);
   const f = fixture(t);
   f.env.PATH = path.join(f.dir, "absent");
   const r = f.run("--dry-run");
   assert.equal(r.status, 0, r.stderr);
-  for (const text of ["[1/4]", "npm install -g @openrig/cli", "rig setup --dry-run", "[4/4] rig setup", "both Claude Code and Codex", "cmux", "Dry run:"]) assert.ok(r.stdout.includes(text), text);
+  for (const text of ["[1/4]", "npm install -g @openrig/cli", "rig setup --dry-run", "[4/4] rig setup", "both Claude Code and Codex", "setup may start cmux while configuring its control", "launch a team or open a kernel conversation", "Dry run:"]) assert.ok(r.stdout.includes(text), text);
   assert.deepEqual(f.calls(), []);
 });
 

@@ -41,8 +41,9 @@ install_main() {
     '  [4/4] rig setup' \
     '        Checks both Claude Code and Codex; may install missing tools.' \
     '        Checks tmux, writes its defaults, and on macOS may install/configure cmux.' \
+    '        On macOS, setup may start cmux while configuring its control.' \
     'This broader setup is optional for the manual selected-provider path.' \
-    'The wrapper does not log in, choose a permission policy, launch a team or open a terminal.' \
+    'The wrapper does not log in, choose a permission policy, launch a team or open a kernel conversation.' \
     'Node advice: 22 or 24; use 22 on Apple silicon. Install Node with npm using' \
     'your package manager or the official Node installer if either is missing.' \
     'The package postinstall owns compatibility checks: below 22 and odd majors' \
