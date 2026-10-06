@@ -73,8 +73,8 @@ describe("control-socket adapter (spike-adopted; arch boundary constraint)", () 
     open = await createControlSocket({ socketPath: shortSockPath(), view });
     const [bad, good, state] = await ask(open.path, ["tab yaml", "spec openrig-build-rig", "state"]);
     expect(JSON.parse(bad!).error).toMatch(/not available/);
-    expect(JSON.parse(good!).viewTab).toBe("configuration");
-    expect(JSON.parse(state!).state.viewTab).toBe("configuration");
+    expect(JSON.parse(good!).viewTab).toBe("graph");
+    expect(JSON.parse(state!).state.viewTab).toBe("graph");
   });
 
   it("addresses the instance root and RECENT tab through the control socket", async () => {

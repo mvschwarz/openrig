@@ -442,6 +442,10 @@ export interface DrillSegment {
 export type ViewTab = "table" | "recent" | "overview" | "graph" | "health" | "topology" | "configuration" | "yaml" | "pulse";
 
 export type Action =
+  | { type: "spec-launch" }
+  | { type: "launch-folder"; folder: string }
+  | { type: "launch-host"; host: string }
+  | { type: "launch-close" }
   | { type: "terminal-result"; view: string; message: string }
   | { type: "terminal-preview"; view: string }
   | { type: "terminal-page"; page: number }
@@ -497,6 +501,7 @@ export type Action =
   | { type: "palette-move"; delta: number }
   /** drive-structure daemon writes (BR-8/BR-9): executed by the driver loop
    * against EXISTING write contracts; never a view-state mutation */
+  | { type: "act"; act: "launch-spec" }
   | { type: "act"; act: "open-terminal"; view: string; expectedPlan?: string }
   | { type: "act"; act: "run"; rigId: string; agent: string }
   | { type: "notice"; message: string };
@@ -511,6 +516,7 @@ export interface SectionDef {
 }
 
 export interface ViewState {
+  specLaunch?: import("./specs/launch.js").SpecLaunch | null;
   terminalResult?: { view: string; message: string };
   terminalView?: string | null;
   terminalPage?: number;

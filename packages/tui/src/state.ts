@@ -116,6 +116,17 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
   const readingNotice = state.notice?.includes("\n") && (["layout", "content-scroll", "content-select", "focus", "copy-mode"].includes(action.type) || (action.type === "select" && action.origin === "refresh"));
   const next: ViewState = { ...state, lastError: null, notice: action.type === "notice" || action.type === "act" || readingNotice ? state.notice : null };
   switch (action.type) {
+    case "spec-launch": {
+      const spec = state.section === "specs" ? findSpec(snap, state.drill.at(-1)?.name ?? "") : null;
+      if (spec?.kind !== "rig") return { ...next, lastError: "Open a rig spec before Launch." };
+      return { ...resetContent(next), focusedPane: "content", specLaunch: { source: spec.name, folder: "", host: "" } };
+    }
+    case "launch-folder":
+      return state.specLaunch ? { ...resetContent(next), specLaunch: { ...state.specLaunch, folder: action.folder } } : { ...next, lastError: "Open Launch first." };
+    case "launch-host":
+      return state.specLaunch ? { ...resetContent(next), specLaunch: { ...state.specLaunch, host: action.host } } : { ...next, lastError: "Open Launch first." };
+    case "launch-close":
+      return { ...resetContent(next), specLaunch: null };
     case "terminal-result":
       return { ...next, terminalResult: { view: action.view, message: action.message } };
     case "terminal-preview":
@@ -150,6 +161,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       return row ? resetContent({ ...next, recentOpen: { ...row }, healthOpen: null }) : { ...next, lastError: "Event is outside the served Recent window" };
     }
     case "back": {
+      if (state.specLaunch) return { ...resetContent(next), specLaunch: null };
       const history = [...(state.history ?? [])];
       const frame = history.pop();
       return frame ? { ...next, ...frame, history } : { ...next, notice: "No previous view" };
@@ -165,6 +177,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     case "config-setting":
       return resetContent({ ...next, section: "config", drill: [], viewTab: "table", configKey: action.key, healthOpen: null });
     case "jump": {
+      next.specLaunch = null;
       next.terminalView = null;
       next.terminalPage = 0;
       if (action.section === "needs") { next.attentionCategory = null; next.attentionOpen = null; next.file = null; next.externalUrl = null; next.recentOpen = null; next.timeZoneHelp = false; }
@@ -300,6 +313,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       return reduce(next, row.action, snap);
     }
     case "drill": {
+      next.specLaunch = null;
       const drilled = drillTo(next, action.resource, action.name, snap, action.target);
       if (drilled.lastError) return drilled;
       const sectionState = clearScopeCoordinatesOnSectionChange(state, drilled);
@@ -308,7 +322,7 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
       // section's filter (founder direct-drive catch — a specs filter leaked
       // into the topology table and blanked it)
       const filter = drilled.section === state.section ? drilled.filter : "";
-      return syncSelection({ ...resetContent({ ...sectionState, filter, viewTab: spec?.kind === "rig" ? "configuration" : "table" }), healthOpen: null }, snap);
+      return syncSelection({ ...resetContent({ ...sectionState, filter, viewTab: action.resource === "spec" && (!spec || spec.kind === "rig") ? "graph" : "table" }), healthOpen: null }, snap);
     }
     case "cross": {
       const crossed = crossNav(next, action.kind, action.name, snap, action.target);

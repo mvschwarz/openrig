@@ -36,6 +36,7 @@ import { pathToFileURL } from "node:url";
 import type { Action, FleetSnapshot, Screen } from "./types.js";
 import type { SpecReviewCache } from "./hydrate.js";
 import { MOTION_FRAME_MS } from "./visual-layout.js";
+import { launchProcess, runSpecLaunch } from "./specs/launch.js";
 import { runCopySession, processCopyTerminal } from "./print-for-copy.js";
 
 function argOf(args: string[], flag: string): string | undefined {
@@ -404,7 +405,7 @@ async function run(): Promise<void> {
           message: `${result.absent.length || result.degraded.length ? "Partial Open" : "Opened"}: ${result.opened.length} opened, ${result.absent.length} absent, ${result.degraded.length} degraded · ${action.view}${result.error ? ` · ${result.error}` : ""}${result.degraded.map(m => ` · ${m.seat}: ${m.reason}`).join("")}${(result.notes ?? []).map(n => ` · ${n}`).join("")}`,
         });
         if (action.expectedPlan === undefined) view.dispatch({ type: "notice", message: `${result.opened.length} terminals opened; ${result.absent.length} absent; ${result.degraded.length} degraded${(result.notes ?? []).map(n => ` · ${n}`).join("")}` });
-      } else {
+      } else if (action.act === "run") {
         const result = await client.launchNode(action.rigId, action.agent);
         view.dispatch({ type: "notice", message: launchNodeNotice(action.agent, result) });
       }
@@ -426,6 +427,21 @@ async function run(): Promise<void> {
         notice: (message) => view.dispatch({ type: "notice", message }),
         draw,
       });
+      return;
+    }
+    if (action.type === "act" && action.act === "launch-spec") {
+      const launch = view.get().specLaunch;
+      if (!launch || nativeAttached) return;
+      if (!client) { view.dispatch({ type: "notice", message: "Demo mode: no rig was launched." }); return; }
+      try {
+        const command = launchProcess(launch, client.baseUrl, process.env, cliExecutable, cliArgs([]));
+        view.dispatch({ type: "launch-close" });
+        void runSpecLaunch({ command, terminal: processCopyTerminal(),
+          pauseInput: () => { process.stdin.pause(); }, resumeInput: () => { process.stdin.resume(); },
+          setSuspended: on => { nativeAttached = on; }, isShuttingDown: () => shuttingDown,
+          notice: message => view.dispatch({ type: "notice", message }), draw,
+        }).catch(error => view.dispatch({ type: "notice", message: String(error) }));
+      } catch (err) { view.dispatch({ type: "notice", message: (err as Error).message }); }
       return;
     }
     if (action.type === "act") {

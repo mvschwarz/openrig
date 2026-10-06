@@ -84,6 +84,7 @@ describe("content-pane parity (Phase 3): click the surface, not a control", () =
     byCommand.dispatch(parseCommand("spec guard-agent"));
 
     byMouse.dispatch(parseCommand("spec openrig-build-rig"));
+    byMouse.dispatch(parseCommand("tab configuration"));
     const layout = renderScreen(byMouse.get(), snap, { cols: 120, rows: 32 });
     byMouse.dispatch({ type: "layout", contentMaxOffset: layout.contentMaxOffset, contentTargetCount: layout.contentTargets.length });
     byMouse.dispatch({ type: "content-scroll", delta: layout.contentMaxOffset });
@@ -165,7 +166,7 @@ describe("content-pane parity (Phase 3): click the surface, not a control", () =
     tab.dispatch(parseCommand("spec openrig-build-rig"));
     press(tab, "\x1b[C", structured);
     press(tab, "\r", structured);
-    expect(tab.get().viewTab).toBe("topology");
+    expect(tab.get().viewTab).toBe("graph");
 
     const row = fresh("row");
     row.dispatch(parseCommand("rig openrig-build"));
@@ -178,6 +179,7 @@ describe("content-pane parity (Phase 3): click the surface, not a control", () =
 
     const ref = createViewState({ instanceId: "ref", getSnapshot: () => structured });
     ref.dispatch(parseCommand("spec openrig-build-rig"));
+    ref.dispatch(parseCommand("tab configuration"));
     press(ref, "\x1b[C", structured);
     screen = syncedScreen(ref, structured);
     const refTarget = screen.contentTargets.findIndex((target) => target.action.type === "drill" && target.action.resource === "spec" && target.action.name === "guard-agent");
