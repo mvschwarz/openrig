@@ -53,8 +53,8 @@ Follow [Open the kernel conversations](getting-started.md#open-the-kernel-conver
 (`rig context get reference/getting-started.md#open-the-kernel-conversations`). The default
 `rig terminal open saved:kernel --provider herdr` needs no saved-view YAML. Once the existing kernel is available,
 tell the person you will open a new terminal space, then do it: herdr, otherwise cmux, otherwise a new plain terminal
-window. Show advisor, operator agent and TUI for a dual-runtime kernel, or advisor and TUI for a single-runtime
-kernel. Leave the queue worker accessible through the TUI. Being an installing agent is not a reason to skip this;
+window. Show TUI | advisor | operator in that order for both single-provider and dual-provider kernels.
+Leave the queue worker accessible through the TUI. Being an installing agent is not a reason to skip this;
 keep your own terminal and existing user spaces intact. If no display can be opened, report that and supply the exact
 connection/attach command. The guide uses existing views and tmux; it does not call for another kernel or new accounts.
 

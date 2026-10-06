@@ -339,8 +339,8 @@ export class TerminalService {
     const operator = rows.find(row => row.logicalId === "operator.agent");
     const runtimesKnown = !!advisor?.runtime && !!operator?.runtime;
     const singleRuntime = runtimesKnown && advisor!.runtime === operator!.runtime;
-    const kernelLayout = runtimesKnown ? (singleRuntime ? "single-runtime" : "dual-runtime") : "runtime layout unverified; advisor, operator and TUI";
-    const roles = ["advisor.lead", ...(!singleRuntime ? ["operator.agent"] : []), "operator.human"];
+    const kernelLayout = runtimesKnown ? (singleRuntime ? "single-runtime" : "dual-runtime") : "runtime layout unverified; TUI, advisor and operator";
+    const roles = ["operator.human", "advisor.lead", "operator.agent"];
     const members = roles.map(logicalId => {
       const row = rows.find(row => row.logicalId === logicalId);
       const bound = row && deriveViewMembers([row])[0];

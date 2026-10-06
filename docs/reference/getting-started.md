@@ -178,8 +178,8 @@ terminal. It must not attach in that terminal, switch an existing tmux client,
 or replace another window's contents.
 
 Use **herdr first**, **cmux second**, and otherwise a **new plain terminal
-window**. The first view contains the advisor, operator agent and TUI for a
-dual-runtime kernel, or the advisor and TUI for a single-runtime kernel.
+window**. The first view contains TUI | advisor | operator in that order, for
+both single-provider and dual-provider kernels.
 The queue worker stays out of this view; it remains reachable through the TUI.
 This selects what you see, not which kernel seats run. Keep the current kernel,
 accounts and conversations; opening a view is not a reason to start or restore
@@ -200,18 +200,18 @@ Use the returned bindings, not the library preview. Find the rows whose
 `logicalId` is `advisor.lead`, `operator.agent` and `operator.human` (the TUI).
 For each, take its `canonicalSessionName`; a logical ID is not a tmux session
 name. The default provider view resolves these values itself; use them directly for
-the plain-terminal commands below. Missing bindings stay named missing. Compare
-the advisor and operator runtimes to choose the dual- or single-runtime view.
+the plain-terminal commands below. Missing bindings stay named missing; the
+three-role view is the same regardless of the agents' runtimes.
 
 ### Herdr or cmux: one new workspace
 
 OpenRig supplies `saved:kernel` automatically from the installed kernel's current
-bindings: advisor | operator | TUI for dual-runtime kernels, advisor | TUI for
-single-runtime kernels. No YAML edit or daemon restart is needed. It excludes
+bindings: TUI | advisor | operator for every kernel. No YAML edit or daemon
+restart is needed. It excludes
 the queue worker and uses the existing conversations. Unavailable expected roles
 are named in `absent`; with no attachable members, the result lists the missing
 bindings. The view reports the runtime layout; when runtime information is
-incomplete, it says so and keeps advisor, operator and TUI visible.
+incomplete, it says so and keeps TUI, advisor and operator visible.
 
 If you already saved a view with id `kernel` in `terminal-views.yaml`, your view
 wins unchanged. Other saved views are preserved. Check the listed membership
@@ -246,23 +246,18 @@ terminal.
 If neither provider is available, compose existing tmux attachments. These
 commands create only a new viewing session; they do not move or recreate the
 kernel's panes. Run them once on the kernel host after checking the bindings
-above. For a manual install, these prompts collect the two exact session names
+above. For a manual install, these prompts collect the three exact session names
 from that inventory. An installing agent sets the same variables from the
 observed values itself:
 
 ```sh
-printf 'canonicalSessionName for advisor.lead: '; read -r advisor_session
 printf 'canonicalSessionName for operator.human (TUI): '; read -r tui_session
-kernel_view="openrig-kernel-$(date +%s)-$$"
-kernel_pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$kernel_view" -n kernel "env -u TMUX tmux attach-session -t '=$advisor_session'")
-tmux split-window -h -t "$kernel_pane" "env -u TMUX tmux attach-session -t '=$tui_session'"
-```
-
-For a dual-runtime kernel, add the operator beside the advisor:
-
-```sh
+printf 'canonicalSessionName for advisor.lead: '; read -r advisor_session
 printf 'canonicalSessionName for operator.agent: '; read -r operator_session
-tmux split-window -h -t "$kernel_pane" "env -u TMUX tmux attach-session -t '=$operator_session'"
+kernel_view="openrig-kernel-$(date +%s)-$$"
+kernel_pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$kernel_view" -n kernel "env -u TMUX tmux attach-session -t '=$tui_session'")
+advisor_pane=$(tmux split-window -h -P -F '#{pane_id}' -t "$kernel_pane" "env -u TMUX tmux attach-session -t '=$advisor_session'")
+tmux split-window -h -t "$advisor_pane" "env -u TMUX tmux attach-session -t '=$operator_session'"
 ```
 
 Then arrange the view and print its exact attach command:

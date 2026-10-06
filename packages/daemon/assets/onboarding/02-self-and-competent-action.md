@@ -48,7 +48,7 @@ Once OpenRig and its kernel are available, tell the person you will open a new t
 the agents. Then use the existing tools to open it: herdr first, otherwise cmux, otherwise a new plain terminal window.
 Do this even from an agent's installation session; never attach into your own terminal or take over an existing space.
 Use `rig terminal open saved:kernel --provider herdr` (or `--provider cmux`); the default view needs no YAML edit.
-Show advisor, operator agent and TUI for a dual-runtime kernel, or advisor and TUI for a single-runtime kernel.
+Show TUI | advisor | operator in that order for both single-provider and dual-provider kernels.
 Keep the queue worker off the first view and accessible through the TUI. Reuse the existing conversations and accounts.
 
 Read `rig context get reference/getting-started.md#open-the-kernel-conversations` for the commands and manual

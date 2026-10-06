@@ -230,13 +230,13 @@ describe("one terminal catalog inventory", () => {
 });
 
 describe("default saved kernel conversations", () => {
-  function kernel(operatorRuntime = "codex"): LiveSeatRow[] {
+  function kernel(operatorRuntime = "codex", advisorRuntime = "claude-code"): LiveSeatRow[] {
     // Bindings deliberately differ from the logical IDs and inventory order.
     return [
       { logicalId: "queue.worker", runtime: "codex", canonicalSessionName: "queue-bound", attachmentType: "tmux" },
       { logicalId: "operator.human", runtime: "terminal", canonicalSessionName: "tui-bound", tmuxSession: "actual-tui", attachmentType: "tmux" },
       { logicalId: "operator.agent", runtime: operatorRuntime, canonicalSessionName: "operator-bound", attachmentType: "tmux" },
-      { logicalId: "advisor.lead", runtime: "claude-code", canonicalSessionName: "advisor-bound", attachmentType: "tmux" },
+      { logicalId: "advisor.lead", runtime: advisorRuntime, canonicalSessionName: "advisor-bound", attachmentType: "tmux" },
     ];
   }
   function makeKernel(rows: LiveSeatRow[], saved: SavedView[] = []) {
@@ -246,19 +246,19 @@ describe("default saved kernel conversations", () => {
     });
   }
 
-  it.each(["codex", "claude-code"])("resolves the %s operator layout from installed bindings without saving it", async runtime => {
+  it.each([["claude-code", "codex"], ["claude-code", "claude-code"], ["codex", "codex"]])("resolves the %s/%s layout from installed bindings without saving it", async (advisorRuntime, operatorRuntime) => {
     const saved: SavedView[] = [];
-    const { deps, herdr } = makeKernel(kernel(runtime), saved);
+    const { deps, herdr } = makeKernel(kernel(operatorRuntime, advisorRuntime), saved);
     const service = new TerminalService(deps);
-    const expected = ["advisor-bound", ...(runtime === "codex" ? ["operator-bound"] : []), "tui-bound"];
+    const expected = ["tui-bound", "advisor-bound", "operator-bound"];
     expect((await service.listViews()).saved[0]?.members.map(member => member.seat)).toEqual(expected);
     expect(herdr.lastView).toBeNull();
     const preview = await service.previewView({ view: "saved:kernel" });
     expect("composed" in preview && preview.composed.opened.map(member => member.seat)).toEqual(expected);
     expect(herdr.lastView).toBeNull();
     expect((await service.openView({ view: "saved:kernel" })).opened).toEqual(expected);
-    expect(herdr.lastView?.opened.at(-1)?.paneCommand).toContain("'actual-tui'");
-    expect(herdr.lastView?.opened[0]?.runtime).toBe("claude-code");
+    expect(herdr.lastView?.opened[0]?.paneCommand).toContain("'actual-tui'");
+    expect(herdr.lastView?.opened[1]?.runtime).toBe(advisorRuntime);
     expect(saved).toEqual([]);
   });
 
@@ -289,8 +289,21 @@ describe("default saved kernel conversations", () => {
     deps.hasSession = name => name !== "advisor-bound";
     const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
     expect(result.opened).toEqual(["operator-bound"]);
-    expect(result.absent.map(member => member.seat)).toEqual(["advisor-bound", "operator.human"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["operator.human", "advisor-bound"]);
     expect(result.notes).toContain("Default kernel view: dual-runtime.");
+  });
+
+  it.each(["claude-code", "codex"])("names an unbound operator in a %s-only kernel", async runtime => {
+    const rows = kernel(runtime, runtime);
+    rows.find(row => row.logicalId === "operator.agent")!.canonicalSessionName = null;
+    const { deps } = makeKernel(rows);
+    const probed: string[] = [];
+    deps.hasSession = name => { probed.push(name); return true; };
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
+    expect(result.ok).toBe(true);
+    expect(result.opened).toEqual(["tui-bound", "advisor-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["operator.agent"]);
+    expect(probed).toEqual(["actual-tui", "advisor-bound"]);
   });
 
   it("keeps missing roles named while opening the remaining TUI", async () => {
@@ -306,7 +319,7 @@ describe("default saved kernel conversations", () => {
     const { deps } = makeKernel(kernel().filter(row => row.logicalId !== "advisor.lead"));
     const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
     expect(result.ok).toBe(true);
-    expect(result.opened).toEqual(["operator-bound", "tui-bound"]);
+    expect(result.opened).toEqual(["tui-bound", "operator-bound"]);
     expect(result.absent.map(member => member.seat)).toEqual(["advisor.lead"]);
     expect(result.notes?.join(" ")).toContain("runtime layout unverified");
   });
@@ -321,7 +334,7 @@ describe("default saved kernel conversations", () => {
     const result = await service.openView({ view: "saved:kernel" });
     expect(result.code).toBe("kernel_seats_unavailable");
     expect(result.opened).toEqual([]);
-    expect(result.absent.map(member => member.seat)).toEqual(["advisor.lead", "operator.agent", "operator.human"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["operator.human", "advisor.lead", "operator.agent"]);
     for (const member of result.absent) expect(result.error).toContain(member.seat);
     expect(herdr.lastView).toBeNull();
   });
