@@ -15,11 +15,33 @@ export const KERNEL_CLAUDE_ALLOW = [
   "Read(~/**)",
 ];
 
-type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "nonInterruptive" | "launchPosture" | "permissionMode">;
+// Team defaults are command allowances, not containment. A project's test runner can run code.
+// Native deny/ask rules remain in force; lifecycle asks precede the broad rig allow.
+export const TEAM_CLAUDE_ALLOW = [
+  "Skill", "Read(./**)", "Glob", "Grep", "Bash(rig:*)",
+  ...["pwd", "ls", "cat", "head", "tail", "rg", "grep", "find"].map(command => `Bash(${command}:*)`),
+  ...["npm test", "npm run test", "pnpm test", "pnpm run test", "yarn test", "yarn run test",
+    "bun test", "bun run test", "node --test", "npx vitest", "npx jest", "pytest", "python -m pytest",
+    "python3 -m pytest", "go test", "cargo test", "make test"].map(command => `Bash(${command}:*)`),
+];
+export const TEAM_CLAUDE_ASK = [
+  "up", "down", "start", "launch", "restore", "fork", "bootstrap", "create", "add", "remove",
+  "grow", "shrink", "expand", "archive", "unarchive", "destroy",
+  "daemon start", "daemon stop", "bundle install", "seat launch", "seat continue", "seat stop",
+  "seat clean", "seat handover", "seat switch-client", "seat set-permissions", "seat set-model",
+].map(command => `Bash(rig ${command}:*)`);
+
+type LaunchChoice = Pick<NodeBinding, "kernelAuthority" | "teamPermissionDefault" | "nonInterruptive" | "launchPosture" | "permissionMode">;
 
 /** Session flags only; never writes a personal/project permission file. */
 export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): string[] {
-  if (!choice.kernelAuthority) return nonInterruptiveArgs(runtime, choice);
+  if (!choice.kernelAuthority) {
+    if (runtime === "claude-code" && choice.teamPermissionDefault && !choice.permissionMode
+      && (!choice.launchPosture || choice.launchPosture === "floor")) {
+      return ["--settings", JSON.stringify({ permissions: { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK } })];
+    }
+    return nonInterruptiveArgs(runtime, choice);
+  }
   if (runtime === "claude-code") {
     return ["--settings", JSON.stringify({ permissions: { allow: KERNEL_CLAUDE_ALLOW } })];
   }

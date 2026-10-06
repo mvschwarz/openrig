@@ -82,7 +82,11 @@ describe("kernel operational launch default", () => {
     expect(b.kernelAuthority).toBe(false); expect(b.launchPosture).toBe("floor");
     const adapter = runtime === "codex" ? new CodexRuntimeAdapter(t) : new ClaudeCodeAdapter(t);
     await adapter.launchHarness(b, { name: "seat" }); const cmd = t.send.mock.calls[0]![1];
-    expect(cmd).not.toContain("--settings"); expect(cmd).not.toContain("notice.");
+    if (runtime === "claude-code") {
+      expect(cmd).toContain("Bash(rig up:*)");
+      expect(cmd).not.toContain("Bash(tmux:*)");
+    }
+    expect(cmd).not.toContain("notice.");
     expect(cmd).toContain(runtime === "codex" ? "-s workspace-write" : "--permission-mode acceptEdits");
   });
   it.each(["codex", "claude-code"])("%s explicit choices and authored policies precede the default", runtime => {

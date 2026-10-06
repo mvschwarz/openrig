@@ -90,7 +90,7 @@ describe("team launch permission defaults", () => {
     });
     it(`${runtime}: startup derives the default before launch`, async () => {
       const f = fixture(runtime);
-      const launchHarness = vi.fn(async () => ({ ok: false as const, error: "inert boundary" }));
+      const launchHarness = vi.fn(async (_binding: NodeBinding) => ({ ok: false as const, error: "inert boundary" }));
       const adapter = { runtime, project: async () => ({ projected: [], skipped: [], failed: [] }),
         deliverStartup: async () => ({ delivered: [], failed: [] }), launchHarness } as unknown as RuntimeAdapter;
       const orchestrator = new StartupOrchestrator({ db: f.db, sessionRegistry: f.registry, eventBus: new EventBus(f.db), tmuxAdapter: {} as TmuxAdapter });

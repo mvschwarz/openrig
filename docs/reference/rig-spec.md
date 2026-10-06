@@ -174,7 +174,7 @@ edges:
 | `name` | string | yes | — | Rig name. Used in session naming (`{pod}-{member}@{name}`), snapshot identification, and spec library lookup. |
 | `summary` | string | no | — | Human-readable description. Shown in the spec library, review surfaces and `rig specs preview` (in `rig specs show` only with `--json`). |
 | `culture_file` | string | no | — | Relative path to a rig-wide culture/constitution file. Must be a safe relative path (no `..`, no absolute). |
-| `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute, no empty segments, each segment `[A-Za-z0-9][A-Za-z0-9._-]*`), or `none`, a recorded choice of the floor. Absent leaves the default floor. A bare built-in name such as `yolo` is refused ("use 'builtin:yolo'"), and so is an explicit `null`. A custom file that is missing, unreadable or invalid isn't a validation error: it resolves to the floor, and preflight warns. A member may set its own `permission_policy` (not on a terminal member), which takes precedence over the rig-level one; there is no pod level. See "Attaching a permission policy" below. |
+| `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute, no empty segments, each segment `[A-Za-z0-9][A-Za-z0-9._-]*`), or `none`, a recorded choice of the floor. Absent uses the default floor with the scoped team launch allowances described below. A bare built-in name such as `yolo` is refused ("use 'builtin:yolo'"), and so is an explicit `null`. A custom file that is missing, unreadable or invalid isn't a validation error: it resolves to the floor, and preflight warns. A member may set its own `permission_policy` (not on a terminal member), which takes precedence over the rig-level one; there is no pod level. See "Attaching a permission policy" below. |
 | `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex, Pi and OMP members use `AGENTS.md`. See "Choosing the Claude instruction file" below. |
 | `workspace` | object | no | — | The rig's workspace: `workspace_root` (required), `repos[]` of `{name, path, kind}` with `kind` one of `user`, `project`, `knowledge`, `lab` or `delivery` and unique names, an optional `default_repo` naming one of them, and an optional `knowledge_root`. Relative repo paths resolve against `workspace_root`. |
 | `docs` | Doc[] | no | — | Documentation files that should travel with the rig. Included in rig bundles. Each entry has a `path` field (safe relative path). The engine does not consume these — they are for humans and agents setting up the environment before launch. |
@@ -211,6 +211,37 @@ An explicit `rig seat set-permissions` choice overrides member/rig policy for
 future managed launches of that stable seat; it does not rewrite this spec or
 its inherited policy provenance. `inherit` removes that override. See
 [per-seat permission mode](getting-started.md#per-seat-permission-mode).
+
+### Team launch defaults
+
+A non-kernel Claude or Codex seat with no authored permission policy, explicit
+seat permission selection, or named Codex profile receives the team launch
+default. An explicit policy, including `none` or `builtin:locked`, keeps its
+existing meaning. The default is derived again for fresh launch, resume, fork
+and handover; it is not saved as a user choice. Kernel, Pi and terminal behavior
+is unchanged.
+
+Claude keeps `acceptEdits` and receives inline session settings allowing ordinary
+`rig` commands, project reads and common project test commands (for example,
+`npm test`, `pnpm test`, `pytest`, `go test` and `cargo test`). Lifecycle commands
+such as `rig up`, `rig down`, `rig restore`, `rig bundle install` and seat stop or
+handover are listed as **ask** rules. Native deny and ask rules take precedence
+over allow rules. These are native command-matching rules, not filesystem
+containment: a project's test command can execute code. OpenRig does not write
+these settings into a personal or project permission file.
+
+Codex keeps `workspace-write` with its existing approval policy and receives the
+configured OpenRig workspace root plus its pod's shared state directory as
+additional writable directories. OpenRig creates missing directory ancestors
+before launch; it does not grant the whole home directory or an ancestor of it.
+An unavailable optional directory is warned about and omitted without blocking
+launch. This does not modify Codex permission files or enable non-interruptive
+mode.
+
+**Codex lifecycle commands do not gain a new approval rule.** With Codex's
+existing `on-request` policy, non-escalated sandboxed commands, including
+`rig up` and `rig down`, can run without asking. This default addresses writable
+workspace access; it does not promise a lifecycle confirmation prompt.
 
 ### Built-in permission policies
 

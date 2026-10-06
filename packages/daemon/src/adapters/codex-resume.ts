@@ -1,3 +1,4 @@
+import { codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { operationalLaunchArg } from "./kernel-authority.js";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { TmuxAdapter } from "./tmux.js";
@@ -17,6 +18,7 @@ const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
 export { type ResumeResult };
 
 interface CodexResumeOptions {
+  prepareTeamWorkspace?: PrepareCodexTeamWorkspace;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   launchPath?: string;
   codexHome?: string;
@@ -61,6 +63,7 @@ export class CodexResumeAdapter {
     effort?: string | null,
     nonInterruptive?: boolean,
     kernelAuthority?: boolean,
+    teamPermissionDefault?: boolean,
   ): Promise<ResumeResult> {
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: "Codex resume not available" };
@@ -95,13 +98,16 @@ export class CodexResumeAdapter {
     const profileArg = codexConfigProfile ? ` -p ${shellQuote(codexConfigProfile)}` : "";
     const posture = codexPostureArg(profileArg, process.env, resolvedPosture);
     const appliedLaunch = observeCodexSandbox(posture);
-    const postureArg = posture + operationalLaunchArg("codex", { kernelAuthority, nonInterruptive, launchPosture: resolvedPosture });
+    const postureArg = posture + operationalLaunchArg("codex", { kernelAuthority, teamPermissionDefault, nonInterruptive, launchPosture: resolvedPosture });
     const networkArg = await codexNetworkDefaultArg(this.options.readNetworkDefault, appliedLaunch, cwd, tmuxSessionName);
+    const workspaceArg = teamPermissionDefault && !codexConfigProfile?.trim()
+      && appliedLaunch.state === "observed" && appliedLaunch.value === "workspace-write"
+      ? codexTeamWorkspaceArg(this.options.prepareTeamWorkspace, tmuxSessionName) : "";
     const cmd = buildCodexResumeCore(
       resumeToken ?? "",
       codexConfigProfile,
       resumeType === "codex_last",
-      undefined,
+      workspaceArg.trim() || undefined,
       resolvedPosture,
       model,
       `${postureArg}${networkArg}`,
