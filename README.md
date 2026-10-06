@@ -220,6 +220,8 @@ rig up factory
 
 Specialist teams: `code-review` (two independent reviews), `research` (an analyst and a synthesizer) and `pm` (a product lead, a researcher and a builder for prototypes).
 
+Also built in: `secrets-manager`, a HashiCorp Vault instance run by a specialist agent.
+
 Browse the library:
 
 ```bash

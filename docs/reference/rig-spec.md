@@ -688,6 +688,7 @@ These are the built-in specs shipped with OpenRig. Read them as worked examples.
 | `code-review` | `packages/daemon/specs/rigs/focused/code-review/rig.yaml` | orch, review | 3 (lead, r1, r2) | no |
 | `research` | `packages/daemon/specs/rigs/focused/research/rig.yaml` | orch, research | 3 (lead, analyst, synthesizer) | no |
 | `pm` | `packages/daemon/specs/rigs/focused/pm/rig.yaml` | pm, dev | 3 (lead, researcher, build) | no |
+| `secrets-manager` | `packages/daemon/specs/rigs/launch/secrets-manager/rig.yaml` | vault | 1 (specialist) | yes (Vault) |
 
 Also shipped, in the same tree: `launch/kernel`, OpenRig's own team, which starts automatically. `first-project` is
 starter's old name and still resolves to it. `workshop`, the four-agent middle team, is a rig bundle rather than a
