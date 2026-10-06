@@ -234,11 +234,13 @@ permission file.
 
 Codex keeps `workspace-write` with its existing approval policy and receives the
 configured OpenRig workspace root plus its pod's shared state directory as
-additional writable directories. OpenRig creates missing directory ancestors
-before launch; it does not grant the whole home directory or an ancestor of it.
-An unavailable optional directory is warned about and omitted without blocking
-launch. This does not modify Codex permission files or enable non-interruptive
-mode.
+additional writable directories. The team workspace preparer creates missing
+directory ancestors and excludes the home directory and its ancestors from its
+prepared scopes. Unavailable optional directories are warned about and omitted
+from that list without blocking launch. When no prepared scopes remain, the
+runtime adapter retains its existing pod-state `--add-dir` fallback, which this
+step does not prepare. This does not modify Codex permission files or enable
+non-interruptive mode.
 
 **Codex lifecycle commands do not gain a new approval rule.** With Codex's
 existing `on-request` policy, non-escalated sandboxed commands, including
