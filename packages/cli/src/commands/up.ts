@@ -136,7 +136,7 @@ Examples:
             if (installed.data.rigId) console.log(`Rig: ${installed.data.rigId}`);
             for (const line of bundleRoutingSummary(installed.data)) console.log(line);
             for (const warning of (installed.data.warnings as string[] | undefined) ?? []) console.warn(warning);
-            if (installed.status >= 400) console.error(bundleInstallError(installed.data));
+            if (installed.status >= 400) console.error(bundleInstallError(installed.data, false));
           }
           if (installed.status >= 400 || ["failed", "partial", "partially_restored", "not_attempted"].includes(String(installed.data.status ?? installed.data.rigResult))) process.exitCode = installed.status === 409 ? 1 : 2;
         } catch (err) { printBundleLinkError(err, opts.json); }
@@ -473,10 +473,6 @@ Examples:
           for (const node of nodes ?? []) {
             console.error(`  ${node.logicalId}${node.sessionName ? ` (${node.sessionName})` : ""}: ${node.reason}`);
           }
-          // #141: the rig is kept on this path, so its warnings (e.g. the archived earlier generation) still apply.
-          for (const w of (res.data["warnings"] as string[]) ?? []) {
-            console.error(`  warning: ${w}`);
-          }
         } else if (code === "cycle_error") {
           console.error("Cycle detected in rig topology. Check edge definitions for circular dependencies.");
         } else if (code === "validation_failed") {
@@ -496,16 +492,19 @@ Examples:
           // nothing-created, alternatives) — render it verbatim, never the
           // generic unknown-error/validate-your-spec fallback. #141's
           // generation_unconfirmed refusal is self-describing the same way.
-          const teaching = bundleInstallError(res.data);
+          const teaching = bundleInstallError(res.data, false);
           console.error(teaching);
         } else {
-          const errorText = bundleInstallError(res.data);
+          const errorText = bundleInstallError(res.data, false);
           console.error(`Up failed: ${errorText} (HTTP ${res.status}). Check daemon logs or validate your spec with: rig spec validate <path>`);
           if (/agent_ref resolution failed|No agent\.yaml found/i.test(errorText)) {
             console.error("Hint: local: agent_ref paths resolve relative to the rig spec directory, not your shell cwd.");
             console.error("      Keep the agents/ tree beside the rig YAML, or switch those refs to path:/absolute/path.");
           }
         }
+        // File disposition and generation recovery matter on every failure,
+        // including validation and preflight refusals after materialization.
+        for (const warning of (res.data["warnings"] as string[]) ?? []) console.error(`  warning: ${warning}`);
         const stages = (res.data["stages"] as Array<{ stage: string; status: string }>) ?? [];
         for (const s of stages) {
           console.log(`  ${s.stage}: ${s.status}`);

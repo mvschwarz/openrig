@@ -26,7 +26,8 @@ import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js
 import { runSyncSite } from "./sync-site-wrap.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
 import { routeBundleContents, routingFailureWarnings, thrownMessage, type BundleContentRouting } from "./bundle-content-routing.js";
-import { bundleInstallContext, bundleInstallContextLines, type BundleInstallContext } from "./bundle-install-context.js";
+import { bundleInstallContext, bundleInstallContextLines, isExistingBundleTarget, type BundleInstallContext } from "./bundle-install-context.js";
+import { confirmStoppedGenerations } from "./running-name-guard.js";
 
 /** Bootstrap mode */
 export type BootstrapMode = "plan" | "apply";
@@ -191,7 +192,7 @@ export class BootstrapOrchestrator {
                 this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
                 return { runId: run.id, status: "failed", stages, errors: [message], warnings, bundleInstall: context };
               }
-              warnings.push(...lines);
+              warnings.push(...bundleInstallContextLines(context, mode === "plan"));
             }
             // Reject service-backed bundles — services require a stable source directory
             try {
@@ -210,7 +211,20 @@ export class BootstrapOrchestrator {
             // otherwise `cwd: "."`, the spec dir and agent refs point at a deleted dir.
             if (opts.mode === "apply" && opts.targetRoot) {
               const targetRoot = nodePath.resolve(opts.targetRoot);
-              const materialized = materializePodBundle(podSource.tempDir, targetRoot, context.existing.length > 0);
+              const replacingOwnTarget = isExistingBundleTarget(this.deps.db, context, targetRoot);
+              const tmux = this.deps.podInstantiator?.["deps"]?.tmuxAdapter;
+              if (replacingOwnTarget && tmux?.probeSession) {
+                // The instantiator repeats this under its name lock. This early
+                // read keeps a known-live or uncertain old session's files intact.
+                const stopped = await confirmStoppedGenerations(this.deps.db, context.existing.map(rig => rig.rigId), tmux.probeSession.bind(tmux));
+                if (!stopped.ok) {
+                  const message = `Could not confirm the existing team is stopped: ${stopped.reason}. No target files were written and no team was created.`;
+                  stages.push({ stage: "import_rig", status: "failed", detail: { code: "generation_unconfirmed", message } });
+                  this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+                  return { runId: run.id, status: "failed", stages, errors: [message], warnings: [...warnings, ...context.resolutions], bundleInstall: context };
+                }
+              }
+              const materialized = materializePodBundle(podSource.tempDir, targetRoot, replacingOwnTarget);
               if (!materialized.ok) {
                 const shown = materialized.conflicts.slice(0, 10).join(", ");
                 const more = materialized.conflicts.length > 10 ? ` (and ${materialized.conflicts.length - 10} more)` : "";
@@ -225,7 +239,9 @@ export class BootstrapOrchestrator {
               warnings.push(`Bundle files are installed in ${targetRoot}; a later launch failure does not remove them.`);
             }
 
-            return { ...await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings), bundleInstall: context };
+            const result = await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings);
+            if (mode === "apply" && result.status === "failed") result.warnings.push(...context.resolutions);
+            return { ...result, bundleInstall: { ...context, resolutions: mode === "apply" && result.status === "completed" ? [] : context.resolutions } };
           } finally {
             if (podBundleTempDir) this.deps.podBundleSourceResolver.cleanup(podBundleTempDir);
           }
@@ -678,7 +694,7 @@ export class BootstrapOrchestrator {
           status: preflight.ready ? "planned" : "failed",
           stages,
           errors: preflight.errors,
-          warnings: preflight.warnings,
+          warnings: [...warnings, ...preflight.warnings],
         };
       } catch (err) {
         stages.push({ stage: "resolve_spec", status: "failed", detail: { error: (err as Error).message } });
@@ -752,7 +768,7 @@ export class BootstrapOrchestrator {
       const outWarnings = (outcome as { warnings?: string[] }).warnings ?? [];
       stages.push({ stage: "import_rig", status: "failed", detail: { code: outcome.code } });
       this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
-      return withRouting({ runId: run.id, status: "failed", stages, errors: outErrors, warnings: outWarnings });
+      return withRouting({ runId: run.id, status: "failed", stages, errors: outErrors, warnings: [...warnings, ...outWarnings] });
     }
 
     const result = outcome.result;

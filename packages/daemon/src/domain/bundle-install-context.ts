@@ -2,6 +2,8 @@ import type Database from "better-sqlite3";
 import { RigRepository } from "./rig-repository.js";
 import { makeRunningSessionCounter } from "./running-name-guard.js";
 import { shellQuote } from "../adapters/shell-quote.js";
+import fs from "node:fs";
+import path from "node:path";
 
 export interface BundleInstallContext {
   offered: { name: string; version: string | null; source: string };
@@ -36,10 +38,19 @@ export function bundleInstallContext(
   };
 }
 
-export function bundleInstallContextLines(context: BundleInstallContext): string[] {
+/** Resolved member cwd is persisted at launch. A matching name alone owns no folder. */
+export function isExistingBundleTarget(db: Database.Database, context: BundleInstallContext, target: string): boolean {
+  const canonical = (p: string) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
+  const targetPath = canonical(target);
+  const rigs = new RigRepository(db);
+  return context.existing.some(rig => rigs.getRig(rig.rigId)?.nodes.some(node =>
+    node.cwd && path.isAbsolute(node.cwd) && canonical(node.cwd) === targetPath));
+}
+
+export function bundleInstallContextLines(context: BundleInstallContext, includeChoices = true): string[] {
   return [
     ...context.existing.map(rig => `Installed team "${rig.name}" (${rig.rigId}): ${rig.state}; source: ${rig.source ?? "not recorded"}; version: not recorded.`),
     `Offered bundle "${context.offered.name}": version ${context.offered.version ?? "not recorded"}; source: ${context.offered.source}.`,
-    ...context.resolutions,
+    ...(includeChoices ? context.resolutions : []),
   ];
 }

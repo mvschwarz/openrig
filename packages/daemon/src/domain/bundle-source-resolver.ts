@@ -228,6 +228,11 @@ export function materializePodBundle(
     if (!preserveConflicts) {
       // Keep the existing first-install handling of identical linked files.
       const stat = fs.statSync(dest, { throwIfNoEntry: false });
+      if (!stat) {
+        let parent = nodePath.dirname(dest);
+        while (parent.length > targetRoot.length && !fs.existsSync(parent)) parent = nodePath.dirname(parent);
+        if (parent.length > targetRoot.length && !fs.statSync(parent).isDirectory()) conflicts.add(nodePath.relative(targetRoot, parent));
+      }
       if (stat && (!stat.isFile() || !fs.readFileSync(dest).equals(fs.readFileSync(nodePath.join(extractedDir, rel))))) conflicts.add(rel);
       continue;
     }

@@ -27,11 +27,11 @@ describe("bundle reinstall through both public routes", () => {
   });
   afterEach(() => { vi.restoreAllMocks(); db.close(); vi.unstubAllEnvs(); fs.rmSync(root, { recursive: true, force: true }); });
 
-  async function bundle(name: string, version = "1.0.0") {
+  async function bundle(name: string, version = "1.0.0", profile = "none") {
     const stage = fs.mkdtempSync(path.join(root, "stage-"));
     fs.writeFileSync(path.join(stage, "rig.yaml"), stringify({
       version: "0.2", name,
-      pods: [{ id: "crew", label: "Crew", members: [{ id: "a", agent_ref: "builtin:terminal", profile: "none", runtime: "terminal", cwd: root }], edges: [] }], edges: [],
+      pods: [{ id: "crew", label: "Crew", members: [{ id: "a", agent_ref: "builtin:terminal", profile, runtime: "terminal", cwd: "." }], edges: [] }], edges: [],
     }));
     fs.writeFileSync(path.join(stage, "README.md"), "offered team documentation\n");
     const integrity = computeIntegrity(stage, {
@@ -46,7 +46,7 @@ describe("bundle reinstall through both public routes", () => {
 
   function seed(name: string, running: boolean) {
     const rig = setup.rigRepo.createRig(name);
-    const node = setup.rigRepo.addNode(rig.id, "crew.old", { runtime: "terminal", cwd: root });
+    const node = setup.rigRepo.addNode(rig.id, "crew.old", { runtime: "terminal", cwd: path.join(root, "target") });
     const session = setup.sessionRegistry.registerSession(node.id, `crew-old@${name}`);
     setup.sessionRegistry.updateStatus(session.id, running ? "running" : "exited");
     const run = setup.bootstrapRepo.createRun("rig_bundle", "/retained/original.rigbundle");
@@ -69,6 +69,8 @@ describe("bundle reinstall through both public routes", () => {
     const result = await install(route, await bundle(name, version));
     expect(result.status).toBeGreaterThanOrEqual(400);
     expect(result.status).toBeLessThan(500);
+    expect(fs.existsSync(result.target)).toBe(false);
+    expect(result.body.bundleInstall).toBeDefined();
     expect(result.body.bundleInstall.existing).toContainEqual({ rigId: previous.id, name, state: "running", source: "/retained/original.rigbundle", version: null });
     expect(result.body.bundleInstall.offered.version).toBe(version);
     expect(result.body.bundleInstall.resolutions.join("\n")).toMatch(/existing team[\s\S]*rig down[\s\S]*archived[\s\S]*Cancel/);
@@ -97,6 +99,65 @@ describe("bundle reinstall through both public routes", () => {
     const backup = path.join(root, "home", "bundle-backups", backups[0]!);
     expect(fs.readFileSync(path.join(backup, "files", "README.md"), "utf8")).toBe("my local edits\n");
     expect(result.body.warnings.join("\n")).toContain(backup);
+    expect(result.body.warnings.join("\n")).not.toMatch(/Cancel this install|Retry this install|Use the existing team/);
+    expect(result.body.bundleInstall.resolutions).toEqual([]);
+  });
+
+  it.each(["present", "transport_unavailable"])("round 2: %s old session leaves stopped-team target untouched", async state => {
+    const previous = seed("workshop", false);
+    vi.mocked(setup.tmuxAdapter.probeSession).mockResolvedValue(state === "present" ? { state: "present" } : { state: "transport_unavailable", cause: "fixture unavailable" });
+    const target = path.join(root, "target"); fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, "README.md"), "original edits");
+    const result = await install("/api/up", await bundle("workshop"), target);
+    expect(result.status).toBe(409);
+    expect(result.body.code).toBe("generation_unconfirmed");
+    expect(fs.readFileSync(path.join(target, "README.md"), "utf8")).toBe("original edits");
+    expect(fs.existsSync(path.join(root, "home", "bundle-backups"))).toBe(false);
+    expect(setup.rigRepo.findUnarchivedRigsByName("workshop").map(rig => rig.id)).toEqual([previous.id]);
+  });
+
+  it.each(["validation", "late-session"])("round 2: %s refusal after materialization names the backup", async failure => {
+    const previous = seed("workshop", false);
+    const target = path.join(root, "target"); fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, "README.md"), "original edits");
+    if (failure === "late-session") {
+      const instantiate = setup.podInstantiator.instantiate.bind(setup.podInstantiator);
+      vi.spyOn(setup.podInstantiator, "instantiate").mockImplementation(async (...args) => {
+        vi.mocked(setup.tmuxAdapter.probeSession).mockResolvedValue({ state: "present" });
+        return instantiate(...args);
+      });
+    }
+    const result = await install("/api/up", await bundle("workshop", "1.0.0", failure === "validation" ? "missing-profile" : "none"), target);
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    const backups = fs.readdirSync(path.join(root, "home", "bundle-backups"));
+    const backup = path.join(root, "home", "bundle-backups", backups[0]!);
+    expect(result.body.warnings.join("\n")).toContain(backup);
+    expect(result.body.warnings.join("\n")).toContain("Bundle files are installed");
+    expect(fs.readFileSync(path.join(backup, "files", "README.md"), "utf8")).toBe("original edits");
+    expect(setup.rigRepo.findUnarchivedRigsByName("workshop").map(rig => rig.id)).toEqual([previous.id]);
+  });
+
+  it.each(["/api/bundles/install", "/api/up"])("round 2: %s leaves a different project's conflicting files in place", async route => {
+    seed("workshop", false);
+    const target = path.join(root, "unrelated-project"); fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, "README.md"), "my project");
+    const result = await install(route, await bundle("workshop"), target);
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    if (route === "/api/up") expect(result.status).toBe(400);
+    expect(result.body.errors.join("\n")).toContain("Nothing was written");
+    expect(fs.readFileSync(path.join(target, "README.md"), "utf8")).toBe("my project");
+    expect(fs.existsSync(path.join(root, "home", "bundle-backups"))).toBe(false);
+  });
+
+  it("round 2: first-install parent file conflicts before any target write", () => {
+    const source = path.join(root, "source"), target = path.join(root, "target");
+    fs.mkdirSync(path.join(source, "agents"), { recursive: true }); fs.mkdirSync(target);
+    fs.writeFileSync(path.join(source, "README.md"), "offered");
+    fs.writeFileSync(path.join(source, "agents", "a"), "offered");
+    fs.writeFileSync(path.join(target, "agents"), "local file");
+    expect(materializePodBundle(source, target)).toEqual({ ok: false, conflicts: ["agents"] });
+    expect(fs.existsSync(path.join(target, "README.md"))).toBe(false);
+    expect(fs.readFileSync(path.join(target, "agents"), "utf8")).toBe("local file");
   });
 
   it("copies all edited originals before removing any when preservation fails", () => {

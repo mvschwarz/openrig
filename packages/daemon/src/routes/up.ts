@@ -459,7 +459,7 @@ upRoutes.post("/", async (c) => {
         const detail = s.detail as { code?: string } | undefined;
         const code = detail?.code;
         if (!code) return false;
-        const isResolveSpec4xx = s.stage === "resolve_spec" && (code === "file_not_found" || code === "parse_error" || code === "validation_failed" || code === "bundle_error" || code === "cycle_error" || code === "invalid_cwd");
+        const isResolveSpec4xx = s.stage === "resolve_spec" && (code === "file_not_found" || code === "parse_error" || code === "validation_failed" || code === "bundle_error" || code === "target_conflict" || code === "cycle_error" || code === "invalid_cwd");
         const isImportRig4xx = s.stage === "import_rig" && (code === "validation_failed" || code === "preflight_failed" || code === "cycle_error" || code === "service_boot_failed" || code === "compose_project_conflict");
         if (isResolveSpec4xx || isImportRig4xx) {
           topLevelCode ??= code;

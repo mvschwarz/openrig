@@ -29,7 +29,7 @@ export function getCliVersion(): string {
 }
 
 /** Keep the daemon's messages readable in human output; JSON retains the original body. */
-export function bundleInstallError(data: Record<string, unknown>): string {
+export function bundleInstallError(data: Record<string, unknown>, includeWarnings = true): string {
   const error = data.error ?? data.errors ?? "Install failed";
   const lines = (Array.isArray(error) ? error : [error]).map(String);
   if (typeof data.detail === "string") lines.push(data.detail);
@@ -39,7 +39,7 @@ export function bundleInstallError(data: Record<string, unknown>): string {
   for (const resolution of Array.isArray(data.resolutions) ? data.resolutions : []) {
     if (typeof resolution === "string") lines.push(resolution);
   }
-  for (const warning of Array.isArray(data.warnings) ? data.warnings : []) {
+  for (const warning of includeWarnings && Array.isArray(data.warnings) ? data.warnings : []) {
     if (typeof warning === "string") lines.push(`Warning: ${warning}`);
   }
   return [...new Set(lines)].join("\n");
