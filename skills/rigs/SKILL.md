@@ -29,9 +29,14 @@ machine without a yes.
 - **Start a team in a repository:** list the built-in teams with `rig specs ls --kind rig`, look at one with
   `rig specs preview <name> --kind rig`, check the plan with `rig up <name> --cwd <repo> --plan`, then start it with
   `rig up <name> --cwd <repo>` once the person says yes.
-- **Join this session to a team:** `rig attach --self --rig <rigId> --pod <pod> --member <name>` adds this session as
-  a new member of a pod. `--node <logicalId>` binds it to an existing seat instead. Add `--print-env` and export what it
-  prints, so later `rig` commands know who you are. Check with `rig whoami --json`.
+- **Join this session to a team:**
+  `rig attach --self --rig <rigId> --pod <pod> --member <name> --runtime <claude-code|codex> --print-env` adds this
+  session as a new member of a pod. `--node <logicalId>` binds it to an existing seat instead. Attach once, and keep
+  the variables it prints (`OPENRIG_NODE_ID` and `OPENRIG_SESSION_NAME`). Each command may run in a fresh shell, so put
+  them in front of every later `rig` command. Check with `rig whoami --json`.
+- **Replies:** other agents can't type into this session. Read work sent to you with
+  `rig queue list --destination <your address>` and `rig queue show <id> --full`, and read an agent's screen with
+  `rig capture <seat>@<rig>`.
 
 ## 3. Work with the team
 
