@@ -646,6 +646,7 @@ describe("S05 authored source and observed consumers", () => {
     const failed = await hydrateSnapshot(fixtureClient({ "/api/specs/library/a1/review": { status: 404 } }, { "/api/specs/library": [{ ...(FIXTURES["/api/specs/library"] as object[])[0], summary: "Stale index purpose" }] }), cache, undefined, undefined, undefined, context);
     const view = createViewState({ instanceId: "proof", getSnapshot: () => failed });
     view.dispatch({ type: "drill", resource: "spec", name: "myrig" });
+    view.dispatch({ type: "tab", tab: "configuration" });
     const screen = renderScreen(view.get(), failed, { cols: 90, rows: 40 });
     const body = screen.lines.join("\n");
     expect(body).toContain("Source unavailable");
