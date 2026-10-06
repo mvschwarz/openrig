@@ -144,3 +144,48 @@ describe("computeTopBurn — tokens/hour + window velocity, facts not judgments"
     expect(top.totalRankedSeats).toBe(5);
   });
 });
+
+
+describe("top burn across same-name node histories", () => {
+  function sample(store: UsageSamplesStore, nodeId: string, at: string, total: number) {
+    store.appendContextSample({ nodeId, seatSession: "dev.qa@reused-rig", source: "codex_token_count_jsonl",
+      sampledAt: at, totalInputTokens: total, totalOutputTokens: 0, usedPercentage: 10 }, at);
+  }
+
+  it("does not treat alternating node counter baselines as consumption or resets", () => {
+    const db = db_();
+    try {
+      const store = new UsageSamplesStore(db);
+      sample(store, "old", "2026-08-07T10:00:00.000Z", 1000);
+      sample(store, "new", "2026-08-07T10:30:00.000Z", 100000);
+      sample(store, "old", "2026-08-07T11:00:00.000Z", 1000);
+      sample(store, "new", "2026-08-07T12:00:00.000Z", 100000);
+      expect(computeTopBurn(db, { windowHours: 4, nowIso: NOW }).ranked[0]).toMatchObject({ tokensDelta: 0, tokensPerHour: 0, resets: 0 });
+    } finally { db.close(); }
+  });
+
+  it("sums actual deltas and resets within each node only", () => {
+    const db = db_();
+    try {
+      const store = new UsageSamplesStore(db);
+      sample(store, "old", "2026-08-07T10:00:00.000Z", 1000);
+      sample(store, "new", "2026-08-07T10:30:00.000Z", 100000);
+      sample(store, "old", "2026-08-07T11:00:00.000Z", 1500);
+      sample(store, "new", "2026-08-07T11:30:00.000Z", 500);
+      sample(store, "new", "2026-08-07T12:00:00.000Z", 750);
+      expect(computeTopBurn(db, { windowHours: 4, nowIso: NOW }).ranked[0]).toMatchObject({ tokensDelta: 750, tokensPerHour: 375, resets: 1 });
+    } finally { db.close(); }
+  });
+
+  it("reports insufficient samples when neither node has a measurable pair", () => {
+    const db = db_();
+    try {
+      const store = new UsageSamplesStore(db);
+      sample(store, "old", "2026-08-07T10:00:00.000Z", 1000);
+      sample(store, "new", "2026-08-07T12:00:00.000Z", 100000);
+      const result = computeTopBurn(db, { windowHours: 4, nowIso: NOW });
+      expect(result.ranked).toEqual([]);
+      expect(result.unknown).toEqual([{ seatSession: "dev.qa@reused-rig", reason: "insufficient_samples" }]);
+    } finally { db.close(); }
+  });
+});
