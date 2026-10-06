@@ -22,8 +22,8 @@ function fixture(t, overrides = {}) {
 printf 'npm:%s\n' "$*" >>"$TEST_LOG"
 case "$*" in
   --version) printf '10.9.4\n' ;;
-  'install -g @openrig/cli') printf 'npm native output\n'; printf 'npm native error\n' >&2; exit "${INSTALL_EXIT:-0}" ;;
-  'prefix -g') printf '%s\n' "$TEST_PREFIX"; exit "${PREFIX_EXIT:-0}" ;;
+  'install -g @openrig/cli') printf 'npm native output\n'; printf 'npm native error\n' >&2; exit "\${INSTALL_EXIT:-0}" ;;
+  'prefix -g') printf '%s\n' "$TEST_PREFIX"; exit "\${PREFIX_EXIT:-0}" ;;
   *) exit 90 ;;
 esac`);
   write(path.join(bin, "rig"), 'printf "STALE\\n" >>"$TEST_LOG"; exit 91');
@@ -32,9 +32,9 @@ printf 'installed:%s\n' "$*" >>"$TEST_LOG"
 # Any available stdin would be an implicit answer or unconsumed script bytes.
 if read -r answer; then printf 'unexpected stdin\n' >&2; exit 92; fi
 case "$*" in
-  'setup --dry-run') printf 'setup preview\n'; exit "${PREVIEW_EXIT:-0}" ;;
+  'setup --dry-run') printf 'setup preview\n'; exit "\${PREVIEW_EXIT:-0}" ;;
   setup) printf 'setup native output\n'; printf 'setup native error\n' >&2
-    printf 'Next steps: choose providers, then rig up\n'; exit "${SETUP_EXIT:-0}" ;;
+    printf 'Next steps: choose providers, then rig up\n'; exit "\${SETUP_EXIT:-0}" ;;
   *) exit 93 ;;
 esac`);
   const env = { PATH: bin, HOME: dir, TEST_PREFIX: prefix, TEST_LOG: path.join(dir, "calls"), ...overrides };
