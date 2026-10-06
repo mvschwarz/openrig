@@ -108,10 +108,12 @@ question through the human channel instead.
    person or a fix. If `rig up` reports `Status: partial` with
    `Startup attention (<seat>): <reason>`, tell them what that seat is waiting
    for and the command its reason ends with.
-8. **Show them the team.** Capture the shared TUI (`rig capture
-   operator-human@kernel`). Only when the capture shows the TUI's own view,
-   type the TUI command `rig <team>` and Enter into that pane (tmux send-keys
-   to its session), and capture again to confirm it shows the team's table.
+8. **Show them the team.** Capture the shared TUI: its session is the
+   `operator.human` member's `canonicalSessionName` in
+   `rig ps --nodes --rig kernel --json`. Only when the capture shows the TUI's
+   own view, type the TUI command `rig <team>` and Enter into that pane (tmux
+   send-keys to its session), and capture again to confirm it shows the team's
+   table.
    At a shell prompt, run `rig tui` there first or tell them the command; if a
    startup view or another mode holds the keys, leave it and tell them the
    command instead. Then open the team's terminals as a new space with
