@@ -102,6 +102,48 @@ describe.each(["current", "without generation stamps"])("claim park exit (%s sch
     expect(repo.getById(row.qitemId)?.blockedOn).toBe("external:new-gate");
   });
 
+  it("keeps a claim gate through ordinary note appends, without changing claim notes", async () => {
+    const row = await create();
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked",
+      blockedOn: "human-review@kernel", summary: "Review requested", evidenceRef: "evidence:before" });
+    await claim(row.qitemId);
+    for (const note of ["progress evidence", "more evidence"]) {
+      const response = await app.request(`/api/queue/${row.qitemId}/update`, {
+        method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "worker@rig" },
+        body: JSON.stringify({ transitionNote: note }),
+      });
+      expect(response.status).toBe(200);
+      expect(repo.getById(row.qitemId)?.blockedOn).toBeNull();
+    }
+    const response = await app.request(`/api/queue/${row.qitemId}/update`, {
+      method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "worker@rig" },
+      body: JSON.stringify({ state: "blocked", summary: "Still waiting", evidenceRef: "evidence:after" }),
+    });
+    expect(response.status).toBe(200);
+    expect(repo.getById(row.qitemId)?.blockedOn).toBe("human-review@kernel");
+    expect(repo.listTransitions(row.qitemId).find((entry) => entry.transitionNote === "claimed"))
+      .toMatchObject({ transitionNote: "claimed", closureTarget: "human-review@kernel", closureReason: null });
+  });
+
+  it.each([false, true])("does not resurrect a claim gate after a state write clears it (later note: %s)", async (laterNote) => {
+    const row = await create();
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "external:old-gate" });
+    await claim(row.qitemId);
+    const update = (body: object) => app.request(`/api/queue/${row.qitemId}/update`, {
+      method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "worker@rig" },
+      body: JSON.stringify(body),
+    });
+    // The same-state write is distinct from a note-only history append.
+    expect((await update({ state: "in-progress", transitionNote: "gate no longer needed" })).status).toBe(200);
+    if (laterNote) expect((await update({ transitionNote: "later progress" })).status).toBe(200);
+    const response = await update({ state: "blocked" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ blockedOn: null });
+    expect(repo.getById(row.qitemId)?.blockedOn).toBeNull();
+    expect(repo.listTransitions(row.qitemId).find((entry) => entry.closureTarget === "external:old-gate"))
+      .toMatchObject({ transitionNote: "claimed", closureReason: null });
+  });
+
   it("rolls back the complete park exit if recording the claim fails", async () => {
     const row = await create();
     repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "external:owned-window", wakeAfterSeconds: 90 });

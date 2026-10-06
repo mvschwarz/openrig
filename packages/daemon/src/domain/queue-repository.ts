@@ -2346,6 +2346,16 @@ export class QueueRepository {
     return { qitemId: input.qitemId, ...result };
   }
 
+  /** The current claim gate survives note-only appends, never a later state write. */
+  private retainedClaimBlocker(qitemId: string): string | undefined {
+    const latest = this.transitionLog.listForQitem(qitemId).at(-1);
+    // Explicit state writes do not carry this non-closure audit pointer. Do not
+    // search past one, even if an older claim still records a gate in history.
+    return latest?.state === "in-progress" && latest.closureReason === null
+      ? latest.closureTarget ?? undefined
+      : undefined;
+  }
+
   /**
    * Internal: closure validation + UPDATE + transition log + emit
    * queue.updated event. Caller is responsible for transaction wrapping
@@ -2400,6 +2410,9 @@ export class QueueRepository {
         state: qitem.state,
         actorSession: input.actorSession,
         transitionNote: input.transitionNote,
+        // A note-only append does not clear the claim's retained park gate.
+        // Carry its audit pointer so a later state write can end this chain.
+        closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(input.qitemId) : undefined,
         identityProvenance: input.identityProvenance ?? null,
       });
       const persistedEvent = this.eventBus.persistWithinTransaction({
@@ -2528,8 +2541,7 @@ export class QueueRepository {
     // retains the previous park's gate, as it did before claim cleared the row.
     const previousClaimBlocker = input.state === "blocked" && qitem.state === "in-progress"
       && input.blockedOn == null && qitem.blockedOn == null
-      ? this.transitionLog.listForQitem(input.qitemId).reverse().find((transition) =>
-          transition.state === "in-progress" && transition.transitionNote === "claimed")?.closureTarget
+      ? this.retainedClaimBlocker(input.qitemId)
       : null;
     const effectiveBlockedOn = input.blockedOn ?? qitem.blockedOn ?? previousClaimBlocker ?? null;
     if (input.state === "blocked" && effectiveBlockedOn && this.getById(effectiveBlockedOn)?.humanIntent === "update") {
