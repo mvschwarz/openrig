@@ -223,6 +223,7 @@ export class RigSpecExporter {
       version: "0.2",
       name: rig.rig.name,
       ...(rigPermissionPolicy ? { permissionPolicy: rigPermissionPolicy } : {}),
+      nonInterruptive: this.rigRepo.getRigNonInterruptive(rigId),
       ...(claudeManagedBlockFile ? { managedBlocks: { "claude-code": claudeManagedBlockFile } } : {}),
       ...(workspace ? { workspace } : {}),
       pods: podSpecs,

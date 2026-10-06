@@ -46,7 +46,7 @@ const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string
 
 const RIG_KEYS = new Set([
   "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
-  "startup", "services", "workspace", "pods", "edges",
+  "startup", "services", "workspace", "pods", "edges", "non_interruptive",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
@@ -172,6 +172,10 @@ export class RigSpecSchema {
       if (refErr) errors.push(refErr);
     }
 
+    if (obj["non_interruptive"] !== undefined && typeof obj["non_interruptive"] !== "boolean") {
+      errors.push("non_interruptive: must be a boolean");
+    }
+
     // #25: optional per-runtime managed-block destination. Only claude-code is
     // configurable in this release; Codex stays on AGENTS.md.
     if (obj["managed_blocks"] !== undefined) {
@@ -245,6 +249,7 @@ export class RigSpecSchema {
       summary: raw["summary"] as string | undefined,
       cultureFile: raw["culture_file"] as string | undefined,
       permissionPolicy: raw["permission_policy"] as string | undefined,
+      nonInterruptive: raw["non_interruptive"] as boolean | undefined,
       managedBlocks: raw["managed_blocks"] as RigSpec["managedBlocks"],
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,

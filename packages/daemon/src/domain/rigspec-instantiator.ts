@@ -1342,7 +1342,8 @@ export class PodRigInstantiator {
       const rig = create();
       rigId = rig.id;
       createdRigId = rig.id;
-      if (opts?.nonInterruptive !== undefined) this.deps.rigRepo.setRigNonInterruptive(rigId, opts.nonInterruptive);
+      const nonInterruptive = opts?.nonInterruptive ?? rigSpec.nonInterruptive;
+      if (nonInterruptive !== undefined) this.deps.rigRepo.setRigNonInterruptive(rigId, nonInterruptive);
       // PL-007: persist typed workspace block (when declared) on the rig
       // record. Whoami / node-inventory read it via getRigWorkspace().
       if (rigSpec.workspace) {

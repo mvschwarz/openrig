@@ -1166,6 +1166,8 @@ export interface WorkspaceSpec {
 }
 
 export interface RigSpec {
+  /** Authored launch-warning choice; an explicit launch option takes precedence. */
+  nonInterruptive?: boolean;
   version: string;
   name: string;
   summary?: string;
