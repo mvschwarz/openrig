@@ -14,8 +14,10 @@ export function bundleInstallContext(
   db: Database.Database, rigName: string, offered: BundleInstallContext["offered"],
 ): BundleInstallContext {
   const running = makeRunningSessionCounter(db);
-  const existing = new RigRepository(db).findRigsByName(rigName)
-    .filter(rig => !rig.archivedAt || running(rig.id) > 0)
+  const rigs = new RigRepository(db);
+  const unarchived = new Set(rigs.findUnarchivedRigsByName(rigName).map(rig => rig.id));
+  const existing = rigs.findRigsByName(rigName)
+    .filter(rig => unarchived.has(rig.id) || running(rig.id) > 0)
     .map(rig => {
       // History records the source used, not immutable manifest bytes. Never infer
       // an installed version from an archive that may since have been replaced.

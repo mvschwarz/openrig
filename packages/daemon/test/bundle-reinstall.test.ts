@@ -88,7 +88,8 @@ describe("bundle reinstall through both public routes", () => {
     expect(result.status).toBe(201);
     expect(result.body.bundleInstall.existing[0].state).toBe("stopped");
     expect(result.body.warnings.join("\n")).toContain(`rig unarchive ${previous.id}`);
-    expect(setup.rigRepo.getRig(previous.id)!.rig.archivedAt).toBeTruthy();
+    expect(setup.rigRepo.findUnarchivedRigsByName(name).map(rig => rig.id)).not.toContain(previous.id);
+    expect(setup.rigRepo.findRigsByName(name).map(rig => rig.id)).toContain(previous.id);
     expect(setup.rigRepo.listRigs().map(rig => rig.id)).toEqual([result.body.rigId]);
     expect(fs.readFileSync(path.join(target, "README.md"), "utf8")).toBe("offered team documentation\n");
     expect(fs.readFileSync(path.join(target, "unrelated.txt"), "utf8")).toBe("leave me here");
