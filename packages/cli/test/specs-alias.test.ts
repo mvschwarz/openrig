@@ -11,7 +11,7 @@ describe("first-project compatibility alias", () => {
     const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
     const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
     expect(await resolveLibrarySpec(clientFor([starter]), "first-project", { kind: "rig" })).toEqual(starter);
-    expect(stderr).toHaveBeenCalledWith("first-project is now starter");
+    expect(stderr).toHaveBeenCalledWith("first-project is now starter (a Claude builder and a Codex reviewer); on a Codex-only machine, ask your OpenRig operator to adapt it");
     expect(stdout).not.toHaveBeenCalled();
   });
   it.each(["builtin", "user_file"])("preserves an exact %s first-project name", async (sourceType) => {

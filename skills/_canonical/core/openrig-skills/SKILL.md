@@ -13,7 +13,7 @@ You're running inside OpenRig. OpenRig ships a set of **skills** — small docum
 
 ## How OpenRig context works (30 seconds)
 
-Skills are **progressive disclosure**: a skill's *name + description* sit in your context ambiently (the "hot tier"); its *body* loads only when you open it. So you don't pre-read everything — you pattern-match a skill's "when" to your moment, then open just that one. This file is the index over the whole shipped set. (For bounded procedures, open `agent-operated-workflows`; for ongoing agent-backed applications, open `agent-operated-software`.)
+Skills are **progressive disclosure**: a skill's *name + description* sit in your context ambiently (the "hot tier"); its *body* loads only when you open it. So you don't pre-read everything — you pattern-match a skill's "when" to your moment, then open just that one. This file recommends skills from the shipped set. (For bounded procedures, open `agent-operated-workflows`; for ongoing agent-backed applications, open `agent-operated-software`.)
 
 Every row below names **how to reach the skill** — already-hot, or an exact load path. No row is a dead end.
 
@@ -43,7 +43,7 @@ shows an operator — `get` is the agent-facing pull.)
 
 ## The index
 
-> Membership rule (`layout.skills[*].edges.length > 0`): every public skill with at least one product edge in the generated edge layout appears exactly once in this index; no other skill appears.
+> Membership rule (`layout.skills[*].edges.length > 0`): this index recommends skills from the public product edges. Optional procedures remain available through `rig context list` without a recommendation here.
 
 ### Always loaded — the universal spine (open its body when its moment hits)
 These are auto-delivered to every rig; their name+description are already in your context. Open the body when the "when" matches.
@@ -106,7 +106,6 @@ Product-management craft (load when shaping/reviewing work):
 ### Vendored craft — load when you're coding (ships with upstream provenance)
 General engineering skills OpenRig ships as vendored copies. Open when the task matches; they carry "modified by OpenRig" provenance.
 
-- **test-driven-development** — implementing a feature or bugfix: write the failing test first.
 - **verification-before-completion** — about to claim done / passing / fixed: run the check and read the output first.
 - **systematic-debugging** — debugging: find the root cause before the fix.
 - **agent-browser** — driving a browser (screenshot / screencast) from an agent.

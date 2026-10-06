@@ -172,7 +172,7 @@ export async function resolveLibrarySpec(
     const starters = entries.filter((entry) =>
       entry.kind === "rig" && entry.name === "starter" && entry.sourceType === "builtin");
     if (starters.length === 1) {
-      console.error("first-project is now starter");
+      console.error("first-project is now starter (a Claude builder and a Codex reviewer); on a Codex-only machine, ask your OpenRig operator to adapt it");
       return starters[0]!;
     }
     if (starters.length > 1) {
