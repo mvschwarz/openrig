@@ -652,8 +652,8 @@ Examples:
 Siblings are untouched. A dead seat is refused (use rig seat clean); an adopted
 session is refused (use rig unclaim). Stopping ends that agent's session and any
 work in progress: check it first (rig capture <seat>) and stop only a seat you
-own or were asked to stop. rig seat launch <seat> --reason <text> starts a fresh
-occupant there; it does not resume the stopped conversation. Examples:
+own or were asked to stop. rig seat launch <seat> --fresh --reason <text> starts
+a fresh occupant there; it does not resume the stopped conversation. Examples:
   rig seat stop dev-impl@my-rig --reason "wave boundary retirement"
   rig seat stop dev.impl --reason "stuck occupant" --json`)
     .action(async (seat: string, opts: { reason: string; operator?: string; json?: boolean }) => {

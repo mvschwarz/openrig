@@ -27,8 +27,9 @@ human channel; a terminal attachment is not a person's address.
   1. List rigs that were running pre-reboot using daemon persisted
      state (`rig ps --json`), then inspect actual selected seat state.
   2. Confirm with the user which subset to restart.
-  3. Restart each via `rig up <rig-name> --existing`, which restores it from its latest
-     snapshot (`rig up <spec>` would start a new team in place of the stopped one).
+  3. Restart each via `rig up <rig-name> --existing`, which restores it from its
+     automatically selected snapshot (`rig up <spec>` would start a new team in place
+     of the stopped one).
   4. Confirm healthy via `rig ps --nodes --rig <name>`.
 - Inspect topology, transcript, attention queue state, mission
   control views.
