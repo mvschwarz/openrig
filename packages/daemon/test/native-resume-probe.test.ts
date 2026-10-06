@@ -125,7 +125,7 @@ describe("native resume probe", () => {
     it.each([
       ["Do you trust the contents of this directory?\n  Yes, continue", "trust_gate"],
       ["Update available!", "update_gate"],
-      [currentUpdatePrompt, "update_gate"],
+      [currentUpdatePrompt.trimEnd(), "update_gate"],
     ])("does not let a custom footer dismiss an unresolved gate: %s", (gate, code) => {
       expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "sh",
         paneContent: `› Earlier conversation prompt\n${gate}\n${reportedFooter}`,
