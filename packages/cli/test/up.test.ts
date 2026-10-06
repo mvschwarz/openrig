@@ -1010,13 +1010,14 @@ describe("Up CLI", () => {
   });
 
   it.each([
-    ["fresh alias", [], [], false, 0],
-    ["existing starter", [{ id: "new-rig", name: "starter" }], [], false, 1],
-    ["existing old name", [{ id: "old-rig", name: "first-project" }], [], false, 1],
-    ["archived starter", [], [{ id: "archived-new", name: "starter" }], false, 1],
-    ["archived old name", [], [{ id: "archived-old", name: "first-project" }], false, 1],
-    ["explicit old restore", [{ id: "old-rig", name: "first-project" }], [], true, 0],
-  ] as const)("first-project routing: %s", async (_label, active, archived, existing, exit) => {
+    ["fresh alias", [], [], false, 0, "first-project"],
+    ["existing starter", [{ id: "new-rig", name: "starter" }], [], false, 1, "first-project"],
+    ["existing old name", [{ id: "old-rig", name: "first-project" }], [], false, 1, "first-project"],
+    ["archived starter", [], [{ id: "archived-new", name: "starter" }], false, 1, "first-project"],
+    ["archived old name", [], [{ id: "archived-old", name: "first-project" }], false, 1, "first-project"],
+    ["explicit old restore", [{ id: "old-rig", name: "first-project" }], [], true, 0, "first-project"],
+    ["explicit library ID", [{ id: "new-rig", name: "starter" }], [], false, 0, "starter-spec"],
+  ] as const)("first-project routing: %s", async (_label, active, archived, existing, exit, input) => {
     const originalListeners = server.listeners("request").slice();
     server.removeAllListeners("request");
     const posts: Array<Record<string, unknown>> = [];
@@ -1038,7 +1039,7 @@ describe("Up CLI", () => {
     });
     try {
       const result = await captureLogs(async () => {
-        await makeCmd().parseAsync(["node", "rig", "up", "first-project", "--plan", "--json", ...(existing ? ["--existing"] : [])]);
+        await makeCmd().parseAsync(["node", "rig", "up", input, "--plan", "--json", ...(existing ? ["--existing"] : [])]);
       });
       expect(result.exitCode ?? 0).toBe(exit);
       if (exit) {

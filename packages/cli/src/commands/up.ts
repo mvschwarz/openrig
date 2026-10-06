@@ -305,8 +305,10 @@ Examples:
           // Use /api/rigs/summary which mirrors findRigsByName (includes stopped rigs)
           const rigSummaries = await fetchRigSummaries();
           // An alias must not bypass the canonical name's existing/archive checks.
-          if (entry.name !== source && await refuseArchivedName(entry.name)) return;
-          const rigMatches = rigSummaries.filter((r) => r.name === source || r.name === entry.name);
+          const resolvedName = source === "first-project" && entry.name === "starter" && entry.sourceType === "builtin"
+            ? entry.name : source;
+          if (resolvedName !== source && await refuseArchivedName(resolvedName)) return;
+          const rigMatches = rigSummaries.filter((r) => r.name === source || r.name === resolvedName);
           if (rigMatches.length > 0) {
             console.error(`'${source}' is ambiguous — it matches both an existing rig restore target and a library spec.`);
             console.error(`  To launch the library spec: rig up ${entry.sourcePath}`);
