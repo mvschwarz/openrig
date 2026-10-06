@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { resolve, isAbsolute } from "node:path";
+import { existsSync } from "node:fs";
 import { Command } from "commander";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
@@ -117,6 +118,14 @@ export function printWorkflowAdvisories(advisories: string[] | undefined): void 
   }
 }
 
+// Preserve discovered workflow IDs, but bind explicit or existing local files
+// to the CLI working directory before the daemon reads them.
+function resolveWorkflowSource(source: string): string {
+  return isAbsolute(source) || source.includes("/") || source.includes("\\") || existsSync(source)
+    ? resolve(source)
+    : source;
+}
+
 export function workflowCommand(depsOverride?: WorkflowDeps): Command {
   const cmd = new Command("workflow").description(
     "Daemon-native Workflow Runtime — declarative spec + transactional-scribe step projection (PL-004 Phase D)",
@@ -139,7 +148,7 @@ Examples:
     .action(async (specPath: string, opts: { json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        const res = await client.post<unknown>("/api/workflow/validate", { specPath });
+        const res = await client.post<unknown>("/api/workflow/validate", { specPath: resolve(specPath) });
         printResult(opts.json ?? false, res.data, res.status);
       });
     });
@@ -283,7 +292,7 @@ Examples:
           instance?: { boundRig?: string | null };
           advisories?: string[];
         }>("/api/workflow/instantiate", {
-          specPath,
+          specPath: resolveWorkflowSource(specPath),
           rootObjective: opts.rootObjective,
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
@@ -703,7 +712,7 @@ Examples:
           instance?: { instanceId?: string };
           advisories?: string[];
         }>("/api/workflow/instantiate", {
-          specPath,
+          specPath: resolveWorkflowSource(specPath),
           rootObjective: opts.rootObjective,
           createdBySession: opts.createdBy,
           entryOwnerSession: opts.entryOwner,
