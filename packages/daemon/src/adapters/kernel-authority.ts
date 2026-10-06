@@ -10,6 +10,8 @@ export const KERNEL_CLAUDE_ALLOW = [
     "uname", "ps", "pgrep", "lsof", "df", "du", "ls", "cat", "head", "tail", "rg", "grep",
     "find", "stat", "date", "sleep", "mkdir", "cp", "mv", "chmod", "tar", "shasum"]
     .map(command => `Bash(${command}:*)`),
+  // Read-only provider login checks, so the operator can check a chosen team's provider without a prompt.
+  "Bash(claude auth status:*)", "Bash(codex login status:*)",
   "Read(~/**)",
 ];
 

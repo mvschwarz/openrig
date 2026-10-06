@@ -56,7 +56,9 @@ through the human channel instead.
    With both available, any of the three works; the mixed team's checker uses
    a different provider from its owner. Then check only that team's provider
    (`claude auth status` or `codex login status`). If you run in Claude Code,
-   say in one line that the check may ask them to approve it. If the login is
+   the kernel launch allows both checks; say in one line that it can still
+   ask them to approve it if their own permission rules cover that command.
+   If the login is
    missing, ask once for `claude auth login` or `codex login` and recheck
    afterwards; don't ask for the other provider.
 3. **Show it before anything starts.** Draw the team from its real spec, not

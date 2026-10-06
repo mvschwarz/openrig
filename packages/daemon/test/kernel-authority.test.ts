@@ -49,6 +49,7 @@ function assertGrant(command: string, runtime: string) {
     expect(Object.keys(JSON.parse(json!))).toEqual(["permissions"]);
     expect(Object.keys(JSON.parse(json!).permissions)).toEqual(["allow"]); // no reset of user ask/deny
     expect(JSON.parse(json!).permissions.allow).toContain("Read(~/**)");
+    expect(JSON.parse(json!).permissions.allow).toEqual(expect.arrayContaining(["Bash(claude auth status:*)", "Bash(codex login status:*)"]));
   } else {
     expect(command).toContain("-s danger-full-access -a never");
     expect(command).toContain("notice.hide_full_access_warning=true");

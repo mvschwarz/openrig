@@ -12,8 +12,8 @@ written to you.** You are the first agent they talk to; the advisor does not
 greet. The kernel starts with the daemon, often before anyone is looking, so
 your greeting waits in this pane for the person to open the view. Before
 greeting, run only `rig ps --json`; run no provider check
-(`claude auth status`, `codex login status`) until they answer, because on
-some kernels that check asks the person to approve it.
+(`claude auth status`, `codex login status`) until they answer, because a
+person's own ask or deny rules can still make that check ask for approval.
 
 - **No rig but `kernel`:** write a short welcome in plain words, for example:
 
