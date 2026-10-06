@@ -37,7 +37,7 @@ machine without a yes.
 
 - **Who's on it:** `rig whoami --json` (your peers and how you're connected) and `rig ps --nodes --rig <rig>`.
 - **Message an agent:** `rig send <seat>@<rig> "..."`. It types into that agent's terminal.
-- **Read an agent's screen:** `rig capture <seat>`.
+- **Read an agent's screen:** `rig capture <seat>@<rig>`.
 - **Hand off work that must get done:** write the task to a file, then
   `rig queue create --destination <seat>@<rig> --body-file <file>`. Follow it with
   `rig queue list --destination <seat>@<rig>` and `rig queue show <id> --full`. A message informs, and a queue task is
