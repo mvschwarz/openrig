@@ -857,7 +857,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // A user's own status line command wins; only OpenRig's collector command is installed or refreshed.
     // If this command's shape changes, keep the old shape recognised in isOwnedCollectorCommand, or
     // seats holding it will never be refreshed.
-    const collectorCmd = `node ${collectorDest} ${contextDir} ${providerUsageDir}`;
+    const collectorCmd = `node ${shellQuote(collectorDest)} ${shellQuote(contextDir)} ${shellQuote(providerUsageDir)}`;
     const current = statusLine["command"];
     if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
 
@@ -986,15 +986,20 @@ function hookCommand(hook: unknown): string | undefined {
   return isPlainObject(hook) && typeof hook["command"] === "string" ? (hook["command"] as string) : undefined;
 }
 
-// OpenRig-owned context collector. provisionContextCollector writes exactly
-// `node <cwd>/.openrig/context-collector.cjs <contextDir> <providerUsageDir>`, unquoted; older
-// releases wrote the same command without `<providerUsageDir>`. Ownership is either shape with any
-// (possibly stale) paths, on one line. A command that merely contains the path, composed with `;`,
-// `&&`, a pipe or a newline, or naming another file such as `.cjs.backup`, is the user's.
+// OpenRig-owned collectors use canonical POSIX-quoted paths. Recognise older unquoted
+// three/four-token commands too, but preserve commands composed with shell operators or
+// extra arguments. Old unquoted paths containing spaces cannot be identified unambiguously.
 const OWNED_COLLECTOR_SUFFIX = nodePath.sep + nodePath.join(".openrig", "context-collector.cjs");
 
 function isOwnedCollectorCommand(cmd: string): boolean {
   if (/[\r\n]/.test(cmd)) return false;
+  const quoted = /^node ('(?:[^']|'"'"')*') ('(?:[^']|'"'"')*')(?: ('(?:[^']|'"'"')*'))?$/.exec(cmd.trim());
+  if (quoted) {
+    const tokens = quoted.slice(1).filter((token): token is string => token !== undefined);
+    const decoded = tokens.map(unquoteSingleShellToken);
+    if (decoded.some((value, index) => value === null || shellQuote(value) !== tokens[index])) return false;
+    return decoded[0]!.endsWith(OWNED_COLLECTOR_SUFFIX);
+  }
   const tokens = cmd.trim().split(/\s+/);
   if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
   if (tokens.some((token) => /[;&|<>`$()'"\\]/.test(token))) return false;
