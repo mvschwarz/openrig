@@ -23,7 +23,12 @@ function extractText(content: unknown, codex = false): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .filter((b): b is { type: string; text: string } => !!b && typeof b === "object" && ((b as { type?: unknown }).type === "text" || (codex && ((b as { type?: unknown }).type === "input_text" || (b as { type?: unknown }).type === "output_text"))) && typeof (b as { text?: unknown }).text === "string")
+      .filter((block): block is { type: string; text: string } => {
+        if (!block || typeof block !== "object") return false;
+        const { type, text } = block as { type?: unknown; text?: unknown };
+        const visible = type === "text" || (codex && (type === "input_text" || type === "output_text"));
+        return visible && typeof text === "string";
+      })
       .map((b) => b.text)
       .join("\n");
   }
