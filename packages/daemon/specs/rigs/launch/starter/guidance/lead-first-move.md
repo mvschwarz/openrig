@@ -18,3 +18,6 @@ You build it and `dev-review` checks it before you call it done.
 **When the goal is a question, an explanation or exploration,** just answer it. No mission or slice.
 
 When the goal is done, close the operator's row with the result.
+
+`rig down`, `rig seat stop` and `rig up` on a running team end agents' sessions or replace the team. Don't run them
+unless the person asked; check `rig ps --nodes` first.

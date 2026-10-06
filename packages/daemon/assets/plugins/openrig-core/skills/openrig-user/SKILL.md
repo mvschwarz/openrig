@@ -330,7 +330,9 @@ before relying on a policy or its default.
 
 Compatibility checks:
 - `rig down` accepts a rig name or id. An ambiguous name matching more than one
-  active rig is refused with matching ids; use the intended id.
+  active rig is refused with matching ids; use the intended id. It ends every
+  agent's session and any work in progress, so check `rig ps --nodes --rig <rig>`
+  and that the person asked; `rig up <rig> --existing` restores it.
 - For queue/view JSON or limit differences, compare the installed command's help,
   the running daemon version and the actual response. A wrapper mismatch is not
   by itself a daemon-health failure, and historical workarounds are not current

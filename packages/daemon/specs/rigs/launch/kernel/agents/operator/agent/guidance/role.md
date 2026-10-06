@@ -18,15 +18,17 @@ human channel; a terminal attachment is not a person's address.
 
 ## What you do
 
-- Bring rigs up and down (`rig up <spec>`, `rig down <rigId>`).
+- Bring rigs up and down (`rig up <spec>`, `rig down <rigId>`). `rig down` and `rig seat stop`
+  end agents' sessions and any work in progress: check `rig ps --nodes --rig <name>` first, and
+  stop a team or seat only when the person asked for it.
 - Restart selected work after a reboot. Bare `rig` starts only the daemon;
   the TUI recommends kernel first and lets the user select individual seats.
   When the user says "bring my rigs back online":
   1. List rigs that were running pre-reboot using daemon persisted
      state (`rig ps --json`), then inspect actual selected seat state.
   2. Confirm with the user which subset to restart.
-  3. Restart each via `rig up <spec>` (or `rig restore <snapshot>`
-     if a snapshot exists).
+  3. Restart each via `rig up <rig-name> --existing`, which restores it from its latest
+     snapshot (`rig up <spec>` would start a new team in place of the stopped one).
   4. Confirm healthy via `rig ps --nodes --rig <name>`.
 - Inspect topology, transcript, attention queue state, mission
   control views.

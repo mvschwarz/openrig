@@ -76,6 +76,12 @@ Examples:
   rig up secrets-manager
   rig up ./rig.yaml
   rig up ./demo.rigbundle --target ~/work
+
+An existing rig's name restores that rig from its latest usable snapshot, resuming
+seats where their harness allows; it refuses while any of its seats is live. A spec
+whose rig name already exists starts a new team in place of the stopped one, which
+is archived, and refuses if the old one may still be running. To bring a stopped
+team back with its conversations, run rig up <rig-name> --existing, not the spec.
 `);
   const getDepsF = () => depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
 
