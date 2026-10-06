@@ -170,6 +170,8 @@ describe("non-interruptive launch choice", () => {
 
 describe("persisted choice at the launch boundary", () => {
   it.each([
+    // A rig without an authored or requested choice must keep its export undeclared.
+    [undefined, undefined, false],
     [undefined, true, true], [true, undefined, true], [true, false, false],
     [false, true, true], [false, undefined, false],
   ] as const)("authored %s / request %s persists %s before launch and restore", async (declared, request, expected) => {
@@ -213,7 +215,12 @@ edges: []
       expect(bindings.map(b => [b.nonInterruptive, b.launchPosture])).toEqual([[expected, "full_bypass"], [expected, "floor"]]);
       const rigId = (result as { ok: true; result: { rigId: string } }).result.rigId;
       expect(setup.rigRepo.getRigNonInterruptive(rigId)).toBe(expected);
-      expect(setup.rigSpecExporter.exportRig(rigId)).toMatchObject({ nonInterruptive: expected });
+      const exported = setup.rigSpecExporter.exportRig(rigId);
+      if (expected) expect(exported).toMatchObject({ nonInterruptive: true });
+      else expect(exported).not.toHaveProperty("nonInterruptive");
+      const exportedYaml = RigSpecCodec.serialize(exported as import("../src/domain/types.js").RigSpec);
+      if (expected) expect(exportedYaml).toContain("non_interruptive: true");
+      else expect(exportedYaml).not.toContain("non_interruptive:");
       expect(nonInterruptiveArgs("claude-code", bindings[1]!)).toEqual([]);
       const rig = setup.rigRepo.getRig(rigId)!;
       const node = rig.nodes.find(n => n.logicalId === "dev.impl")!;

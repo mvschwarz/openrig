@@ -48,8 +48,10 @@ A pod-aware `rig.yaml` may declare `non_interruptive: true` alongside its
 permission policy. This saves the choice on the installed rig without requiring
 a CLI flag. Explicit `--non-interruptive` or `--no-non-interruptive` wins over
 the spec; a declared boolean wins over the machine's `launch.non_interruptive`
-default. A declaration of `false` is distinct from omission. Exported rigs
-carry the saved choice, and later restores retain it.
+default. A declaration of `false` is distinct from omission. Exports include
+`non_interruptive: true` when enabled; disabled or unset choices omit the key
+because saved state does not distinguish their origin. Restores of the existing
+rig retain its saved choice.
 
 The before-install view reports this declaration as
 `posture[].nonInterruptiveDefault` for full-bypass Claude/Codex seats, separately
