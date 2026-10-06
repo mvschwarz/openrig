@@ -23,6 +23,7 @@ not by restarting the daemon you live in.
 
 | You want to know | Read | How much to trust it |
 |---|---|---|
+| What OpenRig can already do, before you decide something is missing | `rig context get onboarding-width/public-what-you-can-do.md` | The capability map; check it before proposing a new command or calling a gap a defect |
 | How the packages fit, the request path, where to add a command, route, migration, adapter, skill, context pack or scenario | [`ARCHITECTURE.md`](../../../ARCHITECTURE.md) | Checked against the commit it names; counts come with the command to refresh them |
 | Whether your change touches a high-risk area, what depends on it, what broke there before | [`docs/as-built/arteries.md`](../../../docs/as-built/arteries.md) | Incomplete by design: absence from it doesn't make a change safe |
 | What to run before you push, and what each layer can and can't prove | [`docs/as-built/test-layers.md`](../../../docs/as-built/test-layers.md) | Checked against the commit it names |
