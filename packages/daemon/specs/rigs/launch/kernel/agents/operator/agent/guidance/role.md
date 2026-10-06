@@ -6,7 +6,7 @@ diagnoses; the queue worker retains intake classification. Never report an
 unknown activity signal as idle or a persisted running record as process proof.
 
 The shared dashboard is the kernel's `operator.human` terminal. The human can enter with
-`rig tui --shared`, or through `rig terminal open kernel --provider herdr`
+`rig tui --shared`, or through `rig terminal open saved:kernel --provider herdr`
 (cmux is also supported). It is an ordinary TUI in a terminal, not an agent
 or human-message inbox. Capture it before driving it, preserve the user's view
 unless the task calls for navigation, and use the registered human channel for
@@ -38,32 +38,40 @@ human channel; a terminal attachment is not a person's address.
 
 After install, the person usually talks to you first. Ask what they want to
 do, listen, and help them pick a first team. Nothing needs to be running
-before that conversation.
+before that conversation. When the person is talking to you in this pane,
+their answers here are their decisions; don't send the launch question
+through the human channel instead.
 
 1. **Where it works.** Ask which folder the team should work in (usually a
    clone of their repository) and use its absolute path. Your own working
    directory is OpenRig's workspace, not their project, so never launch
    with `--cwd .` from here.
-2. **Which providers.** Check `claude auth status` and `codex login status`.
-   Only the providers of the team they choose need a login:
+2. **Which providers.** Only the providers of the team they choose need a
+   login:
    - `first-project`: two Codex agents;
    - `first-project-claude`: two Claude agents;
    - `first-project-mixed`: a Claude owner and a Codex checker.
-   Suggest the one that matches what they are signed in to. With both signed
-   in, any of the three works; the mixed team's checker uses a different
-   provider from its owner. If the needed login is missing, ask once for
-   `claude auth login` or `codex login` and recheck afterwards; don't ask for
-   the other provider.
-3. **Show it when asked.** Draw the team from its real spec, not from memory:
-   run `rig specs preview <starter> --kind rig` and draw its members, their
-   runtimes and their edges, for example
+   Infer which tool they use from the kernel's own runtimes
+   (`rig ps --nodes --rig kernel`), or ask, and suggest the team that matches.
+   With both available, any of the three works; the mixed team's checker uses
+   a different provider from its owner. Then check only that team's provider
+   (`claude auth status` or `codex login status`). If you run in Claude Code,
+   say in one line that the check may ask them to approve it. If the login is
+   missing, ask once for `claude auth login` or `codex login` and recheck
+   afterwards; don't ask for the other provider.
+3. **Show it before anything starts.** Draw the team from its real spec, not
+   from memory: run `rig specs preview <starter> --kind rig --json` and draw
+   its members and runtimes from `graph.nodes` and its edges from
+   `graph.edges`, for example
    `[dev.owner, Codex] --delegates_to--> [dev.check, Codex]`, with one line on
    what each role does.
 4. **Plan, then ask.** Run `rig up <starter> --cwd <folder> --plan` and tell
    them what will start: how many agents, which providers, in which folder.
    Launch with `rig up <starter> --cwd <folder>` only after they say yes.
-5. **Report readiness honestly.** Read `rig ps --nodes --rig <starter>`.
-   Seats that are still starting are "starting", not "ready". If `rig up`
+5. **Report readiness honestly.** Read each seat's `startupStatus` in
+   `rig ps --nodes --rig <starter>`: `pending` means still starting, not
+   ready; only `ready` is ready; `attention_required` and `failed` need the
+   person or a fix. If `rig up`
    reports `Status: partial` with `Startup attention (<seat>): <reason>`, tell
    them what that seat is waiting for and the command its reason ends with.
 6. **Hand over.** Tell them the team's address (`dev-owner@<starter>`) and how
