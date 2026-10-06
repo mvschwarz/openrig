@@ -102,8 +102,19 @@ question through the human channel instead.
      directory.
 6. **Plan, then ask.** Run `rig up <team, copy path or link> --cwd <folder>
    --plan` (for workshop, with its `--target ~/rigs/workshop`) and tell them
-   what will start: how many agents, which providers, in which folder. Launch
-   the same command without `--plan` only after they say yes.
+   what will start: how many agents, which providers, in which folder. Use
+   `applying-a-permission-policy` for permissions and reuse an explicit choice
+   for these harnesses and this scope. If they are unsure, recommend its scoped
+   middle option: remember routine OpenRig commands for this project while
+   keeping other native controls. Explain that keeping prompts can require
+   repeated judgments across several team panes, and that command allowances
+   do not cover every test or shell command. Offer broader access separately;
+   don't collapse the choice into full access or repeated prompts, or treat
+   "what do you suggest?" as consent. If approvals later interrupt work, name
+   them and offer a scoped adjustment; keep the existing choice until accepted.
+   Launch the same command without `--plan` after they approve the team launch;
+   that approval is separate from permission changes. A choice to keep prompts
+   does not prevent an authorized launch.
 7. **Report readiness honestly.** Read each seat's `startupStatus` in
    `rig ps --nodes --rig <team> --json`: `pending` means still starting, not
    ready; only `ready` is ready; `attention_required` and `failed` need the

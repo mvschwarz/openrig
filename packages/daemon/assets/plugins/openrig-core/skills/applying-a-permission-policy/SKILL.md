@@ -23,7 +23,17 @@ to invent tasks, publish work or change another host.
 Reuse an existing explicit choice for these harnesses and this scope from the
 user's onboarding context; do not ask again. Existing rules are configuration,
 not evidence of consent to expand their scope. Preserve them without expansion.
-If the choice is unknown, briefly explain:
+
+Do not reduce the choice to full access or repeated prompts. For someone unsure
+what to choose, recommend the scoped middle option: remember routine OpenRig
+commands for this project, keep other native controls, and ask for their Yes.
+Explain that keeping prompts can mean repeated approvals in several team panes,
+including routine setup and tests; the person needs to be available to judge
+them. Command allowances reduce only matching prompts, not every interruption.
+Broader access remains a separate choice with its filesystem/network exposure
+explained. A request for your recommendation is not consent to change settings.
+
+If the choice is unknown, briefly explain the scope and ask:
 
 > This allows the whole `rig` command family, including starting/stopping agents,
 > changing OpenRig configuration and launching processes. It is not global YOLO
@@ -55,9 +65,14 @@ an answered setup question or ask again for routine steps already authorized.
 
 | Choice | What the agent configures |
 | --- | --- |
-| Keep prompts | Preserve current native settings and handle requests when they arise. |
+| Keep prompts | Preserve current native settings; explain that the person may need to judge repeated requests across the team's panes. |
 | Remember selected commands | Add native allow rules for the chosen family or narrower verbs, leaving other rules and sandbox settings intact. |
 | Broader permissive operation | Explain filesystem/network exposure and configure only the explicitly selected native mode and compatible launch settings. |
+
+If repeated approvals later interrupt the work, name the actual commands and
+offer a scoped adjustment then. Keep the existing choice until the person
+accepts a change; do not promise to adjust later and silently leave the burden
+with them. Do not reopen an answered choice for each routine operation.
 
 **Allowing the whole `rig` family covers all its verbs**, including lifecycle,
 topology/config changes and commands that can launch other processes. It is not
