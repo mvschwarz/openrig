@@ -19,7 +19,10 @@ pods:
         runtime: claude-code
         profile: advisor
         cwd: "."
-    edges: []
+    edges:
+      - kind: collaborates_with
+        from: advisor
+        to: lead
 
   - id: dev
     label: Development
@@ -87,6 +90,3 @@ edges:
   - kind: can_observe
     from: review.r2
     to: dev.qa
-  - kind: collaborates_with
-    from: orch.advisor
-    to: orch.lead
