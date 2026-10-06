@@ -680,50 +680,80 @@ describe("SessionTransport", () => {
     expect(callOrder).toEqual(["capture", "capture", "sendText", "sendKeys"]);
   });
 
-  it("send with wait-for-idle times out on running activity without sending text", async () => {
+  it.each([0, 5])("send with wait-for-idle times out on running activity without sending text (capture cost %ims)", async (captureCostMs) => {
     seedCanonicalRig();
-    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
-    const tmux = mockTmux({
-      capturePaneContent: async () => "Working on task...\n⠋ Processing files\nesc to interrupt",
-      sendText: sendTextSpy,
-    });
-    const transport = createTransport(tmux, { waitForIdlePollMs: 1 });
+    // These cases test expiry AFTER a running observation, not classification speed.
+    // Freeze both the deadline clock and its race timer; advance only at the poll.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({
+        capturePaneContent: async () => {
+          const end = performance.now() + captureCostMs;
+          while (performance.now() < end) { /* controlled classification CPU cost */ }
+          return "Working on task...\n⠋ Processing files\nesc to interrupt";
+        },
+        sendText: sendTextSpy,
+      });
+      const sleep = vi.fn(async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); });
+      const transport = createTransport(tmux, { sleep, waitForIdlePollMs: 1 });
 
-    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("wait_for_idle_timeout");
-    expect(result.sent).toBe(false);
-    expect(result.activity?.state).toBe("running");
-    expect(sendTextSpy).not.toHaveBeenCalled();
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("wait_for_idle_timeout");
+      expect(result.sent).toBe(false);
+      expect(result.activity?.state).toBe("running");
+      expect(sendTextSpy).not.toHaveBeenCalled();
+      expect(result.attempts).toBe(2);
+      expect(result.waitedMs).toBe(1);
+      expect(sleep).toHaveBeenCalledExactlyOnceWith(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("send with wait-for-idle times out on persistent Claude thinking evidence without sending text", async () => {
+  it.each([0, 5])("send with wait-for-idle times out on persistent Claude thinking evidence without sending text (capture cost %ims)", async (captureCostMs) => {
     seedCanonicalRig();
-    const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
-    const tmux = mockTmux({
-      capturePaneContent: async () => [
-        "⏺ Skill(openrig-user)",
-        "  ⎿  Initializing…",
-        "",
-        "✢ Reviewing... (3s · ↓ 107 tokens · thinking)",
-        "",
-        "──────────────────────────────────────── dev-impl@implementation-pair-slice19 ──",
-        "❯ ",
-        "────────────────────────────────────────────────────────────────────────────────",
-        "  paste again to expand                                      ◉ xhigh · /effort",
-      ].join("\n"),
-      sendText: sendTextSpy,
-    });
-    const transport = createTransport(tmux, { waitForIdlePollMs: 1 });
+    // These cases test expiry AFTER a running observation, not classification speed.
+    // Freeze both the deadline clock and its race timer; advance only at the poll.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    try {
+      const sendTextSpy = vi.fn(async () => ({ ok: true as const }));
+      const tmux = mockTmux({
+        capturePaneContent: async () => {
+          const end = performance.now() + captureCostMs;
+          while (performance.now() < end) { /* controlled classification CPU cost */ }
+          return [
+            "⏺ Skill(openrig-user)",
+            "  ⎿  Initializing…",
+            "",
+            "✢ Reviewing... (3s · ↓ 107 tokens · thinking)",
+            "",
+            "──────────────────────────────────────── dev-impl@implementation-pair-slice19 ──",
+            "❯ ",
+            "────────────────────────────────────────────────────────────────────────────────",
+            "  paste again to expand                                      ◉ xhigh · /effort",
+          ].join("\n");
+        },
+        sendText: sendTextSpy,
+      });
+      const sleep = vi.fn(async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); });
+      const transport = createTransport(tmux, { sleep, waitForIdlePollMs: 1 });
 
-    const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
+      const result = await transport.send("dev-impl@my-rig", "hello", { waitForIdleMs: 1 });
 
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("wait_for_idle_timeout");
-    expect(result.sent).toBe(false);
-    expect(result.activity?.state).toBe("running");
-    expect(sendTextSpy).not.toHaveBeenCalled();
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe("wait_for_idle_timeout");
+      expect(result.sent).toBe(false);
+      expect(result.activity?.state).toBe("running");
+      expect(sendTextSpy).not.toHaveBeenCalled();
+      expect(result.attempts).toBe(2);
+      expect(result.waitedMs).toBe(1);
+      expect(sleep).toHaveBeenCalledExactlyOnceWith(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("send with wait-for-idle hard-stops on attention prompts without sending text", async () => {
