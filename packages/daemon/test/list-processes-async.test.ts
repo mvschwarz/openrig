@@ -69,12 +69,16 @@ describe.each(SITES)("B12-T real async list_processes — %s", (_site, listProce
 describe("F1 real async resolve_home — codex-thread-id", () => {
   async function withChild<T>(fn: (pid: number) => Promise<T>, home = "/tmp/f1-probe-home"): Promise<T> {
     const { spawn } = await import("node:child_process");
-    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 15000)"], {
+    const child = spawn(process.execPath, ["-e", "console.log('ready'); setTimeout(() => {}, 15000)"], {
       env: { HOME: home, PATH: process.env.PATH ?? "", OPENRIG_TEST_END: "marker" },
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "ignore"],
     });
     try {
-      await new Promise((r) => setTimeout(r, 100)); // let it exec
+      await new Promise<void>((resolve, reject) => {
+        child.stdout!.once("data", () => resolve());
+        child.once("error", reject);
+        child.once("exit", () => reject(new Error("probe child exited before readiness")));
+      });
       return await fn(child.pid!);
     } finally {
       child.kill("SIGKILL");
