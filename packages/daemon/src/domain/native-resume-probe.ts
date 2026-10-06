@@ -223,7 +223,7 @@ export function assessNativeResumeProbe(
         detail: "Codex is waiting for workspace trust approval before the session can become interactive.",
       };
     }
-    if (paneContent.includes("Update available!") || paneContent.includes("Updating Codex")) {
+    if (hasCodexUpdateHeader(paneContent) || paneContent.includes("Updating Codex")) {
       return {
         status: "inconclusive",
         code: "update_gate",
@@ -336,6 +336,12 @@ function looksLikeClaudeMcpApprovalPrompt(paneContent: string): boolean {
     && paneContent.includes("Enter to confirm");
 }
 
+/** Header formats observed before and since Codex 0.160.0. */
+export function hasCodexUpdateHeader(paneContent: string): boolean {
+  return paneContent.includes("Update available!")
+    || /(?:^|\n)[ \t]*Update available · \S+ → \S+[ \t]*(?:\n|$)/.test(paneContent);
+}
+
 function looksLikeCodexTui(paneContent: string): boolean {
   const current = paneContent.slice(Math.max(0, paneContent.lastIndexOf("OpenAI Codex (v")));
   if (/model:\s*loading\b/i.test(current)) return false;
@@ -351,7 +357,7 @@ function looksLikeCodexTui(paneContent: string): boolean {
   // not a model mentioned somewhere in conversation prose.
   // A custom row must not make an unresolved trust/update panel disappear.
   const hasCustomModelFooter = !looksLikeCodexTrustPrompt(current)
-    && !current.includes("Update available!") && !current.includes("Updating Codex")
+    && !hasCodexUpdateHeader(current) && !current.includes("Updating Codex")
     && recentLines.split("\n").some((line) => {
       const fields = line.trim().split(" · ");
       return /^[ \t]{2,}\S/.test(line) && fields.length > 1

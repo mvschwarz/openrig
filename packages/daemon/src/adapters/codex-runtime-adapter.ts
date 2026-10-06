@@ -24,7 +24,7 @@ import {
   readCodexThreadIdFromCandidateHomes,
   type ResolveHomeDirByPid,
 } from "../domain/codex-thread-id.js";
-import { assessNativeResumeProbe, buildCodexResumeCore, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
+import { assessNativeResumeProbe, buildCodexResumeCore, hasCodexUpdateHeader, type NativeResumeProbeResult } from "../domain/native-resume-probe.js";
 import { unknownDaemonSupportMessage, type CodexDaemonSupportDetector } from "../domain/codex-daemon-support.js";
 import { codexNetworkDefaultArg, type CodexNetworkDefaultReader } from "../domain/codex-network-default.js";
 import { resolveCodexGitAddDirs, type CodexGitAddDirResolver } from "../domain/codex-git-add-dirs.js";
@@ -1560,6 +1560,6 @@ function commandLooksLikeCodex(command: string): boolean {
 }
 
 function isSkippableCodexUpdatePrompt(paneContent: string): boolean {
-  return paneContent.includes("Update available!")
+  return hasCodexUpdateHeader(paneContent)
     && /^\s*[›>]?\s*3\. Skip until next version\s*$/m.test(paneContent);
 }

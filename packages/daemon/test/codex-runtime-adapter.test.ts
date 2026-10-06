@@ -12,6 +12,10 @@ import type { TmuxAdapter } from "../src/adapters/tmux.js";
 import { seedCodexThreads } from "./helpers/codex-state.js";
 import { execFileSync } from "node:child_process";
 
+// Verbatim 250-byte Codex 0.160.0 menu capture, SHA-256
+// 45c70fc01c7d33f4652c9d42523f631734c62aac76f449ff0f2c15e99680ac9b.
+const currentUpdatePrompt = fs.readFileSync(new URL("./fixtures/codex-update-0.160.0.txt", import.meta.url), "utf8");
+
 const CODEX_FLOOR_EFFECT = {
   runtime: "codex",
   axis: "sandbox",
@@ -558,12 +562,14 @@ describe("Codex runtime adapter", () => {
     expect(sendText).toHaveBeenCalledWith("r01-qa", expectedFreshLaunchCommand({ queueRoot: null }));
   });
 
-  it("launchHarness skips the Codex update prompt with one control key before capturing a fresh thread id", async () => {
+  it.each([
+    ["legacy", false], ["current", false], ["legacy", true], ["current", true],
+  ] as const)("launchHarness skips the %s Codex update prompt exactly once (persistent=%s)", async (layout, persistent) => {
     const initialShell = [
       expectedFreshLaunchCommand(),
       "admin@host project %",
     ].join("\n");
-    const updatePrompt = [
+    const updatePrompt = layout === "current" ? currentUpdatePrompt : [
       "✨ Update available! 0.120.0 -> 0.121.0",
       "Release notes: https://github.com/openai/codex/releases/latest",
       "› 1. Update now (runs `npm install -g @openai/codex`)",
@@ -579,7 +585,7 @@ describe("Codex runtime adapter", () => {
         .mockResolvedValueOnce(initialShell)
         .mockResolvedValueOnce(updatePrompt)
         .mockResolvedValueOnce(updatePrompt)
-        .mockResolvedValue("OpenAI Codex (v0.120.0)\n› Ask Codex to do anything"),
+        .mockResolvedValue(persistent ? updatePrompt : "OpenAI Codex (v0.120.0)\n› Ask Codex to do anything"),
       getPanePid: vi.fn(async () => 900),
     });
     const adapter = new CodexRuntimeAdapter({
@@ -612,23 +618,29 @@ describe("Codex runtime adapter", () => {
     ]);
   });
 
-  it("launchHarness does not choose a Codex update action unless skip-until-next-version is visible", async () => {
+  it.each(["legacy", "current"])("launchHarness does not choose a %s Codex update action without option 3", async (layout) => {
     const tmux = mockTmux({
-      capturePaneContent: vi.fn(async () => [
-        "✨ Update available! 0.120.0 -> 0.121.0",
-        "Press enter to continue",
-      ].join("\n")),
+      capturePaneScreen: vi.fn(async () => (layout === "current" ? currentUpdatePrompt
+        : "✨ Update available! 0.120.0 -> 0.121.0\n  2. Skip\n  3. Skip until next version")
+        .replace(/^.*3\. Skip until next version.*$/m, "")),
+      getPanePid: vi.fn(async () => 900),
     });
     const adapter = new CodexRuntimeAdapter({
       tmux,
       fsOps: mockFs(),
-      listProcesses: () => [],
+      listProcesses: () => [
+        { pid: 900, ppid: 1, command: "-zsh", pgid: 900, tpgid: 901, executableName: "zsh", startedAt: "Sat Jan  1 12:00:00 2000" },
+        { pid: 901, ppid: 900, command: "codex", pgid: 901, tpgid: 901, executableName: "codex", startedAt: "Sat Jan  1 12:00:00 2000" },
+      ],
+      readThreadIdByPid: () => "019d45bc-117d-78a3-a4ad-6fb186e5a86d",
       sleep: async () => {},
     });
 
     const result = await adapter.launchHarness(makeBinding(), { name: "dev-qa@test-rig" });
 
     expect(result.ok).toBe(true);
+    // The shell launch gets Enter; no menu key or subsequent Enter is sent.
+    expect(vi.mocked(tmux.sendKeys).mock.calls).toEqual([["r01-qa", ["Enter"]]]);
     const sendText = tmux.sendText as ReturnType<typeof vi.fn>;
     expect(sendText.mock.calls).toEqual([
       ["r01-qa", expectedFreshLaunchCommand()],
