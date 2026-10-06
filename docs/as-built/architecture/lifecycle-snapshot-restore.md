@@ -176,7 +176,7 @@ Restore behavior, each point checked in `restore-orchestrator.ts`:
   proof rolls back to `awaiting-decision` (`:1221–1238`).
 - Saves a `rig up --non-interruptive` or `--no-non-interruptive` choice on
   the rig only after the live-session check and pre-restore validation pass
-  (`:262`); see [adapters-and-runtimes.md](adapters-and-runtimes.md) for the
+  (`:301`); see [adapters-and-runtimes.md](adapters-and-runtimes.md) for the
   launch flags.
 
 `launchNodeSubset` (`:392`) and `launchSingleNode` restore chosen seats rather

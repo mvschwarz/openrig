@@ -115,7 +115,7 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    Bracketed paste preserves multiline input in supporting TUIs; the payload
    never enters a shell argument. A `--dangerously-interact` answer is pasted
    without `-p` (`session-transport.ts:1524`) and Enter is pressed only if the
-   whole answer is still staged (`:1545`–`1546`). A successful paste proves
+   whole answer is still staged (`:1545`–`1553`). A successful paste proves
    transport execution, not runtime consumption.
 5. Optional `--verify`: capture the last 30 pane lines before and after the
    send (after a 500 ms wait, `:1580`) and count the message's first 40

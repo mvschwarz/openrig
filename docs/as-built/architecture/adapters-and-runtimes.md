@@ -45,7 +45,7 @@ string (`runtime-adapter.ts:144`) and implements five required methods
 | `project` | `(plan, binding)` `:154` | Project resources from a `ProjectionPlan` to the runtime's target locations. |
 | `deliverStartup` | `(files, binding, sendInteractiveText?)` `:158` | Deliver resolved startup files to the runtime. The startup orchestrator passes the optional third argument for Claude Code only, so Claude's `send_text` files go through the checked send described in `agent-spec-and-startup.md`. |
 | `launchHarness` | `(binding, opts)` `:168` | Launch the harness inside the bound tmux session; return a resume token. |
-| `checkReady` | `(binding)` `:172` | Probe whether the harness is responsive and ready. |
+| `checkReady` | `(binding)` `:174` | Probe whether the harness is responsive and ready. |
 
 The interface also has two optional members: `claudeManagedLaunch` (`:143`)
 and `skillTargetPath?()` (`:148`), implemented by `PiRuntimeAdapter`
