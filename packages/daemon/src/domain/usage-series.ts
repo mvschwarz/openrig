@@ -38,6 +38,25 @@ export interface UsageSeriesRow {
   resetsAt: string | null;
 }
 
+/** Captures are stored at millisecond precision in UTC. Keep the indexed column
+ * comparison, but compare an ISO cutoff's instant rather than its offset/spelling.
+ * Both >= and < use the next stored instant for a sub-millisecond boundary. */
+function capturedAtBound(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match) return value;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const local = new Date(0);
+  local.setUTCFullYear(year!, month! - 1, day!);
+  local.setUTCHours(hour!, minute!, second!, 0);
+  if (local.getUTCFullYear() !== year || local.getUTCMonth() + 1 !== month ||
+    local.getUTCDate() !== day || local.getUTCHours() !== hour ||
+    local.getUTCMinutes() !== minute || local.getUTCSeconds() !== second) return value;
+  const epoch = Date.parse(value);
+  const betweenMilliseconds = /[1-9]/.test(match[7]?.slice(3) ?? "");
+  const bound = epoch + (betweenMilliseconds ? 1 : 0);
+  return Number.isFinite(bound) && Math.abs(bound) <= 8.64e15 ? new Date(bound).toISOString() : value;
+}
+
 /** Serve the RAW stored rows, oldest first. Bounds are absolute on captured_at
  *  (since inclusive-of-later, i.e. `>=`; until exclusive `<`). */
 export function queryUsageSeries(db: Database, q: UsageSeriesQuery): UsageSeriesRow[] {
@@ -45,8 +64,8 @@ export function queryUsageSeries(db: Database, q: UsageSeriesQuery): UsageSeries
   const params: unknown[] = [];
   if (q.seatSession) { where.push("seat_session = ?"); params.push(q.seatSession); }
   if (q.lane) { where.push("lane = ?"); params.push(q.lane); }
-  if (q.sinceIso) { where.push("captured_at >= ?"); params.push(q.sinceIso); }
-  if (q.untilIso) { where.push("captured_at < ?"); params.push(q.untilIso); }
+  if (q.sinceIso) { where.push("captured_at >= ?"); params.push(capturedAtBound(q.sinceIso)); }
+  if (q.untilIso) { where.push("captured_at < ?"); params.push(capturedAtBound(q.untilIso)); }
   const limit = q.limit && q.limit > 0 ? Math.floor(q.limit) : 10_000;
   const rows = db
     .prepare(
