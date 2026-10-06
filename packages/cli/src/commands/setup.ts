@@ -575,7 +575,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
         status: "fail",
         message: `Claude Code is installed but not ready to launch: ${(err as Error).message}`,
         reason: "Claude Code seats cannot launch until the Claude CLI is logged in and usable.",
-        fixHint: "Run `claude auth login` or open `claude` once to complete authentication, then rerun `rig setup` or `rig doctor`.",
+        fixHint: "Run `claude auth login` or open `claude` once to complete authentication, then rerun `rig setup`.",
       });
     }
   } else {
@@ -640,7 +640,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
           status: "fail",
           message: `Codex is installed but not ready to launch${unresolved}: ${(err as Error).message}`,
           reason: "Codex seats cannot launch until the Codex CLI is logged in and usable.",
-          fixHint: "Run `codex login` and complete authentication, then rerun `rig setup` or `rig doctor`.",
+          fixHint: "Run `codex login` and complete authentication, then rerun `rig setup`.",
         });
       }
     }
@@ -690,7 +690,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   steps.push({
     id: "verify",
     status: anyFail ? "warn" : "pass",
-    message: anyFail ? "Some setup steps failed. Run `rig doctor` for detailed diagnostics." : "Core setup verified.",
+    message: anyFail ? "Some setup steps failed; follow their Fix hints." : "Core setup verified.",
   });
 
   // Full profile extras
@@ -876,8 +876,14 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
         console.log("\nSetup complete.\n");
         for (const line of goldenPathNextSteps()) console.log(line);
       } else {
-        console.log("\nSome steps need attention. Run `rig doctor` for detailed diagnostics.");
-        console.log("Once setup is healthy, follow the guided path: docs/reference/getting-started.md");
+        console.log("\nSome steps need attention:");
+        for (const step of result.steps.filter(step => step.status === "fail")) {
+          console.log(`  ${step.id}: ${step.message}`);
+          if (step.fixHint) console.log(`    Fix: ${step.fixHint}`);
+        }
+        console.log("Only the harnesses selected for your project need a login; an unused harness does not.");
+        console.log("Run `rig doctor` for system checks; it does not check harness logins.");
+        console.log("Guided next steps: docs/reference/getting-started.md");
       }
       if (!opts.dryRun && !result.ready) process.exitCode = 1;
     });
