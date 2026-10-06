@@ -56,6 +56,8 @@ stub-agent scenarios, which run the real CLI, daemon, tmux and SQLite with scrip
 OpenRig is a coordination layer for a trusted environment: it should help agents and people keep work flowing.
 
 - A change that removes friction, or makes state more truthful, is usually welcome.
+- OpenRig runs on agents working in context with tools. Before adding code for a behaviour, ask whether an agent with
+  the right instructions and today's commands could do it. A skill or a page of guidance is often the better change.
 - A change that adds a refusal, a prompt or a required step needs the concrete case in CONTRIBUTING.md: who is
   harmed, how, and what it costs everyone else.
 - One concern per pull request. Keep the diff reviewable in one sitting.
