@@ -197,7 +197,7 @@ describe("rig spec", () => {
       ]));
       expect(exitCode).toBe(1);
       if (json) expect(JSON.parse(logs.join("\n"))).toMatchObject({ valid: false, errors: ["pods[0]: must be an object"] });
-      else expect(logs.join("\n")).toBe("Rig spec invalid: pods[0]: must be an object");
+      else expect(logs.join("\n")).toBe("Rig spec invalid:\n  pods[0]: must be an object\nFix: update rig.yaml and re-validate.");
       expect(clientFactory).not.toHaveBeenCalled();
       for (const operation of Object.values(lifecycleDeps)) expect(operation).not.toHaveBeenCalled();
     }
