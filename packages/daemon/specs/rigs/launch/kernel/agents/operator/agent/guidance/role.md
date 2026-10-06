@@ -92,13 +92,16 @@ question through the human channel instead.
      copy, and plan it: `--plan` checks the agents, but it may not catch a
      missing culture or startup file.
    - **Workshop:** install it from its pinned link,
-     `rig up https://github.com/mvschwarz/openrig-world/tree/<commit>/rigs/workshop`,
-     and choose the configuration from its listing that matches their
-     providers (`--preset <alias>`, or `--seat <member>=<runtime>`).
+     `rig up https://github.com/mvschwarz/openrig-world/tree/<commit>/rigs/workshop
+     --target ~/rigs/workshop`, and choose the configuration from its listing
+     that matches their providers (`--preset <alias>`, or
+     `--seat <member>=<runtime>`). It always installs as "workshop" in
+     `~/rigs/workshop`; without `--target` it would land in your own working
+     directory.
 6. **Plan, then ask.** Run `rig up <team, copy path or link> --cwd <folder>
-   --plan` and tell them what will start: how many agents, which providers, in
-   which folder. Launch the same command without `--plan` only after they say
-   yes.
+   --plan` (for workshop, with its `--target ~/rigs/workshop`) and tell them
+   what will start: how many agents, which providers, in which folder. Launch
+   the same command without `--plan` only after they say yes.
 7. **Report readiness honestly.** Read each seat's `startupStatus` in
    `rig ps --nodes --rig <team> --json`: `pending` means still starting, not
    ready; only `ready` is ready; `attention_required` and `failed` need the
@@ -106,15 +109,18 @@ question through the human channel instead.
    `Startup attention (<seat>): <reason>`, tell them what that seat is waiting
    for and the command its reason ends with.
 8. **Show them the team.** Capture the shared TUI (`rig capture
-   operator-human@kernel`), type the TUI command `rig <team>` and Enter into
-   that pane (tmux send-keys to its session), and capture again to confirm it
-   shows the team's table. If a startup view or another mode holds the keys,
-   leave it and tell them the command instead. Then open the team's terminals
-   as a new herdr space with `rig terminal open <team> --provider herdr`; it
-   creates its own workspace and leaves their terminal alone. A herdr
-   workspace isn't proof of a visible window, so ask whether they see it. If
-   herdr isn't available, give them the attach commands from
-   `rig ps --nodes --rig <team> --json`.
+   operator-human@kernel`). Only when the capture shows the TUI's own view,
+   type the TUI command `rig <team>` and Enter into that pane (tmux send-keys
+   to its session), and capture again to confirm it shows the team's table.
+   At a shell prompt, run `rig tui` there first or tell them the command; if a
+   startup view or another mode holds the keys, leave it and tell them the
+   command instead. Then open the team's terminals as a new space with
+   `rig terminal open <team> --provider herdr` (or `--provider cmux`); it
+   creates its own workspace and leaves their terminal alone. A new workspace
+   isn't proof of a visible window, so ask whether they see it. Without herdr
+   or cmux, give them the attach commands from
+   `rig ps --nodes --rig <team> --json --fields canonicalSessionName,tmuxAttachCommand`
+   to run in a new terminal.
 9. **Hand the goal to the team's lead.** Once the lead's `startupStatus` is
    `ready`, give it the person's goal in their own words, with the folder, as
    a queue row (`rig queue create --destination <lead> --body-file <file>`) so
