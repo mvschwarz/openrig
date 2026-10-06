@@ -141,7 +141,8 @@ function savedMemberToInput(m: SavedViewMember): ViewMemberInput {
   };
 }
 
-type ResolvedView = { id: string; members: ViewMemberInput[] } | { code: string; error: string };
+type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string } | { code: string; error: string };
+type ComposedTerminalView = ComposedView & { kernelLayout?: string };
 
 export class TerminalService {
   private localTmux?: Promise<string | undefined>;
@@ -178,15 +179,24 @@ export class TerminalService {
     if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(providerName, composed)) {
       return errorResult(providerName, "preview_changed", "View membership or layout changed. Refresh the preview before Open; nothing was launched.");
     }
-    return provider.openView(composed);
+    const notes = composed.kernelLayout ? [`Default kernel view: ${composed.kernelLayout}.`] : [];
+    if (composed.kernelLayout && composed.opened.length === 0) {
+      return {
+        ...errorResult(providerName, "kernel_seats_unavailable", `No kernel conversations are attachable: ${composed.absent.map(member => `${member.seat} (${member.reason})`).join("; ")}`),
+        absent: composed.absent, degraded: composed.degraded, notes,
+      };
+    }
+    const result = await provider.openView(composed);
+    return notes.length ? { ...result, notes: [...notes, ...(result.notes ?? [])] } : result;
   }
 
-  private async resolveComposed(viewArg: string, panesPerPage?: number): Promise<ComposedView | { code: string; error: string }> {
+  private async resolveComposed(viewArg: string, panesPerPage?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
     const view = (viewArg ?? "").trim();
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
-    return composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage, localTmux: await this.resolveLocalTmux() });
+    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage, localTmux: await this.resolveLocalTmux() });
+    return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout } : composed;
   }
 
   private planId(provider: string, composed: ComposedView): string {
@@ -210,10 +220,10 @@ export class TerminalService {
       rigs: await this.deps.listRigNames(),
     };
     if (!result.saved.some(view => view.id === "kernel") && result.rigs.includes("kernel")) {
-      const members = await this.defaultKernelMembers();
-      if (members) result.saved = [...result.saved, {
-        id: "kernel", name: "Kernel conversations",
-        members: members.map(({ seat, label, tmuxSession }) => ({ seat, label, tmuxSession: tmuxSession ?? undefined })),
+      const kernel = await this.defaultKernelView();
+      if (kernel) result.saved = [...result.saved, {
+        id: "kernel", name: `Kernel conversations · ${kernel.kernelLayout}`,
+        members: kernel.members.map(({ seat, label, tmuxSession }) => ({ seat, label, tmuxSession: tmuxSession ?? undefined })),
       }];
     }
     if (detail) {
@@ -259,8 +269,9 @@ export class TerminalService {
       const saved = this.deps.viewsStore.get(view.slice(6));
       if (saved) return { id: saved.id, members: saved.members.map(savedMemberToInput) };
       if (view === "saved:kernel") {
-        const members = await this.defaultKernelMembers();
-        if (members) return { id: "kernel", members };
+        const kernel = await this.defaultKernelView();
+        if (kernel) return kernel;
+        return { code: "view_not_found", error: "No kernel rig is installed; saved:kernel has no installed bindings" };
       }
       return { code: "view_not_found", error: `unknown saved view '${view.slice(6)}'` };
     }
@@ -321,16 +332,23 @@ export class TerminalService {
   }
 
   /** An in-memory default; a user's saved kernel view always takes precedence. */
-  private async defaultKernelMembers(): Promise<ViewMemberInput[] | null> {
+  private async defaultKernelView(): Promise<{ id: string; members: ViewMemberInput[]; kernelLayout: string } | null> {
     const rows = await this.deps.listRigSeats("kernel");
     if (rows == null) return null;
     const advisor = rows.find(row => row.logicalId === "advisor.lead");
     const operator = rows.find(row => row.logicalId === "operator.agent");
-    const tui = rows.find(row => row.logicalId === "operator.human");
-    const dualRuntime = advisor?.runtime && operator?.runtime && advisor.runtime !== operator.runtime;
-    const selected = [advisor, ...(dualRuntime ? [operator] : []), tui]
-      .filter((row): row is LiveSeatRow => row !== undefined);
-    return deriveViewMembers(selected);
+    const runtimesKnown = !!advisor?.runtime && !!operator?.runtime;
+    const singleRuntime = runtimesKnown && advisor!.runtime === operator!.runtime;
+    const kernelLayout = runtimesKnown ? (singleRuntime ? "single-runtime" : "dual-runtime") : "runtime layout unverified; advisor, operator and TUI";
+    const roles = ["advisor.lead", ...(!singleRuntime ? ["operator.agent"] : []), "operator.human"];
+    const members = roles.map(logicalId => {
+      const row = rows.find(row => row.logicalId === logicalId);
+      const bound = row && deriveViewMembers([row])[0];
+      // An expected role is still visible when there is no attachable binding.
+      // Its logical ID names the absence; it is never used as a tmux target.
+      return bound ?? { seat: logicalId, label: logicalId, tmuxSession: null, host: null, readOnly: false, alive: false };
+    });
+    return { id: "kernel", members, kernelLayout };
   }
 
   /** Refine local members' liveness with a real has-session probe (a dead seat → absent, honest-partial). */

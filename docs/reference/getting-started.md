@@ -205,7 +205,10 @@ the advisor and operator runtimes to choose the dual- or single-runtime view.
 OpenRig supplies `saved:kernel` automatically from the installed kernel's current
 bindings: advisor | operator | TUI for dual-runtime kernels, advisor | TUI for
 single-runtime kernels. No YAML edit or daemon restart is needed. It excludes
-the queue worker and uses the existing conversations.
+the queue worker and uses the existing conversations. Unavailable expected roles
+are named in `absent`; with no attachable members, the result lists the missing
+bindings. The view reports the runtime layout; when runtime information is
+incomplete, it says so and keeps advisor, operator and TUI visible.
 
 If you already saved a view with id `kernel` in `terminal-views.yaml`, your view
 wins unchanged. Other saved views are preserved. Check the listed membership

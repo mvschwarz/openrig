@@ -289,7 +289,32 @@ describe("default saved kernel conversations", () => {
     deps.hasSession = name => name !== "advisor-bound";
     const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
     expect(result.opened).toEqual(["operator-bound"]);
-    expect(result.absent.map(member => member.seat)).toEqual(["advisor-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["advisor-bound", "operator.human"]);
+    expect(result.notes).toContain("Default kernel view: dual-runtime.");
+  });
+
+  it("keeps missing roles named while opening the remaining TUI", async () => {
+    const { deps } = makeKernel([kernel()[1]!]);
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
+    expect(result.ok).toBe(true);
+    expect(result.opened).toEqual(["tui-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["advisor.lead", "operator.agent"]);
+    expect(result.notes?.join(" ")).toContain("runtime layout unverified");
+  });
+
+  it.each(["unbound", "non-tmux", "missing"])("names all unavailable roles for %s kernels without calling the provider", async kind => {
+    const rows = kind === "missing" ? [] : kernel().map(row => ({ ...row,
+      ...(kind === "unbound" ? { canonicalSessionName: null, tmuxSession: null } : { attachmentType: "external_cli" }),
+    }));
+    const { deps, herdr } = makeKernel(rows);
+    deps.hasSession = () => { throw new Error("must not probe a guessed session"); };
+    const service = new TerminalService(deps);
+    const result = await service.openView({ view: "saved:kernel" });
+    expect(result.code).toBe("kernel_seats_unavailable");
+    expect(result.opened).toEqual([]);
+    expect(result.absent.map(member => member.seat)).toEqual(["advisor.lead", "operator.agent", "operator.human"]);
+    for (const member of result.absent) expect(result.error).toContain(member.seat);
+    expect(herdr.lastView).toBeNull();
   });
 
   it("does not add the default when no kernel is installed", async () => {
