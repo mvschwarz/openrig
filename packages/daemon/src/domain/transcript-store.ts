@@ -1,4 +1,4 @@
-import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync, readFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, existsSync, openSync, readSync, closeSync, statSync, fstatSync, readFileSync } from "node:fs";
 import { join, dirname, relative, isAbsolute, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
@@ -128,19 +128,17 @@ const TAIL_CHUNK_SIZE = 16 * 1024;
  * the read offset to avoid splitting characters.
  */
 function readTailChunked(filePath: string, rawLines: number): string | null {
-  const stat = statSync(filePath);
-  if (stat.size === 0) return null;
-
   const fd = openSync(filePath, "r");
   try {
+    const stat = fstatSync(fd);
+    if (stat.size === 0) return null;
     let text = "";
     let offset = stat.size;
 
     while (offset > 0) {
       const readSize = Math.min(TAIL_CHUNK_SIZE, offset);
       offset -= readSize;
-      const buf = Buffer.alloc(readSize);
-      readSync(fd, buf, 0, readSize, offset);
+      const buf = readTranscriptChunk(fd, readSize, offset);
 
       // Adjust for split UTF-8 multibyte: if the first byte is a continuation
       // byte (10xxxxxx = 0x80-0xBF), we've split a character. Move the offset
@@ -174,6 +172,20 @@ function readTailChunked(filePath: string, rawLines: number): string | null {
   } finally {
     closeSync(fd);
   }
+}
+
+/** An opened descriptor retains the published capture across atomic replacement.
+ * Do not turn a short read into fabricated NUL padding if an external writer
+ * truncates that descriptor in place. Existing callers report the I/O failure. */
+function readTranscriptChunk(fd: number, size: number, offset: number): Buffer {
+  const buffer = Buffer.alloc(size);
+  let read = 0;
+  while (read < size) {
+    const count = readSync(fd, buffer, read, size - read, offset + read);
+    if (count === 0) throw new Error("Transcript changed during read");
+    read += count;
+  }
+  return buffer;
 }
 
 function countNewlines(s: string): number {
@@ -389,14 +401,13 @@ export class TranscriptStore {
     const fd = openSync(filePath, "r");
     const decoder = new StringDecoder("utf-8");
     try {
-      const stat = statSync(filePath);
+      const stat = fstatSync(fd);
       const CHUNK_SIZE = 64 * 1024;
       let remainder = "";
 
       for (let offset = 0; offset < stat.size; offset += CHUNK_SIZE) {
         const readSize = Math.min(CHUNK_SIZE, stat.size - offset);
-        const buf = Buffer.alloc(readSize);
-        readSync(fd, buf, 0, readSize, offset);
+        const buf = readTranscriptChunk(fd, readSize, offset);
         // StringDecoder handles incomplete multibyte sequences at chunk boundaries
         const chunk = remainder + decoder.write(buf);
         const lines = chunk.split("\n");
