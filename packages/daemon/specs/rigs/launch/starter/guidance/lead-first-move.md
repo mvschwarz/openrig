@@ -19,5 +19,5 @@ You build it and `dev-review` checks it before you call it done.
 
 When the goal is done, close the operator's row with the result.
 
-`rig down`, `rig seat stop` and `rig up` on a running team end agents' sessions or replace the team. Don't run them
-unless the person asked; check `rig ps --nodes` first.
+`rig down` and `rig seat stop` end agents' sessions and any work in progress, and `rig up <spec>` on an existing team's
+name replaces it with a new team. Don't run them unless the person asked; check `rig ps --nodes` first.
