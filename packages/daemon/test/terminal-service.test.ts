@@ -302,6 +302,15 @@ describe("default saved kernel conversations", () => {
     expect(result.notes?.join(" ")).toContain("runtime layout unverified");
   });
 
+  it("keeps a bound operator when the advisor row and runtime are missing", async () => {
+    const { deps } = makeKernel(kernel().filter(row => row.logicalId !== "advisor.lead"));
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
+    expect(result.ok).toBe(true);
+    expect(result.opened).toEqual(["operator-bound", "tui-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["advisor.lead"]);
+    expect(result.notes?.join(" ")).toContain("runtime layout unverified");
+  });
+
   it.each(["unbound", "non-tmux", "missing"])("names all unavailable roles for %s kernels without calling the provider", async kind => {
     const rows = kind === "missing" ? [] : kernel().map(row => ({ ...row,
       ...(kind === "unbound" ? { canonicalSessionName: null, tmuxSession: null } : { attachmentType: "external_cli" }),
