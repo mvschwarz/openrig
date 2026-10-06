@@ -269,7 +269,7 @@ Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and take
 its `canonicalSessionName`. Use that returned session name, not the logical ID:
 
 ```sh
-rig send <canonicalSessionName> '<goal and absolute project folder>'
+rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>.'
 ```
 
 Alternatively, have the person type the goal and folder in the operator pane.

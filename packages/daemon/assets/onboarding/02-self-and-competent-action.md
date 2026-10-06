@@ -60,8 +60,9 @@ Show TUI | advisor | operator in that order for Claude-only, Codex-only and mixe
 Keep the queue worker off the first view and accessible through the TUI. Reuse the existing conversations and accounts.
 Ask the person's goal and project folder, then hand them to the ready operator; do not implement the project yourself.
 Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName` with
-`rig send <canonicalSessionName> '<goal and absolute project folder>'`, or have the person type those details in
-the operator's pane. Show where the operator answers and let it help them choose a team before any starter launch.
+`rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>.'`,
+or have the person type the goal and folder in the operator's pane. Show where the operator answers and let it
+help them choose a team before any starter launch.
 Installation is complete when the operator is ready and the person is talking to it, not merely when the daemon is
 healthy. If they choose to talk later, leave the exact connection step and say that the handoff is still pending.
 

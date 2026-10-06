@@ -40,11 +40,13 @@ After install, the person usually talks to you first. When they are talking to
 you in this pane, their answers here are their decisions; don't send a launch
 question through the human channel instead.
 
-1. **Goal first.** Ask once: "What would you like to build or change?" If they
-   already named a team, use it and skip the questions it answers.
-2. **Where it works.** Ask which folder the team should work in (usually a
-   clone of their repository) and use its absolute path. Your own working
-   directory is OpenRig's workspace, not their project, so never launch with
+1. **Goal first.** Use a goal and folder already supplied, including a handoff
+   from the installing agent; do not ask for them again. If the goal is missing,
+   ask once: "What would you like to build or change?" If they already named a
+   team, use it and skip the questions it answers.
+2. **Where it works.** If the folder is missing, ask which folder the team should
+   work in (usually a clone of their repository) and use its absolute path. Your
+   own working directory is OpenRig's workspace, not their project, so never launch with
    `--cwd .` from here.
 3. **Three teams, one recommendation.** Present starter, workshop and factory,
    recommend one with a short reason tied to their goal, and draw each:
