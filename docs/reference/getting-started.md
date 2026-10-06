@@ -117,6 +117,8 @@ No, SSH and headless use are valid background outcomes, not setup failures.
 
 Use **herdr first if installed**, **cmux second**, and otherwise give the exact
 [new-terminal commands below](#plain-terminal-a-new-viewing-session).
+To reach just the operator, use the [direct conversation command](#talk-to-the-operator-in-any-terminal).
+`rig tui --shared` is the team dashboard, not the operator's conversation.
 No new terminal-provider installation is needed for this offer. The first view
 contains TUI | advisor | operator in that order, for Claude-only, Codex-only and
 mixed kernels.
@@ -184,6 +186,29 @@ queue worker. A failed or uncertain open is not evidence that nothing opened;
 inspect the provider before retrying or falling back. If the shared TUI tile
 shows a shell, run `rig tui` **in that new tile**, not in the installing agent's
 terminal.
+
+### Talk to the operator in any terminal
+
+No herdr or cmux is needed. On the kernel's host, run:
+
+```sh
+rig ps --nodes --rig kernel --json
+```
+
+Find the row whose `logicalId` is `operator.agent`. Replace the placeholder below
+with that row's `canonicalSessionName`, then run this in a **new terminal on the
+same host, as the same user**:
+
+```sh
+tmux attach-session -t '=<canonicalSessionName>'
+```
+
+This shows the operator's existing conversation and lets you type your answer.
+The installing agent gives the person the command with the name already filled
+in; it does not attach in its own terminal. Over SSH, connect to the installation
+host first. Use **Ctrl-b, then d** to leave the conversation running and detach.
+If the operator has no binding or needs attention, use
+[Incomplete setup and restart](#incomplete-setup-and-restart).
 
 ### Plain terminal: a new viewing session
 
@@ -274,7 +299,11 @@ rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The p
 
 Alternatively, have the person type the goal and folder in the operator pane.
 Show where the operator answers in the existing view or give the exact attach
-command. It helps the person choose and start a team, then hands the goal to its
+command [above](#talk-to-the-operator-in-any-terminal), with the observed name
+filled in. `rig tui --shared` opens the dashboard, not this conversation.
+If the person gives the installing agent a goal later, forward the goal, folder
+and constraints with `rig send`; leave implementation with the operator's team.
+The operator helps the person choose and start a team, then hands the goal to its
 lead. Leave the project work with that team.
 
 Finish installation when the operator is ready and the person is talking to it;

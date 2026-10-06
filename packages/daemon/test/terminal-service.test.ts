@@ -248,6 +248,25 @@ describe("default saved kernel conversations", () => {
     });
   }
 
+  it.each(["herdr", "cmux"])("offers existing conversation attachments when %s is unavailable", async providerName => {
+    const { deps, herdr, cmux } = makeKernel(kernel());
+    deps.hasSession = session => session !== "advisor-bound";
+    const provider = providerName === "herdr" ? herdr : cmux;
+    provider.openView = async view => ({
+      provider: providerName, ok: false, opened: [], pages: 0,
+      absent: view.absent, degraded: view.degraded,
+      code: `${providerName}_unavailable`, error: "not running", notes: ["Original provider detail"],
+    });
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel", provider: providerName });
+    expect(result).toMatchObject({ ok: false, opened: [], code: `${providerName}_unavailable` });
+    expect(result.absent.map(member => member.seat)).toContain("advisor-bound");
+    expect(result.notes).toContain("operator.agent: tmux attach -t 'operator-bound'");
+    expect(result.notes).toContain("operator.human: tmux attach -t 'actual-tui'");
+    expect(result.notes).toContain("Original provider detail");
+    expect(result.notes!.join("\n")).not.toContain("attach -t 'advisor-bound'");
+    expect(result.notes!.join("\n")).not.toContain("queue-bound");
+  });
+
   it.each([["claude-code", "codex"], ["claude-code", "claude-code"], ["codex", "codex"]])("kernel geometry keeps three columns in preview, fingerprint and open for %s/%s", async (advisorRuntime, operatorRuntime) => {
     const { deps, herdr } = makeKernel(kernel(operatorRuntime, advisorRuntime));
     const service = new TerminalService(deps);

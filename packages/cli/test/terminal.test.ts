@@ -115,6 +115,18 @@ describe("rig terminal CLI", () => {
     expect(process.exitCode).toBe(1);
   });
 
+  it.each([false, true])("preserves fallback attach commands on a failed open (json=%s)", async json => {
+    const command = "operator.agent: tmux attach -t 'operator-bound'";
+    const result = opened([], { code: "herdr_unavailable", error: "no binary", notes: [command] });
+    const { deps } = makeDeps({ routes: { "POST /api/terminal/open": { status: 200, data: result } } });
+    const program = createProgram({ terminalDeps: deps });
+    program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "saved:kernel", ...(json ? ["--json"] : [])]);
+    expect(process.exitCode).toBe(1);
+    if (json) expect(JSON.parse(logs[0]!)).toEqual(result);
+    else expect(logs.join("\n")).toContain(command);
+  });
+
   it("open of an unknown view (404) exits non-zero and surfaces the reason", async () => {
     const { deps } = makeDeps({
       routes: { "POST /api/terminal/open": { status: 404, data: { provider: "herdr", ok: false, opened: [], absent: [], degraded: [], pages: 0, code: "view_not_found", error: "unknown view 'nope'" } } },
