@@ -64,7 +64,7 @@ export function registerTerminalWs(
     terminalAuth,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (upgradeWebSocket as any)((c: any) => {
-      const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+      const sessionName = c.req.param("sessionName")!;
       let broker: TerminalSessionBroker | null = null;
       let subscriber: TerminalSubscriber | null = null;
       // The WebSocket can close DURING the async attach (before the broker

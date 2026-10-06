@@ -351,7 +351,7 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
   router.get("/library/:id", (c) => {
     const lib = c.get("agentImageLibrary" as never) as AgentImageLibraryService | undefined;
     if (!lib) return c.json({ error: "agent_image_library_unavailable" }, 503);
-    const id = decodeURIComponent(c.req.param("id"));
+    const id = c.req.param("id");
     if (id === "sync" || id === "snapshot" || id === "prune") return c.notFound();
     const entry = lib.get(id);
     if (!entry) return c.json({ error: `Agent image '${id}' not found in library` }, 404);
@@ -361,7 +361,7 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
   router.get("/library/:id/preview", (c) => {
     const lib = c.get("agentImageLibrary" as never) as AgentImageLibraryService | undefined;
     if (!lib) return c.json({ error: "agent_image_library_unavailable" }, 503);
-    const id = decodeURIComponent(c.req.param("id"));
+    const id = c.req.param("id");
     const entry = lib.get(id);
     if (!entry) return c.json({ error: `Agent image '${id}' not found in library` }, 404);
     return c.json({
@@ -384,7 +384,7 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
   router.post("/library/:id/pin", (c) => {
     const lib = c.get("agentImageLibrary" as never) as AgentImageLibraryService | undefined;
     if (!lib) return c.json({ error: "agent_image_library_unavailable" }, 503);
-    const id = decodeURIComponent(c.req.param("id"));
+    const id = c.req.param("id");
     try {
       lib.pin(id);
       return c.json({ ok: true, id, pinned: true });
@@ -399,7 +399,7 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
   router.post("/library/:id/unpin", (c) => {
     const lib = c.get("agentImageLibrary" as never) as AgentImageLibraryService | undefined;
     if (!lib) return c.json({ error: "agent_image_library_unavailable" }, 503);
-    const id = decodeURIComponent(c.req.param("id"));
+    const id = c.req.param("id");
     try {
       lib.unpin(id);
       return c.json({ ok: true, id, pinned: false });
@@ -414,7 +414,7 @@ export function agentImagesRoutes(deps: AgentImageRoutesDeps): Hono {
   router.delete("/library/:id", (c) => {
     const lib = c.get("agentImageLibrary" as never) as AgentImageLibraryService | undefined;
     if (!lib) return c.json({ error: "agent_image_library_unavailable" }, 503);
-    const id = decodeURIComponent(c.req.param("id"));
+    const id = c.req.param("id");
     const force = ((c.req.query("force") as string | undefined) ?? "") === "true";
     const entry = lib.get(id);
     if (!entry) return c.json({ error: `Agent image '${id}' not found in library` }, 404);

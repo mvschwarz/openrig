@@ -784,7 +784,7 @@ rigsRoutes.post("/:rigId/expand", async (c) => {
 // spec snake_case field names (id, runtime, agent_ref, profile, cwd, ...).
 rigsRoutes.post("/:rigId/pods/:podNamespace/members", async (c) => {
   const rigId = c.req.param("rigId")!;
-  const podNamespace = decodeURIComponent(c.req.param("podNamespace")!);
+  const podNamespace = c.req.param("podNamespace")!;
   const podInstantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
   if (!podInstantiator) {
     return c.json({ error: "Pod instantiator not available" }, 500);
@@ -845,7 +845,7 @@ rigsRoutes.post("/:rigId/pods/:podNamespace/members", async (c) => {
 // DELETE /api/rigs/:rigId/pods/:podRef
 rigsRoutes.delete("/:rigId/pods/:podRef", async (c) => {
   const rigId = c.req.param("rigId")!;
-  const podRef = decodeURIComponent(c.req.param("podRef")!);
+  const podRef = c.req.param("podRef")!;
   const fallbackDestination = c.req.query("fallback");
   const lifecycleService = c.get("rigLifecycleService" as never) as RigLifecycleService | undefined;
   if (!lifecycleService) {

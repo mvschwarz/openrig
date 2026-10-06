@@ -174,7 +174,7 @@ nodesRoutes.get("/", observeInventoryHandler, async (c) => {
 // GET /api/rigs/:rigId/nodes/:logicalId — node detail
 nodesRoutes.get("/:logicalId", async (c) => {
   const rigId = c.req.param("rigId")!;
-  const logicalId = decodeURIComponent(c.req.param("logicalId")!);
+  const logicalId = c.req.param("logicalId")!;
   const deps = getDeps(c);
   const rig = deps.rigRepo.getRig(rigId);
   if (!rig) return c.json({ error: `Rig "${rigId}" not found. List rigs with: rig ps` }, 404);
@@ -360,7 +360,7 @@ nodesRoutes.post("/launch-subset", async (c) => {
 // SessionTransport is missing from context (degraded daemon).
 nodesRoutes.get("/:logicalId/preview", terminalAuthGuard(), async (c) => {
   const rigId = c.req.param("rigId")!;
-  const logicalId = decodeURIComponent(c.req.param("logicalId")!);
+  const logicalId = c.req.param("logicalId")!;
   const deps = getDeps(c);
   const sessionTransport = c.get("sessionTransport" as never) as SessionTransport | undefined;
   const rateLimiter = c.get("previewRateLimiter" as never) as PreviewRateLimiter<{
@@ -424,7 +424,7 @@ nodesRoutes.get("/:logicalId/preview", terminalAuthGuard(), async (c) => {
 // POST /api/rigs/:rigId/nodes/:logicalId/open-cmux
 nodesRoutes.post("/:logicalId/open-cmux", terminalAuthGuard(), async (c) => {
   const rigId = c.req.param("rigId")!;
-  const logicalId = decodeURIComponent(c.req.param("logicalId")!);
+  const logicalId = c.req.param("logicalId")!;
   const nodeCmuxService = c.get("nodeCmuxService" as never) as NodeCmuxService | undefined;
 
   if (!nodeCmuxService) {
@@ -462,7 +462,7 @@ nodesRoutes.post("/:logicalId/focus", async (c) => {
 // DELETE /api/rigs/:rigId/nodes/:logicalId
 nodesRoutes.delete("/:logicalId", async (c) => {
   const rigId = c.req.param("rigId")!;
-  const nodeRef = decodeURIComponent(c.req.param("logicalId")!);
+  const nodeRef = c.req.param("logicalId")!;
   const fallbackDestination = c.req.query("fallback");
   const { rigLifecycleService } = getDeps(c);
   if (!rigLifecycleService) {
@@ -491,7 +491,7 @@ nodesRoutes.delete("/:logicalId", async (c) => {
 // pair (Steering Loop State panel, Slice Story View Topology tab).
 // Behavior identical to the rig+node-keyed route otherwise.
 sessionAdminRoutes.get("/:sessionName/preview", terminalAuthGuard(), async (c) => {
-  const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+  const sessionName = c.req.param("sessionName")!;
   const sessionTransport = c.get("sessionTransport" as never) as SessionTransport | undefined;
   const rateLimiter = c.get("previewRateLimiter" as never) as PreviewRateLimiter<{
     content: string;
@@ -536,7 +536,7 @@ sessionAdminRoutes.get("/:sessionName/preview", terminalAuthGuard(), async (c) =
 // the reconcile_session converge op (sugar over the topology spine). Never
 // launches/kills/replays startup or writes input into the target pane.
 sessionAdminRoutes.post("/:sessionName/reconcile", terminalAuthGuard(), async (c) => {
-  const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+  const sessionName = c.req.param("sessionName")!;
   const claimService = c.get("claimService" as never) as ClaimService | undefined;
   const podInstantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
   if (!claimService || !podInstantiator) {
@@ -579,7 +579,7 @@ sessionAdminRoutes.post("/:sessionName/reconcile", terminalAuthGuard(), async (c
 
 // POST /api/sessions/:sessionName/clear-attention — OPR.0.3.4.10.
 sessionAdminRoutes.post("/:sessionName/clear-attention", terminalAuthGuard(), async (c) => {
-  const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+  const sessionName = c.req.param("sessionName")!;
   const reconciler = c.get("seatAttentionReconciler" as never) as import("../domain/seat-attention-reconciler.js").SeatAttentionReconciler | undefined;
   if (!reconciler) {
     return c.json({ error: "Seat attention reconciler not configured on this daemon." }, 503);
@@ -601,7 +601,7 @@ sessionAdminRoutes.post("/:sessionName/clear-attention", terminalAuthGuard(), as
 // echoed back, placed in an error message, logged, or written to the audit
 // event — it is credential-class.
 sessionAdminRoutes.post("/:sessionName/resume-token", terminalAuthGuard(), async (c) => {
-  const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+  const sessionName = c.req.param("sessionName")!;
   const { sessionRegistry } = getDeps(c);
   const eventBus = c.get("eventBus" as never) as EventBus | undefined;
 
@@ -657,7 +657,7 @@ sessionAdminRoutes.post("/:sessionName/resume-token", terminalAuthGuard(), async
 
 // POST /api/sessions/:sessionRef/unclaim
 sessionAdminRoutes.post("/:sessionRef/unclaim", terminalAuthGuard(), async (c) => {
-  const sessionRef = decodeURIComponent(c.req.param("sessionRef")!);
+  const sessionRef = c.req.param("sessionRef")!;
   const { rigLifecycleService } = getDeps(c);
   if (!rigLifecycleService) {
     return c.json({ error: "Lifecycle service not available" }, 500);
@@ -682,7 +682,7 @@ sessionAdminRoutes.post("/:sessionRef/unclaim", terminalAuthGuard(), async (c) =
 // Round-2 (r2 HIGH-2): raw conversation bytes with no transcript redaction — a TERMINAL-CLASS
 // surface behind the same bearer gate as its neighbors (401/401/200; null-token loopback passes).
 sessionAdminRoutes.get("/:sessionName/generation-record", terminalAuthGuard(), async (c) => {
-  const sessionName = decodeURIComponent(c.req.param("sessionName")!);
+  const sessionName = c.req.param("sessionName")!;
   const store = c.get("contextUsageStore" as never) as ContextUsageStore | undefined;
   if (!store) {
     return c.json({ error: "unsupported_runtime", message: "No context-usage store on this daemon; the seat's generation record cannot be resolved." }, 409);
