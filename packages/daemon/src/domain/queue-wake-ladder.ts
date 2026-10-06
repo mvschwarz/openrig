@@ -508,6 +508,8 @@ function appendMarker(repo: QueueRepository, row: QueueItem, note: string): void
     state: row.state,
     actorSession: LADDER_ACTOR,
     transitionNote: note,
+    // A scheduler receipt does not clear the claim's original gate. State writes do.
+    closureTarget: row.state === "in-progress" ? repo.retainedClaimBlocker(row.qitemId) : undefined,
   });
 }
 

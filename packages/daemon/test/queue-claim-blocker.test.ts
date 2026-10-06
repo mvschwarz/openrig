@@ -7,6 +7,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
 import { queueRoutes } from "../src/routes/queue.js";
 
 // Both SQL writers are supported by QueueRepository's generation-column detection.
@@ -161,6 +162,44 @@ describe.each(["current", "without generation stamps"])("claim park exit (%s sch
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ blockedOn: cleared ? null : "external:old-gate" });
+  });
+
+  it.each([
+    ["wake retry", "human", false], ["wake retry", "typed", false],
+    ["destination fallback", "human", false], ["destination fallback", "typed", false],
+    ["wake retry", "human", true], ["wake retry", "typed", true],
+    ["destination fallback", "human", true], ["destination fallback", "typed", true],
+  ] as const)("keeps only an unchanged claim gate through %s (%s, cleared: %s)", async (receipt, gateKind, cleared) => {
+    const row = await create();
+    const gate = gateKind === "human" ? "human-review@kernel" : "external:old-gate";
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: gate,
+      ...(gateKind === "human" ? { summary: "await review", evidenceRef: "owned-evidence" } : {}) });
+    await claim(row.qitemId);
+    if (cleared) repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "in-progress", transitionNote: "gate no longer needed" });
+    if (receipt === "wake retry") {
+      // Supported admission: a claimed owner has a durable failed-delivery note
+      // and current failed nudge. The actual scheduler must append the retry.
+      repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", transitionNote: "parked-owner wake delivery failed: owned-key; controlled failure" });
+      db.prepare("UPDATE queue_items SET last_nudge_result = ?, last_nudge_attempt = ? WHERE qitem_id = ?")
+        .run("failed:controlled transport refusal", "2000-01-01T00:00:00.000Z", row.qitemId);
+      const result = await runWakeLadderTick({ db, queueRepo: repo, attemptWake: async () => "failed:controlled retry refusal",
+        resolveOrchestrator: () => "orch@rig", retryIntervalSeconds: 300, retryCap: 3, log: () => {} });
+      expect(result.actions).toContainEqual({ qitemId: row.qitemId, action: "retry", target: "worker@rig" });
+      expect(repo.listTransitions(row.qitemId).at(-1)?.transitionNote).toMatch(/^wake-attempt:/);
+    } else {
+      repo.routeToFallback(row.qitemId, "fallback@rig", "owned destination reroute");
+      expect(repo.getById(row.qitemId)?.destinationSession).toBe("fallback@rig");
+    }
+    expect(repo.listTransitions(row.qitemId).at(-1)).toMatchObject({ closureReason: null, closureTarget: cleared ? null : gate });
+    const destination = repo.getById(row.qitemId)!.destinationSession;
+    const response = await app.request(`/api/queue/${row.qitemId}/update`, {
+      method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": destination },
+      body: JSON.stringify({ state: "blocked", ...(!cleared && gateKind === "human" ? { summary: "still awaiting review", evidenceRef: "owned-new-evidence" } : {}) }),
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json()).blockedOn).toBe(cleared ? null : gate);
+    expect(repo.listTransitions(row.qitemId).find((t) => t.transitionNote === "claimed"))
+      .toMatchObject({ transitionNote: "claimed", closureReason: null, closureTarget: gate });
   });
 
   it("rolls back the complete park exit if recording the claim fails", async () => {

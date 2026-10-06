@@ -2346,8 +2346,8 @@ export class QueueRepository {
     return { qitemId: input.qitemId, ...result };
   }
 
-  /** The current claim gate survives note-only appends, never a later state write. */
-  private retainedClaimBlocker(qitemId: string): string | undefined {
+  /** Internal read-only audit pointer for non-state receipts. Never search past a state write. */
+  retainedClaimBlocker(qitemId: string): string | undefined {
     const latest = this.transitionLog.listForQitem(qitemId).at(-1);
     // Explicit state writes do not carry this non-closure audit pointer. Do not
     // search past one, even if an older claim still records a gate in history.
@@ -3684,6 +3684,7 @@ export class QueueRepository {
         state: qitem.state,
         actorSession: "system:queue-fallback",
         transitionNote: `fallback-routed: ${originalDestination} → ${fallbackDestination} (${reason})`,
+        closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(qitemId) : undefined,
       });
 
       return this.eventBus.persistWithinTransaction({
