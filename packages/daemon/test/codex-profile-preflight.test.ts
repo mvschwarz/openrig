@@ -7,6 +7,20 @@ import { verifyCodexProfiles } from "../src/domain/rigspec-preflight.js";
 import type { RigSpec as PodRigSpec } from "../src/domain/types.js";
 
 describe("verifyCodexProfileLoads", () => {
+  it.each([true, false])("releases the deadline after the command settles (success=%s)", async (success) => {
+    vi.useFakeTimers();
+    try {
+      const result = await verifyCodexProfileLoads("owned", async () => {
+        if (!success) throw new Error("invalid profile");
+        return "";
+      });
+      expect(result.ok).toBe(success);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("PASS: valid profile loads successfully", async () => {
     const exec = vi.fn(async () => "");
     const result = await verifyCodexProfileLoads("openrig_pm", exec);

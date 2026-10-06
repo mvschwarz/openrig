@@ -204,11 +204,16 @@ export class RequirementsProbeRegistry {
   }
 
   private async execWithTimeout(cmd: string): Promise<string> {
-    return Promise.race([
-      this.exec(cmd),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("probe timed out")), this.timeoutMs)
-      ),
-    ]);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.exec(cmd),
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("probe timed out")), this.timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(deadline);
+    }
   }
 }

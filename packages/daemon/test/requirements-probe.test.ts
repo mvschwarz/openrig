@@ -15,6 +15,20 @@ function createMockExec(responses: Record<string, string | Error>): ExecFn {
 }
 
 describe("RequirementsProbeRegistry", () => {
+  it.each([true, false])("releases the deadline after the CLI probe settles (success=%s)", async (success) => {
+    vi.useFakeTimers();
+    try {
+      const registry = new RequirementsProbeRegistry(async () => {
+        if (!success) throw new Error("command not found");
+        return "/usr/bin/node";
+      });
+      expect((await registry.probeCli("node")).status).toBe(success ? "installed" : "missing");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // T1: CLI tool installed — status='installed', detectedPath populated, version=null
   it("CLI tool installed returns installed with detectedPath and null version", async () => {
     const exec = createMockExec({ "command -v": "/usr/local/bin/ripgrep" });

@@ -20,12 +20,13 @@ export async function verifyCodexProfileLoads(
   codexHome: string = process.env.CODEX_HOME || "~/.codex",
 ): Promise<CodexProfileProbeResult> {
   const cmd = `codex -p ${shellQuote(profile)} mcp list`;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
       exec(cmd),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Codex profile probe timed out after ${timeoutMs}ms`)), timeoutMs),
-      ),
+      new Promise<never>((_, reject) => {
+        deadline = setTimeout(() => reject(new Error(`Codex profile probe timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
     ]);
     return { ok: true, profile };
   } catch (err) {
@@ -48,6 +49,8 @@ export async function verifyCodexProfileLoads(
       error: `Codex profile '${profile}' failed to load: ${reason}`,
       migrationHint,
     };
+  } finally {
+    clearTimeout(deadline);
   }
 }
 
