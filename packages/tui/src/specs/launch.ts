@@ -13,7 +13,7 @@ export function launchArgs(launch: SpecLaunch): string[] {
 }
 
 export function launchCommand(launch: SpecLaunch): string {
-  return ["rig", ...launchArgs(launch)].map(s => /^[\w/.:=-]+$/.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`).join(" ");
+  return (launch.host === "local" ? "OPENRIG_HOST_SELECTED=local " : "") + ["rig", ...launchArgs(launch)].map(s => /^[\w/.:=-]+$/.test(s) ? s : `'${s.replaceAll("'", "'\\''")}'`).join(" ");
 }
 
 export interface LaunchProcess { executable: string; args: string[]; env: NodeJS.ProcessEnv }

@@ -937,7 +937,8 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
         lines.push({ text: `rig spec ${spec.name} · authored topology, not live status` });
         lines.push(listItem("Launch… · choose working folder", { type: "spec-launch" }));
         if (state.viewTab === "graph") {
-          if (!spec.graph) return [...lines, { text: spec.sourceUnavailable ?? "Spec graph unavailable in the current library read." }];
+          lines.push(...specSourceLines(spec, snap).filter(line => line.action?.type === "file-open"));
+          if (!spec.graph) return [...lines, { text: spec.sourceUnavailable ? `Source unavailable: ${spec.sourceUnavailable}` : "Spec graph unavailable in the current library read." }];
           const canvas = renderGraphStyle(state.graphStyle, specGraph(spec.graph), { host: "", rig: spec.name }, contentWidth);
           const segs = canvas.segLines();
           // Preview boxes must not drill into nonexistent live seats.

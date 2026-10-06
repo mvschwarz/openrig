@@ -88,7 +88,7 @@ export function createViewState(options: CreateViewStateOptions): ViewStateStore
 
   function dispatch(action: Action): ViewState {
     const previous = state;
-    if (["attention-category", "attention-open", "terminal-preview", "project-select", "jump", "drill", "cross", "tab", "scopes-mission-open", "scopes-open", "health-open", "execution-open", "recent-open", "timezone", "config-category", "config-setting"].includes(action.type)) state = { ...state, file: null, externalUrl: null, recentOpen: null, timeZoneHelp: false, attentionOpen: null };
+    if (["attention-category", "attention-open", "terminal-preview", "project-select", "jump", "drill", "cross", "tab", "scopes-mission-open", "scopes-open", "health-open", "execution-open", "recent-open", "timezone", "config-category", "config-setting"].includes(action.type)) state = { ...state, file: null, externalUrl: null, recentOpen: null, timeZoneHelp: false, attentionOpen: null, specLaunch: null };
     state = reduce(state, action, getSnapshot());
     // Connections is a side trip from work, including explorer/palette entry.
     if (action.type === "jump" && ![...SYSTEM_SECTIONS, "needs"].includes(action.section) && ![...SYSTEM_SECTIONS, "needs"].includes(previous.section)) state.history = [];

@@ -46,6 +46,7 @@ describe("rig spec graph and Launch", () => {
     const { view, screen } = setup();
     view.dispatch({ type: "focus", pane: "content" });
     let frame = screen();
+    view.dispatch({ type: "layout", contentMaxOffset: frame.contentMaxOffset, contentTargetCount: frame.contentTargets.length });
     view.dispatch({ type: "content-select", index: frame.contentTargets.findIndex(t => t.action.type === "spec-launch") });
     const open = resolveKeyAction({ type: "key", key: "enter" }, view.get(), frame, frame.explorerRows.length);
     expect(open).toEqual({ type: "spec-launch" });
@@ -55,6 +56,7 @@ describe("rig spec graph and Launch", () => {
     view.dispatch(parseCommand("launch-folder /work/My Team"));
     view.dispatch(parseCommand("launch-host build-box"));
     frame = screen();
+    view.dispatch({ type: "layout", contentMaxOffset: frame.contentMaxOffset, contentTargetCount: frame.contentTargets.length });
     expect(frame.lines.join("\n")).toContain("/work/My Team");
     expect(frame.lines.join("\n")).toContain("Host: build-box");
     view.dispatch({ type: "content-select", index: frame.contentTargets.findIndex(t => t.action.type === "act") });
@@ -65,6 +67,14 @@ describe("rig spec graph and Launch", () => {
     view.dispatch({ type: "back" });
     expect(view.get().specLaunch).toBeNull();
     expect(view.get().drill.at(-1)?.name).toBe(spec.name);
+  });
+
+  it("closes an unfinished confirmation on navigation rather than retaining a different spec's source", () => {
+    const { view } = setup();
+    view.dispatch(parseCommand("launch"));
+    view.dispatch(parseCommand("launch-folder /work/team"));
+    view.dispatch(parseCommand("tab yaml"));
+    expect(view.get().specLaunch).toBeNull();
   });
 
   it("keeps graph unavailable separate from an empty graph, and defaults after lazy catalog loading", () => {
@@ -112,6 +122,6 @@ describe("unchanged rig up invocation and terminal handoff", () => {
       pauseInput() {}, resumeInput: () => { resumed = true; }, setSuspended() {}, isShuttingDown: () => false,
       notice: s => { notice = s; }, draw() {},
     });
-    expect(runs).toBe(1); expect(resumed).toBe(true); expect(notice).toContain("ENOENT"); expect(notice).toContain("inspect rig ps".replace("inspect", "Inspect"));
+    expect(runs).toBe(1); expect(resumed).toBe(true); expect(notice).toContain("ENOENT"); expect(notice).toContain("Inspect rig ps");
   });
 });
