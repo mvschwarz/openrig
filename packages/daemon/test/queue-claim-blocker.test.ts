@@ -7,7 +7,7 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
-import { runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
+import { escalationDedupTag, runWakeLadderTick } from "../src/domain/queue-wake-ladder.js";
 import { queueRoutes } from "../src/routes/queue.js";
 
 // Both SQL writers are supported by QueueRepository's generation-column detection.
@@ -200,6 +200,42 @@ describe.each(["current", "without generation stamps"])("claim park exit (%s sch
     expect((await response.json()).blockedOn).toBe(cleared ? null : gate);
     expect(repo.listTransitions(row.qitemId).find((t) => t.transitionNote === "claimed"))
       .toMatchObject({ transitionNote: "claimed", closureReason: null, closureTarget: gate });
+  });
+
+  it.each([
+    ["human", false], ["typed", false], ["human", true], ["typed", true],
+  ] as const)("keeps only an unchanged claim gate through aggregate escalation refresh (%s, cleared: %s)", async (gateKind, cleared) => {
+    const baton = async () => {
+      const source = await create("relay@rig");
+      const { created } = await repo.handoff({ qitemId: source.qitemId, fromSession: "relay@rig", toSession: "worker@rig", nudge: false });
+      db.prepare("UPDATE queue_items SET last_nudge_result = ?, last_nudge_attempt = ? WHERE qitem_id = ?")
+        .run("failed:controlled transport refusal", "2000-01-01T00:00:00.000Z", created.qitemId);
+      return created;
+    };
+    const tick = () => runWakeLadderTick({ db, queueRepo: repo, attemptWake: async () => "failed:controlled transport refusal",
+      resolveOrchestrator: () => "orch@rig", retryCap: 0, log: () => {} });
+    await baton();
+    await tick();
+    const aggregate = repo.list().find((row) => row.tags?.includes(escalationDedupTag("worker@rig")))!;
+    const post = (suffix: string, body: object) => app.request(`/api/queue/${aggregate.qitemId}/${suffix}`, {
+      method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "orch@rig" },
+      body: JSON.stringify(body),
+    });
+    const gate = gateKind === "human" ? "human-review@kernel" : "external:old-gate";
+    expect((await post("update", { state: "blocked", blockedOn: gate,
+      ...(gateKind === "human" ? { summary: "await review", evidenceRef: "owned-evidence" } : {}) })).status).toBe(200);
+    expect((await post("claim", {})).status).toBe(200);
+    if (cleared) expect((await post("update", { state: "in-progress", transitionNote: "gate cleared" })).status).toBe(200);
+    const member = await baton();
+    await tick();
+    const receipt = repo.listTransitions(aggregate.qitemId).at(-1)!;
+    expect(receipt).toMatchObject({ state: "in-progress", actorSession: "wake-ladder@system",
+      closureReason: null, closureTarget: cleared ? null : gate });
+    expect(receipt.transitionNote).toBe(`wake-escalation members added: recovery-for:${member.qitemId}`);
+    const response = await post("update", { state: "blocked",
+      ...(!cleared && gateKind === "human" ? { summary: "still waiting", evidenceRef: "owned-new-evidence" } : {}) });
+    expect(response.status).toBe(200);
+    expect((await response.json()).blockedOn).toBe(cleared ? null : gate);
   });
 
   it("rolls back the complete park exit if recording the claim fails", async () => {
