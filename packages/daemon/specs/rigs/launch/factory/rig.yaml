@@ -14,11 +14,21 @@ pods:
         runtime: codex
         profile: default
         cwd: "."
+        startup:
+          files:
+            - path: guidance/lead-first-move.md
+              delivery_hint: send_text
+              required: true
       - id: advisor
         agent_ref: "local:../../../agents/product-management/pm"
         runtime: claude-code
         profile: advisor
         cwd: "."
+        startup:
+          files:
+            - path: guidance/advisor-role.md
+              delivery_hint: send_text
+              required: true
     edges:
       - kind: collaborates_with
         from: advisor

@@ -15,6 +15,11 @@ pods:
         runtime: claude-code
         profile: default
         cwd: "."
+        startup:
+          files:
+            - path: guidance/lead-first-move.md
+              delivery_hint: send_text
+              required: true
       - id: review
         agent_ref: "local:../../../agents/development/qa"
         runtime: codex
