@@ -44,8 +44,11 @@ than printing a summary and disappearing.
 
 ## When you are installing OpenRig for someone
 
-After setup and a working selected login, start the daemon if stopped. On a fresh instance it starts the kernel
-without a starter team. Read `rig status` and `rig ps --nodes --rig kernel`: started is not ready. The view may open
+After setup and a working selected login, use `rig daemon start` if stopped. On a fresh instance it also starts the
+kernel, including the operator and advisor. They are part of installation; choosing a project team comes later.
+Keep the kernel for a normal install. `rig daemon start --no-kernel` is for automation or an explicit request to
+omit its startup, including the operator that helps the person start a team.
+Read `rig status` and `rig ps --nodes --rig kernel`: started is not ready. The view may open
 while agents finish starting; report their actual state and use the guide's existing recovery routes when needed.
 Ask the person: **“Open the OpenRig view now?”** Yes opens a new terminal space using installed herdr, else cmux,
 else the guide's exact new-terminal command. No gives the command to open it later. Over SSH, give the exact
@@ -55,7 +58,12 @@ the person sees; creating a workspace or running the CLI in a new OS window is n
 Use `rig terminal open saved:kernel --provider herdr` (or `--provider cmux`); the default view needs no YAML edit.
 Show TUI | advisor | operator in that order for Claude-only, Codex-only and mixed kernels.
 Keep the queue worker off the first view and accessible through the TUI. Reuse the existing conversations and accounts.
-Let the person tell the operator their goal and choose a first project team before any starter launch.
+Ask the person's goal and project folder, then hand them to the ready operator; do not implement the project yourself.
+Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName` with
+`rig send <canonicalSessionName> '<goal and absolute project folder>'`, or have the person type those details in
+the operator's pane. Show where the operator answers and let it help them choose a team before any starter launch.
+Installation is complete when the operator is ready and the person is talking to it, not merely when the daemon is
+healthy. If they choose to talk later, leave the exact connection step and say that the handoff is still pending.
 
 Read `rig context get reference/getting-started.md#open-the-kernel-conversations` for the commands and manual
 path. Without a working daemon, the same guide is `daemon/docs/reference/getting-started.md` in the installed

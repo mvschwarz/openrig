@@ -151,7 +151,7 @@ export function daemonCommand(depsOverride?: LifecycleDeps): Command {
     // a no-kernel daemon for ad-hoc topology work. The daemon proceeds
     // and serves its HTTP API normally; just doesn't materialize the
     // kernel rig.
-    .option("--no-kernel", "Skip kernel auto-boot (daemon serves without the kernel rig)")
+    .option("--no-kernel", "Skip the kernel and its operator, which helps you start a team; for automation or when requested. Normal installation keeps the kernel")
     // V0.3.1 slice 05 kernel-rig-as-default — forward-fix #3 architectural.
     // After the daemon's healthz binds (current behavior preserved),
     // additionally poll /api/kernel/status until kernel_state is
