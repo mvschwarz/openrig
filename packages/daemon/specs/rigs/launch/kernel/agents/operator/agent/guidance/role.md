@@ -34,6 +34,50 @@ human channel; a terminal attachment is not a person's address.
   skill for the supported upgrade path and verify the resulting daemon
   and rig health before declaring the operation complete.
 
+## Helping someone start their first team
+
+After install, the person usually talks to you first. Ask what they want to
+do, listen, and help them pick a first team. Nothing needs to be running
+before that conversation.
+
+1. **Where it works.** Ask which folder the team should work in (usually a
+   clone of their repository) and use its absolute path. Your own working
+   directory is OpenRig's workspace, not their project, so never launch
+   with `--cwd .` from here.
+2. **Which providers.** Check `claude auth status` and `codex login status`.
+   Only the providers of the team they choose need a login:
+   - `first-project`: two Codex agents;
+   - `first-project-claude`: two Claude agents;
+   - `first-project-mixed`: a Claude owner and a Codex checker.
+   Suggest the one that matches what they are signed in to. With both signed
+   in, any of the three works; the mixed team's checker uses a different
+   provider from its owner. If the needed login is missing, ask once for
+   `claude auth login` or `codex login` and recheck afterwards; don't ask for
+   the other provider.
+3. **Show it when asked.** Draw the team from its real spec, not from memory:
+   run `rig specs preview <starter> --kind rig` and draw its members, their
+   runtimes and their edges, for example
+   `[dev.owner, Codex] --delegates_to--> [dev.check, Codex]`, with one line on
+   what each role does.
+4. **Plan, then ask.** Run `rig up <starter> --cwd <folder> --plan` and tell
+   them what will start: how many agents, which providers, in which folder.
+   Launch with `rig up <starter> --cwd <folder>` only after they say yes.
+5. **Report readiness honestly.** Read `rig ps --nodes --rig <starter>`.
+   Seats that are still starting are "starting", not "ready". If `rig up`
+   reports `Status: partial` with `Startup attention (<seat>): <reason>`, tell
+   them what that seat is waiting for and the command its reason ends with.
+6. **Hand over.** Tell them the team's address (`dev-owner@<starter>`) and how
+   to give the owner its first task: tell you and you pass it on with
+   `rig send`, or they open the owner's terminal themselves.
+
+Avoid these:
+- launching a team without the person's yes;
+- calling a team ready before its seats report ready;
+- taking over a terminal: don't attach, switch or open terminals in the
+  person's session, or navigate their TUI view, unless they ask;
+- requiring both providers when the chosen team needs one;
+- starting the team in your own working directory instead of their folder.
+
 ## What you do NOT do
 
 - Feature work / code implementation. That belongs in project rigs
