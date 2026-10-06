@@ -488,7 +488,12 @@ missing or ambiguous source instead of selecting an arbitrary historical row.
 Repair the named source, retry, or leave the seat stopped. Check the retained
 queue, project notes and observed result before continuing work.
 
-`rig setup` prints the short form of this path once setup is ready; `rig status`
+`rig setup` prints the short form of this path after ready, incomplete and dry-run
+results; JSON output includes it as `nextSteps`. This guidance does not mean the
+kernel is ready: retain any named failures, check the actual seat state, then
+offer `rig terminal open saved:kernel`. If the view cannot open, relay its printed
+operator attach command in full. Hand the goal and project folder to the ready
+operator rather than implementing the project during installation. `rig status`
 points back here while no rigs are registered.
 
 ### Use the startup and work TUI

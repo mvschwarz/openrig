@@ -778,13 +778,13 @@ function buildDefaultDoctorDeps(setupDeps: SetupDeps): DoctorDeps {
  */
 export function goldenPathNextSteps(): string[] {
   return [
-    "Next steps (the guided path; full reference: docs/reference/getting-started.md):",
+    "Next steps (guidance only; full reference: rig context get reference/getting-started.md):",
     "  1. Check only selected logins: claude auth status or codex login status; one working provider is enough",
     "  2. rig daemon start                 If stopped; a fresh instance also starts the kernel, including operator and advisor",
     "     The kernel is part of installation. Keep it for normal setup; --no-kernel is for automation or when requested",
     "  3. rig status                       Read the kernel boot state; rig ps --nodes --rig kernel checks its seats",
     "     Started is not ready. The view may open while agents finish starting; report their actual state",
-    "     For an existing kernel or blocked startup, follow the guide's Incomplete setup and restart section",
+    "     For an existing kernel or blocked startup: rig context get reference/getting-started.md#incomplete-setup-and-restart",
     "  4. Installing agent: ask 'Open the OpenRig view now?'",
     "     Yes: open a NEW space using installed herdr, else cmux, else the guide's exact new-terminal command",
     "     rig terminal open saved:kernel --provider herdr --json (TUI | advisor | operator; no YAML edit)",
@@ -794,7 +794,8 @@ export function goldenPathNextSteps(): string[] {
     "     For herdr, open or attach the actual session and check the visible view; CLI success alone is not proof",
     "     Keep the current terminal and existing spaces intact; opening this view needs no new provider install",
     "     rig tui --shared is the team dashboard, not the operator's conversation",
-    "     Without herdr or cmux, find operator.agent with rig ps --nodes --rig kernel --json",
+    "     If the view cannot open, relay the printed operator.agent attach command unchanged, in full",
+    "     If no command is printed, find operator.agent with rig ps --nodes --rig kernel --json",
     "     Use its canonicalSessionName in: env -u TMUX tmux attach-session -t '=<canonicalSessionName>'",
     "     Give the person that command with the name filled in, to run in a new terminal on the kernel host",
     "  5. Installing agent: ask the person's goal and project folder, then hand them to the ready operator",
@@ -867,7 +868,7 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
       const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, doctorDeps });
 
       if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
+        console.log(JSON.stringify({ ...result, nextSteps: goldenPathNextSteps() }, null, 2));
         if (!opts.dryRun && !result.ready) process.exitCode = 1;
         return;
       }
@@ -887,27 +888,29 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
         if (step.fixHint) console.log(`       Fix: ${step.fixHint}`);
       }
 
-      // Surface the permission-policy choice (the 0.4.8 onboarding "menu" is calm-register narrative,
-      // not a TUI). Recording is optional and never a gate.
-      console.log("");
-      for (const line of permissionPolicyMenuLines()) console.log(line);
-
       // OPR.0.3.3.04.2 (AC-1): the canonical ordered golden path. `rig setup` is
       // the primary surface for the new-operator sequence (status/doctor only
       // HINT back to it; the durable reference is docs/reference/getting-started.md).
       if (result.ready) {
         console.log("\nSetup complete.\n");
-        for (const line of goldenPathNextSteps()) console.log(line);
       } else {
         console.log("\nSome steps need attention:");
+        if (opts.dryRun) console.log("Plan only: no setup changes were made; readiness was not checked.");
         for (const step of result.steps.filter(step => step.status === "fail")) {
           console.log(`  ${step.id}: ${step.message}`);
           if (step.fixHint) console.log(`    Fix: ${step.fixHint}`);
         }
         console.log("Only the harnesses selected for your project need a login; an unused harness does not.");
         console.log("Run `rig doctor` for system checks; it does not check harness logins.");
-        console.log("Guided next steps: docs/reference/getting-started.md");
       }
+      // Keep the conversation route available even after a dry run or incomplete setup,
+      // before the optional menu so a short output read still includes the handoff.
+      console.log("");
+      for (const line of goldenPathNextSteps()) console.log(line);
+
+      // This printed menu records no choice and changes no native permissions.
+      console.log("");
+      for (const line of permissionPolicyMenuLines()) console.log(line);
       if (!opts.dryRun && !result.ready) process.exitCode = 1;
     });
 
