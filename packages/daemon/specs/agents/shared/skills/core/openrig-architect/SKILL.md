@@ -1,6 +1,6 @@
 ---
 name: openrig-architect
-description: Use when designing multi-agent topologies that run ON OpenRig — authoring RigSpec and AgentSpec files for new rigs, creating agent startup content (guidance / skills / culture), or diagnosing why a launched rig's agents aren't behaving as intended. NOT for changing OpenRig itself (use openrig-builder); NOT for ordinary CLI operation of an existing rig (use openrig-user). Covers the full authoring lifecycle from user intent to validated, launchable rig.
+description: Use when designing multi-agent topologies that run ON OpenRig — authoring RigSpec and AgentSpec files for new rigs, creating agent startup content (guidance / skills / culture), or diagnosing why a launched rig's agents aren't behaving as intended. NOT for changing OpenRig itself (use developing-openrig); NOT for ordinary CLI operation of an existing rig (use openrig-user). Covers the full authoring lifecycle from user intent to validated, launchable rig.
 metadata:
   cli_surfaces_referenced:
     - agent validate
@@ -17,7 +17,7 @@ metadata:
     sibling_skills:
       - openrig-user
       - openrig-operator
-      - openrig-builder
+      - developing-openrig
       - openrig-upgrade
       - forming-an-openrig-mental-model
       - ai-dev-workflows

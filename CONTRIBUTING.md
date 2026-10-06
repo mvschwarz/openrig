@@ -11,9 +11,9 @@ change in with the least friction on both sides.
   OS, Node and tmux versions, which harnesses are involved (or none), and the relevant command and output.
   Reports are public: remove credentials, private prompts, personal details and private paths
   before posting. Share a small reproduction rather than a full transcript or instance dump.
-- **Features and behaviour changes:** open an issue or a Discussion in *Ideas* first. A short
-  "what I am trying to do and what stops me" saves both of us a rewrite. Small, obvious fixes do
-  not need an issue.
+- **Features and behaviour changes:** open an issue or a Discussion in *Ideas* first. Search issues
+  and Discussions, and check ROADMAP.md, before proposing a feature. A short "what I am trying to do
+  and what stops me" saves both of us a rewrite. Small, obvious fixes do not need an issue.
 - **Questions:** use [Discussions › Q&A](https://github.com/mvschwarz/openrig/discussions/categories/q-a),
   not an issue.
 

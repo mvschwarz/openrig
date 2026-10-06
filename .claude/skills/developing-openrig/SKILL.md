@@ -23,13 +23,17 @@ not by restarting the daemon you live in.
 
 | You want to know | Read | How much to trust it |
 |---|---|---|
-| What OpenRig can already do, before you decide something is missing | `rig context get onboarding-width/public-what-you-can-do.md` | The capability map; check it before proposing a new command or calling a gap a defect |
+| What OpenRig can already do, before you decide something is missing | `rig context get onboarding-width/public-what-you-can-do.md`; in this checkout, `packages/daemon/context-packs-src/onboarding-width/public-what-you-can-do.md` (the installed copy can differ) | The capability map; check it before proposing a new command or calling a gap a defect |
+| Whether a `rig` command already exists | `rig --help`: the full command list, before you decide a command is missing | The running binary; read the whole list, not only the command you expected |
+| Whether a problem is already known | The "Known problems to compare against" section of [`docs/reference/help.md`](../../../docs/reference/help.md) | Lists known issues by symptom; check an issue's current status before relying on it |
+| Whether a feature is already planned | [`ROADMAP.md`](../../../ROADMAP.md) | Check it before proposing a feature |
 | How the packages fit, the request path, where to add a command, route, migration, adapter, skill, context pack or scenario | [`ARCHITECTURE.md`](../../../ARCHITECTURE.md) | Checked against the commit it names; counts come with the command to refresh them |
 | Whether your change touches a high-risk area, what depends on it, what broke there before | [`docs/as-built/arteries.md`](../../../docs/as-built/arteries.md) | Incomplete by design: absence from it doesn't make a change safe |
 | What to run before you push, and what each layer can and can't prove | [`docs/as-built/test-layers.md`](../../../docs/as-built/test-layers.md) | Checked against the commit it names |
 | The exact behaviour of a `rig` command | `rig <command> --help` on the running binary, then `packages/cli/src/commands/` | The binary and the code win over any document |
-| A subsystem in depth | [`docs/as-built/`](../../../docs/as-built/README.md) | Most modules predate 0.6; check each one's `last-verified-against-source` marker against `git log` before relying on it |
+| A subsystem in depth | [`docs/as-built/`](../../../docs/as-built/README.md) | Each module names the commit it was last checked against in `last-verified-against-source`; compare that marker with `git log` before relying on it |
 | Rig spec, agent spec and other user-facing reference | [`docs/reference/`](../../../docs/reference/) | Ships to every user; if you find drift, fix it there |
+| Which shipped skill covers a task | [`skills/_canonical/core/openrig-skills/SKILL.md`](../../../skills/_canonical/core/openrig-skills/SKILL.md) | The index of the skills that ship with OpenRig |
 | How to open a good pull request, and what review looks like | [`CONTRIBUTING.md`](../../../CONTRIBUTING.md) | Current |
 
 If none of these answers your question, search the code before inventing an answer. A missing map is worth an issue.
@@ -59,6 +63,8 @@ OpenRig is a coordination layer for a trusted environment: it should help agents
 - A change that removes friction, or makes state more truthful, is usually welcome.
 - OpenRig runs on agents working in context with tools. Before adding code for a behaviour, ask whether an agent with
   the right instructions and today's commands could do it. A skill or a page of guidance is often the better change.
+  - Where to look: the capability map above, and the `agent-operated-workflows` skill, which ships in the
+    `openrig-core` plugin (`packages/daemon/assets/plugins/openrig-core/skills/agent-operated-workflows/SKILL.md`).
 - A change that adds a refusal, a prompt or a required step needs the concrete case in CONTRIBUTING.md: who is
   harmed, how, and what it costs everyone else.
 - One concern per pull request. Keep the diff reviewable in one sitting.
