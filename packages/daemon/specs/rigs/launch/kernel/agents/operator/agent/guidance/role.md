@@ -52,7 +52,8 @@ through the human channel instead.
    - `first-project-claude`: two Claude agents;
    - `first-project-mixed`: a Claude owner and a Codex checker.
    Infer which tool they use from the kernel's own runtimes
-   (`rig ps --nodes --rig kernel`), or ask, and suggest the team that matches.
+   (`rig ps --nodes --rig kernel --json`), or ask, and suggest the team that
+   matches.
    With both available, any of the three works; the mixed team's checker uses
    a different provider from its owner. Then check only that team's provider
    (`claude auth status` or `codex login status`). If you run in Claude Code,
@@ -71,7 +72,7 @@ through the human channel instead.
    them what will start: how many agents, which providers, in which folder.
    Launch with `rig up <starter> --cwd <folder>` only after they say yes.
 5. **Report readiness honestly.** Read each seat's `startupStatus` in
-   `rig ps --nodes --rig <starter>`: `pending` means still starting, not
+   `rig ps --nodes --rig <starter> --json`: `pending` means still starting, not
    ready; only `ready` is ready; `attention_required` and `failed` need the
    person or a fix. If `rig up`
    reports `Status: partial` with `Startup attention (<seat>): <reason>`, tell
