@@ -211,7 +211,7 @@ export class BootstrapOrchestrator {
             // otherwise `cwd: "."`, the spec dir and agent refs point at a deleted dir.
             if (opts.mode === "apply" && opts.targetRoot) {
               const targetRoot = nodePath.resolve(opts.targetRoot);
-              const replacingOwnTarget = isExistingBundleTarget(this.deps.db, context, targetRoot);
+              const replacingOwnTarget = isExistingBundleTarget(context, targetRoot);
               const tmux = this.deps.podInstantiator?.["deps"]?.tmuxAdapter;
               if (replacingOwnTarget && tmux?.probeSession) {
                 // The instantiator repeats this under its name lock. This early

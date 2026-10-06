@@ -4,6 +4,7 @@ import { makeRunningSessionCounter } from "./running-name-guard.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import fs from "node:fs";
 import path from "node:path";
+import { parsePodBundleManifest } from "./bundle-types.js";
 
 export interface BundleInstallContext {
   offered: { name: string; version: string | null; source: string };
@@ -38,13 +39,16 @@ export function bundleInstallContext(
   };
 }
 
-/** Resolved member cwd is persisted at launch. A matching name alone owns no folder. */
-export function isExistingBundleTarget(db: Database.Database, context: BundleInstallContext, target: string): boolean {
-  const canonical = (p: string) => { try { return fs.realpathSync(p); } catch { return path.resolve(p); } };
-  const targetPath = canonical(target);
-  const rigs = new RigRepository(db);
-  return context.existing.some(rig => rigs.getRig(rig.rigId)?.nodes.some(node =>
-    node.cwd && path.isAbsolute(node.cwd) && canonical(node.cwd) === targetPath));
+/** Materialization leaves this manifest in the install folder; --cwd can point seats elsewhere. */
+export function isExistingBundleTarget(context: BundleInstallContext, target: string): boolean {
+  if (context.existing.length === 0) return false;
+  try {
+    const manifest = parsePodBundleManifest(fs.readFileSync(path.join(target, "bundle.yaml"), "utf8")) as Record<string, unknown> | null;
+    return manifest?.["schema_version"] === 2 && manifest["name"] === context.offered.name;
+  } catch {
+    // Missing or unreadable identity keeps the existing first-install conflict handling.
+    return false;
+  }
 }
 
 export function bundleInstallContextLines(context: BundleInstallContext, includeChoices = true): string[] {

@@ -54,9 +54,14 @@ describe("bundle reinstall through both public routes", () => {
     return rig;
   }
 
-  async function install(route: string, archive: string, target = path.join(root, "target"), plan = false) {
+  function installedTarget(name: string, target: string) {
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, "bundle.yaml"), stringify({ schema_version: 2, name, version: "0.9.0", created_at: "2026-10-01T00:00:00Z", rig_spec: "rig.yaml", agents: [] }));
+  }
+
+  async function install(route: string, archive: string, target = path.join(root, "target"), plan = false, cwdOverride?: string) {
     const response = await setup.app.request(route, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bundlePath: archive, sourceRef: archive, targetRoot: target, plan }) });
+      body: JSON.stringify({ bundlePath: archive, sourceRef: archive, targetRoot: target, plan, cwdOverride }) });
     return { status: response.status, body: await response.json(), target };
   }
 
@@ -83,7 +88,7 @@ describe("bundle reinstall through both public routes", () => {
   it.each([["/api/bundles/install", "workshop"], ["/api/up", "kernel"]])("%s replaces stopped %s, preserves edited files and returns recovery", async (route, name) => {
     const previous = seed(name, false);
     const target = path.join(root, "target");
-    fs.mkdirSync(target);
+    installedTarget(name, target);
     fs.writeFileSync(path.join(target, "README.md"), "my local edits\n");
     fs.writeFileSync(path.join(target, "unrelated.txt"), "leave me here");
     const result = await install(route, await bundle(name, "99.0.0"), target);
@@ -106,7 +111,7 @@ describe("bundle reinstall through both public routes", () => {
   it.each(["present", "transport_unavailable"])("round 2: %s old session leaves stopped-team target untouched", async state => {
     const previous = seed("workshop", false);
     vi.mocked(setup.tmuxAdapter.probeSession).mockResolvedValue(state === "present" ? { state: "present" } : { state: "transport_unavailable", cause: "fixture unavailable" });
-    const target = path.join(root, "target"); fs.mkdirSync(target);
+    const target = path.join(root, "target"); installedTarget("workshop", target);
     fs.writeFileSync(path.join(target, "README.md"), "original edits");
     const result = await install("/api/up", await bundle("workshop"), target);
     expect(result.status).toBe(409);
@@ -118,7 +123,7 @@ describe("bundle reinstall through both public routes", () => {
 
   it.each(["validation", "late-session"])("round 2: %s refusal after materialization names the backup", async failure => {
     const previous = seed("workshop", false);
-    const target = path.join(root, "target"); fs.mkdirSync(target);
+    const target = path.join(root, "target"); installedTarget("workshop", target);
     fs.writeFileSync(path.join(target, "README.md"), "original edits");
     if (failure === "late-session") {
       const instantiate = setup.podInstantiator.instantiate.bind(setup.podInstantiator);
@@ -147,6 +152,40 @@ describe("bundle reinstall through both public routes", () => {
     expect(result.body.errors.join("\n")).toContain("Nothing was written");
     expect(fs.readFileSync(path.join(target, "README.md"), "utf8")).toBe("my project");
     expect(fs.existsSync(path.join(root, "home", "bundle-backups"))).toBe(false);
+  });
+
+  it.each(["/api/bundles/install", "/api/up"])("round 3: %s replaces the install folder when --cwd points at a project", async route => {
+    const target = path.join(root, "installed"), project = path.join(root, "project");
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, "README.md"), "my project");
+    const first = await install(route, await bundle("workshop"), target, false, project);
+    expect(first.status).toBe(201);
+    expect(setup.rigRepo.getRig(first.body.rigId)?.nodes[0]?.cwd).toBe(project);
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = ?)").run(first.body.rigId);
+    fs.writeFileSync(path.join(target, "README.md"), "edited installed documentation");
+    const result = await install(route, await bundle("workshop", "2.0.0"), target, false, project);
+    expect(result.status).toBe(201);
+    expect(fs.readFileSync(path.join(target, "README.md"), "utf8")).toBe("offered team documentation\n");
+    const backup = path.join(root, "home", "bundle-backups", fs.readdirSync(path.join(root, "home", "bundle-backups"))[0]!);
+    expect(fs.readFileSync(path.join(backup, "files", "README.md"), "utf8")).toBe("edited installed documentation");
+    expect(result.body.warnings.join("\n")).toContain(backup);
+    expect(fs.readFileSync(path.join(project, "README.md"), "utf8")).toBe("my project");
+  });
+
+  it.each(["/api/bundles/install", "/api/up"])("round 3: %s keeps the seats' project intact when it is selected as target", async route => {
+    const target = path.join(root, "installed"), project = path.join(root, "project");
+    fs.mkdirSync(project);
+    for (const name of ["README.md", "CULTURE.md", "rig.yaml"]) fs.writeFileSync(path.join(project, name), `my project ${name}`);
+    const first = await install(route, await bundle("workshop"), target, false, project);
+    expect(first.status).toBe(201);
+    expect(setup.rigRepo.getRig(first.body.rigId)?.nodes[0]?.cwd).toBe(project);
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = ?)").run(first.body.rigId);
+    const result = await install(route, await bundle("workshop", "2.0.0"), project, false, project);
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    expect(result.body.errors.join("\n")).toContain("Nothing was written");
+    for (const name of ["README.md", "CULTURE.md", "rig.yaml"]) expect(fs.readFileSync(path.join(project, name), "utf8")).toBe(`my project ${name}`);
+    expect(fs.existsSync(path.join(root, "home", "bundle-backups"))).toBe(false);
+    expect(setup.rigRepo.findUnarchivedRigsByName("workshop").map(rig => rig.id)).toEqual([first.body.rigId]);
   });
 
   it("round 2: first-install parent file conflicts before any target write", () => {
