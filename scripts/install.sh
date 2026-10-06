@@ -36,6 +36,8 @@ install_main() {
     '  [2/4] npm install -g @openrig/cli' \
     '        Installs the published CLI and dependencies into your npm global prefix.' \
     '        npm prefix -g locates that installation; its bin/rig is used below.' \
+    '        Run node "$(npm root -g)/@openrig/cli/scripts/check-abi.mjs" if present.' \
+    '        Check Node/SQLite explicitly even if npm skipped postinstall; report if unavailable.' \
     '  [3/4] rig setup --dry-run' \
     "        Show the installed version's setup plan without applying it." \
     '  [4/4] rig setup' \
@@ -46,7 +48,7 @@ install_main() {
     'The wrapper does not log in, choose a permission policy, launch a team or open a kernel conversation.' \
     'Node advice: 22 or 24; use 22 on Apple silicon. Install Node with npm using' \
     'your package manager or the official Node installer if either is missing.' \
-    'The package postinstall owns compatibility checks: below 22 and odd majors' \
+    'The installed package checker owns compatibility checks: below 22 and odd majors' \
     'are rejected; later even majors warn as untested. No automatic Node or permission repair.'
 
   if [ "$1" = '--dry-run' ]; then
@@ -72,6 +74,16 @@ install_main() {
   fi
   PATH="$install_prefix/bin:$PATH"
   export PATH
+  if install_modules=$(npm root -g); then :; else
+    install_failed "$?" '[2/4] npm root -g'
+  fi
+  install_checker="$install_modules/@openrig/cli/scripts/check-abi.mjs"
+  if [ -f "$install_checker" ]; then
+    install_step 2/4 node "$install_checker"
+    printf '\n%s\n' 'Node/SQLite compatibility check passed.'
+  else
+    printf '\nNode/SQLite compatibility check SKIPPED: installed checker not found at %s\n' "$install_checker" >&2
+  fi
   install_step 3/4 "$install_rig" setup --dry-run
   install_step 4/4 "$install_rig" setup
   printf '\n%s\n' 'Follow the next steps printed by rig setup: choose your providers, then rig up.'

@@ -14,16 +14,28 @@ function fixture(t, overrides = {}) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const bin = path.join(dir, "tools");
   const prefix = path.join(dir, "npm prefix with spaces");
+  const modules = path.join(dir, "global modules with spaces");
+  const checker = path.join(modules, "@openrig", "cli", "scripts", "check-abi.mjs");
   fs.mkdirSync(bin);
   fs.mkdirSync(path.join(prefix, "bin"), { recursive: true });
+  fs.mkdirSync(path.dirname(checker), { recursive: true });
+  fs.writeFileSync(checker, `import fs from "node:fs";
+fs.appendFileSync(process.env.TEST_LOG, "abi:check\\n");
+console.log("ABI native output");
+console.error("ABI native detail");
+process.exitCode = Number(process.env.ABI_EXIT || 0);
+`);
   const write = (file, body) => fs.writeFileSync(file, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-  write(path.join(bin, "node"), 'printf "node:%s\\n" "$*" >>"$TEST_LOG"; printf "v22.22.1\\n"');
+  write(path.join(bin, "node"), 'printf "node:%s\\n" "$*" >>"$TEST_LOG"; if [ "$1" = --version ]; then printf "v22.22.1\\n"; else exec "$TEST_NODE" "$@"; fi');
   write(path.join(bin, "npm"), `
 printf 'npm:%s\n' "$*" >>"$TEST_LOG"
 case "$*" in
-  --version) printf '10.9.4\n' ;;
-  'install -g @openrig/cli') printf 'npm native output\n'; printf 'npm native error\n' >&2; exit "\${INSTALL_EXIT:-0}" ;;
+  --version) printf '%s\n' "$TEST_NPM_VERSION" ;;
+  'install -g @openrig/cli')
+    if [ "$SKIP_POSTINSTALL" = 1 ]; then printf 'npm warn install-scripts postinstall skipped\n' >&2; fi
+    printf 'npm native output\n'; printf 'npm native error\n' >&2; exit "\${INSTALL_EXIT:-0}" ;;
   'prefix -g') printf '%s\n' "$TEST_PREFIX"; exit "\${PREFIX_EXIT:-0}" ;;
+  'root -g') printf '%s\n' "$TEST_MODULES"; exit "\${ROOT_EXIT:-0}" ;;
   *) exit 90 ;;
 esac`);
   write(path.join(bin, "rig"), 'printf "STALE\\n" >>"$TEST_LOG"; exit 91');
@@ -37,8 +49,8 @@ case "$*" in
     printf 'Next steps: choose providers, then rig up\n'; exit "\${SETUP_EXIT:-0}" ;;
   *) exit 93 ;;
 esac`);
-  const env = { PATH: bin, HOME: dir, TEST_PREFIX: prefix, TEST_LOG: path.join(dir, "calls"), ...overrides };
-  return { dir, bin, prefix, env,
+  const env = { PATH: bin, HOME: dir, TEST_PREFIX: prefix, TEST_MODULES: modules, TEST_NODE: process.execPath, TEST_NPM_VERSION: "10.9.4", TEST_LOG: path.join(dir, "calls"), ...overrides };
+  return { dir, bin, prefix, checker, env,
     calls: () => fs.existsSync(env.TEST_LOG) ? fs.readFileSync(env.TEST_LOG, "utf8").trim().split("\n") : [],
     run: (...args) => spawnSync("/bin/sh", [script, ...args], { env, encoding: "utf8", timeout: 10000 }),
   };
@@ -51,7 +63,7 @@ test("dry run needs no tools and only prints the complete plan", t => {
   f.env.PATH = path.join(f.dir, "absent");
   const r = f.run("--dry-run");
   assert.equal(r.status, 0, r.stderr);
-  for (const text of ["[1/4]", "npm install -g @openrig/cli", "rig setup --dry-run", "[4/4] rig setup", "both Claude Code and Codex", "setup may start cmux while configuring its control", "launch a team or open a kernel conversation", "Dry run:"]) assert.ok(r.stdout.includes(text), text);
+  for (const text of ["[1/4]", "npm install -g @openrig/cli", "npm root -g", "scripts/check-abi.mjs", "even if npm skipped postinstall", "rig setup --dry-run", "[4/4] rig setup", "both Claude Code and Codex", "setup may start cmux while configuring its control", "launch a team or open a kernel conversation", "Dry run:"]) assert.ok(r.stdout.includes(text), text);
   assert.deepEqual(f.calls(), []);
 });
 
@@ -68,6 +80,8 @@ for (const tool of ["node", "npm"]) test(`missing ${tool} reports the prerequisi
 for (const [variable, code, step, command] of [
   ["INSTALL_EXIT", 37, 2, "npm install -g @openrig/cli"],
   ["PREFIX_EXIT", 38, 2, "npm prefix -g"],
+  ["ROOT_EXIT", 45, 2, "npm root -g"],
+  ["ABI_EXIT", 44, 2, "check-abi.mjs"],
   ["PREVIEW_EXIT", 39, 3, "setup --dry-run"],
   ["SETUP_EXIT", 40, 4, "setup"],
 ]) test(`${command} failure preserves status and native output`, t => {
@@ -81,15 +95,43 @@ for (const [variable, code, step, command] of [
   assert.match(r.stderr, /npm native error/);
   assert.ok(!r.stdout.includes("Follow the next steps"));
   if (step < 4) assert.ok(!f.calls().includes("installed:setup"));
+  if (variable === "ABI_EXIT") {
+    assert.match(r.stdout, /ABI native output/);
+    assert.match(r.stderr, /ABI native detail/);
+    assert.ok(!r.stdout.includes("Node/SQLite compatibility check passed."));
+    assert.ok(!f.calls().includes("installed:setup --dry-run"));
+  }
 });
 
 test("installed rig wins over stale PATH and a prefix containing spaces works", t => {
   const f = fixture(t);
   const r = f.run();
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(f.calls(), ["node:--version", "npm:--version", "npm:install -g @openrig/cli", "npm:prefix -g", "installed:setup --dry-run", "installed:setup"]);
+  assert.deepEqual(f.calls(), ["node:--version", "npm:--version", "npm:install -g @openrig/cli", "npm:prefix -g", "npm:root -g", `node:${f.checker}`, "abi:check", "installed:setup --dry-run", "installed:setup"]);
   assert.match(r.stdout, /choose providers, then rig up/);
   assert.match(r.stderr, /setup native error/);
+});
+
+test("skipped npm postinstall still checks the installed package before setup", t => {
+  const f = fixture(t, { SKIP_POSTINSTALL: "1", TEST_NPM_VERSION: "11.19.0" });
+  const r = f.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /npm warn install-scripts postinstall skipped/);
+  assert.match(r.stdout, /Node\/SQLite compatibility check passed\./);
+  const calls = f.calls();
+  assert.equal(calls.filter(x => x === "abi:check").length, 1);
+  assert.ok(calls.indexOf("abi:check") < calls.indexOf("installed:setup --dry-run"));
+});
+
+test("missing installed checker is explicitly skipped without claiming success", t => {
+  const f = fixture(t);
+  fs.unlinkSync(f.checker);
+  const r = f.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /Node\/SQLite compatibility check SKIPPED: installed checker not found/);
+  assert.ok(!r.stdout.includes("Node/SQLite compatibility check passed."));
+  assert.ok(!f.calls().includes("abi:check"));
+  assert.ok(f.calls().includes("installed:setup"));
 });
 
 test("missing installed executable never falls back to a stale rig", t => {
