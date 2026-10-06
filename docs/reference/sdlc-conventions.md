@@ -234,7 +234,7 @@ reported as unknown, not failure.
   seam rather than teaching core a mode.
 - **Skill**: `mission-slice-sop` teaches **Part A**, the light default. **Part B**
   is defined below and applies only when assigned — never self-selected.
-- **Bootstrap**: the shipped pm-team rig culture points its seats at the skill
+- **Bootstrap**: the shipped `pm` rig culture points its seats at the skill
   and this document; the generic `openrig-start.md` overlay no longer does.
 
 # PART B — THE RIGOROUS OVERLAY (assigned only)

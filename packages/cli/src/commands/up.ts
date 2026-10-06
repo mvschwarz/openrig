@@ -252,15 +252,15 @@ Examples:
       // rig of that name), refuse with an honest error pointing at
       // `rig unarchive` - never silently restore an archived rig, never
       // silently fall through. Applies to both default and --existing paths.
-      if (isRigName) {
+      const refuseArchivedName = async (name: string): Promise<boolean> => {
         const activeSummaries = await fetchRigSummaries();
-        const activeMatch = activeSummaries.some((r) => r.name === source);
+        const activeMatch = activeSummaries.some((r) => r.name === name);
         if (!activeMatch) {
           try {
             const archRes = await client.get<Array<{ id: string; name: string }>>(
               "/api/rigs/summary?archived=only",
             );
-            const archivedMatches = (archRes.data ?? []).filter((r) => r.name === source);
+            const archivedMatches = (archRes.data ?? []).filter((r) => r.name === name);
             if (archivedMatches.length > 0) {
               // `rig unarchive` resolves by rig ID, not name (it posts to
               // /api/rigs/<rigId>/unarchive), so the remediation MUST name the
@@ -271,30 +271,32 @@ Examples:
               if (opts.json) {
                 console.log(JSON.stringify({
                   error: "rig_archived",
-                  rig: source,
+                  rig: name,
                   archivedRigIds: ids,
                   action: ids.length === 1
                     ? `rig unarchive ${ids[0]}`
-                    : `rig unarchive <rigId> (archived rigs named '${source}': ${ids.join(", ")})`,
+                    : `rig unarchive <rigId> (archived rigs named '${name}': ${ids.join(", ")})`,
                 }));
               } else if (ids.length === 1) {
-                console.error(`Rig "${source}" is archived, so it is hidden from 'rig up' name resolution.`);
+                console.error(`Rig "${name}" is archived, so it is hidden from 'rig up' name resolution.`);
                 console.error(`  Bring it back first: rig unarchive ${ids[0]}`);
-                console.error(`  Then power it on:    rig up ${source}`);
+                console.error(`  Then power it on:    rig up ${name}`);
               } else {
-                console.error(`${ids.length} archived rigs are named "${source}"; they are hidden from 'rig up' name resolution.`);
+                console.error(`${ids.length} archived rigs are named "${name}"; they are hidden from 'rig up' name resolution.`);
                 console.error(`  Unarchive the one you want by id (then 'rig up'):`);
                 for (const id of ids) console.error(`    rig unarchive ${id}`);
               }
               process.exitCode = 1;
-              return;
+              return true;
             }
           } catch {
             // Archived-summary probe failed (e.g. older daemon) - fall through
             // to normal resolution; there are no archive semantics to enforce.
           }
         }
-      }
+        return false;
+      };
+      if (isRigName && await refuseArchivedName(source)) return;
       if (isRigName && !opts.existing) {
         try {
           const { resolveLibrarySpec } = await import("./specs.js");
@@ -302,12 +304,16 @@ Examples:
           // Library match found — check for existing-rig collision
           // Use /api/rigs/summary which mirrors findRigsByName (includes stopped rigs)
           const rigSummaries = await fetchRigSummaries();
-          const rigMatches = rigSummaries.filter((r) => r.name === source);
+          // An alias must not bypass the canonical name's existing/archive checks.
+          const resolvedName = source === "first-project" && entry.name === "starter" && entry.sourceType === "builtin"
+            ? entry.name : source;
+          if (resolvedName !== source && await refuseArchivedName(resolvedName)) return;
+          const rigMatches = rigSummaries.filter((r) => r.name === source || r.name === resolvedName);
           if (rigMatches.length > 0) {
             console.error(`'${source}' is ambiguous — it matches both an existing rig restore target and a library spec.`);
             console.error(`  To launch the library spec: rig up ${entry.sourcePath}`);
             console.error(`  The rig-name match refers to a stopped rig / snapshot-backed restore path.`);
-            console.error(`  To recover the existing rig instead of importing a starter: rig up ${source} --existing`);
+            console.error(`  To recover the existing rig instead of importing a starter: rig up ${rigMatches[0]!.name} --existing`);
             process.exitCode = 1;
             return;
           }

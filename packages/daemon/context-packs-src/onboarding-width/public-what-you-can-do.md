@@ -240,11 +240,12 @@ relay is a reason to inspect the available routing, not to surrender judgment to
 
 ## Bringing things into and out of existence
 
-**For a first useful repository change**, pick the first-project recipe that matches the
-accounts you have: `first-project` (two Codex seats), `first-project-claude` (two Claude Code
-seats) or `first-project-mixed` (a Claude Code owner and a Codex checker). Preview it, inspect
-`rig up <recipe> --cwd . --plan`, and follow `docs/reference/getting-started.md`. Each is the same
-owner/checker team; verify prerequisites and actual runtime readiness before work. Existing Herdr/cmux terminals can present the managed team
+**For a first useful repository change**, tell the kernel operator your goal. It recommends one
+of three teams, `starter` (a Claude Code builder and a Codex reviewer), `workshop` (a rig bundle:
+a lead, a builder, QA and a reviewer) or `factory` (seven agents), and adapts the team to the
+accounts you have. `first-project` is starter's old name. Preview the team, inspect
+`rig up <team> --cwd . --plan`, and follow `docs/reference/getting-started.md`. Verify
+prerequisites and actual runtime readiness before work. Existing Herdr/cmux terminals can present the managed team
 through `rig terminal open`.
 
 **Need a small team now, without authoring YAML?** Start with `rig create`, then use `rig grow`

@@ -71,7 +71,8 @@ function membershipFor(selector: string | null, layout: Layout): string[] {
     throw new Error(`unsupported or missing index membership rule: ${selector ?? "<none>"}`);
   }
   return Object.entries(layout.skills)
-    .filter(([, entry]) => entry.edges.length > 0)
+    // Keep TDD available to existing user specs without recommending it in the router.
+    .filter(([skill, entry]) => entry.edges.length > 0 && skill !== "test-driven-development")
     .map(([skill]) => skill)
     .sort();
 }
@@ -116,8 +117,10 @@ function builtinLibrary(): ContextPackLibraryService {
 }
 
 describe("S22 OpenRig skill router coverage", () => {
-  it("derives one complete index from its own stated membership rule", () => {
+  it("covers recommended routes while retaining the optional TDD resource outside the index", () => {
     expect(membershipSelector(INDEX)).toBe("layout.skills[*].edges.length > 0");
+    expect(LAYOUT.skills["test-driven-development"]?.edges).toContain("spec");
+    expect(namedRows(indexSection(INDEX))).not.toContain("test-driven-development");
     expect(coverage(INDEX, LAYOUT)).toEqual({ dark: [], dead: [], duplicates: [] });
   });
 

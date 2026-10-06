@@ -4190,6 +4190,31 @@ describe("RestoreOrchestrator", () => {
       expect(delivered.sort()).toEqual([`${RUNNING_SPECS}/rigs/launch/kernel/culture/CULTURE.md`, "/user-rig/CULTURE-default.md"].sort());
     });
 
+    it("restores a stored first-project culture from the upgraded shipped tree", async () => {
+      const OLD_SPECS = "/old-openrig/lib/node_modules/@openrig/cli/daemon/specs";
+      const RUNNING_SPECS = path.resolve(import.meta.dirname, "../specs");
+      const { snap, deliverStartup, adapter } = seedPodAware(false);
+      const culture = {
+        path: "CULTURE.md", absolutePath: `${OLD_SPECS}/rigs/launch/first-project/CULTURE.md`,
+        ownerRoot: `${OLD_SPECS}/rigs/launch/first-project`, deliveryHint: "guidance_merge",
+        required: true, appliesOn: ["fresh_start", "restore"],
+      };
+      const fixed = updateSnapshotData(snap, (data) => {
+        for (const context of Object.values(data.nodeStartupContext)) context.resolvedStartupFiles = [culture];
+      });
+      const result = await createOrchestrator().restore(fixed.id, {
+        adapters: { "claude-code": adapter }, freshLogicalIds: ["dev.impl"],
+        fsOps: { exists: (p) => p.startsWith(RUNNING_SPECS) ? fs.existsSync(p) : notOld(p) },
+      });
+      expect(result.ok).toBe(true);
+      const delivered = deliverStartup.mock.calls.flatMap((c) => c[0] as Array<typeof culture>);
+      expect(delivered).toEqual([{
+        ...culture, absolutePath: `${RUNNING_SPECS}/rigs/launch/first-project/CULTURE.md`,
+        ownerRoot: `${RUNNING_SPECS}/rigs/launch/first-project`,
+      }]);
+      expect(fs.readFileSync(delivered[0]!.absolutePath, "utf8")).toContain("ask dev-check for an independent check");
+    });
+
     it("same-native resume: replay stays contained (no startup files delivered), stored built-ins notwithstanding", async () => {
       const { snap, deliverStartup, adapter } = seedPodAware(true);
       const orch = createOrchestrator({ listProcesses: nativeLineage("claude-code", "resume-token-261") });

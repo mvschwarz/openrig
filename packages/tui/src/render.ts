@@ -16,6 +16,8 @@ import { computeExplorerRows, findAgent, findSpec, findAgentBySession, agentsRun
 import { scopesContentLines } from "./scopes/scopes-model.js";
 import { executionContentLines, executionSliceStripLines } from "./execution/execution-model.js";
 import { navigatorDisplay } from "./navigator.js";
+import { specGraph } from "./specs/graph.js";
+import { launchCommand } from "./specs/launch.js";
 import { renderGraphStyle } from "./topology/render-graph.js";
 import { buildPulseModel } from "./pulse/pulse-model.js";
 import { renderPulseView, pulseLaneTargets } from "./pulse/render-pulse.js";
@@ -457,8 +459,8 @@ function timeZoneLines(state: ViewState, width: number): ContentLine[] {
 }
 
 function specTabsLine(state: ViewState): ContentLine {
-  const active = state.viewTab === "topology" || state.viewTab === "yaml" ? state.viewTab : "configuration";
-  const labels = ["topology", "configuration", "yaml"] as const;
+  const active = state.viewTab === "graph" || state.viewTab === "topology" || state.viewTab === "yaml" ? state.viewTab : "configuration";
+  const labels = ["graph", "topology", "configuration", "yaml"] as const;
   const parts = labels.map((tab) => (tab === active ? `[ ${tab.toUpperCase()} ]` : `  ${tab.toUpperCase()}  `));
   const text = parts.join(" ");
   return {
@@ -912,7 +914,42 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     if (leaf?.kind === "spec") {
       const spec = findSpec(snap, leaf.name);
       if (!spec) return [{ text: snap.readErrors.find((error) => error.startsWith("specs-library")) ?? (!snap.specsLoaded ? "Specs catalog read pending" : `spec "${leaf.name}" not in the current catalog`) }];
-      if (spec.kind === "rig") lines.push(specTabsLine(state));
+      if (spec.kind === "rig") {
+        lines.push(specTabsLine(state));
+        if (state.specLaunch) {
+          const launch = state.specLaunch;
+          let command: string | undefined;
+          let problem: string | undefined;
+          try { command = launchCommand(launch); } catch (err) { problem = (err as Error).message; }
+          return wrapDetailLines([
+            ...lines, { text: `Launch · ${launch.source}` },
+            { text: `Working folder: ${launch.folder || "not chosen"}` },
+            { text: `Host: ${launch.host || "rig up's current selected host (unchanged)"}` },
+            { text: "Launch also sets OPENRIG_URL to this TUI's daemon." },
+            { text: "Type: launch-folder /absolute/working/folder (spaces are literal)" },
+            { text: "Optional: launch-host <host> or launch-host local" },
+            { text: "Ask your operator agent to choose or adapt the team with you." },
+            { text: "The existing rig up command handles collisions, prompts and partial results." },
+            { text: "Its terminal output stays visible until you press Enter to return." },
+            ...(command ? [{ text: command }, listItem("Launch · run this command", { type: "act", act: "launch-spec" })] : [{ text: problem! }]),
+            listItem("Cancel · Esc", { type: "launch-close" }),
+          ], contentWidth);
+        }
+        lines.push({ text: `rig spec ${spec.name} · authored topology, not live status` });
+        lines.push(listItem("Launch… · choose working folder", { type: "spec-launch" }));
+        if (state.viewTab === "graph") {
+          lines.push(...specSourceLines(spec, snap).filter(line => line.action?.type === "file-open"));
+          if (!spec.graph) return [...lines, { text: spec.sourceUnavailable ? `Source unavailable: ${spec.sourceUnavailable}` : "Spec graph unavailable in the current library read." }];
+          const canvas = renderGraphStyle(state.graphStyle, specGraph(spec.graph), { host: "", rig: spec.name }, contentWidth);
+          const segs = canvas.segLines();
+          // Preview boxes must not drill into nonexistent live seats.
+          lines.push(...canvas.plainLines().map((text, i) => ({ text, segs: segs[i] })));
+          if (!spec.graph.nodes.length) lines.push({ text: "Spec graph is empty." });
+          lines.push({ text: "○ declared seat · runtime as authored · context and live status unknown" });
+          if (spec.graph.nodes.some(n => n.kind === "infrastructure")) lines.push({ text: "Infrastructure entries are listed in the Topology tab." });
+          return lines;
+        }
+      }
       lines.push({ text: `${spec.kind} spec ${spec.name}` });
       lines.push(fieldLine({ label: "purpose", value: spec.description ?? "not declared in the available source" }));
       lines.push(fieldLine({ label: "provenance", value: `${sourceProvenance(spec)} · ${spec.sourceState ?? "source state not served"}` }));

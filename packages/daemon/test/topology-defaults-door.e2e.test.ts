@@ -119,9 +119,9 @@ describe("topology defaults DOOR (real daemon, real rig up)", () => {
     ]);
   }, 120_000);
 
-  it("source discriminator: shipped product-team topology bytes install through the real door", async () => {
+  it("source discriminator: shipped factory topology bytes install through the real door", async () => {
     // r2 residual: the synthetic door proved the MECHANISM; this case proves
-    // the product-team spec's actual topology/ folder from source lands
+    // the factory spec's actual topology/ folder from source lands
     // byte-identical through the real `rig up`. It is deliberately separate
     // from the clean-checkout packaging discriminator in check-packing.test.mjs;
     // neither test is labeled as the whole locked proof item by itself.
@@ -130,16 +130,16 @@ describe("topology defaults DOOR (real daemon, real rig up)", () => {
     // proves nothing about defaults and costs real runtimes); the installer
     // keys on the spec dir's topology/ folder and the rig NAME, both of which
     // are the shipped ones here.
-    const shippedTopology = resolve(HERE, "../specs/rigs/preview/product-team/topology");
+    const shippedTopology = resolve(HERE, "../specs/rigs/launch/factory/topology");
     expect(fs.statSync(shippedTopology).isDirectory()).toBe(true);
 
     scaffold = prepareHermeticEnv({ baseEnv: realBaseEnv() });
     daemon = await spawnScenarioDaemon(scaffold, { rigBin: RIG_BIN });
 
-    const specDir = join(scaffold.root, "specs", "product-team");
+    const specDir = join(scaffold.root, "specs", "factory");
     fs.mkdirSync(specDir, { recursive: true });
     fs.cpSync(shippedTopology, join(specDir, "topology"), { recursive: true });
-    fs.writeFileSync(join(specDir, "rig.yaml"), DOOR_RIG_YAML.replace("name: door-rig", "name: product-team"), "utf-8");
+    fs.writeFileSync(join(specDir, "rig.yaml"), DOOR_RIG_YAML.replace("name: door-rig", "name: factory"), "utf-8");
 
     const up = await runRig(["up", join(specDir, "rig.yaml"), "--json"], daemon.readEnv, RIG_BIN);
     expect(up.code, `rig up failed: ${up.stdout} ${up.stderr}`).toBe(0);
@@ -147,10 +147,10 @@ describe("topology defaults DOOR (real daemon, real rig up)", () => {
     const topoRoot = join(scaffold.openrigHome, "topology");
     const shipped = (rel: string) => fs.readFileSync(join(shippedTopology, rel), "utf-8");
     expect(fs.readFileSync(join(topoRoot, "CRAFT.md"), "utf-8")).toBe(shipped("instance/CRAFT.md"));
-    expect(fs.readFileSync(join(topoRoot, "rigs", "product-team", "CRAFT.md"), "utf-8")).toBe(shipped("rig/CRAFT.md"));
-    expect(fs.readFileSync(join(topoRoot, "rigs", "product-team", "ORCHESTRATION-CRAFT.md"), "utf-8")).toBe(shipped("rig/ORCHESTRATION-CRAFT.md"));
-    for (const seat of ["orch1-lead", "rev1-r1", "rev1-r2", "dev1-qa"]) {
-      expect(fs.readFileSync(join(topoRoot, "rigs", "product-team", "seats", seat, "CRAFT.md"), "utf-8"))
+    expect(fs.readFileSync(join(topoRoot, "rigs", "factory", "CRAFT.md"), "utf-8")).toBe(shipped("rig/CRAFT.md"));
+    expect(fs.readFileSync(join(topoRoot, "rigs", "factory", "ORCHESTRATION-CRAFT.md"), "utf-8")).toBe(shipped("rig/ORCHESTRATION-CRAFT.md"));
+    for (const seat of ["orch-lead", "review-r1", "review-r2", "dev-qa"]) {
+      expect(fs.readFileSync(join(topoRoot, "rigs", "factory", "seats", seat, "CRAFT.md"), "utf-8"))
         .toBe(shipped(`seats/${seat}/CRAFT.md`));
     }
   }, 120_000);

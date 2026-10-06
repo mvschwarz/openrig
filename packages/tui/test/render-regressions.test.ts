@@ -176,6 +176,7 @@ describe("live visual regressions", () => {
     };
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "drill", resource: "spec", name: "adversarial-review" });
+    view.dispatch({ type: "tab", tab: "configuration" });
 
     const screen = renderScreen(view.get(), snap, { cols: 140, rows: 34 });
     const output = screen.lines.join("\n");
@@ -223,6 +224,7 @@ describe("live visual regressions", () => {
     };
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
     view.dispatch({ type: "drill", resource: "spec", name: "long-rig" });
+    view.dispatch({ type: "tab", tab: "configuration" });
     const selected = view.get().selection;
 
     const initial = renderScreen(view.get(), snap, { cols: 100, rows: 12 });

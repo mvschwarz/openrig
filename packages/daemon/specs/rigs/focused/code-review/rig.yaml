@@ -1,0 +1,40 @@
+version: "0.2"
+name: code-review
+summary: >
+  Dual independent reviewers with an orchestrator. Each reviewer
+  analyzes the code independently, then the orchestrator synthesizes
+  their findings. Disagreements surface real issues.
+
+pods:
+  - id: orch
+    label: Orchestration
+    members:
+      - id: lead
+        agent_ref: "local:../../../agents/orchestration/orchestrator"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: review
+    label: Review Team
+    members:
+      - id: r1
+        agent_ref: "local:../../../agents/review/independent-reviewer"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+      - id: r2
+        agent_ref: "local:../../../agents/review/independent-reviewer"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges: []
+
+edges:
+  - kind: delegates_to
+    from: orch.lead
+    to: review.r1
+  - kind: delegates_to
+    from: orch.lead
+    to: review.r2

@@ -256,38 +256,39 @@ inventing them. No new account or credential provisioning is part of this
 handoff. Report which provider or fallback ran, which conversations and TUI
 were visible, and any headless or unverified branch.
 
-## Choose your first project team
+## Choose your first team
 
-Tell the kernel operator what you want to do. It helps you pick a first team;
-review that choice before launching it. The shipped first-project recipes each
-have an outcome owner and an independent checker. Reuse your selected working
-accounts; a second provider is optional.
+Tell the kernel operator what you want to do. It asks about your goal, presents
+three teams with one recommendation, and fits the team to the providers you have.
+Review that choice before launching it.
 
-| Choice | Starter name | Owner / checker runtime and model |
+| Team | Agents and runtimes | For |
 | --- | --- | --- |
-| Two Codex agents (existing route) | `first-project` | Both `codex`, pinned `gpt-6-astra` |
-| Two Claude agents | `first-project-claude` | Both `claude-code`, configured native default model |
-| One of each | `first-project-mixed` | Claude owner (native default); Codex checker (`gpt-6-astra`) |
+| `starter` | `dev-build` (Claude Code) and `dev-review` (Codex, pinned `gpt-6-astra`) | One bounded change |
+| `workshop` | A lead, a builder, QA and a reviewer | Ongoing work in one repository. It's a rig bundle, not built in: the operator installs it from its pinned listing |
+| `factory` | Seven: a lead, an advisor, build, QA, design and two independent reviewers | Sustained product work. It uses the most concurrent capacity |
 
-Claude uses the same unpinned model convention as the existing Claude kernel and
-implementation-pair recipes: OpenRig does not pass a model override. Read the
-selected harness's configured model and show it alongside the recipe and launch
-command before proceeding. Confirm account access to any pin; if unavailable,
+As shipped, `starter` needs both Claude Code and Codex. With only one of them, the
+operator writes an adapted copy of the team for your providers and keeps its name;
+there are no per-provider variants. `first-project` is starter's old name and
+still starts it, so an old `rig up first-project` now starts a Claude builder and a
+Codex reviewer.
+
+Claude seats use the native default model, as the Claude kernel does: OpenRig
+does not pass a model override. Read the selected harness's configured model and
+show it alongside the team and launch command before proceeding. Confirm account access to any pin; if unavailable,
 ask for a supported model choice rather than silently substituting a model or
 provider. After launch, confirm the actual native model before assigning work.
 
-### Launch the two project seats
-
-Set `starter` to the chosen name from the table; the existing Codex route remains:
+### Launch the starter team
 
 ```sh
 cd <your-repository>
-starter=first-project  # or first-project-claude or first-project-mixed
-rig specs preview "$starter" --kind rig
-rig up "$starter" --cwd . --plan
-rig up "$starter" --cwd .
+rig specs preview starter --kind rig
+rig up starter --cwd . --plan
+rig up starter --cwd .
 rig status
-rig ps --nodes --rig "$starter"
+rig ps --nodes --rig starter
 ```
 
 Preview the selected seats, models and resources. Plan checks resolution and
@@ -317,34 +318,34 @@ not progress. If startup is still waiting for context delivery, use **c** (or
 command times out, check `rig seat status <seat>` before trying again. Do not
 start another seat to clear a prompt.
 
-These starters are deliberately small starting points, not universal teams.
-For a different installed runtime or team shape, inspect `rig specs ls --kind
-rig` and `rig specs preview <name>` before selecting it. A seven-seat showcase
-is optional and consumes more concurrent capacity. A team published on GitHub
-installs from its folder link with `rig up <link>` (see
+Starter is a deliberately small starting point. For a bigger team, `factory` is
+built in (seven agents, using more concurrent capacity), and so are the specialist
+teams `code-review`, `research` and `pm`. Inspect `rig specs ls --kind rig` and
+`rig specs preview <name>` before selecting one. A team published on GitHub, such
+as workshop, installs from its folder link with `rig up <link>` (see
 [publishing a rig bundle](publishing-a-rig-bundle.md)).
 
-## Give the owner an outcome
+## Give the builder an outcome
 
 For example, in a project that imports CSV files:
 
 ```sh
-rig send "dev-owner@$starter" 'Improve the CSV import error when a required column is missing: name the column and leave the existing data unchanged. Add a regression check, ask dev-check for an independent check of the exact candidate, and record the result and how I can try it. Keep the change local; do not publish.'
+rig send dev-build@starter 'Improve the CSV import error when a required column is missing: name the column and leave the existing data unchanged. Add a regression check, ask dev-review for an independent check of the exact candidate, and record the result and how I can try it. Keep the change local; do not publish.'
 ```
 
 Replace the example with a real problem in your repository. Include what the
-user should observe, a boundary and how success can be checked. The owner
+user should observe, a boundary and how success can be checked. The builder
 creates and claims a durable task, implements it, and routes the selected
 independent check. You should not have to relay the review between terminals.
 `rig send` is the initial conversation; the queue and repository artifacts
 retain the work. An unbound shell does not need to impersonate a queue owner.
 
-Use the chosen rig name in its seat addresses (for example,
-`dev-owner@first-project-claude`). From an actual project seat, follow the work with
+Seat addresses carry the rig name (for example, `dev-build@starter`). From an
+actual project seat, follow the work with
 `rig queue list --limit 1000`: its default scope is the caller's current rig.
 `queue list` has no `--rig` option. From an observer shell or another rig, use
-`rig queue list --destination "dev-owner@$starter" --limit 1000` and the same
-command for `"dev-check@$starter"`, after verifying those live addresses.
+`rig queue list --destination dev-build@starter --limit 1000` and the same
+command for `dev-review@starter`, after verifying those live addresses.
 These show each destination's obligations, not a whole-rig view. An unbound shell
 must not pretend to be a seat to change scope; use `--all-rigs` only when that
 broader view is intended. Then read `rig queue show <id> --full` and
@@ -370,7 +371,7 @@ start or replace a terminal, so a missing binding is reported with recovery
 guidance rather than creating a second kernel.
 
 Herdr users follow the same launch and task path. To place the managed team in
-Herdr, use `rig terminal open "$starter" --provider herdr`; for the shared
+Herdr, use `rig terminal open starter --provider herdr`; for the shared
 dashboard together with the kernel conversations, use the
 [saved first view](#open-the-kernel-conversations). The equivalent
 cmux provider is also available. Read the opened/absent/degraded result: a
@@ -555,18 +556,18 @@ another confirmation. Use it only for work and an environment you deliberately
 trust; it does not supply missing credentials or override organization policy.
 
 Make changes in a **user-owned spec before its first launch**. To customize the
-starter, run `rig specs show first-project --kind rig` and find its `Path`, ending
-in `specs/rigs/launch/first-project/rig.yaml`. Copy that whole `specs` directory to
+starter, run `rig specs show starter --kind rig` and find its `Path`, ending
+in `specs/rigs/launch/starter/rig.yaml`. Copy that whole `specs` directory to
 `./openrig-specs` in your repository, keeping its layout: copying only `rig.yaml`
 breaks its relative agent and culture references. Leave the installed copy alone.
-The examples below use `./openrig-specs/rigs/launch/first-project/rig.yaml`. If you
-already have a running `first-project`, follow the existing-session advice below
+The examples below use `./openrig-specs/rigs/launch/starter/rig.yaml`. If you
+already have a running `starter`, follow the existing-session advice below
 before changing it; this is not a live permission switch.
 
 ### Codex: select sandbox and approvals together
 
 For Codex versions supporting named `.config.toml` profiles, create
-`~/.codex/first-project-permissive.config.toml` (under `CODEX_HOME` instead if you
+`~/.codex/starter-permissive.config.toml` (under `CODEX_HOME` instead if you
 set it for the daemon's launch environment):
 
 ```toml
@@ -574,23 +575,23 @@ sandbox_mode = "danger-full-access"
 approval_policy = "never"
 ```
 
-In the copied rig, add this field to **each Codex member** that should use it;
-keep the member's existing `profile: default`:
+In the copied rig, add this field to **each Codex member** that should use it (in
+starter, that's `dev.review`); keep the member's existing `profile: default`:
 
 ```yaml
-codex_config_profile: first-project-permissive
+codex_config_profile: starter-permissive
 ```
 
 Leave `permission_policy` absent or set it to `none`, with no member-level YOLO
-override. OpenRig then passes `-p first-project-permissive` instead of its default
+override. OpenRig then passes `-p starter-permissive` instead of its default
 `-s workspace-write`, so the native profile supplies both settings. Higher-priority
 native project configuration or managed requirements can still change/refuse the
 result. Inspect native `/status` before assigning work.
 
 ```sh
-rig policy current --spec ./openrig-specs/rigs/launch/first-project/rig.yaml
-rig up ./openrig-specs/rigs/launch/first-project/rig.yaml --cwd . --plan
-rig up ./openrig-specs/rigs/launch/first-project/rig.yaml --cwd .
+rig policy current --spec ./openrig-specs/rigs/launch/starter/rig.yaml
+rig up ./openrig-specs/rigs/launch/starter/rig.yaml --cwd . --plan
+rig up ./openrig-specs/rigs/launch/starter/rig.yaml --cwd .
 ```
 
 OpenRig's `permission_policy: builtin:yolo` setting selects
@@ -622,8 +623,8 @@ Permission mode is the native execution choice; work posture is project guidance
 For an existing managed seat, select future-launch permissions explicitly:
 
 ```sh
-rig seat set-permissions dev-owner@first-project --mode full_bypass --reason "Operator selected broader access"
-rig seat status dev-owner@first-project --json
+rig seat set-permissions dev-build@starter --mode full_bypass --reason "Operator selected broader access"
+rig seat status dev-build@starter --json
 ```
 
 This records the actor, reason and old/new choice on that seat. It does not
@@ -669,7 +670,7 @@ typing guard are separate controls.
 
 ### Claude Code: a different launch flag
 
-The shipped `first-project` uses Codex. For a user-owned **Claude Code** rig,
+In the shipped `starter`, `dev-build` runs Claude Code. For a **Claude Code** seat,
 OpenRig normally passes `--permission-mode acceptEdits`: edits can proceed, while
 other actions follow native rules and prompts. It does not add a global
 `Bash(rig:*)` allowance. To explicitly select the bypass launch flag for that rig:

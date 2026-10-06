@@ -166,6 +166,20 @@ export async function resolveLibrarySpec(
     );
   }
 
+  // Compatibility name only: real IDs/names (including user-authored specs) win.
+  // Do not alias agent/workflow lookups or unrelated user specs named starter.
+  if (nameOrId === "first-project" && (!opts?.kind || opts.kind === "rig")) {
+    const starters = entries.filter((entry) =>
+      entry.kind === "rig" && entry.name === "starter" && entry.sourceType === "builtin");
+    if (starters.length === 1) {
+      console.error("first-project is now starter (a Claude builder and a Codex reviewer); on a Codex-only machine, ask your OpenRig operator to adapt it");
+      return starters[0]!;
+    }
+    if (starters.length > 1) {
+      throw new Error("Spec alias 'first-project' is ambiguous — multiple built-in starter entries match. Use the ID instead.");
+    }
+  }
+
   const scope = opts?.kind ? ` ${opts.kind}` : "";
   throw new Error(
     `Spec '${nameOrId}' not found in${scope} library. Run 'rig specs ls' to see available rigs, agents, workflows, and managed apps.`
