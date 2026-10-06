@@ -109,6 +109,29 @@ describe("terminal browser → preview → explicit Open", () => {
     expect(effects).toEqual([]);
   });
 
+  it("keeps the selected daemon and remote member in plain-terminal guidance", async () => {
+    providerAlive = false;
+    const remote = { id: "remote view", name: "Remote", members: [{ seat: "quoted-seat", tmuxSession: "seat with spaces", host: "remote", readOnly: true }] };
+    const provider = new HerdrAdapter({ transportFactory: () => ({ probe: async () => ({ alive: false, version: null, protocol: null }), request: async () => { throw new Error("must remain passive"); } }) });
+    service = new TerminalService({ resolveProvider: () => provider, viewsStore: { get: () => remote, list: () => [remote] }, listRigNames: () => [], listRigSeats: () => null, listPodSeats: () => null, listScopeSeats: () => null, resolveHost: () => ({ id: "remote", transport: "ssh", target: "other.example", user: "viewer" }) as any, hasSession: () => { throw new Error("remote is not a local session"); } });
+    client = new DaemonClient({ baseUrl: "http://selected.example:7654", fetchImpl: (async (url, init) => {
+      const u = new URL(String(url));
+      const app = new Hono(); app.use("*", async (c, next) => { c.set("terminalService" as never, service); await next(); }); app.route("/api/terminal", terminalRoutes());
+      return app.request(u.pathname + u.search, init);
+    }) as typeof fetch });
+    view.dispatch({ type: "terminal-preview", view: "saved:remote view" }); await refresh();
+    const text = terminalLines(view.get(), snap, 1000).map(line => line.text).join("\n");
+    expect(text).toContain("http://selected.example:7654");
+    expect(text).toContain("saved:remote view");
+    expect(text).toContain("machine running that daemon");
+    const command = snap.terminals!.preview!.composed.pages[0]![0]!.paneCommand;
+    expect(text).toContain(`env -u TMUX ${command.replace(/^ssh /, "ssh -t ")}`);
+    expect(text).toContain("viewer@other.example");
+    expect(text).toContain("seat with spaces");
+    expect(text).toContain("attach -r");
+    expect(effects).toEqual([]);
+  });
+
   it("preserves a failed Open as failure, without a success notice", async () => {
     const p = await client.previewTerminal("saved:fixture"); failPage = true;
     await expect(client.openTerminal(p.view, p.planId)).rejects.toThrow("fixture layout refused");

@@ -32,12 +32,15 @@ export interface TerminalPreview {
 export interface TerminalRead {
   catalog: TerminalEntry[];
   catalogLoaded?: boolean;
+  daemonTarget?: string;
   preview: TerminalPreview | null;
   error?: string;
 }
 
 export async function readTerminals(client: DaemonClient, view?: string | null): Promise<TerminalRead> {
   const result: TerminalRead = { catalog: [], preview: null };
+  // Display the endpoint without URL credentials, query parameters or fragments.
+  try { result.daemonTarget = new URL(client.baseUrl).origin; } catch { /* unavailable target */ }
   try {
     const listing = await client.terminalViews();
     if (!Array.isArray(listing.saved) || !Array.isArray(listing.rigs)) throw new Error("Terminal names could not be read.");
@@ -107,7 +110,18 @@ export function terminalLines(state: ViewState, snap: FleetSnapshot, width: numb
   // Actions precede the diagram so explicit Open/Back remain accessible at 80×24.
   lines.push({ text: "Back to views", action: { type: "back" } });
   if (preview.status.available && plan.opened.length) lines.push({ text: `Open in Herdr · all ${plan.pages.length} pages`, action: { type: "act", act: "open-terminal", view: preview.view, expectedPlan: preview.planId } });
-  else lines.push({ text: preview.status.available ? "Nothing attachable; no space will be opened." : "Herdr unavailable on the selected daemon host. Start/connect Herdr there, then refresh this preview. No automatic recovery." });
+  else if (preview.status.available) lines.push({ text: "Nothing attachable; no space will be opened." });
+  else {
+    lines.push({ text: `Herdr unavailable on the selected daemon (${read.daemonTarget ?? "address unreported"}). Start/connect Herdr there and refresh, or use the plain-terminal commands below. Nothing opens automatically.` });
+    if (page.length) {
+      lines.push({ text: `Plain terminal · ${preview.view}: open a NEW terminal on the machine running that daemon, then run one of these commands. Use a separate terminal for each seat; do not run in an agent's terminal.` });
+      for (const member of page) {
+        // A plain SSH terminal needs a remote PTY; keep the composer's quoted host and target.
+        const command = member.paneCommand.replace(/^ssh /, "ssh -t ");
+        lines.push({ text: `${member.label} · ${member.seat}` }, { text: `env -u TMUX ${command}` });
+      }
+    }
+  }
   lines.push({ text: "Refresh preview", action: { type: "terminal-preview", view: preview.view } });
   if (plan.pages.length > 1) {
     if (pageIndex > 0) lines.push({ text: "Previous page", action: { type: "terminal-page", page: pageIndex - 1 } });
