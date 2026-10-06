@@ -26,7 +26,9 @@ export const TEAM_CLAUDE_ALLOW = [
 ];
 export const TEAM_CLAUDE_ASK = [
   "up", "down", "start", "launch", "restore", "fork", "bootstrap", "create", "add", "remove",
-  "grow", "shrink", "expand", "archive", "unarchive", "destroy",
+  "grow", "shrink", "expand", "archive", "unarchive", "destroy", "compact", "setup", "import", "adopt",
+  "attach", "bind", "handover", "unclaim", "release", "reconcile-session", "env down",
+  "policy apply", "config set", "config reset",
   "daemon start", "daemon stop", "bundle install", "seat launch", "seat continue", "seat stop",
   "seat clean", "seat handover", "seat switch-client", "seat set-permissions", "seat set-model",
 ].map(command => `Bash(rig ${command}:*)`);

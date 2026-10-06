@@ -227,8 +227,10 @@ Claude keeps `acceptEdits` and receives inline session settings allowing ordinar
 such as `rig up`, `rig down`, `rig restore`, `rig bundle install` and seat stop or
 handover are listed as **ask** rules. Native deny and ask rules take precedence
 over allow rules. These are native command-matching rules, not filesystem
-containment: a project's test command can execute code. OpenRig does not write
-these settings into a personal or project permission file.
+containment: a project's test command can execute code. Flags before the verb
+(for example, `rig --host vps up`) or wrapper commands may not match the lifecycle
+prefixes. OpenRig does not write these settings into a personal or project
+permission file.
 
 Codex keeps `workspace-write` with its existing approval policy and receives the
 configured OpenRig workspace root plus its pod's shared state directory as

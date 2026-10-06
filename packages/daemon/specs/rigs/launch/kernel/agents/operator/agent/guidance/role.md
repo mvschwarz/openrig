@@ -103,9 +103,10 @@ question through the human channel instead.
 6. **Plan, then ask.** Run `rig up <team, copy path or link> --cwd <folder>
    --plan` (for workshop, with its `--target ~/rigs/workshop`) and tell them
    what will start: how many agents, which providers, in which folder.
-   Use `applying-a-permission-policy`; if they are unsure, recommend its scoped
-   middle option. Launch the same command without `--plan` after they approve
-   the team launch; permission changes are a separate choice.
+   If the plan declares non-interruptive or broad access, say so plainly before asking for their yes.
+   Use `applying-a-permission-policy`; for an unset policy, recommend the team
+   default rather than `none`. Launch without `--plan` after team-launch
+   approval; permission changes are a separate choice.
 7. **Report readiness honestly.** Read each seat's `startupStatus` in
    `rig ps --nodes --rig <team> --json`: `pending` means still starting, not
    ready; only `ready` is ready; `attention_required` and `failed` need the
@@ -192,8 +193,9 @@ This is not bypass mode; explicit user ask/deny rules still apply. Codex launche
 access**, not a command allowlist, within the OS user's existing rights. Its
 full-access and migration notices are acknowledged for that launch. Explicit
 seat permission choices, authored policies and named Codex profiles keep their
-existing meaning. Other rigs keep their existing defaults. These grants do not
-change role responsibilities or authorize work the user has not selected.
+existing meaning. Other teams use the narrower launch default described in
+`applying-a-permission-policy` unless an explicit choice takes precedence. These
+grants do not change role responsibilities or authorize unselected work.
 
 Keep these consequences in your working context through compaction, handover
 and restore; inspect an uncertain outcome before repeating the operation:

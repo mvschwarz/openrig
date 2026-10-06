@@ -24,31 +24,33 @@ Reuse an existing explicit choice for these harnesses and this scope from the
 user's onboarding context; do not ask again. Existing rules are configuration,
 not evidence of consent to expand their scope. Preserve them without expansion.
 
-Do not reduce the choice to full access or repeated prompts. For someone unsure
-what to choose, recommend the scoped middle option: remember routine OpenRig
-commands for this project, keep other native controls, and ask for their Yes.
-Explain that keeping prompts can mean repeated approvals in several team panes,
-including routine setup and tests; the person needs to be available to judge
-them. Command allowances reduce only matching prompts, not every interruption.
-Broader access remains a separate choice with its filesystem/network exposure
-explained. A request for your recommendation is not consent to change settings.
+For a team with no explicit policy, recommend keeping the team default. Claude
+already allows ordinary `rig` commands, project reads and common tests, while
+lifecycle commands ask. Codex already has writable workspace and pod state;
+its `on-request` policy does **not** guarantee lifecycle prompts. Explicit
+policies, seat choices and named Codex profiles keep their existing meaning.
 
-If the choice is unknown, briefly explain the scope and ask:
+Native restrictions can still prompt for installs, commits, other shell
+commands and writes outside writable roots. With the Claude team default, an
+allow does **not** override lifecycle ask rules: `rig up`, `rig down` and the other listed
+lifecycle commands still ask even after Yes. Do not promise prompt-free operation.
 
-> This allows the whole `rig` command family, including starting/stopping agents,
-> changing OpenRig configuration and launching processes. It is not global YOLO
-> or permission to invent work. The scope is your personal settings for this
-> project unless you explicitly choose your user-wide sessions instead.
->
-> Allow your agents to run OpenRig commands without repeated permission prompts?
-> **Yes — recommended** / **No — keep prompts**
+Only offer additional persistent allowances when wanted, for the selected
+project or explicitly user-wide scope, or to adjust an explicit seat policy:
 
-- **Yes:** require an actual affirmative answer, then apply the procedure below
-  at that scope for the selected harnesses. Never substitute user-wide rules
-  when project rules are unsupported. Native restrictions still apply.
-- **No:** leave permission settings unchanged and continue with existing prompts.
-- **No answer:** make no settings change, infer no consent and continue with
-  existing prompts. Do not keep asking during this setup.
+> Remember these selected OpenRig commands in your native settings for this
+> project? This is separate from the team launch default; stricter rules and
+> Claude lifecycle asks remain. **Yes / No — keep the team default**
+
+- **Yes:** require an affirmative answer, then apply the procedure below only
+  at the agreed scope. Do not replace ask/deny rules or substitute user-wide
+  settings when project rules are unsupported.
+- **No / no answer:** leave settings and any existing explicit choice unchanged.
+  With no policy selected, keep it unset; never record `none` to mean keeping
+  the team default. Do not repeat the question during this setup.
+
+A recommendation is not consent. Broader filesystem/network access requires
+its own explicit choice; permission consent is separate from launch approval.
 
 Remember an explicit Yes or No in the existing onboarding/project context the
 agent already reads: choice, harnesses and scope. For Yes, record the exact files
@@ -65,7 +67,8 @@ an answered setup question or ask again for routine steps already authorized.
 
 | Choice | What the agent configures |
 | --- | --- |
-| Keep prompts | Preserve current native settings; explain that the person may need to judge repeated requests across the team's panes. |
+| Keep the team default | Leave an unset policy unset and preserve current native settings; Claude lifecycle asks and other native restrictions remain. Preserve any existing explicit choice. |
+| “Prompt for everything” (`none`) | Only on an explicit request, opt out of the team allowances. Native rules still decide each prompt; `none` does not guarantee a prompt for every command. |
 | Remember selected commands | Add native allow rules for the chosen family or narrower verbs, leaving other rules and sandbox settings intact. |
 | Broader permissive operation | Explain filesystem/network exposure and configure only the explicitly selected native mode and compatible launch settings. |
 
@@ -74,10 +77,10 @@ offer a scoped adjustment then. Keep the existing choice until the person
 accepts a change; do not promise to adjust later and silently leave the burden
 with them. Do not reopen an answered choice for each routine operation.
 
-**Allowing the whole `rig` family covers all its verbs**, including lifecycle,
+**A whole-family allow matches all `rig` verbs**, including lifecycle,
 topology/config changes and commands that can launch other processes. It is not
-a read-only grant. Offer narrower prefixes such as `rig ps` or `rig queue list`
-when that better fits the request. Do not widen a choice to arbitrary shell
+a read-only grant, but stricter ask/deny rules still win. Offer narrower prefixes
+such as `rig ps` or `rig queue list` when that better fits the request. Do not widen a choice to arbitrary shell
 execution, an entire interpreter or a generic shell wrapper.
 
 ## Apply the choice for the user
@@ -110,7 +113,9 @@ execution, an entire interpreter or a generic shell wrapper.
    existing conversation loaded it.
 6. Verify an ordinary matching operation twice in the target conversation and
    check that an unrelated command gained no matching rule. Use harmless reads,
-   not destructive probes. Report effective settings and remaining prompts.
+   not destructive probes. Report effective settings, their source and remaining
+   prompts; a command already allowed by the launch default does not prove a new
+   persistent rule loaded.
    A parser match alone does not establish native behavior.
 
 Give the user this short undo: **“Undo the OpenRig command allowances added by

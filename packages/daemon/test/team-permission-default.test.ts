@@ -45,7 +45,16 @@ function assertDefault(cmd: string, runtime: string) {
     expect(settings.permissions.allow).toContain("Bash(npm test:*)");
     expect(settings.permissions.allow).not.toContain("Bash(tmux:*)");
     expect(settings.permissions.allow).not.toContain("Bash(node:*)");
-    expect(settings.permissions.ask).toEqual(expect.arrayContaining(["Bash(rig up:*)", "Bash(rig down:*)", "Bash(rig destroy:*)", "Bash(rig bundle install:*)", "Bash(rig seat stop:*)"]));
+    expect(settings.permissions.ask).toEqual(expect.arrayContaining(["Bash(rig up:*)", "Bash(rig down:*)", "Bash(rig destroy:*)", "Bash(rig bundle install:*)", "Bash(rig seat stop:*)", ...["compact", "policy apply", "config set", "config reset", "setup", "import", "adopt", "attach", "bind", "handover", "unclaim", "release", "reconcile-session", "env down"].map(command => `Bash(rig ${command}:*)`)]));
+    // Bare prefix comparisons only; this is not a native permission-enforcement probe.
+    for (const command of ["rig queue claim qitem-example", "rig queue unclaim qitem-example",
+      "rig queue handoff qitem-example --to worker@team", "rig queue update qitem-example --state in-progress",
+      "rig queue show qitem-example", "rig whoami --json"]) {
+      expect(settings.permissions.ask.some((rule: string) => {
+        const prefix = /^Bash\((.*):\*\)$/.exec(rule)?.[1];
+        return prefix && (command === prefix || command.startsWith(`${prefix} `));
+      }), command).toBe(false);
+    }
     expect(settings.permissions.deny).toBeUndefined();
     expect(cmd).toContain("--permission-mode acceptEdits");
   } else {
