@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createViewState, emptySnapshot } from "../src/state.js";
+import { createViewState, emptySnapshot, computeExplorerRows } from "../src/state.js";
 import { parseCommand } from "../src/grammar.js";
 import { renderScreen } from "../src/render.js";
 import { resolveKeyAction } from "../src/input.js";
@@ -21,6 +21,46 @@ function setup() {
 }
 
 describe("rig spec graph and Launch", () => {
+  it.each([false, true])("prefers the rig for a shared name, independent of library order (rig first: %s)", rigFirst => {
+    const rig = { ...spec, name: "pm" };
+    const agent: SpecEntry = { name: "pm", kind: "agent", runtime: "claude" };
+    const snap = { ...emptySnapshot(), specsLoaded: true, specs: rigFirst ? [rig, agent] : [agent, rig] };
+    const view = createViewState({ instanceId: "collision", getSnapshot: () => snap });
+    view.dispatch(parseCommand("spec pm"));
+    expect(view.get().viewTab).toBe("graph");
+    expect(renderScreen(view.get(), snap, { cols: 100, rows: 40 }).lines.join("\n")).toContain("rig spec pm");
+    const rows = computeExplorerRows(view.get(), snap);
+    expect(view.get().selection).toBe(rows.findIndex(row => row.key === "specs-kind:rig") + 1);
+    view.dispatch(parseCommand("launch"));
+    expect(view.get().specLaunch?.source).toBe("pm");
+  });
+
+  it("keeps explicit agent selection, preview and spec-of on the agent with the same name", () => {
+    const snap = { ...emptySnapshot(), specsLoaded: true, specs: [
+      { ...spec, name: "pm" }, { name: "pm", kind: "agent" as const, runtime: "claude", description: "Agent purpose" },
+    ], hosts: [{ name: "local", reachable: true, rigs: [{ name: "team", pods: [{ name: "work", agents: [
+      { name: "work.pm", spec: "pm", runtime: "claude", status: "idle", context: null, tokens: null, live: true },
+    ] }] }] }] };
+    const view = createViewState({ instanceId: "collision", getSnapshot: () => snap });
+    view.dispatch({ type: "jump", section: "specs" });
+    view.dispatch({ type: "toggle-expand", key: "specs-kind:agent" });
+    const rows = computeExplorerRows(view.get(), snap);
+    const index = rows.findIndex(row => row.key === "specs-kind:agent") + 1;
+    expect(rows[index]?.label).toContain("pm");
+    view.dispatch({ type: "select", index });
+    const preview = renderScreen(view.get(), snap, { cols: 100, rows: 40 });
+    expect(preview.lines.join("\n")).toContain("Agent purpose");
+    view.dispatch({ type: "activate" });
+    expect(renderScreen(view.get(), snap, { cols: 100, rows: 40 }).lines.join("\n")).toContain("agent spec pm");
+    expect(view.get().selection).toBe(index);
+    expect(view.dispatch(parseCommand("launch")).lastError).toContain("Open a rig spec");
+    view.dispatch({ type: "cross", kind: "spec-of", name: "work.pm" });
+    expect(renderScreen(view.get(), snap, { cols: 100, rows: 40 }).lines.join("\n")).toContain("agent spec pm");
+    expect(view.dispatch(parseCommand("tab graph")).lastError).toContain("not available");
+    snap.specs = [snap.specs[0]!];
+    expect(renderScreen(view.get(), snap, { cols: 100, rows: 40 }).lines.join("\n")).toContain("not in the current catalog");
+  });
+
   it("opens on the same graph renderer, with no live seat hit targets or invented status", () => {
     const { view, screen } = setup();
     expect(view.get().viewTab).toBe("graph");

@@ -18,6 +18,7 @@ import type {
   ViewState,
   ViewStateStore,
   NavigationFrame,
+  SpecKind,
 } from "./types.js";
 import { SECTION_REGISTRY, SYSTEM_SECTIONS } from "./sections.js";
 import { scopesExplorerRows } from "./scopes/scopes-model.js";
@@ -117,7 +118,8 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
   const next: ViewState = { ...state, lastError: null, notice: action.type === "notice" || action.type === "act" || readingNotice ? state.notice : null };
   switch (action.type) {
     case "spec-launch": {
-      const spec = state.section === "specs" ? findSpec(snap, state.drill.at(-1)?.name ?? "") : null;
+      const leaf = state.drill.at(-1);
+      const spec = state.section === "specs" ? findSpec(snap, leaf?.name ?? "", leaf?.specKind) : null;
       if (spec?.kind !== "rig") return { ...next, lastError: "Open a rig spec before Launch." };
       return { ...resetContent(next), focusedPane: "content", specLaunch: { source: spec.name, folder: "", host: "" } };
     }
@@ -314,10 +316,10 @@ function reduce(state: ViewState, action: Action, snap: FleetSnapshot): ViewStat
     }
     case "drill": {
       next.specLaunch = null;
-      const drilled = drillTo(next, action.resource, action.name, snap, action.target);
+      const drilled = drillTo(next, action.resource, action.name, snap, action.target, action.specKind);
       if (drilled.lastError) return drilled;
       const sectionState = clearScopeCoordinatesOnSectionChange(state, drilled);
-      const spec = action.resource === "spec" ? findSpec(snap, action.name) : null;
+      const spec = action.resource === "spec" ? findSpec(snap, action.name, action.specKind) : null;
       // filters are VIEW-scoped: a drill that crosses sections clears the old
       // section's filter (founder direct-drive catch — a specs filter leaked
       // into the topology table and blanked it)
@@ -389,7 +391,7 @@ export function locationKey(state: ViewState): string {
     case "agent":
       return `agent:${names.get("host")}/${names.get("rig")}/${names.get("pod")}/${leaf.name}`;
     case "spec":
-      return `spec:${leaf.name}`;
+      return `spec:${leaf.specKind ?? "rig"}:${leaf.name}`;
     default:
       return `section:${state.section}`;
   }
@@ -403,7 +405,7 @@ function syncSelection(state: ViewState, snap: FleetSnapshot): ViewState {
   if (names.has("pod")) expanded.add(`pod:${names.get("host")}/${names.get("rig")}/${names.get("pod")}`);
   const leaf = state.drill.at(-1);
   if (leaf?.kind === "spec") {
-    const spec = findSpec(snap, leaf.name);
+    const spec = findSpec(snap, leaf.name, leaf.specKind);
     if (spec) expanded.add(`specs-kind:${spec.kind}`);
     if (spec?.kind === "agent" && spec.namespace) expanded.add(`folder:${spec.namespace}`);
   }
@@ -431,8 +433,10 @@ export function findAgent(snap: FleetSnapshot, name: string, target?: { host: st
   return matches.length === 1 ? matches[0]! : null;
 }
 
-export function findSpec(snap: FleetSnapshot, name: string) {
-  return snap.specs.find((s) => s.name === name) ?? null;
+export function findSpec(snap: FleetSnapshot, name: string, kind?: SpecKind) {
+  // A bare spec command opens teams first; explicit library links keep their kind.
+  return snap.specs.find((s) => s.name === name && s.kind === (kind ?? "rig"))
+    ?? (kind ? null : snap.specs.find((s) => s.name === name) ?? null);
 }
 
 /** Joins a Needs-You target (a session name) back to the topology agent. */
@@ -470,7 +474,7 @@ export function agentsRunningSpecTargets(snap: FleetSnapshot, specName: string) 
   return out;
 }
 
-function drillTo(state: ViewState, resource: string, name: string, snap: FleetSnapshot, target?: { host: string; rig?: string; pod?: string }): ViewState {
+function drillTo(state: ViewState, resource: string, name: string, snap: FleetSnapshot, target?: { host: string; rig?: string; pod?: string }, specKind?: SpecKind): ViewState {
   switch (resource) {
     case "host": {
       if (!snap.hosts.some((h) => h.name === name)) return { ...state, lastError: `no such host "${name}"` };
@@ -539,8 +543,9 @@ function drillTo(state: ViewState, resource: string, name: string, snap: FleetSn
     case "spec": {
       // Another section may intentionally omit Specs. Its absence there is not
       // evidence that this source is missing; judge after the catalog read.
-      if (snap.specsLoaded && !findSpec(snap, name)) return { ...state, lastError: `no such spec "${name}"` };
-      return { ...state, section: "specs", drill: [{ kind: "spec", name }], selection: 0, runningOf: null };
+      const spec = findSpec(snap, name, specKind);
+      if (snap.specsLoaded && !spec) return { ...state, lastError: `no such spec "${name}"` };
+      return { ...state, section: "specs", drill: [{ kind: "spec", name, specKind: specKind ?? spec?.kind }], selection: 0, runningOf: null };
     }
     default:
       return { ...state, lastError: `unknown resource "${resource}"` };
@@ -566,11 +571,11 @@ function crossNav(state: ViewState, kind: "spec-of" | "running", name: string, s
     if (matches.length > 1) return { ...state, lastError: `ambiguous agent "${name}" — use spec-of <host>/<rig>/<pod>/<agent>` };
     const found = matches[0];
     if (!found) return { ...state, lastError: `no such agent "${name}"` };
-    if (!findSpec(snap, found.agent.spec)) return { ...state, lastError: `spec "${found.agent.spec}" not in the library` };
+    if (!findSpec(snap, found.agent.spec, "agent")) return { ...state, lastError: `spec "${found.agent.spec}" not in the library` };
     return resetContent({
       ...state,
       section: "specs",
-      drill: [{ kind: "spec", name: found.agent.spec }],
+      drill: [{ kind: "spec", name: found.agent.spec, specKind: "agent" }],
       selection: 0,
       runningOf: null,
       viewTab: "table",
@@ -678,7 +683,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
         if (!openKind) continue;
         if (kind !== "agent") {
           for (const spec of list)
-            rows.push({ label: `    ▪ ${spec.name}`, action: { type: "drill", resource: "spec", name: spec.name }, key: `spec:${spec.name}` });
+            rows.push({ label: `    ▪ ${spec.name}`, action: { type: "drill", resource: "spec", name: spec.name, specKind: kind }, key: `spec:${kind}:${spec.name}` });
           continue;
         }
         const groups = new Map<string, typeof list>();
@@ -702,8 +707,8 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
           for (const spec of specs)
             rows.push({
               label: `${namespace === "(root)" ? "    " : "      "}▪ ${spec.name}`,
-              action: { type: "drill", resource: "spec", name: spec.name },
-              key: `spec:${spec.name}`,
+              action: { type: "drill", resource: "spec", name: spec.name, specKind: kind },
+              key: `spec:${kind}:${spec.name}`,
             });
         }
       }

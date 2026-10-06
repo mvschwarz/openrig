@@ -14,8 +14,10 @@ import { GRAPH_STYLE_NAMES } from "../topology/render-graph.js";
 export interface CompletionContext { state: ViewState; snapshot: FleetSnapshot }
 
 export function availableTabs(state: ViewState, snap: FleetSnapshot): ViewTab[] {
-  const rigSpec = state.section === "specs" && state.drill.at(-1)?.kind === "spec"
-    && snap.specs.find((s) => s.name === state.drill.at(-1)?.name)?.kind === "rig";
+  const leaf = state.drill.at(-1);
+  const rigSpec = state.section === "specs" && leaf?.kind === "spec"
+    && (!leaf.specKind || leaf.specKind === "rig")
+    && snap.specs.some((s) => s.name === leaf.name && s.kind === "rig");
   return [...(rigSpec ? ["graph", "topology", "configuration", "yaml"] : state.section === "topology" ? ["table", "recent", "overview", "graph", "health"] : []), "pulse"] as ViewTab[];
 }
 

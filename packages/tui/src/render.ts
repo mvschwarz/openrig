@@ -234,7 +234,7 @@ function agentDetailLines(
 ): ContentLine[] {
   const { agent, rig, pod } = found;
   const session = agent.session;
-  const specInLibrary = !!agent.spec && !!findSpec(snap, agent.spec);
+  const specInLibrary = !!agent.spec && !!findSpec(snap, agent.spec, "agent");
   const currentRows = session ? rowsForAgent(snap, session, [snap.attention, snap.blocked, snap.inProgress]) : [];
   const pendingRows = session ? rowsForAgent(snap, session, [snap.pending]) : [];
   const recentRows = session ? rowsForAgent(snap, session, [snap.recentlyFinished]) : [];
@@ -912,7 +912,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
   if (state.section === "specs") {
     const leaf = state.drill.at(-1);
     if (leaf?.kind === "spec") {
-      const spec = findSpec(snap, leaf.name);
+      const spec = findSpec(snap, leaf.name, leaf.specKind);
       if (!spec) return [{ text: snap.readErrors.find((error) => error.startsWith("specs-library")) ?? (!snap.specsLoaded ? "Specs catalog read pending" : `spec "${leaf.name}" not in the current catalog`) }];
       if (spec.kind === "rig") {
         lines.push(specTabsLine(state));
@@ -1008,7 +1008,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
                 ...pod.members.map((member) =>
                   listItem(
                     `${alignedRow([[member.id, 12], [member.agentRef, 34], [member.runtime, 12]])}${member.profile ? ` profile ${member.profile}` : ""}`,
-                    { type: "drill", resource: "spec", name: member.agentRef },
+                    { type: "drill", resource: "spec", name: member.agentRef, specKind: "agent" },
                   ),
                 ),
                 ...pod.edges.map((edge) => ({ text: `    ${edge.from} → ${edge.to}  (${edge.kind})` })),
@@ -1080,7 +1080,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
                   : (spec.usedByRigs ?? []).map((rig) => ({
                       label: "declared by",
                       value: `rig ${rig}`,
-                      link: { type: "drill", resource: "spec", name: rig } as Action,
+                      link: { type: "drill", resource: "spec", name: rig, specKind: "rig" } as Action,
                     }))),
                 {
                   label: "seats now",
@@ -1096,14 +1096,14 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
     }
     if (state.filter) lines.push({ text: `/ filter specs: ${state.filter} · / replace · esc clear` });
     const selected = computeExplorerRows(state, snap)[state.selection]?.action;
-    const spec = selected?.type === "drill" && selected.resource === "spec" ? findSpec(snap, selected.name) : null;
+    const spec = selected?.type === "drill" && selected.resource === "spec" ? findSpec(snap, selected.name, selected.specKind) : null;
     if (spec) {
       lines.push({ text: `${spec.name} · ${spec.kind} · ${sourceProvenance(spec)}` });
       lines.push({ text: "" }, { text: spec.description?.trim() || "Purpose not declared in the available source." });
       if (spec.kind === "rig") lines.push(fieldLine({ label: "contents", value: `${spec.pods?.length ?? 0} pods · ${spec.pods?.reduce((n, p) => n + p.members.length, 0) ?? spec.legacyNodes?.length ?? 0} members · ${spec.agentRefs?.join(", ") || "no member references served"}` }));
       else if (spec.kind === "agent") lines.push(fieldLine({ label: "contents", value: `${spec.runtime ?? "runtime not declared"} · ${(spec.skills ?? []).length} skills · ${(spec.startupFiles ?? []).length} startup files` }));
       else lines.push(fieldLine({ label: "contents", value: `${spec.rolesCount ?? "unknown"} roles · ${spec.stepsCount ?? "unknown"} steps` }));
-      lines.push({ text: "" }, listItem("Read details · Enter", { type: "drill", resource: "spec", name: spec.name }), ...specSourceLines(spec, snap));
+      lines.push({ text: "" }, listItem("Read details · Enter", { type: "drill", resource: "spec", name: spec.name, specKind: spec.kind }), ...specSourceLines(spec, snap));
       if (spec.sourceUnavailable) lines.push({ text: `Source unavailable: ${spec.sourceUnavailable}` });
     } else {
       lines.push({ text: "SPEC LIBRARY" }, { text: "Choose a spec at left to preview its purpose, contents and source." },

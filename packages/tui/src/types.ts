@@ -437,6 +437,7 @@ export interface ResourceTarget {
 export interface DrillSegment {
   kind: ResourceKind;
   name: string;
+  specKind?: SpecKind;
 }
 
 export type ViewTab = "table" | "recent" | "overview" | "graph" | "health" | "topology" | "configuration" | "yaml" | "pulse";
@@ -469,7 +470,7 @@ export type Action =
   | { type: "filter"; text: string }
   | { type: "select"; delta?: number; index?: number; rowCount?: number; origin?: "refresh" }
   | { type: "activate" }
-  | { type: "drill"; resource: ResourceKind; name: string; target?: ResourceTarget }
+  | { type: "drill"; resource: ResourceKind; name: string; target?: ResourceTarget; specKind?: SpecKind }
   | { type: "cross"; kind: "spec-of" | "running"; name: string; target?: ResourceTarget }
   | { type: "tab"; tab: ViewTab }
   | { type: "content-scroll"; delta: number }

@@ -190,7 +190,7 @@ describe("live visual regressions", () => {
     const memberY = screen.lines.findIndex((line) => line.includes("independent-reviewer")) + 1;
     expect(screen.hitMap).toContainEqual(expect.objectContaining({
       y: memberY,
-      action: { type: "drill", resource: "spec", name: "independent-reviewer" },
+      action: { type: "drill", resource: "spec", name: "independent-reviewer", specKind: "agent" },
     }));
 
     const tabsY = screen.lines.findIndex((line) => line.includes("TOPOLOGY") && line.includes("YAML")) + 1;
@@ -279,7 +279,7 @@ describe("live visual regressions", () => {
     const usedY = screen.lines.findIndex((line) => line.includes("rig adversarial-review")) + 1;
     expect(screen.hitMap).toContainEqual(expect.objectContaining({
       y: usedY,
-      action: { type: "drill", resource: "spec", name: "adversarial-review" },
+      action: { type: "drill", resource: "spec", name: "adversarial-review", specKind: "rig" },
     }));
   });
 

@@ -33,7 +33,7 @@ it("Specs kinds and Derived views start collapsed, expand deliberately, and reta
   view.dispatch({ type: "jump", section: "specs" });
   expect(computeExplorerRows(view.get(), snap).some(row => row.key?.startsWith("spec:"))).toBe(false);
   view.dispatch({ type: "toggle-expand", key: "specs-kind:rig" });
-  expect(computeExplorerRows(view.get(), snap).some(row => row.key === `spec:${snap.specs.find(s => s.kind === "rig")!.name}`)).toBe(true);
+  expect(computeExplorerRows(view.get(), snap).some(row => row.key === `spec:rig:${snap.specs.find(s => s.kind === "rig")!.name}`)).toBe(true);
   view.dispatch({ type: "jump", section: "terminals" });
   expect(computeExplorerRows(view.get(), snap).some(row => row.key === "terminal:saved:watch")).toBe(true);
   expect(computeExplorerRows(view.get(), snap).some(row => row.key?.startsWith("terminal:rig:"))).toBe(false);

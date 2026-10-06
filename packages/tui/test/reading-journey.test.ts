@@ -51,7 +51,7 @@ describe("current-file reading through real routes and TUI state", () => {
   it.each([[140, 42], [80, 24]])("previews actual purpose, opens detail/source and preserves the caller at %ix%i", async (cols, rows) => {
     view.dispatch({ type: "jump", section: "specs" }); await refresh();
     view.dispatch({ type: "filter", text: "story" });
-    const index = computeExplorerRows(view.get(), snap).findIndex((r) => r.key === "spec:story");
+    const index = computeExplorerRows(view.get(), snap).findIndex((r) => r.key === "spec:rig:story");
     view.dispatch({ type: "select", index });
     let screen = draw(cols, rows);
     expect(screen.lines.join("\n")).toContain("Understand the manuscript.");
@@ -117,7 +117,7 @@ describe("current-file reading through real routes and TUI state", () => {
   it.each([[140, 42], [80, 24]])("reads a capped long line and line-broken control, then returns at %ix%i", async (cols, rows) => {
     view.dispatch({ type: "jump", section: "specs" }); await refresh();
     view.dispatch({ type: "filter", text: "story" });
-    const index = computeExplorerRows(view.get(), snap).findIndex((r) => r.key === "spec:story");
+    const index = computeExplorerRows(view.get(), snap).findIndex((r) => r.key === "spec:rig:story");
     view.dispatch({ type: "select", index }); draw(cols, rows);
     const caller = view.get();
     for (const content of ["x".repeat(1048600), ("x".repeat(79) + "\n").repeat(13110)]) {

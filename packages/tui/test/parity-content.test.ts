@@ -185,7 +185,7 @@ describe("content-pane parity (Phase 3): click the surface, not a control", () =
     const refTarget = screen.contentTargets.findIndex((target) => target.action.type === "drill" && target.action.resource === "spec" && target.action.name === "guard-agent");
     for (let i = 0; i < refTarget; i++) press(ref, "\x1b[B", structured);
     press(ref, "\r", structured);
-    expect(ref.get().drill.at(-1)).toEqual({ kind: "spec", name: "guard-agent" });
+    expect(ref.get().drill.at(-1)).toEqual({ kind: "spec", name: "guard-agent", specKind: "agent" });
 
     const needs = fresh("needs");
     needs.dispatch(parseCommand(":needs"));
