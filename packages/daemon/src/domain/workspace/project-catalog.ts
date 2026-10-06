@@ -109,7 +109,7 @@ export function inferCatalogProject(
         warnings.push(`project '${entry.id}' root does not exist; skipped it for working-directory selection`);
         continue;
       }
-      if (inside(root, cwd)) containing.push({ id: entry.id, root, depth: root.split(path.sep).length });
+      if (inside(root, cwd)) containing.push({ id: entry.id, root, depth: root.split(path.sep).filter(Boolean).length });
     }
     const depth = Math.max(...containing.map((entry) => entry.depth));
     const deepest = containing.filter((entry) => entry.depth === depth);
