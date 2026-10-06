@@ -179,7 +179,7 @@ or replace another window's contents.
 
 Use **herdr first**, **cmux second**, and otherwise a **new plain terminal
 window**. The first view contains TUI | advisor | operator in that order, for
-both single-provider and dual-provider kernels.
+Claude-only, Codex-only and mixed kernels.
 The queue worker stays out of this view; it remains reachable through the TUI.
 This selects what you see, not which kernel seats run. Keep the current kernel,
 accounts and conversations; opening a view is not a reason to start or restore
@@ -210,8 +210,8 @@ bindings: TUI | advisor | operator for every kernel. No YAML edit or daemon
 restart is needed. It excludes
 the queue worker and uses the existing conversations. Unavailable expected roles
 are named in `absent`; with no attachable members, the result lists the missing
-bindings. The view reports the runtime layout; when runtime information is
-incomplete, it says so and keeps TUI, advisor and operator visible.
+bindings. The runtime label describes the agents' runtime mix, or says that it is
+unverified. Every default kernel view keeps the same three roles.
 
 If you already saved a view with id `kernel` in `terminal-views.yaml`, your view
 wins unchanged. Other saved views are preserved. Check the listed membership

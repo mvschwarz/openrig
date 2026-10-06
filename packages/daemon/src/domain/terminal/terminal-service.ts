@@ -141,7 +141,7 @@ function savedMemberToInput(m: SavedViewMember): ViewMemberInput {
   };
 }
 
-type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string } | { code: string; error: string };
+type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string; columns?: number } | { code: string; error: string };
 type ComposedTerminalView = ComposedView & { kernelLayout?: string };
 
 export class TerminalService {
@@ -196,11 +196,11 @@ export class TerminalService {
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
     const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage, localTmux: await this.resolveLocalTmux() });
-    return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout } : composed;
+    return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout, columns: resolved.columns } : composed;
   }
 
   private planId(provider: string, composed: ComposedView): string {
-    return createHash("sha256").update(JSON.stringify({ provider, composed, grids: composed.pages.map(buildGridRoot) })).digest("hex");
+    return createHash("sha256").update(JSON.stringify({ provider, composed, grids: composed.pages.map(page => buildGridRoot(page, composed.columns)) })).digest("hex");
   }
 
   /** Passive: inventory, local has-session and provider probe only. Never openView. */
@@ -210,7 +210,7 @@ export class TerminalService {
     if (!provider) return errorResult(providerName, "unknown_provider", `unknown provider '${providerName}'`);
     const composed = await this.resolveComposed(req.view, provider.panesPerPage);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
-    return { provider: providerName, view: req.view, composed, grids: composed.pages.map(buildGridRoot), planId: this.planId(providerName, composed), status: await provider.status() };
+    return { provider: providerName, view: req.view, composed, grids: composed.pages.map(page => buildGridRoot(page, composed.columns)), planId: this.planId(providerName, composed), status: await provider.status() };
   }
 
   /** List saved views + the rig names openable as derived views. */
@@ -332,7 +332,7 @@ export class TerminalService {
   }
 
   /** An in-memory default; a user's saved kernel view always takes precedence. */
-  private async defaultKernelView(): Promise<{ id: string; members: ViewMemberInput[]; kernelLayout: string } | null> {
+  private async defaultKernelView(): Promise<{ id: string; members: ViewMemberInput[]; kernelLayout: string; columns: number } | null> {
     const rows = await this.deps.listRigSeats("kernel");
     if (rows == null) return null;
     const advisor = rows.find(row => row.logicalId === "advisor.lead");
@@ -348,7 +348,7 @@ export class TerminalService {
       // Its logical ID names the absence; it is never used as a tmux target.
       return bound ?? { seat: logicalId, label: logicalId, tmuxSession: null, host: null, readOnly: false, alive: false };
     });
-    return { id: "kernel", members, kernelLayout };
+    return { id: "kernel", members, kernelLayout, columns: members.length };
   }
 
   /** Refine local members' liveness with a real has-session probe (a dead seat → absent, honest-partial). */

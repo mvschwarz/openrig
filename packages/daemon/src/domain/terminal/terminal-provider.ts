@@ -61,6 +61,8 @@ export interface ComposedView {
   degraded: DegradedSeat[];
   /** `opened` chunked into ≤ PANES_PER_PAGE grids; a provider renders one tab per page. */
   pages: ComposedPane[][];
+  /** Fixed columns for a composed layout; omitted views use the provider's auto-grid. */
+  columns?: number;
 }
 
 /** Provider availability + version + capability map (from a version-adaptive probe). */

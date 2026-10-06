@@ -8,6 +8,8 @@
 //  - the composed view handed to the provider carries the composer's partition.
 
 import { describe, it, expect } from "vitest";
+import { createHash } from "node:crypto";
+import { planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { TerminalService, type TerminalServiceDeps } from "../src/domain/terminal/terminal-service.js";
 import type {
   ComposedView,
@@ -245,6 +247,76 @@ describe("default saved kernel conversations", () => {
       listRigNames: () => ["kernel"], listRigSeats: name => name === "kernel" ? rows : null,
     });
   }
+
+  it.each([["claude-code", "codex"], ["claude-code", "claude-code"], ["codex", "codex"]])("kernel geometry keeps three columns in preview, fingerprint and open for %s/%s", async (advisorRuntime, operatorRuntime) => {
+    const { deps, herdr } = makeKernel(kernel(operatorRuntime, advisorRuntime));
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view: "saved:kernel" });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect(preview.composed.columns).toBe(3);
+    expect(preview.grids).toHaveLength(1);
+    expect(preview.grids[0]).toMatchObject({ columns: 3, rows: 1, blanks: 0 });
+    expect(preview.grids[0]!.root).toMatchObject({
+      type: "split", direction: "right", ratio: 1 / 3,
+      first: { type: "pane", label: "operator.human" },
+      second: { type: "split", direction: "right", ratio: 1 / 2,
+        first: { type: "pane", label: "advisor.lead" },
+        second: { type: "pane", label: "operator.agent" } },
+    });
+    expect(preview.planId).toBe(createHash("sha256").update(JSON.stringify({
+      provider: "herdr", composed: preview.composed, grids: preview.grids,
+    })).digest("hex"));
+    const result = await service.openView({ view: "saved:kernel", expectedPlan: preview.planId });
+    expect(result.ok).toBe(true);
+    expect(herdr.lastView).toEqual(preview.composed);
+    expect(planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.root).toEqual(preview.grids[0]!.root);
+  });
+
+  it.each(["saved:kernel", "saved:custom", "rig:kernel"])("kernel geometry preserves auto-grid for %s outside the default", async view => {
+    const custom: SavedView = { id: view.slice(6), name: "Custom", members: ["a", "b", "c"].map(seat => ({ seat })) };
+    const { deps, herdr } = makeKernel(kernel().filter(row => row.logicalId !== "queue.worker"), [custom]);
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect(preview.composed.columns).toBeUndefined();
+    expect(preview.grids[0]).toMatchObject({ columns: 2, rows: 2, blanks: 1 });
+    expect((await service.openView({ view, expectedPlan: preview.planId })).ok).toBe(true);
+    expect(planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.root).toEqual(preview.grids[0]!.root);
+  });
+
+  it("kernel geometry caps partial views to available panes while retaining named absences", async () => {
+    const rows = kernel();
+    rows.find(row => row.logicalId === "operator.agent")!.canonicalSessionName = null;
+    const { deps, herdr } = makeKernel(rows);
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view: "saved:kernel" });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect(preview.composed.columns).toBe(3);
+    expect(preview.grids[0]).toMatchObject({ columns: 2, rows: 1, blanks: 0 });
+    const result = await service.openView({ view: "saved:kernel", expectedPlan: preview.planId });
+    expect(result.opened).toEqual(["tui-bound", "advisor-bound"]);
+    expect(result.absent.map(member => member.seat)).toEqual(["operator.agent"]);
+    expect(planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.root).toEqual(preview.grids[0]!.root);
+  });
+
+  it("kernel geometry keeps auto-grid on each page without treating map indexes as columns", async () => {
+    const custom: SavedView = { id: "custom", name: "Custom", members: Array.from({ length: 6 }, (_, i) => ({ seat: `s${i}` })) };
+    const { deps } = makeKernel(kernel(), [custom]);
+    class PagedProvider extends RecordingProvider { readonly panesPerPage = 3; }
+    const provider = new PagedProvider("herdr");
+    deps.resolveProvider = () => provider;
+    const service = new TerminalService(deps);
+    const preview = await service.previewView({ view: "saved:custom" });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect(preview.grids.map(({ columns, rows, blanks }) => ({ columns, rows, blanks }))).toEqual([
+      { columns: 2, rows: 2, blanks: 1 }, { columns: 2, rows: 2, blanks: 1 },
+    ]);
+    expect(preview.planId).toBe(createHash("sha256").update(JSON.stringify({
+      provider: "herdr", composed: preview.composed, grids: preview.grids,
+    })).digest("hex"));
+    expect((await service.openView({ view: "saved:custom", expectedPlan: preview.planId })).ok).toBe(true);
+    expect(planHerdrLayout(provider.lastView!, "fixed").pages.map(page => page.root)).toEqual(preview.grids.map(grid => grid.root));
+  });
 
   it.each([["claude-code", "codex"], ["claude-code", "claude-code"], ["codex", "codex"]])("resolves the %s/%s layout from installed bindings without saving it", async (advisorRuntime, operatorRuntime) => {
     const saved: SavedView[] = [];
