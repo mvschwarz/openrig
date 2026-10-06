@@ -103,7 +103,7 @@ reproduces the drift it was meant to catch. Run it; do not recall it.
 ## Shipped defaults and the curation path
 
 Included rigs ship sensible-default chain files under a `topology/` folder,
-installed under `topology.root` at rig-up. Today only `product-team` ships one,
+installed under `topology.root` at rig-up. Today only `factory` ships one,
 with instance, rig and seat defaults; the installer also supports pod defaults.
 A shipped default is a **starting point** the occupying team appends to — it
 is never overwritten by a later rig-up (existing files win).

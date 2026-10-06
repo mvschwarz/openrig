@@ -40,38 +40,42 @@ Check `tmux -V` and only your selected CLI/login: `claude --version` plus
 sign in once with `claude auth login` or `codex login`; do not install or log in
 to an unused provider.
 
-| Team | Starter | Models |
-| --- | --- | --- |
-| Two Codex agents | `first-project` | Both `gpt-6-astra` (unchanged) |
-| Two Claude agents | `first-project-claude` | Configured native Claude default |
-| Claude owner + Codex checker | `first-project-mixed` | Claude default + `gpt-6-astra` |
+The kernel's operator helps you pick a first team. It asks what you want to build,
+recommends one of three, and fits it to the providers you have.
 
-All three use the same owner/checker roles and task. Show the selected runtime,
-configured model and command before launch; confirm the account supports the
-model instead of silently falling back. The kernel starts automatically and
-selects from available authenticated providers independently of these two project
-agents. A missing unused provider is not a setup requirement.
+| Team | Agents | For |
+| --- | --- | --- |
+| `starter` | A builder (`dev-build`, Claude Code) and a reviewer (`dev-review`, Codex) | One bounded change |
+| `workshop` | A lead, a builder, QA and a reviewer | Ongoing work in one repository; a rig bundle the operator installs from its pinned listing |
+| `factory` | Seven: a lead, an advisor, build, QA, design and two independent reviewers | Sustained product work |
+
+As shipped, `starter` uses both Claude Code and Codex. With only one of them, ask
+the kernel operator to adapt it: it writes a copy of the team for your providers
+under the same name. `first-project` is starter's old name and still starts it.
+Show the selected runtime, configured model and command before launch; confirm the
+account supports the model instead of silently falling back. The kernel starts
+automatically and selects from available authenticated providers independently of
+these teams. A missing unused provider is not a setup requirement.
 
 ```bash
 cd /path/to/your/repository
-starter=first-project  # or first-project-claude or first-project-mixed
-rig specs preview "$starter" --kind rig
-rig up "$starter" --cwd . --plan
-rig up "$starter" --cwd .
+rig specs preview starter --kind rig
+rig up starter --cwd . --plan
+rig up starter --cwd .
 ```
 
 After installation, your agent should [open a **new kernel conversation space**](docs/reference/getting-started.md#open-the-kernel-conversations): `rig terminal open saved:kernel --provider herdr`, then cmux or a plain terminal if unavailable. The default view needs no YAML edit. The agent tells you before opening it and keeps its own terminal and your existing spaces intact. The guide also gives the manual and SSH commands.
 
 The kernel provides separate operational support and the shared dashboard. To detach without stopping the dashboard, press Ctrl-b then d; `rig tui --shared` returns to that view. Plain `rig tui` opens an independent view. Closing a viewing terminal does not mean you should relaunch the team.
 
-Check project-seat readiness with `rig ps --nodes --rig "$starter"` and resolve any authentication, trust or permission prompt before assigning work. If a seat stopped at such a prompt before its startup context arrived, `rig ps` shows the `rig seat continue <seat>` command that delivers it once the prompt is answered. Then give the owner one bounded outcome from your repository:
+Check project-seat readiness with `rig ps --nodes --rig starter` and resolve any authentication, trust or permission prompt before assigning work. If a seat stopped at such a prompt before its startup context arrived, `rig ps` shows the `rig seat continue <seat>` command that delivers it once the prompt is answered. Then give the builder one bounded outcome from your repository:
 
 ```bash
-rig send "dev-owner@$starter" 'Implement <one useful change>. Track the task in the queue and return its ID. Keep it local, verify the behavior, ask dev-check in this rig to check the exact candidate, and record the result and how I can try it.'
-rig queue list --destination "dev-owner@$starter" --limit 1000
+rig send dev-build@starter 'Implement <one useful change>. Track the task in the queue and return its ID. Keep it local, verify the behavior, ask dev-review in this rig to check the exact candidate, and record the result and how I can try it.'
+rig queue list --destination dev-build@starter --limit 1000
 ```
 
-Sending a message does not itself create a queue item; the owner records the task. Read the final artifact and the review of its exact candidate, then return to the same owner for the next change. [The guided first-use path](docs/reference/getting-started.md) covers readiness, a useful task, a reviewed result, Herdr/cmux terminals and recovery.
+Sending a message does not itself create a queue item; the builder records the task. Read the final artifact and the review of its exact candidate, then return to the same builder for the next change. [The guided first-use path](docs/reference/getting-started.md) covers readiness, a useful task, a reviewed result, Herdr/cmux terminals and recovery.
 
 Not setting this up today? Get the next walkthrough and occasional OpenRig updates → https://openrig.dev/follow
 
@@ -201,29 +205,20 @@ OpenRig is a multi-agent harness — it manages the system that coding agents fo
 
 Every agent runs in a tmux session you can attach to, inspect, and work with directly.
 
-## Starter Rigs
+## Teams
 
-Use `first-project`, `first-project-claude`, or `first-project-mixed` for the
-same focused first-use path on your selected providers. `product-team` is an optional
-larger product-development example:
+Three teams grow with you, and the kernel operator helps you pick one:
 
-```bash
-rig specs preview product-team --kind rig
-rig up product-team
-```
-
-Use it when you want a larger product squad: two orchestrators, implementation, QA, design, and two independent reviewers.
-
-For a smaller starter, use `conveyor`:
+- **`starter`**: a builder and a reviewer for one bounded change.
+- **`workshop`**: a lead, a builder, QA and a reviewer for ongoing work in one repository. It's a rig bundle, installed from its pinned listing.
+- **`factory`**: seven agents (a lead, an advisor, build, QA, design and two independent reviewers) for sustained product work. You bring ideas to the advisor, and the lead runs the team.
 
 ```bash
-rig specs preview conveyor --kind rig
-rig up conveyor
+rig specs preview factory --kind rig
+rig up factory
 ```
 
-`conveyor` is a four-seat starter mixing Claude Code and Codex. It shows a handoff path through intake, planning, build, and review; `first-project` remains the smaller two-seat starting point.
-
-Also ships: `implementation-pair`, `adversarial-review`, `research-team`, and `secrets-manager` (HashiCorp Vault managed by a specialist agent).
+Specialist teams: `code-review` (two independent reviews), `research` (an analyst and a synthesizer) and `pm` (a product lead, a researcher and a builder for prototypes).
 
 Browse the library:
 
@@ -261,7 +256,7 @@ The TUI shows the team's coordination state; herdr and cmux show the actual agen
 With herdr installed and connected, open the starter's terminals together:
 
 ```bash
-rig terminal open first-project --provider herdr
+rig terminal open starter --provider herdr
 ```
 
 For cmux, use `--provider cmux`. In the TUI, a rig's detail view has a `term ▸ rig <name>` link that opens every running seat of that rig in the default terminal provider; with herdr that is up to 16 seats per tab, in a workspace named after the rig. The underlying sessions remain accessible through tmux. See the [terminal workspace guide](docs/reference/getting-started.md#share-the-dashboard-and-return-to-it) for setup and returning to an existing view.
@@ -270,7 +265,7 @@ For cmux, use `--provider cmux`. In the TUI, a rig's detail view has a `term ▸
 
 - **RigSpec**: Declarative multi-agent harness definition in YAML. Pods, members, edges, continuity policies, culture file.
 - **AgentSpec**: Reusable agent blueprint with skills, guidance, hooks, profiles, and startup contracts.
-- **Seat**: A stable role and address in a rig, such as `dev-owner@first-project`. The conversation occupying it can change while its identity and authored context remain.
+- **Seat**: A stable role and address in a rig, such as `dev-build@starter`. The conversation occupying it can change while its identity and authored context remain.
 - **Pod**: A group of related seats with shared guidance and context. Each agent still has its own context window.
 - **Discovery**: `rig discover` fingerprints existing tmux sessions. `rig adopt` brings them under management.
 - **Snapshot/Restore**: `rig down --snapshot` captures full state. `rig up <name>` restores from latest snapshot. Restore reports per-node outcomes: resumed, fresh-primed, awaiting-decision (the original conversation can't resume; choose `--fresh`), attention_required, or failed.

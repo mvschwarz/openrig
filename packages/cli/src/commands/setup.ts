@@ -794,11 +794,12 @@ export function goldenPathNextSteps(): string[] {
     "     Keep the current terminal and existing spaces intact; opening this view needs no new provider install",
     "     rig tui --shared joins the existing kernel TUI from a new terminal; plain rig tui opens an independent view",
     "  5. Tell the operator your goal and pick a first team, then cd <your-repository>",
-    "     Choose first-project (two Codex), first-project-claude (two Claude), or first-project-mixed",
-    "     Preview rig up <starter> --cwd . --plan; with your yes, rig up <starter> --cwd .",
-    "     rig ps --nodes --rig <starter> checks the project seats before giving them work",
-    "  6. rig send dev-owner@<starter> '<one useful change, boundaries, and how to check it>'",
-    "  Next: rig queue list --destination dev-owner@<starter>; rig workspace doctor; rig scope ...; rig workflow specs",
+    "     Teams: starter (a Claude builder and a Codex reviewer), workshop (a rig bundle) or factory (seven agents)",
+    "     With one provider, the operator adapts the team for you; first-project is starter's old name",
+    "     Preview rig up <team> --cwd . --plan; with your yes, rig up <team> --cwd .",
+    "     rig ps --nodes --rig <team> checks the project seats before giving them work",
+    "  6. rig send dev-build@starter '<one useful change, boundaries, and how to check it>' (workshop, factory: orch-lead@<team>)",
+    "  Next: rig queue list --destination dev-build@starter; rig workspace doctor; rig scope ...; rig workflow specs",
   ];
 }
 

@@ -251,8 +251,8 @@ Examples:
   rig context sync
   rig context profile world-public --situation fresh --runtime claude-code
   rig context work-install --runtime claude-code
-  rig context trace --rig product-team --seat orch1-lead --name LEARNED.md
-  rig context trace --rig product-team --pod delivery --seat dev1-qa --name LEARNED.md
+  rig context trace --rig factory --seat orch-lead --name LEARNED.md
+  rig context trace --rig factory --pod dev --seat dev-qa --name LEARNED.md
 `);
 
   const getDeps = (): StatusDeps => depsOverride ?? {
