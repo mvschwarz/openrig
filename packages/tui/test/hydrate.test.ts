@@ -591,10 +591,10 @@ describe("footer stream tail via the bounded latest-active projection", () => {
 });
 
 describe("S05 authored source and observed consumers", () => {
-  it("shows the shipped first-project summary as its purpose", async () => {
-    const raw = readFileSync(new URL("../../daemon/specs/rigs/launch/first-project/rig.yaml", import.meta.url), "utf8");
+  it("shows the shipped starter summary as its purpose", async () => {
+    const raw = readFileSync(new URL("../../daemon/specs/rigs/launch/starter/rig.yaml", import.meta.url), "utf8");
     const { summary } = parseYaml(raw) as { summary: string };
-    expect(summary).toContain("Two Codex seats");
+    expect(summary).toContain("Claude Code builder and a Codex reviewer");
     const snap = await hydrateSnapshot(fixtureClient({}, {
       "/api/specs/library/a1/review": { ...(FIXTURES["/api/specs/library/a1/review"] as object), raw },
     }));

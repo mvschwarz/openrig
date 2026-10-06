@@ -17,28 +17,28 @@ test("npm pack of @openrig/cli includes scripts/check-abi.mjs in tarball", () =>
   );
 });
 
-test("product-team topology defaults have a clean-checkout source and package path", () => {
+test("factory topology defaults have a clean-checkout source and package path", () => {
   const expectedDefaults = [
     "instance/CRAFT.md",
     "rig/CRAFT.md",
     "rig/ORCHESTRATION-CRAFT.md",
-    "seats/orch1-lead/CRAFT.md",
-    "seats/rev1-r1/CRAFT.md",
-    "seats/rev1-r2/CRAFT.md",
-    "seats/dev1-qa/CRAFT.md",
+    "seats/orch-lead/CRAFT.md",
+    "seats/review-r1/CRAFT.md",
+    "seats/review-r2/CRAFT.md",
+    "seats/dev-qa/CRAFT.md",
   ];
-  const sourceRoot = "packages/daemon/specs/rigs/preview/product-team/topology";
+  const sourceRoot = "packages/daemon/specs/rigs/launch/factory/topology";
   for (const rel of expectedDefaults) {
     const source = `${sourceRoot}/${rel}`;
-    assert.ok(existsSync(source), `shipped product-team topology default missing from source: ${source}`);
-    assert.ok(readFileSync(source).length > 0, `shipped product-team topology default is empty: ${source}`);
+    assert.ok(existsSync(source), `shipped factory topology default missing from source: ${source}`);
+    assert.ok(readFileSync(source).length > 0, `shipped factory topology default is empty: ${source}`);
   }
 
   const buildScript = readFileSync("scripts/build-package.sh", "utf-8");
   assert.match(
     buildScript,
     /cp -r "\$DAEMON_DIR\/specs" "\$CLI_DIR\/daemon\/specs"/,
-    "build-package no longer stages the complete daemon specs tree; product-team topology defaults would be absent from the published CLI package",
+    "build-package no longer stages the complete daemon specs tree; factory topology defaults would be absent from the published CLI package",
   );
   const pkg = JSON.parse(readFileSync("packages/cli/package.json", "utf-8"));
   assert.ok(

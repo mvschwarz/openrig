@@ -1,0 +1,29 @@
+version: "0.2"
+name: starter
+summary: >
+  A Claude Code builder and a Codex reviewer in your repository. Give the builder one bounded change; follow the durable result and
+  continue at the same address. See docs/reference/getting-started.md.
+
+culture_file: CULTURE.md
+
+pods:
+  - id: dev
+    label: Project
+    members:
+      - id: build
+        agent_ref: "local:../../../agents/development/implementer"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+      - id: review
+        agent_ref: "local:../../../agents/development/qa"
+        runtime: codex
+        model: gpt-6-astra
+        profile: default
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: build
+        to: review
+
+edges: []

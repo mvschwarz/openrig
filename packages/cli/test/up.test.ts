@@ -1009,6 +1009,55 @@ describe("Up CLI", () => {
     expect(exitCode).toBe(1);
   });
 
+  it.each([
+    ["fresh alias", [], [], false, 0],
+    ["existing starter", [{ id: "new-rig", name: "starter" }], [], false, 1],
+    ["existing old name", [{ id: "old-rig", name: "first-project" }], [], false, 1],
+    ["archived starter", [], [{ id: "archived-new", name: "starter" }], false, 1],
+    ["archived old name", [], [{ id: "archived-old", name: "first-project" }], false, 1],
+    ["explicit old restore", [{ id: "old-rig", name: "first-project" }], [], true, 0],
+  ] as const)("first-project routing: %s", async (_label, active, archived, existing, exit) => {
+    const originalListeners = server.listeners("request").slice();
+    server.removeAllListeners("request");
+    const posts: Array<Record<string, unknown>> = [];
+    const requests: string[] = [];
+    server.on("request", async (req, res) => {
+      requests.push(req.url ?? "");
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (req.url === "/api/rigs/summary") res.end(JSON.stringify(active));
+      else if (req.url === "/api/rigs/summary?archived=only") res.end(JSON.stringify(archived));
+      else if (req.url?.startsWith("/api/specs/library")) res.end(JSON.stringify([{
+        id: "starter-spec", name: "starter", kind: "rig", sourceType: "builtin", sourcePath: "/builtin/starter/rig.yaml",
+      }]));
+      else if (req.url === "/api/up") {
+        posts.push(JSON.parse(body));
+        res.end(JSON.stringify({ status: "planned", runId: "alias-plan", stages: [], errors: [], warnings: [] }));
+      } else res.end("{}");
+    });
+    try {
+      const result = await captureLogs(async () => {
+        await makeCmd().parseAsync(["node", "rig", "up", "first-project", "--plan", "--json", ...(existing ? ["--existing"] : [])]);
+      });
+      expect(result.exitCode ?? 0).toBe(exit);
+      if (exit) {
+        expect(posts).toHaveLength(0);
+        if (archived.length) expect(result.logs.join("\n")).toContain(`rig unarchive ${archived[0]!.id}`);
+        else expect(result.logs.join("\n")).toContain(`rig up ${active[0]!.name} --existing`);
+      } else {
+        expect(posts).toHaveLength(1);
+        expect(posts[0]!.sourceRef).toBe(existing ? "first-project" : "/builtin/starter/rig.yaml");
+        if (existing) expect(requests.some((url) => url.startsWith("/api/specs/library"))).toBe(false);
+        else expect(posts[0]!.cwdOverride).toBe(process.cwd());
+        expect(result.logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))).toHaveLength(1);
+      }
+    } finally {
+      server.removeAllListeners("request");
+      for (const listener of originalListeners) server.on("request", listener as (req: http.IncomingMessage, res: http.ServerResponse) => void);
+    }
+  });
+
   it("up resolves a same-name rig and workflow to the rig library entry", async () => {
     const origListeners = server.listeners("request");
     let lastBody: Record<string, unknown> = {};

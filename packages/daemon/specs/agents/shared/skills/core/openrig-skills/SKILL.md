@@ -106,7 +106,6 @@ Product-management craft (load when shaping/reviewing work):
 ### Vendored craft — load when you're coding (ships with upstream provenance)
 General engineering skills OpenRig ships as vendored copies. Open when the task matches; they carry "modified by OpenRig" provenance.
 
-- **test-driven-development** — implementing a feature or bugfix: write the failing test first.
 - **verification-before-completion** — about to claim done / passing / fixed: run the check and read the output first.
 - **systematic-debugging** — debugging: find the root cause before the fix.
 - **agent-browser** — driving a browser (screenshot / screencast) from an agent.

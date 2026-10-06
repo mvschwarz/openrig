@@ -36,7 +36,7 @@ describe('packaged SDLC entry', () => {
 
 it('generic starter overlays cannot reintroduce universal edit gates', () => {
   const rigs = resolve(agents, '../rigs');
-  for (const file of ['launch/implementation-pair/rig.yaml', 'launch/demo/CULTURE.md', 'preview/product-team/CULTURE.md']) {
+  for (const file of ['launch/factory/CULTURE.md']) {
     const text = readFileSync(resolve(rigs, file), 'utf8');
     expect(text).not.toMatch(/gates every edit|reviews every edit|strict gated loop|Reviewers do not wait to be asked|Wait for QA approval/);
     expect(text).toContain('Part A');

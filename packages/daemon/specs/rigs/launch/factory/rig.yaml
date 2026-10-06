@@ -1,0 +1,92 @@
+version: "0.2"
+name: factory
+culture_file: CULTURE.md
+summary: >
+  A product factory with a lead, a PM advisor, build, QA, design, and two
+  independent reviewers. Bring ideas to the advisor; the lead runs the team.
+
+pods:
+  - id: orch
+    label: Orchestration
+    members:
+      - id: lead
+        agent_ref: "local:../../../agents/orchestration/orchestrator"
+        runtime: codex
+        profile: default
+        cwd: "."
+      - id: advisor
+        agent_ref: "local:../../../agents/product-management/pm"
+        runtime: claude-code
+        profile: advisor
+        cwd: "."
+    edges: []
+
+  - id: dev
+    label: Development
+    members:
+      - id: build
+        agent_ref: "local:../../../agents/development/implementer"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+      - id: qa
+        agent_ref: "local:../../../agents/development/qa"
+        runtime: codex
+        profile: default
+        cwd: "."
+      - id: design
+        agent_ref: "local:../../../agents/design/product-designer"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges:
+      - kind: delegates_to
+        from: build
+        to: qa
+
+  - id: review
+    label: Review
+    members:
+      - id: r1
+        agent_ref: "local:../../../agents/review/independent-reviewer"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+      - id: r2
+        agent_ref: "local:../../../agents/review/independent-reviewer"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges: []
+
+edges:
+  - kind: delegates_to
+    from: orch.lead
+    to: dev.build
+  - kind: delegates_to
+    from: orch.lead
+    to: dev.design
+  - kind: delegates_to
+    from: orch.lead
+    to: review.r1
+  - kind: delegates_to
+    from: orch.lead
+    to: dev.qa
+  - kind: delegates_to
+    from: orch.lead
+    to: review.r2
+  - kind: can_observe
+    from: review.r1
+    to: dev.build
+  - kind: can_observe
+    from: review.r1
+    to: dev.design
+  - kind: can_observe
+    from: review.r2
+    to: dev.build
+  - kind: can_observe
+    from: review.r2
+    to: dev.qa
+  - kind: collaborates_with
+    from: orch.advisor
+    to: orch.lead

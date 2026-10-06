@@ -1,0 +1,40 @@
+version: "0.2"
+name: research
+summary: >
+  Research topology with an orchestrator coordinating an analyst
+  and a synthesizer. The analyst does deep-dive investigation,
+  the synthesizer consolidates findings into actionable summaries.
+
+pods:
+  - id: orch
+    label: Orchestration
+    members:
+      - id: lead
+        agent_ref: "local:../../../agents/orchestration/orchestrator"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+    edges: []
+
+  - id: research
+    label: Research Pod
+    members:
+      - id: analyst
+        agent_ref: "local:../../../agents/research/analyst"
+        runtime: claude-code
+        profile: default
+        cwd: "."
+      - id: synthesizer
+        agent_ref: "local:../../../agents/research/synthesizer"
+        runtime: codex
+        profile: default
+        cwd: "."
+    edges: []
+
+edges:
+  - kind: delegates_to
+    from: orch.lead
+    to: research.analyst
+  - kind: delegates_to
+    from: orch.lead
+    to: research.synthesizer
