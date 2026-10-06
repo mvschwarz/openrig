@@ -120,17 +120,23 @@ question through the human channel instead.
    startup view or another mode holds the keys, leave it and tell them the
    command instead. Then open the team's terminals as a new space with
    `rig terminal open <team> --provider herdr` (or `--provider cmux`); it
-   creates its own workspace and leaves their terminal alone. A new workspace
-   isn't proof of a visible window, so ask whether they see it. Without herdr
-   or cmux, give them the attach commands from
+   creates its own workspace and leaves their terminal alone. If it opens,
+   tell them where to look. If it cannot open, relay the complete, filled-in
+   attach commands from the result's notes to run in new terminals on the
+   team's host. Copy them unchanged, including `env -u TMUX`, executable paths
+   and quoting; do not shorten them. If no commands were returned, get them from
    `rig ps --nodes --rig <team> --json --fields canonicalSessionName,tmuxAttachCommand`
-   to run in a new terminal.
+   and prepend `env -u TMUX` if absent. Explain that the dashboard is the
+   overview and the lead's pane is where the work happens. For either route,
+   ask whether they can see the team: a new workspace or your own capture is
+   not proof of what the person sees.
 9. **Hand the goal to the team's lead.** Once the lead's `startupStatus` is
    `ready`, give it the person's goal in their own words, with the folder, as
    a queue row (`rig queue create --destination <lead> --body-file <file>`) so
    it is durable and wakes the lead. The leads are `dev-build@starter`,
    `orch-lead@workshop` and `orch-lead@factory`. Tell the person the lead has
-   their goal and that they talk to it in its pane; it won't ask the opening
+   their goal, and identify its pane in the new space or repeat its exact
+   attach command from step 8 so they can talk to it. It won't ask the opening
    question again.
 
 Avoid these:
