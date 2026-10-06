@@ -76,6 +76,7 @@ async function run(): Promise<void> {
   const client = demo ? null : new DaemonClient({ baseUrl: argOf(args, "--url"), headers: startupHeaders });
   let startup: StartupController | null = null;
   let nativeAttached = false;
+  let launching = false;
   let controlSocketPath: string | undefined;
   let shuttingDown = false;
 
@@ -438,7 +439,7 @@ async function run(): Promise<void> {
         view.dispatch({ type: "launch-close" });
         void runSpecLaunch({ command, terminal: processCopyTerminal(),
           pauseInput: () => { process.stdin.pause(); }, resumeInput: () => { process.stdin.resume(); },
-          setSuspended: on => { nativeAttached = on; }, isShuttingDown: () => shuttingDown,
+          setSuspended: on => { nativeAttached = on; launching = on; }, isShuttingDown: () => shuttingDown,
           notice: message => view.dispatch({ type: "notice", message }), draw,
         }).catch(error => view.dispatch({ type: "notice", message: String(error) }));
       } catch (err) { view.dispatch({ type: "notice", message: (err as Error).message }); }
@@ -468,7 +469,9 @@ async function run(): Promise<void> {
     process.exit(0);
   }
   process.stdout.on("resize", draw);
-  process.on("SIGINT", () => void shutdown());
+  // In cooked mode Ctrl-C reaches both us and rig up. Let the child stop while
+  // keeping its result and the Enter-to-return prompt available in this TUI.
+  process.on("SIGINT", () => { if (!launching) void shutdown(); });
   process.on("SIGTERM", () => void shutdown());
 
   if (process.stdin.isTTY) process.stdin.setRawMode(true);

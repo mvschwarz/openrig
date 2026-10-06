@@ -925,6 +925,7 @@ function contentLines(state: ViewState, snap: FleetSnapshot, contentWidth: numbe
             ...lines, { text: `Launch · ${launch.source}` },
             { text: `Working folder: ${launch.folder || "not chosen"}` },
             { text: `Host: ${launch.host || "rig up's current selected host (unchanged)"}` },
+            { text: "Launch also sets OPENRIG_URL to this TUI's daemon." },
             { text: "Type: launch-folder /absolute/working/folder (spaces are literal)" },
             { text: "Optional: launch-host <host> or launch-host local" },
             { text: "Ask your operator agent to choose or adapt the team with you." },

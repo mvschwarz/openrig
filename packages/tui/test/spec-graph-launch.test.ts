@@ -59,6 +59,7 @@ describe("rig spec graph and Launch", () => {
     view.dispatch({ type: "layout", contentMaxOffset: frame.contentMaxOffset, contentTargetCount: frame.contentTargets.length });
     expect(frame.lines.join("\n")).toContain("/work/My Team");
     expect(frame.lines.join("\n")).toContain("Host: build-box");
+    expect(frame.lines.join("\n")).toContain("Launch also sets OPENRIG_URL to this TUI's daemon.");
     view.dispatch({ type: "content-select", index: frame.contentTargets.findIndex(t => t.action.type === "act") });
     expect(resolveKeyAction({ type: "key", key: "enter" }, view.get(), frame, frame.explorerRows.length)).toEqual({ type: "act", act: "launch-spec" });
     // Dispatch alone (including control-socket navigation) cannot execute an act.
