@@ -8,6 +8,13 @@ import { spawn, spawnSync } from "node:child_process";
 
 const script = path.join(import.meta.dirname, "install.sh");
 const source = fs.readFileSync(script, "utf8");
+const nodeAdvice = [
+  "Node.js 22 or 24 with npm",
+  "Distribution packages can be older; check node --version.",
+  "official Node installer",
+  "Linux route (NodeSource or nvm)",
+  "https://github.com/mvschwarz/openrig/blob/main/docs/reference/getting-started.md",
+];
 
 function fixture(t, overrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openrig-install-"));
@@ -63,7 +70,7 @@ test("dry run needs no tools and only prints the complete plan", t => {
   f.env.PATH = path.join(f.dir, "absent");
   const r = f.run("--dry-run");
   assert.equal(r.status, 0, r.stderr);
-  for (const text of ["[1/4]", "npm install -g @openrig/cli", "npm root -g", "scripts/check-abi.mjs", "even if npm skipped postinstall", "rig setup --dry-run", "[4/4] rig setup", "both Claude Code and Codex", "setup may start cmux while configuring its control", "launch a team or open a kernel conversation", "Dry run:"]) assert.ok(r.stdout.includes(text), text);
+  for (const text of ["[1/4]", "npm install -g @openrig/cli", "npm root -g", "scripts/check-abi.mjs", "even if npm skipped postinstall", "rig setup --dry-run", "[4/4] rig setup", "both Claude Code and Codex", "setup may start cmux while configuring its control", "launch a team or open a kernel conversation", "Dry run:", ...nodeAdvice]) assert.ok(r.stdout.includes(text), text);
   assert.deepEqual(f.calls(), []);
 });
 
@@ -73,6 +80,7 @@ for (const tool of ["node", "npm"]) test(`missing ${tool} reports the prerequisi
   const r = f.run();
   assert.equal(r.status, 127);
   assert.match(r.stderr, new RegExp(`Missing prerequisite: ${tool}`));
+  for (const text of nodeAdvice) assert.ok(r.stderr.includes(text), text);
   assert.match(r.stderr, /FAILED \[1\/4\].*exit 127/);
   assert.deepEqual(f.calls(), []);
 });
