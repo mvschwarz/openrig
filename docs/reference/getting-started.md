@@ -440,9 +440,11 @@ partial terminal view is not a healthy team. Repeated terminal-open calls can
 create another provider workspace; return to the one already open when you
 want to preserve it. This is terminal integration, not native plugin enrollment.
 
-The open result also distinguishes the dashboard overview from the team's lead
-conversation and asks whether you can see the team. If the provider cannot open,
-each labelled fallback command joins a different seat. Keep all returned commands
+For team views with interactive panes, the open result distinguishes the dashboard
+overview from the team's lead conversation and asks whether you can see the team.
+This reminder is omitted from the default kernel view and entirely read-only watch
+views. If the provider cannot open, each labelled fallback command joins a different
+seat. Keep all returned commands
 complete when sharing them; a created workspace alone does not confirm visibility.
 
 ## Continue real project work

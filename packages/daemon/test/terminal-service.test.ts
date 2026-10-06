@@ -159,13 +159,24 @@ describe("TerminalService — view resolution + one-shape result", () => {
     expect((await svc.openView({ view: "pod:acme-build/ghost" })).code).toBe("view_not_found"); // unknown pod
   });
 
-  it("opens mission:/slice: as a READ-ONLY derived view (cross-rig observational)", async () => {
+  it.each(["mission:4.6", "slice:02"])("opens %s as a watch view without a team-conversation handoff", async view => {
     const { deps, herdr } = makeDeps();
     const svc = new TerminalService(deps);
-    const res = await svc.openView({ view: "mission:4.6" });
+    const res = await svc.openView({ view });
     expect(res.ok).toBe(true);
     expect(herdr.lastView?.opened.every((p) => p.readOnly === true)).toBe(true);
     expect(herdr.lastView?.opened[0]?.paneCommand).toContain("attach -r -t");
+    expect(res.notes?.join("\n") ?? "").not.toMatch(/lead pane|Can you see the team/);
+  });
+
+  it("omits the team-conversation handoff when every saved pane is read-only", async () => {
+    const { deps, herdr } = makeDeps({
+      viewsStore: { list: () => [], get: () => ({ ...savedView, members: savedView.members.map(member => ({ ...member, readOnly: true })) }) },
+    });
+    const result = await new TerminalService(deps).openView({ view: "watchtower" });
+    expect(result.opened).toEqual(savedView.members.map(member => member.seat));
+    expect(herdr.lastView?.opened.every(pane => pane.readOnly)).toBe(true);
+    expect(result.notes?.join("\n") ?? "").not.toMatch(/lead pane|Can you see the team/);
   });
 
   it("opens a saved view with per-member read-only", async () => {
@@ -279,6 +290,20 @@ describe("default saved kernel conversations", () => {
       listRigNames: () => ["kernel"], listRigSeats: name => name === "kernel" ? rows : null,
     });
   }
+
+  it.each([false, true])("keeps the default kernel handoff distinct from a team (provider unavailable=%s)", async unavailable => {
+    const { deps, herdr } = makeKernel(kernel());
+    if (unavailable) herdr.openView = async view => ({
+      provider: "herdr", ok: false, opened: [], absent: view.absent, degraded: view.degraded,
+      pages: 0, code: "herdr_unavailable", error: "not running",
+    });
+    const result = await new TerminalService(deps).openView({ view: "saved:kernel" });
+    expect(result.ok).toBe(!unavailable);
+    expect(result.opened).toEqual(unavailable ? [] : ["tui-bound", "advisor-bound", "operator-bound"]);
+    expect(result.notes?.join("\n")).toContain("Default kernel view:");
+    expect(result.notes?.join("\n")).not.toMatch(/lead pane|Can you see the team/);
+    if (unavailable) expect(result.notes).toContain("operator.agent: env -u TMUX tmux attach -t 'operator-bound'");
+  });
 
   it.each(["herdr", "cmux"])("offers existing conversation attachments when %s is unavailable", async providerName => {
     const { deps, herdr, cmux } = makeKernel(kernel());
