@@ -18,8 +18,8 @@ const RIG_SPECS = [
   "rigs/launch/kernel/rig.yaml",
   "rigs/launch/kernel/rig-claude-only.yaml",
   "rigs/launch/kernel/rig-codex-only.yaml",
+  "rigs/launch/secrets-manager/rig.yaml",
   // Retained for the world migration, deliberately absent from the built-in shelf.
-  "rigs/launch/secrets-manager/world-bundle.yaml",
   "rigs/launch/factory-rsi/world-bundle.yaml",
 ];
 const PROOF_RIG_SPECS: string[] = [];
@@ -199,24 +199,29 @@ describe("Starter specs", () => {
 
     const rigs = lib.list({ kind: "rig" });
     expect(rigs.map((entry) => entry.name).sort()).toEqual([
-      "code-review", "factory", "kernel", "pm", "research", "starter",
+      "code-review", "factory", "kernel", "pm", "research", "secrets-manager", "starter",
     ]);
   });
 
-  it("retained world specs still expose services when explicitly loaded as user files", () => {
+  it("service-backed rigs expose hasServices, non-service rigs do not", () => {
     const lib = new SpecLibraryService({
-      roots: [{ path: join(SPECS_ROOT, "rigs/launch/secrets-manager"), sourceType: "user_file" }],
+      roots: [{ path: SPECS_ROOT, sourceType: "builtin" }],
       specReviewService,
     });
     lib.scan();
-    expect(lib.list({ kind: "rig" }).find((entry) => entry.name === "secrets-manager")?.hasServices).toBe(true);
-    const builtins = new SpecLibraryService({ roots: [{ path: SPECS_ROOT, sourceType: "builtin" }], specReviewService });
-    builtins.scan();
-    expect(builtins.list({ kind: "rig" }).find((entry) => entry.name === "starter")?.hasServices).toBeFalsy();
+
+    const rigs = lib.list({ kind: "rig" });
+    const secretsManager = rigs.find((entry) => entry.name === "secrets-manager");
+    const starter = rigs.find((entry) => entry.name === "starter");
+
+    expect(secretsManager).toBeDefined();
+    expect(secretsManager!.hasServices).toBe(true);
+    expect(starter).toBeDefined();
+    expect(starter!.hasServices).toBeFalsy();
   });
 
   it("secrets-manager rig uses canonical vault.specialist topology", () => {
-    const yaml = readFileSync(join(SPECS_ROOT, "rigs/launch/secrets-manager/world-bundle.yaml"), "utf-8");
+    const yaml = readFileSync(join(SPECS_ROOT, "rigs/launch/secrets-manager/rig.yaml"), "utf-8");
     const parsed = parseYaml(yaml) as Record<string, unknown>;
     const pods = parsed["pods"] as Array<Record<string, unknown>>;
     expect(pods).toHaveLength(1);

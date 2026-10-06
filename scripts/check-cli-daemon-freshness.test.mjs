@@ -70,7 +70,7 @@ test("vendored built-in teams match source and omit retired shelf entries when a
     "launch/starter/rig.yaml", "launch/factory/rig.yaml", "focused/code-review/rig.yaml",
     "focused/research/rig.yaml", "focused/pm/rig.yaml", "launch/kernel/rig.yaml",
     "launch/kernel/rig-claude-only.yaml", "launch/kernel/rig-codex-only.yaml",
-    "launch/factory-rsi/world-bundle.yaml", "launch/secrets-manager/world-bundle.yaml",
+    "launch/factory-rsi/world-bundle.yaml", "launch/secrets-manager/rig.yaml",
   ]) {
     const source = path.join(SRC_SPECS, "rigs", rel);
     const vendored = path.join(VEND_SPECS, "rigs", rel);
@@ -81,7 +81,7 @@ test("vendored built-in teams match source and omit retired shelf entries when a
     "launch/first-project", "launch/first-project-claude", "launch/first-project-mixed",
     "launch/conveyor", "launch/demo", "launch/implementation-pair", "preview/product-team",
     "focused/adversarial-review", "focused/research-team", "focused/pm-team",
-    "launch/factory-rsi", "launch/secrets-manager",
+    "launch/factory-rsi",
   ]) assert.equal(fs.existsSync(path.join(VEND_SPECS, "rigs", rel, "rig.yaml")), false, `Retired shelf entry still packaged: ${rel}`);
 });
 
