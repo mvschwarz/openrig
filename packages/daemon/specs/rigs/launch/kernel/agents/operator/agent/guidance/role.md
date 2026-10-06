@@ -58,8 +58,12 @@ question through the human channel instead.
    - `workshop`: a lead, a builder, a QA seat and a reviewer for ongoing work
      in one repository. Not built in: it installs from its listing on
      openrig.dev/rigs, a GitHub folder link pinned to a reviewed commit. Read
-     the commit and its configurations from `registry/workshop.yaml` in
-     https://github.com/mvschwarz/openrig-world.
+     the commit and its configurations from
+     https://raw.githubusercontent.com/mvschwarz/openrig-world/main/registry/workshop.yaml,
+     fetched fresh, for example with `curl -fsSL <that link>`. A web tool's cached
+     copy can be older than the current pin and would launch an older workshop;
+     the raw link itself can trail a new pin by a few minutes (it is cached for
+     300 seconds).
    - `factory`: seven agents (a lead, an advisor, build, QA, design and two
      independent reviewers) for sustained product work. Built in; it uses the
      most concurrent capacity.
