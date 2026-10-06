@@ -71,6 +71,11 @@ describe("Up CLI", () => {
 
       if (req.url === "/api/up" && req.method === "POST") {
         const parsed = JSON.parse(body);
+        if (String(parsed.sourceRef).includes("reinstall-cause")) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "failed", errors: ["Install target has different content at README.md"], warnings: ["Original files are kept at /fixture/backup"], stages: [] }));
+          return;
+        }
         if (parsed.plan) {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ status: "planned", runId: "run-1", stages: [{ stage: "resolve_spec", status: "ok" }], errors: [], warnings: [] }));
@@ -95,6 +100,14 @@ describe("Up CLI", () => {
     prog.addCommand(upCommand(runningDeps(port)));
     return prog;
   }
+
+  it("local bundle reinstall renders errors[] and file disposition instead of unknown error", async () => {
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "up", "reinstall-cause.rigbundle"]).then(() => {}));
+    expect(exitCode).toBe(2);
+    expect(logs.join("\n")).toContain("different content at README.md");
+    expect(logs.join("\n")).toContain("Original files are kept at /fixture/backup");
+    expect(logs.join("\n")).not.toContain("unknown error");
+  });
 
   it("renders structured remote up failures and attention hints as text", () => {
     const lines = formatRemoteUpFailure("build-host", {

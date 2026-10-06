@@ -1054,8 +1054,11 @@ describe("Bundle API routes", () => {
     });
     expect(createRes.status).toBe(201);
 
-    // Seed a running rig with the same name as the bundle's rig
-    setup.rigRepo.createRig("test-rig");
+    // A rig row alone is stopped; the import guard derives running from sessions.
+    const rig = setup.rigRepo.createRig("test-rig");
+    const node = setup.rigRepo.addNode(rig.id, "dev", { runtime: "claude-code" });
+    const session = setup.sessionRegistry.registerSession(node.id, "dev@test-rig");
+    setup.sessionRegistry.updateStatus(session.id, "running");
 
     const installRes = await app.request("/api/bundles/install", {
       method: "POST",

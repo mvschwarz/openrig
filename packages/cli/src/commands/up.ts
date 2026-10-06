@@ -131,7 +131,7 @@ Examples:
           if (opts.json) console.log(JSON.stringify(data));
           else {
             for (const line of bundleIdentityLines(data)) console.log(line);
-            console.log(`Status: ${installed.data.status ?? "unknown"}`);
+            console.log(`Status: ${installed.data.status ?? (installed.status >= 400 ? "not attempted" : "unknown")}`);
             for (const line of startupAttentionSummary(installed.data)) console.log(line);
             if (installed.data.rigId) console.log(`Rig: ${installed.data.rigId}`);
             for (const line of bundleRoutingSummary(installed.data)) console.log(line);
@@ -496,10 +496,10 @@ Examples:
           // nothing-created, alternatives) — render it verbatim, never the
           // generic unknown-error/validate-your-spec fallback. #141's
           // generation_unconfirmed refusal is self-describing the same way.
-          const teaching = String(res.data["error"] ?? ((res.data["errors"] as string[]) ?? [])[0] ?? "A rig with this name is already running.");
+          const teaching = bundleInstallError(res.data);
           console.error(teaching);
         } else {
-          const errorText = String(res.data["error"] ?? "unknown error");
+          const errorText = bundleInstallError(res.data);
           console.error(`Up failed: ${errorText} (HTTP ${res.status}). Check daemon logs or validate your spec with: rig spec validate <path>`);
           if (/agent_ref resolution failed|No agent\.yaml found/i.test(errorText)) {
             console.error("Hint: local: agent_ref paths resolve relative to the rig spec directory, not your shell cwd.");

@@ -7,6 +7,7 @@ import { parseLegacyBundleManifest as parseBundleManifest, validateLegacyBundleM
 import { resolvePackage } from "./package-resolve-helper.js";
 import { isPathInsideRoot } from "./cwd-resolution.js";
 import type { ResolvedPackage, FsOps } from "./package-resolver.js";
+import { getDefaultOpenRigPath } from "../openrig-compat.js";
 
 /** Result of resolving a bundle for bootstrap consumption */
 export interface BundleResolvedSource {
@@ -204,11 +205,14 @@ export class PodBundleSourceResolver {
  * Refuses — writing nothing — when any bundle file would land on a path in the
  * target that holds different content (or a directory). Identical files are
  * left as they are, so re-installing the same bundle into the same target works.
+ * For an explicitly requested stopped-team replacement, preserve conflicting
+ * paths in the instance before writing the offered bundle. Other files stay put.
  */
 export function materializePodBundle(
   extractedDir: string,
   targetRoot: string,
-): { ok: true } | { ok: false; conflicts: string[] } {
+  preserveConflicts = false,
+): { ok: true; backupPath?: string } | { ok: false; conflicts: string[] } {
   const files: string[] = [];
   (function walk(dir: string, prefix: string) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -221,27 +225,64 @@ export function materializePodBundle(
   const conflicts = new Set<string>();
   for (const rel of files) {
     const dest = nodePath.join(targetRoot, rel);
-    const stat = fs.statSync(dest, { throwIfNoEntry: false });
-    if (!stat) {
-      // A missing file is fine unless the nearest existing parent is not a directory.
-      let parent = nodePath.dirname(dest);
-      while (parent.length > targetRoot.length && !fs.existsSync(parent)) parent = nodePath.dirname(parent);
-      if (parent.length > targetRoot.length && !fs.statSync(parent).isDirectory()) {
-        conflicts.add(nodePath.relative(targetRoot, parent));
-      }
+    if (!preserveConflicts) {
+      // Keep the existing first-install handling of identical linked files.
+      const stat = fs.statSync(dest, { throwIfNoEntry: false });
+      if (stat && (!stat.isFile() || !fs.readFileSync(dest).equals(fs.readFileSync(nodePath.join(extractedDir, rel))))) conflicts.add(rel);
       continue;
     }
+    let blockedParent = false;
+    const parts = rel.split(nodePath.sep);
+    for (let i = 1; i < parts.length; i++) {
+      const parentRel = nodePath.join(...parts.slice(0, i));
+      const parent = fs.lstatSync(nodePath.join(targetRoot, parentRel), { throwIfNoEntry: false });
+      if (!parent) break;
+      if (!parent.isDirectory()) {
+        conflicts.add(parentRel);
+        blockedParent = true;
+        break;
+      }
+    }
+    if (blockedParent) continue;
+    const stat = fs.lstatSync(dest, { throwIfNoEntry: false });
+    if (!stat) continue;
     if (!stat.isFile() || !fs.readFileSync(dest).equals(fs.readFileSync(nodePath.join(extractedDir, rel)))) {
       conflicts.add(rel);
     }
   }
-  if (conflicts.size > 0) return { ok: false, conflicts: [...conflicts] };
+  if (conflicts.size > 0 && !preserveConflicts) return { ok: false, conflicts: [...conflicts] };
 
-  for (const rel of files) {
-    const dest = nodePath.join(targetRoot, rel);
-    if (fs.existsSync(dest)) continue;
-    fs.mkdirSync(nodePath.dirname(dest), { recursive: true });
-    fs.copyFileSync(nodePath.join(extractedDir, rel), dest);
+  let backupPath: string | undefined;
+  let roots: string[] = [];
+  if (conflicts.size > 0) {
+    roots = [...conflicts].filter(rel => ![...conflicts].some(parent => rel.startsWith(parent + nodePath.sep)));
+    const backupRoot = getDefaultOpenRigPath("bundle-backups");
+    fs.mkdirSync(backupRoot, { recursive: true });
+    backupPath = fs.mkdtempSync(nodePath.join(backupRoot, "reinstall-"));
+    // A parent conflict owns all its descendants. Preserve the path itself,
+    // including a symlink. Copy all originals before removing any; the instance
+    // and target may be on different filesystems.
+    fs.writeFileSync(nodePath.join(backupPath, "RESTORE.json"), JSON.stringify({ targetRoot, paths: roots }, null, 2));
+    for (const rel of roots) {
+      const dest = nodePath.join(backupPath, "files", rel);
+      fs.mkdirSync(nodePath.dirname(dest), { recursive: true });
+      try { fs.cpSync(nodePath.join(targetRoot, rel), dest, { recursive: true, dereference: false, verbatimSymlinks: true, preserveTimestamps: true, errorOnExist: true, force: false }); }
+      catch (error) {
+        throw new Error(`Could not preserve target path ${rel}: ${(error as Error).message}. Originals were kept; partial backup is at ${backupPath}.`);
+      }
+    }
   }
-  return { ok: true };
+
+  try {
+    for (const rel of roots) fs.rmSync(nodePath.join(targetRoot, rel), { recursive: true });
+    for (const rel of files) {
+      const dest = nodePath.join(targetRoot, rel);
+      if (fs.existsSync(dest)) continue;
+      fs.mkdirSync(nodePath.dirname(dest), { recursive: true });
+      fs.copyFileSync(nodePath.join(extractedDir, rel), dest);
+    }
+  } catch (error) {
+    throw new Error(`Bundle files may have been written to ${targetRoot}: ${(error as Error).message}.${backupPath ? ` Original files are preserved at ${backupPath}; see RESTORE.json.` : ""}`);
+  }
+  return { ok: true, ...(backupPath ? { backupPath } : {}) };
 }

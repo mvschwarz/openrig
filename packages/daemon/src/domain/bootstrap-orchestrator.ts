@@ -26,6 +26,7 @@ import { getOpenRigInstallCwdError, resolveLaunchCwd } from "./cwd-resolution.js
 import { runSyncSite } from "./sync-site-wrap.js";
 import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
 import { routeBundleContents, routingFailureWarnings, thrownMessage, type BundleContentRouting } from "./bundle-content-routing.js";
+import { bundleInstallContext, bundleInstallContextLines, type BundleInstallContext } from "./bundle-install-context.js";
 
 /** Bootstrap mode */
 export type BootstrapMode = "plan" | "apply";
@@ -64,6 +65,7 @@ export interface BootstrapResult {
   actionKeys?: string[];
   /** What a pod-aware bundle's pre-launch routing did, when it ran */
   bundleRouting?: BundleContentRouting;
+  bundleInstall?: BundleInstallContext;
 }
 
 import type { PodRigInstantiator } from "./rigspec-instantiator.js";
@@ -177,6 +179,20 @@ export class BootstrapOrchestrator {
           stages.push({ stage: "resolve_spec", status: "ok", detail: { specName: podSource.manifest.name, source: "pod_bundle" } });
 
           try {
+            const parsedSpec = parsePodBundleManifest(rawYaml) as Record<string, unknown>;
+            const context = bundleInstallContext(this.deps.db, typeof parsedSpec?.name === "string" ? parsedSpec.name : "", {
+              name: podSource.manifest.name, version: podSource.manifest.version, source: sourceRef,
+            });
+            if (context.existing.length > 0) {
+              const lines = bundleInstallContextLines(context);
+              if (mode === "apply" && context.existing.some(rig => rig.state === "running")) {
+                const message = [...lines, "No bundle files were written and no team was created or launched."].join("\n");
+                stages.push({ stage: "import_rig", status: "failed", detail: { code: "rig_name_running", message } });
+                this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
+                return { runId: run.id, status: "failed", stages, errors: [message], warnings, bundleInstall: context };
+              }
+              warnings.push(...lines);
+            }
             // Reject service-backed bundles — services require a stable source directory
             try {
               const parsed = parsePodBundleManifest(rawYaml) as Record<string, unknown>;
@@ -194,7 +210,7 @@ export class BootstrapOrchestrator {
             // otherwise `cwd: "."`, the spec dir and agent refs point at a deleted dir.
             if (opts.mode === "apply" && opts.targetRoot) {
               const targetRoot = nodePath.resolve(opts.targetRoot);
-              const materialized = materializePodBundle(podSource.tempDir, targetRoot);
+              const materialized = materializePodBundle(podSource.tempDir, targetRoot, context.existing.length > 0);
               if (!materialized.ok) {
                 const shown = materialized.conflicts.slice(0, 10).join(", ");
                 const more = materialized.conflicts.length > 10 ? ` (and ${materialized.conflicts.length - 10} more)` : "";
@@ -204,10 +220,12 @@ export class BootstrapOrchestrator {
                 this.deps.bootstrapRepo.updateRunStatus(run.id, "failed");
                 return { runId: run.id, status: "failed" as BootstrapStatus, stages, errors, warnings };
               }
+              if (materialized.backupPath) warnings.push(`Existing target files were preserved at ${materialized.backupPath} before installing the replacement. Unrelated target files were kept.`);
               specDir = nodePath.dirname(nodePath.join(targetRoot, podSource.manifest.rigSpec));
+              warnings.push(`Bundle files are installed in ${targetRoot}; a later launch failure does not remove them.`);
             }
 
-            return await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings);
+            return { ...await this.handlePodAwareSpec(opts, run, rawYaml, specDir, stages, errors, warnings), bundleInstall: context };
           } finally {
             if (podBundleTempDir) this.deps.podBundleSourceResolver.cleanup(podBundleTempDir);
           }

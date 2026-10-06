@@ -113,6 +113,15 @@ describe("Bundle CLI", () => {
       } else if (req.url === "/api/bundles/install" && req.method === "POST") {
         const parsed = JSON.parse(body);
         capturedInstallBodies.push(parsed);
+        if (String(parsed.bundlePath ?? "").includes("reinstall")) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Bundle install conflict check failed", status: "not_attempted",
+            detail: "Installed team workshop (rig-old): running; offered version 99.0.0.",
+            conflicts: [{ description: "workshop already has a running team" }],
+            resolutions: ["Use the existing team: rig ps --rig workshop --nodes", "Stop with rig down workshop, then retry; the stopped generation is archived", "Cancel this install"],
+          }));
+          return;
+        }
         if (String(parsed.bundlePath ?? "").includes("blocked")) {
           res.writeHead(409, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "blocked" }));
@@ -169,6 +178,16 @@ describe("Bundle CLI", () => {
     prog.addCommand(bundleCommand(runningDeps(port)));
     return prog;
   }
+
+  it("reinstall renders daemon facts and all actionable choices, retaining the error exit", async () => {
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync(["node", "rig", "bundle", "install", "reinstall.rigbundle", "--target", "/tmp/project"]).then(() => {}));
+    const text = logs.join("\n");
+    expect(exitCode).toBe(2);
+    expect(text).toContain("running; offered version 99.0.0");
+    expect(text).toContain("rig ps --rig workshop --nodes");
+    expect(text).toContain("rig down workshop");
+    expect(text).toContain("Cancel this install");
+  });
 
   // T11: create produces output
   it("bundle create prints confirmation", async () => {

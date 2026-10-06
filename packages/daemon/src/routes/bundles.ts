@@ -21,6 +21,7 @@ import { RigSpecSchema } from "../domain/rigspec-schema.js";
 import { parseLegacyBundleManifest as parseBundleManifest, normalizeLegacyBundleManifest as normalizeBundleManifest, serializePodBundleManifest, parsePodBundleManifest, validatePodBundleManifest, validateLegacyBundleManifest, normalizeProvenanceBlock, normalizeBundleSource, normalizeCompatibilityBlock, isRelativeSafePath } from "../domain/bundle-types.js";
 import type { PodBundleManifest, BundleProvenance, BundleCompatibility, BundlePluginReference } from "../domain/bundle-types.js";
 import { detectBundleConflicts, type BundleConflict } from "../domain/bundle-conflict-detector.js";
+import { bundleInstallContext, bundleInstallContextLines } from "../domain/bundle-install-context.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import { BundleAuditReader, BundleAuditWriter, type BundleAuditFsOps, type BundleAuditRecord } from "../domain/bundle-audit.js";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
@@ -1183,7 +1184,12 @@ bundleRoutes.post("/install", async (c) => {
   // The check fails CLOSED on extraction failure (handled above) and
   // fail-OPEN on missing rig name in the bundle (no rig name to compare).
   if (!force && installMeta && rigRepo) {
-    const runningRigs = rigRepo.listRigs().map((r) => ({ rigId: r.id, name: r.name }));
+    const context = bundleInstallContext(rigRepo.db, installMeta.rigName ?? "", {
+      name: String(installMeta.bundleManifest.name ?? installMeta.rigName ?? ""),
+      version: typeof installMeta.bundleManifest.version === "string" ? installMeta.bundleManifest.version : null,
+      source: bundlePath,
+    });
+    const runningRigs = context.existing.filter(rig => rig.state === "running");
     const report = detectBundleConflicts({
       bundleRigName: installMeta.rigName ?? "",
       runningRigs,
@@ -1191,11 +1197,11 @@ bundleRoutes.post("/install", async (c) => {
     if (report.hasConflicts) {
       return c.json({
         error: "Bundle install conflict check failed",
+        status: "not_attempted",
+        detail: bundleInstallContextLines(context).slice(0, context.existing.length + 1).join("\n"),
+        bundleInstall: context,
         conflicts: report.conflicts,
-        resolutions: [
-          "stop the conflicting running rig and re-attempt install",
-          "use --force to bypass for an operator-explicit override (NOT recommended for routine use; conflicts may produce partial install state)",
-        ],
+        resolutions: context.resolutions,
       }, 400);
     }
   }
