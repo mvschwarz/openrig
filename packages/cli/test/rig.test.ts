@@ -168,7 +168,6 @@ describe("rig spec", () => {
 
   it.each([
     'version: "1"\nname: broken\nnodes: [null]\n',
-    'version: "0.2"\nname: broken\npods: [null]\n',
     'version: "1"\nname: broken\nnodes: []\nedges: [null]\n',
   ])("reports validator exceptions as internal failure, not invalid YAML: %s", async (yaml) => {
     for (const json of [false, true]) {
@@ -182,6 +181,23 @@ describe("rig spec", () => {
       const message = "Internal validator error; validation did not complete.";
       if (json) expect(JSON.parse(logs.join("\n"))).toEqual({ error: message });
       else expect(logs.join("\n")).toBe(message);
+      expect(clientFactory).not.toHaveBeenCalled();
+      for (const operation of Object.values(lifecycleDeps)) expect(operation).not.toHaveBeenCalled();
+    }
+  });
+
+  it("reports a null topology pod as structured invalid YAML, without contacting a daemon", async () => {
+    const yaml = 'version: "0.2"\nname: broken\npods: [null]\n';
+    for (const json of [false, true]) {
+      const lifecycleDeps = mockLifecycleDeps();
+      const clientFactory = vi.fn(() => { throw new Error("must stay local"); });
+      const program = new Command().addCommand(rigCommand({ lifecycleDeps, clientFactory, readFile: () => yaml }));
+      const { logs, exitCode } = await captureLogs(() => program.parseAsync([
+        "node", "rig", "spec", "validate", "rig.yaml", ...(json ? ["--json"] : []),
+      ]));
+      expect(exitCode).toBe(1);
+      if (json) expect(JSON.parse(logs.join("\n"))).toMatchObject({ valid: false, errors: ["pods[0]: must be an object"] });
+      else expect(logs.join("\n")).toBe("Rig spec invalid: pods[0]: must be an object");
       expect(clientFactory).not.toHaveBeenCalled();
       for (const operation of Object.values(lifecycleDeps)) expect(operation).not.toHaveBeenCalled();
     }
