@@ -1,7 +1,7 @@
 // Workflows in Spec Library + Activation Lens v0 — active lens store tests.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ActiveLensStore } from "../src/domain/active-lens-store.js";
@@ -58,6 +58,18 @@ describe("ActiveLensStore (Workflows in Spec Library v0)", () => {
   it("clear is a no-op when no file exists", () => {
     const store = new ActiveLensStore({ filePath });
     expect(() => store.clear()).not.toThrow();
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("reports a permission-denied clear without claiming the selected lens disappeared", () => {
+    const store = new ActiveLensStore({ filePath });
+    const lens = store.set("selected", "1");
+    chmodSync(tmp, 0o500);
+    try {
+      expect(() => store.clear()).toThrow();
+      expect(store.get()).toEqual(lens);
+    } finally {
+      chmodSync(tmp, 0o700);
+    }
   });
 
   it("returns null for malformed JSON", () => {

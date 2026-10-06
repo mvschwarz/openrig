@@ -93,7 +93,8 @@ export class ActiveLensStore {
   clear(): void {
     try {
       fs.unlinkSync(this.filePath);
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       // Already absent — no-op.
     }
   }
