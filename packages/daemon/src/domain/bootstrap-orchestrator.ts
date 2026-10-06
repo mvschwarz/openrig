@@ -728,7 +728,12 @@ export class BootstrapOrchestrator {
           return serviceResult.ok ? bundleHook() : serviceResult;
         }
       : serviceHook ?? bundleHook;
-    const nonInterruptive = opts.nonInterruptive ?? (new SettingsStore().resolveOne("launch.non_interruptive").value === true);
+    let declaredNonInterruptive: boolean | undefined;
+    try {
+      const raw = RigSpecCodec.parse(rigSpecYaml) as Record<string, unknown> | null;
+      if (typeof raw?.["non_interruptive"] === "boolean") declaredNonInterruptive = raw["non_interruptive"];
+    } catch { /* The instantiator returns the existing structured validation failure. */ }
+    const nonInterruptive = opts.nonInterruptive ?? declaredNonInterruptive ?? (new SettingsStore().resolveOne("launch.non_interruptive").value === true);
     const outcome = await podInstantiator.instantiate(rigSpecYaml, rigRoot, { nonInterruptive, cwdOverride: opts.cwdOverride, prelaunchHook });
     if ((outcome.ok || "rigId" in outcome) && (nonInterruptive || opts.nonInterruptive === false)) warnings.push(nonInterruptiveSummary(nonInterruptive));
     const withRouting = (r: BootstrapResult): BootstrapResult => (bundleRouting ? { ...r, bundleRouting } : r);
