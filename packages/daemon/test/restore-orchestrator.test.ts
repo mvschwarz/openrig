@@ -434,9 +434,13 @@ describe("RestoreOrchestrator", () => {
       undefined,
       node.id,
       "high",
+      false, // unchanged non-interruptive setting
+      false, // this is not the kernel
+      true, // derived team launch default
     );
 
-    // Codex forwards effort
+    // Codex forwards effort; the named profile remains authoritative.
+    db.prepare("UPDATE nodes SET codex_config_profile = 'profile1' WHERE id = ?").run(node.id);
     (orch as any).claudeResume.canResume = vi.fn(() => false);
     await (orch as any).attemptResume(
       node.id,
