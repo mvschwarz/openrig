@@ -13,6 +13,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
+import { Worker } from "node:worker_threads";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -231,6 +232,54 @@ describe("PL-slice-story-view-v0 slices routes", () => {
   });
 
   describe("GET /api/slices/:name/proof-asset/* (named proof assets)", () => {
+    it("keeps range bytes and metadata on one file during atomic replacement", async () => {
+      writeSlice(slicesRoot, "changing", { "README.md": "---\n---\n" });
+      const proofDir = path.join(dogfoodRoot, "changing-20261005");
+      fs.mkdirSync(proofDir, { recursive: true });
+      const file = path.join(proofDir, "changing.bin");
+      const payload = (size: number) => Buffer.from(`${size}\n${"A".repeat(size - String(size).length - 1)}`);
+      fs.writeFileSync(file, payload(4096));
+      const control = new Int32Array(new SharedArrayBuffer(4));
+      const writer = new Worker(`
+        const { workerData, parentPort } = require("node:worker_threads");
+        const fs = require("node:fs");
+        const control = new Int32Array(workerData.control);
+        const payload = size => Buffer.from(size + "\\n" + "A".repeat(size - String(size).length - 1));
+        const sizes = [payload(4096), payload(64)];
+        parentPort.postMessage("ready");
+        let count = 0;
+        while (Atomics.load(control, 0) === 0) {
+          fs.writeFileSync(workerData.file + ".tmp", sizes[count++ % 2]);
+          fs.renameSync(workerData.file + ".tmp", workerData.file);
+        }
+      `, { eval: true, workerData: { file, control: control.buffer } });
+      const exited = new Promise<void>((resolve, reject) => {
+        writer.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`Writer exited ${code}`)));
+        writer.once("error", reject);
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          writer.once("message", () => resolve());
+          writer.once("error", reject);
+        });
+        for (let i = 0; i < 2000; i++) {
+          const response = await app.request("/api/slices/changing/proof-asset/changing.bin", {
+            headers: { Range: "bytes=0-4095" },
+          });
+          const bytes = Buffer.from(await response.arrayBuffer());
+          const encodedSize = Number(bytes.subarray(0, 8).toString().split("\n")[0]);
+          expect(response.status).toBe(206);
+          expect(bytes.length).toBe(encodedSize);
+          expect(response.headers.get("content-length")).toBe(String(bytes.length));
+          expect(response.headers.get("content-range")).toBe(`bytes 0-${bytes.length - 1}/${bytes.length}`);
+          expect(bytes.includes(0)).toBe(false);
+        }
+      } finally {
+        Atomics.store(control, 0, 1);
+        await exited;
+      }
+    });
+
     it("serves a screenshot file with image/png Content-Type", async () => {
       writeSlice(slicesRoot, "proof-slice", { "README.md": "---\n---\n" });
       const dir = path.join(dogfoodRoot, "proof-slice-20260504");

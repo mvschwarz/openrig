@@ -231,29 +231,34 @@ function inferContentType(absPath: string): string {
 }
 
 function fileAssetResponse(absPath: string, contentType: string, rangeHeader?: string): Response {
-  const size = fs.statSync(absPath).size;
   const cacheControl = "public, max-age=86400";
 
   if (rangeHeader) {
-    const m = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
-    const start = m && m[1] !== "" ? Number(m[1]) : m && m[2] !== "" ? Math.max(0, size - Number(m[2])) : NaN;
-    const end = m && m[1] !== "" && m[2] !== "" ? Number(m[2]) : size - 1;
-    if (!m || Number.isNaN(start) || start < 0 || start >= size || end < start) {
-      return new Response(null, {
-        status: 416,
-        headers: {
-          "Content-Range": `bytes */${size}`,
-          "Accept-Ranges": "bytes",
-        },
-      });
-    }
-
-    const boundedEnd = Math.min(end, size - 1);
-    const length = boundedEnd - start + 1;
     const fd = fs.openSync(absPath, "r");
     try {
+      const size = fs.fstatSync(fd).size;
+      const m = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+      const start = m && m[1] !== "" ? Number(m[1]) : m && m[2] !== "" ? Math.max(0, size - Number(m[2])) : NaN;
+      const end = m && m[1] !== "" && m[2] !== "" ? Number(m[2]) : size - 1;
+      if (!m || Number.isNaN(start) || start < 0 || start >= size || end < start) {
+        return new Response(null, {
+          status: 416,
+          headers: {
+            "Content-Range": `bytes */${size}`,
+            "Accept-Ranges": "bytes",
+          },
+        });
+      }
+
+      const boundedEnd = Math.min(end, size - 1);
+      const length = boundedEnd - start + 1;
       const buf = Buffer.alloc(length);
-      fs.readSync(fd, buf, 0, length, start);
+      let bytesRead = 0;
+      while (bytesRead < length) {
+        const count = fs.readSync(fd, buf, bytesRead, length - bytesRead, start + bytesRead);
+        if (count === 0) throw new Error("Asset changed before the requested range could be read");
+        bytesRead += count;
+      }
       return new Response(new Uint8Array(buf), {
         status: 206,
         headers: {
@@ -274,7 +279,7 @@ function fileAssetResponse(absPath: string, contentType: string, rangeHeader?: s
     status: 200,
     headers: {
       "Content-Type": contentType,
-      "Content-Length": String(size),
+      "Content-Length": String(data.byteLength),
       "Accept-Ranges": "bytes",
       "Cache-Control": cacheControl,
     },

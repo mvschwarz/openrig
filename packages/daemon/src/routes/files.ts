@@ -146,7 +146,6 @@ export function filesRoutes(): Hono {
     if (!rootName || !relativePath) return c.json({ error: "root_and_path_required" }, 400);
     try {
       const resolved = resolveAllowedFile(deps.allowlist, rootName, relativePath);
-      const size = fs.statSync(resolved).size;
       let contentType = inferContentType(resolved);
       // OPR.0.4.4.20 FR-11: .html renders as text/html ONLY under the explicit
       // ?render=1 opt-in (text/plain stays the default for every other read).
@@ -161,21 +160,29 @@ export function filesRoutes(): Hono {
       // is the documented iOS failure mode). Single-range form only.
       const rangeHeader = c.req.header("Range");
       if (rangeHeader) {
-        const m = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
-        const start = m && m[1] !== "" ? Number(m[1]) : m && m[2] !== "" ? Math.max(0, size - Number(m[2])) : NaN;
-        const end = m && m[1] !== "" && m[2] !== "" ? Number(m[2]) : size - 1;
-        if (!m || Number.isNaN(start) || start < 0 || start >= size || end < start) {
-          return new Response(null, {
-            status: 416,
-            headers: { "Content-Range": `bytes */${size}`, "Accept-Ranges": "bytes" },
-          });
-        }
-        const boundedEnd = Math.min(end, size - 1);
-        const length = boundedEnd - start + 1;
         const fd = fs.openSync(resolved, "r");
         try {
+          // Atomic saves can replace the pathname between resolution and open.
+          // Bind range metadata and bytes to the same opened file.
+          const size = fs.fstatSync(fd).size;
+          const m = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+          const start = m && m[1] !== "" ? Number(m[1]) : m && m[2] !== "" ? Math.max(0, size - Number(m[2])) : NaN;
+          const end = m && m[1] !== "" && m[2] !== "" ? Number(m[2]) : size - 1;
+          if (!m || Number.isNaN(start) || start < 0 || start >= size || end < start) {
+            return new Response(null, {
+              status: 416,
+              headers: { "Content-Range": `bytes */${size}`, "Accept-Ranges": "bytes" },
+            });
+          }
+          const boundedEnd = Math.min(end, size - 1);
+          const length = boundedEnd - start + 1;
           const buf = Buffer.alloc(length);
-          fs.readSync(fd, buf, 0, length, start);
+          let bytesRead = 0;
+          while (bytesRead < length) {
+            const count = fs.readSync(fd, buf, bytesRead, length - bytesRead, start + bytesRead);
+            if (count === 0) throw new Error("Asset changed before the requested range could be read");
+            bytesRead += count;
+          }
           return new Response(new Uint8Array(buf), {
             status: 206,
             headers: {

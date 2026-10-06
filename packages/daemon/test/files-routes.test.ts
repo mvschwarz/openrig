@@ -12,6 +12,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
+import { Worker } from "node:worker_threads";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -137,6 +138,65 @@ describe("UI Enhancement Pack v0 — /api/files routes", () => {
   });
 
   describe("GET /asset", () => {
+    it("keeps range bytes and metadata on one file during atomic replacement", async () => {
+      const file = join(tempDir, "workspace", "changing.bin");
+      const payload = (size: number) => Buffer.from(`${size}\n${"A".repeat(size - String(size).length - 1)}`);
+      writeFileSync(file, payload(4096));
+      const control = new Int32Array(new SharedArrayBuffer(4));
+      const writer = new Worker(`
+        const { workerData, parentPort } = require("node:worker_threads");
+        const fs = require("node:fs");
+        const control = new Int32Array(workerData.control);
+        const payload = size => Buffer.from(size + "\\n" + "A".repeat(size - String(size).length - 1));
+        const sizes = [payload(4096), payload(64)];
+        parentPort.postMessage("ready");
+        let count = 0;
+        while (Atomics.load(control, 0) === 0) {
+          fs.writeFileSync(workerData.file + ".tmp", sizes[count++ % 2]);
+          fs.renameSync(workerData.file + ".tmp", workerData.file);
+        }
+      `, { eval: true, workerData: { file, control: control.buffer } });
+      const exited = new Promise<void>((resolve, reject) => {
+        writer.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`Writer exited ${code}`)));
+        writer.once("error", reject);
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          writer.once("message", () => resolve());
+          writer.once("error", reject);
+        });
+        for (let i = 0; i < 2000; i++) {
+          const response = await app.request("/api/files/asset?root=workspace&path=changing.bin", {
+            headers: { Range: "bytes=0-4095" },
+          });
+          const bytes = Buffer.from(await response.arrayBuffer());
+          const encodedSize = Number(bytes.subarray(0, 8).toString().split("\n")[0]);
+          expect(response.status).toBe(206);
+          expect(bytes.length).toBe(encodedSize);
+          expect(response.headers.get("content-length")).toBe(String(bytes.length));
+          expect(response.headers.get("content-range")).toBe(`bytes 0-${bytes.length - 1}/${bytes.length}`);
+          expect(bytes.includes(0)).toBe(false);
+        }
+      } finally {
+        Atomics.store(control, 0, 1);
+        await exited;
+      }
+    });
+
+    it.each([
+      ["bytes=0-3", 206, "bytes 0-3/8", 4],
+      ["bytes=-3", 206, "bytes 5-7/8", 3],
+      ["bytes=4-", 206, "bytes 4-7/8", 4],
+      ["bytes=8-", 416, "bytes */8", 0],
+      ["bytes=3-2", 416, "bytes */8", 0],
+      ["not-a-range", 416, "bytes */8", 0],
+    ])("retains ordinary range behavior for %s", async (range, status, contentRange, length) => {
+      const response = await app.request("/api/files/asset?root=workspace&path=image.png", { headers: { Range: String(range) } });
+      expect(response.status).toBe(status);
+      expect(response.headers.get("content-range")).toBe(contentRange);
+      expect((await response.arrayBuffer()).byteLength).toBe(length);
+    });
+
     it("serves a .png file with image/png Content-Type", async () => {
       const res = await app.request("/api/files/asset?root=workspace&path=image.png");
       expect(res.status).toBe(200);
