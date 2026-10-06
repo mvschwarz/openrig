@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { CodexRuntimeAdapter, type CodexAdapterFsOps } from "../src/adapters/codex-runtime-adapter.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
+import { assessNativeResumeProbe } from "../src/domain/native-resume-probe.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 
 const MENU = [
@@ -106,6 +107,38 @@ it.each(paths)("current update header sends one key through real tmux serializat
   expect(f.counts()).toEqual({ updates: 0, dismissals: 1 });
   expect(f.leaked).toEqual([]);
   expect(result.ok).toBe(true);
+});
+
+describe.each(paths)("copied current update text: $name", ({ opts }) => {
+  it.each([
+    ["header", "  Update available · 0.160.0 → 0.160.1"],
+    ["menu", CURRENT_MENU.trimEnd()],
+  ])("preserves the later live composer after a copied %s", async (_label, copied) => {
+    const screen = `The documentation shows this:\n${copied}\n› Continue\n  5h 71% left · GPT-6-Astra high · Context 81% left`;
+    const f = fixture({ screen });
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent: screen }))
+      .toMatchObject({ status: "resumed", code: "active_runtime" });
+    await f.adapter.launchHarness(binding, opts);
+    expect(f.commands).toEqual([]);
+  });
+
+  it("keeps a genuine menu with a custom footer and no later composer gated", async () => {
+    const menu = `${CURRENT_MENU.trimEnd()}\n  5h 71% left · GPT-6-Astra high · Context 81% left`;
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex", paneContent: menu }))
+      .toMatchObject({ status: "inconclusive", code: "update_gate" });
+    const f = fixture({ menu });
+    await f.adapter.launchHarness(binding, opts);
+    expect(f.commands).toEqual(["tmux send-keys -t 'checker@test' '3'"]);
+    expect(f.counts()).toEqual({ updates: 0, dismissals: 1 });
+  });
+
+  it.each([
+    "› Continue", "» Continue",
+  ])("does not choose from copied menu text before the later marker: %s", async (marker) => {
+    const f = fixture({ screen: `${CURRENT_MENU.trimEnd()}\n${marker}` });
+    await f.adapter.launchHarness(binding, opts);
+    expect(f.commands).toEqual([]);
+  });
 });
 
 describe.each(paths)("Codex update input: $name", ({ opts }) => {

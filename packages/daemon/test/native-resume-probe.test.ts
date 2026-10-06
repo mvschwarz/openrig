@@ -490,6 +490,18 @@ describe("native resume probe", () => {
     });
   });
 
+  it("keeps a current update menu after an earlier composer gated", () => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex",
+      paneContent: `› Earlier conversation prompt\n${currentUpdatePrompt}`,
+    })).toMatchObject({ status: "inconclusive", code: "update_gate" });
+  });
+
+  it.each(["›", "»"])("ignores a copied current menu before a later %s composer and custom footer", (prompt) => {
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "codex",
+      paneContent: `${currentUpdatePrompt.trimEnd()}\n${prompt} Continue\n  5h 71% left · GPT-6-Astra high · Context 81% left`,
+    })).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
   it.each([
     ["legacy", "✨ Update available! 0.117.0 -> 0.118.0\nPress enter to continue"],
     ["current", currentUpdatePrompt],

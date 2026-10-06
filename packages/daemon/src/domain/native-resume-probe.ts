@@ -338,19 +338,26 @@ function looksLikeClaudeMcpApprovalPrompt(paneContent: string): boolean {
 
 /** Header formats observed before and since Codex 0.160.0. */
 export function hasCodexUpdateHeader(paneContent: string): boolean {
-  return paneContent.includes("Update available!")
-    || /(?:^|\n)[ \t]*Update available · \S+ → \S+[ \t]*(?:\n|$)/.test(paneContent);
+  // Preserve legacy-header behavior. A current-format header may instead be
+  // quoted output above a later live composer. A footer alone does not end it.
+  if (paneContent.includes("Update available!")) return true;
+  const header = [...paneContent.matchAll(/^[ \t]*Update available · \S+ → \S+[ \t]*$/gm)].at(-1);
+  return !!header && !hasCodexComposer(paneContent.slice(header.index! + header[0].length));
+}
+
+function hasCodexComposer(paneContent: string): boolean {
+  return paneContent.split("\n").some((line) => {
+    const text = line.trimStart();
+    const hasPrompt = text.startsWith("›") || text.startsWith("»");
+    return hasPrompt && !/^\d+\.\s/.test(text.slice(1).trimStart());
+  });
 }
 
 function looksLikeCodexTui(paneContent: string): boolean {
   const current = paneContent.slice(Math.max(0, paneContent.lastIndexOf("OpenAI Codex (v")));
   if (/model:\s*loading\b/i.test(current)) return false;
   const recentLines = current.trimEnd().split("\n").slice(-20).join("\n");
-  const hasPromptLine = recentLines.split("\n").some((line) => {
-    const text = line.trimStart();
-    const hasPrompt = text.startsWith("›") || text.startsWith("»");
-    return hasPrompt && !/^\d+\.\s/.test(text.slice(1).trimStart());
-  });
+  const hasPromptLine = hasCodexComposer(recentLines);
   const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
   // Custom status lines can put the model's display name in any field. Keep
   // corroboration structural: an indented status row and a whole model field,
