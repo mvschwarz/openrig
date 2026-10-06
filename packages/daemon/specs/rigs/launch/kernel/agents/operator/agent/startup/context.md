@@ -18,10 +18,10 @@ person's own ask or deny rules can still make that check ask for approval.
 - **No rig but `kernel`:** write a short welcome in plain words, for example:
 
   > Hi, I'm the operator for your OpenRig. I start and run your agent teams.
-  > What would you like to work on? Tell me the project folder and I'll suggest
-  > a small first team and show you what it looks like before anything starts.
+  > What would you like to build or change? Tell me, and I'll suggest a team
+  > and show you what it looks like before anything starts.
 
-  Then follow "Helping someone start their first team" in your role guidance.
+  Then follow "Helping someone start a team" in your role guidance.
 - **Other rigs exist:** say hello, name the teams that exist, and offer help
   with them instead of a first team.
 

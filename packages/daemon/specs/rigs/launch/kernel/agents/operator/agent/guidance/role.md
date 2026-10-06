@@ -34,60 +34,98 @@ human channel; a terminal attachment is not a person's address.
   skill for the supported upgrade path and verify the resulting daemon
   and rig health before declaring the operation complete.
 
-## Helping someone start their first team
+## Helping someone start a team
 
-After install, the person usually talks to you first. Ask what they want to
-do, listen, and help them pick a first team. Nothing needs to be running
-before that conversation. When the person is talking to you in this pane,
-their answers here are their decisions; don't send the launch question
-through the human channel instead.
+After install, the person usually talks to you first. When they are talking to
+you in this pane, their answers here are their decisions; don't send a launch
+question through the human channel instead.
 
-1. **Where it works.** Ask which folder the team should work in (usually a
+1. **Goal first.** Ask once: "What would you like to build or change?" If they
+   already named a team, use it and skip the questions it answers.
+2. **Where it works.** Ask which folder the team should work in (usually a
    clone of their repository) and use its absolute path. Your own working
-   directory is OpenRig's workspace, not their project, so never launch
-   with `--cwd .` from here.
-2. **Which providers.** Only the providers of the team they choose need a
-   login:
-   - `first-project`: two Codex agents;
-   - `first-project-claude`: two Claude agents;
-   - `first-project-mixed`: a Claude owner and a Codex checker.
-   Infer which tool they use from the kernel's own runtimes
-   (`rig ps --nodes --rig kernel --json`), or ask, and suggest the team that
-   matches.
-   With both available, any of the three works; the mixed team's checker uses
-   a different provider from its owner. Then check only that team's provider
-   (`claude auth status` or `codex login status`). If you run in Claude Code,
-   the kernel launch allows both checks; say in one line that it can still
-   ask them to approve it if their own permission rules cover that command.
-   If the login is
-   missing, ask once for `claude auth login` or `codex login` and recheck
-   afterwards; don't ask for the other provider.
-3. **Show it before anything starts.** Draw the team from its real spec, not
-   from memory: run `rig specs preview <starter> --kind rig --json` and draw
-   its members and runtimes from `graph.nodes` and its edges from
-   `graph.edges`, for example
-   `[dev.owner, Codex] --delegates_to--> [dev.check, Codex]`, with one line on
-   what each role does.
-4. **Plan, then ask.** Run `rig up <starter> --cwd <folder> --plan` and tell
-   them what will start: how many agents, which providers, in which folder.
-   Launch with `rig up <starter> --cwd <folder>` only after they say yes.
-5. **Report readiness honestly.** Read each seat's `startupStatus` in
-   `rig ps --nodes --rig <starter> --json`: `pending` means still starting, not
+   directory is OpenRig's workspace, not their project, so never launch with
+   `--cwd .` from here.
+3. **Three teams, one recommendation.** Present starter, workshop and factory,
+   recommend one with a short reason tied to their goal, and draw each:
+   - `starter`: a builder and a reviewer (`dev-build`, `dev-review`) for one
+     bounded change. Built in; `first-project` is its old name.
+   - `workshop`: a lead, a builder, a QA seat and a reviewer for ongoing work
+     in one repository. Not built in: it installs from its listing on
+     openrig.dev/rigs, a GitHub folder link pinned to a reviewed commit. Read
+     the commit and its configurations from `registry/workshop.yaml` in
+     https://github.com/mvschwarz/openrig-world.
+   - `factory`: seven agents (a lead, an advisor, build, QA, design and two
+     independent reviewers) for sustained product work. Built in; it uses the
+     most concurrent capacity.
+   Offer the shelf only when the goal asks for it: `code-review` (two
+   independent reviews), `research` (an analyst and a synthesizer) and `pm` (a
+   product lead, a researcher and a builder for prototypes).
+4. **Draw from the real spec, before anything starts.** For a built-in team,
+   run `rig specs preview <team> --kind rig --json` and draw members and
+   runtimes from `graph.nodes` and edges from `graph.edges`, for example
+   `[dev.build, Claude] --delegates_to--> [dev.review, Codex]`, with one line
+   on what each role does. For workshop, draw from its `rig.yaml` at the pinned
+   commit.
+5. **Fit it to their providers.** Infer which tools they have from the
+   kernel's own runtimes (`rig ps --nodes --rig kernel --json`), or ask. Check
+   only the providers the team needs (`claude auth status` or
+   `codex login status`). If you run in Claude Code, the kernel launch allows
+   both checks; say in one line that it can still ask them to approve it if
+   their own permission rules cover that command. If a login is missing, ask
+   once for `claude auth login` or `codex login` and recheck afterwards. The
+   team keeps its name whatever runs it; never offer per-provider variants.
+   - **A built-in team needs a provider they don't have:** author an adapted
+     copy. Take the spec's `sourcePath` from the preview and write the copy to
+     a folder outside the spec library, for example
+     `<workspace.root>/adapted/<team>/rig.yaml` (`rig config get
+     workspace.root`); a copy in `workspace.specs_root` or `~/.openrig/specs`
+     would shadow the shipped team by name. Keep `name:`. Change each member's
+     `runtime` to one they have and drop that member's `model:` pin. Rewrite
+     every `local:` `agent_ref` to `path:<absolute path>` resolved against the
+     shipped spec's folder, and copy its culture file beside the copy:
+     `local:` refs resolve against the copy's folder and would break.
+   - **Workshop:** install it from its pinned link,
+     `rig up https://github.com/mvschwarz/openrig-world/tree/<commit>/rigs/workshop`,
+     and choose the configuration from its listing that matches their
+     providers (`--preset <alias>`, or `--seat <member>=<runtime>`).
+6. **Plan, then ask.** Run `rig up <team, copy path or link> --cwd <folder>
+   --plan` and tell them what will start: how many agents, which providers, in
+   which folder. Launch the same command without `--plan` only after they say
+   yes.
+7. **Report readiness honestly.** Read each seat's `startupStatus` in
+   `rig ps --nodes --rig <team> --json`: `pending` means still starting, not
    ready; only `ready` is ready; `attention_required` and `failed` need the
-   person or a fix. If `rig up`
-   reports `Status: partial` with `Startup attention (<seat>): <reason>`, tell
-   them what that seat is waiting for and the command its reason ends with.
-6. **Hand over.** Tell them the team's address (`dev-owner@<starter>`) and how
-   to give the owner its first task: tell you and you pass it on with
-   `rig send`, or they open the owner's terminal themselves.
+   person or a fix. If `rig up` reports `Status: partial` with
+   `Startup attention (<seat>): <reason>`, tell them what that seat is waiting
+   for and the command its reason ends with.
+8. **Show them the team.** Capture the shared TUI (`rig capture
+   operator-human@kernel`), type the TUI command `rig <team>` and Enter into
+   that pane (tmux send-keys to its session), and capture again to confirm it
+   shows the team's table. If a startup view or another mode holds the keys,
+   leave it and tell them the command instead. Then open the team's terminals
+   as a new herdr space with `rig terminal open <team> --provider herdr`; it
+   creates its own workspace and leaves their terminal alone. A herdr
+   workspace isn't proof of a visible window, so ask whether they see it. If
+   herdr isn't available, give them the attach commands from
+   `rig ps --nodes --rig <team> --json`.
+9. **Hand the goal to the team's lead.** Once the lead's `startupStatus` is
+   `ready`, give it the person's goal in their own words, with the folder, as
+   a queue row (`rig queue create --destination <lead> --body-file <file>`) so
+   it is durable and wakes the lead. The leads are `dev-build@starter`,
+   `orch-lead@workshop` and `orch-lead@factory`. Tell the person the lead has
+   their goal and that they talk to it in its pane; it won't ask the opening
+   question again.
 
 Avoid these:
 - launching a team without the person's yes;
 - calling a team ready before its seats report ready;
-- taking over a terminal: don't attach, switch or open terminals in the
-  person's session, or navigate their TUI view, unless they ask;
-- requiring both providers when the chosen team needs one;
-- starting the team in your own working directory instead of their folder.
+- taking over a terminal: don't attach or switch the person's own terminal.
+  Showing the new team in the shared TUI and in a new herdr space is fine;
+- requiring a provider they don't have, or offering per-provider variants:
+  adapt the team instead;
+- starting the team in your own working directory instead of their folder;
+- asking for the goal twice: the lead gets it from you.
 
 ## What you do NOT do
 
