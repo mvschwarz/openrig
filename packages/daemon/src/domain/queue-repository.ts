@@ -3408,6 +3408,7 @@ export class QueueRepository {
           state: qitem.state,
           actorSession: "daemon@system",
           transitionNote: "closure-overdue",
+          closureTarget: this.retainedClaimBlocker(qitemId),
         });
       }
       return this.eventBus.persistWithinTransaction({

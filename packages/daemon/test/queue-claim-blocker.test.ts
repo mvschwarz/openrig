@@ -144,6 +144,25 @@ describe.each(["current", "without generation stamps"])("claim park exit (%s sch
       .toMatchObject({ transitionNote: "claimed", closureReason: null });
   });
 
+  it.each([false, true])("preserves only an unchanged claim gate through an overdue audit (cleared: %s)", async (cleared) => {
+    const row = await repo.create({ sourceSession: "orch@rig", destinationSession: "worker@rig", body: "owned overdue work", tier: "fast", nudge: false });
+    repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "external:old-gate" });
+    await claim(row.qitemId);
+    if (cleared) repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "in-progress", transitionNote: "gate no longer needed" });
+    expect(repo.recordClosureOverdue(row.qitemId, { now: "9999-01-01T00:00:00.000Z" })).not.toBeNull();
+    expect(repo.listTransitions(row.qitemId).at(-1)).toMatchObject({
+      state: "in-progress", actorSession: "daemon@system", transitionNote: "closure-overdue",
+      closureTarget: cleared ? null : "external:old-gate", closureReason: null,
+    });
+    expect(repo.recordClosureOverdue(row.qitemId, { now: "9999-01-01T00:00:00.000Z" })).toBeNull();
+    const response = await app.request(`/api/queue/${row.qitemId}/update`, {
+      method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "worker@rig" },
+      body: JSON.stringify({ state: "blocked" }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ blockedOn: cleared ? null : "external:old-gate" });
+  });
+
   it("rolls back the complete park exit if recording the claim fails", async () => {
     const row = await create();
     repo.update({ qitemId: row.qitemId, actorSession: "worker@rig", state: "blocked", blockedOn: "external:owned-window", wakeAfterSeconds: 90 });
