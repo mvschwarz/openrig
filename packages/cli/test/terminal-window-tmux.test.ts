@@ -70,7 +70,7 @@ it.each([
   await new Promise(resolve => setTimeout(resolve, 150));
   expect(tmux(viewer, ["list-panes", "-s", "-t", `=openrig-view-${id}`, "-F", "#{pane_dead}"]).trim().split("\n")).toEqual(Array(19).fill("0"));
   for (const page of [1, 2]) {
-    expect(tmux(viewer, ["show-options", "-wv", "-t", `openrig-view-${id}:view-${page}`, "window-size"]).trim()).toBe("latest");
+    expect(tmux(viewer, ["show-options", "-Awv", "-t", `openrig-view-${id}:view-${page}`, "window-size"]).trim()).toBe("latest");
   }
 }, 40_000);
 
