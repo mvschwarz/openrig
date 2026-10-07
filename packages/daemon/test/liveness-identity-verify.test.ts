@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from "vitest";
 import type Database from "better-sqlite3";
+import { ulid } from "ulid";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { getNodeInventory, getNodeDetail, deriveNodeLifecycleState } from "../src/domain/node-inventory.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
@@ -240,6 +241,22 @@ describe("getNodeInventory verdict applicability gate (rev1-r2 B1 — no stale f
       store.upsert(verdict("mismatch"));
       expect(getNodeInventory(db, "rig-1")[0].identityVerdict).toBeNull();
       store.upsert({ ...verdict("pane_missing", "session_missing"), observedAt: "2026-07-02T12:00:00.001Z" });
+      expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("attention_required");
+    } finally { db.close(); }
+  });
+
+  it("same-pane registration keeps millisecond precision within one SQLite second", () => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      const createdAt = Date.parse("2026-07-02T12:00:00.200Z");
+      db.prepare("UPDATE sessions SET id = ?, created_at = '2026-07-02 12:00:00' WHERE id = 'sess1'").run(ulid(createdAt));
+      const store = new SeatIdentityStore(db);
+      for (const offset of [-1, 0]) {
+        store.upsert({ ...verdict("mismatch"), observedAt: new Date(createdAt + offset).toISOString() });
+        expect(getNodeInventory(db, "rig-1")[0].identityVerdict).toBeNull();
+      }
+      store.upsert({ ...verdict("mismatch"), observedAt: new Date(createdAt + 1).toISOString() });
       expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("attention_required");
     } finally { db.close(); }
   });

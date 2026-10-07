@@ -1,5 +1,6 @@
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
 import type Database from "better-sqlite3";
+import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
 import { identityVerdictDownranksRunning } from "./types.js";
@@ -45,6 +46,7 @@ interface InventoryRow {
   previous_occupant: string | null;
   handover_at: string | null;
   // Newest session fields (may be null if no session)
+  session_id: string | null;
   session_name: string | null;
   session_created_at: string | null;
   session_status: string | null;
@@ -459,7 +461,7 @@ function mapProjectionEntries(entries: unknown[]): Array<{ id: string; category:
  */
 function applicableVerdict(
   verdict: SeatIdentityVerdict | null,
-  row: Pick<InventoryRow, "session_name" | "session_created_at" | "binding_tmux_pane" | "handover_at">,
+  row: Pick<InventoryRow, "session_id" | "session_name" | "session_created_at" | "binding_tmux_pane" | "handover_at">,
 ): SeatIdentityVerdict | null {
   if (!verdict) return null;
   if (verdict.sessionName !== row.session_name) return null;
@@ -470,6 +472,10 @@ function applicableVerdict(
   const utcTime = (value: string) => Date.parse(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(value)
     ? `${value.replace(" ", "T")}Z` : value);
   if (row.session_created_at && !(observedAt >= utcTime(row.session_created_at))) return null;
+  // Registry session IDs are ULIDs; retain their millisecond precision when
+  // two registrations share SQLite's one-second created_at timestamp.
+  if (row.session_id && /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/i.test(row.session_id)
+    && observedAt <= decodeTime(row.session_id)) return null;
   // Equal-millisecond observations cannot establish which occupant was read.
   if (row.handover_at && !(observedAt > utcTime(row.handover_at))) return null;
   return verdict;
@@ -549,6 +555,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       n.handover_result,
       n.previous_occupant,
       n.handover_at,
+      s.id as session_id,
       s.session_name,
       s.created_at as session_created_at,
       s.status as session_status,
