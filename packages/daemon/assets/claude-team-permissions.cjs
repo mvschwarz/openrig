@@ -99,7 +99,7 @@ function substitutions(text) {
 
 // Decode literal shell words without executing anything. Keep command boundaries
 // for lifecycle asks, but never allow an entire compound/expanding command.
-function words(command) {
+function words(command, comments = true) {
   const commands = [];
   let tokens = [], word = "", started = false, literal = true, quote = "", simple = true, rawWord = "";
   const flush = () => {
@@ -122,7 +122,7 @@ function words(command) {
       else { word += c; if (c === "$" || c === "`") { literal = false; simple = false; } }
     } else if (c === "'" || c === '"') {
       quote = c; started = true;
-    } else if (c === "#" && !started) {
+    } else if (comments && c === "#" && !started) {
       while (i + 1 < command.length && command[i + 1] !== "\n") i++;
     } else if (";&|\n()<>".includes(c)) {
       boundary(); simple = false;
@@ -217,7 +217,10 @@ function decide(command, policy, depth = 0) {
   const parsed = words(main.trim());
   const asks = prefixes(policy.ask);
   const askExecutables = new Set(asks.map(prefix => prefix[0]));
-  for (const command of parsed.commands) {
+  // Retain comment text for asks too: a # inside backticks or ${...} must not
+  // hide a later command. Keep the comment-aware scan as well, so quotes in a
+  // real comment cannot swallow the following line. Allow parsing is unchanged.
+  for (const command of [...parsed.commands, ...words(main.trim(), false).commands]) {
     // ponytail: ask conservatively at every word position rather than owning a
     // second shell grammar for wrappers/control flow. Unquoted prose may ask;
     // quoted messages remain single words, and literal heredoc bodies are gone.

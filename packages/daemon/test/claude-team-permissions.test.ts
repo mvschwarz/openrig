@@ -29,7 +29,7 @@ describe("Claude team command permissions", () => {
     });
   }
   it.each([
-    "rig whoami --json", "rig queue claim example", "rig queue unclaim example",
+    "rig whoami --json", "rig status # note", "rig queue claim example", "rig queue unclaim example",
     "rig queue handoff example --to worker@team", "rig help down",
     "/opt/tools/rig status", "'/opt/my tools/rig' queue list", '"/opt/my tools/rig" down --help',
     "r\\ig down -h", "env OPENRIG_PORT=7434 /opt/tools/rig status", "A=value rig status",
@@ -57,6 +57,8 @@ describe("Claude team command permissions", () => {
     "echo $((1 <<value))\nrig down example\nvalue", "((1 <<value))\nrig down example\nvalue",
     "echo $((\n1 <<value))\nrig down example\nvalue",
     "PATH=/inert rig down example", "NODE_OPTIONS=--no-warnings rig down example", "./rig down example",
+    "ls `pwd # x`; rig down example", "ls `pwd # x` && rig down example",
+    "ls ${x:-a #b}; rig down example", "echo safe # $(rig down example)",
   ])("retains lifecycle confirmation: %s", command => expect(decide(command, policy)).toBe("ask"));
 
   it.each([
@@ -68,7 +70,7 @@ describe("Claude team command permissions", () => {
     "'/opt/tools/rig down' example", "'A=value' rig status", "not-rig down example", "", "'unterminated",
     "PATH=/inert rig status", "LD_PRELOAD=/inert rig status", "DYLD_INSERT_LIBRARIES=/inert rig status",
     "env NODE_OPTIONS=--no-warnings rig status", "BASH_ENV=/inert rig status", "ENV=/inert rig status", "./rig status",
-    "echo safe # $(rig down example)", "cat <<'EOF' # <<OTHER\nrig down example\nEOF\nOTHER",
+    "cat <<'EOF' # <<OTHER\nrig down example\nEOF\nOTHER",
   ])("leaves unrelated/data/complex forms to native checks: %s", command => expect(decide(command, policy)).toBeUndefined());
 
   it("falls back to native lifecycle asks when the launch asset is absent", () => {

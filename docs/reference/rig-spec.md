@@ -242,9 +242,11 @@ substitutions, redirects, heredocs, shell functions or other unrecognized syntax
 Lifecycle prefixes are checked at every word position, including after wrappers,
 control-flow words and CLI argument separators. A `--` separator before or after
 the subcommand ends option parsing, so a later `--help` is an operand and still
-asks. Unquoted prose containing a
-lifecycle command may also ask. Quoted messages and quoted heredoc bodies remain
-data. Comments and arithmetic shifts cannot hide later lifecycle commands. These are command
+asks. Ask detection also scans with comment text retained, so a `#` inside a
+substitution does not hide a later lifecycle command. Unquoted prose or comments
+containing a lifecycle command may also ask; ordinary trailing comments do not
+change allowance matching. Quoted messages and quoted heredoc bodies remain data.
+Arithmetic shifts are not treated as heredoc operators. These are command
 allowances, not containment: a project's test command can execute code. The
 hook and allowances are passed with `--settings` at launch, including resume
 and fork; nothing is written to personal or project permission files.
