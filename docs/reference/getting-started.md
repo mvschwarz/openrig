@@ -58,10 +58,11 @@ With their yes, run the same command without `--dry-run`:
 `curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh`. It installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
-Codex and may install a missing one, as described below. A failed step prints `FAILED [n/4] <command> (exit <code>)`.
-Where a provider isn't signed in yet, step 4 ends that way after everything is installed: `rig setup` lists each
-provider's sign-in under "Some steps need attention". Only the provider the person chose needs one. Sign in to it as
-below, then continue at [Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
+Codex and may install a missing one, as described below. A failed step prints
+`FAILED [n/4] <command or check> (exit <code>)`. Where a provider isn't signed in yet, step 4 ends that way and
+`rig setup` lists each sign-in under "Some steps need attention". If the only remaining failures are provider
+sign-ins, the install steps finished: sign in to each selected provider as below, then continue at
+[Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
 by step instead:
 
 ### Choose your providers
