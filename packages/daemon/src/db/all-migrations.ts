@@ -99,6 +99,7 @@ import { usageSamplesLatestIndexesSchema } from "./migrations/094_usage_samples_
 import type { Migration } from "./migrate.js";
 
 import { rigNonInterruptiveSchema } from "./migrations/095_rig_non_interruptive.js";
+import { rigInstallRootSchema } from "./migrations/096_rig_install_root.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -197,4 +198,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeEffortSchema,
   usageSamplesLatestIndexesSchema,
   rigNonInterruptiveSchema,
+  rigInstallRootSchema,
 ];

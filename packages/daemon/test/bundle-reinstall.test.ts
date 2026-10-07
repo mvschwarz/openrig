@@ -27,11 +27,11 @@ describe("bundle reinstall through both public routes", () => {
   });
   afterEach(() => { vi.restoreAllMocks(); db.close(); vi.unstubAllEnvs(); fs.rmSync(root, { recursive: true, force: true }); });
 
-  async function bundle(name: string, version = "1.0.0", profile = "none") {
+  async function bundle(name: string, version = "1.0.0", profile = "none", memberCount = 1) {
     const stage = fs.mkdtempSync(path.join(root, "stage-"));
     fs.writeFileSync(path.join(stage, "rig.yaml"), stringify({
       version: "0.2", name,
-      pods: [{ id: "crew", label: "Crew", members: [{ id: "a", agent_ref: "builtin:terminal", profile, runtime: "terminal", cwd: "." }], edges: [] }], edges: [],
+      pods: [{ id: "crew", label: "Crew", members: Array.from({ length: memberCount }, (_, i) => ({ id: i === 0 ? "a" : "b", agent_ref: "builtin:terminal", profile, runtime: "terminal", cwd: "." })), edges: [] }], edges: [],
     }));
     fs.writeFileSync(path.join(stage, "README.md"), "offered team documentation\n");
     const integrity = computeIntegrity(stage, {
@@ -65,6 +65,84 @@ describe("bundle reinstall through both public routes", () => {
     return { status: response.status, body: await response.json(), target };
   }
 
+  function stop(rigId: string) {
+    db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = ?)").run(rigId);
+  }
+
+  it.each([
+    ["/api/bundles/install", "copied"], ["/api/up", "copied"],
+    ["/api/bundles/install", "minimal"], ["/api/up", "minimal"],
+  ])("install-root: %s refuses a %s same-name manifest in another folder", async (route, kind) => {
+    const target = path.join(root, "installed"), project = path.join(root, "project");
+    fs.mkdirSync(project);
+    const archive = await bundle("workshop");
+    const first = await install(route, archive, target, false, project);
+    expect(first.status).toBe(201);
+    stop(first.body.rigId);
+    fs.writeFileSync(path.join(project, "README.md"), "my project");
+    const manifest = kind === "copied" ? fs.readFileSync(path.join(target, "bundle.yaml"), "utf8") : "schema_version: 2\nname: workshop\n";
+    fs.writeFileSync(path.join(project, "bundle.yaml"), manifest);
+    const result = await install(route, archive, project, false, project);
+    expect(result.status).toBe(400);
+    expect(result.body.errors.join("\n")).toContain("Nothing was written");
+    expect(fs.readFileSync(path.join(project, "README.md"), "utf8")).toBe("my project");
+    expect(fs.readFileSync(path.join(project, "bundle.yaml"), "utf8")).toBe(manifest);
+    expect(fs.readdirSync(project).sort()).toEqual(["README.md", "bundle.yaml"]);
+    expect(fs.existsSync(path.join(root, "home", "bundle-backups"))).toBe(false);
+    expect(setup.rigRepo.findUnarchivedRigsByName("workshop").map(rig => rig.id)).toEqual([first.body.rigId]);
+  });
+
+  it.each(["/api/bundles/install", "/api/up"])("install-root: %s keeps canonical aliases usable and records each generation", async route => {
+    const target = path.join(root, "installed"), alias = path.join(root, "alias"), project = path.join(root, "project");
+    fs.mkdirSync(target); fs.mkdirSync(project); fs.symlinkSync(target, alias, "dir");
+    const first = await install(route, await bundle("workshop"), alias, false, project);
+    expect(first.status).toBe(201);
+    expect(setup.rigRepo.getRigInstallRoot(first.body.rigId)).toBe(fs.realpathSync(target));
+    stop(first.body.rigId);
+    fs.writeFileSync(path.join(target, "README.md"), "installed edits");
+    const second = await install(route, await bundle("workshop", "2.0.0"), target, false, project);
+    expect(second.status).toBe(201);
+    expect(second.body.rigId).not.toBe(first.body.rigId);
+    expect(setup.rigRepo.getRigInstallRoot(second.body.rigId)).toBe(fs.realpathSync(target));
+    expect(setup.rigRepo.getRigInstallRoot(first.body.rigId)).toBe(fs.realpathSync(target));
+    expect(second.body.warnings.join("\n")).toContain("bundle-backups");
+    stop(second.body.rigId);
+    const third = await install(route, await bundle("workshop", "3.0.0"), alias, false, project);
+    expect(third.status).toBe(201);
+    expect(setup.rigRepo.getRigInstallRoot(third.body.rigId)).toBe(fs.realpathSync(target));
+  });
+
+  it("install-root: a legacy sibling cannot authorize a different target for a recorded generation", async () => {
+    const target = path.join(root, "installed"), other = path.join(root, "other");
+    const first = await install("/api/up", await bundle("workshop"), target);
+    expect(first.status).toBe(201); stop(first.body.rigId);
+    const legacy = seed("workshop", false);
+    installedTarget("workshop", other);
+    fs.writeFileSync(path.join(other, "README.md"), "other folder");
+    const result = await install("/api/up", await bundle("workshop", "2.0.0"), other);
+    expect(result.status).toBe(400);
+    expect(fs.readFileSync(path.join(other, "README.md"), "utf8")).toBe("other folder");
+    expect(setup.rigRepo.findUnarchivedRigsByName("workshop").map(rig => rig.id).sort()).toEqual([first.body.rigId, legacy.id].sort());
+  });
+
+  it("install-root: an empty new target is still installable and gets its own binding", async () => {
+    const first = await install("/api/up", await bundle("workshop"));
+    expect(first.status).toBe(201); stop(first.body.rigId);
+    const target = path.join(root, "new-folder");
+    const next = await install("/api/up", await bundle("workshop", "2.0.0"), target);
+    expect(next.status).toBe(201);
+    expect(setup.rigRepo.getRigInstallRoot(next.body.rigId)).toBe(fs.realpathSync(target));
+  });
+
+  it("install-root: a failed seat launch retains the generation's materialization folder", async () => {
+    vi.mocked(setup.tmuxAdapter.createSession).mockResolvedValueOnce({ ok: true }).mockResolvedValue({ ok: false, error: "fixture launch failed" });
+    const target = path.join(root, "partial");
+    const result = await install("/api/up", await bundle("workshop", "1.0.0", "none", 2), target);
+    expect(result.body.status).toBe("partial");
+    expect(result.body.rigId).toBeDefined();
+    expect(setup.rigRepo.getRigInstallRoot(result.body.rigId)).toBe(fs.realpathSync(target));
+  });
+
   it.each([
     ["GitHub install endpoint, running workshop", "/api/bundles/install", "workshop", "1.0.0"],
     ["local changed manifest version, running workshop", "/api/up", "workshop", "99.0.0"],
@@ -94,6 +172,8 @@ describe("bundle reinstall through both public routes", () => {
     const result = await install(route, await bundle(name, "99.0.0"), target);
     expect(result.status).toBe(201);
     expect(result.body.bundleInstall.existing[0].state).toBe("stopped");
+    expect(setup.rigRepo.getRigInstallRoot(previous.id)).toBeNull();
+    expect(setup.rigRepo.getRigInstallRoot(result.body.rigId)).toBe(fs.realpathSync(target));
     expect(result.body.warnings.join("\n")).toContain(`rig unarchive ${previous.id}`);
     expect(setup.rigRepo.findUnarchivedRigsByName(name).map(rig => rig.id)).not.toContain(previous.id);
     expect(setup.rigRepo.findRigsByName(name).map(rig => rig.id)).toContain(previous.id);
