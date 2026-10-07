@@ -87,9 +87,9 @@ mentions of the app (`app_mention`), and to emoji reactions (`reaction_added`). 
 direct-message or private-channel access.
 
 A reaction added to an ask reaches the agent that asked, as a note naming who reacted and with
-which emoji; the agent decides what it means. The ask's message and the parts OpenRig posted for
-it in the thread all count, so a long ask's reply parts work too. A reaction on any other message,
-including a person's reply in the thread, is ignored. An app created from an older manifest has neither the `reactions:read` scope nor the
+which emoji; the agent decides what it means. Every message OpenRig posted for the ask counts:
+its first message, a long ask's numbered parts, and an ask posted as a reply in a thread. A
+reaction on any other message, including a person's reply in the thread, is ignored. An app created from an older manifest has neither the `reactions:read` scope nor the
 `reaction_added` event: add both under **OAuth & Permissions** and **Event Subscriptions**, then
 reinstall the app to the workspace.
 

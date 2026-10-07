@@ -48,9 +48,10 @@ export interface SubsystemSlackDeliveryOpts {
   onPostedRoot?: (payload: OutboundPostPayload, ts: string) => void;
   /** Receipt hook for every successful post, root or threaded. */
   onPosted?: (payload: OutboundPostPayload, messageTs: string, threadTs?: string) => void;
-  /** #899 — receipt hook for each reply part posted for a multipart ask: the part's own ts and
-   *  its ask's root, so a reaction on the part can reach the asking seat. A throw retains the ask
-   *  like any receipt failure; the replay reconciles the part by marker and records it again. */
+  /** #899 — receipt hook for every message posted (or reconciled) into a thread: a long ask's reply
+   *  parts, a later notification in an ask's own thread, an ask posted into another thread. The payload
+   *  names the ask and its seat, so a reaction on that message can reach them. A throw retains the
+   *  delivery like any receipt failure; the replay reconciles the message by marker and records it again. */
   onPostedPart?: (payload: OutboundPostPayload, messageTs: string, threadTs: string) => void;
   /** OPR.0.5.6.14 — the transport-failure receipt hook: a failed post writes
    *  the row's transport-failed ledger transition (class + API error), so a
@@ -244,6 +245,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
           // replay (the marker stays findable; no repost can occur).
           try {
             if (threadTs === undefined) opts.onPostedRoot?.(q, matched.ts);
+            else opts.onPostedPart?.(q, matched.ts, threadTs);
             opts.onPosted?.(q, matched.ts, threadTs);
           } catch (e) {
             log(`receipt write FAILED on reconcile for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained for the next replay`);
@@ -352,6 +354,7 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
     // IS in the channel — and retries the idempotent receipt without reposting.
     try {
       if (threadTs === undefined) opts.onPostedRoot?.(q, res.ts);
+      else opts.onPostedPart?.(q, res.ts, threadTs);
       opts.onPosted?.(q, res.ts, threadTs);
     } catch (e) {
       log(`receipt write FAILED after successful post for ${q.qitemId ?? decision.decisionId}: ${(e as Error).message} — retained; replay reconciles by marker and retries the idempotent receipt`);
@@ -606,11 +609,7 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
         resolveThreadTs: index === 0 ? opts.resolveThreadTs : () => primary!.threadTs ?? primary!.messageTs,
         onPostedRoot: index === 0 ? opts.onPostedRoot : undefined,
         onPosted: (_part, messageTs, threadTs) => {
-          if (index !== 0) {
-            // A reply reconciled without a Slack ts can't be mapped; it stays routable only from its root.
-            if (messageTs !== "reconciled") opts.onPostedPart?.(q, messageTs, threadTs ?? primary!.threadTs ?? primary!.messageTs);
-            return;
-          }
+          if (index !== 0) return;
           if (messageTs === "reconciled") throw new Error("Primary reconciliation has no Slack timestamp; multipart delivery remains incomplete.");
           primary = { messageTs, threadTs };
           opts.attempted.mark(rootPrefix + Buffer.from(JSON.stringify(primary)).toString("base64url"), "primary-receipt");

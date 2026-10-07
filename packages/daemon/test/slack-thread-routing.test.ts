@@ -87,35 +87,42 @@ describe("thread↔seat map — exact-lookup semantics", () => {
     expect(map.resolveByThread("T2")!.seat).toBe("s2-live"); // untouched
   });
 
-  it("maps a long ask's reply parts to its root by channel, and rebuilds them from their stamps (#899)", () => {
+  it("maps a message posted into a thread to its own ask by channel, and rebuilds it from its stamp (#899)", () => {
     const map = new ThreadSeatMap(mapDb(), clock);
     map.open({ threadTs: "T1", channel: "C1", human: "h1", seat: "s1", conversationId: "q1" });
-    map.recordPart({ messageTs: "P2", threadTs: "T1", channel: "C1" });
-    map.recordPart({ messageTs: "P2", threadTs: "T1", channel: "C1" }); // a replayed receipt keeps one row
-    expect(map.rootOfPart("P2", "C1")).toBe("T1");
-    expect(map.rootOfPart("P2", "C-OTHER")).toBeNull(); // a timestamp is unique only within a channel
-    expect(map.resolveByThread("P2")).toBeNull(); // a part never becomes a thread root
+    const reply = { messageTs: "P2", channel: "C1", threadTs: "T1", seat: "s2", conversationId: "q2" };
+    map.recordPart(reply);
+    map.recordPart(reply); // a replayed receipt keeps one row
+    expect(map.partOf("P2", "C1")).toEqual({ threadTs: "T1", seat: "s2", conversationId: "q2" });
+    expect(map.partOf("P2", "C-OTHER")).toBeNull(); // a timestamp is unique only within a channel
+    expect(map.resolveByThread("P2")).toBeNull(); // a reply never becomes a thread root
     expect(map.resolveByConversation("q1")!.threadTs).toBe("T1");
-    // A lost table rebuilds parts from their stamps, which name the part and its root.
+    // A lost table rebuilds replies from their stamps, which name the reply, the thread, its seat and its ask.
     const rebuilt = new ThreadSeatMap(mapDb(), clock);
-    const stamp = (messageTs: string) => formatPostedStamp({ threadTs: "T1", messageTs, channel: "C1", human: "h1", seat: "s1", conversationId: "q1" });
-    expect(rebuilt.rebuildFromStamps([stamp("T1"), stamp("P2"), stamp("P3"), stamp("P2")])).toEqual({ inserted: 3, skipped: 1 });
-    expect(rebuilt.rootOfPart("P3", "C1")).toBe("T1");
+    const stamp = (messageTs: string, seat = "s1", conversationId = "q1") =>
+      formatPostedStamp({ threadTs: "T1", messageTs, channel: "C1", human: "h1", seat, conversationId });
+    expect(rebuilt.rebuildFromStamps([stamp("T1"), stamp("P2", "s2", "q2"), stamp("P3"), stamp("P2", "s2", "q2")])).toEqual({ inserted: 3, skipped: 1 });
+    expect(rebuilt.partOf("P2", "C1")).toEqual({ threadTs: "T1", seat: "s2", conversationId: "q2" });
     expect(rebuilt.resolveByThread("T1")!.seat).toBe("s1");
   });
 
-  it("routes a reaction on a reply part to the ask's seat, and ignores one on any other message (#899)", () => {
+  it("routes a reaction on a message posted into a thread to its own ask's seat, and ignores any other (#899)", () => {
     const map = new ThreadSeatMap(mapDb(), clock);
     map.open({ threadTs: "T1", channel: "C1", human: "h1", seat: "s1", conversationId: "q1" });
-    map.recordPart({ messageTs: "P2", threadTs: "T1", channel: "C1" });
+    map.recordPart({ messageTs: "P2", channel: "C1", threadTs: "T1", seat: "s1", conversationId: "q1" }); // q1's own reply part
+    map.recordPart({ messageTs: "P3", channel: "C1", threadTs: "T1", seat: "s2", conversationId: "q2" }); // q2, posted into q1's thread
     const route = makeThreadRouteResolver({ map, unroutedDestination: "orch@rig" });
-    const onPart = route({ type: "reaction_added", thread_ts: "P2", channel: "C1" } as never);
-    expect(onPart).toMatchObject({ destination: "s1", correlationQitemId: "q1", routeClass: "existing-thread" });
-    // A person's reply in the thread is not a part; neither is the same ts in another channel.
+    expect(route({ type: "reaction_added", thread_ts: "P2", channel: "C1" } as never)).toMatchObject({ destination: "s1", correlationQitemId: "q1" });
+    // Not the thread owner's: the ask the message was posted for.
+    expect(route({ type: "reaction_added", thread_ts: "P3", channel: "C1" } as never)).toMatchObject({ destination: "s2", correlationQitemId: "q2" });
+    // A person's reply in the thread was not posted by OpenRig; the same ts in another channel is another message.
     expect(route({ type: "reaction_added", thread_ts: "R9", channel: "C1" } as never).routeClass).toBe("unmapped-thread");
     expect(route({ type: "reaction_added", thread_ts: "P2", channel: "C-OTHER" } as never).routeClass).toBe("unmapped-thread");
     // A typed reply keeps routing by its thread root only.
     expect(route({ type: "message", thread_ts: "P2", channel: "C1" } as never).routeClass).toBe("unmapped-thread");
+    // A root elsewhere with the same ts doesn't hide this channel's reply.
+    map.open({ threadTs: "P2", channel: "C-OTHER", human: "h1", seat: "s9", conversationId: "q9" });
+    expect(route({ type: "reaction_added", thread_ts: "P2", channel: "C1" } as never)).toMatchObject({ destination: "s1", correlationQitemId: "q1" });
   });
 
   it("newest root is Slack's latest thread_ts, not when a rebuild happened to re-insert it", () => {

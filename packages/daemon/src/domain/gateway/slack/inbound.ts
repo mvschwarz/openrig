@@ -390,8 +390,9 @@ export class InboundRouter {
 
   /**
    * #899 — a reaction on an ask. The ask is the root message the thread map is keyed on, so the
-   * lookup that routes a typed reply names the asking seat; a reaction on one of the reply parts
-   * OpenRig posted for a long ask resolves to that root too. The row carries the fact (who, which
+   * lookup that routes a typed reply names the asking seat; a reaction on a message OpenRig posted
+   * into a thread for an ask (a long ask's part, or an ask posted as a reply) names that ask's own
+   * seat. The row carries the fact (who, which
    * emoji, which ask) and leaves its meaning to that seat: a reaction neither answers nor closes
    * the ask. A reaction on any other message is logged and ignored. The row id derives from the
    * reaction event, so a redelivery or a retry finds the same row; a failed create is

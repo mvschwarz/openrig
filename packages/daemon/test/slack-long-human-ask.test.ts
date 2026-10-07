@@ -323,6 +323,45 @@ describe("long human asks (#897)", () => {
     expect(onPostedPart.mock.calls.map((call) => [call[1], call[2]])).toEqual(posts.slice(1).map((_, i) => [`${i + 2}.1`, "1.1"]));
   });
 
+  it("reports every message of an ask posted into an existing thread, first message included (#899)", async () => {
+    // A later notification in the ask's own thread, or an ask posted into another thread: its first message is a reply.
+    const shortPosts: Post[] = [];
+    const shortParts = vi.fn();
+    const onPostedRoot = vi.fn();
+    const short = subsystemSlackDeliver({ ...stores("threaded"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(shortPosts), resolveThreadTs: () => "9.9", onPostedPart: shortParts, onPostedRoot });
+    expect(await short(decision("threaded", { body: "Why: restores status. Approve or hold?" }))).toEqual({ ok: true });
+    expect(shortPosts.map((p) => p.thread_ts)).toEqual(["9.9"]);
+    expect(onPostedRoot).not.toHaveBeenCalled();
+    expect(shortParts.mock.calls.map((call) => [call[0].qitemId, call[1], call[2]])).toEqual([["q-threaded", "1.1", "9.9"]]);
+
+    const longPosts: Post[] = [];
+    const longParts = vi.fn();
+    const long = subsystemSlackDeliver({ ...stores("threaded-long"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(longPosts), resolveThreadTs: () => "9.9", onPostedPart: longParts });
+    expect(await long(decision("threaded-long", { body: longBody }))).toEqual({ ok: true });
+    expect(longPosts.length).toBeGreaterThan(2);
+    expect(longParts.mock.calls.map((call) => [call[0].qitemId, call[1], call[2]])).toEqual(longPosts.map((_, i) => ["q-threaded-long", `${i + 1}.1`, "9.9"]));
+
+    // The first message landed in the thread but its response was lost: the retry finds it there and reports it.
+    const landed: Post[] = [];
+    let calls = 0;
+    const lostResponse: FetchImpl = async (url, init) => {
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: landed });
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${++calls}.1` };
+      landed.push(msg);
+      if (calls === 1) throw new Error("synthetic timeout after the post landed");
+      return reply({ ok: true, ts: msg.ts });
+    };
+    const reconciledParts = vi.fn();
+    const base = { ...stores("threaded-landed"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: lostResponse, resolveThreadTs: () => "9.9", onPostedPart: reconciledParts, onPostedRoot };
+    const ask = decision("threaded-landed", { body: "Why: restores status. Approve or hold?" });
+    expect((await subsystemSlackDeliver(base)(ask)).ok).toBe(false);
+    expect(reconciledParts).not.toHaveBeenCalled();
+    expect(await subsystemSlackDeliver(base)(ask)).toEqual({ ok: true });
+    expect(landed).toHaveLength(1);
+    expect(onPostedRoot).not.toHaveBeenCalled();
+    expect(reconciledParts.mock.calls.map((call) => [call[0].qitemId, call[1], call[2]])).toEqual([["q-threaded-landed", "1.1", "9.9"]]);
+  });
+
   it("keeps the recorded cuts when only parts already delivered would no longer fit", async () => {
     // The primary is cut to the limit; the reply after it is shorter, so it still fits beside a longer label.
     const brief = "a".repeat(4000);

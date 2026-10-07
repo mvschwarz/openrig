@@ -9,9 +9,9 @@
 // below). rebuildFromStamps() re-derives the table from those stamps, so the map is a cache of
 // queue-row truth, not a second source that can silently diverge.
 //
-// #899 — the reply parts OpenRig posts for a long ask live in thread_part_map, keyed to their root,
-// so a reaction on a part can find its ask. A part's stamp names its own message_ts and its root's
-// thread_ts; the root queries below never see parts.
+// #899 — every message OpenRig posts into a thread for an ask lives in thread_part_map with its own
+// ask and seat (the thread's root may belong to another ask), so a reaction on it can find its ask. Its
+// stamp names its own message_ts and the thread's thread_ts; the root queries below never see these.
 
 import type Database from "better-sqlite3";
 
@@ -113,19 +113,19 @@ export class ThreadSeatMap {
     return row ? project(row) : null;
   }
 
-  /** #899 — record a reply part OpenRig posted for an ask, under that ask's root (idempotent). */
-  recordPart(m: { messageTs: string; threadTs: string; channel: string }): void {
+  /** #899 — record a message OpenRig posted into a thread for an ask, with that ask and its seat (idempotent). */
+  recordPart(m: { messageTs: string; channel: string; threadTs: string; seat: string; conversationId: string }): void {
     this.db
-      .prepare(`INSERT INTO thread_part_map (message_ts, channel, thread_ts) VALUES (?, ?, ?) ON CONFLICT(channel, message_ts) DO NOTHING`)
-      .run(m.messageTs, m.channel, m.threadTs);
+      .prepare(`INSERT INTO thread_part_map (message_ts, channel, thread_ts, seat, conversation_id) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(channel, message_ts) DO NOTHING`)
+      .run(m.messageTs, m.channel, m.threadTs, m.seat, m.conversationId);
   }
 
-  /** #899 — the root of a reply part OpenRig posted in this channel; null for any other message. */
-  rootOfPart(messageTs: string, channel: string): string | null {
-    const row = this.db.prepare(`SELECT thread_ts FROM thread_part_map WHERE message_ts = ? AND channel = ?`).get(messageTs, channel) as
-      | { thread_ts: string }
-      | undefined;
-    return row?.thread_ts ?? null;
+  /** #899 — the ask and seat of a message OpenRig posted into a thread in this channel; null for any other message. */
+  partOf(messageTs: string, channel: string): { threadTs: string; seat: string; conversationId: string } | null {
+    const row = this.db.prepare(`SELECT thread_ts, seat, conversation_id FROM thread_part_map WHERE message_ts = ? AND channel = ?`)
+      .get(messageTs, channel) as { thread_ts: string; seat: string; conversation_id: string } | undefined;
+    return row ? { threadTs: row.thread_ts, seat: row.seat, conversationId: row.conversation_id } : null;
   }
 
   close(threadTs: string): void {
@@ -143,9 +143,9 @@ export class ThreadSeatMap {
       const m = parsePostedStamp(note);
       if (!m) { skipped++; continue; }
       if (m.messageTs !== m.threadTs) {
-        // #899 — a reply part's stamp maps the part to its root; it never opens a thread.
-        if (this.rootOfPart(m.messageTs, m.channel)) { skipped++; continue; }
-        this.recordPart({ messageTs: m.messageTs, threadTs: m.threadTs, channel: m.channel });
+        // #899 — a reply's stamp maps the message to its own ask and seat; it never opens a thread.
+        if (this.partOf(m.messageTs, m.channel)) { skipped++; continue; }
+        this.recordPart({ messageTs: m.messageTs, channel: m.channel, threadTs: m.threadTs, seat: m.seat, conversationId: m.conversationId });
         inserted++;
         continue;
       }

@@ -34,17 +34,25 @@ export function makeThreadRouteResolver(opts: {
   return (ev) => {
     const threadTs = (ev as { thread_ts?: string }).thread_ts;
     if (threadTs) {
-      let rootTs = threadTs;
-      let mapping = opts.map.resolveByThread(threadTs);
-      if (!mapping && ev.type === "reaction_added") {
-        // #899 — a reaction on one of the reply parts OpenRig posted for a long ask routes as one on
-        // the ask's root. A person's reply in the thread is not a part, so a reaction on it stays ignored.
-        const root = opts.map.rootOfPart(threadTs, ev.channel ?? "");
-        if (root) { rootTs = root; mapping = opts.map.resolveByThread(root); }
-      }
+      const mapping = opts.map.resolveByThread(threadTs);
       // #899 — a reaction names its message by channel and timestamp, and a timestamp is unique only
       // within a channel, so a reaction on another channel's message is not on this ask.
       const sameMessage = ev.type !== "reaction_added" || mapping?.channel === ev.channel;
+      if (ev.type === "reaction_added" && !(mapping && sameMessage)) {
+        // #899 — a reaction on a message OpenRig posted into a thread for an ask (a long ask's reply
+        // part, a later notification, an ask posted into another thread) reaches that ask's own seat.
+        // A person's reply in the thread was not posted by OpenRig, so a reaction on it stays ignored.
+        const part = opts.map.partOf(threadTs, ev.channel ?? "");
+        if (part) {
+          log(`inbound reaction on ts=${threadTs} (posted for ${part.conversationId}) -> ${part.seat}`);
+          return {
+            destination: part.seat,
+            tags: [...BASE_TAGS, "thread", `reply-to:${part.conversationId}`],
+            correlationQitemId: part.conversationId,
+            routeClass: "existing-thread",
+          };
+        }
+      }
       if (mapping && sameMessage) {
         // FOUNDER ROOT INVARIANT (2026-08-27): the map stores the bare local seat because the
         // queue row's source_session is bare inside one instance — the seat routes as stored.
@@ -55,7 +63,7 @@ export function makeThreadRouteResolver(opts: {
         // still arriving in the OLDER root lands on the seat as a message but answers nothing:
         // only the conversation's newest root correlates to its current human gate.
         const newest = opts.map.resolveByConversation(mapping.conversationId);
-        const current = !newest || newest.threadTs === rootTs;
+        const current = !newest || newest.threadTs === threadTs;
         log(`inbound routed thread_ts=${threadTs} -> ${mapping.seat} (${routeClass}${current ? "" : ", superseded root: no gate correlation"})`);
         return {
           destination: mapping.seat,

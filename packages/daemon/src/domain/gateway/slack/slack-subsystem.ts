@@ -427,17 +427,22 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
             log(`thread stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
-        // #899 — each reply part of a long ask maps to its root, so a reaction on the part reaches the asking seat.
+        // #899 — a message posted into a thread for an ask maps to that ask and its seat (the thread's root
+        // may be another ask's), so a reaction on it reaches the seat that asked. A digest speaks for many
+        // rows and has no single asking seat, so it isn't mapped.
         onPostedPart: (p, messageTs, threadTs) => {
-          threadMap.recordPart({ messageTs, threadTs, channel: cfg.channel! });
+          const seat = p.sourceSession ?? "";
+          if (!p.qitemId || !seat || (p as { deliveryDigestPost?: boolean }).deliveryDigestPost) return;
+          const human = p.destinationSession ?? "";
+          threadMap.recordPart({ messageTs, channel: cfg.channel!, threadTs, seat, conversationId: p.qitemId });
           try {
             opts.queueRepo.update({
               qitemId: p.qitemId,
               actorSession: "daemon@kernel",
-              transitionNote: formatPostedStamp({ threadTs, messageTs, channel: cfg.channel!, human: p.destinationSession ?? "", seat: p.sourceSession ?? "", conversationId: p.qitemId }),
+              transitionNote: formatPostedStamp({ threadTs, messageTs, channel: cfg.channel!, human, seat, conversationId: p.qitemId }),
             });
           } catch (e) {
-            log(`part stamp failed for ${p.qitemId}: ${(e as Error).message}`);
+            log(`reply stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
         onTransportFailed: recordTransportFailed,
