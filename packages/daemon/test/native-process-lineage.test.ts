@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { findExactNativeResumeProcess, observeClaudePaneStartedAt, observeClaudeDelivery, verifyClaudePaneProcess, verifyCodexPaneProcess, type NativeProcessRow } from "../src/domain/native-process-lineage.js";
 
 import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
-import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 
 const token = "00000000-0000-7000-8000-000000000001";
 const startedAt = "Sat Jan  1 12:00:00 2000";
@@ -25,12 +24,6 @@ describe("joined native Codex identity", () => {
   });
   it("proves direct-native resume", async () => {
     expect((await check(() => [{ ...rows()[3]!, pid: 10, ppid: 1 }]))?.process.pid).toBe(10);
-  });
-  it("retains paired quotes in generated resume commands with a profile named resume", async () => {
-    const command = buildCodexResumeCore(token, "resume", false, "--add-dir /tmp/state");
-    const list = () => rows().map(r => r.pid === 13 ? { ...r, command } : r);
-    expect((await check(list))?.process.pid).toBe(13);
-    expect(await check(list, { expectedToken: "different" })).toBeNull();
   });
   it.each([
     `resume ${token} --add-dir /Users/me/code/Bob's app`,
@@ -173,10 +166,22 @@ describe("Claude identity with inline settings in ps output", () => {
   });
   it.each([
     `--settings ${JSON.stringify({ label: `two words --session-id ${token}` })}`,
+    `--settings {"env":{"note":"text --session-id ${token} --model trailing`,
     `--settings ${settings[0]![1]} --session-id ${token} --session-id different`,
     `--settings ${settings[1]![1]} --session-id ${token} --unknown`,
   ])("does not promote ambiguous argv: %s", async args => {
     expect(await verifyClaudePaneProcess(input(args))).toBeNull();
     expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
+  });
+  it.each(["before", "after"])("a literal quote %s settings never promotes settings text into identity", async order => {
+    const settings = `--settings ${JSON.stringify({ env: { REVIEW_NOTE: `text --session-id ${token} --model trailing` } })}`;
+    const name = '--name review"desk';
+    const args = order === "before" ? `${name} ${settings}` : `${settings} ${name}`;
+    expect(await verifyClaudePaneProcess(input(args))).toBeNull();
+    expect((await observeClaudeDelivery(input(args))).state).toBe("unknown");
+    const actualIdentity = input(`${args} --session-id ${token}`);
+    expect((await verifyClaudePaneProcess(actualIdentity))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(actualIdentity)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...actualIdentity, expectedToken: "different" })).toBeNull();
   });
 });

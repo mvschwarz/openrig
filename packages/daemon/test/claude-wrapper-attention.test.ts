@@ -61,6 +61,19 @@ function fixture(token: string | null = null) {
 }
 
 describe("Claude wrapper manual attention recovery", () => {
+  it("does not clear attention using identity text inside settings beside a literal quote", async () => {
+    const f = fixture("review-token");
+    f.listProcesses.mockResolvedValue([root, { ...child,
+      command: ['/tmp/review/.local/share/claude/versions/2.1.1', '--settings',
+        JSON.stringify({ env: { REVIEW_NOTE: 'text --session-id review-token --model trailing' } }),
+        '--name', 'review"desk'].join(' '),
+    }]);
+    expect((await f.verify(true)).ok).toBe(false);
+    expect((await f.post()).status).toBe(422);
+    expect(f.startup()).toBe("attention_required");
+    expect(f.sendVerify).not.toHaveBeenCalled();
+  });
+
   it.each(["/fixture/review's-settings.json", '/fixture/review"settings.json'])(
     "clear-attention preserves a literal quote in a settings filename: %s", async path => {
       const f = fixture("review-token");
