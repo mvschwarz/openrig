@@ -12,6 +12,8 @@ const words = (v: unknown) => text(v, "unknown step").replaceAll("-", " ");
 const packets = (instance: Row) => rows(instance.frontier_packets);
 const title = (instance: Row) => text(instance.description, "Mission lifecycle");
 const field = (label: string, value: unknown, link?: Action) => fieldLine({ label, value: text(value), ...(link ? { link } : {}) });
+// The daemon writes the epoch as a wake-now marker when a blocker changes (#860); it is not a check time.
+const lastCheck = (value: unknown, timeZone: string) => typeof value === "string" && Date.parse(value) === 0 ? "wake pending" : displayTime(value, timeZone);
 
 export function workflowOverview(execution: ExecutionViewSnap, width: number): ContentLine[] {
   const instances = execution.lifecycle_instances;
@@ -59,7 +61,7 @@ export function workflowDetail(execution: ExecutionViewSnap, key: string, width:
     lines.push(field("wake", packet.wake ? `${text(wake.kind)} · ${text(wake.phase)} · ${wake.live ? "live" : "not live"}${wake.unconsumed ? " · fired without pickup" : ""}` : "none recorded"));
     if (packet.wake) lines.push(field("wake ref", wake.ref), field("delivery", wake.deliveryStatus));
     if (wake.expiresAt) lines.push(field("due", displayTime(wake.expiresAt, timeZone)));
-    if (packet.wake_schedule) lines.push(field("policy", schedule.policy), field("cadence", `${text(schedule.interval_seconds)} seconds (a check, not guaranteed delivery)`), field("last check", displayTime(schedule.last_evaluation_at, timeZone)));
+    if (packet.wake_schedule) lines.push(field("policy", schedule.policy), field("cadence", `${text(schedule.interval_seconds)} seconds (a check, not guaranteed delivery)`), field("last check", lastCheck(schedule.last_evaluation_at, timeZone)));
     lines.push(sectionRule("Next action", width), ...actionLines(text(packet.targeted_action), width));
     if (packet.gate) lines.push(field("gate", packet.gate));
     if (packet.acceptance) lines.push(field("decision", packet.acceptance));

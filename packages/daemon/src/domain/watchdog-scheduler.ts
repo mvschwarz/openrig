@@ -1,6 +1,6 @@
 import type { WatchdogJob, WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import type { WatchdogPolicyEngine } from "./watchdog-policy-engine.js";
-import { isQueueWaitEventPending } from "./queue-wait-backoff.js";
+import { nextDueAt } from "./watchdog-due.js";
 
 /**
  * Watchdog scheduler (PL-004 Phase C; daemon-native supervision tree
@@ -153,23 +153,6 @@ export class WatchdogScheduler {
  * is enforced one layer up by the policy engine, NOT here.
  */
 export function isDue(job: WatchdogJob, nowMs: number): boolean {
-  if (!job.lastEvaluationAt) {
-    // #801: a periodic reminder with no evaluation yet measures its first
-    // interval from registration, so it waits a full interval instead of
-    // firing on the scheduler's first scan. Every other policy keeps the
-    // immediate first evaluation.
-    if (job.policy !== "periodic-reminder") return true;
-    // Upgrade bridge (#860): pre-upgrade builds marked a pending wake with a
-    // null evaluation. Fresh arms start unpending, so null plus a pending
-    // event is upgrade state and stays immediately due.
-    if (isQueueWaitEventPending(job.specYaml)) return true;
-    const registered = Date.parse(job.registeredAt);
-    if (Number.isNaN(registered)) return true;
-    const cadenceSeconds = job.scanIntervalSeconds ?? job.intervalSeconds;
-    return nowMs - registered >= cadenceSeconds * 1000;
-  }
-  const last = Date.parse(job.lastEvaluationAt);
-  if (Number.isNaN(last)) return true;
-  const cadenceSeconds = job.scanIntervalSeconds ?? job.intervalSeconds;
-  return nowMs - last >= cadenceSeconds * 1000;
+  const due = nextDueAt(job);
+  return due === null || nowMs >= due;
 }

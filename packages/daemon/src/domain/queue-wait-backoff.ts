@@ -39,18 +39,6 @@ export function isQueueWait(specYaml: string): boolean {
   catch { return false; }
 }
 
-/**
- * Upgrade bridge (#860): builds predating the first-interval rule marked a
- * pending wake by writing a null lastEvaluationAt. Fresh arms always start
- * with eventPending false (and record an evaluation at registration), so a
- * null evaluation plus a pending event can only be pre-upgrade state — and
- * stays immediately due instead of waiting out a fresh first interval.
- */
-export function isQueueWaitEventPending(specYaml: string): boolean {
-  try { return JSON.parse(specYaml).context?.queue_wait?.eventPending === true; }
-  catch { return false; }
-}
-
 /** The exact blocker owns progress signals. Ignore delivery receipts; do not
  * interpret its notes. Our own waiting acknowledgments are on a different row. */
 function blockerTransition(db: Database.Database, blocker: string | null): number | null {
