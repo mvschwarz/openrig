@@ -68,6 +68,7 @@ const CORE_STEP_IDS = [
   "brew",
   "tmux_install",
   "herdr_install",
+  "ghostty_install",
   "claude_install",
   "claude_auth",
   "codex_install",
@@ -171,6 +172,29 @@ function installHerdr(deps: SetupDeps, platform: NodeJS.Platform): SetupStep {
   }
 }
 
+/** The installing agent asks once; only an explicit Yes installs the optional Mac terminal. */
+function installGhostty(deps: SetupDeps, platform: NodeJS.Platform, choice?: boolean): SetupStep {
+  const id = "ghostty_install";
+  if (platform !== "darwin") return { id, status: "skipped", message: "The Ghostty offer is for macOS; existing Linux terminals remain available." };
+  if (choice === false) return { id, status: "skipped", message: "Ghostty declined (--no-ghostty). Terminal.app remains available." };
+  const home = (deps.env ?? process.env)["HOME"] ?? homedir();
+  const locations = ["/Applications/Ghostty.app", path.join(home, "Applications/Ghostty.app")];
+  if (locations.some(deps.exists)) return { id, status: "pass", message: "Ghostty is already installed. No terminal was opened." };
+  if (choice !== true) return {
+    id, status: "skipped",
+    message: "Installing agent: ask once, 'Install Ghostty for the OpenRig view?'",
+    fixHint: "On Yes, run rig setup --ghostty. On No, use --no-ghostty; Terminal.app remains available. The person types no command.",
+  };
+  try {
+    installCommand(deps, "brew install --cask ghostty");
+    if (!locations.some(deps.exists)) throw new Error("The installer returned, but Ghostty.app was not found.");
+    return { id, status: "applied", message: "Installed Ghostty. No terminal was opened." };
+  } catch (err) {
+    return { id, status: "fail", message: `Could not install or verify Ghostty: ${(err as Error).message}`,
+      fixHint: "Check Homebrew and https://ghostty.org/docs/install/binary. Terminal.app remains available; no view was opened." };
+  }
+}
+
 // Slice-03 Lane B (OPR.0.4.8) onboarding RECORD path. RULING-C (b4913ed4): the v1 onboarding menu
 // EDITS/RECORDS a deliberate policy choice into an EXISTING RigSpec only — a NEW INSTALL has no spec,
 // so nothing is written and the floor holds by ABSENCE. Persistence is the RigSpec `permission_policy`
@@ -265,7 +289,7 @@ export function recordPermissionPolicyStep(deps: SetupDeps, choice: string, spec
   };
 }
 
-export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
+export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; ghostty?: boolean; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
   const profile = opts.full ? "full" : "core";
   const platform = deps.platform ?? process.platform;
   const runtimeConfig = [...BASE_RUNTIME_CONFIG_DISCLOSURE];
@@ -276,6 +300,10 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     for (const id of stepIds) {
       const platformSkip = id === "herdr_install" && opts.herdr === false ? "Skipped: herdr installation declined (--no-herdr)."
         : id === "herdr_install" && !["darwin", "linux"].includes(platform) ? "Automatic herdr installation is supported on macOS and Linux."
+        : id === "ghostty_install" ? (platform !== "darwin" ? "The Ghostty offer is for macOS."
+          : opts.ghostty === false ? "Ghostty declined (--no-ghostty)."
+          : opts.ghostty === true ? "Dry run: Ghostty installation would be attempted."
+          : "Dry run: the installing agent offers Ghostty once; only Yes installs it.")
         : platform !== "darwin" ? NON_DARWIN_DRY_RUN_SKIPS[id] : undefined;
       steps.push({ id, status: "skipped", message: platformSkip ?? `Dry run: ${id} would be attempted.` });
     }
@@ -340,6 +368,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   steps.push(opts.herdr === false
     ? { id: "herdr_install", status: "skipped", message: "Skipped: herdr installation declined (--no-herdr)." }
     : installHerdr(deps, platform));
+  steps.push(installGhostty(deps, platform, opts.ghostty));
 
   // 4. Claude Code runtime
   let claudeInstalled = false;
@@ -539,6 +568,7 @@ export function goldenPathNextSteps(): string[] {
     "     No: give the command to open it later. Over SSH: give the exact connection/attach command",
     "     No, SSH and headless use are fine background outcomes; do not report an unseen window as opened",
     "     No copying or typing for the person; confirm three visible columns, not just CLI success",
+    "     On a Mac, offer Ghostty once: on Yes run rig setup --ghostty; on No use --no-ghostty and Terminal.app",
     "     Setup installs herdr by default; use --no-herdr if the person declines. Plain tmux remains available",
     "     rig tui --shared is the team dashboard, not the operator's conversation",
     "     If opening fails, inspect any new surface before retrying; report the error and finish the local action",
@@ -610,12 +640,14 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
     .option("--json", "Machine-readable JSON output")
     .option("--full", "Install broader operator workstation tools")
     .option("--no-herdr", "Skip the default herdr installation; the welcome view can use plain tmux")
+    .option("--ghostty", "Install Ghostty on macOS after the person accepts the offer")
+    .option("--no-ghostty", "Decline Ghostty; Terminal.app remains available on macOS")
     .option("--policy <name>", `Record a deliberate permission-policy choice into an existing spec (${POLICY_CHOICES.join("|")})`)
     .option("--spec <path>", "Existing rig spec (file or directory) to record the --policy choice into")
-    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; herdr?: boolean; policy?: string; spec?: string }) => {
+    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; herdr?: boolean; ghostty?: boolean; policy?: string; spec?: string }) => {
       const deps = depsOverride ?? defaultDeps();
       const doctorDeps = opts.dryRun ? undefined : buildDefaultDoctorDeps(deps);
-      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, herdr: opts.herdr, doctorDeps });
+      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, herdr: opts.herdr, ghostty: opts.ghostty, doctorDeps });
 
       if (opts.json) {
         console.log(JSON.stringify({ ...result, nextSteps: goldenPathNextSteps() }, null, 2));

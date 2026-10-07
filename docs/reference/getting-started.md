@@ -136,6 +136,13 @@ Herdr, use `rig setup --no-herdr`; the welcome view can use plain tmux. Setup
 checks both PATH and the installer's default `~/.local/bin/herdr` location. It
 leaves existing cmux settings alone and does not open a view during setup.
 
+On a Mac, the installing agent also asks once, "Install Ghostty for the OpenRig
+view?" On Yes it runs `rig setup --ghostty`, which installs the
+[documented Homebrew cask](https://ghostty.org/docs/install/binary) and checks for
+the app. On No it uses `--no-ghostty`; Terminal.app remains available. Plain setup
+reports this offer without installing Ghostty or waiting for input. The person
+types no command.
+
 The installing agent asks: **“Open the OpenRig view now?”**
 
 - **Yes:** the installing agent runs the command below. It opens a new terminal

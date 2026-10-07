@@ -388,9 +388,9 @@ Optional:
 
 ## Setup and Troubleshooting
 
-- `rig setup` attempts core machine preparation: it installs a missing Claude Code or Codex and writes tmux defaults. It installs Herdr by default on macOS and Linux; use `--no-herdr` if you decline it. On macOS it also installs a missing tmux with an existing Homebrew; elsewhere install tmux yourself (setup only checks it). Existing cmux settings are preserved. It reports what it tried and what actually succeeded. If something fails, it gives the local agent enough context to finish the job.
+- `rig setup` attempts core machine preparation: it installs a missing Claude Code or Codex and writes tmux defaults. It installs Herdr by default on macOS and Linux; use `--no-herdr` if you decline it. On macOS it also installs a missing tmux with an existing Homebrew; elsewhere install tmux yourself (setup only checks it). On a Mac, the installing agent offers Ghostty once; accepting uses `rig setup --ghostty`, and declining leaves Terminal.app available. Existing cmux settings are preserved. It reports what it tried and what actually succeeded. If something fails, it gives the local agent enough context to finish the job.
 - `rig setup --full` attempts a broader operator workstation setup (jq, gh, via Homebrew, so macOS only) on top of core.
-- `rig doctor` inspects current system health and helps diagnose problems after setup. Use it when something stops working or after machine changes. It does not check provider logins or whether agents can work: also run `claude auth status` or `codex login status`, and `rig ps --nodes --rig <rig>`.
+- `rig doctor` inspects current system health and helps diagnose problems after setup. Use it when something stops working or after machine changes. It shares setup's local provider login checks. These do not prove provider acceptance or a working agent; also inspect `rig ps --nodes --rig <rig>`.
 
 Both commands support `--json` for agent-driven workflows.
 

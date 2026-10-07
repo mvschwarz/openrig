@@ -49,3 +49,41 @@ describe("setup Herdr default", () => {
     expect(result.steps).toContainEqual(expect.objectContaining({ id: "claude_auth", status: "pass" }));
   });
 });
+
+
+describe("setup Ghostty offer", () => {
+  it("offers once without installing, and installs only after the accepted choice", async () => {
+    const f = fixture(true);
+    let installed = false;
+    f.deps.exists = file => installed && file === "/Applications/Ghostty.app";
+    const original = f.deps.exec;
+    f.deps.exec = vi.fn((cmd, opts) => {
+      if (cmd === "brew install --cask ghostty") installed = true;
+      return original(cmd, opts);
+    });
+    const offered = await runSetup(f.deps, {});
+    expect(offered.steps).toContainEqual(expect.objectContaining({ id: "ghostty_install", status: "skipped", message: expect.stringContaining("ask once") }));
+    expect(f.deps.exec).not.toHaveBeenCalledWith("brew install --cask ghostty", expect.anything());
+    const accepted = await runSetup(f.deps, { ghostty: true });
+    expect(accepted.steps).toContainEqual(expect.objectContaining({ id: "ghostty_install", status: "applied" }));
+    expect(f.deps.exec).toHaveBeenCalledWith("brew install --cask ghostty", { timeoutMs: 300_000 });
+    const existing = await runSetup(f.deps, {});
+    expect(existing.steps).toContainEqual(expect.objectContaining({ id: "ghostty_install", status: "pass" }));
+    expect(vi.mocked(f.deps.exec).mock.calls.filter(([cmd]) => cmd.includes("--cask ghostty"))).toHaveLength(1);
+  });
+
+  it.each(["declined", "dry-run", "linux"])("does not install or launch Ghostty for %s", async mode => {
+    const f = fixture(true);
+    if (mode === "linux") f.deps.platform = "linux";
+    const result = await runSetup(f.deps, { ghostty: mode !== "declined", dryRun: mode === "dry-run" });
+    expect(result.steps).toContainEqual(expect.objectContaining({ id: "ghostty_install", status: "skipped" }));
+    expect(f.exec.mock.calls.some(([cmd]) => /ghostty|osascript|open -a/.test(cmd))).toBe(false);
+  });
+
+  it("does not report an unverified installation as successful", async () => {
+    const f = fixture(true);
+    const result = await runSetup(f.deps, { ghostty: true });
+    expect(result.ready).toBe(false);
+    expect(result.steps).toContainEqual(expect.objectContaining({ id: "ghostty_install", status: "fail", message: expect.stringContaining("was not found") }));
+  });
+});
