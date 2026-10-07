@@ -208,10 +208,10 @@ describe("long human asks (#897)", () => {
     expect(unescape(posted[0]!.blocks[1]!.text!.text)).toBe(body);
   });
 
-  it("plans again, rather than refusing, when a retry can't render its recorded plan", async () => {
-    // An ask from no seat is signed with the configured sender label. At the limit with one label,
-    // it no longer fits as one message once the label has grown by the retry.
-    const ask = (body: string) => decision("replan", { sourceSession: undefined, body, summary: nearLimitSummary });
+  /** An ask from no seat, which is signed with the configured sender label, at the longest brief that fits
+   *  in one message with the label "fixture". With a longer label it no longer fits as one message. */
+  const askAtLabelLimit = async (id: string) => {
+    const ask = (body: string) => decision(id, { sourceSession: undefined, body, summary: nearLimitSummary });
     const fitsWithLabel = async (length: number) => {
       const posts: Post[] = [];
       await subsystemSlackDeliver({ ...stores(`label-probe-${length}`), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts) })(ask("a".repeat(length)));
@@ -219,7 +219,11 @@ describe("long human asks (#897)", () => {
     };
     let fits = 0, splits = 6000;
     while (splits - fits > 1) { const mid = (fits + splits) >> 1; if (await fitsWithLabel(mid)) fits = mid; else splits = mid; }
-    const body = "a".repeat(fits);
+    return { ask, body: "a".repeat(fits) };
+  };
+
+  it("plans again, rather than refusing, when a retry can't render its recorded plan", async () => {
+    const { ask, body } = await askAtLabelLimit("replan");
 
     const posted: Post[] = [];
     let calls = 0;
@@ -239,6 +243,52 @@ describe("long human asks (#897)", () => {
     expect(bodies.length).toBeGreaterThan(1);
     expect(bodies[0]!.endsWith(NOTE)).toBe(true);
     expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(body);
+  });
+
+  it("refuses the rest, loudly, rather than planning again when the ask may already be in Slack", async () => {
+    const { ask, body } = await askAtLabelLimit("landed");
+    const posted: Post[] = [];
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url, init) => {
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: posted });
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${++calls}.1` };
+      posted.push(msg);
+      if (calls === 1) throw new Error("synthetic timeout after the post landed");
+      return reply({ ok: true, ts: msg.ts });
+    };
+    const failed = vi.fn();
+    const base = { ...stores("landed"), botToken: "synthetic", channel: "C", fetchImpl, onTransportFailed: failed };
+    // The first attempt's one message lands, but its response is lost.
+    expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask(body))).ok).toBe(false);
+    // A longer label before the retry: a new plan would split under new ids and post the brief again.
+    const retry = await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask(body));
+    expect(retry).toMatchObject({ ok: false, class: "human-message-unrenderable" });
+    expect(posted).toHaveLength(1);
+    expect(failed).toHaveBeenLastCalledWith(expect.anything(), "human-message-unrenderable", expect.any(String), true);
+  });
+
+  it("keeps the recorded cuts when only parts already delivered would no longer fit", async () => {
+    // The primary is cut to the limit; the reply after it is shorter, so it still fits beside a longer label.
+    const brief = "a".repeat(4000);
+    const ask = decision("rest", { sourceSession: undefined, body: brief, summary: nearLimitSummary });
+    const posted: Post[] = [];
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url, init) => {
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: posted });
+      if (++calls === 2) throw new Error("synthetic timeout before the reply landed");
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${calls}.1` };
+      posted.push(msg);
+      return reply({ ok: true, ts: msg.ts });
+    };
+    const base = { ...stores("rest"), botToken: "synthetic", channel: "C", fetchImpl };
+    expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask)).ok).toBe(false);
+    expect(posted).toHaveLength(1);
+    expect(await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask)).toEqual({ ok: true });
+    // Joined back in posting order, the parts are the whole brief: nothing lost, nothing repeated.
+    const bodies = posted.map((p) => unescape(p.blocks[1]!.text!.text));
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]!.endsWith(NOTE)).toBe(true);
+    expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(brief);
   });
 
   it("redacts secrets before cutting, so no part carries a piece of one", async () => {

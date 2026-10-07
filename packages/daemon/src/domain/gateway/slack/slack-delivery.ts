@@ -50,8 +50,9 @@ export interface SubsystemSlackDeliveryOpts {
   onPosted?: (payload: OutboundPostPayload, messageTs: string, threadTs?: string) => void;
   /** OPR.0.5.6.14 — the transport-failure receipt hook: a failed post writes
    *  the row's transport-failed ledger transition (class + API error), so a
-   *  delivery failure is as legible on the row as a success. */
-  onTransportFailed?: (payload: OutboundPostPayload, failureClass: string, detail: string) => void;
+   *  delivery failure is as legible on the row as a success. `partlyPosted` marks an ask whose
+   *  remaining parts can't be posted although part of it may already be in Slack (#897). */
+  onTransportFailed?: (payload: OutboundPostPayload, failureClass: string, detail: string, partlyPosted?: boolean) => void;
   /** F (interim loudness rule): return the Slack USER ID to mention for an ESCALATION payload,
    *  undefined for everything else (quiet-threaded). The composition wires the registry lookup
    *  + the escalation predicate; delivery just renders what it is told. */
@@ -417,6 +418,22 @@ function recordedPlan(attempted: Set<string>, decisionId: string): DeliveryPlan 
   return key ? JSON.parse(Buffer.from(key.slice(prefix.length), "base64url").toString("utf8")) as DeliveryPlan : undefined;
 }
 
+/** Whether an ask's first message can already be in Slack; later parts post only after it lands. It can be if
+ *  it was delivered or its receipt was kept, or if it was attempted and a scan finds its marker or reads only
+ *  part of the history. An unreadable scan is reported, so the caller retains the ask instead of guessing. */
+async function firstMessageMayHaveLanded(
+  opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decisionId: string, firstId: string,
+): Promise<boolean | { unreadable: string }> {
+  if (opts.delivered.load().has(firstId)) return true;
+  const attempted = opts.attempted.load();
+  if ([...attempted.keys()].some((key) => key.startsWith(`${decisionId}::primary-receipt::`))) return true;
+  if (!attempted.has(firstId)) return false;
+  const marker = reconcileToken(firstId);
+  const scan = await fetchRecentMessageTexts(opts.botToken, opts.channel, opts.resolveThreadTs?.(q), opts.fetchImpl, undefined, undefined, marker);
+  if (!scan.ok) return { unreadable: scan.error ?? "reconcile scan failed" };
+  return Boolean(scan.incomplete) || scan.messages.some((m) => m.text.includes(marker));
+}
+
 /** The pieces splitForSlack cut, replayed from their recorded lengths; undefined if they no longer add up. */
 function replayPieces(text: string, lengths: number[] | undefined): string[] | undefined {
   const rest = redactSecrets(text).trimEnd();
@@ -500,8 +517,13 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     const choose = (kept?: DeliveryPlan) => {
       const mention = kept ? kept.mention : opts.resolveMentionUserId?.(q);
       const planned: SubsystemSlackDeliveryOpts = { ...opts, resolveMentionUserId: () => mention };
+      // A kept plan checks only the parts still to post: delivered parts are acknowledged, never rendered again.
+      const delivered = kept ? opts.delivered.load() : new Set<string>();
       const preflight = (candidate: DeliveryPart[]) => {
-        for (const [index, part] of candidate.entries()) renderPart(planned, q, part, index, partIdFor(decision.decisionId, candidate.length, index));
+        for (const [index, part] of candidate.entries()) {
+          const id = partIdFor(decision.decisionId, candidate.length, index);
+          if (!delivered.has(id)) renderPart(planned, q, part, index, id);
+        }
       };
       if (kept?.body) {
         const split = splitIntoParts(planned, q, decision.decisionId, kept).parts;
@@ -522,19 +544,25 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     };
     let chosen: ReturnType<typeof choose>;
     let replanned = false;
+    let partlyPosted = false;
     try {
       try {
         chosen = choose(recorded);
       } catch (error) {
-        // A recorded plan that no longer renders (the sender label or the rendering changed between
-        // attempts) is planned afresh, as before #897, rather than refused; the new plan is kept.
         if (!recorded || !(error instanceof HumanMessageShapeError)) throw error;
+        // A recorded plan that no longer renders (the sender label or the rendering changed between
+        // attempts) is planned afresh, as before #897, only if none of it can be in Slack yet: new cuts or
+        // ids could otherwise repeat or lose text. If some may be, the rest is refused, loudly.
+        const firstId = partIdFor(decision.decisionId, recorded.body ? 2 : authored.length, 0);
+        const landed = await firstMessageMayHaveLanded(opts, q, decision.decisionId, firstId);
+        if (typeof landed === "object") return { ok: false, class: "reconcile-unreadable", detail: landed.unreadable };
+        if (landed) { partlyPosted = true; throw error; }
         chosen = choose();
         replanned = true;
       }
     } catch (error) {
       const detail = (error as Error).message;
-      try { opts.onTransportFailed?.(q, "human-message-unrenderable", detail); }
+      try { opts.onTransportFailed?.(q, "human-message-unrenderable", detail, partlyPosted); }
       catch (receiptError) { return { ok: false, class: "receipt-failed", detail: (receiptError as Error).message }; }
       return { ok: false, class: "human-message-unrenderable", detail };
     }
