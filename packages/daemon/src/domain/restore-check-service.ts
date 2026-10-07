@@ -844,7 +844,9 @@ export class RestoreCheckService {
         check,
         status: "red",
         evidence: `Seat identity needs verification: verdict=${node.identityVerdict.verdict} reason=${node.identityVerdict.reason ?? "unknown"}; stored startupStatus=ready`,
-        remediation: "Verify the current pane identity, then use rig seat clear-attention for this seat and rerun rig restore-check",
+        remediation: node.identityVerdict.verdict === "mismatch"
+          ? "Verify the current pane identity, then use rig seat clear-attention for this seat and rerun rig restore-check"
+          : "If the seat's tmux session or pane is gone, restore or relaunch the seat; if it now runs in another pane of its session, rig seat clear-attention for this seat rebinds and verifies it. Then rerun rig restore-check.",
         remediationSafe: false,
       };
     }
