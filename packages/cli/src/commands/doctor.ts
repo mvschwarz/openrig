@@ -401,7 +401,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         exists: existsSync,
         baseDir: import.meta.dirname,
         readFile: (p: string) => { try { return readFileSync(p, "utf-8"); } catch { return null; } },
-        exec: (c: string) => execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 30_000 }),
+        exec: (c: string) => execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }),
         checkPort: defaultCheckPort,
         configStore: new ConfigStore(),
         mkdirp: (dirPath: string) => mkdirSync(dirPath, { recursive: true }),
@@ -428,7 +428,12 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
         },
       };
 
-      const { checks, asyncChecks } = runDoctorChecks(deps);
+      // Only the newly added provider probes inherit setup's timeout.
+      const providerChecks = checkProviderReadiness(depsOverride ?? {
+        ...deps,
+        exec: (c: string) => execSync(c, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 30_000 }),
+      });
+      const { checks, asyncChecks } = runDoctorChecks(deps, providerChecks);
       const resolvedAsync = await Promise.all(asyncChecks);
       const allChecks = [...checks, ...resolvedAsync];
       const healthy = allChecks.every((c) => c.status !== "fail");
@@ -449,6 +454,7 @@ export function doctorCommand(depsOverride?: DoctorDeps): Command {
       console.log("");
       console.log(healthy ? "No failures in the checks above. Review any WARN or SKIP rows." : "Some checks failed. Review the FAIL rows and their fixes above.");
       console.log("Authentication checks report local provider facts; no agent task or provider request was tested.");
+      console.log("Only the harnesses selected for your project need a login; an unused harness does not.");
       console.log("A credential variable being set does not prove the provider accepts it or that managed seats receive it.");
       console.log("Inspect your team with `rig ps --nodes --rig <rig>` and `rig capture <seat> --lines 30`.");
       if (!healthy) process.exitCode = 1;
