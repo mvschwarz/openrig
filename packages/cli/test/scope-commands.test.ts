@@ -22,9 +22,9 @@ function writeFile(p: string, content: string): void {
   fs.writeFileSync(p, content, "utf8");
 }
 
-function seedSubstrate(): { root: string; missionsRoot: string } {
+function seedSubstrate(workspaceFolder = "internal-docs"): { root: string; missionsRoot: string } {
   const root = mktemp();
-  const missionsRoot = path.join(root, "internal-docs", "missions");
+  const missionsRoot = path.join(root, workspaceFolder, "missions");
   execFileSync("git", ["-C", root, "init", "-q"], { stdio: "ignore" });
   execFileSync("git", ["-C", root, "config", "user.email", "t@e.com"], { stdio: "ignore" });
   execFileSync("git", ["-C", root, "config", "user.name", "T"], { stdio: "ignore" });
@@ -505,6 +505,57 @@ describe("rig scope slice move (HG-7)", () => {
       { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
       { ref: "slices/02-debt-foo/slice.yaml", order: 20, active: true },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------
+// Scope moves treat repository-relative paths as operands, including '-'.
+// ---------------------------------------------------------------------
+
+describe("rig scope slice moves in a dash-prefixed workspace", () => {
+  let env: { root: string; missionsRoot: string };
+  afterEach(() => { if (env) fs.rmSync(env.root, { recursive: true, force: true }); });
+
+  it.each([
+    ["move", "docs"], ["ship", "docs"], ["close", "docs"],
+    ["move", "-docs"], ["ship", "-docs"], ["close", "-docs"],
+  ])("%s preserves the Git rename under %s", async (operation, folder) => {
+    env = seedSubstrate(folder);
+    const source = path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo");
+    const args = operation === "close"
+      ? ["slice", operation, "01-debt-foo", "--reason", "wontfix"]
+      : ["slice", operation, "01-debt-foo", "release-0.3.2"];
+    const result = await run([...args, "--mission", "backlog", "--json"], env.missionsRoot);
+    expect(result.exitCode, result.stderr || result.stdout).toBe(0);
+    const payload = JSON.parse(result.stdout);
+    expect(payload.ok).toBe(true);
+    const destination = operation === "close" ? payload.closed.path : payload[operation === "move" ? "moved" : "shipped"].to.path;
+    expect(fs.existsSync(source)).toBe(false);
+    expect(fs.existsSync(path.join(destination, "README.md"))).toBe(true);
+    const renames = execFileSync("git", ["-C", env.root, "diff", "--cached", "--name-status", "-M"], { encoding: "utf8" });
+    expect(renames).toContain(`R100\t${folder}/missions/backlog/slices/01-debt-foo/README.md\t`);
+    const frontmatter = readFrontmatter(path.join(destination, "README.md"));
+    expect(frontmatter.status).toBe(operation === "close" ? "closed-wontfix" : operation === "ship" ? "shipped-to-release-0.3.2" : "active");
+  });
+
+  // Root can write a mode-0444 file, so it cannot exercise this failure boundary.
+  it.skipIf(process.getuid?.() === 0)("rolls back the Git rename after a real read-only node write fails", async () => {
+    env = seedSubstrate("-docs");
+    const source = path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo", "README.md");
+    const original = fs.readFileSync(source, "utf8");
+    fs.chmodSync(source, 0o444);
+    try {
+      const result = await run([
+        "slice", "close", "01-debt-foo", "--reason", "wontfix", "--mission", "backlog", "--json",
+      ], env.missionsRoot);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout + result.stderr).toContain("EACCES");
+      expect(fs.readFileSync(source, "utf8")).toBe(original);
+      expect(fs.existsSync(path.join(env.missionsRoot, "backlog", "closed", "01-debt-foo"))).toBe(false);
+      expect(execFileSync("git", ["-C", env.root, "status", "--porcelain"], { encoding: "utf8" })).toBe("");
+    } finally {
+      if (fs.existsSync(source)) fs.chmodSync(source, 0o644);
+    }
   });
 });
 
