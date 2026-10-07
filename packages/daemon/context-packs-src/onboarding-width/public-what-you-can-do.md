@@ -705,10 +705,13 @@ your circumstances is configuration, and the ones that are not, another agent ca
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
 - **`rig tui`** — the interactive view over rigs, pods, seats and specs. `rig` and `rig tui` open
   the status dashboard, not a conversation with an agent: talk to the operator through
-  `rig terminal open saved:kernel`, which opens the dashboard and the conversations together, or
-  through an attach command the operator gives. `rig tui --shared`
-  attaches to the existing kernel terminal; Ctrl-b then d detaches, and no missing seat or
-  terminal is implicitly launched. Plain `rig tui` remains a separate view.
+  `rig terminal open saved:kernel --window`. For “show me my agents”, “see my agents” or
+  “welcome screen”, run that command to open the dashboard and conversations together;
+  do not finish by showing a table or suggesting a command for the person to type.
+  Only if the window cannot open, `rig tui --shared` is the dashboard-only fallback:
+  it attaches to the existing kernel terminal; Ctrl-b then d detaches, and no missing
+  seat or terminal is implicitly launched. Explain the failure and help with the
+  chosen fallback. Plain `rig tui` remains a separate dashboard.
   Open the instance row for one continuous cross-rig agent table with pod separators and material
   `RECENT` transitions; drill into a rig, mission, slice, or agent without losing the owning
   identity. Use the mission's workflow/packet view and Specs purpose/source to understand work.

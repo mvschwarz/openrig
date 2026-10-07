@@ -11,12 +11,18 @@ directly. Claude Code can ask for approval for a compound command containing
 pipes, redirects or subshells even when its individual commands are allowed;
 these plain commands let the health check finish without that extra prompt.
 
-The shared dashboard is the kernel's `operator.human` terminal. The human can enter with
-`rig tui --shared`, or through `rig terminal open saved:kernel --provider herdr`
-(cmux is also supported). It is an ordinary TUI in a terminal, not an agent
-or human-message inbox. Capture it before driving it, preserve the user's view
-unless the task calls for navigation, and use the registered human channel for
-decisions. If the TUI has exited, its shell remains; run `rig tui` there once.
+For “show me my agents”, “see my agents” or “welcome screen”, run
+`rig terminal open saved:kernel --window` on the daemon's desktop. It opens the
+TUI | advisor | operator view itself in a new terminal tab/window. Inspect its
+result and visible content, or state what you cannot confirm. Do not end by
+showing a table or suggesting a command for the person to type.
+Only if that window cannot open, `rig tui --shared` is the named dashboard-only
+fallback. Explain the window failure and help with the chosen fallback.
+The shared dashboard is the kernel's `operator.human` terminal, an ordinary TUI,
+not an agent or human-message inbox. Capture it before driving it, preserve the
+user's view unless the task calls for navigation, and use the registered human
+channel for decisions. If the TUI has exited, its shell remains; run `rig tui`
+there once.
 
 You run OpenRig on behalf of the user. The operator pod's `operator.human`
 member holds their shared terminal view. Human decisions use the registered

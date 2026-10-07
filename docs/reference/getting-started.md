@@ -5,7 +5,7 @@ the advisor and TUI beside it. No starter team is needed to reach that view.
 Tell the operator what you want to do, then choose a project team for a bounded
 change you can exercise. Reuse the accounts and terminal tools you already have.
 
-Want the **welcome screen**, the **OpenRig view**, or to **see my agents**?
+Want the **welcome screen**, the **OpenRig view**, or to **show me my agents** / **see my agents**?
 After installation and sign-in, the path is `rig daemon start` (if stopped),
 then `rig terminal open saved:kernel --window`. The second command opens the
 desktop window itself. An agent can run it from its shell on the daemon's
@@ -148,7 +148,7 @@ when it starts the daemon.
 
 ## Open the kernel conversations
 
-This is the **welcome screen** or **OpenRig view**. If someone asks to **“see my
+This is the **welcome screen** or **OpenRig view**. If someone asks to **“show me my agents”** or **“see my
 agents”**, use `rig terminal open saved:kernel --window`; you do not need to have
 run setup yourself to discover or use it. When the person has already asked you
 to open it, act on that request. Otherwise offer it as below.
@@ -246,8 +246,8 @@ rig terminal open saved:kernel --provider cmux --json
 ```
 
 Use `rig terminal status --json` to inspect provider availability and liveness.
-For the first desktop handoff, use `--window`. `rig tui --shared` is the team
-dashboard, not the operator's conversation.
+For the first desktop handoff, use `--window`. Only if the window cannot open,
+`rig tui --shared` is the dashboard-only fallback, not the operator's conversation.
 
 ### Talk to the operator in any terminal
 
@@ -297,7 +297,7 @@ rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The p
 Alternatively, have the person type the goal and folder in the operator pane.
 Show where the operator answers in the existing view or give the exact attach
 command [above](#talk-to-the-operator-in-any-terminal), with the observed name
-filled in. `rig tui --shared` opens the dashboard, not this conversation.
+filled in. The `rig tui --shared` fallback is only for a window that cannot open; it shows the dashboard, not this conversation.
 If the person gives the installing agent a goal later, forward the goal, folder
 and constraints with `rig send`; leave implementation with the operator's team.
 The operator helps the person choose and start a team, then hands the goal to its
@@ -421,9 +421,13 @@ Read the artifact, exercise its behavior, and check the candidate reviewed.
 
 ## Share the dashboard and return to it
 
-```sh
-rig tui --shared
-```
+For “show me my agents” or the welcome screen, the installing agent runs
+`rig terminal open saved:kernel --window` and checks the result. It does not
+finish by suggesting a dashboard command for the person to type.
+
+**Only if that window cannot open**, `rig tui --shared` is the dashboard-only
+fallback. Explain the window failure and help with this fallback if chosen;
+it does not show the advisor or operator conversation.
 
 A fresh kernel runs the ordinary TUI in its existing `operator-human` terminal.
 This command attaches another client to that terminal. **Ctrl-b, then d**
@@ -517,7 +521,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | "Readiness timeout after 30s — harness did not become interactive" | The harness took longer than the readiness window. Raise it for the next launch with `rig config set runtime.readiness_timeout_seconds <1-600>`, then relaunch that seat. |
 | Daemon is healthy, kernel is still starting | Read `rig status` and `rig ps --nodes --rig kernel`; kernel readiness is separate. |
 | Shared terminal is absent | Inspect the existing kernel binding and recovery state; use standalone `rig tui` while resolving it. |
-| Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` opens only the dashboard. Do not relaunch the team. |
+| Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` is only the dashboard fallback if that window cannot open. Do not relaunch the team. |
 | Daemon restarted but tmux survived | Re-read `rig status` and the existing queue; a daemon restart is not a fresh project. |
 | Host reboot lost tmux sessions | Open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
 | Launch reports no usable snapshot | Inspect the existing rig and retained project files, then follow the same-seat recovery below. |

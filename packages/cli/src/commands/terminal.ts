@@ -93,7 +93,7 @@ function printOpen(json: boolean, r: OpenViewResult, status: number): void {
 export function terminalCommand(depsOverride?: TerminalDeps): Command {
   const cmd = new Command("terminal").description(
     "Open the welcome screen and agent conversations in terminal tiles",
-  ).addHelpText("after", "\nWelcome screen / OpenRig view / see my agents:\n  rig terminal open saved:kernel --window\n  Opens the window itself on the daemon's desktop; an agent can run it from its shell.\n  Uses herdr when installed, otherwise the same layout in plain tmux.\n  rig tui is the team dashboard; talk to the operator in the welcome view.\n");
+  ).addHelpText("after", "\nWelcome screen / OpenRig view / show me my agents / see my agents:\n  rig terminal open saved:kernel --window\n  Opens the window itself on the daemon's desktop; an agent can run it from its shell.\n  Uses herdr when installed, otherwise the same layout in plain tmux.\n  Only if the window cannot open: rig tui --shared is the dashboard-only fallback.\n  An agent opens the view for the person; it does not finish by printing a command to copy.\n");
 
   const getDeps = (): TerminalDeps =>
     depsOverride ?? {

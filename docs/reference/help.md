@@ -66,12 +66,13 @@ Follow [Open the kernel conversations](getting-started.md#open-the-kernel-conver
 `rig terminal open saved:kernel --window` needs no saved-view YAML or starter team. After the selected login
 works, start the daemon if stopped, then read `rig status` and `rig ps --nodes --rig kernel`. Started is not ready;
 the view can open while the agents finish starting, with that state reported honestly.
-The person's words **“welcome screen”**, **“OpenRig view”** or **“see my agents”** lead to that command.
+The person's words **“welcome screen”**, **“OpenRig view”**, **“show me my agents”** or **“see my agents”** lead to that command.
 It opens the desktop window itself. An agent can run it from its shell on the daemon's desktop, including when
 it did not run setup; “my shell isn't your terminal” is not a reason to stop. Use the person's request to open it,
 or ask **“Open the OpenRig view now?”** if they have not chosen. The command uses installed Herdr, otherwise plain
-tmux, in a new terminal tab/window. Keep your terminal and existing conversations intact. `rig tui` is the team
-dashboard, not the operator's conversation. An existing cmux workspace remains available with `--provider cmux`
+tmux, in a new terminal tab/window. Keep your terminal and existing conversations intact. Only if that window
+cannot open, name `rig tui --shared` as the dashboard-only fallback; it does not show the operator conversation.
+Resolve or explain the window failure instead of ending with a command for the person to type. An existing cmux workspace remains available with `--provider cmux`
 without `--window`.
 
 If the person chooses a manual attachment after a failure, read `rig ps --nodes --rig kernel --json`, find
@@ -99,7 +100,7 @@ Automation permission; a missing display or remote daemon needs the documented h
 Herdr may show an intro (Return to continue) and an agent-integration panel (Esc to close); the view does not
 require installing those integrations. Enlarge a cramped 80×24 window. Use authorized desktop tools to inspect the
 window contents, or state that visibility is unconfirmed and ask the person to check. A successful command or
-window listing alone is not visual proof. The [full friction table](getting-started.md#what-can-interrupt-installation-and-the-welcome-screen)
+window listing alone is not visual proof. The [welcome-screen guide and friction table](getting-started.md#open-the-kernel-conversations)
 connects each observation to its next step. Preserve existing conversations while resolving it.
 
 ### The team did not start, or a terminal is missing

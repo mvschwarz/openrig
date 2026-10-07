@@ -11,8 +11,10 @@ runtime dependency (`yaml`); it reads the daemon's EXISTING projections (two ren
 ## Run — one herdr tile, daemon-direct
 
 From an installed CLI, `rig tui` opens mission control in the current terminal.
-`rig tui --shared` joins the kernel's shared terminal instead (detach with
-Ctrl-b d). The package's own bin is `openrig-tui` (`dist/main.js`).
+For “show me my agents” or the welcome screen, use
+`rig terminal open saved:kernel --window` to open the dashboard and conversations
+together. Only if that window cannot open, `rig tui --shared` is the dashboard-only
+fallback (detach with Ctrl-b d). The package's own bin is `openrig-tui` (`dist/main.js`).
 
 The TUI runs as ONE pane/tile inside herdr's wall (any tmux pane works the
 same way — the tile IS a tmux pane; no extra multiplexer, no integration
