@@ -530,6 +530,10 @@ after its own session ends. Check each result before calling the shutdown done.
 
 `rig daemon stop` stops only the background service and preserves agent tmux
 sessions. If you also want that service stopped, run it after stopping the rigs.
+If the operator is handling this full shutdown and kernel is included, it gives you this
+last step before running `rig down kernel`: once kernel is down, run
+`rig daemon stop` in your own shell and check the result. The operator's session
+ends with kernel, so it cannot run that final command for you afterwards.
 If the daemon is already stopped, use `rig daemon start --no-kernel` to restore
 the lifecycle API without booting a new kernel, then stop the remaining rigs.
 

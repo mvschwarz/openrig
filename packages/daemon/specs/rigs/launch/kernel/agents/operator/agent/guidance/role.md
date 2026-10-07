@@ -32,6 +32,10 @@ human channel; a terminal attachment is not a person's address.
   if it is included, since that ends your own session too. `rig daemon stop`
   stops the service but leaves agent sessions running; it comes after the rigs
   when the person also wants the service stopped.
+  If the service should also stop and kernel is included, before running
+  `rig down kernel` tell the person to run `rig daemon stop` in their own shell
+  once kernel is down and check its result. That hands off the final service
+  stop before your own session ends.
 - Restart selected work after a reboot. Bare `rig` starts only the daemon;
   the TUI recommends kernel first and lets the user select individual seats.
   When the user says "bring my rigs back online":
