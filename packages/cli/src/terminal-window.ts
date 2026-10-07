@@ -169,11 +169,16 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     if (herdr) {
       const endpoint = preview.data.status.launch;
       if (!endpoint?.socketPath) throw new Error("The daemon does not report its herdr endpoint. Update the daemon, or use --provider tmux --window.");
-      const configPath = deps.herdrConfig(endpoint.socketPath);
+      let configEnv = "";
+      try {
+        configEnv = ` HERDR_CONFIG_PATH=${shellQuote(deps.herdrConfig(endpoint.socketPath))}`;
+        windowNotes.push("Herdr starts with the sidebar collapsed unless this endpoint has a saved choice; later toggles are kept.");
+      } catch (error) {
+        windowNotes.push(`Could not prepare OpenRig's private Herdr settings (${error instanceof Error ? error.message : String(error)}); Herdr starts with its usual sidebar.`);
+      }
       // A CLI session would override the daemon's resolved socket in Herdr.
       windowAttempted = true;
-      window = await launchWindow(`env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} HERDR_CONFIG_PATH=${shellQuote(configPath)} ${shellQuote(herdr)}`);
-      windowNotes.push("Herdr starts with the sidebar collapsed unless this endpoint has a saved choice; later toggles are kept.");
+      window = await launchWindow(`env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)}${configEnv} ${shellQuote(herdr)}`);
       let alive = false;
       for (let attempt = 0; attempt < 20; attempt++) {
         const status = await client.get<{ providers: Array<{ liveness: { alive: boolean } }> }>("/api/terminal/status?provider=herdr");

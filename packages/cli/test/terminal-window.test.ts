@@ -121,14 +121,27 @@ describe("desktop terminal view", () => {
     expect(f.post).not.toHaveBeenCalled();
   });
 
-  it("does not open a window or apply a view if preserving the person's config fails", async () => {
+  it.each([
+    new Error("EACCES: cannot read Herdr config"),
+    new SyntaxError("Invalid TOML"),
+    new Error("EROFS: cannot write private Herdr config"),
+  ])("opens one window with the original configuration when preparation fails: %s", async error => {
     const f = fixture();
-    f.deps.herdrConfig = vi.fn(() => { throw new Error("Cannot read Herdr config"); });
-    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({
-      ok: false, windowAttempted: false, error: expect.stringContaining("Cannot read Herdr config"),
+    f.deps.env["HERDR_CONFIG_PATH"] = "/fixture/original config.toml";
+    const originalEnv = { ...f.deps.env };
+    f.deps.herdrConfig = vi.fn(() => { throw error; });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({
+      ok: true, opened: ["tui", "advisor", "operator"], window: { app: "Terminal", surface: "window" },
     });
-    expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript")).toBe(false);
-    expect(f.post).not.toHaveBeenCalled();
+    const launches = f.exec.mock.calls.filter(([file]) => file === "/usr/bin/osascript");
+    expect(launches).toHaveLength(1);
+    expect(launches[0]![1][2]).toBe("env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr'");
+    expect(f.deps.env).toEqual(originalEnv);
+    expect(f.deps.herdrConfig).toHaveBeenCalledExactlyOnceWith("/daemon home/herdr.sock");
+    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", expectedPlan: "bound-plan" }, { timeoutMs: 45_000 });
+    expect(result.notes).toContain(`Could not prepare OpenRig's private Herdr settings (${error.message}); Herdr starts with its usual sidebar.`);
+    expect(result.notes?.join(" ")).not.toContain("sidebar collapsed");
   });
 
   it("returns Automation denial without replaying in another terminal or applying a layout", async () => {
