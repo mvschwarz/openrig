@@ -16,8 +16,7 @@ import {
   upsertCmuxSocketControlMode,
 } from "../cmux-config.js";
 import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
-import { parse as parseToml } from "smol-toml";
-import { resolveCodexHome } from "../lib/codex-auth.js";
+import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
 
 export interface SetupStep {
   id: string;
@@ -64,40 +63,8 @@ export interface SetupDeps {
   env?: NodeJS.ProcessEnv;
 }
 
-/** Issue #194 — how the Codex provider selected in `$CODEX_HOME/config.toml`
- *  authenticates. Only an explicit provider entry with
- *  `requires_openai_auth = false` and an `env_key` uses its credential
- *  variable; every unresolved case keeps the OpenAI login check. Other Codex
- *  config layers are not resolved here. The daemon's kernel probe
- *  (`selectCodexProviderAuth` in kernel-boot.ts) carries the same rule. */
-export type CodexProviderAuth =
-  | { kind: "openai-login"; unresolved?: string }
-  | { kind: "env-key"; providerId: string; envKey: string };
-
-export function selectCodexProviderAuth(configToml: string | null): CodexProviderAuth {
-  if (configToml === null) return { kind: "openai-login" };
-  let config: Record<string, unknown>;
-  try {
-    config = parseToml(configToml) as Record<string, unknown>;
-  } catch {
-    return { kind: "openai-login", unresolved: "config.toml could not be parsed" };
-  }
-  if (Object.hasOwn(config, "profile")) {
-    return { kind: "openai-login", unresolved: "config.toml selects a legacy profile, which is not resolved here" };
-  }
-  const providerId = config["model_provider"];
-  const providers = config["model_providers"];
-  if (typeof providerId !== "string" || !providers || typeof providers !== "object" || !Object.hasOwn(providers, providerId)) {
-    return { kind: "openai-login" };
-  }
-  const entry = (providers as Record<string, unknown>)[providerId];
-  if (!entry || typeof entry !== "object") return { kind: "openai-login" };
-  const { requires_openai_auth: requiresOpenAiAuth, env_key: envKey } = entry as Record<string, unknown>;
-  if (requiresOpenAiAuth !== false || typeof envKey !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(envKey)) {
-    return { kind: "openai-login" };
-  }
-  return { kind: "env-key", providerId, envKey };
-}
+// Preserve the setup module's existing selector export.
+export { selectCodexProviderAuth, type CodexProviderAuth } from "../provider-auth.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const INSTALL_COMMAND_TIMEOUT_MS = 5 * 60_000;
@@ -137,7 +104,7 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
     runtime: "claude-code",
     path: ".claude/settings.local.json",
     purpose:
-      "Apply context-collector statusLine config and the acceptEdits floor fragment. OpenRig bakes NO allow/ask/deny permission policy — the harness-native permissions are the control surface.",
+      "Apply context-collector statusLine config and the acceptEdits floor fragment. The team and kernel launch defaults pass allow/ask lists per launch and save none; a selected Claude settings fragment can merge native settings, rules included; the harness-native permissions are the control surface.",
   },
   {
     scope: "project",
@@ -325,7 +292,7 @@ export function recordPermissionPolicyStep(deps: SetupDeps, choice: string, spec
       status: "fail",
       message: "No existing rig spec to record the policy into.",
       reason:
-        "The onboarding menu records a policy choice into an EXISTING spec only. A new install has no spec, so nothing is written — the usability floor holds by absence.",
+        "The onboarding menu records a policy choice into an EXISTING spec only. A new install has no spec, so nothing is written — team seats keep the team default.",
       fixHint: "Point --spec at an existing rig.yaml (or a directory containing one), then re-run `rig setup --policy`.",
     };
   }
@@ -565,27 +532,8 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     }
   }
 
-  if (claudeInstalled) {
-    try {
-      deps.exec("claude auth status");
-      steps.push({ id: "claude_auth", status: "pass", message: "Claude Code authentication available." });
-    } catch (err) {
-      steps.push({
-        id: "claude_auth",
-        status: "fail",
-        message: `Claude Code is installed but not ready to launch: ${(err as Error).message}`,
-        reason: "Claude Code seats cannot launch until the Claude CLI is logged in and usable.",
-        fixHint: "Run `claude auth login` or open `claude` once to complete authentication, then rerun `rig setup`.",
-      });
-    }
-  } else {
-    steps.push({
-      id: "claude_auth",
-      status: "skipped",
-      message: "Skipped: Claude Code is not installed.",
-      reason: "Authentication cannot be checked until the Claude Code CLI is installed.",
-    });
-  }
+  const { name: claudeName, fix: claudeFix, ...claudeAuth } = checkClaudeAuth(deps, claudeInstalled);
+  steps.push({ id: claudeName, ...claudeAuth, ...(claudeFix ? { fixHint: claudeFix } : {}) });
 
   // 5. Codex runtime
   let codexInstalled = false;
@@ -610,48 +558,8 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     }
   }
 
-  if (codexInstalled) {
-    const env = deps.env ?? process.env;
-    const codexAuth = selectCodexProviderAuth(deps.readFile(path.join(resolveCodexHome(env).codexHome, "config.toml")));
-    if (codexAuth.kind === "env-key") {
-      if (env[codexAuth.envKey]?.trim()) {
-        steps.push({
-          id: "codex_auth",
-          status: "pass",
-          message: `Codex provider "${codexAuth.providerId}" does not use an OpenAI login, and its credential variable ${codexAuth.envKey} is set. This confirms a local credential is available, not that the provider accepts it or that managed seats receive it.`,
-        });
-      } else {
-        steps.push({
-          id: "codex_auth",
-          status: "fail",
-          message: `Codex provider "${codexAuth.providerId}" needs ${codexAuth.envKey}, which is not set in this environment.`,
-          reason: "Codex seats using this provider cannot authenticate without that variable.",
-          fixHint: `Export ${codexAuth.envKey} in the environment that runs rig setup and the OpenRig daemon, then rerun \`rig setup\`.`,
-        });
-      }
-    } else {
-      try {
-        deps.exec("codex login status");
-        steps.push({ id: "codex_auth", status: "pass", message: "Codex authentication available." });
-      } catch (err) {
-        const unresolved = codexAuth.unresolved ? ` (${codexAuth.unresolved}, so the OpenAI login was checked)` : "";
-        steps.push({
-          id: "codex_auth",
-          status: "fail",
-          message: `Codex is installed but not ready to launch${unresolved}: ${(err as Error).message}`,
-          reason: "Codex seats cannot launch until the Codex CLI is logged in and usable.",
-          fixHint: "Run `codex login` and complete authentication, then rerun `rig setup`.",
-        });
-      }
-    }
-  } else {
-    steps.push({
-      id: "codex_auth",
-      status: "skipped",
-      message: "Skipped: Codex is not installed.",
-      reason: "Authentication cannot be checked until the Codex CLI is installed.",
-    });
-  }
+  const { name: codexName, fix: codexFix, ...codexAuth } = checkCodexAuth(deps, codexInstalled);
+  steps.push({ id: codexName, ...codexAuth, ...(codexFix ? { fixHint: codexFix } : {}) });
 
   // 6. tmux config
   const TMUX_CONF = `${process.env["HOME"] ?? "~"}/.tmux.conf`;
@@ -718,7 +626,14 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   let verification: SetupResult["verification"];
   if (!opts.dryRun && opts.doctorDeps) {
     const doctorDeps = opts.doctorDeps;
-    const doctor = runDoctorChecks(doctorDeps);
+    // Reuse the post-install facts above; do not repeat login probes during verification.
+    const providerChecks = steps
+      .filter((step) => ["claude_install", "claude_auth", "codex_install", "codex_auth"].includes(step.id))
+      .map(({ id, status, fixHint, ...check }) => ({
+        name: id, status: status === "applied" ? "pass" as const : status,
+        ...check, ...(fixHint ? { fix: fixHint } : {}),
+      }));
+    const doctor = runDoctorChecks(doctorDeps, providerChecks);
     const asyncResults = await Promise.all(doctor.asyncChecks);
     const allDoctorChecks = [...doctor.checks, ...asyncResults];
     verification = {
@@ -826,13 +741,17 @@ export function goldenPathNextSteps(): string[] {
  * skip-line phrasing, NO pre-selected default, and `Standard` carries the ⭐ recommendation marker.
  * REGISTER RULE (pm-lead): factual + version-neutral — never "treacherous"/editorializing/
  * founder-internal wording. Recording is a thought, never a gate — `rig up` always works bare.
+ * 0.6.7: the question, the deliberate-none line and the skip line now state the team launch default
+ * (#893) that ships with 0.6.6, matching docs/reference/getting-started.md and the
+ * applying-a-permission-policy skill. The labels, marker and register are unchanged.
  */
 export function permissionPolicyMenuLines(): string[] {
   return [
-    "Before team launch, your agent asks once (reuse an existing explicit choice):",
-    "  Allow your agents to run OpenRig commands without repeated permission prompts?",
-    "  Yes — recommended / No — keep prompts. No answer leaves settings unchanged too.",
-    "  Includes all rig verbs, lifecycle/config changes and launching processes; not global YOLO or authority to invent work.",
+    "Before team launch, your agent recommends keeping the team default (reuse an existing explicit choice):",
+    "  Claude team seats with no policy or explicit seat choice run ordinary rig commands, project reads and common tests without prompts; lifecycle commands such as rig up and rig down still ask.",
+    "  Only if you want more, it offers once: Remember these selected OpenRig commands in your native settings for this project?",
+    "  Yes / No — keep the team default. No answer leaves settings unchanged too.",
+    "  A remembered allowance can cover all rig verbs, but Claude team seats still ask before lifecycle commands; not global YOLO or authority to invent work.",
     "  Personal project scope unless you explicitly choose user-wide sessions. On Yes, the agent adds native rules, preserving stricter rules.",
     "  Procedure: rig context get skills/applying-a-permission-policy/SKILL.md",
     "  Undo: ask your agent to remove only the OpenRig command allowances added by this setup.",
@@ -844,12 +763,12 @@ export function permissionPolicyMenuLines(): string[] {
     "    Standard  ⭐      The recommended balanced built-in policy.",
     "    Open              The least restrictive built-in policy.",
     "  YOLO Mode           The full-bypass built-in policy.",
-    "  No policy — deliberate choice (recorded)",
+    "  No policy — deliberate choice (recorded): the floor, without the team allowances",
     "",
-    "  If you skip: OpenRig sets nothing — the usability floor only",
+    "  If you skip: nothing is recorded; team seats launch with the team default unless a seat choice or named Codex profile applies",
     "",
     "  To record a choice into an existing spec:",
-    "    rig setup --policy <locked|standard|open|yolo|none> --spec <path>",
+    "    rig setup --policy <locked|standard|open|yolo|auto|none> --spec <path>",
   ];
 }
 
@@ -901,7 +820,7 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
           if (step.fixHint) console.log(`    Fix: ${step.fixHint}`);
         }
         console.log("Only the harnesses selected for your project need a login; an unused harness does not.");
-        console.log("Run `rig doctor` for system checks; it does not check harness logins.");
+        console.log("Run `rig doctor` to recheck the system and provider authentication.");
       }
       // Keep the conversation route available even after a dry run or incomplete setup,
       // before the optional menu so a short output read still includes the handoff.

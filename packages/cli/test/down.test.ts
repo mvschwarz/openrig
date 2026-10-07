@@ -22,7 +22,7 @@ function mockLifecycleDeps(overrides?: Partial<LifecycleDeps>): LifecycleDeps {
   };
 }
 
-function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCode: number | undefined }> {
+function captureLogs(fn: () => Promise<void>, onLine?: (line: string) => void): Promise<{ logs: string[]; exitCode: number | undefined }> {
   return new Promise(async (resolve) => {
     const logs: string[] = [];
     const origLog = console.log;
@@ -30,7 +30,7 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
     const origExitCode = process.exitCode;
     process.exitCode = undefined;
     console.log = (...args: unknown[]) => logs.push(args.join(" "));
-    console.error = (...args: unknown[]) => logs.push(args.join(" "));
+    console.error = (...args: unknown[]) => { const line = args.join(" "); logs.push(line); onLine?.(line); };
     try { await fn(); } finally { console.log = origLog; console.error = origErr; }
     const exitCode = process.exitCode;
     process.exitCode = origExitCode;
@@ -64,6 +64,8 @@ describe("Down CLI", () => {
   // Count POST /api/down calls so the AC-3 discriminator can assert that an
   // ambiguous name reaches teardown ZERO times (fail-safe).
   let downCallCount: number;
+  let inventory: { status: number; data: unknown } | null;
+  let events: string[];
 
   beforeAll(async () => {
     responseOverride = null;
@@ -84,7 +86,15 @@ describe("Down CLI", () => {
         return;
       }
 
+      if (req.url === "/api/rigs/rig-1/nodes" && req.method === "GET") {
+        events.push("inventory");
+        if (inventory?.status === 0) { req.socket.destroy(); return; }
+        res.writeHead(inventory?.status ?? 404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(inventory?.data ?? { error: "not found" }));
+        return;
+      }
       if (req.url === "/api/down" && req.method === "POST") {
+        events.push("down");
         downCallCount += 1;
         lastBody = JSON.parse(body);
 
@@ -116,6 +126,8 @@ describe("Down CLI", () => {
     summaryOverride = null;
     downCallCount = 0;
     lastBody = undefined;
+    inventory = null;
+    events = [];
   });
 
   function makeCmd(): Command {
@@ -124,6 +136,73 @@ describe("Down CLI", () => {
     prog.addCommand(downCommand(runningDeps(port)));
     return prog;
   }
+
+  function node(logicalId: string, fields: Record<string, unknown> = {}) {
+    return { logicalId, nodeKind: "agent", sessionStatus: "running", canonicalSessionName: `${logicalId}@team`, ...fields };
+  }
+
+  it("names live agent sessions and served activity before teardown without prompting", async () => {
+    inventory = { status: 200, data: [
+      node("busy", { activityState: { display: "working" } }),
+      node("idle", { activityState: { display: "idle" } }),
+      node("uncertain", { activityState: { display: "unknown" }, agentActivity: { state: "running" }, hasAssignedWork: true }),
+      node("waiting", { activityState: { display: "needs-input" } }),
+      node("tool", { nodeKind: "infrastructure" }),
+      node("gone", { sessionStatus: "exited" }),
+      node("unbound", { sessionStatus: null }),
+    ] };
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["down", "rig-1"], { from: "user" });
+    }, line => { if (line.startsWith("Before stopping")) events.push("notice"); });
+    expect(logs[0]).toBe("Before stopping rig-1: recorded agent sessions: busy@team (activity: working), idle@team (activity: idle), uncertain@team (activity: unknown), waiting@team (activity: needs-input).");
+    expect(events).toEqual(["inventory", "notice", "down"]);
+    expect(downCallCount).toBe(1);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("does not infer activity from a live process or assigned work and supports legacy activity", async () => {
+    inventory = { status: 200, data: [
+      node("no-sample", { canonicalSessionName: null, hasAssignedWork: true }),
+      node("legacy-working", { agentActivity: { state: "running" } }),
+      node("legacy-idle", { sessionStatus: "idle", agentActivity: { state: "idle" } }),
+      node("legacy-waiting", { sessionStatus: "unknown", agentActivity: { state: "needs_input" } }),
+    ] };
+    const { logs } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1"], { from: "user" }).then(() => {}));
+    expect(logs[0]).toContain("no-sample (activity: unknown)");
+    expect(logs[0]).toContain("legacy-working@team (activity: working)");
+    expect(logs[0]).toContain("legacy-idle@team (activity: idle)");
+    expect(logs[0]).toContain("legacy-waiting@team (activity: needs-input)");
+    expect(downCallCount).toBe(1);
+  });
+
+  it.each([
+    { status: 0, data: null },
+    { status: 503, data: { error: "unavailable" } },
+    { status: 200, data: { items: [] } },
+    { status: 200, data: [null] },
+  ])("continues teardown with named unknown facts on unavailable or malformed inventory (%j)", async unavailable => {
+    inventory = unavailable;
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCmd().parseAsync(["down", "rig-1"], { from: "user" });
+    });
+    expect(logs[0]).toBe("Before stopping rig-1: agent sessions unknown; work status unknown.");
+    expect(downCallCount).toBe(1);
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("reports an empty live roster without claiming to stop absent agents", async () => {
+    inventory = { status: 200, data: [node("gone", { sessionStatus: "exited" })] };
+    const { logs } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1"], { from: "user" }).then(() => {}));
+    expect(logs[0]).toBe("Before stopping rig-1: no agent sessions reported live.");
+    expect(downCallCount).toBe(1);
+  });
+
+  it("preserves one JSON result without an inventory read or human notice", async () => {
+    const { logs } = await captureLogs(() => makeCmd().parseAsync(["down", "rig-1", "--json"], { from: "user" }).then(() => {}));
+    expect(events).toEqual(["down"]);
+    expect(logs).toHaveLength(1);
+    expect(JSON.parse(logs[0]!).rigId).toBe("rig-1");
+  });
 
   // T1: down success -> exit 0
   it("down success prints summary and exits 0", async () => {

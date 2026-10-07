@@ -115,7 +115,7 @@ an explicit install whose `install.skills` is empty clears it. This keeps
 catalog, the workspace root itself is the project (`selectedBy: workspace`, or
 `explicit` with a matching `--project`), and `--project` must match its
 `project.yaml` id. Operating posture uses steps 3-5
-the same way when a queue row names no project (see
+the same way when a task names no project (see
 [scoped operating posture](scoped-operating-posture.md)).
 
 1. `--project <id>`;
@@ -160,7 +160,7 @@ existing file-reader allowlist. Catalog membership does not grant file-read or
 execution permission. These views only read; they do not select a lifecycle
 operation or activate a mission. Execution and slice queue membership require
 an exact `project:<id>` tag; lifecycle instances use their authored project
-identity. Unscoped historical queue rows and global review artifacts without
+identity. Unscoped historical tasks and global review artifacts without
 project binding are excluded from project-specific claims.
 
 The read API adds `GET /api/scopes/projects` and optional `project` and

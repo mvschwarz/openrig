@@ -148,10 +148,11 @@ def light_learned(text):
     return body[:boundary if boundary > 0 else 800].rstrip() + "\n[… use --depth full for the rest]"
 
 
-def render_topology(start, root, depth):
+def render_topology(start, root, depth, failures):
     output = ["## TOPOLOGY TRACE", f"root: {root}", f"start: {start}"]
     nodes, error = ascent(start, root)
     if error:
+        failures.append(error)
         return "\n".join(output + [f"TRACE GAP — {error}"])
     for node in nodes:
         chain_file = node / "LEARNED.md"
@@ -165,12 +166,13 @@ def render_topology(start, root, depth):
     return "\n".join(output)
 
 
-def render_work(start, root, depth, fallback=None):
+def render_work(start, root, depth, failures, fallback=None):
     output = ["## WORK TRACE", f"root: {root}", f"start: {start}"]
     if fallback:
         output.append(f"FALLBACK — {fallback}")
     nodes, error = ascent(start, root)
     if error:
+        failures.append(error)
         return "\n".join(output + [f"TRACE GAP — {error}"])
     for node in nodes:
         label = node.relative_to(root) or Path(".")
@@ -188,12 +190,14 @@ def render_work(start, root, depth, fallback=None):
 
         notes, resolution_error = resolve_notes(node)
         if resolution_error:
+            failures.append(resolution_error)
             output.append(f"NOTES RESOLUTION GAP — {resolution_error} at {node}")
         elif notes:
             notes_path, notes_name = notes
             if depth == "full":
                 notes_text = read(notes_path)
                 if notes_text is None:
+                    failures.append(f"unreadable notes: {notes_path}")
                     output.append(f"NOTES RESOLUTION GAP — resolved {notes_name} became unreadable at {notes_path}")
                 else:
                     output.append(f"\nNOTES · {notes_name}\n{notes_text.strip()}")
@@ -201,6 +205,7 @@ def render_work(start, root, depth, fallback=None):
                 try:
                     size = notes_path.stat().st_size
                 except OSError:
+                    failures.append(f"unreadable notes: {notes_path}")
                     output.append(f"NOTES RESOLUTION GAP — resolved {notes_name} became unreadable at {notes_path}")
                 else:
                     output.append(f"NOTES · {notes_name} · {size} bytes · {notes_path}")
@@ -273,43 +278,49 @@ def main():
     parser.add_argument("--work-start")
     parser.add_argument("--work-basis", help="the daemon's reason no current work node was named")
     parser.add_argument("--work-unknown", help="why the current work node could not be read")
+    parser.add_argument("--check", action="store_true", help="exit nonzero on trace or notes resolution failure; rendered text is unchanged")
     args = parser.parse_args()
 
     sections = []
+    failures = []
+
+    def gap(text):
+        failures.append(text)
+        return text
     if args.trees in {"topology", "both"}:
         root = configured_root("topology.root", "OPENRIG_TOPOLOGY_ROOT")
         if root is None:
-            sections.append("## TOPOLOGY TRACE\nTRACE GAP — topology.root is unresolved")
+            sections.append(gap("## TOPOLOGY TRACE\nTRACE GAP — topology.root is unresolved"))
         else:
             start = Path(args.topology_start) if args.topology_start else derive_topology_start(root)
-            sections.append(render_topology(start, root, args.depth) if start else
-                            "## TOPOLOGY TRACE\nTRACE GAP — current topology node is unresolved; set OPENRIG_REFOCUS_TOPOLOGY_NODE")
+            sections.append(render_topology(start, root, args.depth, failures) if start else
+                            gap("## TOPOLOGY TRACE\nTRACE GAP — current topology node is unresolved; set OPENRIG_REFOCUS_TOPOLOGY_NODE"))
 
     if args.trees in {"work", "both"}:
         root = configured_root("workspace.root", "OPENRIG_WORKSPACE_ROOT")
         if root is None:
-            sections.append("## WORK TRACE\nTRACE GAP — workspace.root is unresolved")
+            sections.append(gap("## WORK TRACE\nTRACE GAP — workspace.root is unresolved"))
         else:
             # Precedence: an explicit start wins; then the hook's daemon answer (basis or unknown);
             # only a standalone run with neither falls back to inferring from the working directory.
             explicit = args.work_start or os.environ.get("OPENRIG_REFOCUS_WORK_NODE")
             if explicit:
-                sections.append(render_work(Path(explicit), root, args.depth))
+                sections.append(render_work(Path(explicit), root, args.depth, failures))
             elif args.work_basis == NO_CURRENT_BATON_BASIS:
-                sections.append(render_work(root, root, args.depth, fallback=(
+                sections.append(render_work(root, root, args.depth, failures, fallback=(
                     f"no current typed baton ({args.work_basis}). Showing the project-level chain from the work root: "
                     "a broad orientation, not evidence of a current mission")))
             elif args.work_basis:
-                sections.append(f"## WORK TRACE\nTRACE GAP — no single current work node: {args.work_basis}")
+                sections.append(gap(f"## WORK TRACE\nTRACE GAP — no single current work node: {args.work_basis}"))
             elif args.work_unknown:
-                sections.append(f"## WORK TRACE\nTRACE GAP — current work node UNKNOWN: {args.work_unknown}")
+                sections.append(gap(f"## WORK TRACE\nTRACE GAP — current work node UNKNOWN: {args.work_unknown}"))
             else:
                 start = derive_work_start(root)
-                sections.append(render_work(start, root, args.depth) if start else
-                                "## WORK TRACE\nTRACE GAP — current work node is unresolved; set OPENRIG_REFOCUS_WORK_NODE")
+                sections.append(render_work(start, root, args.depth, failures) if start else
+                                gap("## WORK TRACE\nTRACE GAP — current work node is unresolved; set OPENRIG_REFOCUS_WORK_NODE"))
 
     print("\n\n".join(sections))
-    return 0
+    return 1 if args.check and failures else 0
 
 
 if __name__ == "__main__":

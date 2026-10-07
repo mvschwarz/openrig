@@ -14,7 +14,7 @@ it is the mechanism that makes shipped chain files (see
 |---|---|---|---|
 | UserPromptSubmit | ✓ | ✓ | deliver due or on-demand context at a model-visible boundary |
 | Stop | ✓ | — | catch a long Claude turn crossing the growth threshold |
-| PostCompact | ✓ | ✓ | retain exact compaction due-state; deliver on the next prompt |
+| PostCompact | ✓ | ✓ | retain exact compaction due-state; deliver on the next actionable prompt |
 
 Claude's additional firing signal is **transcript growth** — not turns (one turn
 can burn 200k tokens across fifty tool calls) and not wall-clock (the failure is
@@ -25,7 +25,10 @@ redundant double-fire around Codex's own compaction cadence. Set
 `OPENRIG_REFOCUS_NOW=1` for an on-demand refocus and
 `OPENRIG_REFOCUS_ENABLED=0` to disable the feature. Fresh `SessionStart` is
 always a no-op: the default onboarding pack owns fresh orientation. Both
-runtimes retain `PostCompact` due-state for the next prompt. Otherwise the hook
+runtimes retain `PostCompact` due-state for the next prompt. The managed Claude
+acknowledgement-only boundary is skipped without consuming that state; the restore
+request explicitly asks the seat to read the refocusing skill and run both traces,
+and the read-depth audit checks that work. Otherwise the hook
 is a no-op (it writes a stderr advisory when the transcript shrinks or the
 session has no identity), and it degrades to silence on unrelated hook errors.
 Both runtimes stop the hook after 5 seconds, and the content REF lookup gets 2;
@@ -33,6 +36,13 @@ a slow REF shows as `REFOCUS CONTENT REF FAILED`. A
 configured REF resolution failure instead degrades
 loudly in the delivered payload while still completing the hook — a refocus
 must never break a seat's turn.
+
+Failed trace or configured-content resolution keeps refocus due. After three
+consecutive failed attempts for the same seat and occupant, the hook emits one
+idempotent issue-stream item tagged `issue,refocus`, visible through `rig stream
+list --tag refocus`. A successful delivery resets that failure episode. An
+unconfirmed stream write keeps the same item ID for the next failed attempt; it
+does not send a wake, change seat status, or prove the agent read the content.
 
 Because the hook runs at the seat's own turn boundaries, delivery to a
 RUNNING seat needs no relaunch, no operator action, and no message traffic:

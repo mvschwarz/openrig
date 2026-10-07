@@ -86,8 +86,8 @@ permissions, supplies a missing product decision or authorizes more work.
 
 ## Permissions at the point of work
 
-Before the first task, ask the agent to configure your choice: keep prompts,
-remember selected commands, or deliberately select broader access. Use
+Before the first task, ask the agent to configure your choice: keep the team
+default, remember selected commands, or deliberately select broader access. Use
 `rig context get skills/applying-a-permission-policy/SKILL.md`, or the
 [compatible source/package paths](../SKILL.md#find-the-compatible-permission-guide).
 The agent handles setup and verifies the actual conversation; the user need not

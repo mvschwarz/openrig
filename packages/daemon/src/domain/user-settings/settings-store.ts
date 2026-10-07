@@ -589,7 +589,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "recovery.provider_auth_env_allowlist": return "";
     // V1 Phase 4 — Advisor default per universal-shell.md L83;
     // Operator default empty per L84 ("not configured").
-    case "agents.advisor_session": return "advisor-lead@openrig-velocity";
+    case "agents.advisor_session": return "advisor-lead@kernel";
     case "agents.operator_session": return "";
     // V1 Phase 5 P5-3 — For You feed subscription defaults per
     // for-you-feed.md L144–L151. action_required is forced ON in the UI

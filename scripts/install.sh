@@ -88,7 +88,7 @@ install_main() {
   fi
   install_step 3/4 "$install_rig" setup --dry-run
   install_step 4/4 "$install_rig" setup
-  printf '\n%s\n' 'Follow the next steps printed by rig setup: choose your providers, then rig up.'
+  printf '\n%s\n' 'Follow the next steps printed by rig setup: start the daemon, open the OpenRig view, then tell the operator what you want to build.'
 }
 
 # Setup prints policy guidance, not an input prompt. EOF keeps children from

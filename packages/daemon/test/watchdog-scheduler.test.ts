@@ -42,7 +42,7 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
     });
   }
 
-  it("isDue returns true for never-evaluated jobs", () => {
+  it("isDue waits a full interval for a never-evaluated periodic reminder (#801)", () => {
     const job = jobsRepo.register({
       policy: "periodic-reminder",
       specYaml: "context:\n  target:\n    session: a@rig\n  message: x\n",
@@ -50,7 +50,56 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
       intervalSeconds: 30,
       registeredBySession: "ops@kernel",
     });
+    const registeredAt = Date.parse(job.registeredAt);
+    expect(isDue(job, registeredAt)).toBe(false);
+    expect(isDue(job, registeredAt + 29_999)).toBe(false);
+    expect(isDue(job, registeredAt + 30_000)).toBe(true);
+  });
+
+  it("isDue still returns true immediately for never-evaluated non-periodic jobs", () => {
+    const job = jobsRepo.register({
+      policy: "artifact-pool-ready",
+      specYaml: "context:\n  target:\n    session: a@rig\n",
+      targetSession: "a@rig",
+      intervalSeconds: 30,
+      registeredBySession: "ops@kernel",
+    });
     expect(isDue(job, Date.now())).toBe(true);
+  });
+
+  it("stays immediately due for a pre-upgrade pending wake (null evaluation + pending event, #860)", () => {
+    const pendingSpec = JSON.stringify({
+      policy: "periodic-reminder",
+      target: { session: "a@rig" },
+      message: "x",
+      context: { queue_wait: { qitemId: "qitem-1", eventPending: true } },
+    });
+    const pending = jobsRepo.register({
+      policy: "periodic-reminder",
+      specYaml: pendingSpec,
+      targetSession: "a@rig",
+      intervalSeconds: 300,
+      registeredBySession: "ops@kernel",
+    });
+    expect(pending.lastEvaluationAt).toBeNull();
+    // Same instant, same null evaluation — the pending event is the split:
+    // upgrade state fires now, a fresh arm waits its first interval.
+    expect(isDue(pending, Date.now())).toBe(true);
+
+    const freshSpec = JSON.stringify({
+      policy: "periodic-reminder",
+      target: { session: "a@rig" },
+      message: "x",
+      context: { queue_wait: { qitemId: "qitem-2", eventPending: false } },
+    });
+    const fresh = jobsRepo.register({
+      policy: "periodic-reminder",
+      specYaml: freshSpec,
+      targetSession: "a@rig",
+      intervalSeconds: 300,
+      registeredBySession: "ops@kernel",
+    });
+    expect(isDue(fresh, Date.now())).toBe(false);
   });
 
   it("isDue returns false when interval not yet elapsed", () => {
@@ -97,6 +146,7 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
       registeredBySession: "ops@kernel",
     });
     jobsRepo.recordEvaluation(j1.jobId, new Date(Date.now() - 5_000).toISOString(), true);
+    jobsRepo.recordEvaluation(j2.jobId, new Date(Date.now() - 60_000).toISOString(), true);
 
     const engine = makeEngine();
     const sched = new WatchdogScheduler({ jobsRepo, policyEngine: engine });
@@ -112,6 +162,8 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
       intervalSeconds: 1,
       registeredBySession: "ops@kernel",
     });
+    // Seed a past evaluation: fresh registrations wait their first interval (#801).
+    jobsRepo.recordEvaluation(job.jobId, new Date(Date.now() - 5_000).toISOString(), true);
     const engine = makeEngine();
     const sched = new WatchdogScheduler({ jobsRepo, policyEngine: engine });
     await sched.runTickNow();
@@ -130,6 +182,9 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
       intervalSeconds: 30,
       registeredBySession: "ops@kernel",
     });
+    // Otherwise-due job: without the stop it would fire, so this fails if
+    // the exclusion breaks.
+    jobsRepo.recordEvaluation(job.jobId, new Date(Date.now() - 60_000).toISOString(), true);
     jobsRepo.stop(job.jobId);
     const engine = makeEngine();
     const sched = new WatchdogScheduler({ jobsRepo, policyEngine: engine });
@@ -145,6 +200,9 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
       intervalSeconds: 30,
       registeredBySession: "ops@kernel",
     });
+    // Otherwise-due job: without the terminal mark it would fire, so this
+    // fails if the exclusion breaks.
+    jobsRepo.recordEvaluation(job.jobId, new Date(Date.now() - 60_000).toISOString(), true);
     jobsRepo.markTerminal(job.jobId, "done");
     const engine = makeEngine();
     const sched = new WatchdogScheduler({ jobsRepo, policyEngine: engine });
@@ -154,7 +212,9 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
 
   it("policy evaluation errors are caught and tick continues for siblings", async () => {
     // Job 1 has no message anywhere — periodic-reminder throws policy_spec_invalid.
-    jobsRepo.register({
+    // Both jobs carry a past evaluation so the tick reaches evaluation (#801:
+    // fresh registrations wait their first interval instead of firing).
+    const bad = jobsRepo.register({
       policy: "periodic-reminder",
       specYaml: "policy: periodic-reminder\ntarget:\n  session: a@rig\n",
       targetSession: "a@rig",
@@ -168,6 +228,8 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
       intervalSeconds: 30,
       registeredBySession: "ops@kernel",
     });
+    jobsRepo.recordEvaluation(bad.jobId, new Date(Date.now() - 60_000).toISOString(), true);
+    jobsRepo.recordEvaluation(ok.jobId, new Date(Date.now() - 60_000).toISOString(), true);
     const engine = makeEngine();
     const errors: unknown[] = [];
     const sched = new WatchdogScheduler({
@@ -296,13 +358,16 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
   });
 
   it("recovers schedule across restart via SQLite (new repo + new scheduler picks up active jobs)", async () => {
-    jobsRepo.register({
+    const job = jobsRepo.register({
       policy: "periodic-reminder",
       specYaml: "context:\n  target:\n    session: persist@rig\n  message: persisted\n",
       targetSession: "persist@rig",
       intervalSeconds: 1,
       registeredBySession: "ops@kernel",
     });
+    // A due evaluation from before the restart: fresh registrations wait
+    // their first interval (#801), so seed the past to exercise recovery.
+    jobsRepo.recordEvaluation(job.jobId, new Date(Date.now() - 5_000).toISOString(), true);
     // Simulate restart: new repo + new history-log + new engine + new scheduler
     // sharing the same DB handle. Phase A/B pattern; SQLite is canonical.
     const repo2 = new WatchdogJobsRepository(db);

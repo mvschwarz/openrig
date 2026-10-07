@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const COMPACTION_TEMPLATE = "   `<launch cwd>/.openrig/compaction/preparation/<session>/<attempt>/RESTORE-MAP.md`; its parent";
 
 test("scanner blocks internal paths before reading content", async () => {
   const scanner = await loadScanner();
@@ -80,6 +83,55 @@ test("scanner finds tokens in NUL-containing bytes and does not crash on clean b
       rules: fixtureRules(),
     }),
   );
+});
+
+test("exact-line allowances preserve modified lines, adjacent findings and internal paths", async () => {
+  const { scanInternalLeaks } = await loadScanner();
+  const line = COMPACTION_TEMPLATE;
+  const rules = {
+    ...fixtureRules(),
+    path_prefixes: [".openrig/compaction/"],
+    allowed_context_lines: [line],
+  };
+  const scan = (text, path = "skills/public/SKILL.md") => scanInternalLeaks({
+    path, bytes: Buffer.from(text), rules,
+  });
+
+  assert.deepEqual(scan(line), []);
+  for (const modified of [
+    line.replace("<launch cwd>", "/home/example/project"),
+    line.replace("<session>/<attempt>", "session-1/attempt-1"),
+    `${line} appended detail`,
+    `prefix ${line}`,
+    line.trimStart(),
+    line.toUpperCase(),
+  ]) {
+    assert.ok(scan(modified).some(({ token }) => token === ".openrig/compaction/"));
+  }
+  assert.deepEqual(scan(`${line}\n.openrig/compaction/private.txt\n`).map(({ line }) => line), [2]);
+  assert.equal(scan(line, "skills/internal/SKILL.md")[0].kind, "path");
+});
+
+test("generated rules allow the shipped compaction template and still detect concrete paths", async () => {
+  const { scanInternalLeaks } = await loadScanner();
+  const rules = JSON.parse(readFileSync(new URL("./internal-tokens.generated.json", import.meta.url), "utf8"));
+  const bytes = readFileSync(new URL(
+    "../packages/daemon/assets/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md",
+    import.meta.url,
+  ));
+  assert.ok(bytes.toString("utf8").split("\n").includes(COMPACTION_TEMPLATE));
+  assert.ok(rules.allowed_context_lines.includes(COMPACTION_TEMPLATE));
+  assert.ok(rules.path_prefixes.includes(".openrig/compaction/"));
+  for (const path of [
+    "daemon/assets/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md",
+    "daemon/context-packs/skills/claude-compaction-restore/SKILL.md",
+  ]) {
+    assert.deepEqual(scanInternalLeaks({ path, bytes, rules }), []);
+    const changed = Buffer.from(bytes.toString("utf8").replace(COMPACTION_TEMPLATE,
+      `${COMPACTION_TEMPLATE} .openrig/compaction/preparation/session-1/attempt-1/RESTORE-MAP.md`));
+    assert.ok(scanInternalLeaks({ path, bytes: changed, rules }).some(({ token }) =>
+      token === ".openrig/compaction/"));
+  }
 });
 
 test("scanner returns findings in deterministic path/token/line order", async () => {

@@ -39,6 +39,18 @@ export function isQueueWait(specYaml: string): boolean {
   catch { return false; }
 }
 
+/**
+ * Upgrade bridge (#860): builds predating the first-interval rule marked a
+ * pending wake by writing a null lastEvaluationAt. Fresh arms always start
+ * with eventPending false (and record an evaluation at registration), so a
+ * null evaluation plus a pending event can only be pre-upgrade state — and
+ * stays immediately due instead of waiting out a fresh first interval.
+ */
+export function isQueueWaitEventPending(specYaml: string): boolean {
+  try { return JSON.parse(specYaml).context?.queue_wait?.eventPending === true; }
+  catch { return false; }
+}
+
 /** The exact blocker owns progress signals. Ignore delivery receipts; do not
  * interpret its notes. Our own waiting acknowledgments are on a different row. */
 function blockerTransition(db: Database.Database, blocker: string | null): number | null {
@@ -108,7 +120,10 @@ export function refreshQueueWaits(db: Database.Database, jobs: WatchdogJobsRepos
     state.blockerTransition = current;
     state.attentionRevision = revision;
     state.eventPending = true;
-    jobs.updateSchedule(job.jobId, JSON.stringify(spec), state.initialSeconds, null);
+    // Wake-now: a blocker change must wake the owner even inside the first
+    // interval (#801 gives fresh reminders a full first interval, so null no
+    // longer means due). Write the epoch, which is always due, instead.
+    jobs.updateSchedule(job.jobId, JSON.stringify(spec), state.initialSeconds, new Date(0).toISOString());
   }
 }
 
@@ -162,6 +177,7 @@ export function retargetQueueWait(db: Database.Database, jobs: WatchdogJobsRepos
   const spec = job ? readWait(job) : null;
   if (!job || !spec) return false;
   Object.assign(spec.context.queue_wait, { blocker, blockerTransition: blockerTransition(db, blocker), eventPending: true, notice: undefined });
-  jobs.updateSchedule(jobId, JSON.stringify(spec), spec.context.queue_wait.initialSeconds, null);
+  // Wake-now on custody move: epoch is always due, unlike null (#801).
+  jobs.updateSchedule(jobId, JSON.stringify(spec), spec.context.queue_wait.initialSeconds, new Date(0).toISOString());
   return true;
 }

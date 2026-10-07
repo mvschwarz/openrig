@@ -156,7 +156,9 @@ describe("authored mission boundary with event-first wait", () => {
     const jobId = timer(run.entryQitemId).jobId;
     stepTime(1);
     await queue.claim({ qitemId: blocker.qitemId, destinationSession: "worker@rig", actorSession: "worker@rig" });
-    expect(timer(run.entryQitemId).lastEvaluationAt).toBeNull();
+    // Wake-now marker: epoch is always due, so a blocker change 1s into the
+    // 300s wait still wakes (#801 keeps fresh reminders on full interval).
+    expect(timer(run.entryQitemId).lastEvaluationAt).toBe(new Date(0).toISOString());
     await scheduler.runTickNow();
     expect(delivered).toHaveLength(1);
     expect(timer(run.entryQitemId).intervalSeconds).toBe(300);
@@ -166,7 +168,8 @@ describe("authored mission boundary with event-first wait", () => {
     stopEvents();
     await queue.update({ qitemId: blocker.qitemId, actorSession: "worker@rig", state: "in-progress", transitionNote: "New receipt evidence" });
     wire();
-    expect(timer(run.entryQitemId).lastEvaluationAt).toBeNull();
+    // Same wake-now marker on the evidence path.
+    expect(timer(run.entryQitemId).lastEvaluationAt).toBe(new Date(0).toISOString());
     await scheduler.runTickNow();
     expect(delivered).toHaveLength(2);
     expect(timer(run.entryQitemId).jobId).toBe(jobId);

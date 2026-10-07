@@ -5,6 +5,12 @@ and the affected work before acting. You already own these operational
 diagnoses; the queue worker retains intake classification. Never report an
 unknown activity signal as idle or a persisted running record as process proof.
 
+For the kernel's first-boot health check, run `rig daemon status` and
+`rig ps --nodes --rig kernel` as separate shell tool calls and read their output
+directly. Claude Code can ask for approval for a compound command containing
+pipes, redirects or subshells even when its individual commands are allowed;
+these plain commands let the health check finish without that extra prompt.
+
 The shared dashboard is the kernel's `operator.human` terminal. The human can enter with
 `rig tui --shared`, or through `rig terminal open saved:kernel --provider herdr`
 (cmux is also supported). It is an ordinary TUI in a terminal, not an agent
@@ -21,6 +27,15 @@ human channel; a terminal attachment is not a person's address.
 - Bring rigs up and down (`rig up <spec>`, `rig down <rigId>`). `rig down` and `rig seat stop`
   end agents' sessions and any work in progress: check `rig ps --nodes --rig <name>` first, and
   stop a team or seat only when the person asked for it.
+  For "stop everything", list the rigs with `rig ps --json`, then run `rig down`
+  for each rig they want stopped while the daemon is available. Stop kernel last
+  if it is included, since that ends your own session too. `rig daemon stop`
+  stops the service but leaves agent sessions running; it comes after the rigs
+  when the person also wants the service stopped.
+  If the service should also stop and kernel is included, before running
+  `rig down kernel` tell the person to run `rig daemon stop` in their own shell
+  once kernel is down and check its result. That hands off the final service
+  stop before your own session ends.
 - Restart selected work after a reboot. Bare `rig` starts only the daemon;
   the TUI recommends kernel first and lets the user select individual seats.
   When the user says "bring my rigs back online":
@@ -63,7 +78,11 @@ question through the human channel instead.
      fetched fresh, for example with `curl -fsSL <that link>`. A web tool's cached
      copy can be older than the current pin and would launch an older workshop;
      the raw link itself can trail a new pin by a few minutes (it is cached for
-     300 seconds).
+     300 seconds). If permission prompts are slowing the person down, point
+     them to https://openrig.dev/rigs/workshop: the bundle ships with broad
+     access and non-interruptive mode, bypassing permission prompts and
+     supported harness warning dialogs. Its listing and before-install view
+     explain that access so they can choose it knowingly.
    - `factory`: seven agents (a lead, an advisor, build, QA, design and two
      independent reviewers) for sustained product work. Built in; it uses the
      most concurrent capacity.
@@ -120,6 +139,16 @@ question through the human channel instead.
    person or a fix. If `rig up` reports `Status: partial` with
    `Startup attention (<seat>): <reason>`, tell them what that seat is waiting
    for and the command its reason ends with.
+   Relay any untracked-file warnings from `rig up` to the person, including the
+   paths and suggested local exclude lines. Those files were created by the
+   launch, so describe them as OpenRig additions rather than pre-existing work.
+   - **A Codex seat says its model requires a newer version of Codex:** their
+     Codex is older than the model the team pins (the starter's reviewer uses
+     `gpt-6-astra`, which Codex 0.145 can't run). Tell them, and offer to update
+     Codex the way it was installed, for example
+     `npm install -g @openai/codex`. On their yes, update it, then start
+     that seat again. It's context for them, not a reason to stop or change the
+     team.
 8. **Show them the team.** Capture the shared TUI: its session is the
    `operator.human` member's `canonicalSessionName` in
    `rig ps --nodes --rig kernel --json`. Only when the capture shows the TUI's

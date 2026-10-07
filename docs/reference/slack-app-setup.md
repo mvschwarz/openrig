@@ -63,9 +63,10 @@ groups:
   a member of, and reading channel details.
   `rig slack verify` checks these.
 - **Feature scopes**: `files:read` (download attachments people send), `files:write` (upload
-  attachments to Slack), and `app_mentions:read` (receive @-mentions of the app). `rig slack verify`
-  warns when one of these is missing (if Slack returns the granted scopes) but does not require
-  them, so a READY from verify does not prove attachments or mentions will work.
+  attachments to Slack), `app_mentions:read` (receive @-mentions of the app), and `reactions:read`
+  (receive emoji reactions). `rig slack verify` warns when one of these is missing (if Slack returns
+  the granted scopes) but does not require them, so a READY from verify does not prove attachments,
+  mentions or reactions will work.
 
 If a feature scope was not granted, the effect differs by feature:
 
@@ -75,12 +76,21 @@ If a feature scope was not granted, the effect differs by feature:
   the failure appears only in the daemon log (`rig daemon logs`).
 - **Mentions** (`app_mentions:read`): Slack does not deliver `app_mention` events to the app.
   Only `rig slack verify` warns that the scope is missing; nothing reports the missing events.
+- **Reactions** (`reactions:read`): Slack does not deliver `reaction_added` events, so a reaction
+  on an ask doesn't reach the asking agent. A reply in the ask's thread still does.
 
-So after installing, compare the granted scopes Slack shows for the app with all six scopes that
+So after installing, compare the granted scopes Slack shows for the app with all seven scopes that
 `rig slack manifest --json` lists.
 
-The app subscribes to messages in public channels it is a member of (`message.channels`) and to
-mentions of the app (`app_mention`). It does not request direct-message or private-channel access.
+The app subscribes to messages in public channels it is a member of (`message.channels`), to
+mentions of the app (`app_mention`), and to emoji reactions (`reaction_added`). It does not request
+direct-message or private-channel access.
+
+A reaction added to an ask's message reaches the agent that asked, as a note naming who reacted
+and with which emoji; the agent decides what it means. A reaction on any other message is
+ignored. An app created from an older manifest has neither the `reactions:read` scope nor the
+`reaction_added` event: add both under **OAuth & Permissions** and **Event Subscriptions**, then
+reinstall the app to the workspace.
 
 The manifest also turns on **Interactivity**, so the human can answer a decision's structured
 questions by clicking a button (`rig queue create --human-questions-file`). In Socket Mode the
@@ -105,7 +115,7 @@ part of OpenRig.
 
 The daemon scans available top-level messages in the configured channel after a
 Socket Mode connection and on its existing five-minute retry cadence. Recovered
-queue rows say **Recovered after a gap** and show the original Slack posting time.
+tasks say **Recovered after a gap** and show the original Slack posting time.
 They use the same sender admission, routing, attachment handling, fixed identity
 and dead-letter path as live messages. A durable dead letter is custody of a
 failed delivery, not successful delivery.

@@ -12,11 +12,12 @@ describe("remote down operation outcomes", () => {
   let server: ReturnType<typeof serve>;
   let url: string;
   let outcome = {};
+  let noticeAtTeardown = "";
 
   beforeAll(async () => {
     const app = new Hono();
     app.use("*", async (c, next) => {
-      c.set("teardownOrchestrator" as never, { teardown: async () => outcome } as never);
+      c.set("teardownOrchestrator" as never, { teardown: async () => { noticeAtTeardown = String(vi.mocked(console.error).mock.calls.at(-1)?.[0] ?? ""); return outcome; } } as never);
       c.set("rigRepo" as never, {
         getRig: () => ({ rig: { name: "owned-rig" } }),
         findRigsByName: () => [{ id: "owned-rig-id" }],
@@ -24,6 +25,9 @@ describe("remote down operation outcomes", () => {
       await next();
     });
     app.get("/api/ps", c => c.json([{ rigId: "owned-rig-id", name: "owned-rig" }]));
+    app.get("/api/rigs/owned-rig-id/nodes", c => c.json([
+      { logicalId: "lead", canonicalSessionName: "lead@owned-rig", nodeKind: "agent", sessionStatus: "running", activityState: { display: "working" } },
+    ]));
     app.route("/api/down", downRoutes);
     server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
     if (!server.listening) await new Promise<void>(resolve => server.once("listening", resolve));
@@ -71,6 +75,7 @@ describe("remote down operation outcomes", () => {
           // the HTTP request succeeded, even when teardown reports partial work.
           expect(json ? printed.data.errors : printed.errors).toEqual(testCase.errors);
           if (json) expect(printed.ok).toBe(true);
+          expect(noticeAtTeardown).toBe(json ? "" : "Before stopping owned-rig-id: recorded agent sessions: lead@owned-rig (activity: working).");
         } finally {
           process.exitCode = originalExit;
           log.mockRestore();

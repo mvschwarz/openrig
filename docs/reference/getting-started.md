@@ -40,12 +40,36 @@ and offers to remember selected OpenRig commands in your native settings only if
 you want that. An existing explicit choice is reused; No or no answer keeps the
 team default and leaves settings unchanged. Broader access is separate.
 
+If permission prompts are slowing you down, consider the
+[workshop bundle](https://openrig.dev/rigs/workshop). It ships with broad access
+and [non-interruptive mode](non-interruptive-mode.md): its agents bypass
+permission prompts and supported harness warning dialogs. The listing and
+before-install view explain that access before you choose it.
+
 > Everything below reports **what is currently true**, never a guarantee that
 > downstream work will succeed. "Daemon up" does not mean every agent is healthy;
 > "kernel ready" does not mean every kernel agent is healthy; a workspace root
 > being *live* does not mean it is the *right* one for your project.
 
 ## Install and sign in
+
+**One command, when the person wants the full setup.** It needs Node.js 22 or 24 with npm already installed. First
+run the preview, which prints what the script will do and changes nothing, and show the person that plan:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh -s -- --dry-run
+```
+
+With their yes, run the same command without `--dry-run`:
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh`. It installs the
+latest published `@openrig/cli` with `npm install -g`,
+runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
+Codex and may install a missing one, as described below. A failed step prints
+`FAILED [n/4] <command or check> (exit <code>)`. Where a provider isn't signed in yet, step 4 ends that way and
+`rig setup` lists each sign-in under "Some steps need attention". If the only remaining failures are provider
+sign-ins, the install steps finished: sign in to each selected provider as below, then continue at
+[Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
+by step instead:
 
 ### Choose your providers
 
@@ -321,6 +345,12 @@ If the person chooses to talk later, keep that choice, leave the exact connectio
 step, and say that the conversation handoff is still pending. SSH, headless use,
 and declining a desktop view remain valid background outcomes.
 
+Stopping OpenRig keeps a team's work, and the branch a team makes is your
+change: an agent tidying up says what's on it before offering to remove it. The
+operator starts a team when you ask for one in its conversation, so an agent
+reporting back checks `rig ps` or the team's tasks before saying a team started
+on its own.
+
 ## Choose your first team
 
 Tell the kernel operator what you want to do. It asks about your goal, presents
@@ -381,7 +411,7 @@ Approval controls whether an action may run; the sandbox controls its filesystem
 and network access. Turning approvals off does not grant network access.
 
 After answering, watch for the command's result and the agent continuing. Read
-the corresponding queue row and transition from your ordinary terminal. If an
+the corresponding task and its history from your ordinary terminal. If an
 operation timed out, read its result before asking for another attempt: it may
 already have taken effect. A delivered message or disappearing prompt alone is
 not progress. If startup is still waiting for context delivery, use **c** (or
@@ -488,6 +518,30 @@ three choices clear: stay with the pair, add one or two seats to the running rig
 with `rig grow` and no YAML, or optionally author a custom rig. It covers
 new-seat context/work ownership, concurrency costs and saving the expanded spec.
 This guide remains the short first-use path.
+
+## Stop your teams
+
+`rig down <rig-name>` ends that rig's agent sessions and work in progress.
+Read `rig ps --nodes --rig <rig-name>` first so you can see who will stop.
+For example, to stop starter:
+
+```sh
+rig down starter
+```
+
+For "stop everything", list the rigs with `rig ps --json` and run `rig down`
+for each one you want stopped. Include `kernel` last if you want its operator,
+advisor and queue worker stopped too; its operator cannot continue helping
+after its own session ends. Check each result before calling the shutdown done.
+
+`rig daemon stop` stops only the background service and preserves agent tmux
+sessions. If you also want that service stopped, run it after stopping the rigs.
+If the operator is handling this full shutdown and kernel is included, it gives you this
+last step before running `rig down kernel`: once kernel is down, run
+`rig daemon stop` in your own shell and check the result. The operator's session
+ends with kernel, so it cannot run that final command for you afterwards.
+If the daemon is already stopped, use `rig daemon start --no-kernel` to restore
+the lifecycle API without booting a new kernel, then stop the remaining rigs.
 
 ## Incomplete setup and restart
 

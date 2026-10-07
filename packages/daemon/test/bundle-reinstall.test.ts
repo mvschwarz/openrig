@@ -7,6 +7,7 @@ import { pack } from "../src/domain/bundle-archive.js";
 import { computeIntegrity } from "../src/domain/bundle-integrity.js";
 import { stringify } from "yaml";
 import { materializePodBundle } from "../src/domain/bundle-source-resolver.js";
+import type { BootstrapResult, BootstrapStageResult } from "../src/domain/bootstrap-orchestrator.js";
 
 describe("bundle reinstall through both public routes", () => {
   let root: string;
@@ -69,6 +70,50 @@ describe("bundle reinstall through both public routes", () => {
     db.prepare("UPDATE sessions SET status = 'exited' WHERE node_id IN (SELECT id FROM nodes WHERE rig_id = ?)").run(rigId);
   }
 
+  const failed = (stage: string, code: string, message?: string): BootstrapStageResult => ({
+    stage, status: "failed", detail: { code, ...(message ? { message } : {}) },
+  });
+  const blocked: BootstrapStageResult = { stage: "approve", status: "blocked", detail: { reason: "approval required" } };
+  const refusalCases: { label: string; stages: BootstrapStageResult[]; plan: boolean; status: number; code?: string; error?: string }[] = [
+    ...["file_not_found", "parse_error", "validation_failed", "bundle_error", "cycle_error", "invalid_cwd"].flatMap(code => [
+      { label: `plan resolve ${code}`, stages: [failed("resolve_spec", code)], plan: true, status: 400 },
+      { label: `apply resolve ${code}`, stages: [failed("resolve_spec", code)], plan: false, status: 400, code },
+    ]),
+    { label: "apply target conflict", stages: [failed("resolve_spec", "target_conflict")], plan: false, status: 400, code: "target_conflict" },
+    ...["validation_failed", "preflight_failed", "cycle_error", "service_boot_failed", "compose_project_conflict"].map(code => ({
+      label: `apply import ${code}`, stages: [failed("import_rig", code)], plan: false, status: 400, code,
+    })),
+    ...["rig_name_running", "generation_unconfirmed"].flatMap(code => [
+      { label: `apply ${code} detail message`, stages: [failed("import_rig", code, "existing rig retained")], plan: false, status: 409, code, error: "existing rig retained" },
+      { label: `apply ${code} errors fallback`, stages: [failed("import_rig", code)], plan: false, status: 409, code, error: "fixture refusal" },
+    ]),
+    ...[true, false].flatMap(plan => [
+      { label: `${plan ? "plan" : "apply"} blocked`, stages: [blocked], plan, status: 409 },
+      { label: `${plan ? "plan" : "apply"} unknown failure`, stages: [failed("resolve_spec", "unknown_failure")], plan, status: 500 },
+      { label: `${plan ? "plan" : "apply"} wrong stage`, stages: [failed("start_nodes", "validation_failed")], plan, status: 500 },
+    ]),
+    { label: "plan preserves first failure", stages: [failed("resolve_spec", "bundle_error"), blocked], plan: true, status: 400 },
+    { label: "apply blocked outranks bad request", stages: [failed("resolve_spec", "bundle_error"), blocked], plan: false, status: 409, code: "bundle_error" },
+    { label: "apply conflict outranks bad request", stages: [failed("resolve_spec", "bundle_error"), failed("import_rig", "rig_name_running")], plan: false, status: 409, code: "rig_name_running", error: "fixture refusal" },
+  ];
+
+  it.each(refusalCases)("shared bootstrap refusal: $label has the same HTTP status and complete body", async ({ stages, plan, status, code, error }) => {
+    const archive = await bundle("workshop");
+    const result: BootstrapResult = { runId: "refusal-fixture", status: "failed", stages, errors: ["fixture refusal"], warnings: ["retained warning"] };
+    const bootstrap = vi.spyOn(setup.bootstrapOrchestrator, "bootstrap").mockResolvedValue(result);
+    const release = vi.spyOn(setup.bootstrapOrchestrator, "release");
+    const expected = { ...result, ...(code ? { code } : {}), ...(error ? { error } : {}) };
+    for (const route of ["/api/up", "/api/bundles/install"]) {
+      const response = await install(route, archive, undefined, plan);
+      expect(response.status).toBe(status);
+      expect(response.body).toEqual(expected);
+    }
+    expect(bootstrap).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(setup.tmuxAdapter.createSession).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(root, "target"))).toBe(false);
+  });
+
   it.each([
     ["/api/bundles/install", "copied"], ["/api/up", "copied"],
     ["/api/bundles/install", "minimal"], ["/api/up", "minimal"],
@@ -83,8 +128,8 @@ describe("bundle reinstall through both public routes", () => {
     const manifest = kind === "copied" ? fs.readFileSync(path.join(target, "bundle.yaml"), "utf8") : "schema_version: 2\nname: workshop\n";
     fs.writeFileSync(path.join(project, "bundle.yaml"), manifest);
     const result = await install(route, archive, project, false, project);
-    // Preserve each route's existing target-conflict HTTP mapping.
-    expect(result.status).toBe(route === "/api/up" ? 400 : 500);
+    expect(result.status).toBe(400);
+    expect(result.body.code).toBe("target_conflict");
     expect(result.body.status).toBe("failed");
     expect(result.body.stages).toContainEqual(expect.objectContaining({
       stage: "resolve_spec", status: "failed", detail: expect.objectContaining({ code: "target_conflict" }),
@@ -232,8 +277,8 @@ describe("bundle reinstall through both public routes", () => {
     const target = path.join(root, "unrelated-project"); fs.mkdirSync(target);
     fs.writeFileSync(path.join(target, "README.md"), "my project");
     const result = await install(route, await bundle("workshop"), target);
-    expect(result.status).toBeGreaterThanOrEqual(400);
-    if (route === "/api/up") expect(result.status).toBe(400);
+    expect(result.status).toBe(400);
+    expect(result.body.code).toBe("target_conflict");
     expect(result.body.errors.join("\n")).toContain("Nothing was written");
     expect(fs.readFileSync(path.join(target, "README.md"), "utf8")).toBe("my project");
     expect(fs.existsSync(path.join(root, "home", "bundle-backups"))).toBe(false);
