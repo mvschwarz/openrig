@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, type DaemonResponse } from "../client.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -312,9 +312,25 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
         const params = new URLSearchParams(filterParams);
         if (cursor) params.set("after", cursor);
 
-        const res = await client.get<Array<Record<string, unknown>>>(
-          `/api/rigs/${encodeURIComponent(rigId)}/chat/history?${params}`,
-        );
+        const controller = new AbortController();
+        const remainingForRequest = timeoutMs - (Date.now() - start);
+        if (remainingForRequest <= 0) break;
+        // Keep the command's deadline through headers and body consumption.
+        // The client's own request timeout still bounds an unresponsive daemon.
+        const timer = setTimeout(() => controller.abort(), Math.min(remainingForRequest, 2_147_483_647));
+        let res: DaemonResponse<Array<Record<string, unknown>>>;
+        try {
+          res = await client.get<Array<Record<string, unknown>>>(
+            `/api/rigs/${encodeURIComponent(rigId)}/chat/history?${params}`,
+            { signal: controller.signal },
+          );
+        } catch (err) {
+          if (controller.signal.aborted) break;
+          throw err;
+        } finally {
+          clearTimeout(timer);
+        }
+        if (controller.signal.aborted || Date.now() - start >= timeoutMs) break;
 
         if (res.status >= 400) {
           console.error((res.data as { error?: string })?.error ?? `Failed (HTTP ${res.status})`);

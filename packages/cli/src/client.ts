@@ -125,6 +125,8 @@ export function formatDaemonHostForUrl(host: string): string {
 
 interface DaemonRequestOptions {
   timeoutMs?: number;
+  /** Caller cancellation applies to the request and its finite response body. */
+  signal?: AbortSignal;
   /** Per-call header overrides (e.g., `Authorization: Bearer ...`). */
   headers?: Record<string, string>;
 }
@@ -265,6 +267,7 @@ export class DaemonClient {
 
   private async fetch(path: string, init: RequestInit, options?: DaemonRequestOptions, consumeResponse?: (response: Response) => Promise<void>): Promise<Response> {
     const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
+    if (options?.signal) init = { ...init, signal: options.signal };
     if (options?.headers) {
       init = { ...init, headers: { ...(init.headers as Record<string, string> ?? {}), ...options.headers } };
     }

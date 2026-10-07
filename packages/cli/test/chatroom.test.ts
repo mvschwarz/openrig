@@ -71,8 +71,11 @@ describe("Chatroom CLI", () => {
   // Mutable list for dynamic injection during wait tests
   const dynamicMessages: Array<typeof chatMessages[0]> = [];
   let historyFailure: { status: number; body: Record<string, unknown> | null } | null = null;
+  let historyDelayMs = 0;
+  let historyDelayStage: "headers" | "body" = "body";
+  let canceledHistoryResponses = 0;
 
-  beforeEach(() => { historyFailure = null; });
+  beforeEach(() => { historyFailure = null; historyDelayMs = 0; canceledHistoryResponses = 0; });
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -111,7 +114,14 @@ describe("Chatroom CLI", () => {
           if (senderFilter) {
             filtered = filtered.filter(m => m.sender === senderFilter);
           }
-          res.end(JSON.stringify(filtered));
+          if (historyDelayMs > 0) {
+            if (historyDelayStage === "body") res.flushHeaders();
+            const timer = setTimeout(() => res.end(JSON.stringify(filtered)), historyDelayMs);
+            res.once("close", () => {
+              if (!res.writableEnded) canceledHistoryResponses++;
+              clearTimeout(timer);
+            });
+          } else res.end(JSON.stringify(filtered));
           return;
         }
 
@@ -336,6 +346,18 @@ describe("Chatroom CLI", () => {
     expect(output).toContain("hello");
   });
 
+  it.each(["headers", "body"] as const)("chatroom wait cancels late %s instead of printing a message after its deadline", async (stage) => {
+    historyDelayMs = 600;
+    historyDelayStage = stage;
+    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync([
+      "node", "rig", "chatroom", "wait", "my-rig", "--after", "000", "--timeout", "0.2",
+    ]));
+    expect(exitCode).toBe(1);
+    expect(logs.join("\n")).toContain("Timed out after 0.2 seconds");
+    expect(logs.join("\n")).not.toContain("[alice] hello");
+    await expect.poll(() => canceledHistoryResponses).toBe(1);
+  });
+
   it.each(["30s", "30", "0.5", "0.5s", "1.5s", "1e2", "0x10"])("chatroom wait accepts timeout form %s", async (timeout) => {
     capturedUrls.length = 0;
     const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync([
@@ -362,7 +384,7 @@ describe("Chatroom CLI", () => {
       ]).then(settled);
 
       await vi.advanceTimersByTimeAsync(49);
-      expect(get).toHaveBeenNthCalledWith(2, "/api/rigs/rig-1/chat/history?after=ZZZ");
+      expect(get).toHaveBeenNthCalledWith(2, "/api/rigs/rig-1/chat/history?after=ZZZ", { signal: expect.any(AbortSignal) });
       expect(settled).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(1);
