@@ -62,16 +62,18 @@ async function herdrBinary(deps: WindowDeps): Promise<string | null> {
 }
 
 /** New surfaces only. No System Events keystrokes or existing-terminal input. */
-async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<((command: string) => Promise<{ app: string; surface: string }>) | null> {
+async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<((command: string) => Promise<{ app: string; surface: string }>) | string> {
   // Shell tools can pipe stdio while still running inside the person's terminal.
   const program = deps.env["TERM_PROGRAM"];
-  const host = !program || program === "tmux" ? deps.env["__CFBundleIdentifier"] : program;
-  if (deps.env["CI"] && !["0", "false"].includes(deps.env["CI"])) return null;
-  if ((deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"])
-    && (deps.platform === "darwin" || (!deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"]))) return null;
+  const linuxHost = deps.platform !== "linux" ? undefined
+    : deps.env["GNOME_TERMINAL_SERVICE"] ? "gnome-terminal"
+    : deps.env["KONSOLE_VERSION"] ? "konsole" : deps.env["XTERM_VERSION"] ? "xterm" : undefined;
+  const host = !program || program === "tmux" ? deps.env["__CFBundleIdentifier"] ?? linuxHost : program;
+  if (deps.env["CI"] && !["0", "false"].includes(deps.env["CI"])) return "This is a CI run.";
+  if (deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"]) return "This is an SSH session; no desktop window is opened over SSH.";
   if (deps.platform === "darwin") {
     const inGhostty = host === "ghostty" || host === "com.mitchellh.ghostty";
-    if (!inGhostty && host !== "Apple_Terminal" && host !== "com.apple.Terminal") return null;
+    if (!inGhostty && host !== "Apple_Terminal" && host !== "com.apple.Terminal") return `Unrecognised or unscriptable hosting terminal: ${JSON.stringify(host ?? "unknown")}.`;
     const app = inGhostty ? ["/Applications/Ghostty.app", path.join(deps.env["HOME"] ?? homedir(), "Applications/Ghostty.app")].find(deps.exists) : undefined;
     let ghostty = false;
     if (app) {
@@ -81,7 +83,7 @@ async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<((comm
         ghostty = major! > 1 || (major === 1 && minor! >= 3);
       } catch { /* No other app is a substitute for the hosting terminal. */ }
     }
-    if (inGhostty && !ghostty) return null;
+    if (inGhostty && !ghostty) return "The hosting Ghostty does not provide a supported scripting interface.";
     // Native macOS tab groups appear as separate one-tab Terminal windows.
     // That is not evidence that resizing one would leave existing windows alone.
     const script = ghostty ? `on run argv
@@ -116,9 +118,8 @@ end run`;
       return { app: ghostty ? "Ghostty" : "Terminal", surface: ghostty ? surface : "window" };
     };
   }
-  if (deps.platform !== "linux" || (!deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"])) {
-    return null;
-  }
+  if (deps.platform !== "linux") return `No supported desktop launcher on ${deps.platform}.`;
+  if (!deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"]) return "No desktop display is available.";
   for (const app of ["ghostty", "gnome-terminal", "konsole", "xterm"].filter(app => app === host)) {
     try { await deps.exec("/bin/sh", ["-c", `command -v ${app}`]); } catch { continue; }
     return async command => {
@@ -133,7 +134,7 @@ end run`;
       return { app, surface: "window-requested" };
     };
   }
-  return null;
+  return `Unrecognised or unavailable hosting terminal: ${JSON.stringify(host ?? "unknown")}.`;
 }
 
 function failure(provider: string, error: string): OpenViewResult {
@@ -169,12 +170,17 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       return failure(provider, "The terminal view changed since preview. Refresh the preview before opening.");
     }
     if (!composed.opened.length) return { ...failed("No conversations are attachable."), absent: composed.absent, degraded: composed.degraded };
-    if (!launchWindow) {
+    if (typeof launchWindow === "string") {
       const socket = preview.data.status.launch?.socketPath;
       const command = herdr && socket
         ? `env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)} ${shellQuote(herdr)}`
-        : composed.opened[0]!.paneCommand;
-      return { ...failure(provider, `No terminal window was opened. Can't open a window from this terminal. Open a new terminal window on the daemon's desktop and run: ${command}`), windowAttempted: false, absent: composed.absent, degraded: composed.degraded };
+        : `env -u TMUX ${composed.opened[0]!.paneCommand.replace(/^ssh /, "ssh -t ")}`;
+      const headless = deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"]
+        || (deps.platform === "linux" && !deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"]);
+      const where = headless ? "Open a new SSH session to the daemon's host" : "Open a new terminal window on the daemon's host";
+      const notes = herdr && socket
+        ? [`After the person starts Herdr, have the agent place this view by running: rig terminal open ${shellQuote(view)} --provider herdr`] : [];
+      return { ...failure(provider, `No terminal window was opened. ${launchWindow} ${where} and run: ${command}`), windowAttempted: false, absent: composed.absent, degraded: composed.degraded, notes };
     }
 
     if (herdr) {

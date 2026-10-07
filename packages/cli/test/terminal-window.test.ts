@@ -67,7 +67,9 @@ describe("desktop terminal view", () => {
     f.deps.env = env;
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result).toMatchObject({ ok: false, windowAttempted: false, opened: [], code: "terminal_window_failed" });
-    expect(result.error).toBe("No terminal window was opened. Can't open a window from this terminal. Open a new terminal window on the daemon's desktop and run: env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr'");
+    expect(result.error).toContain("No terminal window was opened.");
+    expect(result.error).toContain("run: env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr'");
+    expect(result.notes).toEqual(["After the person starts Herdr, have the agent place this view by running: rig terminal open 'saved:kernel' --provider herdr"]);
     expect(result.error).not.toContain("\n");
     expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/usr/bin/open")).toBe(false);
     expect(f.deps.launch).not.toHaveBeenCalled();
@@ -75,12 +77,97 @@ describe("desktop terminal view", () => {
     expect(f.post).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { platform: "darwin", env: { TERM_PROGRAM: "vscode" }, reason: "Unrecognised or unscriptable", where: "new terminal window" },
+    { platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", CI: "true" }, reason: "CI run", where: "new terminal window" },
+    { platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", SSH_TTY: "/dev/ttys1" }, reason: "SSH session", where: "new SSH session" },
+    { platform: "linux", env: {}, reason: "No desktop display", where: "new SSH session" },
+  ] as const)("explains $reason and the manual follow-up", async ({ platform, env, reason, where }) => {
+    const f = fixture();
+    Object.assign(f.deps, { platform, env });
+    const result = await openTerminalWindow(f.client, "saved:team's view", undefined, f.deps);
+    expect(result).toMatchObject({ ok: false, windowAttempted: false });
+    expect(result.error).toContain(reason);
+    expect(result.error).toContain(where);
+    expect(result.error).not.toContain("daemon's desktop");
+    expect(result.notes?.[0]).toContain("rig terminal open 'saved:team'\\''s view' --provider herdr");
+    expect(f.post).not.toHaveBeenCalled();
+    expect(f.deps.launch).not.toHaveBeenCalled();
+    expect(f.deps.sleep).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { app: "gnome-terminal", env: { GNOME_TERMINAL_SERVICE: ":1.42" } },
+    { app: "konsole", env: { KONSOLE_VERSION: "250801" } },
+    { app: "xterm", env: { XTERM_VERSION: "XTerm(402)" } },
+  ])("opens $app from its own host signal with or without tmux", async ({ app, env }) => {
+    for (const program of [undefined, "tmux"]) {
+      const f = fixture();
+      Object.assign(f.deps, { platform: "linux", env: { DISPLAY: ":fixture", TERM_PROGRAM: program, ...env } });
+      const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+      expect(result).toMatchObject({ ok: true, window: { app } });
+      expect(f.deps.launch).toHaveBeenCalledExactlyOnceWith(app, expect.any(Array));
+    }
+  });
+
+  it.each([
+    { VTE_VERSION: "8200" },
+    { TERM_PROGRAM: "vscode", GNOME_TERMINAL_SERVICE: ":1.42" },
+  ])("does not guess a Linux host from shared or inherited signals: %j", async env => {
+    const f = fixture();
+    Object.assign(f.deps, { platform: "linux", env: { DISPLAY: ":fixture", ...env } });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({ ok: false, windowAttempted: false });
+    expect(f.deps.launch).not.toHaveBeenCalled();
+  });
+
+  it.each(["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"])("refuses Linux %s even with a forwarded display", async signal => {
+    for (const display of [{}, { DISPLAY: ":forwarded" }, { WAYLAND_DISPLAY: "wayland-1" }]) {
+      const f = fixture();
+      Object.assign(f.deps, { platform: "linux", env: { TERM_PROGRAM: "ghostty", [signal]: "present", ...display } });
+      const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+      expect(result).toMatchObject({ ok: false, windowAttempted: false, error: expect.stringContaining("SSH session") });
+      expect(result.error).toContain("new SSH session to the daemon's host");
+      expect(f.deps.launch).not.toHaveBeenCalled();
+      expect(f.deps.sleep).not.toHaveBeenCalled();
+      expect(f.post).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(["0", "false"])("does not mistake CI=%s for a CI run", async CI => {
+    const f = fixture();
+    f.deps.env.CI = CI;
+    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: true, window: { app: "Terminal" } });
+    expect(f.exec.mock.calls.filter(([file]) => file === "/usr/bin/osascript")).toHaveLength(1);
+  });
+
+  it("still refuses a recognized Linux host without a display", async () => {
+    const f = fixture();
+    Object.assign(f.deps, { platform: "linux", env: { GNOME_TERMINAL_SERVICE: ":1.42" } });
+    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: false, windowAttempted: false, error: expect.stringContaining("No desktop display") });
+    expect(f.deps.launch).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("makes the remote first pane interactive (Herdr installed=%s, no endpoint)", async herdr => {
+    const f = fixture({ herdr });
+    f.deps.env = {};
+    Object.assign(f.preview, { status: {} });
+    f.preview.composed.opened[0]!.paneCommand = "ssh 'user@remote-host' 'tmux attach-session -t =operator'";
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
+    expect(result).toMatchObject({ ok: false, windowAttempted: false });
+    expect(result.error).toContain("run: env -u TMUX ssh -t 'user@remote-host' 'tmux attach-session -t =operator'");
+    expect(result.notes).toEqual([]);
+    expect(f.post).not.toHaveBeenCalled();
+    expect(f.deps.launch).not.toHaveBeenCalled();
+    expect(f.exec.mock.calls.some(([file]) => file === "ssh" || file === "/usr/bin/osascript")).toBe(false);
+  });
+
   it("returns the first composed attach command when no Herdr is available", async () => {
     const f = fixture({ herdr: false });
     f.deps.env = {};
     const result = await openTerminalWindow(f.client, "saved:kernel", "tmux", f.deps);
     expect(result).toMatchObject({ ok: false, windowAttempted: false, opened: [] });
-    expect(result.error).toContain("run: tmux attach-session -t '=fixture-tui'");
+    expect(result.error).toContain("run: env -u TMUX tmux attach-session -t '=fixture-tui'");
     expect(f.exec.mock.calls.some(([file]) => file === "/fixture/bin/tmux" || file === "/usr/bin/osascript")).toBe(false);
     expect(f.post).not.toHaveBeenCalled();
   });
