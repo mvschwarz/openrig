@@ -513,6 +513,26 @@ with `rig grow` and no YAML, or optionally author a custom rig. It covers
 new-seat context/work ownership, concurrency costs and saving the expanded spec.
 This guide remains the short first-use path.
 
+## Stop your teams
+
+`rig down <rig-name>` ends that rig's agent sessions and work in progress.
+Read `rig ps --nodes --rig <rig-name>` first so you can see who will stop.
+For example, to stop starter:
+
+```sh
+rig down starter
+```
+
+For "stop everything", list the rigs with `rig ps --json` and run `rig down`
+for each one you want stopped. Include `kernel` last if you want its operator,
+advisor and queue worker stopped too; its operator cannot continue helping
+after its own session ends. Check each result before calling the shutdown done.
+
+`rig daemon stop` stops only the background service and preserves agent tmux
+sessions. If you also want that service stopped, run it after stopping the rigs.
+If the daemon is already stopped, use `rig daemon start --no-kernel` to restore
+the lifecycle API without booting a new kernel, then stop the remaining rigs.
+
 ## Incomplete setup and restart
 
 | Observation | Next action |
