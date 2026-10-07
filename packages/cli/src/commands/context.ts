@@ -857,9 +857,8 @@ Examples:
         if (opts.git) {
           const gitClient = await getClient(true);
           assertLocalGitClient(gitClient);
-          const added = addGitContext(source, opts, targetRoot);
+          const added = addGitContext(source, { ...opts, onWarning: (message) => console.error(`Warning: ${message}`) }, targetRoot);
           ({ installedAt: targetDir, selected: gitSelection } = added);
-          if (added.warning) console.error(`Warning: ${added.warning}`);
         } else if (isHttpUrl(source)) {
           // R4 — URL install: fetch → validate → atomic stage+rename (no partial pack).
           ({ targetDir } = await installPackFromUrl(source, opts.name, targetRoot));

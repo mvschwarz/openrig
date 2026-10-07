@@ -94,8 +94,13 @@ describe("Git context initial download", () => {
   ])("announces a full-clone fallback only for a shallow refusal: %s", (refusal) => {
     const f = fixture(); transport.refusal = refusal;
     transport.afterAdvertisement = () => { writeFileSync(join(f.upstream, "guide.md"), "Later guide\n"); commit(f.upstream, "later"); };
-    const added = addGitContext(f.upstream, {}, f.root);
+    const warnings: string[] = [];
+    const added = addGitContext(f.upstream, { onWarning: (message) => {
+      expect(transport.calls.some(a => a.includes("clone"))).toBe(false);
+      warnings.push(message);
+    } }, f.root);
     expect(added).toHaveProperty("warning", expect.stringMatching(/shallow.*full clone/i));
+    expect(warnings).toEqual([added.warning]);
     expect(added.selected.revision).toBe(f.head);
     expect(git(added.selected.checkout, "rev-parse", "--is-shallow-repository")).toBe("false");
     expect(git(added.selected.checkout, "cat-file", "-t", f.oldBlob)).toBe("blob");

@@ -181,7 +181,7 @@ export function inspectGitContext(target: string) {
   }
 }
 
-export function addGitContext(source: string, opts: { pack?: string; name?: string; checkout?: boolean }, targetRoot: string) {
+export function addGitContext(source: string, opts: { pack?: string; name?: string; checkout?: boolean; onWarning?: (message: string) => void }, targetRoot: string) {
   if (opts.name) assertSafeInstallRef(opts.name);
   let checkout: string;
   let warning: string | undefined;
@@ -207,10 +207,10 @@ export function addGitContext(source: string, opts: { pack?: string; name?: stri
     } catch (err) {
       if (!(err as { shallowUnsupported?: boolean }).shallowUnsupported) throw err;
       warning = "Git source refused shallow retrieval; using a full clone, including repository history.";
+      opts.onWarning?.(warning);
       // Keep the failed checkout for inspection, just as other Git failures do.
       checkout = join(parent, randomUUID());
-      try { git(parent, ["clone", "--", remote, checkout]); }
-      catch (cloneError) { throw new Error(`${warning}\n${(cloneError as Error).message}`); }
+      git(parent, ["clone", "--", remote, checkout]);
     }
     if (branchRef) {
       const branch = branchRef.slice("refs/heads/".length);
