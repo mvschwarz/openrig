@@ -236,7 +236,7 @@ export class BootstrapOrchestrator {
                 return { runId: run.id, status: "failed" as BootstrapStatus, stages, errors, warnings };
               }
               if (materialized.backupPath) warnings.push(`Existing target files were preserved at ${materialized.backupPath} before installing the replacement. Unrelated target files were kept.`);
-              installRoot = fs.realpathSync(targetRoot);
+              installRoot = fs.realpathSync.native(targetRoot);
               specDir = nodePath.dirname(nodePath.join(targetRoot, podSource.manifest.rigSpec));
               warnings.push(`Bundle files are installed in ${targetRoot}; a later launch failure does not remove them.`);
             }

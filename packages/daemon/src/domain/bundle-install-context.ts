@@ -49,7 +49,7 @@ export function isExistingBundleTarget(context: BundleInstallContext, target: st
       return root === null ? [] : [root];
     });
     // An unbound older generation must not weaken a known generation's folder identity.
-    if (recordedRoots.length > 0 && !recordedRoots.includes(fs.realpathSync(target))) return false;
+    if (recordedRoots.length > 0 && !recordedRoots.includes(fs.realpathSync.native(target))) return false;
     const manifest = parsePodBundleManifest(fs.readFileSync(path.join(target, "bundle.yaml"), "utf8")) as Record<string, unknown> | null;
     return manifest?.["schema_version"] === 2 && manifest["name"] === context.offered.name;
   } catch {
