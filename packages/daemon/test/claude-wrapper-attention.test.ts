@@ -69,9 +69,11 @@ describe("Claude wrapper manual attention recovery", () => {
     f.listProcesses.mockResolvedValue([root, { ...child,
       command: "/tmp/review/.local/share/claude/versions/2.1.1 " + args.join(" "),
     }]);
-    expect((await f.verify(true)).ok).toBe(true);
-    expect((await f.post()).status).toBe(200);
+    // Explicit verification persists its verdict; exercise recovery first.
+    const result = await f.post();
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
     expect(f.startup()).toBe("ready");
+    expect((await f.verify(true)).ok).toBe(true);
     expect(f.sendVerify).not.toHaveBeenCalled();
   });
 
