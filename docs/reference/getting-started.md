@@ -47,6 +47,24 @@ team default and leaves settings unchanged. Broader access is separate.
 
 ## Install and sign in
 
+**One command, when the person wants the full setup.** It needs Node.js 22 or 24 with npm already installed. First
+run the preview, which prints what the script will do and changes nothing, and show the person that plan:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh -s -- --dry-run
+```
+
+With their yes, run the same command without `--dry-run`:
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh`. It installs the
+latest published `@openrig/cli` with `npm install -g`,
+runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
+Codex and may install a missing one, as described below. A failed step prints
+`FAILED [n/4] <command or check> (exit <code>)`. Where a provider isn't signed in yet, step 4 ends that way and
+`rig setup` lists each sign-in under "Some steps need attention". If the only remaining failures are provider
+sign-ins, the install steps finished: sign in to each selected provider as below, then continue at
+[Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
+by step instead:
+
 ### Choose your providers
 
 Ask: **“Which working account do you want this team to use: Claude Code, Codex,
@@ -320,6 +338,12 @@ daemon health alone is not completion. Use the existing
 If the person chooses to talk later, keep that choice, leave the exact connection
 step, and say that the conversation handoff is still pending. SSH, headless use,
 and declining a desktop view remain valid background outcomes.
+
+Stopping OpenRig keeps a team's work, and the branch a team makes is your
+change: an agent tidying up says what's on it before offering to remove it. The
+operator starts a team when you ask for one in its conversation, so an agent
+reporting back checks `rig ps` or the team's tasks before saying a team started
+on its own.
 
 ## Choose your first team
 

@@ -960,10 +960,12 @@ describe("rig setup permission-policy menu copy (frozen)", () => {
     expect(out).toContain("YOLO Mode");
   });
 
-  it("renders the exact frozen deliberate-none and skip-line copy", () => {
+  it("renders the deliberate-none and skip-line copy with the team default", () => {
     const out = permissionPolicyMenuLines().join("\n");
-    expect(out).toContain("No policy — deliberate choice (recorded)");
-    expect(out).toContain("If you skip: OpenRig sets nothing — the usability floor only");
+    expect(out).toContain("No policy — deliberate choice (recorded): the floor, without the team allowances");
+    expect(out).toContain("If you skip: nothing is recorded; team seats launch with the team default unless a seat choice or named Codex profile applies");
+    expect(out).toContain("Yes / No — keep the team default.");
+    expect(out).not.toContain("keep prompts");
   });
 
   it("marks Standard with the ⭐ recommendation marker and pre-selects nothing", () => {

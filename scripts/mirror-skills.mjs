@@ -442,30 +442,14 @@ function readJson(path) {
 
 function defaultGenerateControlPlaneJson() {
   const repoRoot = process.cwd();
-  const required = {
-    membership: process.env.OPENRIG_PRODUCT_PUBLIC_SKILLS_YAML,
-    denylist: process.env.OPENRIG_INTERNAL_TOKENS_YAML,
-    layout: process.env.OPENRIG_SKILL_EDGE_LAYOUT_YAML,
-  };
-  for (const [name, path] of Object.entries(required)) {
-    if (!path) {
-      throw new Error(
-        `Authoring apply requires the ${name} authority path environment variable`,
-      );
-    }
-  }
+  // Membership, rules and layout come from the product JSON. Only skill content
+  // still comes from OPENRIG_SKILL_CANON_ROOT; old YAML selectors are ignored.
   execFileSync(
     process.execPath,
     [
       join(repoRoot, "packages/daemon/scripts/gen-control-plane-json.mjs"),
       "--repo-root",
       repoRoot,
-      "--membership",
-      required.membership,
-      "--denylist",
-      required.denylist,
-      "--layout",
-      required.layout,
       "--output",
       join(repoRoot, "scripts"),
     ],
