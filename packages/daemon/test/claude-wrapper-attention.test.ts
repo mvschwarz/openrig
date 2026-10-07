@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -60,6 +61,76 @@ function fixture(token: string | null = null) {
 }
 
 describe("Claude wrapper manual attention recovery", () => {
+  it.each([
+    ["relative settings file", ["--settings", '"review.json', "--session-id", "review-token"]],
+    ["name before identity", ["--name", '"review-desk', "--session-id", "review-token"]],
+  ] as const)("a leading literal quote in %s preserves the real identity", async (_name, args) => {
+    const f = fixture("review-token");
+    f.listProcesses.mockResolvedValue([root, { ...child,
+      command: "/tmp/review/.local/share/claude/versions/2.1.1 " + args.join(" "),
+    }]);
+    // Explicit verification persists its verdict; exercise recovery first.
+    const result = await f.post();
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    expect(f.startup()).toBe("ready");
+    expect((await f.verify(true)).ok).toBe(true);
+    expect(f.sendVerify).not.toHaveBeenCalled();
+  });
+
+  it("does not clear attention using identity text inside settings beside a literal quote", async () => {
+    const f = fixture("review-token");
+    f.listProcesses.mockResolvedValue([root, { ...child,
+      command: ['/tmp/review/.local/share/claude/versions/2.1.1', '--settings',
+        JSON.stringify({ env: { REVIEW_NOTE: 'text --session-id review-token --model trailing' } }),
+        '--name', 'review"desk'].join(' '),
+    }]);
+    expect((await f.verify(true)).ok).toBe(false);
+    expect((await f.post()).status).toBe(422);
+    expect(f.startup()).toBe("attention_required");
+    expect(f.sendVerify).not.toHaveBeenCalled();
+  });
+
+  it.each(["/fixture/review's-settings.json", '/fixture/review"settings.json'])(
+    "clear-attention preserves a literal quote in a settings filename: %s", async path => {
+      const f = fixture("review-token");
+      f.listProcesses.mockResolvedValue([root, { ...child,
+        command: `${child.command} --settings ${path}`,
+      }]);
+      const result = await f.post();
+      expect(result.status, JSON.stringify(result.body)).toBe(200);
+      expect(f.startup()).toBe("ready");
+      expect((await f.verify(true)).ok).toBe(true);
+      expect(f.sendVerify).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["kernel", "team"])("periodic identity and clear-attention accept inline %s settings", async authority => {
+    const settings = operationalLaunchArgs("claude-code", authority === "kernel"
+      ? { kernelAuthority: true } : { teamPermissionDefault: true });
+    const setup = () => {
+      const f = fixture("review-token");
+      f.listProcesses.mockResolvedValue([root, { ...child,
+        command: ["/tmp/review/.local/share/claude/versions/2.1.1", "--permission-mode", "acceptEdits",
+          ...settings, "--session-id", "review-token", "--name", f.name].join(" "),
+      }]);
+      return f;
+    };
+    const periodic = setup();
+    await periodic.poll.reconcileAll();
+    expect(periodic.store.getForNode(periodic.node.id)?.verdict).toBe("verified");
+    // Periodic identity does not erase a separate startup attention marker.
+    expect(periodic.startup()).toBe("attention_required");
+    // Exercise clear-attention from its own still-active identity mismatch.
+    const f = setup();
+    const result = await f.post();
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    expect(result.body.evidence.kind).toBe("pane_identity_reverified");
+    expect(f.startup()).toBe("ready");
+    await f.poll.reconcileAll();
+    expect(f.store.getForNode(f.node.id)?.verdict).toBe("verified");
+    expect(f.sendVerify).not.toHaveBeenCalled();
+  });
+
   it.each(["valid", "no token", "wrong token", "missing path", "background", "unrelated", "ambiguous", "PID reused", "unavailable"])("numeric Claude pane identity clear: %s", async mode => {
     const f = fixture(mode === "no token" ? null : "review-token");
     f.tmux.getPaneCommand.mockResolvedValue("2.1.289");

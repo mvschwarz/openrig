@@ -64,12 +64,14 @@ function humanOpen(r: OpenViewResult): string {
   const lines: string[] = [];
   const tiled = r.opened.length;
   lines.push(
-    tiled > 0
-      ? `Opened ${tiled} tile(s) in ${r.provider}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
-      : `No tiles opened in ${r.provider}.`,
+    r.code === "terminal_window_failed" && r.error
+      ? r.error
+      : tiled > 0
+        ? `${r.window ? "Terminal window requested. " : ""}Prepared ${tiled} tile(s) in ${r.provider}${r.pages > 1 ? ` across ${r.pages} page(s)` : ""}.`
+        : `No tiles opened in ${r.provider}.`,
   );
   if (r.window) lines.push(`  Terminal: ${r.window.app} (${r.window.surface}).`);
-  if (r.error) lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
+  if (r.error && r.code !== "terminal_window_failed") lines.push(`  provider: ${r.error}${r.code ? ` (${r.code})` : ""}`);
   for (const seat of r.opened) lines.push(`  ● ${seat}`);
   for (const a of r.absent) lines.push(`  ○ ${a.seat} — absent: ${a.reason}`);
   for (const d of r.degraded) lines.push(`  ▲ ${d.seat} — skipped (${d.host}): ${d.reason}`);
@@ -104,14 +106,16 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
   cmd
     .command("open")
     .argument("<view>", "a rig name, mission:<id>, slice:<id>, or a saved-view id")
-    .description("Open every live agent in the view as an interactive terminal tile")
-    .option("--provider <name>", "herdr (default), cmux, or tmux with --window")
-    .option("--window", "Open a new desktop terminal tab/window; herdr if installed, otherwise plain tmux")
+    .description("Open a desktop terminal showing the view's live agents as interactive tiles")
+    .option("--provider <name>", "herdr or cmux: use an existing workspace without opening a window; tmux requires --window")
+    .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
     .option("--json", "JSON output for agents")
     .action(async (view: string, opts: { provider?: string; json?: boolean; window?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
-        if (opts.window) {
+        // Herdr's control socket can answer with no desktop client attached.
+        // The default requests a desktop; an explicit provider reuses its workspace.
+        if (opts.window || !opts.provider) {
           const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps);
           printOpen(opts.json ?? false, result, 200);
           return;
