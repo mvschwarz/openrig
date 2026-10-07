@@ -49,16 +49,16 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   does not open one. No and headless/SSH use are valid background outcomes. Provider-only `--provider herdr` or
   `--provider cmux` is for an existing provider workspace, not the first desktop window.
 - **If the window can't open, or over headless SSH:** say plainly that no visible terminal was opened, and ask the
-  person to open a new terminal window or tab. Give them one complete command for it, filled in:
-  - **The operator's conversation:** find `operator.agent` in `rig ps --nodes --rig kernel --json`, take its
+  person to open a new terminal window or tab on the daemon's host. Over SSH, that's a new SSH session to it with the
+  known account. If you only know an HTTP daemon address, ask for the SSH details rather than inventing them. Then
+  give them one complete command:
+  - **The command OpenRig printed:** when `rig terminal open saved:kernel --window` can't open a window, it says why
+    and ends with `run:` and a command (the `error` field with `--json`). That command already names the installed
+    herdr binary and the daemon's socket, or the conversation to attach. Relay it exactly rather than composing one.
+    If a note asks you to place the view once Herdr starts, run that `rig terminal open` yourself after they start it.
+  - **If it printed no command:** find `operator.agent` in `rig ps --nodes --rig kernel --json`, take its
     `canonicalSessionName` (never a guessed name) and give
-    `env -u TMUX tmux attach-session -t '=<canonicalSessionName>'`, for a terminal on the same host and account. Not
-    every failure prints this command.
-  - **The herdr view:** `rig terminal status --provider herdr --json` reports `launch.socketPath`. Give
-    `env -u TMUX -u HERDR_SESSION HERDR_SOCKET_PATH=<launch.socketPath> herdr`, with no guessed endpoint. Once
-    that client is open, `rig terminal open saved:kernel --provider herdr --json` selects the view in it.
-  - **Over SSH:** put the known host and account in front: `ssh -t <account>@<host> '<the command above>'`. If you
-    only know an HTTP daemon address, ask for the SSH details rather than inventing them.
+    `env -u TMUX tmux attach-session -t '=<canonicalSessionName>'` for the operator's conversation.
 
   For any other failure, the table under "What can interrupt installation and the welcome screen" in
   `rig context get reference/getting-started.md#open-the-kernel-conversations` says why and what to do next.
@@ -113,4 +113,4 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Everything in the library:** `rig context list`.
 - **Exact syntax:** `rig <command> --help` is always current for the installed version.
 
-Written for OpenRig 0.6.6. When something here and `--help` disagree, `--help` wins.
+Written for OpenRig 0.6.7. When something here and `--help` disagree, `--help` wins.

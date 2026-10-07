@@ -323,8 +323,8 @@ A provider running on the server opens no window on the person's desktop. From a
 own machine, connect over SSH with the known host and account, then attach:
 - **the operator's conversation**, with the command in
   [Talk to the operator in any terminal](#talk-to-the-operator-in-any-terminal);
-- **the Herdr view**, by running the installed Herdr on the socket that `rig terminal status --provider herdr --json`
-  reports as `launch.socketPath`: `env -u TMUX -u HERDR_SESSION HERDR_SOCKET_PATH=<launch.socketPath> herdr`. Then
+- **the Herdr view**, with the command that `rig terminal open saved:kernel --window` prints when it can't open a
+  window. It names the installed Herdr, wherever setup put it, and the daemon's socket. Then
   `rig terminal open saved:kernel --provider herdr --json` selects the view in it.
 
 No new account or credential provisioning is part of this. **Agents:** the `rigs` skill gives the person this as one
