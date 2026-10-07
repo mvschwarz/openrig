@@ -36,14 +36,15 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it.
-- **Open the OpenRig terminal:** say you'll open it so they can see the OpenRig agents, then open it in a new terminal
-  space, never the one in use: `rig terminal open saved:kernel` (herdr), `--provider cmux`, or a plain terminal
-  window. If they'd rather not, or there's no display (SSH), give them the command to open it later. "Open the kernel
-  conversations" in `rig context get reference/getting-started.md` covers each case.
+- **Offer the OpenRig view:** ask "Open the OpenRig view now?" On yes, open it in a new terminal space, never the one
+  in use: `rig terminal open saved:kernel` (herdr), `--provider cmux`, or a plain terminal window. On no, or with no
+  display (SSH), give the command to open it later; that's a valid outcome. "Open the kernel conversations" in
+  `rig context get reference/getting-started.md` covers each case.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
-  said. Then follow "Installing-agent handoff" in the same guide: `rig send` the goal, folder and branch to the
-  operator. It helps them pick a team that fits their logins, starts it on their yes and gives the goal to the team's
-  lead. Show them where the operator answers, and don't build the project yourself.
+  said. Then follow "Installing-agent handoff" in the same guide: find the `operator.agent` row in
+  `rig ps --nodes --rig kernel --json` and `rig send` its `canonicalSessionName` (never a guessed name) the goal,
+  folder and branch. The operator helps them pick a team that fits their logins, starts it on their yes and gives the
+  goal to the team's lead. Show them where the operator answers, and don't build the project yourself.
 - **See what's running:** `rig ps`, then `rig ps --nodes --rig <rig>` for a team's agents. If a team is already
   running in that repository, tell the operator.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
@@ -61,8 +62,9 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 ## 3. Follow the work to its result
 
 - **Find the team's task:** the operator gives the goal to the team's lead as a queue task: `dev-build@starter`, or
-  `orch-lead` in `workshop` and `factory` (`rig specs preview <name> --kind rig` says what each seat does). Find it
-  with `rig queue list --destination <seat>@<rig> -a`.
+  `orch-lead` in `workshop` and `factory` (for starter and factory, `rig specs preview <name> --kind rig` says what
+  each seat does; for a running team, `rig ps --nodes --rig <rig>`). Find it with
+  `rig queue list --destination <seat>@<rig> -a`.
 - **Follow it to the result:** a task that changed hands isn't finished. `rig queue show <id> --full` names the seat it
   went to, and that seat's next task is the one whose `handedOffFrom` is that ID
   (`rig queue list --destination <seat>@<rig> -a -o json`). Follow each handoff until an agent reports the result, and
