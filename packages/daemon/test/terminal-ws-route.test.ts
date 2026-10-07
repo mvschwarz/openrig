@@ -568,3 +568,67 @@ describe("terminal WebSocket send-at-open buffering (initialText race)", () => {
     expect(sentTexts).toEqual([]);
   }, 10000);
 });
+
+// Exercise the real WebSocket callback: node-ws does not await async onOpen.
+describe("terminal WebSocket attach rejection", () => {
+  it.each(["probe", "pipe"])("closes a rejected %s viewer and accepts a later viewer", async (stage) => {
+    let fail = true;
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("tmuxAdapter" as never, {
+        hasSession: async () => {
+          if (fail && stage === "probe") throw new Error("probe unavailable");
+          return true;
+        },
+        setWindowOption: async () => ({ ok: true }),
+        resizeWindow: async () => ({ ok: true }),
+        startPipePane: async () => {
+          if (fail && stage === "pipe") throw new Error("pipe unavailable");
+          return { ok: true };
+        },
+        stopPipePane: async () => ({ ok: true }),
+        sendKeys: async () => ({ ok: true }),
+        sendText,
+        capturePaneScreen: async () => "ready",
+        getPaneCursorPosition: async () => null,
+      });
+      await next();
+    });
+    app.use("/api/*", browserBoundary({ webUiEnabled: true, bearerTokens: [TOKEN], warn: () => {} }));
+    app.get("/healthz", (c) => c.text("ok"));
+    const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
+    registerTerminalWs(app, upgradeWebSocket as never, { bearerToken: TOKEN });
+    const localServer = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" });
+    injectWebSocket(localServer);
+    await new Promise<void>((resolve) => {
+      if (localServer.listening) resolve();
+      else localServer.once("listening", resolve);
+    });
+    const port = (localServer.address() as { port: number }).port;
+    const url = `ws://127.0.0.1:${port}/api/terminal/retry@rig?token=${TOKEN}`;
+    const viewers: WebSocket[] = [];
+    try {
+      const failed = new WebSocket(url);
+      viewers.push(failed);
+      failed.onopen = () => failed.send(JSON.stringify({ type: "text", text: "early input" }));
+      const closed = await new Promise<CloseEvent>((resolve) => { failed.onclose = resolve; });
+      expect(closed.code).toBe(1011);
+      expect(closed.reason).toBe("terminal attach failed");
+      expect(sendText).not.toHaveBeenCalled();
+      expect((await fetch(`http://127.0.0.1:${port}/healthz`)).status).toBe(200);
+
+      fail = false;
+      const retry = new WebSocket(url);
+      viewers.push(retry);
+      const frame = await new Promise<MessageEvent>((resolve) => { retry.onmessage = resolve; });
+      expect(String(frame.data)).toContain("ready");
+      const retryClosed = new Promise<void>((resolve) => { retry.onclose = () => resolve(); });
+      retry.close();
+      await retryClosed;
+    } finally {
+      for (const ws of viewers) ws.close();
+      localServer.close();
+    }
+  }, 5000);
+});

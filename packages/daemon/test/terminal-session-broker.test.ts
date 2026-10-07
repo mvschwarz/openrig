@@ -298,6 +298,49 @@ describe("TerminalSessionBroker", () => {
 // ---- registry: create-if-absent + eviction ---------------------------------
 
 describe("TerminalBrokerRegistry", () => {
+  it.each(["probe", "pipe"])("evicts a rejected %s attach, cleans resources, and permits retry", async (stage) => {
+    let fail = true;
+    let outputPath: string | null = null;
+    const fault = new Error("attach unavailable");
+    const reg = new TerminalBrokerRegistry(makeTmux({
+      hasSession: async (name) => {
+        if (name === "failed@rig" && fail && stage === "probe") throw fault;
+        return true;
+      },
+      startPipePane: async (name, file) => {
+        if (name === "failed@rig") {
+          outputPath = file;
+          if (fail && stage === "pipe") throw fault;
+        }
+        return { ok: true };
+      },
+    }));
+    const healthy = track(await reg.attach("healthy@rig", makeSub()));
+    const first = reg.attach("failed@rig", makeSub());
+    const failed = track(reg.get("failed@rig")!);
+    const attempts = await Promise.allSettled([first, reg.attach("failed@rig", makeSub())]);
+    expect(attempts).toEqual([
+      { status: "rejected", reason: fault },
+      { status: "rejected", reason: fault },
+    ]);
+    expect(failed.subscriberCount).toBe(0);
+    expect(failed.pipeOutputPath).toBeNull();
+    if (stage === "pipe") {
+      expect(outputPath).toBeTruthy();
+      expect(fs.existsSync(outputPath!)).toBe(false);
+    }
+    expect(reg.get("failed@rig")).toBeUndefined();
+    expect(reg.size).toBe(1);
+    expect(reg.get("healthy@rig")).toBe(healthy);
+    expect(healthy.subscriberCount).toBe(1);
+
+    fail = false;
+    const recovered = track(await reg.attach("failed@rig", makeSub()));
+    expect(recovered).not.toBe(failed);
+    expect(recovered.subscriberCount).toBe(1);
+    expect(reg.size).toBe(2);
+  });
+
   it("create-if-absent: two subscribers on one session share ONE broker / ONE pipe", async () => {
     const startPipePane = vi.fn(async () => ({ ok: true as const }));
     const reg = new TerminalBrokerRegistry(makeTmux({ startPipePane }), { pollMs: 10 });
