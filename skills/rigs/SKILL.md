@@ -46,16 +46,32 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   to it rather than opening another. On a desktop, do not finish by showing a table or suggesting a command for the person to type. Only if the window
   cannot open, `rig tui --shared` is the dashboard-only fallback; explain the failure and help with the chosen
   fallback. Herdr is visible only in a terminal the person can see; switching the shared TUI to `:terminals`
-  does not open one. Over headless SSH, explain this and tell the person to open a new terminal window or tab;
-  give one exact connection and attachment command using the current endpoint or binding from the guide.
-  No and headless/SSH use are valid background outcomes. Provider-only `--provider herdr` or
-  `--provider cmux` is for an existing provider workspace, not the first desktop window. “Open the kernel
-  conversations” in `rig context get reference/getting-started.md` covers manual attachment after failure.
+  does not open one. No and headless/SSH use are valid background outcomes. Provider-only `--provider herdr` or
+  `--provider cmux` is for an existing provider workspace, not the first desktop window.
+- **If the window can't open, or over headless SSH:** say plainly that no visible terminal was opened, and ask the
+  person to open a new terminal window or tab. Give them one complete command for it, filled in:
+  - **The operator's conversation:** find `operator.agent` in `rig ps --nodes --rig kernel --json`, take its
+    `canonicalSessionName` (never a guessed name) and give
+    `env -u TMUX tmux attach-session -t '=<canonicalSessionName>'`, for a terminal on the same host and account. Not
+    every failure prints this command.
+  - **The herdr view:** `rig terminal status --provider herdr --json` reports `launch.socketPath`. Give
+    `env -u TMUX -u HERDR_SESSION HERDR_SOCKET_PATH=<launch.socketPath> herdr`, with no guessed endpoint. Once
+    that client is open, `rig terminal open saved:kernel --provider herdr --json` selects the view in it.
+  - **Over SSH:** put the known host and account in front: `ssh -t <account>@<host> '<the command above>'`. If you
+    only know an HTTP daemon address, ask for the SSH details rather than inventing them.
+
+  For any other failure, the table under "What can interrupt installation and the welcome screen" in
+  `rig context get reference/getting-started.md#open-the-kernel-conversations` says why and what to do next.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
-  said. Then follow "Installing-agent handoff" in the same guide: find the `operator.agent` row in
-  `rig ps --nodes --rig kernel --json` and `rig send` its `canonicalSessionName` (never a guessed name) the goal,
-  folder and branch. The operator helps them pick a team that fits their logins, starts it on their yes and gives the
-  goal to the team's lead. Show them where the operator answers, and don't build the project yourself.
+  said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`
+  (never the logical ID or a guessed name) and send:
+  `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
+  Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
+  way. The operator helps them pick a team that fits their logins, starts it on their yes and gives the goal to the
+  team's lead. Show them where the operator answers, and don't build the project yourself.
+- **Installation is finished** when the operator is ready and the person is talking to it; a healthy daemon alone isn't
+  that. If they'd rather talk later, keep that choice, leave them the exact connection step and say the handoff to the
+  operator is still pending.
 - **See what's running:** `rig ps`, then `rig ps --nodes --rig <rig>` for a team's agents. If a team is already
   running in that repository, tell the operator.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,

@@ -97,15 +97,20 @@ user.
 
 ## Install and sign in
 
-**One command, when the person wants the full setup.** It needs Node.js 22 or 24 with npm already installed. First
-run the preview, which prints what the script will do and changes nothing, and show the person that plan:
+**Agents:** if you're setting OpenRig up for someone, load the `rigs` skill and follow it. It carries the install, the
+welcome screen and the handoff to the operator as one procedure. From 0.6.7, OpenRig installs it as `rigs` in
+`~/.claude/skills` and `~/.agents/skills` when the daemon starts. Before that, add it with
+`npx skills add mvschwarz/openrig --skill rigs`, or read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md).
+
+**One command, for the full setup.** It needs Node.js 22 or 24 with npm already installed. The preview prints what the
+script will do and changes nothing:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh -s -- --dry-run
 ```
 
-With their yes, run the same command without `--dry-run`:
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh`. It installs the
+The same command without `--dry-run`,
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints
@@ -181,10 +186,9 @@ when it starts the daemon.
 
 ## Open the kernel conversations
 
-This is the **welcome screen** or **OpenRig view**. If someone asks to **“show me my agents”**, **“show me the terminals”** or **“see my
-agents”**, use `rig terminal open saved:kernel --window`; you do not need to have
-run setup yourself to discover or use it. When the person has already asked you
-to open it, act on that request. Otherwise offer it as below.
+This is the **welcome screen** or **OpenRig view**: TUI | advisor | operator, in a new terminal window or tab.
+**Agents:** the `rigs` skill says when to open it, what to check, what to do when it can't open, and how to hand the
+person's goal to the operator; [Install and sign in](#install-and-sign-in) says how to load it.
 
 `rig setup` installs Herdr by default on macOS and Linux. If the person declines
 Herdr, use `rig setup --no-herdr`; the welcome view can use plain tmux. Setup
@@ -199,13 +203,8 @@ the app. On No it uses `--no-ghostty`; Terminal.app remains available. Plain set
 reports this offer without installing Ghostty or waiting for input. The person
 types no command.
 
-The installing agent asks: **“Open the OpenRig view now?”**
-
-- **Yes:** the installing agent runs the command below. It opens a new terminal
-  tab or window itself. The person copies and types no commands.
-- **No:** leave the current terminal alone and offer to open the view later.
-- **Over SSH or without a local display:** explain that no local desktop view
-  was opened. Background use remains valid; see the headless handoff below.
+This command opens it in a new terminal tab or window itself, so nobody copies or types commands. Over SSH or
+without a local display it can't, and the [headless handoff](#headless-or-ssh-handoff) applies:
 
 ```sh
 rig terminal open saved:kernel --window --json
@@ -320,45 +319,26 @@ commands need to be assembled by the person.
 
 ### Headless or SSH handoff
 
-A provider running on the server does not establish a window on the person's
-desktop. Say **“No visible terminal was opened here.”** Ask the person to open a
-new terminal window or tab. The installing agent gives one complete connection
-and attachment command for that terminal, using the known SSH host and account.
-For Herdr, inspect `rig terminal status --provider herdr --json` and use the
-provider's reported `launch.socketPath` with the installed Herdr binary; do not
-guess an endpoint or inherit a different `HERDR_SESSION`. Once that client is
-open, the agent can select `saved:kernel` with the existing-workspace route above.
-For a manual operator-only conversation, use the current operator binding from
-[Talk to the operator in any terminal](#talk-to-the-operator-in-any-terminal).
-If only an HTTP daemon address is known, obtain the SSH connection details instead of inventing them. No new account or credential
-provisioning is part of this handoff. Report any headless or unverified branch.
+A provider running on the server opens no window on the person's desktop. From a new terminal window or tab on their
+own machine, connect over SSH with the known host and account, then attach:
+- **the operator's conversation**, with the command in
+  [Talk to the operator in any terminal](#talk-to-the-operator-in-any-terminal);
+- **the Herdr view**, by running the installed Herdr on the socket that `rig terminal status --provider herdr --json`
+  reports as `launch.socketPath`: `env -u TMUX -u HERDR_SESSION HERDR_SOCKET_PATH=<launch.socketPath> herdr`. Then
+  `rig terminal open saved:kernel --provider herdr --json` selects the view in it.
+
+No new account or credential provisioning is part of this. **Agents:** the `rigs` skill gives the person this as one
+filled-in command.
 
 ### Installing-agent handoff
 
-Ask what the person wants to do and which project folder to use. Hand that goal
-to the ready kernel operator; do not implement the person's project yourself.
-Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and take
-its `canonicalSessionName`. Use that returned session name, not the logical ID:
+The kernel's operator takes the person's goal and project folder, helps them choose and start a team, and hands the
+goal to the team's lead. The person can type the goal in the operator's pane (attach with the command
+[above](#talk-to-the-operator-in-any-terminal)), or the agent that installed OpenRig sends it. The `rig tui --shared`
+fallback shows the dashboard, not this conversation. If the operator needs attention, use the
+[recovery routes](#incomplete-setup-and-restart).
 
-```sh
-rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>.'
-```
-
-Alternatively, have the person type the goal and folder in the operator pane.
-Show where the operator answers in the existing view or give the exact attach
-command [above](#talk-to-the-operator-in-any-terminal), with the observed name
-filled in. The `rig tui --shared` fallback is only for a window that cannot open; it shows the dashboard, not this conversation.
-If the person gives the installing agent a goal later, forward the goal, folder
-and constraints with `rig send`; leave implementation with the operator's team.
-The operator helps the person choose and start a team, then hands the goal to its
-lead. Leave the project work with that team.
-
-Finish installation when the operator is ready and the person is talking to it;
-daemon health alone is not completion. Use the existing
-[recovery routes](#incomplete-setup-and-restart) if the operator needs attention.
-If the person chooses to talk later, keep that choice, leave the exact connection
-step, and say that the conversation handoff is still pending. SSH, headless use,
-and declining a desktop view remain valid background outcomes.
+**Agents:** the `rigs` skill's step 2 has the exact `rig send` to the operator and says when installation is finished.
 
 Stopping OpenRig keeps a team's work, and the branch a team makes is your
 change: an agent tidying up says what's on it before offering to remove it. The
