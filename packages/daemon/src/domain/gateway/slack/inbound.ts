@@ -413,7 +413,14 @@ export class InboundRouter {
       this.deps.log?.(`reaction REFUSED — unregistered sender ${ev.user}: ${who.teaching}`);
       return { status: "refused", reason: "unregistered" };
     }
-    const route = this.deps.resolveRoute?.({ type: "reaction_added", thread_ts: ev.item?.ts, channel: ev.item?.channel });
+    let route: ReturnType<NonNullable<InboundDeps["resolveRoute"]>> | undefined;
+    try {
+      route = this.deps.resolveRoute?.({ type: "reaction_added", thread_ts: ev.item?.ts, channel: ev.item?.channel });
+    } catch (e) {
+      // The event is already acknowledged and Slack won't resend it: keep it for the retry pass.
+      this.deps.log?.(`reaction route lookup failed for ts=${ev.item?.ts}: ${(e as Error).message}`);
+      return { status: "handler-failed", reason: "route_failed" };
+    }
     // A mapped thread names its ask; the unrouted fallback names none.
     const ask = route?.correlationQitemId ?? route?.tags?.find((tag) => tag.startsWith("reply-to:"))?.slice("reply-to:".length);
     if (!route || !ask) {

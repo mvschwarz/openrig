@@ -21,15 +21,19 @@ const clock = () => new Date("2026-10-07T07:00:00Z");
 
 interface Landed { qitemId: string; source: string; destination: string; tags: string[]; summary: string; body: string }
 
-function harness(opts: { admitted?: boolean; failCreates?: number; newerRoot?: string } = {}) {
+function harness(opts: { admitted?: boolean; failCreates?: number; newerRoot?: string; failLookups?: number } = {}) {
   const fs = memFs();
   const rows: Landed[] = [];
   const resolved: string[] = [];
   const logs: string[] = [];
   let failures = opts.failCreates ?? 0;
-  // One ask, posted as the root 400.0 of conversation qitem-ask-1 and owned by asker@rig.
+  let lookupFailures = opts.failLookups ?? 0;
+  // One ask, posted in channel C1 as the root 400.0 of conversation qitem-ask-1 and owned by asker@rig.
   const threadMap = {
-    resolveByThread: (ts: string) => ts === "400.0" ? { seat: "asker@rig", conversationId: "qitem-ask-1", threadTs: ts, state: "open" } : null,
+    resolveByThread: (ts: string) => {
+      if (lookupFailures > 0) { lookupFailures--; throw new Error("database is locked"); }
+      return ts === "400.0" ? { seat: "asker@rig", channel: "C1", conversationId: "qitem-ask-1", threadTs: ts, state: "open" } : null;
+    },
     resolveByConversation: () => opts.newerRoot ? { threadTs: opts.newerRoot } : null,
   } as never;
   const deadLetter = new DeadLetterStore<SlackEvent>("/d.jsonl", fs, clock);
@@ -102,6 +106,22 @@ describe("#899 reactions on an ask", () => {
     // The log says it was ignored, not that it went to the unrouted-signal destination.
     expect(h.logs.some((m) => m.includes("unrouted-signal"))).toBe(false);
     expect(h.logs.some((m) => m.includes("reaction ignored"))).toBe(true);
+  });
+
+  it("are ignored on another channel's message with the same timestamp as an ask", async () => {
+    const h = harness();
+    expect(await deliver(h, reaction({ item: { type: "message", channel: "C-OTHER", ts: "400.0" } }))).toEqual({ status: "ignored", reason: "not-an-ask" });
+    expect(h.rows).toEqual([]);
+  });
+
+  it("survive a failed route lookup: dead-lettered, then landed once by the retry", async () => {
+    const h = harness({ failLookups: 1 });
+    expect(await deliver(h, reaction())).toEqual({ status: "dead-lettered", reason: "route_failed" });
+    expect(h.rows).toEqual([]);
+    expect(h.deadLetter.readAll()).toHaveLength(1);
+    expect(await h.router.retryDeadLetters()).toEqual({ retried: 1, landed: 1 });
+    expect(h.rows).toHaveLength(1);
+    expect(h.rows[0]).toMatchObject({ destination: "asker@rig" });
   });
 
   it("from an unregistered person are refused", async () => {

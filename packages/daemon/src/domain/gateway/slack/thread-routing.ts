@@ -35,7 +35,10 @@ export function makeThreadRouteResolver(opts: {
     const threadTs = (ev as { thread_ts?: string }).thread_ts;
     if (threadTs) {
       const mapping = opts.map.resolveByThread(threadTs);
-      if (mapping) {
+      // #899 — a reaction names its message by channel and timestamp, and a timestamp is unique only
+      // within a channel, so a reaction on another channel's message is not on this ask.
+      const sameMessage = ev.type !== "reaction_added" || mapping?.channel === ev.channel;
+      if (mapping && sameMessage) {
         // FOUNDER ROOT INVARIANT (2026-08-27): the map stores the bare local seat because the
         // queue row's source_session is bare inside one instance — the seat routes as stored.
         // (The interim self-host localizer from the L2 first pass was deleted with the root
