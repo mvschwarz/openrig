@@ -1,0 +1,183 @@
+import { execFile, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir, hostname, networkInterfaces } from "node:os";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { promisify } from "node:util";
+import type { DaemonClient } from "./client.js";
+import { shellQuote } from "./cross-host-executor.js";
+import type { OpenViewResult } from "./commands/terminal.js";
+
+interface Pane { seat: string; label: string; paneCommand: string }
+interface Preview {
+  planId: string;
+  status: { launch?: { socketPath: string; session?: string } };
+  composed: { opened: Pane[]; pages: Pane[][]; columns?: number; absent: OpenViewResult["absent"]; degraded: OpenViewResult["degraded"] };
+}
+
+export interface WindowDeps {
+  platform: NodeJS.Platform;
+  env: NodeJS.ProcessEnv;
+  exists(file: string): boolean;
+  exec(file: string, args: string[], timeoutMs?: number): Promise<string>;
+  launch(file: string, args: string[]): Promise<void>;
+  sleep(ms: number): Promise<void>;
+  id(): string;
+}
+
+export function defaultWindowDeps(): WindowDeps {
+  const env = { ...process.env };
+  delete env["TMUX"];
+  const run = promisify(execFile);
+  return {
+    platform: process.platform, env, exists: existsSync,
+    exec: async (file, args, timeoutMs = 10_000) => (await run(file, args, { env, encoding: "utf8", timeout: timeoutMs })).stdout,
+    launch: (file, args) => new Promise((resolve, reject) => {
+      const child = spawn(file, args, { env, detached: true, stdio: "ignore" });
+      child.once("error", reject);
+      child.once("spawn", () => { child.unref(); resolve(); });
+    }),
+    sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+    id: () => randomUUID().slice(0, 12),
+  };
+}
+
+function localDaemon(url: string): boolean {
+  const host = new URL(url).hostname.replace(/^\[|\]$/g, "");
+  return ["localhost", "::1", "::", "0.0.0.0", hostname()].includes(host)
+    || /^127\./.test(host)
+    || Object.values(networkInterfaces()).flat().some(iface => iface?.address === host);
+}
+
+async function herdrBinary(deps: WindowDeps): Promise<string | null> {
+  const dir = deps.env["HERDR_INSTALL_DIR"] ?? path.join(deps.env["HOME"] ?? homedir(), ".local", "bin");
+  for (const candidate of ["herdr", path.join(dir, "herdr")]) {
+    try {
+      await deps.exec(candidate, ["--version"]);
+      const binary = candidate === "herdr" ? (await deps.exec("/bin/sh", ["-c", "command -v herdr"])).trim() : candidate;
+      if (path.isAbsolute(binary)) return binary;
+    } catch { /* The installer path also works when it is absent from PATH. */ }
+  }
+  return null;
+}
+
+/** New surfaces only. No System Events keystrokes or existing-terminal input. */
+async function windowLauncher(deps: WindowDeps): Promise<(command: string) => Promise<{ app: string; surface: string }>> {
+  if (deps.platform === "darwin") {
+    const app = ["/Applications/Ghostty.app", path.join(deps.env["HOME"] ?? homedir(), "Applications/Ghostty.app")].find(deps.exists);
+    let ghostty = false;
+    if (app) {
+      try {
+        const version = await deps.exec("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleShortVersionString", path.join(app, "Contents/Info.plist")]);
+        const [major, minor] = version.trim().split(".").map(Number);
+        ghostty = major! > 1 || (major === 1 && minor! >= 3);
+      } catch { /* Older/non-scriptable Ghostty uses the system terminal. */ }
+    }
+    const script = ghostty ? `on run argv
+tell application "Ghostty"
+  set cfg to new surface configuration
+  set command of cfg to item 1 of argv
+  if (count of windows) > 0 then
+    set newTab to new tab in front window with configuration cfg
+    select tab newTab
+    focus (focused terminal of newTab)
+    return "tab"
+  else
+    set newWindow to new window with configuration cfg
+    activate window newWindow
+    return "window"
+  end if
+end tell
+end run` : `on run argv
+tell application "Terminal"
+  do script (item 1 of argv)
+  activate
+end tell
+return "window"
+end run`;
+    // A denied/uncertain Automation request is returned once, never replayed in another app.
+    return async command => {
+      const surface = (await deps.exec("/usr/bin/osascript", ["-e", script, command], 120_000)).trim();
+      return { app: ghostty ? "Ghostty" : "Terminal", surface };
+    };
+  }
+  if (deps.platform !== "linux" || (!deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"])) {
+    throw new Error("No local desktop display is available; no terminal window was opened. Run this command on the daemon's desktop.");
+  }
+  for (const app of ["ghostty", "x-terminal-emulator", "gnome-terminal", "konsole", "xterm"]) {
+    try { await deps.exec("/bin/sh", ["-c", `command -v ${app}`]); } catch { continue; }
+    return async command => {
+      const args = app === "gnome-terminal" ? ["--window", "--", "/bin/sh", "-c", command] : ["-e", "/bin/sh", "-c", command];
+      await deps.launch(app, args);
+      return { app, surface: "window-requested" };
+    };
+  }
+  throw new Error("No supported desktop terminal was found; install Ghostty or a system terminal and retry.");
+}
+
+function failure(provider: string, error: string): OpenViewResult {
+  return { provider, ok: false, opened: [], absent: [], degraded: [], pages: 0, error, code: "terminal_window_failed" };
+}
+
+/** Render the daemon's existing composition; never rediscover/relaunch kernel seats here. */
+export async function openTerminalWindow(client: DaemonClient, view: string, requestedProvider?: string, deps = defaultWindowDeps()): Promise<OpenViewResult> {
+  let provider = requestedProvider ?? "herdr";
+  let window: { app: string; surface: string } | undefined;
+  let viewer: string | undefined;
+  try {
+    if (!localDaemon(client.baseUrl)) throw new Error("--window must run on the daemon's own desktop; the configured daemon is remote.");
+    if (requestedProvider && !["herdr", "tmux"].includes(requestedProvider)) throw new Error("--window supports herdr or tmux. Use cmux without --window.");
+    const launchWindow = await windowLauncher(deps);
+    const herdr = requestedProvider === "tmux" ? null : await herdrBinary(deps);
+    if (!herdr && requestedProvider === "herdr") throw new Error("Herdr is not installed. Run rig setup, or use --provider tmux --window.");
+    provider = herdr ? "herdr" : "tmux";
+    // Preview is provider-neutral composition, including saved-view membership, absences and quoting.
+    const preview = await client.get<Preview | OpenViewResult>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr`);
+    if (preview.status >= 400 || !("composed" in preview.data)) {
+      return failure(provider, (preview.data as OpenViewResult).error ?? "Could not compose the requested view.");
+    }
+    const { composed, planId } = preview.data;
+    if (!composed.opened.length) return { ...failure(provider, "No conversations are attachable."), absent: composed.absent, degraded: composed.degraded };
+
+    if (herdr) {
+      const endpoint = preview.data.status.launch;
+      if (!endpoint?.socketPath) throw new Error("The daemon does not report its herdr endpoint. Update the daemon, or use --provider tmux --window.");
+      const session = endpoint.session ? ` --session ${shellQuote(endpoint.session)}` : "";
+      window = await launchWindow(`env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)}${session}`);
+      let alive = false;
+      for (let attempt = 0; attempt < 20; attempt++) {
+        const status = await client.get<{ providers: Array<{ liveness: { alive: boolean } }> }>("/api/terminal/status?provider=herdr");
+        if (status.data.providers?.[0]?.liveness.alive) { alive = true; break; }
+        await deps.sleep(250);
+      }
+      if (!alive) throw new Error("The terminal was requested, but herdr's control socket did not become ready. Inspect the new terminal before retrying.");
+      const result = await client.post<OpenViewResult>("/api/terminal/open", { view, provider: "herdr", expectedPlan: planId }, { timeoutMs: 45_000 });
+      if (result.status >= 400) return { ...failure(provider, result.data.error ?? `The daemon refused the view (HTTP ${result.status}).`), window, absent: composed.absent, degraded: composed.degraded };
+      if (!Array.isArray(result.data?.opened)) throw new Error("The terminal opened, but the daemon returned no view result. Inspect it before retrying.");
+      return { ...result.data, window, notes: [...(result.data.notes ?? []), "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
+    }
+
+    const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"])).trim();
+    if (!tmux) throw new Error("tmux is unavailable; run rig setup first.");
+    viewer = `openrig-view-${deps.id()}`;
+    for (const [pageIndex, page] of composed.pages.entries()) {
+      if (!page.length) continue;
+      const name = `view-${pageIndex + 1}`;
+      const first = page[0]!;
+      const args = pageIndex === 0 ? ["new-session", "-d", "-s", viewer, "-n", name] : ["new-window", "-d", "-t", `${viewer}:`, "-n", name];
+      let pane = (await deps.exec(tmux, [...args, "-P", "-F", "#{pane_id}", `env -u TMUX ${first.paneCommand}`])).trim();
+      await deps.exec(tmux, ["select-pane", "-t", pane, "-T", first.label]);
+      for (const item of page.slice(1)) {
+        pane = (await deps.exec(tmux, ["split-window", "-d", "-h", "-t", pane, "-P", "-F", "#{pane_id}", `env -u TMUX ${item.paneCommand}`])).trim();
+        await deps.exec(tmux, ["select-pane", "-t", pane, "-T", item.label]);
+        await deps.exec(tmux, ["select-layout", "-t", `${viewer}:${name}`, "even-horizontal"]);
+      }
+      await deps.exec(tmux, ["select-layout", "-t", `${viewer}:${name}`, composed.columns === page.length ? "even-horizontal" : "tiled"]);
+    }
+    await deps.exec(tmux, ["select-window", "-t", `${viewer}:view-1`]);
+    window = await launchWindow(`env -u TMUX ${shellQuote(tmux)} attach-session -t ${shellQuote(`=${viewer}`)}`);
+    return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
+  } catch (err) {
+    return { ...failure(provider, (err as Error).message), ...(window ? { window } : {}), ...(viewer ? { notes: [`Viewing session ${viewer} may exist. Inspect it before retrying; no existing conversation was replaced.`] } : {}) };
+  }
+}

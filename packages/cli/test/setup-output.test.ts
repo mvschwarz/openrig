@@ -38,8 +38,8 @@ function fixture(failed: boolean): SetupDeps {
 function expectConversationRoute(text: string): void {
   expect(text).toContain("Open the OpenRig view now?");
   expect(text).toContain("rig terminal open saved:kernel");
-  expect(text).toContain("relay the printed operator.agent attach command unchanged, in full");
-  expect(text).toContain("env -u TMUX tmux attach-session");
+  expect(text).toContain("rig terminal open saved:kernel --window --json");
+  expect(text).toContain("No copying or typing for the person");
   expect(text).toContain("then hand them to the ready operator");
   expect(text).toContain("Do not implement the person's project yourself");
   expect(text).toContain("Started is not ready");

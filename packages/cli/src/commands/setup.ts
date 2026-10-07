@@ -2,19 +2,13 @@ import { Command } from "commander";
 import { execSync } from "node:child_process";
 import { readFileSync, writeFileSync, existsSync, accessSync, constants, mkdirSync } from "node:fs";
 import path from "node:path";
+import { homedir } from "node:os";
+import { shellQuote } from "../cross-host-executor.js";
 import { fileURLToPath } from "node:url";
 import { parseDocument } from "yaml";
 import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
-import { formatDaemonHostForUrl } from "../client.js";
 import { ConfigStore } from "../config-store.js";
-import {
-  CMUX_SETTINGS_DISCLOSURE_PATH,
-  isCmuxSocketControlCompatible,
-  readCmuxSocketControlModeFromText,
-  resolveCmuxSettingsPath,
-  upsertCmuxSocketControlMode,
-} from "../cmux-config.js";
 import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
 import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
 
@@ -68,13 +62,12 @@ export { selectCodexProviderAuth, type CodexProviderAuth } from "../provider-aut
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const INSTALL_COMMAND_TIMEOUT_MS = 5 * 60_000;
-const CMUX_READY_ATTEMPTS = 5;
-const CMUX_READY_DELAY_MS = 1_000;
+const HERDR_INSTALL_COMMAND = "curl -fsSL https://herdr.dev/install.sh | sh";
 
 const CORE_STEP_IDS = [
   "brew",
   "tmux_install",
-  "cmux_install",
+  "herdr_install",
   "claude_install",
   "claude_auth",
   "codex_install",
@@ -84,11 +77,9 @@ const CORE_STEP_IDS = [
 ];
 const FULL_EXTRA_STEP_IDS = ["jq_install", "gh_install"];
 const BREW_PLATFORM_SKIP = "Skipped: Homebrew setup path is only used on macOS.";
-const BREW_UNAVAILABLE_SKIP = "Skipped: Homebrew not available.";
-/** Steps the real run skips off macOS, with the message it gives (cmux is a macOS app installed via Homebrew). */
+/** Homebrew is only used by the macOS setup path. Herdr also installs on Linux. */
 const NON_DARWIN_DRY_RUN_SKIPS: Record<string, string> = {
   brew: BREW_PLATFORM_SKIP,
-  cmux_install: BREW_UNAVAILABLE_SKIP,
 };
 const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   // OPR.0.4.8.2 agnostic rip-out: OpenRig no longer writes ~/.claude/settings.json — the global
@@ -120,13 +111,6 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   },
 ];
 
-const DARWIN_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure = {
-  scope: "global",
-  runtime: "cmux",
-  path: CMUX_SETTINGS_DISCLOSURE_PATH,
-  purpose: "Set cmux socket control to an OpenRig-compatible automation mode.",
-};
-
 export function defaultDeps(): SetupDeps {
   return {
     exec: (cmd: string, opts?: { timeoutMs?: number }) =>
@@ -146,90 +130,44 @@ function installCommand(deps: SetupDeps, cmd: string): string {
   return deps.exec(cmd, { timeoutMs: INSTALL_COMMAND_TIMEOUT_MS });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForCmuxCapabilities(deps: SetupDeps, attempts = CMUX_READY_ATTEMPTS): Promise<boolean> {
-  for (let index = 0; index < attempts; index += 1) {
+/** Probe without starting a server or taking over the installing terminal. */
+function findHerdrCommand(deps: SetupDeps): string | null {
+  const env = deps.env ?? process.env;
+  const installDir = env["HERDR_INSTALL_DIR"] ?? path.join(env["HOME"] ?? homedir(), ".local", "bin");
+  for (const command of ["herdr", shellQuote(path.join(installDir, "herdr"))]) {
     try {
-      deps.exec("cmux capabilities --json");
-      return true;
-    } catch {
-      if (index < attempts - 1) {
-        await sleep(CMUX_READY_DELAY_MS);
-      }
-    }
+      deps.exec(`${command} --version`);
+      return command;
+    } catch { /* Try the installer's default path if it is not on PATH. */ }
   }
-  return false;
+  return null;
 }
 
-async function tryEnableCmuxControl(deps: SetupDeps, platform: NodeJS.Platform): Promise<boolean> {
-  if (platform !== "darwin") return false;
-
-  const settingsPath = resolveCmuxSettingsPath();
-  const settingsText = deps.readFile(settingsPath);
-  const currentMode = readCmuxSocketControlModeFromText(settingsText);
-  if (currentMode.error) {
-    return false;
+function installHerdr(deps: SetupDeps, platform: NodeJS.Platform): SetupStep {
+  if (platform !== "darwin" && platform !== "linux") {
+    return { id: "herdr_install", status: "skipped", message: "Automatic herdr installation is supported on macOS and Linux." };
   }
-
+  let command = findHerdrCommand(deps);
+  const present = command !== null;
   try {
-    deps.mkdirp?.(path.dirname(settingsPath));
-    const next = upsertCmuxSocketControlMode(settingsText, "automation");
-    if (next.changed) {
-      deps.writeFile(settingsPath, next.content);
+    if (!command) {
+      installCommand(deps, HERDR_INSTALL_COMMAND);
+      command = findHerdrCommand(deps);
+      if (!command) throw new Error("The installer returned, but the herdr binary could not be verified.");
     }
-  } catch {
-    return false;
-  }
-
-  const shellReady = await waitForCmuxCapabilities(deps, 1);
-  if (shellReady) {
-    try {
-      deps.exec("cmux reload-config");
-    } catch {
-      // Best effort: if reload fails, the daemon-side verification will surface it honestly.
-    }
-    return waitForCmuxCapabilities(deps, 1);
-  }
-
-  try {
-    deps.exec("open -a /Applications/cmux.app");
-  } catch {
-    // Best effort: cmux may already be running or the app open may be blocked; capability probe decides readiness.
-  }
-
-  return waitForCmuxCapabilities(deps);
-}
-
-function buildRuntimeConfigDisclosure(platform: NodeJS.Platform): RuntimeConfigDisclosure[] {
-  return platform === "darwin"
-    ? [...BASE_RUNTIME_CONFIG_DISCLOSURE, DARWIN_RUNTIME_CONFIG_DISCLOSURE]
-    : [...BASE_RUNTIME_CONFIG_DISCLOSURE];
-}
-
-async function probeDaemonCmuxStatus(doctorDeps?: DoctorDeps): Promise<"available" | "unavailable" | "skipped"> {
-  const fetchFn = doctorDeps?.fetch;
-  if (!fetchFn) return "skipped";
-  const config = doctorDeps.configStore.resolve();
-  const host = config.daemon.host;
-  const port = config.daemon.port;
-
-  try {
-    const healthRes = await fetchFn(`http://${formatDaemonHostForUrl(host)}:${port}/healthz`);
-    if (!healthRes.ok) return "skipped";
-  } catch {
-    return "skipped";
-  }
-
-  try {
-    const cmuxRes = await fetchFn(`http://${formatDaemonHostForUrl(host)}:${port}/api/adapters/cmux/status`);
-    if (!cmuxRes.ok || !cmuxRes.json) return "unavailable";
-    const data = (await cmuxRes.json()) as { available?: boolean };
-    return data.available ? "available" : "unavailable";
-  } catch {
-    return "unavailable";
+    return {
+      id: "herdr_install",
+      status: present ? "pass" : "applied",
+      message: `${present ? "Found" : "Installed"} herdr (${command}). No terminal or view was opened.`,
+      ...(command !== "herdr" ? { fixHint: `Use ${command} when opening the view, or add its directory to your shell PATH.` } : {}),
+    };
+  } catch (err) {
+    return {
+      id: "herdr_install", status: "fail",
+      message: `Could not install or verify herdr: ${(err as Error).message}`,
+      reason: "The OpenRig view uses herdr. Existing cmux and plain-terminal workflows remain available.",
+      fixHint: `Retry \`${HERDR_INSTALL_COMMAND}\`, or follow https://herdr.dev/docs/install/.`,
+    };
   }
 }
 
@@ -327,16 +265,18 @@ export function recordPermissionPolicyStep(deps: SetupDeps, choice: string, spec
   };
 }
 
-export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
+export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?: boolean; policy?: string; specPath?: string; herdr?: boolean; doctorDeps?: DoctorDeps }): Promise<SetupResult> {
   const profile = opts.full ? "full" : "core";
   const platform = deps.platform ?? process.platform;
-  const runtimeConfig = buildRuntimeConfigDisclosure(platform);
+  const runtimeConfig = [...BASE_RUNTIME_CONFIG_DISCLOSURE];
   const stepIds = opts.full ? [...CORE_STEP_IDS, ...FULL_EXTRA_STEP_IDS] : [...CORE_STEP_IDS];
   const steps: SetupStep[] = [];
 
   if (opts.dryRun) {
     for (const id of stepIds) {
-      const platformSkip = platform !== "darwin" ? NON_DARWIN_DRY_RUN_SKIPS[id] : undefined;
+      const platformSkip = id === "herdr_install" && opts.herdr === false ? "Skipped: herdr installation declined (--no-herdr)."
+        : id === "herdr_install" && !["darwin", "linux"].includes(platform) ? "Automatic herdr installation is supported on macOS and Linux."
+        : platform !== "darwin" ? NON_DARWIN_DRY_RUN_SKIPS[id] : undefined;
       steps.push({ id, status: "skipped", message: platformSkip ?? `Dry run: ${id} would be attempted.` });
     }
     if (opts.policy !== undefined) {
@@ -364,7 +304,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
         id: "brew",
         status: "fail",
         message: "Homebrew not found.",
-        reason: "Homebrew is required to install tmux and cmux on macOS.",
+        reason: "Homebrew is required to install tmux on macOS.",
         fixHint: "Install Homebrew: https://brew.sh",
       });
     }
@@ -396,119 +336,11 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     steps.push({ id: "tmux_install", status: "pass", message: "tmux available." });
   }
 
-  // 3. cmux
-  const daemonCmuxBefore = await probeDaemonCmuxStatus(opts.doctorDeps);
-  if (await waitForCmuxCapabilities(deps, 1)) {
-    const socketMode = readCmuxSocketControlModeFromText(deps.readFile(resolveCmuxSettingsPath()));
-    if (platform === "darwin" && socketMode.error) {
-      steps.push({
-        id: "cmux_install",
-        status: "fail",
-        message: "cmux settings file is unreadable.",
-        reason: `OpenRig could not parse ${CMUX_SETTINGS_DISCLOSURE_PATH}: ${socketMode.error}`,
-        fixHint: "Repair or remove the cmux settings file, then rerun `rig setup`.",
-      });
-    } else if (platform === "darwin" && !isCmuxSocketControlCompatible(socketMode.mode)) {
-      if (await tryEnableCmuxControl(deps, platform)) {
-        const daemonCmuxAfter = await probeDaemonCmuxStatus(opts.doctorDeps);
-        if (daemonCmuxAfter === "unavailable") {
-          steps.push({
-            id: "cmux_install",
-            status: "fail",
-            message: "OpenRig updated cmux settings, but the running daemon still cannot control cmux.",
-            reason: "The cmux settings file is now compatible, so the remaining blocker is in the live daemon/cmux session state.",
-            fixHint: "Restart the daemon with `rig daemon start`, then rerun `rig doctor` to confirm cmux daemon control.",
-          });
-        } else {
-          steps.push({
-            id: "cmux_install",
-            status: "applied",
-            message: "Normalized cmux socket control to automation mode in ~/.config/cmux/settings.json.",
-          });
-        }
-      } else {
-        steps.push({
-          id: "cmux_install",
-          status: "fail",
-          message: "cmux shell control works, but OpenRig could not normalize cmux socket control.",
-          reason: "OpenRig needs a compatible cmux socket control mode so the daemon can open CMUX surfaces reliably.",
-          fixHint: `Set automation.socketControlMode to "automation" in ${CMUX_SETTINGS_DISCLOSURE_PATH}, then rerun \`rig setup\` or \`rig doctor\`.`,
-        });
-      }
-    } else if (daemonCmuxBefore === "unavailable") {
-      steps.push({
-        id: "cmux_install",
-        status: "fail",
-        message: "cmux shell control works, but the running daemon still cannot control cmux.",
-        reason: "Current cmux settings already look compatible, so the remaining blocker is outside the cmux settings file OpenRig can repair automatically.",
-        fixHint: "Run `rig doctor` for the exact daemon cmux diagnosis, then restart the daemon after clearing the underlying blocker.",
-      });
-    } else {
-      steps.push({ id: "cmux_install", status: "pass", message: "cmux available." });
-    }
-  } else {
-    try {
-      deps.exec("cmux --help");
+  // 3. Herdr is the default view provider. Leave optional cmux installations untouched.
+  steps.push(opts.herdr === false
+    ? { id: "herdr_install", status: "skipped", message: "Skipped: herdr installation declined (--no-herdr)." }
+    : installHerdr(deps, platform));
 
-      if (await tryEnableCmuxControl(deps, platform)) {
-        const daemonCmuxAfter = await probeDaemonCmuxStatus(opts.doctorDeps);
-        if (daemonCmuxAfter === "unavailable") {
-          steps.push({
-            id: "cmux_install",
-            status: "fail",
-            message: "OpenRig enabled cmux socket control, but the running daemon still cannot control cmux.",
-            reason: "The cmux app and settings are now in place, so the remaining blocker is in the live daemon/cmux session state.",
-            fixHint: "Restart the daemon with `rig daemon start`, then rerun `rig doctor` to confirm cmux daemon control.",
-          });
-        } else {
-          steps.push({
-            id: "cmux_install",
-            status: "applied",
-            message: "Enabled cmux socket control in ~/.config/cmux/settings.json.",
-          });
-        }
-      } else {
-        steps.push({
-          id: "cmux_install",
-          status: platform === "darwin" ? "fail" : "warn",
-          message: "cmux installed but control unavailable.",
-          reason: "Open CMUX workflows need cmux socket control to be enabled.",
-          fixHint: platform === "darwin"
-            ? `Set automation.socketControlMode to "automation" in ${CMUX_SETTINGS_DISCLOSURE_PATH}, then rerun \`rig setup\` or \`rig doctor\`.`
-            : "Open cmux, approve any first-run prompts, and rerun `rig setup` or `rig doctor`.",
-        });
-      }
-    } catch {
-      if (!brewOk) {
-        steps.push({ id: "cmux_install", status: "skipped", message: BREW_UNAVAILABLE_SKIP });
-      } else {
-        try {
-          installCommand(deps, "brew install --cask cmux");
-          if (await tryEnableCmuxControl(deps, platform) || await waitForCmuxCapabilities(deps, 1)) {
-            steps.push({ id: "cmux_install", status: "applied", message: "Installed cmux with Homebrew." });
-          } else {
-            steps.push({
-              id: "cmux_install",
-              status: platform === "darwin" ? "fail" : "warn",
-              message: "Installed cmux, but control is still unavailable.",
-              reason: "Open CMUX workflows need the cmux app to expose socket control after installation.",
-              fixHint: "Open cmux, approve any first-run prompts, and rerun `rig setup` or `rig doctor`.",
-            });
-          }
-        } catch (err) {
-          steps.push({
-            id: "cmux_install",
-            status: "fail",
-            message: `Failed to install cmux: ${(err as Error).message}`,
-            reason: "Open CMUX workflows stay unavailable until the cmux app and CLI are installed.",
-            fixHint: "Retry `brew install --cask cmux` after connectivity stabilizes, or install cmux manually.",
-          });
-        }
-      }
-    }
-  }
-
-  // 4. tmux config
   // 4. Claude Code runtime
   let claudeInstalled = false;
   try {
@@ -701,18 +533,16 @@ export function goldenPathNextSteps(): string[] {
     "     Started is not ready. The view may open while agents finish starting; report their actual state",
     "     For an existing kernel or blocked startup: rig context get reference/getting-started.md#incomplete-setup-and-restart",
     "  4. Installing agent: ask 'Open the OpenRig view now?'",
-    "     Yes: open a NEW space using installed herdr, else cmux, else the guide's exact new-terminal command",
-    "     rig terminal open saved:kernel --provider herdr --json (TUI | advisor | operator; no YAML edit)",
+    "     Yes: run the command below; it opens a NEW terminal tab/window and preserves this terminal",
+    "     rig terminal open saved:kernel --window --json (TUI | advisor | operator; herdr, otherwise plain tmux)",
     "     rig context get reference/getting-started.md#open-the-kernel-conversations",
     "     No: give the command to open it later. Over SSH: give the exact connection/attach command",
     "     No, SSH and headless use are fine background outcomes; do not report an unseen window as opened",
-    "     For herdr, open or attach the actual session and check the visible view; CLI success alone is not proof",
-    "     Keep the current terminal and existing spaces intact; opening this view needs no new provider install",
+    "     No copying or typing for the person; confirm three visible columns, not just CLI success",
+    "     Setup installs herdr by default; use --no-herdr if the person declines. Plain tmux remains available",
     "     rig tui --shared is the team dashboard, not the operator's conversation",
-    "     If the view cannot open, relay the printed operator.agent attach command unchanged, in full",
-    "     If no command is printed, find operator.agent with rig ps --nodes --rig kernel --json",
-    "     Use its canonicalSessionName in: env -u TMUX tmux attach-session -t '=<canonicalSessionName>'",
-    "     Give the person that command with the name filled in, to run in a new terminal on the kernel host",
+    "     If opening fails, inspect any new surface before retrying; report the error and finish the local action",
+    "     Do not replace a failed desktop action with commands for the person to copy or type",
     "  5. Installing agent: ask the person's goal and project folder, then hand them to the ready operator",
     "     Find operator.agent with rig ps --nodes --rig kernel --json; use its canonicalSessionName with rig send",
     "     Send the goal and folder, or have the person type them in the operator pane; show where it answers",
@@ -779,12 +609,13 @@ export function setupCommand(depsOverride?: SetupDeps): Command {
     .option("--dry-run", "Show the plan without making changes")
     .option("--json", "Machine-readable JSON output")
     .option("--full", "Install broader operator workstation tools")
+    .option("--no-herdr", "Skip the default herdr installation; the welcome view can use plain tmux")
     .option("--policy <name>", `Record a deliberate permission-policy choice into an existing spec (${POLICY_CHOICES.join("|")})`)
     .option("--spec <path>", "Existing rig spec (file or directory) to record the --policy choice into")
-    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; policy?: string; spec?: string }) => {
+    .action(async (opts: { dryRun?: boolean; json?: boolean; full?: boolean; herdr?: boolean; policy?: string; spec?: string }) => {
       const deps = depsOverride ?? defaultDeps();
       const doctorDeps = opts.dryRun ? undefined : buildDefaultDoctorDeps(deps);
-      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, doctorDeps });
+      const result = await runSetup(deps, { dryRun: opts.dryRun, full: opts.full, policy: opts.policy, specPath: opts.spec, herdr: opts.herdr, doctorDeps });
 
       if (opts.json) {
         console.log(JSON.stringify({ ...result, nextSteps: goldenPathNextSteps() }, null, 2));

@@ -4,13 +4,11 @@ import { Command } from "commander";
 import { parse as parseYaml } from "yaml";
 import { setupCommand, runSetup, goldenPathNextSteps, permissionPolicyMenuLines, type SetupDeps, type SetupResult } from "../src/commands/setup.js";
 import type { DoctorDeps } from "../src/commands/doctor.js";
-import { resolveCmuxSettingsPath } from "../src/cmux-config.js";
-
-const CMUX_SETTINGS_PATH = resolveCmuxSettingsPath();
 
 function makeDeps(overrides?: Partial<SetupDeps>): SetupDeps {
   return {
     exec: (cmd: string) => {
+      if (cmd === "herdr --version") return "herdr 0.9.3\n";
       if (cmd === "brew --version") return "Homebrew 4.0\n";
       if (cmd === "tmux -V") return "tmux 3.4\n";
       if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
@@ -48,9 +46,8 @@ function captureLogs(fn: () => Promise<void>): Promise<{ logs: string[]; exitCod
 }
 
 function expectRuntimeConfigDisclosure(result: SetupResult): void {
-  // OPR.0.4.8.2 agnostic rip-out: the ~/.claude/settings.json disclosure (the global allow-list,
-  // C2) is REMOVED — OpenRig no longer writes that file. Disclosure drops from 6 to 5 entries.
-  expect(result.runtimeConfig).toHaveLength(5);
+  // Setup leaves cmux configuration alone; only managed runtime disclosures remain.
+  expect(result.runtimeConfig).toHaveLength(4);
   expect(result.runtimeConfig.find((d) => d.path === "~/.claude/settings.json")).toBeUndefined();
   expect(result.runtimeConfig).toEqual(expect.arrayContaining([
     {
@@ -77,12 +74,6 @@ function expectRuntimeConfigDisclosure(result: SetupResult): void {
       path: "$CODEX_HOME/config.toml (default: ~/.codex/config.toml)",
       purpose: "Pre-trust managed workspaces and apply selected Codex config runtime-resource fragments.",
     },
-    {
-      scope: "global",
-      runtime: "cmux",
-      path: "~/.config/cmux/settings.json",
-      purpose: "Set cmux socket control to an OpenRig-compatible automation mode.",
-    },
   ]));
 }
 
@@ -108,7 +99,7 @@ describe("rig setup", () => {
     const stepIds = result.steps.map((s) => s.id);
     expect(stepIds).toContain("brew");
     expect(stepIds).toContain("tmux_install");
-    expect(stepIds).toContain("cmux_install");
+    expect(stepIds).toContain("herdr_install");
     expect(stepIds).toContain("claude_install");
     expect(stepIds).toContain("claude_auth");
     expect(stepIds).toContain("codex_install");
@@ -138,7 +129,7 @@ describe("rig setup", () => {
     // Core steps still present
     expect(stepIds).toContain("brew");
     expect(stepIds).toContain("tmux_install");
-    expect(stepIds).toContain("cmux_install");
+    expect(stepIds).toContain("herdr_install");
     expect(stepIds).toContain("claude_install");
     expect(stepIds).toContain("claude_auth");
     expect(stepIds).toContain("codex_install");
@@ -176,7 +167,7 @@ describe("rig setup", () => {
       throw new Error(`not found: ${cmd}`);
     } }), {});
 
-    for (const id of ["brew", "cmux_install"]) {
+    for (const id of ["brew"]) {
       const dryStep = dry.steps.find((s) => s.id === id);
       expect(dryStep?.status).toBe("skipped");
       expect(dryStep?.message).toBe(real.steps.find((s) => s.id === id)?.message);
@@ -185,10 +176,10 @@ describe("rig setup", () => {
     expect(dry.steps.find((s) => s.id === "tmux_install")?.message).toBe("Dry run: tmux_install would be attempted.");
   });
 
-  it("--dry-run on darwin still reports brew and cmux_install as would be attempted", async () => {
+  it("--dry-run on darwin still reports brew and herdr_install as would be attempted", async () => {
     const dry = await runSetup(makeDeps({ platform: "darwin" }), { dryRun: true });
     expect(dry.steps.find((s) => s.id === "brew")).toEqual({ id: "brew", status: "skipped", message: "Dry run: brew would be attempted." });
-    expect(dry.steps.find((s) => s.id === "cmux_install")).toEqual({ id: "cmux_install", status: "skipped", message: "Dry run: cmux_install would be attempted." });
+    expect(dry.steps.find((s) => s.id === "herdr_install")).toEqual({ id: "herdr_install", status: "skipped", message: "Dry run: herdr_install would be attempted." });
   });
 
   it("core profile execution with all tools present returns pass/applied steps and ready=true", async () => {
@@ -205,8 +196,8 @@ describe("rig setup", () => {
     const tmux = result.steps.find((s) => s.id === "tmux_install");
     expect(tmux?.status).toBe("pass");
 
-    const cmux = result.steps.find((s) => s.id === "cmux_install");
-    expect(cmux?.status).toBe("applied");
+    const herdr = result.steps.find((s) => s.id === "herdr_install");
+    expect(herdr?.status).toBe("pass");
 
     const claudeInstall = result.steps.find((s) => s.id === "claude_install");
     expect(claudeInstall?.status).toBe("pass");
@@ -275,6 +266,7 @@ describe("rig setup", () => {
   it("fails setup honestly when tmux is installed but the default control socket is unhealthy", async () => {
     const deps = makeDeps({
       exec: (cmd: string) => {
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
         if (cmd === "brew --version") return "Homebrew 4.0\n";
         if (cmd === "tmux -V") return "tmux 3.4\n";
         if (cmd === "tmux list-sessions") throw new Error("server exited unexpectedly");
@@ -321,6 +313,7 @@ describe("rig setup", () => {
     let claudeInstalled = false;
     const deps = makeDeps({
       exec: (cmd: string) => {
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
         if (cmd === "brew --version") return "Homebrew 4.0\n";
         if (cmd === "tmux -V") return "tmux 3.4\n";
         if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
@@ -351,6 +344,7 @@ describe("rig setup", () => {
   it("fails setup honestly when Codex is installed but not logged in", async () => {
     const deps = makeDeps({
       exec: (cmd: string) => {
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
         if (cmd === "brew --version") return "Homebrew 4.0\n";
         if (cmd === "tmux -V") return "tmux 3.4\n";
         if (cmd === "cmux capabilities --json") return '{"capabilities":[]}\n';
@@ -373,6 +367,7 @@ describe("rig setup", () => {
     const deps = makeDeps({
       platform: "linux",
       exec: (cmd: string) => {
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
         if (cmd === "tmux -V") return "tmux 3.4\n";
         if (cmd === "tmux list-sessions") return "";
         if (cmd === "cmux capabilities --json") throw new Error("not found");
@@ -395,6 +390,7 @@ describe("rig setup", () => {
   it("brew failure does not crash — later brew-dependent steps are skipped honestly", async () => {
     const deps = makeDeps({
       exec: (cmd: string) => {
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
         if (cmd === "brew --version") throw new Error("command not found: brew");
         if (cmd === "tmux -V") throw new Error("command not found: tmux");
         if (cmd === "tmux list-sessions") throw new Error("command not found: tmux");
@@ -413,8 +409,8 @@ describe("rig setup", () => {
     const tmux = result.steps.find((s) => s.id === "tmux_install");
     expect(tmux?.status).toBe("skipped");
 
-    const cmux = result.steps.find((s) => s.id === "cmux_install");
-    expect(cmux?.status).toBe("skipped");
+    const herdr = result.steps.find((s) => s.id === "herdr_install");
+    expect(herdr?.status).toBe("pass");
 
     // verify step should reflect the failures
     const verify = result.steps.find((s) => s.id === "verify");
@@ -512,6 +508,7 @@ describe("rig setup", () => {
   it("tmux install failure returns structured fail, does not crash setup", async () => {
     const deps = makeDeps({
       exec: (cmd: string) => {
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
         if (cmd === "brew --version") return "Homebrew 4.0\n";
         if (cmd === "tmux -V") throw new Error("not found");
         if (cmd === "brew install tmux") throw new Error("brew install failed");
@@ -526,224 +523,9 @@ describe("rig setup", () => {
     expect(result.ready).toBe(false);
 
     // Other steps still attempted
-    const cmux = result.steps.find((s) => s.id === "cmux_install");
-    expect(cmux).toBeDefined();
-    expect(cmux?.status).toBe("applied");
-  });
-
-  it("enables cmux automation mode on macOS when cmux is installed but not yet controllable", async () => {
-    let cmuxReady = false;
-    const seen: string[] = [];
-    const writeSpy = vi.fn();
-    const deps = makeDeps({
-      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? null : null,
-      writeFile: writeSpy,
-      exec: (cmd: string) => {
-        seen.push(cmd);
-        if (cmd === "brew --version") return "Homebrew 4.0\n";
-        if (cmd === "tmux -V") return "tmux 3.4\n";
-        if (cmd === "cmux capabilities --json") {
-          if (cmuxReady) return '{"methods":["surface.focus"]}\n';
-          throw new Error("socket not ready");
-        }
-        if (cmd === "cmux --help") return "cmux help\n";
-        if (cmd === "open -a /Applications/cmux.app") {
-          cmuxReady = true;
-          return "";
-        }
-        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
-        if (cmd === "claude auth status") return "Authenticated\n";
-        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
-        if (cmd === "codex login status") return "Logged in\n";
-        return "";
-      },
-    });
-
-    const result = await runSetup(deps, {});
-
-    const cmux = result.steps.find((s) => s.id === "cmux_install");
-    expect(cmux?.status).toBe("applied");
-    expect(cmux?.message).toContain("Enabled cmux socket control");
-    expect(seen).toContain("open -a /Applications/cmux.app");
-    expect(writeSpy).toHaveBeenCalledWith(
-      CMUX_SETTINGS_PATH,
-      expect.stringContaining("\"socketControlMode\": \"automation\""),
-    );
-    expect(result.ready).toBe(true);
-  });
-
-  it("normalizes restrictive cmux socket control on macOS even when shell cmux already works", async () => {
-    const seen: string[] = [];
-    const writeSpy = vi.fn();
-    const doctorDeps: DoctorDeps = {
-      exists: () => true,
-      baseDir: "/install/cli/dist",
-      readFile: () => null,
-      exec: (cmd: string) => {
-        if (cmd === "tmux -V") return "tmux 3.4\n";
-        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
-        if (cmd === "cmux --help") return "cmux help\n";
-        return "";
-      },
-      checkPort: async () => false,
-      configStore: { resolve: () => ({ daemon: { port: 7433, host: "127.0.0.1" }, db: { path: "/tmp/openrig/openrig.sqlite" }, transcripts: { enabled: true, path: "/tmp/openrig/transcripts" } }) },
-      platform: "darwin",
-      mkdirp: () => {},
-      checkWritable: () => {},
-      fetch: async (url: string) => {
-        if (url.includes("/healthz")) return { ok: true };
-        if (url.includes("/api/adapters/cmux/status")) return { ok: true, json: async () => ({ available: true }) };
-        throw new Error(`unexpected fetch ${url}`);
-      },
-    };
-    const deps = makeDeps({
-      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"cmuxOnly\"\n  }\n}\n" : null,
-      writeFile: writeSpy,
-      exec: (cmd: string) => {
-        seen.push(cmd);
-        if (cmd === "brew --version") return "Homebrew 4.0\n";
-        if (cmd === "tmux -V") return "tmux 3.4\n";
-        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
-        if (cmd === "cmux --help") return "cmux help\n";
-        if (cmd === "cmux reload-config") return "";
-        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
-        if (cmd === "claude auth status") return "Authenticated\n";
-        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
-        if (cmd === "codex login status") return "Logged in\n";
-        return "";
-      },
-    });
-
-    const result = await runSetup(deps, { doctorDeps });
-
-    const cmux = result.steps.find((s) => s.id === "cmux_install");
-    expect(cmux?.status).toBe("applied");
-    expect(cmux?.message).toContain("automation");
-    expect(seen).toContain("cmux reload-config");
-    expect(writeSpy).toHaveBeenCalledWith(
-      CMUX_SETTINGS_PATH,
-      expect.stringContaining("\"socketControlMode\": \"automation\""),
-    );
-    expect(result.ready).toBe(true);
-  });
-
-  it("fails honestly when cmux stays uncontrollable after automatic macOS setup", async () => {
-    const deps = makeDeps({
-      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"cmuxOnly\"\n  }\n}\n" : null,
-      exec: (cmd: string) => {
-        if (cmd === "brew --version") return "Homebrew 4.0\n";
-        if (cmd === "tmux -V") return "tmux 3.4\n";
-        if (cmd === "cmux capabilities --json") throw new Error("broken pipe");
-        if (cmd === "cmux --help") return "cmux help\n";
-        if (cmd === "open -a /Applications/cmux.app") return "";
-        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
-        if (cmd === "claude auth status") return "Authenticated\n";
-        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
-        if (cmd === "codex login status") return "Logged in\n";
-        return "";
-      },
-    });
-
-    const result = await runSetup(deps, {});
-
-    const cmux = result.steps.find((s) => s.id === "cmux_install");
-    expect(cmux?.status).toBe("fail");
-    expect(cmux?.message).toContain("cmux installed but control unavailable");
-    expect(result.ready).toBe(false);
-  });
-
-  it("does not rewrite compatible password mode when shell cmux already works", async () => {
-    const writeSpy = vi.fn();
-    const deps = makeDeps({
-      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"password\"\n  }\n}\n" : null,
-      writeFile: writeSpy,
-      exec: (cmd: string) => {
-        if (cmd === "brew --version") return "Homebrew 4.0\n";
-        if (cmd === "tmux -V") return "tmux 3.4\n";
-        if (cmd === "tmux list-sessions") return "";
-        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
-        if (cmd === "cmux --help") return "cmux help\n";
-        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
-        if (cmd === "claude auth status") return "Authenticated\n";
-        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
-        if (cmd === "codex login status") return "Logged in\n";
-        throw new Error(`unexpected: ${cmd}`);
-      },
-    });
-
-    const result = await runSetup(deps, {});
-
-    const cmux = result.steps.find((s) => s.id === "cmux_install");
-    expect(cmux?.status).toBe("pass");
-    expect(writeSpy).not.toHaveBeenCalledWith(
-      CMUX_SETTINGS_PATH,
-      expect.any(String),
-    );
-    expect(result.ready).toBe(true);
-  });
-
-  it("fails setup when shell cmux works but the running daemon still cannot control cmux", async () => {
-    const doctorDeps: DoctorDeps = {
-      exists: () => true,
-      baseDir: "/install/cli/dist",
-      readFile: () => null,
-      exec: (cmd: string) => {
-        if (cmd === "tmux -V") return "tmux 3.4\n";
-        if (cmd === "cmux capabilities --json") return '{"capabilities":["surface.focus"]}\n';
-        if (cmd === "cmux --help") return "cmux help\n";
-        return "";
-      },
-      checkPort: async () => false,
-      configStore: { resolve: () => ({ daemon: { port: 7433, host: "127.0.0.1" }, db: { path: "/tmp/openrig/openrig.sqlite" }, transcripts: { enabled: true, path: "/tmp/openrig/transcripts" } }) },
-      platform: "darwin",
-      mkdirp: () => {},
-      checkWritable: () => {},
-      fetch: async (url: string) => {
-        if (url.includes("/healthz")) return { ok: true };
-        if (url.includes("/api/adapters/cmux/status")) return { ok: true, json: async () => ({ available: false }) };
-        throw new Error(`unexpected fetch ${url}`);
-      },
-    };
-    const deps = makeDeps({
-      readFile: (filePath: string) => filePath === CMUX_SETTINGS_PATH ? "{\n  \"automation\": {\n    \"socketControlMode\": \"password\"\n  }\n}\n" : null,
-    });
-
-    const result = await runSetup(deps, { doctorDeps });
-
-    const cmux = result.steps.find((s) => s.id === "cmux_install");
-    expect(cmux?.status).toBe("fail");
-    expect(cmux?.message).toContain("running daemon still cannot control cmux");
-    expect(result.ready).toBe(false);
-  });
-
-  it("gives fresh install commands a longer timeout budget and fails cmux honestly when install still errors", async () => {
-    const seenTimeouts = new Map<string, number | undefined>();
-    const deps = makeDeps({
-      exec: (cmd: string, opts?: { timeoutMs?: number }) => {
-        if (cmd === "brew --version") return "Homebrew 4.0\n";
-        if (cmd === "tmux -V") return "tmux 3.4\n";
-        if (cmd === "tmux list-sessions") throw new Error("error connecting to /tmp/tmux (No such file or directory)");
-        if (cmd === "cmux capabilities --json") throw new Error("command not found: cmux");
-        if (cmd === "cmux --help") throw new Error("command not found: cmux");
-        if (cmd === "brew install --cask cmux") {
-          seenTimeouts.set(cmd, opts?.timeoutMs);
-          throw new Error("spawnSync /bin/sh ETIMEDOUT");
-        }
-        if (cmd === "claude --version") return "2.1.101 (Claude Code)\n";
-        if (cmd === "claude auth status") return "Authenticated\n";
-        if (cmd === "codex --version") return "codex-cli 0.118.0\n";
-        if (cmd === "codex login status") return "Logged in\n";
-        throw new Error(`unexpected: ${cmd}`);
-      },
-    });
-
-    const result = await runSetup(deps, {});
-
-    expect(seenTimeouts.get("brew install --cask cmux")).toBe(300000);
-    const cmux = result.steps.find((s) => s.id === "cmux_install");
-    expect(cmux?.status).toBe("fail");
-    expect(cmux?.message).toContain("ETIMEDOUT");
-    expect(result.ready).toBe(false);
+    const herdr = result.steps.find((s) => s.id === "herdr_install");
+    expect(herdr).toBeDefined();
+    expect(herdr?.status).toBe("pass");
   });
 
   it("uses the extended timeout budget for npm runtime installs", async () => {
@@ -752,6 +534,7 @@ describe("rig setup", () => {
     let codexInstalled = false;
     const deps = makeDeps({
       exec: (cmd: string, opts?: { timeoutMs?: number }) => {
+        if (cmd === "herdr --version") return "herdr 0.9.3\n";
         if (cmd === "brew --version") return "Homebrew 4.0\n";
         if (cmd === "tmux -V") return "tmux 3.4\n";
         if (cmd === "tmux list-sessions") return "";

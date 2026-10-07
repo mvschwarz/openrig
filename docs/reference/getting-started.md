@@ -130,187 +130,110 @@ when it starts the daemon.
 
 ## Open the kernel conversations
 
+`rig setup` installs Herdr by default on macOS and Linux. If the person declines
+Herdr, use `rig setup --no-herdr`; the welcome view can use plain tmux. Setup
+checks both PATH and the installer's default `~/.local/bin/herdr` location. It
+leaves existing cmux settings alone and does not open a view during setup.
+
 The installing agent asks: **“Open the OpenRig view now?”**
 
-- **Yes:** open a new space with the installed tools below. Keep the terminal in
-  use and existing windows intact, including an agent's installation session.
-- **No:** give the matching command so the person can open it later. Leave the
-  current terminal alone.
-- **Over SSH or without a local display:** give the exact connection/attach
-  command for the installation host instead of trying to open a window here.
-
-No, SSH and headless use are valid background outcomes, not setup failures.
-
-Use **herdr first if installed**, **cmux second**, and otherwise give the exact
-[new-terminal commands below](#plain-terminal-a-new-viewing-session).
-To reach just the operator, use the [direct conversation command](#talk-to-the-operator-in-any-terminal).
-`rig tui --shared` is the team dashboard, not the operator's conversation.
-No new terminal-provider installation is needed for this offer. The first view
-contains TUI | advisor | operator in that order, for Claude-only, Codex-only and
-mixed kernels.
-The queue worker stays out of this view; it remains reachable through the TUI.
-This selects what you see, not which kernel seats run. Keep the current kernel,
-accounts and conversations; opening a view is not a reason to start or restore
-seats. If the kernel is starting, report that; opening the view need not wait.
-If it is absent or blocked, follow
-[Incomplete setup and restart](#incomplete-setup-and-restart).
-
-### Confirm the existing seats
-
-Run these on the daemon's machine, in the installation environment:
+- **Yes:** the installing agent runs the command below. It opens a new terminal
+  tab or window itself. The person copies and types no commands.
+- **No:** leave the current terminal alone and offer to open the view later.
+- **Over SSH or without a local display:** explain that no local desktop view
+  was opened. Background use remains valid; see the headless handoff below.
 
 ```sh
-rig status
-rig ps --nodes --rig kernel --json --fields logicalId,runtime,canonicalSessionName,tmuxAttachCommand
-rig terminal status --json
+rig terminal open saved:kernel --window --json
 ```
 
-Use the returned bindings, not the library preview. Find the rows whose
-`logicalId` is `advisor.lead`, `operator.agent` and `operator.human` (the TUI).
-For each, take its `canonicalSessionName`; a logical ID is not a tmux session
-name. The default provider view resolves these values itself; use them directly for
-the plain-terminal commands below. Missing bindings stay named missing; the
-three-role view is the same regardless of the agents' runtimes.
+Run this on the daemon's desktop, as the same user. The command prefers a new
+Ghostty tab on macOS when Ghostty 1.3 or newer is installed, otherwise a new
+Terminal window. With no existing window, including an installation run from
+Claude Desktop, it creates one. macOS may ask for Automation permission; let the
+person answer that system prompt. A denied or uncertain action is reported once,
+not replayed in another app. On Linux a local graphical display and a supported
+terminal are required (Ghostty, the system terminal, GNOME Terminal, Konsole or
+xterm). Linux reports a window request; verify what actually appeared.
 
-### Herdr or cmux: one new workspace
+The command runs Herdr when installed, using the daemon's configured session and
+socket. Otherwise it creates a plain tmux viewing session. Explicitly choose the
+latter with `--provider tmux --window`. Neither route types into or replaces the
+installing agent's terminal. Existing conversations continue in their original
+sessions.
 
-OpenRig supplies `saved:kernel` automatically from the installed kernel's current
-bindings: TUI | advisor | operator for every kernel. No YAML edit or daemon
-restart is needed. It excludes
-the queue worker and uses the existing conversations. Unavailable expected roles
-are named in `absent`; with no attachable members, the result lists the missing
-bindings. The runtime label describes the agents' runtime mix, or says that it is
-unverified. Every default kernel view keeps the same three roles.
+### Confirm the view
 
-If you already saved a view with id `kernel` in `terminal-views.yaml`, your view
-wins unchanged. Other saved views are preserved. Check the listed membership
-before opening a custom view.
+The default `saved:kernel` composition is **TUI | advisor | operator**, in three
+columns, for Claude-only, Codex-only and mixed kernels. The queue worker remains
+reachable through the TUI. The composition uses the installed kernel's current
+bindings; no YAML edit, seat launch or daemon restart is needed. A custom saved
+view named `kernel` still takes precedence.
 
-Check `rig terminal status --json` for provider availability and liveness. If
-herdr is installed but closed, open the app normally and check again. When it
-is available:
+Inspect `opened`, `absent`, `degraded`, `window` and any notes. Confirm the new
+surface visibly shows the intended conversations and TUI, and that the original
+terminal remains intact. A created window or successful CLI response alone is
+not visual confirmation. A partial view remains partial. If the shared TUI tile
+shows a shell, the installing agent starts `rig tui` in that new tile.
+
+Opening the view can happen while the kernel finishes starting. Report its actual
+state; do not start or restore seats just to obtain a view. If the kernel is absent
+or blocked, follow [Incomplete setup and restart](#incomplete-setup-and-restart).
+
+After a failure, inspect any newly opened surface before retrying. A tmux failure
+may name a newly created viewing session for inspection. Do not replace a failed
+local desktop action with commands for the person to copy; finish or explain the
+failed action. Close only the viewing window, or use **Ctrl-b, then d** in plain
+tmux, to leave the underlying conversations running.
+
+### Existing provider workspaces
+
+The existing provider-only commands remain available when a terminal is already
+open. They create a workspace inside that provider, without opening an OS window:
 
 ```sh
 rig terminal views --json
 rig terminal open saved:kernel --provider herdr --json
-```
-
-If herdr is unavailable, use a running cmux:
-
-```sh
 rig terminal open saved:kernel --provider cmux --json
 ```
 
-These view opens create a fresh provider workspace. Inspect `opened`, `absent`,
-`degraded` and any notes, then confirm the new workspace actually shows the
-intended conversations and TUI. A partial result is not a complete handoff.
-For herdr, open or attach the actual herdr session in the new space and check
-what the person sees. A created workspace is not proof of a visible window;
-running the CLI in a new OS terminal window does not show that workspace there.
-Do not use `rig terminal open kernel` for this first view: it also includes the
-queue worker. A failed or uncertain open is not evidence that nothing opened;
-inspect the provider before retrying or falling back. If the shared TUI tile
-shows a shell, run `rig tui` **in that new tile**, not in the installing agent's
-terminal.
+Use `rig terminal status --json` to inspect provider availability and liveness.
+For the first desktop handoff, use `--window`. `rig tui --shared` is the team
+dashboard, not the operator's conversation.
 
 ### Talk to the operator in any terminal
 
-No herdr or cmux is needed. On the kernel's host, run:
+For an explicitly requested manual attachment, inspect the current bindings:
 
 ```sh
 rig ps --nodes --rig kernel --json
 ```
 
-Find the row whose `logicalId` is `operator.agent`. Replace the placeholder below
-with that row's `canonicalSessionName`, then run this in a **new terminal on the
-same host, as the same user**:
+Find `logicalId: operator.agent` and use its `canonicalSessionName` in a new
+terminal on the same host and account:
 
 ```sh
 env -u TMUX tmux attach-session -t '=<canonicalSessionName>'
 ```
 
-This shows the operator's existing conversation and lets you type your answer.
-The installing agent gives the person the command with the name already filled
-in; it does not attach in its own terminal. Over SSH, connect to the installation
-host first. Use **Ctrl-b, then d** to leave the conversation running and detach.
-If the operator has no binding or needs attention, use
-[Incomplete setup and restart](#incomplete-setup-and-restart).
+The installing agent fills in the actual session name. This optional manual route
+is separate from the first-install desktop action above.
 
 ### Plain terminal: a new viewing session
 
-After Yes, if neither provider is available, compose existing tmux attachments. These
-commands create only a new viewing session; they do not move or recreate the
-kernel's panes. Run them once on the kernel host after checking the bindings
-above. For a manual install, these prompts collect the three exact session names
-from that inventory. An installing agent sets the same variables from the
-observed values itself:
-
-```sh
-printf 'canonicalSessionName for operator.human (TUI): '; read -r tui_session
-printf 'canonicalSessionName for advisor.lead: '; read -r advisor_session
-printf 'canonicalSessionName for operator.agent: '; read -r operator_session
-kernel_view="openrig-kernel-$(date +%s)-$$"
-kernel_pane=$(tmux new-session -d -P -F '#{pane_id}' -s "$kernel_view" -n kernel "env -u TMUX tmux attach-session -t '=$tui_session'")
-advisor_pane=$(tmux split-window -h -P -F '#{pane_id}' -t "$kernel_pane" "env -u TMUX tmux attach-session -t '=$advisor_session'")
-tmux split-window -h -t "$advisor_pane" "env -u TMUX tmux attach-session -t '=$operator_session'"
-```
-
-Then arrange the view and print its exact attach command:
-
-```sh
-tmux select-layout -t "$kernel_view:" even-horizontal
-printf "env -u TMUX tmux attach-session -t '=%s'\n" "$kernel_view"
-```
-
-**On macOS**, the installer can open a new Terminal window with that view:
-
-```sh
-osascript - "$kernel_view" <<'APPLESCRIPT'
-on run argv
-  tell application "Terminal"
-    do script "env -u TMUX tmux attach-session -t " & quoted form of ("=" & item 1 of argv)
-    activate
-  end tell
-end run
-APPLESCRIPT
-```
-
-**On a Linux desktop with GNOME Terminal**, use its explicit new-window action:
-
-```sh
-gnome-terminal --window -- env -u TMUX tmux attach-session -t "=$kernel_view"
-```
-
-For another terminal app, use its **New Window** action and run the attach
-command printed above in that window. After Yes, the installing agent should
-perform the available new-window action.
-If desktop automation is unavailable or denied, say so and give the printed
-command to the person for a new terminal. Never silently reuse an existing
-window. Close the viewing window or use **Ctrl-b, then d** to detach; don't
-quit the native agents. A standalone `rig tui` in another new terminal is also
-available if the shared TUI binding is missing, with that limitation stated.
+`rig terminal open saved:kernel --provider tmux --window --json` creates and opens
+the three-column view itself. It reuses the daemon's composition and preserves
+existing sessions. The result names the viewing session. No pane names or shell
+commands need to be assembled by the person.
 
 ### Headless or SSH handoff
 
-A provider running on the server does not establish a window on your desktop.
-When there is no display, say **“No visible terminal was opened here.”** Keep
-the exact attach command printed above. From a new terminal on your own
-machine, connect to the same host/account used for installation, then run that
-command. For example, this asks for the actual SSH destination and the viewing
-session name printed above; neither value is guessed:
-
-```sh
-printf 'Existing SSH destination (user@host): '; read -r kernel_host
-printf 'Viewing session name (openrig-kernel-... printed above): '; read -r kernel_view
-ssh -t "$kernel_host" "env -u TMUX tmux attach-session -t '=$kernel_view'"
-```
-
-The installing agent gives you the **fully resolved** connection and attach
-command from the known installation host and created viewing session. If only
-an HTTP daemon address is known, ask for the SSH connection details instead of
-inventing them. No new account or credential provisioning is part of this
-handoff. Report which provider or fallback ran, which conversations and TUI
-were visible, and any headless or unverified branch.
+A provider running on the server does not establish a window on the person's
+desktop. Say **“No visible terminal was opened here.”** The installing agent uses
+the known SSH destination and current operator binding to provide an exact remote
+attachment when requested. If only an HTTP daemon address is known, obtain the
+SSH connection details instead of inventing them. No new account or credential
+provisioning is part of this handoff. Report any headless or unverified branch.
 
 ### Installing-agent handoff
 

@@ -300,3 +300,13 @@ describe("S08 — cmux is unchanged", () => {
     expect(planHerdrLayout(view, "t").workspaceLabel).toBe("mission:4.6");
   });
 });
+
+describe("desktop Herdr endpoint", () => {
+  it.each([false, true])("retains the configured launch endpoint when socket alive=%s", async alive => {
+    const { transport } = herdrTransport();
+    transport.probe = async () => ({ alive });
+    const launch = { socketPath: "/fixture/daemon/herdr.sock", session: "fixture-daemon" };
+    const adapter = new HerdrAdapter({ transportFactory: () => transport, launch });
+    expect(await adapter.status()).toMatchObject({ available: alive, launch });
+  });
+});
