@@ -6,7 +6,7 @@ import { shellQuote as quoteShellArgument } from "../adapters/shell-quote.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { validatePreRestore } from "./restore-preconditions.js";
 import type { CurrentStateRehydrateEligibility } from "./rehydrate-eligibility.js";
-import type { Snapshot, RigServicesRecord } from "./types.js";
+import type { Snapshot, RigServicesRecord, SeatIdentityVerdict } from "./types.js";
 
 // --- Types ---
 
@@ -185,6 +185,8 @@ export interface NodeInventoryEntry {
   runtime: string | null;
   sessionStatus: string | null;
   startupStatus: string | null;
+  storedStartupStatus?: string | null;
+  identityVerdict?: SeatIdentityVerdict | null;
   tmuxAttachCommand: string | null;
   latestError: string | null;
   cwd?: string | null;
@@ -831,6 +833,18 @@ export class RestoreCheckService {
         status: "red",
         evidence: "Missing canonical session identity",
         remediation: "Restore or relaunch the seat so it has a canonical session identity",
+        remediationSafe: false,
+      };
+    }
+
+    if (node.sessionStatus === "running" && node.storedStartupStatus === "ready"
+      && node.startupStatus === "attention_required"
+      && (node.identityVerdict?.verdict === "mismatch" || node.identityVerdict?.verdict === "pane_missing")) {
+      return {
+        check,
+        status: "red",
+        evidence: `Seat identity needs verification: verdict=${node.identityVerdict.verdict} reason=${node.identityVerdict.reason ?? "unknown"}; stored startupStatus=ready`,
+        remediation: "Verify the current pane identity, then use rig seat clear-attention for this seat and rerun rig restore-check",
         remediationSafe: false,
       };
     }

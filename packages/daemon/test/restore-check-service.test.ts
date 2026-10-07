@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createFullTestDb } from "./helpers/test-app.js";
+import { getNodeInventory } from "../src/domain/node-inventory.js";
+import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import {
   RestoreCheckService,
   type RestoreCheckDeps,
@@ -126,6 +129,34 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
 }
 
 describe("RestoreCheckService", () => {
+  it.each(["ready", "failed", "attention_required"])("identity projection advice preserves the stored %s outcome", stored => {
+    const db = createFullTestDb();
+    try {
+      db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1', 'test-rig')").run();
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-1','rig-1','dev.impl','claude-code')").run();
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, created_at) VALUES ('session-1','node-1','dev-impl@test-rig','running',?,'2026-07-01 00:00:00')").run(stored);
+      db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('binding-1','node-1','tmux','dev-impl@test-rig','%1')").run();
+      new SeatIdentityStore(db).upsert({
+        nodeId: "node-1", verdict: "mismatch", evidenceSource: "pane_process", reason: "process_identity_ambiguous",
+        evidence: { registeredPane: "%1", observedPid: 123, observedCommand: "node", matchedLayer: null },
+        sessionName: "dev-impl@test-rig", observedAt: "2026-07-02T12:00:00.000Z",
+      });
+      const service = new RestoreCheckService(mockDeps({ getNodeInventory: rigId => getNodeInventory(db, rigId) }));
+      const result = service.check({ noQueue: true, noHooks: true }) as any;
+      const check = result.checks.find((entry: { check: string }) => entry.check === "seat.dev-impl@test-rig.readiness");
+      expect(check.status).toBe("red");
+      expect(check.remediationSafe).toBe(false);
+      if (stored === "ready") {
+        expect(check.evidence).toContain("verdict=mismatch reason=process_identity_ambiguous");
+        expect(check.remediation).toContain("Verify the current pane identity");
+        expect(check.remediation).toContain("rig seat clear-attention");
+        expect(check.remediation).not.toMatch(/relaunch/i);
+      } else {
+        expect(check.remediation).toContain("Restore or relaunch");
+      }
+    } finally { db.close(); }
+  });
+
   let previousOpenRigHome: string | undefined;
   let testOpenRigHome: string | null;
 

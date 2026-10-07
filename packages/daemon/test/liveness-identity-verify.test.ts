@@ -18,7 +18,7 @@ import { identityVerdictDownranksRunning } from "../src/domain/types.js";
 function seedRunningSeat(db: Database.Database): void {
   db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-1','test-rig')").run();
   db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('n1','rig-1','dev.impl','claude-code','/tmp')").run();
-  db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status) VALUES ('sess1','n1','dev-impl@rig','running','ready')").run();
+  db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, created_at) VALUES ('sess1','n1','dev-impl@rig','running','ready','2026-07-01 00:00:00')").run();
   db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('bind1','n1','tmux','dev-impl@rig','%1')").run();
 }
 
@@ -184,6 +184,66 @@ describe("getNodeInventory identity gating", () => {
 });
 
 describe("getNodeInventory verdict applicability gate (rev1-r2 B1 — no stale false-green)", () => {
+  it.each(["retained", "finishes after cutover"])("same-pane successor rejects predecessor evidence: %s", timing => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      const store = new SeatIdentityStore(db);
+      const old = { ...verdict("mismatch", "process_identity_ambiguous"), observedAt: "2026-07-02T12:00:00.100Z" };
+      if (timing === "retained") store.upsert(old);
+      // The cutover keeps the canonical name and pane, supersedes the session,
+      // and records a handover within the same SQLite timestamp second.
+      db.prepare("UPDATE sessions SET status = 'superseded' WHERE id = 'sess1'").run();
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, startup_status, created_at) VALUES ('sess2','n1','dev-impl@rig','running','ready','2026-07-02 12:00:00')").run();
+      db.prepare("UPDATE nodes SET handover_at = '2026-07-02T12:00:00.200Z' WHERE id = 'n1'").run();
+      if (timing === "finishes after cutover") store.upsert(old);
+      for (const node of [getNodeInventory(db, "rig-1")[0], getNodeDetail(db, "rig-1", "dev.impl")!]) {
+        expect(node.identityVerdict).toBeNull();
+        expect(node.startupStatus).toBe("ready");
+        expect(node.lifecycleState).toBe("running");
+        expect(node.occupantLifecycle).toBe("active");
+      }
+      const overlay = getNodeInventory(db, "rig-1");
+      const graph = projectRigToGraph({
+        rig: { id: "rig-1", name: "test-rig" } as never,
+        nodes: [{ id: "n1", rigId: "rig-1", logicalId: "dev.impl", runtime: "claude-code" } as never],
+        sessions: [{ id: "sess2", nodeId: "n1", sessionName: "dev-impl@rig", status: "running", startupStatus: "ready" } as never],
+        pods: [], edges: [],
+      }, overlay);
+      expect(graph.nodes[0].data.startupStatus).toBe("ready");
+      // A later observation of THIS occupant still down-ranks it.
+      store.upsert({ ...old, observedAt: "2026-07-02T12:00:00.300Z" });
+      expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("attention_required");
+      db.prepare("UPDATE sessions SET startup_status = 'failed' WHERE id = 'sess2'").run();
+      store.upsert({ ...verdict("verified"), observedAt: "2026-07-02T12:00:00.400Z" });
+      expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("failed");
+    } finally { db.close(); }
+  });
+
+  it("same-pane registration rejects observations older than the latest session", () => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      db.prepare("UPDATE sessions SET created_at = '2026-07-02 12:00:01' WHERE id = 'sess1'").run();
+      new SeatIdentityStore(db).upsert(verdict("pane_missing", "session_missing"));
+      expect(getNodeInventory(db, "rig-1")[0].identityVerdict).toBeNull();
+      expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("ready");
+    } finally { db.close(); }
+  });
+
+  it("same-pane cutover rejects equal-time observations without discarding later negatives", () => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      db.prepare("UPDATE nodes SET handover_at = ? WHERE id = 'n1'").run(verdict("mismatch").observedAt);
+      const store = new SeatIdentityStore(db);
+      store.upsert(verdict("mismatch"));
+      expect(getNodeInventory(db, "rig-1")[0].identityVerdict).toBeNull();
+      store.upsert({ ...verdict("pane_missing", "session_missing"), observedAt: "2026-07-02T12:00:00.001Z" });
+      expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("attention_required");
+    } finally { db.close(); }
+  });
+
   // The durable verdict table is keyed ONLY by node_id. After a rebind/relaunch
   // the node keeps its id but gets a NEW session + NEW pane. A verdict computed
   // against the OLD session/pane must NOT be applied to the current binding: it
