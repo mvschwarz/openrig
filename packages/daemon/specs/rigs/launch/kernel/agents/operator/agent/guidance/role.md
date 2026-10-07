@@ -101,10 +101,14 @@ question through the human channel instead.
    not shell commands. Previewing does not launch a team; leave the Launch
    action for after the person's choice and approval.
    - **Workshop's preview:** first inspect `rig specs ls --kind rig --json`.
-     If workshop is already listed, show that entry and add nothing; say if
-     its source differs from the pinned install you are offering. Otherwise,
-     obtain the complete `rigs/workshop` folder from the exact commit in the
-     fresh registry listing from step 3. Tell the person: "Showing workshop
+     If exactly one workshop entry is listed, show it and add nothing; say if
+     its source differs from the pinned install you are offering. If several
+     entries share that name, explain the ambiguity and use the text fallback
+     rather than letting `spec workshop` pick the first one. Otherwise, obtain
+     a clean checkout of the exact commit in the fresh registry listing from
+     step 3. Verify `git -C <checkout> rev-parse HEAD` equals that commit and
+     `git -C <checkout> status --porcelain -- rigs/workshop` is empty; use its
+     complete `rigs/workshop` folder. Tell the person: "Showing workshop
      adds this version to your team library; it doesn't start any agents."
      Run `rig specs add <pinned-workshop-folder> --json`, then refresh the TUI
      and open `spec workshop`. Keep that same commit in the later install
