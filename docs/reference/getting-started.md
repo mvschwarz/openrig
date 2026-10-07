@@ -80,8 +80,11 @@ user.
   - the install and the OpenRig instance on the Linux filesystem;
   - Linux-native Node.js and harnesses, not the Windows `npm` or `pi` that WSL
     inherits;
-  - Pi credentials in the managed seat's agent directory, because a global Pi
-    login isn't shared with managed seats;
+  - Pi credentials the managed seat can reach, because a global Pi login isn't
+    shared with managed seats. This user put them in the seat's agent
+    directory. A provider key in the daemon environment also works: name it in
+    `recovery.provider_auth_env_allowlist`, give the seat a `<provider>/<id>`
+    model, then restart the daemon and relaunch the seat;
   - the current `@earendil-works/pi-coding-agent` package in its own npm prefix,
     not the deprecated `@mariozechner` one.
 - **Not tested:** the kernel and operator, herdr, reboot, suspend and resume,
