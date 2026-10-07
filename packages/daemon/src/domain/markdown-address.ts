@@ -126,8 +126,7 @@ function scanHeaders(lines: string[]): HeaderScan {
       continue;
     }
     if (fence) continue;
-    // Empty ATX headings still end spans and change the parent scope. Their
-    // empty slug is reported by the existing addressability validator.
+    // Empty ATX headings still end spans and change the parent scope.
     const header = line.match(/^ {0,3}(#{1,6})(?:\s+(.*\S))?\s*$/);
     if (header) hits.push({ level: header[1]!.length, title: header[2] ?? "", line: i });
   }
@@ -225,9 +224,15 @@ export function validateMarkdownAddressability(text: string): AddressabilityFind
     findings.push({ kind: "unterminated-fence", line: unterminatedFenceLine });
   }
   const seen = new Map<string, number[]>();
+  let blankH2Scope = false;
   for (const s of sections) {
-    // r1 F2 family rule: ANY empty segment makes a section unreachable by a legal
-    // address (parseAddress rejects empty segments) — flag parent AND children.
+    if (s.level === 2) blankH2Scope = s.title.length === 0;
+    // Blank headings are scope boundaries, not names to validate. Preserve
+    // recap-write compatibility for their content without promoting children
+    // into a preceding section or the top-level address space.
+    if (s.title.length === 0 || (blankH2Scope && s.headerPath.length === 2 && s.headerPath[1]!.length > 0)) continue;
+    // r1 F2 family rule: for remaining named headers, any empty segment makes
+    // the section unreachable by a legal address — flag parent AND children.
     if (s.headerPath.some((segment) => segment.length === 0)) {
       findings.push({ kind: "unaddressable-header", headerPath: s.headerPath.join("/"), line: s.headerLine, title: s.title });
       continue;

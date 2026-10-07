@@ -221,7 +221,7 @@ describe("Markdown block boundaries in context addresses", () => {
     expect(resolveAddress(text, ["setup"]).text).toBe("## Setup\nsetup instructions");
     expect(() => resolveAddress(text, ["setup", "child"])).toThrow(AddressResolutionError);
     expect(parseMarkdownSections(text).find((section) => section.title === "Child")?.headerPath).toEqual(["", "child"]);
-    expect(validateMarkdownAddressability(text).filter((finding) => finding.kind === "unaddressable-header")).toHaveLength(2);
+    expect(validateMarkdownAddressability(text)).toEqual([]);
   });
 
   it("resets the parent scope at an empty H1 and terminates an H3 at an empty H4", () => {
