@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import BetterSqlite3, { type Database } from "better-sqlite3";
-import { mkdirSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { createDb } from "../src/db/connection.js";
@@ -156,10 +156,10 @@ describe("ContextMonitor", () => {
     settings.set("policies.claude_compaction.threshold_percent", "80");
     const send = vi.fn(async (_session: string, text: string) => {
       const marker = text.match(/<!-- openrig-compaction-complete .*? -->/)?.[0];
-      const target = text.match(/atomically rename it to ("(?:[^"\\]|\\.)*")/);
+      const target = text.match(/Write this attempt's complete restore map to ("(?:[^"\\]|\\.)*")/);
       if (marker && target) {
         const file = JSON.parse(target[1]!); mkdirSync(dirname(file), { recursive: true });
-        writeFileSync(file + ".tmp", "# Completed fixture map\n" + marker + "\n"); renameSync(file + ".tmp", file);
+        writeFileSync(file, "# Completed fixture map\n" + marker + "\n");
       }
       return { ok: true };
     });
