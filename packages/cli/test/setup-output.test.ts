@@ -43,7 +43,8 @@ function expectConversationRoute(text: string): void {
   expect(text).toContain("preserve earlier choices such as --no-herdr");
   expect(text).toContain("rig terminal open saved:kernel");
   expect(text).toContain("rig terminal open saved:kernel --window --json");
-  expect(text).toContain("No copying or typing for the person");
+  expect(text).toContain("On a desktop, no copying or typing for the person; confirm three visible columns, not just CLI success");
+  expect(text).toContain("Over headless SSH: ask the person to open a new terminal/tab and give the exact connection/attach command");
   expect(text).toContain("then hand them to the ready operator");
   expect(text).toContain("Do not implement the person's project yourself");
   expect(text).toContain("Started is not ready");
