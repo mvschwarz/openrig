@@ -22,7 +22,8 @@ supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`)
 or NodeSource. On a Mac with Apple
 silicon, use Node.js 22 (see the [compatibility
 history](../releases/v0.5.15.md#known-compatibility-limitation)). Native
-Windows is not supported yet, and WSL2 has not been tested. Node 20 and
+Windows is not supported yet. WSL2 isn't a supported platform either, though one
+user has [reported a working setup](#wsl2-a-reported-working-setup). Node 20 and
 odd-numbered releases (23, 25 and so on) are not supported; Node 26 and later
 even-numbered releases are untested.
 
@@ -61,6 +62,30 @@ before-install view explain that access before you choose it.
 > downstream work will succeed. "Daemon up" does not mean every agent is healthy;
 > "kernel ready" does not mean every kernel agent is healthy; a workspace root
 > being *live* does not mean it is the *right* one for your project.
+
+### WSL2: a reported working setup
+
+This is one user's report, not a supported platform.
+[dajiaohuang](https://github.com/dajiaohuang)
+[ran OpenRig 0.6.6 under WSL2](https://github.com/mvschwarz/openrig/issues/88#issuecomment-6043925546)
+on Ubuntu 24.04, with Node.js 24.14.1, tmux 3.4, Codex CLI 0.161.0 and Pi
+(`@earendil-works/pi-coding-agent`) 1.0.4, headless, as the distribution's root
+user.
+
+- **What worked**, with one Codex seat and one Pi seat: `rig doctor`, starting
+  the daemon (`rig daemon start --no-kernel`), launching both seats, replies to
+  `rig send` and `rig capture`, and stopping with `rig down --snapshot`
+  followed by a warm restore with `rig up --existing`.
+- **What mattered:**
+  - the install and the OpenRig instance on the Linux filesystem;
+  - Linux-native Node.js and harnesses, not the Windows `npm` or `pi` that WSL
+    inherits;
+  - Pi credentials in the managed seat's agent directory, because a global Pi
+    login isn't shared with managed seats;
+  - the current `@earendil-works/pi-coding-agent` package in its own npm prefix,
+    not the deprecated `@mariozechner` one.
+- **Not tested:** the kernel and operator, herdr, reboot, suspend and resume,
+  cross-host operation and long-running work.
 
 ## Install and sign in
 
