@@ -20,6 +20,14 @@ hook registration alone does not prove native skill discovery.
 Refocus preserves a long session's earned expertise while re-grounding it in current intent and
 lived context. It is not a restart, wake, or phase checkpoint.
 
+During an actionable managed restore, consume the current topology and work trace
+that actually arrived with the request. Do not rerun Python merely to duplicate it.
+If no current trace arrived, name that delivery gap. A packet pointer, compact
+summary or truncated extract is not a full source read. Use the native file-read
+tool for required notes and full sources, and complete the existing restore audit;
+partial file reads do not establish completed refocus or restoration.
+
+For a new trace outside that delivered context, follow the command guidance below.
 Resolve the bundled script's absolute path from the directory of this loaded skill.
 Stay in your current working directory; do not `cd` into the skill directory, which
 can change the inferred work node. Run the trace as **one plain command**, replacing
@@ -35,7 +43,7 @@ files separately with the native read tool. Combined shell loops or variables ca
 require native approval even when the intended operations are read-only; a plain
 command is not a guarantee that approval will never be needed.
 
-For managed compaction, do this during the restore request or its read-depth
+For managed compaction, refocus during the restore request or its read-depth
 audit. The earlier acknowledgement-only boundary is not permission to restore.
 
 Use `--trees topology|work|both` to select context domains and `--depth light|full` to control how
