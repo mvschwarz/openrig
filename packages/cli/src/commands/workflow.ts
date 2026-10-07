@@ -133,7 +133,7 @@ export function workflowCommand(depsOverride?: WorkflowDeps): Command {
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  $ rig workflow validate workflows/conveyor-starter.workflow.md
+  $ rig workflow validate workflows/release.workflow.md
   $ rig workflow validate ./my-spec.workflow.md --json | jq .ok
 `)
     .action(async (specPath: string, opts: { json?: boolean }) => {
@@ -257,9 +257,9 @@ Examples:
     .option("--json", "JSON output for agents")
     .addHelpText("after", `
 Examples:
-  $ rig workflow instantiate workflows/conveyor.workflow.md \\
+  $ rig workflow instantiate workflows/release.workflow.md \\
       --root-objective "Ship release-0.3.2" \\
-      --created-by orch-lead@openrig-velocity
+      --created-by orch-lead@my-rig
 
   $ rig workflow instantiate ./my-spec.workflow.md \\
       --root-objective "Run dogfood" \\
@@ -685,7 +685,7 @@ command reconnects, then degrades to polling — announced, never a
 silent freeze.
 
 Examples:
-  $ rig workflow run workflows/conveyor.workflow.md \\
+  $ rig workflow run workflows/release.workflow.md \\
       --root-objective "Ship it" --created-by orch-lead@my-rig
   $ rig workflow run ./spec.yaml --root-objective x --created-by a@b --json
 `)

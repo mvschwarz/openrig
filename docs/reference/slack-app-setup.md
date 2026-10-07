@@ -105,7 +105,7 @@ part of OpenRig.
 
 The daemon scans available top-level messages in the configured channel after a
 Socket Mode connection and on its existing five-minute retry cadence. Recovered
-queue rows say **Recovered after a gap** and show the original Slack posting time.
+tasks say **Recovered after a gap** and show the original Slack posting time.
 They use the same sender admission, routing, attachment handling, fixed identity
 and dead-letter path as live messages. A durable dead letter is custody of a
 failed delivery, not successful delivery.

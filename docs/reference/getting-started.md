@@ -405,7 +405,7 @@ Approval controls whether an action may run; the sandbox controls its filesystem
 and network access. Turning approvals off does not grant network access.
 
 After answering, watch for the command's result and the agent continuing. Read
-the corresponding queue row and transition from your ordinary terminal. If an
+the corresponding task and its history from your ordinary terminal. If an
 operation timed out, read its result before asking for another attempt: it may
 already have taken effect. A delivered message or disappearing prompt alone is
 not progress. If startup is still waiting for context delivery, use **c** (or
