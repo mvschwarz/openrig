@@ -1,6 +1,6 @@
 ---
 name: rigs
-description: Use when the user types /rigs, or asks to install OpenRig, to join this session to an OpenRig team, or to work with a team of Claude Code or Codex agents from here.
+description: Use when the user types /rigs, or asks to install OpenRig, to see their OpenRig agents ("show me my agents", "show me the terminals", the welcome screen or the OpenRig view), to join this session to an OpenRig team, or to work with a team of Claude Code or Codex agents from here.
 ---
 
 # rigs: your route into OpenRig
