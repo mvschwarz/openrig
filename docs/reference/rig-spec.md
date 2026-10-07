@@ -226,12 +226,22 @@ Claude keeps `acceptEdits` and receives inline session settings allowing ordinar
 `rig` commands, project reads and common project test commands (for example,
 `npm test`, `pnpm test`, `pytest`, `go test` and `cargo test`). Lifecycle commands
 such as `rig up`, `rig down`, `rig restore`, `rig bundle install` and seat stop or
-handover are listed as **ask** rules. Native deny and ask rules take precedence
-over allow rules. These are native command-matching rules, not filesystem
-containment: a project's test command can execute code. Flags before the verb
-(for example, `rig --host vps up`) or wrapper commands may not match the lifecycle
-prefixes. OpenRig does not write these settings into a personal or project
-permission file.
+handover ask through a session `PreToolUse` hook. Their literal help forms, such
+as `rig down --help`, `rig bundle install -h` and `rig help down`, run without
+that lifecycle prompt. Native personal, project and managed deny/ask rules still
+apply; OpenRig does not remove or override them.
+
+The hook recognizes literal command words (including quoted or absolute paths),
+leading environment assignments, and `env`, `command` and `exec` wrappers without
+options other than `--`. The same existing team allowances apply after spelling
+normalization; project `node_modules/.bin/vitest` and `jest` paths match their
+existing `npx` allowances. It does not automatically allow pipelines, command
+substitutions, redirects, heredocs, shell functions or other unrecognized syntax.
+Lifecycle calls in recognized command positions and substitutions still ask;
+quoted text and quoted heredoc bodies are not commands. These are command
+allowances, not containment: a project's test command can execute code. The
+hook and allowances are passed with `--settings` at launch, including resume
+and fork; nothing is written to personal or project permission files.
 
 Codex keeps `workspace-write` with its existing approval policy and receives the
 configured OpenRig workspace root plus its pod's shared state directory as

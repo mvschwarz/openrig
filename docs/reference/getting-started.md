@@ -765,8 +765,9 @@ In the shipped `starter`, `dev-build` runs Claude Code. For a **Claude Code** se
 OpenRig normally passes `--permission-mode acceptEdits`: edits can proceed, while
 other actions follow native rules and prompts. For a seat with no permission
 policy or per-seat choice it also passes the per-launch team default (`--settings` allowing ordinary
-`rig` commands, project reads and common tests, with lifecycle commands as ask
-rules); nothing is written to your settings files. To explicitly select the bypass launch flag for that rig:
+`rig` commands, project reads and common tests, with a session hook asking for
+lifecycle commands while allowing literal help forms such as `rig down --help`);
+personal and project rules still apply. Nothing is written to your settings files. To explicitly select the bypass launch flag for that rig:
 
 ```sh
 rig policy apply yolo --spec ./my-claude-rig/rig.yaml
