@@ -371,7 +371,7 @@ rig bundle install <bundle-path-or-github-link> [--plan] [--yes] [--target <root
 | `--preset <name>`, `--seat <pod.member=runtime>` | no | — | For a GitHub link, the declared configuration to build and install. |
 | `--non-interruptive` | no | the bundle `rig.yaml`'s `non_interruptive`, else the operator setting `launch.non_interruptive`, else off | Accept the harnesses' first-launch warnings for this rig's full-bypass Claude and Codex seats with launch flags, writing nothing to your settings. The choice is saved on the rig. `--no-non-interruptive` turns a saved choice off; stop a running rig with `rig down` first. See [non-interruptive mode](non-interruptive-mode.md). |
 | `--skip-version-check` | no | off | Skip the compatibility check below. Not for routine use. |
-| `--force` | no | off | Skip the running-team check below. Not for routine use. A pod-aware bundle is still refused before anything is written when a team with the same name is running; a legacy (schema 1) bundle can be left partly installed. |
+| `--force` | no | off | Skip the running-team check below. Not for routine use. A pod-aware bundle is still refused before target files are written when a team with the same name is running; a legacy (schema 1) bundle can be left partly installed. |
 | `--json` | no | `false` | Emit machine-readable JSON. |
 
 Install **launches the rig**; it does not just unpack it. It extracts the bundle to a temporary directory, validates integrity, and bootstraps the rig. In apply mode, the daemon requires `targetRoot`, so `rig bundle install` must be given `--target <root>` for an archive path unless you are running with `--plan`.
@@ -452,7 +452,7 @@ take different routes:
   and rig-name checks and the install audit.
 - **A local `.rigbundle` path** goes through the bundle bootstrap path directly. It skips the compatibility check,
   isn't recorded in the install audit (so `rig bundle history` doesn't list it), and doesn't print the routing summary.
-  For a pod-aware archive, a running team with the same name is still refused before anything is written, and a
+  For a pod-aware archive, a running team with the same name is still refused before target files are written, and a
   stopped one is replaced as described under "Install a bundle". A legacy (schema 1) archive runs its approved install
   steps before its rig-name check, which then refuses a running team and fails preflight for a stopped one; it also
   gets no post-install routing this way. To get the checks and the audit for a local archive, use `rig bundle install`

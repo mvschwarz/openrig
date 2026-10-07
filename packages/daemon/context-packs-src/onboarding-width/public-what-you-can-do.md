@@ -577,8 +577,8 @@ working arrangement becomes something someone else can instantiate.
   launches, with failures listed in `routingFailures`, so there is no sync step after the install;
   a legacy (schema 1) bundle still routes them after a completed install. Re-installing a team that
   is already installed says what is installed and offers to use it, stop and replace it, or
-  cancel. For a pod-aware bundle, a running team with the same name is refused before anything is
-  written, and a stopped one is replaced: the earlier team is archived, and reinstalling into its
+  cancel. For a pod-aware bundle, a running team with the same name is refused before target files
+  are written, and a stopped one is replaced: the earlier team is archived, and reinstalling into its
   own install folder first copies each differing file to a backup. A legacy bundle doesn't replace
   a stopped team, and with `--force` it can run its approved install steps before its name check
   fails. Read those choices before reaching for `--force`.
