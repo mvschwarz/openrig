@@ -224,9 +224,12 @@ describe("Markdown block boundaries in context addresses", () => {
     expect(validateMarkdownAddressability(text)).toEqual([]);
   });
 
-  it("resets the parent scope at an empty H1 and terminates an H3 at an empty H4", () => {
+  it("keeps children of an empty H1 unaddressable and terminates an H3 at an empty H4", () => {
     const text = "## Setup\n### Child\nchild instructions\n####\nother subsection\n#\n### Independent\nindependent instructions";
     expect(resolveAddress(text, ["setup", "child"]).ownText).toBe("### Child\nchild instructions");
-    expect(resolveAddress(text, ["independent"]).text).toContain("independent instructions");
+    expect(parseMarkdownSections(text).find((section) => section.title === "Independent")?.headerPath).toEqual(["", "independent"]);
+    expect(() => resolveAddress(text, ["independent"])).toThrow(AddressResolutionError);
+    expect(validateMarkdownAddressability(text)).toEqual([]);
+    expect(resolveAddress(text.replace("\n#\n", "\n# Named\n"), ["independent"]).text).toContain("independent instructions");
   });
 });

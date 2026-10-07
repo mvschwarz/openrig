@@ -146,7 +146,7 @@ export function parseMarkdownSections(text: string): MarkdownSection[] {
   for (let idx = 0; idx < headers.length; idx++) {
     const h = headers[idx]!;
     if (h.level < MIN_LEVEL || h.level > MAX_LEVEL) {
-      if (h.level < MIN_LEVEL) currentH2 = null; // an H1 resets the H2 scope
+      if (h.level < MIN_LEVEL) currentH2 = h.title.length === 0 ? "" : null; // a blank H1 keeps children unaddressable
       continue;
     }
     const slug = slugifyHeader(h.title);
@@ -214,7 +214,7 @@ export type AddressabilityFinding =
  *  the caller decides the gate. */
 export function validateMarkdownAddressability(text: string): AddressabilityFinding[] {
   const lines = text.split("\n");
-  const { unterminatedFenceLine } = scanHeaders(lines);
+  const { hits: headers, unterminatedFenceLine } = scanHeaders(lines);
   const sections = parseMarkdownSections(text);
   const findings: AddressabilityFinding[] = [];
   // r1 F1: an unclosed fence swallows every later header; resolution stays honest
@@ -224,13 +224,17 @@ export function validateMarkdownAddressability(text: string): AddressabilityFind
     findings.push({ kind: "unterminated-fence", line: unterminatedFenceLine });
   }
   const seen = new Map<string, number[]>();
-  let blankH2Scope = false;
+  let blankParentScope = false;
+  let headerIndex = 0;
   for (const s of sections) {
-    if (s.level === 2) blankH2Scope = s.title.length === 0;
+    while (headerIndex < headers.length && headers[headerIndex]!.line <= s.headerLine) {
+      const header = headers[headerIndex++]!;
+      if (header.level <= 2) blankParentScope = header.title.length === 0;
+    }
     // Blank headings are scope boundaries, not names to validate. Preserve
     // recap-write compatibility for their content without promoting children
     // into a preceding section or the top-level address space.
-    if (s.title.length === 0 || (blankH2Scope && s.headerPath.length === 2 && s.headerPath[1]!.length > 0)) continue;
+    if (s.title.length === 0 || (blankParentScope && s.headerPath.length === 2 && s.headerPath[1]!.length > 0)) continue;
     // r1 F2 family rule: for remaining named headers, any empty segment makes
     // the section unreachable by a legal address — flag parent AND children.
     if (s.headerPath.some((segment) => segment.length === 0)) {

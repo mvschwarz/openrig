@@ -27,7 +27,7 @@ beforeEach(() => { seatDir = mkdtempSync(join(tmpdir(), "s05-recap-")); });
 afterEach(() => rmSync(seatDir, { recursive: true, force: true }));
 
 describe("writeSeatRecap — superseded-chain retention (Q2-Amendment 1(b))", () => {
-  it.each(["##", "##\n### Child\nchild prose", "###"])("retains a recap containing the blank heading boundary %j", (heading) => {
+  it.each(["##", "##\n### Child\nchild prose", "###", "#", "#\n### Next\n## Next"])("retains a recap containing the blank heading boundary %j", (heading) => {
     writeSeatRecap({ seatDir, content: GOOD_RECAP, now: () => 1 });
     const content = `## Recent Decisions\nOwned decision\n${heading}\nUnaddressed prose\n`;
     writeSeatRecap({ seatDir, content, now: () => 2 });
