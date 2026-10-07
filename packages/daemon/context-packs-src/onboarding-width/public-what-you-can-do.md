@@ -146,8 +146,9 @@ your context, your compaction and your replacement — and it is the only thing 
   `--note` does not reopen a terminal row; terminal-to-active repair requires explicit `--reopen`
   with both `--state` and `--note`.
 - **`rig queue handoff`** — pass work so the close and the create are **one transaction**, instead
-  of closing yours, failing to create theirs, and stranding the work in between. Closing a row
-  with `handed_off_to` and no linked successor is flagged within 24 hours; use `handoff` instead.
+  of closing yours, failing to create theirs, and stranding the work in between. A standing sweep
+  checks recently closed rows (a 24-hour lookback) and flags a `handed_off_to` closure whose
+  successor it can't verify; use `handoff` instead.
 - **`rig queue block` / `resolve`** — park a row on a real blocker so it stays **yours and
   visible**, with a plain-language summary and a pointer to what a human must judge; `resolve`
   writes their decision onto the durable record and wakes the owner. **Closing it would be a lie
@@ -292,8 +293,8 @@ not have to tear one down to change it, and you rarely have to start from nothin
 
 - **`rig up <source>`** — make a whole rig exist and run: from a spec you wrote, a shipped starter
   by name, a bundle someone handed you, a GitHub folder link (pinned to one commit), or a stopped
-  rig. `rig up <spec>` on an existing team's name replaces that team, so check `rig ps --nodes`
-  first. Launch-created `AGENTS.md` or `CLAUDE` files now show in `git status`.
+  rig. `rig up` with a pod-aware spec on a stopped team's name replaces that team (the earlier one
+  is archived), so check `rig ps --nodes` first. Launch-created `AGENTS.md` or `CLAUDE` files now show in `git status`.
 - **`rig down`** — stop a rig's seats and take it out of the running set. It ends the agents'
   sessions and any work in progress; don't run it on a live team unless the person asked.
 - **`rig launch <rig> [seat]`** — one seat is down; start just that one, without disturbing the
@@ -497,10 +498,12 @@ scheme, and nothing downstream can see it.
   System World, topology, and Project World plan. Add `--runtime` to see the composed managed skill
   loadout, `--apply-skills` to reconcile its owned harness projection, or `--deliver` to emit the
   exact extant files in order while marking absent pieces visibly. Without the flags it remains
-  plan-only. It picks the project itself, in order: `--project`, the only project, the project
-  whose `rigs:` lists the seat's rig, the working folder, the only unclaimed project. It reports
-  `position.selectedBy` and stops only when still ambiguous, so `--project` is no longer needed
-  just because several projects exist. World packs named in `project.yaml`'s `install.worlds`
+  plan-only. Without `--project` it picks the project itself, in order: the only project, the
+  project whose `rigs:` lists the seat's rig, the deepest project root containing the working
+  folder, then the only unclaimed project. It reports `position.selectedBy`. If a step is
+  ambiguous (two projects list the rig, or two roots tie), it stops there and asks for
+  `--project` rather than falling through to a weaker signal. Several projects alone no longer
+  require `--project`. World packs named in `project.yaml`'s `install.worlds`
   are listed after the System World; read each with `rig context get <ref>`.
   `context profile` and `context work-install` both accept `--runtime claude-code` (alias
   `claude`) or `codex`; explicit invalid values refuse before projection. This does not rename
@@ -563,17 +566,22 @@ working arrangement becomes something someone else can instantiate.
   workspace declaration to an existing rig without changing topology; `rig export` preserves it.
 - **`rig bundle create` / `inspect` / `install` / `history`** — one file that rebuilds a rig on a
   machine with none of its content, what is inside one before you trust it, and what has actually
-  been installed here. They also take a GitHub folder link and pin it to one commit, as
-  `rig up <link>` does. `inspect`, and the view shown before `install` or `rig up`, list the
+  been installed here. `create`, `inspect` and `install` also take a GitHub folder link and pin it
+  to one commit, as `rig up <link>` does. `inspect`, and the view shown before `install` or `rig up`, list the
   permission posture, startup actions, writes, outside domains and the author's preconditions
   (shown, never run). A bundle can declare configurations: `rig bundle configurations <spec>`
-  lists them, and `--preset <name>` or `--seat pod.member=runtime` picks one. A bundle installs
-  into `--target` (default: the current folder), and `--cwd <dir>` sets every seat's working
-  folder. Skills, plugins and context packs are routed before any seat launches, with failures
-  listed in `routingFailures`; there is no sync step after the install. Re-installing a team
-  that is already installed says what is installed and offers to use it, stop and replace it, or
-  cancel: a running team is refused before any write, and a stopped one is replaced after a named
-  backup. Read those choices before reaching for `--force`.
+  lists them, and `--preset <name>` or `--seat pod.member=runtime` picks one. A bundle from a link
+  installs into `--target` (default: the current folder); a local archive needs `--target`.
+  `--cwd <dir>` sets every seat's working folder, separately from the install folder. For a
+  pod-aware (schema 2) bundle, skills, plugins and context packs are routed before any seat
+  launches, with failures listed in `routingFailures`, so there is no sync step after the install;
+  a legacy (schema 1) bundle still routes them after a completed install. Re-installing a team that
+  is already installed says what is installed and offers to use it, stop and replace it, or
+  cancel. For a pod-aware bundle, a running team with the same name is refused before anything is
+  written, and a stopped one is replaced: the earlier team is archived, and reinstalling into its
+  own install folder first copies each differing file to a backup. A legacy bundle doesn't replace
+  a stopped team, and with `--force` it can run its approved install steps before its name check
+  fails. Read those choices before reaching for `--force`.
 - **`rig bundle check <folder>`** — a local, advisory check of a team you are authoring.
   `rig bundle create --context-pack <dir>` and `--project-dir <dir>` carry a context pack or a
   project with it, and `docs/reference/publishing-a-rig-bundle.md` explains how to share it on
@@ -640,18 +648,26 @@ your circumstances is configuration, and the ones that are not, another agent ca
   `rig` commands, project reads and common test commands without a prompt; lifecycle commands
   (`rig up`, `rig down`, `rig seat stop`, `rig daemon stop` and similar) ask. Routine `rig`
   commands used to prompt, so don't widen permissions to avoid prompts. Codex team seats run
-  `workspace-write` with the workspace root and their pod's state folder writable, and
-  default-sandbox Codex seats have network access unless config turns it off, so full bypass is
-  not needed to reach the daemon. Explicit author or person policies win. Known limits at 0.6.6:
-  Codex team seats are not yet asked before lifecycle commands, and in a Claude team seat
-  `rig down --help` asks because it matches the `rig down` rule (`rig help down` prints the same
-  help without a prompt).
+  `workspace-write` with the workspace root and their pod's state folder writable. When Codex's
+  own config check shows a default-sandbox seat is eligible, OpenRig turns its network access on
+  (`network_access = false` keeps it off); if that check can't be read, the launch is left
+  unchanged. So full bypass is usually not needed just to reach the daemon; this was not checked
+  with real logins or on Linux. Explicit author or person policies, explicit seat selections and
+  named Codex profiles turn these team defaults off, and native ask and deny rules still apply.
+  When setting up a team, the operator recommends keeping this default. It offers to remember
+  extra OpenRig commands in your native settings, for this project or user-wide, only when you
+  want that, and stricter rules and Claude's lifecycle asks remain. The `openrig-core` plugin's
+  `applying-a-permission-policy` skill has the procedure. Known limits at 0.6.6: Codex team seats
+  are not yet asked before lifecycle commands, and in a Claude team seat `rig down --help` asks
+  because it matches the `rig down` rule (`rig help down` prints the same help without a prompt).
 - **`permission_policy: builtin:auto`**, and a fixed order for a seat's first launch:
   `rig seat set-permissions`, then the member policy, then the rig policy, then the system floor.
   See `docs/reference/rig-spec.md#built-in-permission-policies`.
-- **`--non-interruptive`** on `rig up` or `rig bundle install` launches a team without permission
-  prompts and is remembered for that team through restores and handovers; `--no-non-interruptive`,
-  with the team down, clears it. A rig spec can declare `non_interruptive: true` beside its
+- **`--non-interruptive`** on `rig up` or `rig bundle install` accepts Claude's bypass-permissions
+  warning and hides Codex's full-access notices for seats that already launch with full bypass. It
+  does not select bypass or change permission policy or native settings, so other seats ask as
+  before. The choice is saved for that team and carries through restores and handovers;
+  `--no-non-interruptive`, with the team down, clears it. A rig spec can declare `non_interruptive: true` beside its
   permission policy: an explicit flag wins over it, and it wins over the operator default
   `launch.non_interruptive`. The before-install view shows it as
   `posture[].nonInterruptiveDefault`.
