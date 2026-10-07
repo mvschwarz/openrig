@@ -40,7 +40,10 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
   `rig terminal open saved:kernel --window` on the daemon's desktop. Otherwise ask “Open the OpenRig view now?”
   first. It opens a new terminal tab/window itself: TUI | advisor | operator, using herdr when installed or plain
   tmux otherwise. Preserve the current terminal. Check the result and visible content, or report what cannot be
-  verified. On a desktop, do not finish by showing a table or suggesting a command for the person to type. Only if the window
+  verified. On a Mac the first open can raise two macOS prompts: “… is an app downloaded from the Internet”
+  (Open) and “… wants access to control …” (Allow). Tell the person to expect them and accept both; if the open
+  timed out while a prompt was up, check the desktop and run it once more. If the view is already open, point them
+  to it rather than opening another. On a desktop, do not finish by showing a table or suggesting a command for the person to type. Only if the window
   cannot open, `rig tui --shared` is the dashboard-only fallback; explain the failure and help with the chosen
   fallback. Herdr is visible only in a terminal the person can see; switching the shared TUI to `:terminals`
   does not open one. Over headless SSH, explain this and tell the person to open a new terminal window or tab;
