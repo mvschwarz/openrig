@@ -202,7 +202,7 @@ export class ContextMonitor {
         n.cwd,
         s.startup_status
       FROM nodes n
-      JOIN rigs r ON r.id = n.rig_id AND r.archived_at IS NULL
+      JOIN rigs r ON r.id = n.rig_id
       JOIN sessions s ON s.node_id = n.id
         AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
       LEFT JOIN bindings b ON b.node_id = n.id
@@ -217,6 +217,7 @@ export class ContextMonitor {
             )
           )
         )
+        AND (r.archived_at IS NULL OR s.status = 'running')
         AND COALESCE(b.attachment_type, 'tmux') = 'tmux'
         AND COALESCE(b.tmux_session, s.session_name) IS NOT NULL
     `).all() as EligibleSession[];

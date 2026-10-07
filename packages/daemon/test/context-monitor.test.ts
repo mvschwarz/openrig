@@ -272,6 +272,26 @@ describe("ContextMonitor", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE node_id = ?").get(codexNode.id)).toEqual({ n: 1 });
   });
 
+  it.each(["claude-code", "codex"])("still polls a running %s seat in an archived rig", async (runtime) => {
+    const { rig, node, sessionName } = runtime === "codex" ? seedCodexNode() : seedClaudeNode();
+    if (runtime === "codex") {
+      writeCodexTokenCount("thread-1");
+    } else {
+      writeSidecar(sessionName, { ...VALID_SIDECAR, sampled_at: new Date().toISOString() });
+    }
+    const samples = new UsageSamplesStore(db);
+    const maybeAutoCompact = vi.fn(async () => {});
+    const nativeMonitor = new ContextMonitor(db, store, undefined,
+      { maybeAutoCompact } as unknown as ClaudeCompactionEnforcer, undefined, samples);
+    rigRepo.archiveRig(rig.id);
+
+    await nativeMonitor.pollOnce();
+
+    expect(store.getForNode(node.id, sessionName).availability).toBe("known");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM usage_samples WHERE node_id = ?").get(node.id)).toEqual({ n: 1 });
+    expect(maybeAutoCompact).toHaveBeenCalledWith(expect.objectContaining({ sessionName, runtime }));
+  });
+
   // STUB-A (51-01 GAP-1): running stub sessions with a context sidecar are polled and observed
   it("pollOnce discovers running stub sessions and persists context usage", async () => {
     const { node, sessionName } = seedStubNode();
