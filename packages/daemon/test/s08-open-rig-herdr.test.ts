@@ -95,13 +95,15 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
   it("17 live seats → workspace named after the rig, tabs of 16 then 1, each cell on its own seat, in order", async () => {
     const { transport, requests } = herdrTransport();
     const { svc } = service(new HerdrAdapter({ transportFactory: () => transport, newLaunchToken: () => "tok" }));
-    const res = await svc.openView({ view: `rig:${RIG}` });
+    const preview = await svc.previewView({ view: `rig:${RIG}` });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    const res = await svc.openView({ view: `rig:${RIG}`, expectedPlan: preview.planId });
     expect(res).toMatchObject({ provider: "herdr", ok: true, pages: 2, absent: [], degraded: [] });
     expect(res.opened).toEqual(rows.map((r) => r.canonicalSessionName));
     const create = requests.find((r) => r.method === "workspace.create")!;
     expect(create.params).toEqual({ focus: false, label: RIG });
     const applies = requests.filter((r) => r.method === "layout.apply");
-    expect(applies.map((a) => a.params["tab_label"])).toEqual([`openrig:rig:${RIG}#tok/1`, `openrig:rig:${RIG}#tok/2`]);
+    expect(applies.map((a) => a.params["tab_label"])).toEqual([`openrig:rig:${RIG}#${preview.planId.slice(0, 16)}#tok/1`, `openrig:rig:${RIG}#${preview.planId.slice(0, 16)}#tok/2`]);
     expect(applies.map((a) => cellSeats(a.params["root"]).length)).toEqual([16, 1]);
     expect([...cellSeats(applies[0]!.params["root"]), ...cellSeats(applies[1]!.params["root"])]).toEqual(rows.map((r) => r.canonicalSessionName));
   });
