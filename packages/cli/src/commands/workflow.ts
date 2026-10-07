@@ -263,8 +263,8 @@ Examples:
 
   $ rig workflow instantiate ./my-spec.workflow.md \\
       --root-objective "Run dogfood" \\
-      --created-by velocity-driver@openrig-velocity \\
-      --entry-owner velocity-qa@openrig-velocity --json
+      --created-by driver@my-rig \\
+      --entry-owner qa@my-rig --json
 `)
     .action(async (specPath: string, opts: {
       rootObjective: string;
@@ -329,21 +329,21 @@ Examples:
       --instance WF01ABC \\
       --current-packet QITEM-123 \\
       --exit handoff \\
-      --actor-session velocity-driver@openrig-velocity \\
+      --actor-session driver@my-rig \\
       --result-note "implementation green; ready for review"
 
   # close the run cleanly
   $ rig workflow project --instance WF01ABC --current-packet QITEM-9 \\
-      --exit done --actor-session orch-lead@openrig-velocity
+      --exit done --actor-session orch-lead@my-rig
 
   # block on an external gate
   $ rig workflow project --instance WF01ABC --current-packet QITEM-4 \\
-      --exit waiting --actor-session velocity-qa@openrig-velocity \\
+      --exit waiting --actor-session qa@my-rig \\
       --blocked-on "founder-gate-2"
 
   # also wait for the current outcome of a slice (no copied readiness)
   $ rig workflow project --instance WF01ABC --current-packet QITEM-4 \\
-      --exit waiting --actor-session velocity-qa@openrig-velocity \\
+      --exit waiting --actor-session qa@my-rig \\
       --blocked-on QITEM-3 --wait-for-proof release-example/slices/01-build
 `)
     .action(async (opts: {
