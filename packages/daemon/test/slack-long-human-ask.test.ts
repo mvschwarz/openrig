@@ -269,6 +269,63 @@ describe("long human asks (#897)", () => {
     expect(failed.mock.calls.map((call) => call[1])).not.toContain("human-message-unrenderable");
   });
 
+  // #192 channel map: a long ask can post to a mapped channel, so the check for its first message
+  // looks there, and each part is reported with the channel it went to.
+  const channelAware = (posted: Array<Post & { channel: string; ts: string }>, scanned: string[], onPost: (n: number) => void = () => {}): FetchImpl => async (url, init) => {
+    const raw = String(init?.body ?? "");
+    const fields = raw.startsWith("{") ? JSON.parse(raw) as Record<string, string> : Object.fromEntries(new URLSearchParams(raw));
+    if (!url.endsWith("chat.postMessage")) {
+      const channel = new URL(url).searchParams.get("channel") ?? fields.channel ?? "";
+      scanned.push(channel);
+      return reply({ ok: true, messages: posted.filter((m) => m.channel === channel) });
+    }
+    const msg = { ...JSON.parse(raw), ts: `${posted.length + 1}.1` };
+    posted.push(msg);
+    onPost(posted.length);
+    return reply({ ok: true, ts: msg.ts });
+  };
+
+  it("with a channel map, a retry finds a one-message ask already in its mapped channel and does not post it again", async () => {
+    const { ask, body } = await askAtLabelLimit("mapped-landed");
+    const posted: Array<Post & { channel: string; ts: string }> = [];
+    const scanned: string[] = [];
+    const lost = channelAware(posted, scanned, (n) => { if (n === 1) throw new Error("synthetic timeout after the post landed"); });
+    const onPosted = vi.fn();
+    const base = { ...stores("mapped-landed"), botToken: "synthetic", channel: "C0DEFAULT", resolveChannel: () => "C0EXAMPLE2", pinChannel: true, fetchImpl: lost, onPosted };
+    // The first attempt's one message lands in the mapped channel, but its response is lost.
+    expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask(body))).ok).toBe(false);
+    expect(posted.map((p) => p.channel)).toEqual(["C0EXAMPLE2"]);
+    // A longer label: the recorded one message no longer renders; the check must look in the mapped channel.
+    expect(await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask(body))).toEqual({ ok: true });
+    expect(posted).toHaveLength(1); // no second post anywhere
+    expect(scanned.length).toBeGreaterThan(0);
+    expect(new Set(scanned)).toEqual(new Set(["C0EXAMPLE2"]));
+    expect(onPosted).toHaveBeenCalledWith(expect.anything(), "1.1", undefined);
+  });
+
+  it("with a channel map, every part of a long ask goes to the mapped channel and is reported with it", async () => {
+    const posted: Array<Post & { channel: string; ts: string }> = [];
+    const onPostedPart = vi.fn();
+    const deliver = subsystemSlackDeliver({ ...stores("mapped-long"), botToken: "synthetic", channel: "C0DEFAULT", resolveChannel: () => "C0EXAMPLE2", pinChannel: true, sourceLabel: "fixture", fetchImpl: channelAware(posted, []), onPostedPart });
+    expect(await deliver(decision("mapped-long", { body: longBody }))).toEqual({ ok: true });
+    expect(posted.length).toBeGreaterThan(2);
+    expect(new Set(posted.map((p) => p.channel))).toEqual(new Set(["C0EXAMPLE2"]));
+    expect(onPostedPart).toHaveBeenCalledTimes(posted.length - 1);
+    for (const call of onPostedPart.mock.calls) expect(call.slice(2)).toEqual(["1.1", "C0EXAMPLE2"]);
+  });
+
+  it("without a map, the first-message check still looks in the default channel only", async () => {
+    const { ask, body } = await askAtLabelLimit("unmapped-landed");
+    const posted: Array<Post & { channel: string; ts: string }> = [];
+    const scanned: string[] = [];
+    const lost = channelAware(posted, scanned, (n) => { if (n === 1) throw new Error("synthetic timeout after the post landed"); });
+    const base = { ...stores("unmapped-landed"), botToken: "synthetic", channel: "C0DEFAULT", fetchImpl: lost };
+    expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask(body))).ok).toBe(false);
+    expect(await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask(body))).toEqual({ ok: true });
+    expect(posted).toHaveLength(1);
+    expect(new Set(scanned)).toEqual(new Set(["C0DEFAULT"]));
+  });
+
   it("still refuses a one-message ask whose history scan is incomplete, rather than marking it delivered", async () => {
     const { ask, body } = await askAtLabelLimit("unverified");
     const posted: Post[] = [];

@@ -182,7 +182,7 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     }
   });
 
-  it("A1 advisory receipt: with several hand-authored fragments list --json renders all + the 0.5.7 advisory", async () => {
+  it("A1 advisory receipt: with several hand-authored fragments list --json renders all + the one-human advisory", async () => {
     // Fix-r1 F1: the SECOND human arrives by hand-authoring (the registry surface), never
     // through the add verb — the verb is the single-human boundary.
     seedSecondHuman("ana");
@@ -193,7 +193,7 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     const out = JSON.parse(logSpy.mock.calls.at(-1)![0] as string) as { ok: boolean; humans: unknown[]; advisory?: string };
     expect(out.ok).toBe(true);
     expect(out.humans).toHaveLength(2); // honest display
-    expect(out.advisory).toContain("0.5.7"); // never a management surface
+    expect(out.advisory).toContain("one configured human"); // never a management surface
   });
 
   it("show --json carries authored-vs-default provenance and the fragment path", async () => {
@@ -257,7 +257,7 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
 
   // ── fix-r1 F1: the add verb IS the single-human boundary ──
 
-  it("F1: a second DISTINCT add REFUSES with teaching (existing human named, hand-authoring + 0.5.7 pointed at) and writes ZERO fragment bytes", async () => {
+  it("F1: a second DISTINCT add REFUSES with teaching (existing human named, remove and hand-authoring pointed at) and writes ZERO fragment bytes", async () => {
     const dirBefore = readdirSync(humansDir(home)).sort();
     const mikeBytes = readFileSync(join(humansDir(home), "mike.yaml"), "utf8");
     const p = program();
@@ -271,7 +271,8 @@ describe("rig gateway human lifecycle verbs (S12)", () => {
     expect(process.exitCode).toBe(1);
     const err = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(err).toContain("mike");        // the existing human, named
-    expect(err).toContain("0.5.7");       // where multi-human management lives
+    expect(err).toContain("gateway human remove"); // how to register someone else
+    expect(err).not.toMatch(/\d+\.\d+\.\d+/);     // no promise of a release that manages several
     expect(err).toContain("hand-author"); // the sanctioned several-fragment path
     // Zero new fragment bytes: directory unchanged, existing fragment byte-identical.
     expect(readdirSync(humansDir(home)).sort()).toEqual(dirBefore);

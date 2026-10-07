@@ -109,11 +109,17 @@ unseen — which makes messages the one delivery channel that never gets skipped
 - **`rig stream emit` / `list` / `watch` / `archive`** — drop an observation somewhere the *next*
   agent will find it. Emitting costs nothing and does not interrupt anyone; the value appears when
   someone lists the stream before starting.
-- **`rig terminal open <view>`** — bring every live agent in a rig, mission or slice up as real
-  typeable tiles at once. **`rig terminal open saved:kernel`** opens the dashboard, the advisor
-  and the operator with no YAML. Without Herdr, a failed open prints exact tmux attach commands,
-  and `rig ps --nodes --rig <rig> --json --fields canonicalSessionName,tmuxAttachCommand` gives
-  one per seat.
+- **`rig terminal open <view> --window`** — open a new desktop terminal with live agent tiles.
+  For “show me my agents”, “show me the terminals” or “welcome screen”, run **`rig terminal open saved:kernel --window`**
+  on the daemon's desktop: TUI | advisor | operator, no YAML, herdr when installed or plain tmux.
+  Herdr is visible only in a terminal the person can see; switching the shared TUI to `:terminals` does not
+  open one. Over headless SSH, explain the limitation and give one exact connection/attachment command for
+  a new terminal window or tab, using the current endpoint or binding from the getting-started guide.
+  Inspect the result and visible content, or say what cannot be verified. On a desktop, do not finish by
+  printing a command for the person to type. Only if the window cannot open, `rig tui --shared`
+  is the dashboard-only fallback; explain the failure. Existing herdr or cmux workspaces
+  can use `rig terminal open <view> --provider herdr` or `--provider cmux` without `--window`
+  to add tiles inside that provider, not to open the first desktop window.
   In the TUI, **TERMINALS** keeps Saved views prominent and Derived groups collapsed until
   expanded. Names load before detailed readiness. Select a view to inspect its members,
   layout and pages; preview is passive. Saved membership requires deliberate setup.
@@ -705,10 +711,13 @@ your circumstances is configuration, and the ones that are not, another agent ca
   reset, or stopped reporting entirely. The last one is a signal, not a gap.
 - **`rig tui`** — the interactive view over rigs, pods, seats and specs. `rig` and `rig tui` open
   the status dashboard, not a conversation with an agent: talk to the operator through
-  `rig terminal open saved:kernel`, which opens the dashboard and the conversations together, or
-  through an attach command the operator gives. `rig tui --shared`
-  attaches to the existing kernel terminal; Ctrl-b then d detaches, and no missing seat or
-  terminal is implicitly launched. Plain `rig tui` remains a separate view.
+  `rig terminal open saved:kernel --window`. For “show me my agents”, “show me the terminals”, “see my agents” or
+  “welcome screen”, run that command to open the dashboard and conversations together;
+  do not finish by showing a table or suggesting a command for the person to type.
+  Only if the window cannot open, `rig tui --shared` is the dashboard-only fallback:
+  it attaches to the existing kernel terminal; Ctrl-b then d detaches, and no missing
+  seat or terminal is implicitly launched. Explain the failure and help with the
+  chosen fallback. Plain `rig tui` remains a separate dashboard.
   Open the instance row for one continuous cross-rig agent table with pod separators and material
   `RECENT` transitions; drill into a rig, mission, slice, or agent without losing the owning
   identity. Use the mission's workflow/packet view and Specs purpose/source to understand work.

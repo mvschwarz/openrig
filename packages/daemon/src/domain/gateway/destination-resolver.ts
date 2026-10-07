@@ -8,10 +8,13 @@
 //   unroutable        → an honest structured teaching refusal; tmux is never
 //                       consulted for an address it can never hold
 //
-// D3 forward-design (Q-e): a future channel-map layer EXTENDS this function
-// (channel → rig|seat in front of thread → seat). It must never become a third
-// resolver beside it — this is deliberately the single classification site the
-// wake path consults.
+// D3 forward-design (Q-e), as settled on #192: the channel map does not change
+// who owns transport, so it is not a class here. Its one resolver is
+// slack/channel-map.ts, shared by every channel decision (outbound posting,
+// `rig slack verify` and human delivery readiness); inbound channel routing
+// belongs in slack/thread-routing.ts, in front of thread → seat, through that
+// same module. Neither may become a third resolver beside this function — this
+// is deliberately the single classification site the wake path consults.
 //
 // Class membership, in order:
 //   1. `@external` addresses (registered entities AND literal-scheme one-offs)

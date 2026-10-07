@@ -20,9 +20,9 @@ The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
 
-There are **87 top-level registrations**, **352 registered command objects**
+There are **87 top-level registrations**, **356 registered command objects**
 below `rig` (including groups and the hidden `restore apply` command), and
-**1,072 explicitly registered option objects**, including the root version
+**1,077 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
 These are source counts, not a claim about a deployed release.
@@ -411,6 +411,10 @@ Root: `rig`; declared option: `-V, --version`.
 | `rig slack status` | — | `--json` |
 | `rig slack manifest` | — | `--url`<br>`--json` |
 | `rig slack verify` | — | `--json`<br>`--reason <reason>`<br>`--actor <actor>` |
+| `rig slack channel-map` | — | — |
+| `rig slack channel-map list` | — | `--json` |
+| `rig slack channel-map set <match> <channel>` | — | `--reason <reason>`<br>`--actor <actor>` |
+| `rig slack channel-map remove <match>` | — | `--reason <reason>`<br>`--actor <actor>` |
 | `rig slack enable` | — | `--reason <reason>`<br>`--actor <actor>` |
 | `rig slack disable` | — | `--reason <reason>` **required**<br>`--actor <actor>` |
 | `rig slack outbound` | — | `--json` |

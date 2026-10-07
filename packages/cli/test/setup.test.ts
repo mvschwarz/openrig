@@ -248,7 +248,8 @@ describe("rig setup", () => {
     expect(out).toContain("Check only selected logins");
     expect(out).toContain("Started is not ready");
     expect(out).toContain("No: give the command to open it later");
-    expect(out).toContain("Over SSH: give the exact connection/attach command");
+    expect(out).toContain("Over headless SSH: ask the person to open a new terminal/tab and give the exact connection/attach command");
+    expect(out).toContain("On a desktop, no copying or typing for the person; confirm three visible columns, not just CLI success");
     expect(out).toContain("rig send dev-build@starter");
     expect(out).toContain("rig queue list --destination dev-build@starter");
     expect(out).not.toContain("rig queue list --rig");

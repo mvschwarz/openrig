@@ -36,10 +36,18 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it.
-- **Offer the OpenRig view:** ask "Open the OpenRig view now?" On yes, open it in a new terminal space, never the one
-  in use: `rig terminal open saved:kernel` (herdr), `--provider cmux`, or a plain terminal window. On no, or with no
-  display (SSH), give the command to open it later; that's a valid outcome. "Open the kernel conversations" in
-  `rig context get reference/getting-started.md` covers each case.
+- **Open the welcome screen:** for “show me my agents”, “show me the terminals”, “see my agents” or “welcome screen”, run
+  `rig terminal open saved:kernel --window` on the daemon's desktop. Otherwise ask “Open the OpenRig view now?”
+  first. It opens a new terminal tab/window itself: TUI | advisor | operator, using herdr when installed or plain
+  tmux otherwise. Preserve the current terminal. Check the result and visible content, or report what cannot be
+  verified. On a desktop, do not finish by showing a table or suggesting a command for the person to type. Only if the window
+  cannot open, `rig tui --shared` is the dashboard-only fallback; explain the failure and help with the chosen
+  fallback. Herdr is visible only in a terminal the person can see; switching the shared TUI to `:terminals`
+  does not open one. Over headless SSH, explain this and tell the person to open a new terminal window or tab;
+  give one exact connection and attachment command using the current endpoint or binding from the guide.
+  No and headless/SSH use are valid background outcomes. Provider-only `--provider herdr` or
+  `--provider cmux` is for an existing provider workspace, not the first desktop window. “Open the kernel
+  conversations” in `rig context get reference/getting-started.md` covers manual attachment after failure.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
   said. Then follow "Installing-agent handoff" in the same guide: find the `operator.agent` row in
   `rig ps --nodes --rig kernel --json` and `rig send` its `canonicalSessionName` (never a guessed name) the goal,

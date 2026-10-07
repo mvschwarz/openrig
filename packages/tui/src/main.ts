@@ -38,6 +38,7 @@ import type { SpecReviewCache } from "./hydrate.js";
 import { MOTION_FRAME_MS } from "./visual-layout.js";
 import { launchProcess, runSpecLaunch } from "./specs/launch.js";
 import { runCopySession, processCopyTerminal } from "./print-for-copy.js";
+import { openTerminalInWindow, terminalWindowNotice } from "./terminals/open-window.js";
 
 function argOf(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag);
@@ -77,6 +78,7 @@ async function run(): Promise<void> {
   let startup: StartupController | null = null;
   let nativeAttached = false;
   let launching = false;
+  let openingTerminal = false;
   let controlSocketPath: string | undefined;
   let shuttingDown = false;
 
@@ -390,29 +392,35 @@ async function run(): Promise<void> {
 
   if (socket.path !== socketPath) controlSocketPath = socket.path;
 
-  // Acts are drive-structure daemon WRITES (BR-8/BR-9) — executed here against
-  // the two existing contracts; the view-state is only told the outcome.
+  // Reuse the CLI's desktop opener and the daemon's node-launch contract.
+  // The view-state is only told the outcome.
   async function executeAct(action: Extract<Action, { type: "act" }>): Promise<void> {
     if (!client || startup?.state.connection !== "up") {
       view.dispatch({ type: "notice", message: "Live actions require a confirmed daemon connection. S opens startup; L opens local reading." });
       draw();
       return;
     }
+    if (action.act === "open-terminal" && openingTerminal) return;
     try {
       if (action.act === "open-terminal") {
-        const result = await client.openTerminal(action.view, action.expectedPlan);
-        view.dispatch({
-          type: "terminal-result", view: action.view,
-          message: `${result.absent.length || result.degraded.length ? "Partial Open" : "Opened"}: ${result.opened.length} opened, ${result.absent.length} absent, ${result.degraded.length} degraded · ${action.view}${result.error ? ` · ${result.error}` : ""}${result.degraded.map(m => ` · ${m.seat}: ${m.reason}`).join("")}${(result.notes ?? []).map(n => ` · ${n}`).join("")}`,
-        });
-        if (action.expectedPlan === undefined) view.dispatch({ type: "notice", message: `${result.opened.length} terminals opened; ${result.absent.length} absent; ${result.degraded.length} degraded${(result.notes ?? []).map(n => ` · ${n}`).join("")}` });
+        openingTerminal = true;
+        view.dispatch({ type: "notice", message: `Opening terminals for ${action.view}…` });
+        draw();
+        const result = await openTerminalInWindow(action.view, client.baseUrl, cliEntry, action.expectedPlan,
+          () => view.dispatch({ type: "terminal-preview", view: action.view }));
+        const message = terminalWindowNotice(action.view, result);
+        view.dispatch({ type: "terminal-result", view: action.view, message });
+        view.dispatch({ type: "notice", message });
       } else if (action.act === "run") {
         const result = await client.launchNode(action.rigId, action.agent);
         view.dispatch({ type: "notice", message: launchNodeNotice(action.agent, result) });
       }
     } catch (err) {
-      if (action.act === "open-terminal") view.dispatch({ type: "terminal-result", view: action.view, message: err instanceof Error ? err.message : String(err) });
-      view.dispatch({ type: "notice", message: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      if (action.act === "open-terminal") view.dispatch({ type: "terminal-result", view: action.view, message });
+      view.dispatch({ type: "notice", message: action.act === "open-terminal" ? `Terminal view not confirmed\n${message}` : message });
+    } finally {
+      if (action.act === "open-terminal") openingTerminal = false;
     }
     draw();
     refreshFromActivity();

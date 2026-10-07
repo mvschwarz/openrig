@@ -112,6 +112,50 @@ part of OpenRig.
 - `rig slack status` shows what is still missing, without contacting Slack.
 - `rig slack verify` checks the granted baseline scopes and channel membership with Slack.
 
+## One channel per rig or seat (optional)
+
+By default every human-bound item posts to the one channel from `rig slack setup --channel`.
+To follow each rig separately, post a rig's items, or a single seat's, to its own channel:
+
+```bash
+rig slack channel-map set my-rig C0EXAMPLE1
+rig slack channel-map set pr@my-rig C0EXAMPLE2
+rig slack channel-map list
+rig slack channel-map remove pr@my-rig
+```
+
+- **Which channel an item posts to.** The item's seat is matched exactly first (`pr@my-rig`),
+  then its rig (`my-rig`). Anything unmapped posts to the default channel, so a config
+  without a map behaves exactly as before. Aggregate delivery digests have no single seat and
+  always post to the default channel.
+- **Threads.** Updates, `--reply-to` and later notifications for an item stay in its thread.
+  With a map configured, if a seat's channel has changed since the thread was opened, the
+  next post opens a new thread in the seat's current channel, and `--reply-to` records the
+  fallback as `root-other-channel`. With no map, threads behave exactly as before: an item's
+  next notification reuses its open thread in whatever channel that thread was posted in.
+- **Changing the map.** A change applies to new posts. A post already in flight (one being
+  retried after a failure or an unconfirmed send) finishes in the channel and thread it started
+  in, and its retry checks that channel first so it is not posted twice. This includes adding
+  the first map: a post first tried before any map existed finishes in the default channel.
+  Without a map, OpenRig records nothing about a post's channel, so if the default channel
+  changes while a post is being retried, the retry goes to the new default channel (as it always
+  has); that also applies to a post first tried before the map was added.
+- **Replies and new messages.** A reply in an item's thread reaches that item's seat, in any
+  channel. A message the human starts (or a reply in a thread OpenRig does not know) goes to
+  the connector's inbound destination, whichever channel it is in. Missed-message recovery
+  (below) covers the default channel only.
+
+Invite the app to every mapped channel (`/invite @OpenRig`). `rig slack verify` checks
+membership in the default channel and every mapped channel, and reports NOT ready until the
+app is in all of them. A saved change reaches a running connector when it next rewires:
+`rig slack disable` then `rig slack enable`, or a daemon restart. The TUI's Connections page
+says whether the running configuration matches the file.
+
+The map is stored as `channelMap` in `slack-connector.json`, as a list of `{ "match", "channel" }`
+entries. Saving refuses any other field. A field written by a newer OpenRig is ignored when the
+connector reads the file, and `rig slack status` names it. Private channels and direct messages
+are not supported targets.
+
 ## Reconnect recovery and status
 
 The daemon scans available top-level messages in the configured channel after a

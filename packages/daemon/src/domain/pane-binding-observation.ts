@@ -1,3 +1,4 @@
+import { decodeTime } from "ulid";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { SeatIdentityVerdict } from "./types.js";
 
@@ -41,6 +42,7 @@ export async function observeSolePane(
 /** Durable named state for a launch/adopt/refresh ingress that cannot resolve a sole pane. */
 export function paneObservationVerdict(input: {
   nodeId: string;
+  sessionId: string;
   sessionName: string;
   observation: Exclude<PaneBindingObservation, { ok: true }>;
   observedAt?: string;
@@ -66,6 +68,7 @@ export function paneObservationVerdict(input: {
       matchedLayer: null,
     },
     sessionName: input.sessionName,
-    observedAt: input.observedAt ?? new Date().toISOString(),
+    // This verdict is committed with registration, so it belongs to the new occupant.
+    observedAt: input.observedAt ?? new Date(Math.max(Date.now(), decodeTime(input.sessionId) + 1)).toISOString(),
   };
 }

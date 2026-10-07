@@ -1,5 +1,6 @@
 import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
 import type Database from "better-sqlite3";
+import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
 import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
 import { identityVerdictDownranksRunning } from "./types.js";
@@ -45,7 +46,9 @@ interface InventoryRow {
   previous_occupant: string | null;
   handover_at: string | null;
   // Newest session fields (may be null if no session)
+  session_id: string | null;
   session_name: string | null;
+  session_created_at: string | null;
   session_status: string | null;
   startup_status: string | null;
   resume_type: string | null;
@@ -447,9 +450,10 @@ function mapProjectionEntries(entries: unknown[]): Array<{ id: string; category:
  * window (a stale `verified` suppresses the down-rank a fresh squat/orphan
  * should trigger; a stale `mismatch` would down-rank a healthy new pane).
  *
- * A verdict applies ONLY when it was computed against the current binding:
- *   verdict.sessionName === row.session_name  AND
- *   verdict.evidence.registeredPane === row.tmux_pane
+ * Same-name/same-pane handovers also replace the occupant. The observation
+ * must belong to the latest registration and follow the recorded handover.
+ * observedAt is captured before the reconciler's async probes, so a sweep
+ * that finishes after cutover still carries its predecessor observation time.
  * Otherwise return null — the projection treats it as ABSENT (fail-open: a
  * running seat is left unchanged, never down-ranked). This keeps the rev1-r1
  * fail-open discipline: turning a stale verdict into ABSENT never down-ranks;
@@ -457,11 +461,23 @@ function mapProjectionEntries(entries: unknown[]): Array<{ id: string; category:
  */
 function applicableVerdict(
   verdict: SeatIdentityVerdict | null,
-  row: Pick<InventoryRow, "session_name" | "binding_tmux_pane">,
+  row: Pick<InventoryRow, "session_id" | "session_name" | "session_created_at" | "binding_tmux_pane" | "handover_at">,
 ): SeatIdentityVerdict | null {
   if (!verdict) return null;
   if (verdict.sessionName !== row.session_name) return null;
   if (verdict.evidence.registeredPane !== row.binding_tmux_pane) return null;
+  const observedAt = Date.parse(verdict.observedAt);
+  if (!Number.isFinite(observedAt)) return null;
+  // SQLite's datetime('now') is UTC but omits the timezone suffix.
+  const utcTime = (value: string) => Date.parse(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(value)
+    ? `${value.replace(" ", "T")}Z` : value);
+  if (row.session_created_at && !(observedAt >= utcTime(row.session_created_at))) return null;
+  // Registry session IDs are ULIDs; retain their millisecond precision when
+  // two registrations share SQLite's one-second created_at timestamp.
+  if (row.session_id && /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/i.test(row.session_id)
+    && observedAt <= decodeTime(row.session_id)) return null;
+  // Equal-millisecond observations cannot establish which occupant was read.
+  if (row.handover_at && !(observedAt > utcTime(row.handover_at))) return null;
   return verdict;
 }
 
@@ -539,7 +555,9 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       n.handover_result,
       n.previous_occupant,
       n.handover_at,
+      s.id as session_id,
       s.session_name,
+      s.created_at as session_created_at,
       s.status as session_status,
       s.startup_status,
       s.resume_type,
@@ -641,7 +659,13 @@ function buildInventoryEntry(
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
     sessionStatus: row.session_status,
-    startupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
+    // Match the graph's current-status projection without rewriting the startup
+    // result. Applicable mismatch (including ambiguity) or pane_missing overrides it.
+    storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
+    startupStatus: row.session_status === "running"
+      && identityVerdictDownranksRunning(identityVerdict?.verdict)
+      ? "attention_required"
+      : row.startup_status as NodeInventoryEntry["startupStatus"],
     restoreOutcome,
     // FS-1 W1.3 S2 — O(1) lookup into the fleet-batched oriented map
     // (byte-identical to the prior per-node deriveOriented; "n-a" when a node has

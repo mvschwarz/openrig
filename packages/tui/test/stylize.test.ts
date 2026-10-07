@@ -73,6 +73,7 @@ describe("treatment (mockup palette semantics)", () => {
   it("links/acts get the G2 accent (term ▸, open ▸, tabs)", () => {
     const styled = stylizeLines(screenFor("rig openrig-build"), style).join("\n");
     expect(styled).toContain("\x1b[1;38;2;111;168;255mterm ▸\x1b[0m");
+    expect(styled).toContain("\x1b[1;38;2;111;168;255mOpen terminals ▸\x1b[0m");
   });
 
   it("Attention styling preserves unavailable truth without legacy fleet alerts", () => {

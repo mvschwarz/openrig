@@ -9,7 +9,9 @@ export interface ConnectionsRead {
   settings: Array<{ key: string; value: string | null; source: string }>;
   configSource: { state: string; path: string | null };
   configuration: null | { enabled: boolean; channel: string | null; inboundDestination: string | null;
-    outboundDestinations: Array<string | null>; postLevel: string; interruptLevel: string; botToken: string; appToken: string };
+    outboundDestinations: Array<string | null>; postLevel: string; interruptLevel: string; botToken: string; appToken: string;
+    /** #192: absent from daemons that predate the channel map. */
+    channelMap?: Array<{ match: string | null; channel: string | null }> };
   running: { state: string; activatedAt: string | null; outboundReady: boolean | null; inboundReady: boolean | null; inboundState: string; applied: string };
   state: string; nextAction: string;
   verification: { state: string; at: string | null; actor: string | null };
@@ -85,6 +87,7 @@ export function connectionsLines(snap: FleetSnapshot, width: number, timeZone = 
   if (cfg) {
     lines.push(fieldLine({ label: "enabled", value: String(cfg.enabled) }),
       fieldLine({ label: "channel", value: cfg.channel ?? "missing" }),
+      ...(cfg.channelMap ?? []).map((e) => fieldLine({ label: "channel map", value: `${e.match ?? "withheld"} → ${e.channel ?? "withheld"}` })),
       fieldLine({ label: "credentials", value: `bot ${cfg.botToken}; Socket Mode app ${cfg.appToken} (values hidden)` }),
       fieldLine({ label: "outbound", value: c.running.outboundReady === null ? "unreported" : `${c.running.outboundReady ? "configured at activation" : "not configured at activation"}; posting >= ${cfg.postLevel}, interrupting >= ${cfg.interruptLevel} (current config)` }),
       fieldLine({ label: "inbound", value: c.running.inboundState }));

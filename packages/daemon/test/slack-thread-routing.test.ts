@@ -258,3 +258,43 @@ describe("outbound threading through the REAL delivery path (one reply root per 
     expect(parsePostedStamp(stamps[1]!)).toMatchObject({ threadTs: "1724.2", conversationId: "q2" });
   });
 });
+
+describe("#192 channel map — one resolved channel per post (post, reconcile scan, upload)", () => {
+  let home: string;
+  beforeEach(() => { home = mkdtempSync(join(tmpdir(), "s192-del-")); });
+  afterEach(() => { rmSync(home, { recursive: true, force: true }); });
+
+  it("posts, reconciles an ambiguous earlier attempt and uploads in the payload's channel, never the default", async () => {
+    const fsx = memFs();
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    const fetchImpl: FetchImpl = async (url, init) => {
+      const method = new URL(url).pathname.split("/").pop() ?? "";
+      const raw = String(init?.body ?? "");
+      const body: Record<string, unknown> = raw.startsWith("{") ? JSON.parse(raw) as Record<string, unknown>
+        : { ...Object.fromEntries(new URL(url).searchParams), ...Object.fromEntries(new URLSearchParams(raw)) };
+      calls.push({ method, body });
+      const json = method === "conversations.history" ? { ok: true, messages: [], has_more: false }
+        : method === "files.getUploadURLExternal" ? { ok: true, upload_url: "https://files.slack.com/upload/v1/x", file_id: "F1" }
+        : { ok: true, ts: "1800.1" };
+      return new Response(JSON.stringify(json), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const attempted = new SeenStore("/att.jsonl", fsx, clock);
+    attempted.mark("d-1", "attempted"); // an earlier attempt with an unknown outcome
+    const roots: string[] = [];
+    const deliver = subsystemSlackDeliver({
+      botToken: "xoxb-EXAMPLE-fake", channel: "C0DEFAULT", sourceLabel: "vm", fetchImpl,
+      resolveChannel: (p) => (p.sourceSession === "pr@my-rig" ? "C0EXAMPLE2" : "C0DEFAULT"),
+      delivered: new SeenStore("/del.jsonl", fsx, clock), attempted, outboundSeen: new SeenStore("/seen.jsonl", fsx, clock),
+      readLocalImage: () => ({ bytes: new Uint8Array([1, 2, 3]), filename: "shot.png" }),
+      onPostedRoot: (_p, ts, channel) => { roots.push(`${channel}:${ts}`); },
+    });
+    const outcome = await deliver({ decisionId: "d-1", op: OUTBOUND_OP, entityBindingRef: "mike@external",
+      payload: { qitemId: "q1", summary: "s", body: "b", destinationSession: "mike@external", sourceSession: "pr@my-rig", evidenceRef: "/tmp/shot.png" } } as never);
+    expect(outcome).toEqual({ ok: true });
+    const channelOf = (method: string) => calls.filter((c) => c.method === method).map((c) => c.body.channel ?? c.body.channel_id);
+    expect(channelOf("conversations.history")).toEqual(["C0EXAMPLE2"]);
+    expect(channelOf("chat.postMessage")).toEqual(["C0EXAMPLE2"]);
+    expect(channelOf("files.completeUploadExternal")).toEqual(["C0EXAMPLE2"]);
+    expect(roots).toEqual(["C0EXAMPLE2:1800.1"]);
+  });
+});

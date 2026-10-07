@@ -3172,9 +3172,15 @@ export class QueueRepository {
     if (!this.hasQueueTransitionsTable) return false;
     // Same trust rule as replyToChoiceFor: a pre-provenance schema reads every row as null.
     const provenance = this.hasTransitionProvenanceColumn ? " AND identity_provenance IS NULL" : "";
+    // #192: with a channel map the note carries a ` channel=<id>` suffix. Match the exact note, or
+    // the exact note followed by that suffix; a prefix compare, not LIKE (the note itself contains
+    // `_`), and the trailing space keeps thread 1.1 from matching 1.10.
+    const note = formatReplyToChoice({ kind: "thread", threadTs });
+    const withChannel = `${note} channel=`;
     return this.db.prepare(
-      `SELECT 1 FROM queue_transitions WHERE transition_note = ? AND actor_session = ?${provenance} LIMIT 1`,
-    ).get(formatReplyToChoice({ kind: "thread", threadTs }), REPLY_TO_CHOICE_ACTOR) !== undefined;
+      `SELECT 1 FROM queue_transitions
+        WHERE (transition_note = ? OR substr(transition_note, 1, ?) = ?) AND actor_session = ?${provenance} LIMIT 1`,
+    ).get(note, withChannel.length, withChannel, REPLY_TO_CHOICE_ACTOR) !== undefined;
   }
 
   private replyToFallbackFor(qitemId: string): string | null {

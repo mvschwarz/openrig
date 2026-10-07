@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { DaemonClient } from "../src/client.js";
 import { openTerminalWindow, type WindowDeps } from "../src/terminal-window.js";
 
-function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number; empty?: boolean; alive?: boolean; terminalSize?: boolean } = {}) {
+function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number; empty?: boolean; alive?: boolean } = {}) {
   const panes = ["tui", "advisor", "operator"].map(seat => ({ seat, label: seat, paneCommand: `tmux attach-session -t '=fixture-${seat}'` }));
   const composed = { id: "kernel", opened: options.empty ? [] : panes, pages: options.empty ? [] : [panes], columns: 3, absent: [], degraded: [] };
   const preview = { planId: "bound-plan", composed, status: { launch: { socketPath: "/daemon home/herdr.sock", session: "daemon-session" } } };
@@ -17,7 +17,7 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
       return "herdr 0.9.3";
     }
     if (file === "/usr/libexec/PlistBuddy") return options.ghostty ?? "1.2.0";
-    if (file === "/usr/bin/osascript") return options.ghostty === "1.3.0" ? "tab" : options.terminalSize === false ? "window-manual" : "window-sized";
+    if (file === "/usr/bin/osascript") return options.ghostty === "1.3.0" ? "tab" : "window";
     if (file === "/bin/sh") return args[1] === "command -v herdr" ? "/fixture/bin/herdr" : "/fixture/bin/tmux";
     if (args.at(-1) === "default-size") return "120x40";
     if (args[0] === "show-options" && args.at(-1) === "window-size") return "latest";
@@ -29,6 +29,20 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
 }
 
 describe("desktop terminal view", () => {
+  it.each([true, false])("rejects a changed preview before opening a window (Herdr installed: %s)", async herdr => {
+    const f = fixture({ herdr });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps, "prior-plan");
+    expect(result).toMatchObject({ ok: false, opened: [], error: expect.stringContaining("changed since preview") });
+    expect(f.exec.mock.calls.some(([file, args]) => file === "/usr/bin/osascript" || args.includes("new-session"))).toBe(false);
+    expect(f.post).not.toHaveBeenCalled();
+  });
+
+  it("opens the previewed tmux layout when the expected plan still matches", async () => {
+    const f = fixture({ herdr: false });
+    const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps, "bound-plan");
+    expect(result).toMatchObject({ ok: true, provider: "tmux", opened: ["tui", "advisor", "operator"] });
+  });
+
   it("opens a new Ghostty tab and applies the same daemon plan and Herdr endpoint", async () => {
     const f = fixture({ ghostty: "1.3.0" });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
@@ -53,19 +67,16 @@ describe("desktop terminal view", () => {
     expect(script).toContain('tell application "Terminal"');
     expect(script).toContain("do script (item 1 of argv)");
     expect(script).not.toContain("in front window");
-    expect(script).toContain("set newTab to do script");
-    expect(script).toContain("if newTab is in tabs of targetWindow and (count of tabs of targetWindow) is 1 then");
-    expect(script).toContain("set number of columns of newTab to 140");
-    expect(script).toContain("set number of rows of newTab to 40");
+    expect(script).not.toMatch(/number of (columns|rows)|bounds|position|size|tabs of|repeat with/);
     expect(script).not.toMatch(/settings set|default settings|System Events/);
-    expect(result.notes).toContain("The new Terminal tab reports 140 columns by 40 rows.");
+    expect(result.notes).toContain("Terminal opened with its own window sizing. Resize or move the new view manually if needed; OpenRig did not request a size or position change.");
   });
 
-  it("keeps the opened Terminal view when sizing cannot be confirmed, without retrying", async () => {
-    const f = fixture({ terminalSize: false });
+  it("keeps the Terminal view and reports manual sizing without reopening", async () => {
+    const f = fixture();
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result).toMatchObject({ ok: true, window: { app: "Terminal", surface: "window" } });
-    expect(result.notes?.join(" ")).toContain("Enlarge the new window manually");
+    expect(result.notes?.join(" ")).toContain("Resize or move the new view manually");
     expect(result.notes?.join(" ")).not.toContain("tab reports 140");
     expect(f.exec.mock.calls.filter(([file]) => file === "/usr/bin/osascript")).toHaveLength(1);
     expect(f.post).toHaveBeenCalledTimes(1);
@@ -103,6 +114,7 @@ describe("desktop terminal view", () => {
     if (reason === "headless") Object.assign(f.deps, { platform: "linux", env: {} });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
     expect(result.ok).toBe(false);
+    expect(result).toMatchObject({ code: "terminal_window_failed", windowAttempted: false });
     expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/fixture/bin/tmux")).toBe(false);
     expect(f.post).not.toHaveBeenCalled();
   });
@@ -114,7 +126,7 @@ describe("desktop terminal view", () => {
       if (file === "/usr/bin/osascript") throw new Error("Automation denied");
       return original(file, args);
     });
-    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: false, error: expect.stringContaining("Terminal window status is unknown. Automation denied"), opened: [] });
+    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: false, windowAttempted: true, error: expect.stringContaining("Terminal window status is unknown. Automation denied"), opened: [] });
     expect(vi.mocked(f.deps.exec).mock.calls.filter(([file]) => file === "/usr/bin/osascript")).toHaveLength(1);
     expect(f.post).not.toHaveBeenCalled();
   });

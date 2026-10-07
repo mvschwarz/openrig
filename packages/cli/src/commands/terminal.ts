@@ -38,6 +38,8 @@ export interface OpenViewResult {
   notes?: string[];
   window?: { app: string; surface: string };
   reusedWorkspace?: { id: string; tabId: string; view: string };
+  /** On window failures, false means no desktop launch was attempted. */
+  windowAttempted?: boolean;
 }
 
 // Opening applies pages through several bounded provider round trips; it is
@@ -96,8 +98,8 @@ function printOpen(json: boolean, r: OpenViewResult, status: number): void {
 
 export function terminalCommand(depsOverride?: TerminalDeps): Command {
   const cmd = new Command("terminal").description(
-    "Open agent conversations as tiles (herdr / cmux); kernel dashboard + chats: rig terminal open saved:kernel",
-  );
+    "Open the welcome screen and agent conversations in terminal tiles",
+  ).addHelpText("after", "\nWelcome screen / OpenRig view / show me my agents / show me the terminals / see my agents:\n  rig terminal open saved:kernel --window\n  Opens the window itself on the daemon's desktop; an agent can run it from its shell.\n  Uses herdr when installed, otherwise the same layout in plain tmux.\n  Herdr needs a terminal the person can see; TUI navigation does not open one.\n  Over headless SSH, give the exact connection/attach command for a new terminal/tab.\n  Only if the window cannot open: rig tui --shared is the dashboard-only fallback.\n  On a desktop, the agent opens the view; it does not finish by printing a command to copy.\n");
 
   const getDeps = (): TerminalDeps =>
     depsOverride ?? {
@@ -111,18 +113,19 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
     .option("--provider <name>", "herdr or cmux: use an existing workspace without opening a window; tmux requires --window")
     .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
+    .option("--expected-plan <id>", "Open only if the view still matches this preview")
     .option("--json", "JSON output for agents")
-    .action(async (view: string, opts: { provider?: string; json?: boolean; window?: boolean }) => {
+    .action(async (view: string, opts: { provider?: string; json?: boolean; window?: boolean; expectedPlan?: string }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         // Herdr's control socket can answer with no desktop client attached.
         // The default requests a desktop; an explicit provider reuses its workspace.
         if (opts.window || !opts.provider) {
-          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps);
+          const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps, opts.expectedPlan);
           printOpen(opts.json ?? false, result, 200);
           return;
         }
-        const body = { view, ...(opts.provider ? { provider: opts.provider } : {}) };
+        const body = { view, ...(opts.provider ? { provider: opts.provider } : {}), ...(opts.expectedPlan !== undefined ? { expectedPlan: opts.expectedPlan } : {}) };
         const res = await client.post<OpenViewResult>("/api/terminal/open", body, { timeoutMs: TERMINAL_OPEN_TIMEOUT_MS });
         if (!Array.isArray(res.data?.opened)) {
           printResult(opts.json ?? false, res.data, res.status);
