@@ -671,7 +671,7 @@ Examples:
   // `rig workflow run … && next-thing` is honest in scripts.
   cmd
     .command("run <specPath>")
-    .description("Instantiate a workflow AND follow it live to a terminal state (exit 0 completed / 3 failed)")
+    .description("Instantiate a workflow AND follow it live to a terminal state (exit 0 completed / 3 failed or aborted)")
     .requiredOption("--root-objective <text>", "Root objective for the run")
     .requiredOption("--created-by <session>", "Session creating the instance (canonical <member>@<rig>)")
     .option("--entry-owner <session>", "Override default entry-step owner")
@@ -679,7 +679,7 @@ Examples:
     .option("--json", "Stream events as JSON lines for agents")
     .addHelpText("after", `
 Streams each step event as it happens; exits when the workflow reaches
-a terminal state. Exit codes: 0 = completed, 3 = workflow failed,
+a terminal state. Exit codes: 0 = completed, 3 = workflow failed or aborted,
 1/2 = transport errors (4xx/5xx). If the event stream drops, the
 command reconnects, then degrades to polling — announced, never a
 silent freeze.
@@ -736,8 +736,8 @@ Examples:
 Read-only: renders the instance's current state (snapshot), then
 streams live events until a terminal state. Attaching to an already
 fast-moving instance is safe — steps that closed before attach render
-from the snapshot exactly once. Exit codes: 0 = completed, 3 =
-workflow failed, 1/2 = transport errors.
+from the snapshot exactly once. Exit codes: 0 = completed, 3 = workflow failed or aborted,
+1/2 = transport errors.
 
 Examples:
   $ rig workflow watch WF01ABC
