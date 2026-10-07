@@ -30,7 +30,7 @@ function fixture(options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv;
     }
     return "";
   });
-  const windowDeps: WindowDeps = { platform: options.platform ?? "darwin", env: options.env ?? {}, exists: () => false, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), id: () => "fixture" };
+  const windowDeps: WindowDeps = { platform: options.platform ?? "darwin", env: options.env ?? { TERM_PROGRAM: "Apple_Terminal" }, exists: () => false, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), id: () => "fixture" };
   const deps: TerminalDeps = {
     lifecycleDeps: {} as TerminalDeps["lifecycleDeps"], windowDeps,
     clientFactory: () => ({ baseUrl: options.remote ? "http://192.0.2.2:7433" : "http://localhost:7433", get, post }) as unknown as ReturnType<TerminalDeps["clientFactory"]>,
@@ -85,7 +85,7 @@ describe("terminal open desktop default", () => {
     const result = JSON.parse(logs[0]!);
     expect(result).toMatchObject({ ok: false, opened: [], code: "terminal_window_failed" });
     expect(result.error).toContain("No terminal window was opened.");
-    expect(result.error).toContain("rig terminal open 'saved:kernel' --window");
+    expect(result.error).toContain(reason === "remote" ? "rig terminal open 'saved:kernel' --window" : "HERDR_SOCKET_PATH='/fixture/herdr.sock' '/fixture/bin/herdr'");
     expect(f.post).not.toHaveBeenCalled();
     expect(f.windowDeps.launch).not.toHaveBeenCalled();
   });
@@ -94,7 +94,7 @@ describe("terminal open desktop default", () => {
     const f = fixture({ platform: "linux", env: {} });
     await f.run(["saved:kernel"]);
     expect(logs[0]).toMatch(/^No terminal window was opened\./);
-    expect(logs[0]).toContain("rig terminal open 'saved:kernel' --window");
+    expect(logs[0]).toContain("HERDR_SOCKET_PATH='/fixture/herdr.sock' '/fixture/bin/herdr'");
   });
 
   it("does not replay an uncertain desktop request or claim that no window exists", async () => {

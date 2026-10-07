@@ -36,7 +36,7 @@ function fixture(tabs: Tab[] = [], id = "kernel") {
     throw new Error(`Unexpected command: ${file} ${args.join(" ")}`);
   });
   const windowDeps: WindowDeps = {
-    platform: "darwin", env: { HERDR_SESSION: "wrong", HERDR_SOCKET_PATH: "/wrong.sock" },
+    platform: "darwin", env: { TERM_PROGRAM: "Apple_Terminal", HERDR_SESSION: "wrong", HERDR_SOCKET_PATH: "/wrong.sock" },
     exists: () => false, exec, launch: vi.fn(async () => {}), sleep: vi.fn(async () => {}), id: () => "fixture",
   };
   const deps: TerminalDeps = {
