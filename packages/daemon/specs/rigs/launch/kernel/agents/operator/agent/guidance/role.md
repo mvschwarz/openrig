@@ -74,7 +74,7 @@ question through the human channel instead.
      in one repository. Not built in: it installs from its listing on
      openrig.dev/rigs, a GitHub folder link pinned to a reviewed commit. Read
      the commit and its configurations from
-     https://raw.githubusercontent.com/mvschwarz/openrig-world/main/registry/workshop.yaml,
+     https://raw.githubusercontent.com/mvschwarz/openrig-registry/main/registry/workshop.yaml,
      fetched fresh, for example with `curl -fsSL <that link>`. A web tool's cached
      copy can be older than the current pin and would launch an older workshop;
      the raw link itself can trail a new pin by a few minutes (it is cached for

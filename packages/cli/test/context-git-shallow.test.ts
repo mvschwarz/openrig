@@ -46,10 +46,10 @@ function commit(root: string, message: string) {
   git(root, "add", ".");
   git(root, "-c", "user.name=Context Test", "-c", "user.email=context@example.invalid", "commit", "-m", message);
 }
-function fixture() {
+function fixture(format = "sha1") {
   const home = mkdtempSync(join(tmpdir(), "openrig-context-shallow-")); homes.push(home);
   const upstream = join(home, "upstream"); mkdirSync(upstream);
-  git(upstream, "init", "-b", "main");
+  git(upstream, "init", `--object-format=${format}`, "-b", "main");
   mkdirSync(join(upstream, "registry", "views"), { recursive: true });
   writeFileSync(join(upstream, "registry", "views", "old-diagram.json"), JSON.stringify({ diagram: "historical-only".repeat(10_000) }));
   writeFileSync(join(upstream, "manifest.yaml"), "name: guide\nversion: 1\ntaxonomy: world\nfiles:\n  - path: guide.md\n    role: reference\n");
@@ -90,10 +90,13 @@ describe("Git context initial download", () => {
   it.each([
     "fatal: dumb http transport does not support shallow capabilities",
     "fatal: Server does not support shallow clients",
+    "fatal: Server does not support shallow requests",
   ])("announces a full-clone fallback only for a shallow refusal: %s", (refusal) => {
     const f = fixture(); transport.refusal = refusal;
+    transport.afterAdvertisement = () => { writeFileSync(join(f.upstream, "guide.md"), "Later guide\n"); commit(f.upstream, "later"); };
     const added = addGitContext(f.upstream, {}, f.root);
     expect(added).toHaveProperty("warning", expect.stringMatching(/shallow.*full clone/i));
+    expect(added.selected.revision).toBe(f.head);
     expect(git(added.selected.checkout, "rev-parse", "--is-shallow-repository")).toBe("false");
     expect(git(added.selected.checkout, "cat-file", "-t", f.oldBlob)).toBe("blob");
     expect(transport.calls.filter(a => a.includes("clone"))).toHaveLength(1);
@@ -102,7 +105,11 @@ describe("Git context initial download", () => {
 
   it("does not retry an ordinary fetch failure with a full clone or expose its stderr", () => {
     const f = fixture(); transport.refusal = "fatal: Authentication failed for https://user:private-value@example.invalid/";
-    expect(() => addGitContext(f.upstream, {}, f.root)).toThrow(/git fetch failed/);
+    let failure: unknown;
+    try { addGitContext(f.upstream, {}, f.root); } catch (err) { failure = err; }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toMatch(/git fetch failed/);
+    expect((failure as Error).message).not.toContain("private-value");
     expect(transport.calls.some(a => a.includes("clone"))).toBe(false);
     expect(existsSync(join(f.root, "guide"))).toBe(false);
   });
@@ -114,5 +121,13 @@ describe("Git context initial download", () => {
     expect(git(f.upstream, "rev-parse", "--is-shallow-repository")).toBe("false");
     expect(git(f.upstream, "cat-file", "-t", f.oldBlob)).toBe("blob");
     expect(transport.calls.some(a => a.includes("fetch") || a.includes("clone"))).toBe(false);
+  });
+
+  it("preserves the source object format for a SHA-256 repository", () => {
+    const f = fixture("sha256");
+    const added = addGitContext(f.upstream, {}, f.root);
+    expect(added.selected.revision).toBe(f.head);
+    expect(git(added.selected.checkout, "rev-parse", "--show-object-format")).toBe("sha256");
+    expect(git(added.selected.checkout, "rev-list", "--count", "HEAD")).toBe("1");
   });
 });

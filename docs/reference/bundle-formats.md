@@ -77,8 +77,8 @@ Shared test vectors are in `schemas/fixtures/identity-vectors.json`.
 | Declared configurations | `bundle-configurations.v1` | `configurations.yaml` beside `rig.yaml` | the bundle's author |
 | Before-install view | `bundle-behaviour.v1` (`openrig.bundle-behaviour/v1`) | the registry, one file per configuration and assembler version; never inside the archive | the daemon's inspect: `rig bundle inspect`, under `behaviour` with `--json` |
 | Run record | `run-record.v1` | beside its receipt, private | Fleet, Dev QA, and maintainers for community reports |
-| Public status | `bundle-status.v1` | `openrig-world` status, generated | the status generator only |
-| Registry entry | `registry-entry.v1` | `openrig-world/registry/<slug>.yaml` | maintainers, through review |
+| Public status | `bundle-status.v1` | `openrig-registry` status, generated | the status generator only |
+| Registry entry | `registry-entry.v1` | `openrig-registry/registry/<slug>.yaml` | maintainers, through review |
 
 ### Declared configurations
 

@@ -841,10 +841,11 @@ Examples:
     .argument("<source>", "Pack directory/manifest URL, or Git repository path/URL with --git")
     .description("Install a pack; --git discovers a pack in a Git repository and retains its update relationship")
     .option("--name <name>", "Override the install name (defaults to the manifest name / source basename)")
-    .option("--git", "Clone a Git repository path/URL with existing Git credentials; select a pack snapshot")
+    .option("--git", "Fetch a Git repository's advertised commit at depth 1 with existing credentials; select a pack snapshot")
     .option("--checkout", "With --git, select an existing checkout instead of cloning; updates may merge in it")
     .option("--pack <path>", "With --git, select a repository-relative pack; default discovers manifest.yaml or .openrig/context-packs")
     .option("--json", "JSON output")
+    .addHelpText("after", "\nGit downloads omit history and tags initially. A server that refuses shallow retrieval gets a full clone instead, with a warning on stderr (also with --json).\nExisting --checkout history is unchanged; context source update explicitly fetches and merges later revisions.\n")
     .action(async (source: string, opts: { name?: string; json?: boolean; git?: boolean; checkout?: boolean; pack?: string }) => {
       try {
         // OPR.0.5.9.5 Wave B — config-resolved context library,
@@ -856,7 +857,9 @@ Examples:
         if (opts.git) {
           const gitClient = await getClient(true);
           assertLocalGitClient(gitClient);
-          ({ installedAt: targetDir, selected: gitSelection } = addGitContext(source, opts, targetRoot));
+          const added = addGitContext(source, opts, targetRoot);
+          ({ installedAt: targetDir, selected: gitSelection } = added);
+          if (added.warning) console.error(`Warning: ${added.warning}`);
         } else if (isHttpUrl(source)) {
           // R4 — URL install: fetch → validate → atomic stage+rename (no partial pack).
           ({ targetDir } = await installPackFromUrl(source, opts.name, targetRoot));

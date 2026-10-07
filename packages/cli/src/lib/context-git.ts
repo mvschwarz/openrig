@@ -22,13 +22,16 @@ function git(checkout: string, args: string[]): string {
   try {
     return execFileSync("git", ["-C", checkout, ...args], {
       encoding: "utf8", timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no" },
+      env: { ...process.env, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_MERGE_AUTOEDIT: "no" },
       stdio: ["ignore", "pipe", "pipe"],
     }).trimEnd();
   } catch (err) {
     // Git's stderr can echo a credential-bearing remote. Never export it.
     const status = (err as { status?: number }).status;
-    throw new Error(`git ${args[0]} failed${status == null ? " or timed out" : ` (exit ${status})`}. Checkout retained at ${checkout}; inspect with Git using your existing credentials.`);
+    const stderr = String((err as { stderr?: unknown }).stderr ?? "");
+    throw Object.assign(new Error(`git ${args[0]} failed${status == null ? " or timed out" : ` (exit ${status})`}. Checkout retained at ${checkout}; inspect with Git using your existing credentials.`), {
+      shallowUnsupported: /^(?:fatal: )?(?:dumb http transport does not support shallow capabilities|Server does not support shallow (?:clients|requests))\s*$/m.test(stderr),
+    });
   }
 }
 
@@ -181,14 +184,43 @@ export function inspectGitContext(target: string) {
 export function addGitContext(source: string, opts: { pack?: string; name?: string; checkout?: boolean }, targetRoot: string) {
   if (opts.name) assertSafeInstallRef(opts.name);
   let checkout: string;
+  let warning: string | undefined;
   if (opts.checkout) checkout = checkoutRoot(source);
   else {
     // Existing Git credential helpers remain in charge; no secret arguments.
     if (source.startsWith("-") || /^(?:https?:\/\/[^/]*@|[a-z]+:\/\/[^/]*:[^/]*@)/i.test(source)) throw new Error("Use a repository path or credential-free Git URL with your existing Git credential mechanism.");
     const parent = `${resolve(targetRoot)}-git-checkouts`;
     mkdirSync(parent, { recursive: true });
+    // Resolve a local path before changing Git's working directory.
+    const remote = existsSync(source) ? resolve(source) : source;
+    const advertised = git(parent, ["ls-remote", "--symref", "--", remote, "HEAD"]);
+    const revision = /^([a-f0-9]{40}|[a-f0-9]{64})\tHEAD$/m.exec(advertised)?.[1];
+    const branchRef = /^ref: (refs\/heads\/[^\t\r\n]+)\tHEAD$/m.exec(advertised)?.[1];
+    if (!revision) throw new Error("Git source has no advertised HEAD commit. Check its default branch before retrying.");
     checkout = join(parent, randomUUID());
-    git(parent, ["clone", "--", source, checkout]);
+    git(parent, ["init", `--object-format=${revision.length === 64 ? "sha256" : "sha1"}`, "--", checkout]);
+    git(checkout, ["remote", "add", "origin", remote]);
+    try {
+      // Pin the advertised commit even if the branch advances during the fetch.
+      // Depth and no-tags keep deleted catalog objects out of the initial download.
+      git(checkout, ["fetch", "--depth=1", "--no-tags", "origin", revision]);
+    } catch (err) {
+      if (!(err as { shallowUnsupported?: boolean }).shallowUnsupported) throw err;
+      warning = "Git source refused shallow retrieval; using a full clone, including repository history.";
+      // Keep the failed checkout for inspection, just as other Git failures do.
+      checkout = join(parent, randomUUID());
+      try { git(parent, ["clone", "--", remote, checkout]); }
+      catch (cloneError) { throw new Error(`${warning}\n${(cloneError as Error).message}`); }
+    }
+    if (branchRef) {
+      const branch = branchRef.slice("refs/heads/".length);
+      if (!warning) git(checkout, ["update-ref", `refs/remotes/origin/${branch}`, revision]);
+      // This is a newly created checkout: pin its branch even after a full fallback.
+      git(checkout, ["checkout", "-B", branch, revision]);
+      git(checkout, ["branch", "--set-upstream-to", `origin/${branch}`, "--", branch]);
+    } else {
+      git(checkout, ["checkout", "--detach", revision]);
+    }
     checkout = checkoutRoot(checkout);
   }
   const pack = discoverPack(checkout, opts.pack);
@@ -200,7 +232,7 @@ export function addGitContext(source: string, opts: { pack?: string; name?: stri
   try { lstatSync(target); throw new Error(`Context destination already exists: ${target}. Checkout retained at ${checkout}`); }
   catch (err) { if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err; }
   const selected = selectPack(checkout, pack, target, targetRoot);
-  return { installedAt: target, selected };
+  return { installedAt: target, selected, ...(warning ? { warning } : {}) };
 }
 
 export function updateGitContext(target: string) {
