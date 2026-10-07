@@ -103,7 +103,7 @@ end run`;
     };
   }
   if (deps.platform !== "linux" || (!deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"])) {
-    throw new Error("No local desktop display is available; no terminal window was opened. Run this command on the daemon's desktop.");
+    throw new Error("No local desktop display is available.");
   }
   for (const app of ["ghostty", "x-terminal-emulator", "gnome-terminal", "konsole", "xterm"]) {
     try { await deps.exec("/bin/sh", ["-c", `command -v ${app}`]); } catch { continue; }
@@ -126,13 +126,13 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
   let window: { app: string; surface: string } | undefined;
   let viewer: string | undefined;
   let windowAttempted = false;
-  const recovery = `rig terminal open ${shellQuote(view)} --window${requestedProvider ? ` --provider ${shellQuote(requestedProvider)}` : ""}`;
+  const recovery = `rig terminal open ${shellQuote(view)} --window${requestedProvider && ["herdr", "tmux"].includes(requestedProvider) ? ` --provider ${shellQuote(requestedProvider)}` : ""}`;
   const failed = (reason: string): OpenViewResult => failure(provider,
     window ? `A terminal window was requested, but the view did not open. ${reason} Inspect the terminal before retrying: ${recovery}`
       : windowAttempted ? `Terminal window status is unknown. ${reason} Inspect the desktop before retrying: ${recovery}`
         : `No terminal window was opened. ${reason} On the daemon's desktop, run: ${recovery}`);
   try {
-    if (!localDaemon(client.baseUrl)) throw new Error("--window must run on the daemon's own desktop; the configured daemon is remote.");
+    if (!localDaemon(client.baseUrl)) throw new Error("The window launcher must run on the daemon's own desktop; the configured daemon is remote.");
     if (requestedProvider && !["herdr", "tmux"].includes(requestedProvider)) throw new Error("--window supports herdr or tmux. Use cmux without --window.");
     const launchWindow = await windowLauncher(deps);
     const herdr = requestedProvider === "tmux" ? null : await herdrBinary(deps);
