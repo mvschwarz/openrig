@@ -83,7 +83,12 @@ describe("bundle reinstall through both public routes", () => {
     const manifest = kind === "copied" ? fs.readFileSync(path.join(target, "bundle.yaml"), "utf8") : "schema_version: 2\nname: workshop\n";
     fs.writeFileSync(path.join(project, "bundle.yaml"), manifest);
     const result = await install(route, archive, project, false, project);
-    expect(result.status).toBe(400);
+    // Preserve each route's existing target-conflict HTTP mapping.
+    expect(result.status).toBe(route === "/api/up" ? 400 : 500);
+    expect(result.body.status).toBe("failed");
+    expect(result.body.stages).toContainEqual(expect.objectContaining({
+      stage: "resolve_spec", status: "failed", detail: expect.objectContaining({ code: "target_conflict" }),
+    }));
     expect(result.body.errors.join("\n")).toContain("Nothing was written");
     expect(fs.readFileSync(path.join(project, "README.md"), "utf8")).toBe("my project");
     expect(fs.readFileSync(path.join(project, "bundle.yaml"), "utf8")).toBe(manifest);
