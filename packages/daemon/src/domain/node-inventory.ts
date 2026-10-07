@@ -641,7 +641,12 @@ function buildInventoryEntry(
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
     sessionStatus: row.session_status,
-    startupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
+    // Match the graph's current-status projection without rewriting the startup
+    // result. Only an applicable, positive identity failure overrides it.
+    startupStatus: row.session_status === "running"
+      && identityVerdictDownranksRunning(identityVerdict?.verdict)
+      ? "attention_required"
+      : row.startup_status as NodeInventoryEntry["startupStatus"],
     restoreOutcome,
     // FS-1 W1.3 S2 — O(1) lookup into the fleet-batched oriented map
     // (byte-identical to the prior per-node deriveOriented; "n-a" when a node has

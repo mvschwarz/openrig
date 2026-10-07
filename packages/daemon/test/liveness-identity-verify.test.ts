@@ -9,7 +9,7 @@
 import { describe, it, expect } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
-import { getNodeInventory, deriveNodeLifecycleState } from "../src/domain/node-inventory.js";
+import { getNodeInventory, getNodeDetail, deriveNodeLifecycleState } from "../src/domain/node-inventory.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
 import { projectRigToGraph, type InventoryOverlay } from "../src/domain/graph-projection.js";
 import type { SeatIdentityVerdict, SeatIdentityVerdictKind } from "../src/domain/types.js";
@@ -63,6 +63,32 @@ describe("deriveNodeLifecycleState identity gate (unit)", () => {
 });
 
 describe("getNodeInventory identity gating", () => {
+  it.each(["claude-code", "codex"])("%s startup status follows current identity in list and detail, preserving the stored result", runtime => {
+    const db = createFullTestDb();
+    try {
+      seedRunningSeat(db);
+      db.prepare("UPDATE nodes SET runtime = ? WHERE id = 'n1'").run(runtime);
+      const identities = new SeatIdentityStore(db);
+      for (const kind of ["mismatch", "pane_missing"] as const) {
+        identities.upsert(verdict(kind));
+        expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("attention_required");
+        expect(getNodeDetail(db, "rig-1", "dev.impl")?.startupStatus).toBe("attention_required");
+        expect(db.prepare("SELECT startup_status FROM sessions WHERE id = 'sess1'").get())
+          .toEqual({ startup_status: "ready" });
+      }
+      identities.upsert(verdict("verified"));
+      expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("ready");
+      // Process identity alone cannot erase a real startup/context-delivery failure.
+      db.prepare("UPDATE sessions SET startup_status = 'failed' WHERE id = 'sess1'").run();
+      expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("failed");
+      db.prepare("UPDATE sessions SET status = 'stopped' WHERE id = 'sess1'").run();
+      identities.upsert(verdict("pane_missing"));
+      expect(getNodeInventory(db, "rig-1")[0].startupStatus).toBe("failed");
+    } finally {
+      db.close();
+    }
+  });
+
   it("no verdict → running/active + null identityVerdict (no-regression)", () => {
     const db = createFullTestDb();
     seedRunningSeat(db);
@@ -70,6 +96,7 @@ describe("getNodeInventory identity gating", () => {
     expect(n.lifecycleState).toBe("running");
     expect(n.occupantLifecycle).toBe("active");
     expect(n.identityVerdict).toBeNull();
+    expect(n.startupStatus).toBe("ready");
     db.close();
   });
 
@@ -81,6 +108,7 @@ describe("getNodeInventory identity gating", () => {
     expect(n.lifecycleState).toBe("running");
     expect(n.occupantLifecycle).toBe("active");
     expect(n.identityVerdict?.verdict).toBe("verified");
+    expect(n.startupStatus).toBe("ready");
     db.close();
   });
 
@@ -194,6 +222,7 @@ describe("getNodeInventory verdict applicability gate (rev1-r2 B1 — no stale f
     const [n] = getNodeInventory(db, "rig-1");
     expect(n.identityVerdict).toBeNull();
     expect(n.lifecycleState).toBe("running"); // stale verdict does not apply
+    expect(n.startupStatus).toBe("ready");
     expect(n.occupantLifecycle).toBe("active");
     db.close();
   });
@@ -208,6 +237,7 @@ describe("getNodeInventory verdict applicability gate (rev1-r2 B1 — no stale f
     const [n] = getNodeInventory(db, "rig-1");
     expect(n.identityVerdict).toBeNull();
     expect(n.lifecycleState).toBe("running");
+    expect(n.startupStatus).toBe("ready");
     db.close();
   });
 

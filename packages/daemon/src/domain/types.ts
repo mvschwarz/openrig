@@ -638,6 +638,8 @@ export interface NodeInventoryEntry {
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
   sessionStatus: string | null;
+  // Current projection: an applicable identity failure down-ranks a running
+  // session to attention_required; the stored startup result stays unchanged.
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
   restoreOutcome: NodeRestoreOutcome;
   // OPR.0.4.3.06 — challenge-verified orientation, surfaced beside (never
