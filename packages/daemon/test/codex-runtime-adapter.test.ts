@@ -1483,6 +1483,22 @@ describe("Codex runtime adapter", () => {
       .toBe("https://exa.internal.example/mcp");
   });
 
+  it("keeps $ sequences in a fragment literal when it is re-projected", async () => {
+    const userConfig = '[projects."/tmp/workspace"]\ntrust_level = "trusted"\n';
+    const fragment = '[mcp_servers.dollar]\ncommand = "echo $$ $& $` $\'"\n';
+    const { project, read } = await projectFragment(userConfig, fragment);
+
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const afterFirst = read();
+    expect(await project()).toEqual({ projected: ["codex-default-config"], skipped: [], failed: [] });
+    const afterSecond = read();
+
+    expect(afterSecond).toBe(afterFirst);
+    expect(afterSecond.startsWith(userConfig)).toBe(true);
+    expect(afterSecond.match(/BEGIN OPENRIG MANAGED CODEX CONFIG FRAGMENT: codex-default-config/g)!.length).toBe(1);
+    expect((parseToml(afterSecond) as Record<string, any>).mcp_servers.dollar.command).toBe("echo $$ $& $` $'");
+  });
+
   it("does not mistake a header after an ESCAPED delimiter inside a multi-line string (r2 NOT-CLEAR, 09-01)", async () => {
     // review50-r2 blocking finding on candidate 4d2ad86c. `\"""` is an escaped
     // quote plus two more, NOT the end of the string, so [mcp_servers.exa] here

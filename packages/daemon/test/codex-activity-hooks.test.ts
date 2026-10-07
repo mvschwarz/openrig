@@ -106,6 +106,23 @@ describe("OPR.0.4.1.10 FR-A — Codex config-layer activity hooks", () => {
     expect(cfg.match(/# BEGIN OPENRIG MANAGED ACTIVITY HOOKS/g)?.length).toBe(1);
   });
 
+  it("keeps $ sequences in the relay path literal when the block is rewritten", () => {
+    const dollarRelay = "/opt/rig$&$$/`x`/activity-relay.cjs";
+    const fs = mockCodexFs({
+      [dollarRelay]: "// relay",
+      [CONFIG]: '[projects."/some/project"]\ntrust_level = "trusted"\n',
+    });
+    const adapter = makeAdapter(fs, dollarRelay);
+    adapter.ensureCodexActivityHooks();
+    const first = fs._store[CONFIG]!;
+    adapter.ensureCodexActivityHooks();
+    const second = fs._store[CONFIG]!;
+    expect(second).toBe(first);
+    expect(second.split(`command = 'node "${dollarRelay}"'`).length - 1).toBe(EVENTS.length);
+    expect(second.match(/# BEGIN OPENRIG MANAGED ACTIVITY HOOKS/g)?.length).toBe(1);
+    expect(second.startsWith('[projects."/some/project"]\ntrust_level = "trusted"\n')).toBe(true);
+  });
+
   it("fail-safe: skips writing + warns when the relay asset is missing", () => {
     const fs = mockCodexFs({}); // RELAY not present in the store
     const warn = vi.spyOn(console, "error").mockImplementation(() => {});
