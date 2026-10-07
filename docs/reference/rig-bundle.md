@@ -381,13 +381,18 @@ Before it plans or applies, install runs two checks on the archive, both also un
   reports "Bundle compatibility check failed" with the versions involved.
 - **running team:** a running team with the bundle's rig name refuses the install with "Bundle install conflict check
   failed". The error names the installed and the offered team and lists three choices: use the existing team, stop it
-  with `rig down` and retry to replace it, or cancel. A stopped team with that name does not refuse the install.
+  with `rig down` and retry to replace it, or cancel. This check does not refuse a stopped team with that name.
 
 Each error lists its fixes; the compatibility error also names `--skip-version-check`.
 
-Installing a team whose rig name matches a stopped team replaces it: the earlier team is archived when the new one is
-created, and the result gives the `rig unarchive <id>` command that restores it. If OpenRig cannot confirm the earlier
-team is stopped, install refuses with `generation_unconfirmed` and creates nothing.
+For a pod-aware (schema version 2) bundle, installing a team whose rig name matches a stopped team replaces it: the
+earlier team is archived when the new one is created, and the result gives the `rig unarchive <id>` command that
+restores it. If OpenRig cannot confirm the earlier team is stopped, install refuses with `generation_unconfirmed` and
+creates no replacement team. For an install into that team's own install folder, OpenRig makes this check before
+writing any files; for any other target, bundle files already copied there stay.
+
+A legacy (schema version 1) bundle does not replace a stopped team. Its approved external and package install steps run
+first, and then its rig-name check fails preflight with "Rig name '<name>' already exists".
 
 For a pod-aware (schema version 2) bundle, apply copies every extracted file (`bundle.yaml`, `rig.yaml`, `agents/`, culture and docs files, and any carried `project/`, `context-packs/` and author-declared contents) into the target and launches from there, then removes the temporary extraction. So:
 
@@ -445,11 +450,13 @@ rig up <bundle-path-or-github-link> [--target <root>] [--cwd <dir>] [--plan] [--
 take different routes:
 - **A GitHub link** builds the archive and installs it through the `rig bundle install` path, with its compatibility
   and rig-name checks and the install audit.
-- **A local `.rigbundle` path** goes through the bundle bootstrap path directly. It skips the compatibility check
-  (a running team with the same name is still refused before anything is written, and a stopped one is replaced as
-  described under "Install a bundle"), isn't recorded in the install audit (so `rig bundle history` doesn't list it), and doesn't print the
-  routing summary. A legacy (schema 1) archive gets no post-install routing this way. To get the checks and the audit
-  for a local archive, use `rig bundle install` or `rig bootstrap`.
+- **A local `.rigbundle` path** goes through the bundle bootstrap path directly. It skips the compatibility check,
+  isn't recorded in the install audit (so `rig bundle history` doesn't list it), and doesn't print the routing summary.
+  For a pod-aware archive, a running team with the same name is still refused before anything is written, and a
+  stopped one is replaced as described under "Install a bundle". A legacy (schema 1) archive runs its approved install
+  steps before its rig-name check, which then refuses a running team and fails preflight for a stopped one; it also
+  gets no post-install routing this way. To get the checks and the audit for a local archive, use `rig bundle install`
+  or `rig bootstrap`.
 
 `rig bootstrap <bundle-path>` also accepts archives and uses the ordinary bundle
 install path, including compatibility checks and the install audit. Use `--plan`
