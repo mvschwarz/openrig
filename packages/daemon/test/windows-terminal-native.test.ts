@@ -24,13 +24,14 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
     const invoke = async (argv: string[]) => (await execFileAsync(process.env.OPENRIG_TEST_PSMUX!, argv.slice(1), { windowsHide: true })).stdout;
     const adapter = new TmuxAdapter(async () => { throw new Error("No POSIX transport"); }, undefined, invoke, "psmux");
     try {
-      expect(await adapter.createSession(session, dir)).toEqual({ ok: true });
+      expect(await adapter.createSession(session, os.tmpdir())).toEqual({ ok: true });
       const q = (value: string) => "'" + value.replace(/'/g, "'\"'\"'") + "'";
       expect(await adapter.sendShellCommand(session, renderWindowsLaunch([process.execPath, script].map(q).join(" "), {}))).toEqual({ ok: true });
       const waitForFile = async (file: string) => {
         const deadline = Date.now() + 5000;
         while (Date.now() < deadline) { try { return readFileSync(file, "utf8"); } catch { await new Promise(resolve => setTimeout(resolve, 50)); } }
-        throw new Error("receiver did not produce its fixture file");
+        const screen = await adapter.capturePaneScreen(session);
+        throw new Error(`receiver did not produce ${path.basename(file)}; fixture screen: ${screen?.slice(-1200) ?? "unavailable"}`);
       };
       await waitForFile(ready);
       const pane = (await adapter.listPanes(session))[0]!;
