@@ -125,6 +125,12 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
   let provider = requestedProvider ?? "herdr";
   let window: { app: string; surface: string } | undefined;
   let viewer: string | undefined;
+  let windowAttempted = false;
+  const recovery = `rig terminal open ${shellQuote(view)} --window${requestedProvider ? ` --provider ${shellQuote(requestedProvider)}` : ""}`;
+  const failed = (reason: string): OpenViewResult => failure(provider,
+    window ? `A terminal window was requested, but the view did not open. ${reason} Inspect the terminal before retrying: ${recovery}`
+      : windowAttempted ? `Terminal window status is unknown. ${reason} Inspect the desktop before retrying: ${recovery}`
+        : `No terminal window was opened. ${reason} On the daemon's desktop, run: ${recovery}`);
   try {
     if (!localDaemon(client.baseUrl)) throw new Error("--window must run on the daemon's own desktop; the configured daemon is remote.");
     if (requestedProvider && !["herdr", "tmux"].includes(requestedProvider)) throw new Error("--window supports herdr or tmux. Use cmux without --window.");
@@ -135,15 +141,16 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     // Preview is provider-neutral composition, including saved-view membership, absences and quoting.
     const preview = await client.get<Preview | OpenViewResult>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr`);
     if (preview.status >= 400 || !("composed" in preview.data)) {
-      return failure(provider, (preview.data as OpenViewResult).error ?? "Could not compose the requested view.");
+      return failed((preview.data as OpenViewResult).error ?? "Could not compose the requested view.");
     }
     const { composed, planId } = preview.data;
-    if (!composed.opened.length) return { ...failure(provider, "No conversations are attachable."), absent: composed.absent, degraded: composed.degraded };
+    if (!composed.opened.length) return { ...failed("No conversations are attachable."), absent: composed.absent, degraded: composed.degraded };
 
     if (herdr) {
       const endpoint = preview.data.status.launch;
       if (!endpoint?.socketPath) throw new Error("The daemon does not report its herdr endpoint. Update the daemon, or use --provider tmux --window.");
       // A CLI session would override the daemon's resolved socket in Herdr.
+      windowAttempted = true;
       window = await launchWindow(`env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)}`);
       let alive = false;
       for (let attempt = 0; attempt < 20; attempt++) {
@@ -153,7 +160,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       }
       if (!alive) throw new Error("The terminal was requested, but herdr's control socket did not become ready. Inspect the new terminal before retrying.");
       const result = await client.post<OpenViewResult>("/api/terminal/open", { view, provider: "herdr", expectedPlan: planId }, { timeoutMs: 45_000 });
-      if (result.status >= 400) return { ...failure(provider, result.data.error ?? `The daemon refused the view (HTTP ${result.status}).`), window, absent: composed.absent, degraded: composed.degraded };
+      if (result.status >= 400) return { ...failed(result.data.error ?? `The daemon refused the view (HTTP ${result.status}).`), window, absent: composed.absent, degraded: composed.degraded };
       if (!Array.isArray(result.data?.opened)) throw new Error("The terminal opened, but the daemon returned no view result. Inspect it before retrying.");
       return { ...result.data, window, notes: [...(result.data.notes ?? []), "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
     }
@@ -182,9 +189,10 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       await deps.exec(tmux, ["set-option", "-w", "-t", `${viewer}:${name}`, "window-size", sizing]);
     }
     await deps.exec(tmux, ["select-window", "-t", `${viewer}:view-1`]);
+    windowAttempted = true;
     window = await launchWindow(`env -u TMUX ${shellQuote(tmux)} attach-session -t ${shellQuote(`=${viewer}`)}`);
     return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
   } catch (err) {
-    return { ...failure(provider, (err as Error).message), ...(window ? { window } : {}), ...(viewer ? { notes: [`Viewing session ${viewer} may exist. Inspect it before retrying; no existing conversation was replaced.`] } : {}) };
+    return { ...failed((err as Error).message), ...(window ? { window } : {}), ...(viewer ? { notes: [`Viewing session ${viewer} may exist. Inspect it before retrying; no existing conversation was replaced.`] } : {}) };
   }
 }

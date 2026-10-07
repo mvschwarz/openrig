@@ -72,7 +72,7 @@ describe("desktop terminal view", () => {
       if (file === "/bin/sh" && args[1] === "command -v tmux") throw new Error("Command failed: /bin/sh -c command -v tmux");
       return original(file, args);
     });
-    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: false, error: "tmux is unavailable; run rig setup first." });
+    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: false, error: expect.stringContaining("tmux is unavailable; run rig setup first.") });
     expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/fixture/bin/tmux")).toBe(false);
     expect(f.post).not.toHaveBeenCalled();
   });
@@ -94,7 +94,7 @@ describe("desktop terminal view", () => {
       if (file === "/usr/bin/osascript") throw new Error("Automation denied");
       return original(file, args);
     });
-    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: false, error: "Automation denied", opened: [] });
+    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: false, error: expect.stringContaining("Terminal window status is unknown. Automation denied"), opened: [] });
     expect(vi.mocked(f.deps.exec).mock.calls.filter(([file]) => file === "/usr/bin/osascript")).toHaveLength(1);
     expect(f.post).not.toHaveBeenCalled();
   });
@@ -102,7 +102,7 @@ describe("desktop terminal view", () => {
   it.each([409, 503])("preserves HTTP %s refusal after a window opens", async refusal => {
     const f = fixture({ refusal });
     const result = await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps);
-    expect(result).toMatchObject({ ok: false, error: "view changed", opened: [], window: { app: "Terminal" } });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("view changed"), opened: [], window: { app: "Terminal" } });
     expect(f.post).toHaveBeenCalledTimes(1);
   });
 
