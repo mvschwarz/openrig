@@ -81,6 +81,7 @@ tell application "Ghostty"
     set newTab to new tab in front window with configuration cfg
     select tab newTab
     focus (focused terminal of newTab)
+    activate window front window
     return "tab"
   else
     set newWindow to new window with configuration cfg

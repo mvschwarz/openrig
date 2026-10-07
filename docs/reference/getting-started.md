@@ -79,13 +79,14 @@ Install OpenRig (`npm install -g @openrig/cli`) and check `tmux -V`. With npm 11
   ask once: “Please run `codex login` in your launch environment.”
 
 Install a missing selected CLI using its provider's installation instructions.
-The other provider's CLI/login and Herdr/cmux are optional. Do not copy credentials
+The other provider's CLI/login is optional. Herdr is installed by default unless
+you decline it; cmux remains optional. Do not copy credentials
 or start repeated sign-in attempts. Recheck the selected login after the user
 completes it. `rig setup --dry-run` previews the broader setup; applying
 `rig setup` checks **both** harnesses and installs a missing one with npm; on
 macOS it uses an existing Homebrew (it does not install Homebrew) to install a
-missing tmux and cmux (off macOS those steps are skipped, and tmux isn't
-installed for you). It also
+missing tmux (elsewhere tmux is checked, not installed). Herdr installs on
+macOS and Linux; pass `--no-herdr` to decline it. Setup also
 writes an OpenRig-managed block (mouse on, a longer history) into `~/.tmux.conf`.
 It is optional for this selected-provider path, not a requirement to fix an unused
 provider.
