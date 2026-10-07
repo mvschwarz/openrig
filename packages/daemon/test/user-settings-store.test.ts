@@ -191,6 +191,11 @@ describe("SettingsStore (User Settings v0)", () => {
     expect(() => store.resolveOne("context.root")).toThrow(/OPENRIG_CONTEXT_PACKS_ROOT.*OPENRIG_CONTEXT_ROOT/i);
   });
 
+  it("defaults the advisor session to the kernel's advisor seat", () => {
+    const store = new SettingsStore(configPath);
+    expect(store.resolveOne("agents.advisor_session")).toMatchObject({ value: "advisor-lead@kernel", source: "default" });
+  });
+
   it("resolves mutable 95/99 context-pressure thresholds and rejects invalid order", () => {
     const store = new SettingsStore(configPath);
     expect(store.resolveContextPressurePolicy()).toEqual({ warningPercent: 95, criticalPercent: 99 });

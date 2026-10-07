@@ -201,6 +201,11 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
     expect(store.resolve().context.root).toBe(join(tmpDir, "context-library"));
   });
 
+  it("defaults the advisor session to the kernel's advisor seat", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("agents.advisor_session")).toMatchObject({ value: "advisor-lead@kernel", source: "default" });
+  });
+
   it("resolves context.system_world with visible default, file, and env provenance", () => {
     const store = new ConfigStore(configPath);
     expect(store.resolveWithSource("context.system_world")).toMatchObject({ value: "default", source: "default" });

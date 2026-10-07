@@ -258,7 +258,7 @@ const DEFAULTS = {
   // V1 Phase 4 — Advisor default per universal-shell.md L83;
   // Operator default empty per L84 ("not configured").
   agents: {
-    advisorSession: "advisor-lead@openrig-velocity",
+    advisorSession: "advisor-lead@kernel",
     operatorSession: "",
   },
   // V1 Phase 5 P5-3 — feed subscription defaults per for-you-feed.md
