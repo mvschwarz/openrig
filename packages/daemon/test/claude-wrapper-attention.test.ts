@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { operationalLaunchArgs } from "../src/adapters/kernel-authority.js";
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -60,6 +61,33 @@ function fixture(token: string | null = null) {
 }
 
 describe("Claude wrapper manual attention recovery", () => {
+  it.each(["kernel", "team"])("periodic identity and clear-attention accept inline %s settings", async authority => {
+    const settings = operationalLaunchArgs("claude-code", authority === "kernel"
+      ? { kernelAuthority: true } : { teamPermissionDefault: true });
+    const setup = () => {
+      const f = fixture("review-token");
+      f.listProcesses.mockResolvedValue([root, { ...child,
+        command: ["/tmp/review/.local/share/claude/versions/2.1.1", "--permission-mode", "acceptEdits",
+          ...settings, "--session-id", "review-token", "--name", f.name].join(" "),
+      }]);
+      return f;
+    };
+    const periodic = setup();
+    await periodic.poll.reconcileAll();
+    expect(periodic.store.getForNode(periodic.node.id)?.verdict).toBe("verified");
+    // Periodic identity does not erase a separate startup attention marker.
+    expect(periodic.startup()).toBe("attention_required");
+    // Exercise clear-attention from its own still-active identity mismatch.
+    const f = setup();
+    const result = await f.post();
+    expect(result.status, JSON.stringify(result.body)).toBe(200);
+    expect(result.body.evidence.kind).toBe("pane_identity_reverified");
+    expect(f.startup()).toBe("ready");
+    await f.poll.reconcileAll();
+    expect(f.store.getForNode(f.node.id)?.verdict).toBe("verified");
+    expect(f.sendVerify).not.toHaveBeenCalled();
+  });
+
   it.each(["valid", "no token", "wrong token", "missing path", "background", "unrelated", "ambiguous", "PID reused", "unavailable"])("numeric Claude pane identity clear: %s", async mode => {
     const f = fixture(mode === "no token" ? null : "review-token");
     f.tmux.getPaneCommand.mockResolvedValue("2.1.289");

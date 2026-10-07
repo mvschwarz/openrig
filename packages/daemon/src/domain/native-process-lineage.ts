@@ -21,7 +21,33 @@ export interface NativeProcessRow {
 export type NativeRuntime = "claude-code" | "codex";
 
 function tokens(command: string): string[] {
-  return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^['"]|['"]$/g, "")) ?? [];
+  // ps flattens argv: inline JSON keeps its internal quotes, but has no outer
+  // shell quotes. Quoted runs can begin anywhere within a token, not just at its
+  // first character. Preserve escaped JSON quotes while finding token boundaries.
+  const result: string[] = [];
+  let start = 0;
+  let quote: string | null = null;
+  const append = (end: number) => {
+    if (start === end) return;
+    const token = command.slice(start, end);
+    result.push((token[0] === '"' || token[0] === "'") && token.at(-1) === token[0]
+      ? token.slice(1, -1) : token);
+  };
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (quote !== null) {
+      if (quote === '"' && char === "\\") { index += 1; continue; }
+      if (char === quote) quote = null;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (/\s/.test(char)) {
+      append(index);
+      start = index + 1;
+    }
+  }
+  if (quote !== null) return []; // Incomplete quoting is not positive identity proof.
+  append(command.length);
+  return result;
 }
 
 function executableName(token: string): string {
