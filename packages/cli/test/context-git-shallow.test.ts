@@ -8,6 +8,7 @@ import { addGitContext, inspectGitContext, updateGitContext } from "../src/lib/c
 const transport = vi.hoisted(() => ({
   refusal: null as string | null,
   hideHeadSymref: false,
+  initialBranch: null as string | null,
   afterAdvertisement: null as (() => void) | null,
   calls: [] as string[][],
 }));
@@ -22,7 +23,9 @@ vi.mock("node:child_process", async (importOriginal) => {
           throw Object.assign(new Error("fixture transport failure"), { status: 128, stderr: transport.refusal });
         }
       }
-      let result = actual.execFileSync(command, args, options);
+      const configuredArgs = command === "git" && transport.initialBranch
+        ? ["-c", `init.defaultBranch=${transport.initialBranch}`, ...args] : args;
+      let result = actual.execFileSync(command, configuredArgs, options);
       if (command === "git" && args.includes("ls-remote") && transport.hideHeadSymref) {
         result = result.replace(/^ref: .*\tHEAD\r?\n/m, "");
       }
@@ -40,6 +43,7 @@ const homes: string[] = [];
 afterEach(() => {
   transport.refusal = null;
   transport.hideHeadSymref = false;
+  transport.initialBranch = null;
   transport.afterAdvertisement = null;
   transport.calls = [];
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
@@ -90,6 +94,35 @@ describe("Git context initial download", () => {
     expect(added.selected.revision).toBe(f.head);
     const updated = updateGitContext(added.installedAt);
     expect(updated.served.revision).toBe(git(f.upstream, "rev-parse", "HEAD"));
+  });
+
+  it.each([
+    { initial: "unused", extra: [] as string[], expected: "main" },
+    { initial: "main", extra: ["aaa", "master"], expected: "main" },
+    { initial: "unused", extra: ["aaa", "master"], expected: "master" },
+    { initial: "unused", extra: ["aaa", "zzz"], expected: "aaa" },
+  ])("retains inferred $expected upstream without HEAD symref (initial=$initial, extra=$extra)", ({ initial, extra, expected }) => {
+    const f = fixture();
+    for (const branch of extra) git(f.upstream, "branch", branch);
+    transport.hideHeadSymref = true;
+    transport.initialBranch = initial;
+    transport.afterAdvertisement = () => {
+      git(f.upstream, "checkout", expected);
+      writeFileSync(join(f.upstream, "guide.md"), "Next inferred-branch guide\n");
+      commit(f.upstream, "advance inferred branch");
+    };
+    const added = addGitContext(f.upstream, {}, f.root);
+    expect(added.selected.revision).toBe(f.head);
+    expect(git(added.selected.checkout, "rev-parse", "--is-shallow-repository")).toBe("true");
+    expect(git(added.selected.checkout, "rev-list", "--count", "HEAD")).toBe("1");
+    expect(() => git(added.selected.checkout, "cat-file", "-e", f.old)).toThrow();
+    expect(() => git(added.selected.checkout, "cat-file", "-e", f.oldBlob)).toThrow();
+    expect(git(added.selected.checkout, "tag", "--list")).toBe("");
+    expect(transport.calls.some(a => a.includes("clone"))).toBe(false);
+    expect(inspectGitContext(added.installedAt).checkout).toMatchObject({ branch: expected, upstream: `origin/${expected}` });
+    const updated = updateGitContext(added.installedAt);
+    expect(updated.served.revision).toBe(git(f.upstream, "rev-parse", "HEAD"));
+    expect(updated.checkout).toMatchObject({ branch: expected, upstream: `origin/${expected}` });
   });
 
   it.each([
