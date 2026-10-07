@@ -14,7 +14,7 @@ export function terminalWindowNotice(view: string, result: TerminalOpenResult): 
 }
 
 /** Reuse the installed CLI's desktop selection and fallback, preserving this TUI's daemon. */
-export async function openTerminalInWindow(view: string, endpoint: string, cliEntry?: string, expectedPlan?: string): Promise<TerminalOpenResult> {
+export async function openTerminalInWindow(view: string, endpoint: string, cliEntry?: string, expectedPlan?: string, onUnavailable?: () => void): Promise<TerminalOpenResult> {
   const args = ["terminal", "open", "--window", "--json", ...(expectedPlan !== undefined ? ["--expected-plan", expectedPlan] : []), "--", view];
   let stdout: string;
   let executionError: string | undefined;
@@ -28,7 +28,7 @@ export async function openTerminalInWindow(view: string, endpoint: string, cliEn
     executionError = failure.message;
     stdout = failure.stdout;
   }
-  let result: TerminalOpenResult & { window?: { app: string; surface: string } };
+  let result: TerminalOpenResult & { window?: { app: string; surface: string }; windowAttempted?: boolean };
   try { result = JSON.parse(stdout); }
   catch { throw new Error("The terminal command returned no readable result. Inspect any new terminal before retrying."); }
   if (!result || typeof result !== "object") throw new Error("The terminal command returned no view result. Inspect any new terminal before retrying.");
@@ -36,6 +36,8 @@ export async function openTerminalInWindow(view: string, endpoint: string, cliEn
     throw new Error(result.error ?? "The terminal command returned no view result. Inspect any new terminal before retrying.");
   }
   if (executionError || !result.opened.length) {
+    // Only a definite pre-launch failure can reveal passive recovery; unknown outcomes stay put.
+    if (result.code === "terminal_window_failed" && result.windowAttempted === false && !result.window && !result.opened.length) onUnavailable?.();
     throw new Error([result.error ?? executionError ?? "No terminals were confirmed open.", ...(result.notes ?? []),
       ...result.absent.map(member => `Absent: ${member.seat} — ${member.reason}`),
       ...result.degraded.map(member => `Skipped: ${member.seat} — ${member.reason}`),

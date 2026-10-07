@@ -151,10 +151,10 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
   let viewer: string | undefined;
   let windowAttempted = false;
   const recovery = `rig terminal open ${shellQuote(view)} --window${requestedProvider && ["herdr", "tmux"].includes(requestedProvider) ? ` --provider ${shellQuote(requestedProvider)}` : ""}`;
-  const failed = (reason: string): OpenViewResult => failure(provider,
+  const failed = (reason: string): OpenViewResult => ({ ...failure(provider,
     window ? `A terminal window was requested, but the view outcome could not be confirmed. ${reason} Inspect the terminal before retrying: ${recovery}`
       : windowAttempted ? `Terminal window status is unknown. ${reason} Inspect the desktop before retrying: ${recovery}`
-        : `No terminal window was opened. ${reason} On the daemon's desktop, run: ${recovery}`);
+        : `No terminal window was opened. ${reason} On the daemon's desktop, run: ${recovery}`), windowAttempted });
   const windowNotes: string[] = [];
   try {
     if (!localDaemon(client.baseUrl)) throw new Error("The window launcher must run on the daemon's own desktop; the configured daemon is remote.");

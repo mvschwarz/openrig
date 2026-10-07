@@ -37,6 +37,8 @@ export interface OpenViewResult {
   code?: string;
   notes?: string[];
   window?: { app: string; surface: string };
+  /** On window failures, false means no desktop launch was attempted. */
+  windowAttempted?: boolean;
 }
 
 // Opening applies pages through several bounded provider round trips; it is
