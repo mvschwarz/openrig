@@ -321,6 +321,12 @@ If the person chooses to talk later, keep that choice, leave the exact connectio
 step, and say that the conversation handoff is still pending. SSH, headless use,
 and declining a desktop view remain valid background outcomes.
 
+Stopping OpenRig keeps a team's work, and the branch a team makes is your
+change: an agent tidying up says what's on it before offering to remove it. The
+operator starts a team when you ask for one in its conversation, so an agent
+reporting back checks `rig ps` or the team's tasks before saying a team started
+on its own.
+
 ## Choose your first team
 
 Tell the kernel operator what you want to do. It asks about your goal, presents

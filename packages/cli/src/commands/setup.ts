@@ -137,7 +137,7 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
     runtime: "claude-code",
     path: ".claude/settings.local.json",
     purpose:
-      "Apply context-collector statusLine config and the acceptEdits floor fragment. OpenRig bakes NO allow/ask/deny permission policy — the harness-native permissions are the control surface.",
+      "Apply context-collector statusLine config and the acceptEdits floor fragment. OpenRig writes NO allow/ask/deny permission policy into settings files; launch can pass per-launch allow/ask lists (the team and kernel defaults), and the harness-native permissions are the control surface.",
   },
   {
     scope: "project",
@@ -325,7 +325,7 @@ export function recordPermissionPolicyStep(deps: SetupDeps, choice: string, spec
       status: "fail",
       message: "No existing rig spec to record the policy into.",
       reason:
-        "The onboarding menu records a policy choice into an EXISTING spec only. A new install has no spec, so nothing is written — the usability floor holds by absence.",
+        "The onboarding menu records a policy choice into an EXISTING spec only. A new install has no spec, so nothing is written — team seats keep the team default.",
       fixHint: "Point --spec at an existing rig.yaml (or a directory containing one), then re-run `rig setup --policy`.",
     };
   }
@@ -826,13 +826,17 @@ export function goldenPathNextSteps(): string[] {
  * skip-line phrasing, NO pre-selected default, and `Standard` carries the ⭐ recommendation marker.
  * REGISTER RULE (pm-lead): factual + version-neutral — never "treacherous"/editorializing/
  * founder-internal wording. Recording is a thought, never a gate — `rig up` always works bare.
+ * 0.6.7: the question, the deliberate-none line and the skip line now state the team launch default
+ * (#893) that ships with 0.6.6, matching docs/reference/getting-started.md and the
+ * applying-a-permission-policy skill. The labels, marker and register are unchanged.
  */
 export function permissionPolicyMenuLines(): string[] {
   return [
-    "Before team launch, your agent asks once (reuse an existing explicit choice):",
-    "  Allow your agents to run OpenRig commands without repeated permission prompts?",
-    "  Yes — recommended / No — keep prompts. No answer leaves settings unchanged too.",
-    "  Includes all rig verbs, lifecycle/config changes and launching processes; not global YOLO or authority to invent work.",
+    "Before team launch, your agent recommends keeping the team default (reuse an existing explicit choice):",
+    "  Claude team seats with no policy run ordinary rig commands, project reads and common tests without prompts; lifecycle commands such as rig up and rig down still ask.",
+    "  It offers once: Remember these selected OpenRig commands in your native settings for this project?",
+    "  Yes / No — keep the team default. No answer leaves settings unchanged too.",
+    "  A remembered allowance can cover all rig verbs, but Claude team seats still ask before lifecycle commands; not global YOLO or authority to invent work.",
     "  Personal project scope unless you explicitly choose user-wide sessions. On Yes, the agent adds native rules, preserving stricter rules.",
     "  Procedure: rig context get skills/applying-a-permission-policy/SKILL.md",
     "  Undo: ask your agent to remove only the OpenRig command allowances added by this setup.",
@@ -844,12 +848,12 @@ export function permissionPolicyMenuLines(): string[] {
     "    Standard  ⭐      The recommended balanced built-in policy.",
     "    Open              The least restrictive built-in policy.",
     "  YOLO Mode           The full-bypass built-in policy.",
-    "  No policy — deliberate choice (recorded)",
+    "  No policy — deliberate choice (recorded): the floor, without the team allowances",
     "",
-    "  If you skip: OpenRig sets nothing — the usability floor only",
+    "  If you skip: team seats launch with the team default; nothing is recorded",
     "",
     "  To record a choice into an existing spec:",
-    "    rig setup --policy <locked|standard|open|yolo|none> --spec <path>",
+    "    rig setup --policy <locked|standard|open|yolo|auto|none> --spec <path>",
   ];
 }
 

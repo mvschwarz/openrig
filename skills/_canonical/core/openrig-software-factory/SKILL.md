@@ -51,7 +51,7 @@ or `codex login` once when that selected login is missing. No credential copying
 unused provider prerequisite or silent model/provider fallback.
 
 Read the compatible getting-started guide's **Choose your providers** and
-**Kernel startup stays automatic** sections before launch. The choice selects
+**Start the kernel and check its state** sections before launch. The choice selects
 the two project agents. Kernel auto-boot independently uses available
 authenticated accounts, so it may use both even when the project uses one.
 Do not add an unused-provider login gate or manual kernel setup to this path.
@@ -63,7 +63,8 @@ Show the chosen team, resolved runtimes/models and exact
 retain `gpt-6-astra`; Claude seats use the configured native default without an
 OpenRig model override. Confirm that model with the user and its availability;
 verify the native session's actual model before consequential work. Use the
-chosen rig name in owner/checker addresses throughout the same task and return.
+chosen rig name in owner/checker addresses (in the starter, `dev-build@<rig>` and
+`dev-review@<rig>`) throughout the same task and return.
 
 ## Establish the working agreement
 
@@ -79,16 +80,20 @@ model turns, but delivered wakes and resumed work **can spend tokens**. Prefer
 an event-driven wait to frequent empty reminders. Wakes cannot answer a user
 question, clear a permission prompt or guarantee progress.
 
-**Ask once before launching or assigning work:** “Allow your agents to run
-OpenRig commands without repeated permission prompts?” **Yes — recommended** /
-**No — keep prompts**. Reuse an existing explicit choice for this scope. Explain
-that this covers all `rig` verbs, including starting/stopping agents and changing
-configuration, at personal project scope unless the user explicitly chooses
-user-wide sessions. It is not global YOLO or permission to invent work.
+**Ask once before launching or assigning work.** For a team with no permission
+policy, recommend keeping the team default: Claude team seats run ordinary `rig`
+commands, project reads and common tests without prompts, and lifecycle commands
+such as `rig up` and `rig down` still ask. Then offer: “Remember these selected
+OpenRig commands in your native settings for this project?” **Yes** /
+**No — keep the team default**. Reuse an existing explicit choice for this scope.
+Explain that a remembered allowance can cover all `rig` verbs, but Claude team
+seats still ask before lifecycle commands, at personal project scope unless the
+user explicitly chooses user-wide sessions. It is not global YOLO or permission
+to invent work.
 On an actual Yes, follow [Applying a permission policy](#find-the-compatible-permission-guide)
 to add existing native rules, preserve stricter/unrelated settings, and verify
-the target conversation. No or no answer leaves settings alone and continues
-with existing prompts. Remember the explicit choice and exact additions in the
+the target conversation. No or no answer leaves settings alone and keeps the
+team default. Remember the explicit choice and exact additions in the
 existing onboarding context; “Undo the OpenRig command allowances added by this
 setup” removes only those additions. Broader access remains a separate opt-in.
 
@@ -102,8 +107,9 @@ or explicitly reports none. Preserve work and custody before a supported stop.
 
 Choose the team size separately from the coordination method above:
 
-1. **Use the two-agent starter.** Keep the existing owner and independent checker
-   while that pair meets the workload. The owner can implement and coordinate.
+1. **Use the two-agent starter.** Keep its builder (the owner) and independent
+   reviewer (the checker) while that pair meets the workload. The builder can
+   implement and coordinate.
 2. **Add one or two seats to the running rig.** This is the usual next step.
    Follow [Grow the running team](references/worked-example.md#grow-the-running-team)
    for `rig grow` commands, readiness/context/work

@@ -120,6 +120,13 @@ question through the human channel instead.
    person or a fix. If `rig up` reports `Status: partial` with
    `Startup attention (<seat>): <reason>`, tell them what that seat is waiting
    for and the command its reason ends with.
+   - **A Codex seat says its model requires a newer version of Codex:** their
+     Codex is older than the model the team pins (the starter's reviewer uses
+     `gpt-6-astra`, which Codex 0.145 can't run). Tell them, and offer to update
+     Codex the way it was installed, for example
+     `npm install -g @openai/codex@latest`. On their yes, update it, then start
+     that seat again. It's context for them, not a reason to stop or change the
+     team.
 8. **Show them the team.** Capture the shared TUI: its session is the
    `operator.human` member's `canonicalSessionName` in
    `rig ps --nodes --rig kernel --json`. Only when the capture shows the TUI's

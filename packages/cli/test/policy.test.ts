@@ -8,7 +8,7 @@ import path from "node:path";
 import { Command } from "commander";
 import { policyCommand } from "../src/commands/policy.js";
 
-const PIN = "OpenRig bakes NO allow/ask/deny permission policy — the harness-native permissions are the control surface.";
+const PIN = "OpenRig writes NO allow/ask/deny permission policy into settings files; launch can pass per-launch allow/ask lists (the team and kernel defaults), and the harness-native permissions are the control surface.";
 
 function runCapture(argv: string[]): Promise<{ logs: string[]; errs: string[]; exitCode: number | undefined }> {
   return new Promise(async (resolve) => {
@@ -73,13 +73,13 @@ describe("rig policy — the permission-policy verb", () => {
     expect(exitCode).toBe(1);
   });
 
-  it("current classifies ABSENT as the floor (honest absence)", async () => {
+  it("current classifies ABSENT as the team launch default (nothing recorded)", async () => {
     const spec = path.join(dir, "rig.yaml");
     fs.writeFileSync(spec, "name: r\npods: []\n");
     const { logs } = await runCapture(["policy", "current", "--spec", spec, "--json"]);
     const out = JSON.parse(logs.join("")) as { sites: Array<{ effective: unknown; applies?: string }> };
     expect(out.sites[0]!.effective).toBeNull();
-    expect(String(out.sites[0]!.applies)).toContain("floor");
+    expect(String(out.sites[0]!.applies)).toContain("team launch default");
   });
 
   it("apply records builtin:standard into an existing spec and current reads it back classified", async () => {
