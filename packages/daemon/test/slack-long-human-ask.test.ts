@@ -245,7 +245,7 @@ describe("long human asks (#897)", () => {
     expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(body);
   });
 
-  it("refuses the rest, loudly, rather than planning again when the ask may already be in Slack", async () => {
+  it("acknowledges a one-message ask already in Slack, rather than refusing or repeating it", async () => {
     const { ask, body } = await askAtLabelLimit("landed");
     const posted: Post[] = [];
     let calls = 0;
@@ -257,14 +257,47 @@ describe("long human asks (#897)", () => {
       return reply({ ok: true, ts: msg.ts });
     };
     const failed = vi.fn();
-    const base = { ...stores("landed"), botToken: "synthetic", channel: "C", fetchImpl, onTransportFailed: failed };
+    const onPosted = vi.fn();
+    const base = { ...stores("landed"), botToken: "synthetic", channel: "C", fetchImpl, onTransportFailed: failed, onPosted };
     // The first attempt's one message lands, but its response is lost.
     expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask(body))).ok).toBe(false);
-    // A longer label before the retry: a new plan would split under new ids and post the brief again.
-    const retry = await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask(body));
+    // A longer label before the retry: the recorded one message no longer renders, but it is the whole
+    // ask and it is in Slack, so the retry records it as delivered, with its real ts for thread replies.
+    expect(await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask(body))).toEqual({ ok: true });
+    expect(posted).toHaveLength(1);
+    expect(onPosted).toHaveBeenCalledWith(expect.anything(), "1.1", undefined);
+    expect(failed.mock.calls.map((call) => call[1])).not.toContain("human-message-unrenderable");
+  });
+
+  it("refuses the rest, loudly, when a split's first part is in Slack and the rest no longer renders", async () => {
+    const ask = decision("partial", { sourceSession: undefined, body: "a".repeat(4000), summary: nearLimitSummary });
+    const posted: Post[] = [];
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url, init) => {
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: posted });
+      if (++calls === 2) throw new Error("synthetic timeout before the reply landed");
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${calls}.1` };
+      posted.push(msg);
+      return reply({ ok: true, ts: msg.ts });
+    };
+    const failed = vi.fn();
+    const base = { ...stores("partial"), botToken: "synthetic", channel: "C", fetchImpl, onTransportFailed: failed };
+    expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask)).ok).toBe(false);
+    expect(posted).toHaveLength(1);
+    // A sender label past its 2,000-unit limit renders no part at all, and the first part is already posted.
+    const retry = await subsystemSlackDeliver({ ...base, sourceLabel: "x".repeat(2001) })(ask);
     expect(retry).toMatchObject({ ok: false, class: "human-message-unrenderable" });
     expect(posted).toHaveLength(1);
     expect(failed).toHaveBeenLastCalledWith(expect.anything(), "human-message-unrenderable", expect.any(String), true);
+  });
+
+  it("reports each reply part with its ask's root, so a reaction on it can find the ask (#899)", async () => {
+    const posts: Post[] = [];
+    const onPostedPart = vi.fn();
+    const deliver = subsystemSlackDeliver({ ...stores("parts"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts), onPostedPart });
+    expect(await deliver(decision("parts", { body: longBody }))).toEqual({ ok: true });
+    expect(posts.length).toBeGreaterThan(2);
+    expect(onPostedPart.mock.calls.map((call) => [call[1], call[2]])).toEqual(posts.slice(1).map((_, i) => [`${i + 2}.1`, "1.1"]));
   });
 
   it("keeps the recorded cuts when only parts already delivered would no longer fit", async () => {

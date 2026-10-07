@@ -34,7 +34,14 @@ export function makeThreadRouteResolver(opts: {
   return (ev) => {
     const threadTs = (ev as { thread_ts?: string }).thread_ts;
     if (threadTs) {
-      const mapping = opts.map.resolveByThread(threadTs);
+      let rootTs = threadTs;
+      let mapping = opts.map.resolveByThread(threadTs);
+      if (!mapping && ev.type === "reaction_added") {
+        // #899 — a reaction on one of the reply parts OpenRig posted for a long ask routes as one on
+        // the ask's root. A person's reply in the thread is not a part, so a reaction on it stays ignored.
+        const root = opts.map.rootOfPart(threadTs, ev.channel ?? "");
+        if (root) { rootTs = root; mapping = opts.map.resolveByThread(root); }
+      }
       // #899 — a reaction names its message by channel and timestamp, and a timestamp is unique only
       // within a channel, so a reaction on another channel's message is not on this ask.
       const sameMessage = ev.type !== "reaction_added" || mapping?.channel === ev.channel;
@@ -48,7 +55,7 @@ export function makeThreadRouteResolver(opts: {
         // still arriving in the OLDER root lands on the seat as a message but answers nothing:
         // only the conversation's newest root correlates to its current human gate.
         const newest = opts.map.resolveByConversation(mapping.conversationId);
-        const current = !newest || newest.threadTs === threadTs;
+        const current = !newest || newest.threadTs === rootTs;
         log(`inbound routed thread_ts=${threadTs} -> ${mapping.seat} (${routeClass}${current ? "" : ", superseded root: no gate correlation"})`);
         return {
           destination: mapping.seat,

@@ -35,6 +35,8 @@ function harness(opts: { admitted?: boolean; failCreates?: number; newerRoot?: s
       return ts === "400.0" ? { seat: "asker@rig", channel: "C1", conversationId: "qitem-ask-1", threadTs: ts, state: "open" } : null;
     },
     resolveByConversation: () => opts.newerRoot ? { threadTs: opts.newerRoot } : null,
+    // A long ask's reply part, posted by OpenRig in the ask's thread.
+    rootOfPart: (ts: string, channel: string) => ts === "400.5" && channel === "C1" ? "400.0" : null,
   } as never;
   const deadLetter = new DeadLetterStore<SlackEvent>("/d.jsonl", fs, clock);
   const router = new InboundRouter({
@@ -96,6 +98,13 @@ describe("#899 reactions on an ask", () => {
   it("on an older root of the same ask still reach its seat", async () => {
     const h = harness({ newerRoot: "450.0" });
     expect(await deliver(h, reaction())).toEqual({ status: "accepted", reason: "reaction" });
+    expect(h.rows[0]).toMatchObject({ destination: "asker@rig", summary: "Founder via Slack: reacted :white_check_mark: to qitem-ask-1" });
+  });
+
+  it("on a reply part OpenRig posted for a long ask reach the seat that asked, as on the ask itself", async () => {
+    const h = harness({ newerRoot: "400.0" });
+    expect(await deliver(h, reaction({ item: { type: "message", channel: "C1", ts: "400.5" } }))).toEqual({ status: "accepted", reason: "reaction" });
+    expect(h.rows).toHaveLength(1);
     expect(h.rows[0]).toMatchObject({ destination: "asker@rig", summary: "Founder via Slack: reacted :white_check_mark: to qitem-ask-1" });
   });
 

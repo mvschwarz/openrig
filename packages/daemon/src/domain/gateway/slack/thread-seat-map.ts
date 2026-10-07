@@ -8,6 +8,10 @@
 // (`slack-posted thread_ts=… message_ts=… channel=… human=… seat=…` — see stampFormat/parse
 // below). rebuildFromStamps() re-derives the table from those stamps, so the map is a cache of
 // queue-row truth, not a second source that can silently diverge.
+//
+// #899 — the reply parts OpenRig posts for a long ask live in thread_part_map, keyed to their root,
+// so a reaction on a part can find its ask. A part's stamp names its own message_ts and its root's
+// thread_ts; the root queries below never see parts.
 
 import type Database from "better-sqlite3";
 
@@ -109,6 +113,21 @@ export class ThreadSeatMap {
     return row ? project(row) : null;
   }
 
+  /** #899 — record a reply part OpenRig posted for an ask, under that ask's root (idempotent). */
+  recordPart(m: { messageTs: string; threadTs: string; channel: string }): void {
+    this.db
+      .prepare(`INSERT INTO thread_part_map (message_ts, channel, thread_ts) VALUES (?, ?, ?) ON CONFLICT(channel, message_ts) DO NOTHING`)
+      .run(m.messageTs, m.channel, m.threadTs);
+  }
+
+  /** #899 — the root of a reply part OpenRig posted in this channel; null for any other message. */
+  rootOfPart(messageTs: string, channel: string): string | null {
+    const row = this.db.prepare(`SELECT thread_ts FROM thread_part_map WHERE message_ts = ? AND channel = ?`).get(messageTs, channel) as
+      | { thread_ts: string }
+      | undefined;
+    return row?.thread_ts ?? null;
+  }
+
   close(threadTs: string): void {
     this.db
       .prepare(`UPDATE thread_seat_map SET state = 'closed', closed_at = ? WHERE thread_ts = ?`)
@@ -123,6 +142,13 @@ export class ThreadSeatMap {
     for (const note of stamps) {
       const m = parsePostedStamp(note);
       if (!m) { skipped++; continue; }
+      if (m.messageTs !== m.threadTs) {
+        // #899 — a reply part's stamp maps the part to its root; it never opens a thread.
+        if (this.rootOfPart(m.messageTs, m.channel)) { skipped++; continue; }
+        this.recordPart({ messageTs: m.messageTs, threadTs: m.threadTs, channel: m.channel });
+        inserted++;
+        continue;
+      }
       const before = this.db.prepare(`SELECT 1 FROM thread_seat_map WHERE thread_ts = ?`).get(m.threadTs);
       if (before) { skipped++; continue; }
       this.open({ threadTs: m.threadTs, channel: m.channel, human: m.human, seat: m.seat, conversationId: m.conversationId });

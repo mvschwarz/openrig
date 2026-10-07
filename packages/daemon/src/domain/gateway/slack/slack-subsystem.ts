@@ -427,6 +427,19 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
             log(`thread stamp failed for ${p.qitemId}: ${(e as Error).message}`);
           }
         },
+        // #899 — each reply part of a long ask maps to its root, so a reaction on the part reaches the asking seat.
+        onPostedPart: (p, messageTs, threadTs) => {
+          threadMap.recordPart({ messageTs, threadTs, channel: cfg.channel! });
+          try {
+            opts.queueRepo.update({
+              qitemId: p.qitemId,
+              actorSession: "daemon@kernel",
+              transitionNote: formatPostedStamp({ threadTs, messageTs, channel: cfg.channel!, human: p.destinationSession ?? "", seat: p.sourceSession ?? "", conversationId: p.qitemId }),
+            });
+          } catch (e) {
+            log(`part stamp failed for ${p.qitemId}: ${(e as Error).message}`);
+          }
+        },
         onTransportFailed: recordTransportFailed,
         onPosted: (p, messageTs, threadTs) => {
           // v3 digest branch: transport truth first — every member receipt is

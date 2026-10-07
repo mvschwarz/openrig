@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { migrate } from "../src/db/migrate.js";
 import { threadSeatMapSchema } from "../src/db/migrations/072_thread_seat_map.js";
+import { threadPartMapSchema } from "../src/db/migrations/097_thread_part_map.js";
 import { ThreadSeatMap, formatPostedStamp, parsePostedStamp } from "../src/domain/gateway/slack/thread-seat-map.js";
 import { makeThreadRouteResolver } from "../src/domain/gateway/slack/thread-routing.js";
 import { InboundRouter, type SlackEvent } from "../src/domain/gateway/slack/inbound.js";
@@ -20,7 +21,7 @@ import type { FetchImpl } from "../src/domain/gateway/slack/slack-api.js";
 
 function mapDb(): Database.Database {
   const db = new Database(":memory:");
-  migrate(db, [threadSeatMapSchema]);
+  migrate(db, [threadSeatMapSchema, threadPartMapSchema]);
   return db;
 }
 function memFs(): StateFsOps {
@@ -84,6 +85,37 @@ describe("thread↔seat map — exact-lookup semantics", () => {
     expect(r.skipped).toBe(3); // T2 (live) + 2 non-stamps
     expect(map.resolveByThread("T1")!.seat).toBe("s1");
     expect(map.resolveByThread("T2")!.seat).toBe("s2-live"); // untouched
+  });
+
+  it("maps a long ask's reply parts to its root by channel, and rebuilds them from their stamps (#899)", () => {
+    const map = new ThreadSeatMap(mapDb(), clock);
+    map.open({ threadTs: "T1", channel: "C1", human: "h1", seat: "s1", conversationId: "q1" });
+    map.recordPart({ messageTs: "P2", threadTs: "T1", channel: "C1" });
+    map.recordPart({ messageTs: "P2", threadTs: "T1", channel: "C1" }); // a replayed receipt keeps one row
+    expect(map.rootOfPart("P2", "C1")).toBe("T1");
+    expect(map.rootOfPart("P2", "C-OTHER")).toBeNull(); // a timestamp is unique only within a channel
+    expect(map.resolveByThread("P2")).toBeNull(); // a part never becomes a thread root
+    expect(map.resolveByConversation("q1")!.threadTs).toBe("T1");
+    // A lost table rebuilds parts from their stamps, which name the part and its root.
+    const rebuilt = new ThreadSeatMap(mapDb(), clock);
+    const stamp = (messageTs: string) => formatPostedStamp({ threadTs: "T1", messageTs, channel: "C1", human: "h1", seat: "s1", conversationId: "q1" });
+    expect(rebuilt.rebuildFromStamps([stamp("T1"), stamp("P2"), stamp("P3"), stamp("P2")])).toEqual({ inserted: 3, skipped: 1 });
+    expect(rebuilt.rootOfPart("P3", "C1")).toBe("T1");
+    expect(rebuilt.resolveByThread("T1")!.seat).toBe("s1");
+  });
+
+  it("routes a reaction on a reply part to the ask's seat, and ignores one on any other message (#899)", () => {
+    const map = new ThreadSeatMap(mapDb(), clock);
+    map.open({ threadTs: "T1", channel: "C1", human: "h1", seat: "s1", conversationId: "q1" });
+    map.recordPart({ messageTs: "P2", threadTs: "T1", channel: "C1" });
+    const route = makeThreadRouteResolver({ map, unroutedDestination: "orch@rig" });
+    const onPart = route({ type: "reaction_added", thread_ts: "P2", channel: "C1" } as never);
+    expect(onPart).toMatchObject({ destination: "s1", correlationQitemId: "q1", routeClass: "existing-thread" });
+    // A person's reply in the thread is not a part; neither is the same ts in another channel.
+    expect(route({ type: "reaction_added", thread_ts: "R9", channel: "C1" } as never).routeClass).toBe("unmapped-thread");
+    expect(route({ type: "reaction_added", thread_ts: "P2", channel: "C-OTHER" } as never).routeClass).toBe("unmapped-thread");
+    // A typed reply keeps routing by its thread root only.
+    expect(route({ type: "message", thread_ts: "P2", channel: "C1" } as never).routeClass).toBe("unmapped-thread");
   });
 
   it("newest root is Slack's latest thread_ts, not when a rebuild happened to re-insert it", () => {
