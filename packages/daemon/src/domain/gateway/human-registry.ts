@@ -421,10 +421,10 @@ export type ListHumansResult =
   | { ok: true; humans: HumanSummary[]; advisory?: string }
   | { ok: false; error: string };
 
-/** Amendment A1 (founder R5): the 0.5.5 surface is SINGLE-HUMAN. Several fragments render
+/** Amendment A1 (founder R5): the human surface is SINGLE-HUMAN. Several fragments render
  *  honestly, but enumeration is display, never management — the advisory names the boundary. */
 export const MULTI_HUMAN_ADVISORY =
-  "several human fragments exist; this release's surface is single-human — multi-human management is 0.5.7 scope (fragments are displayed honestly; no plural management verbs exist)";
+  "several human fragments exist; OpenRig supports one configured human, so they are displayed as found and no command manages several";
 
 /** A field value with its provenance: authored in the fragment, or filled by a default. */
 export interface ProvenancedValue<T> {
