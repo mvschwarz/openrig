@@ -94,9 +94,13 @@ tell application "Terminal"
   set newTab to do script (item 1 of argv)
   set sized to false
   try
-    set number of columns of newTab to 140
-    set number of rows of newTab to 40
-    set sized to (number of columns of newTab is 140 and number of rows of newTab is 40)
+    repeat with targetWindow in windows
+      if newTab is in tabs of targetWindow and (count of tabs of targetWindow) is 1 then
+        set number of columns of newTab to 140
+        set number of rows of newTab to 40
+        set sized to (number of columns of newTab is 140 and number of rows of newTab is 40)
+      end if
+    end repeat
   end try
   activate
   if sized then return "window-sized"

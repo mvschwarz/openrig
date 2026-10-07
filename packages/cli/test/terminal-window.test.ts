@@ -53,6 +53,7 @@ describe("desktop terminal view", () => {
     expect(script).toContain("do script (item 1 of argv)");
     expect(script).not.toContain("in front window");
     expect(script).toContain("set newTab to do script");
+    expect(script).toContain("if newTab is in tabs of targetWindow and (count of tabs of targetWindow) is 1 then");
     expect(script).toContain("set number of columns of newTab to 140");
     expect(script).toContain("set number of rows of newTab to 40");
     expect(script).not.toMatch(/settings set|default settings|System Events/);
