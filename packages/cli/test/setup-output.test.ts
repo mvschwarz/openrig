@@ -40,6 +40,7 @@ function expectConversationRoute(text: string): void {
   expect(text).toContain("On a Mac, offer Ghostty once");
   expect(text).toContain("rig setup --ghostty");
   expect(text).toContain("--no-ghostty");
+  expect(text).toContain("preserve earlier choices such as --no-herdr");
   expect(text).toContain("rig terminal open saved:kernel");
   expect(text).toContain("rig terminal open saved:kernel --window --json");
   expect(text).toContain("No copying or typing for the person");

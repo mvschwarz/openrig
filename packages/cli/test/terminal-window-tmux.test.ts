@@ -17,8 +17,9 @@ afterEach(() => {
 });
 
 it("opens three real viewer panes while original sessions keep the same pane and process", async () => {
-  const source = `openrig-window-source-${randomUUID()}`;
-  const viewer = `openrig-window-view-${randomUUID()}`;
+  // Short names also fit macOS Unix sockets under CI's existing TMPDIR.
+  const source = `ws-${randomUUID().slice(0, 12)}`;
+  const viewer = `wv-${randomUUID().slice(0, 12)}`;
   sockets.push(source, viewer);
   const names = ["tui", "advisor", "operator"];
   for (const name of names) tmux(source, ["new-session", "-d", "-s", name, "sleep 60"]);
