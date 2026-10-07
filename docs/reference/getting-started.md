@@ -40,6 +40,12 @@ and offers to remember selected OpenRig commands in your native settings only if
 you want that. An existing explicit choice is reused; No or no answer keeps the
 team default and leaves settings unchanged. Broader access is separate.
 
+If permission prompts are slowing you down, consider the
+[workshop bundle](https://openrig.dev/rigs/workshop). It ships with broad access
+and [non-interruptive mode](non-interruptive-mode.md): its agents bypass
+permission prompts and supported harness warning dialogs. The listing and
+before-install view explain that access before you choose it.
+
 > Everything below reports **what is currently true**, never a guarantee that
 > downstream work will succeed. "Daemon up" does not mean every agent is healthy;
 > "kernel ready" does not mean every kernel agent is healthy; a workspace root
