@@ -193,13 +193,23 @@ export function addGitContext(source: string, opts: { pack?: string; name?: stri
     mkdirSync(parent, { recursive: true });
     // Resolve a local path before changing Git's working directory.
     const remote = existsSync(source) ? resolve(source) : source;
-    const advertised = git(parent, ["ls-remote", "--symref", "--", remote, "HEAD"]);
+    const advertised = git(parent, ["ls-remote", "--symref", "--", remote, "HEAD", "refs/heads/*"]);
     const revision = /^([a-f0-9]{40}|[a-f0-9]{64})\tHEAD$/m.exec(advertised)?.[1];
-    const branchRef = /^ref: (refs\/heads\/[^\t\r\n]+)\tHEAD$/m.exec(advertised)?.[1];
+    let branchRef = /^ref: (refs\/heads\/[^\t\r\n]+)\tHEAD$/m.exec(advertised)?.[1];
     if (!revision) throw new Error("Git source has no advertised HEAD commit. Check its default branch before retrying.");
     checkout = join(parent, randomUUID());
     // Old Git ignores this environment variable and retains its SHA-1 default.
     git(parent, ["init", "--", checkout], { GIT_DEFAULT_HASH: revision.length === 64 ? "sha256" : "sha1" });
+    if (!branchRef) {
+      // Match clone's inference: configured initial branch, then master, then
+      // the first matching advertised branch. Ref metadata fetches no objects.
+      const matching = advertised.split("\n")
+        .filter(line => line.startsWith(`${revision}\trefs/heads/`))
+        .map(line => line.split("\t")[1]!);
+      const initialBranch = git(checkout, ["symbolic-ref", "HEAD"]);
+      branchRef = matching.find(ref => ref === initialBranch)
+        ?? matching.find(ref => ref === "refs/heads/master") ?? matching[0];
+    }
     git(checkout, ["remote", "add", "origin", remote]);
     try {
       // Pin the advertised commit even if the branch advances during the fetch.
