@@ -191,7 +191,7 @@ describe("desktop terminal view", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]![0]).toBe(app);
     expect(calls[0]![1].slice(0, -1)).toEqual([...prefix, "/bin/sh", "-c"]);
-    expect(calls[0]![1].at(-1)).toBe("env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' '/fixture/bin/herdr'");
+    expect(calls[0]![1].at(-1)).toBe("env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH='/daemon home/herdr.sock' HERDR_CONFIG_PATH='/fixture/private herdr.toml' '/fixture/bin/herdr'");
     expect(result).toMatchObject({ ok: true, window: { app, surface: "window-requested" } });
     expect(result.notes?.join(" ")).toContain(app === "x-terminal-emulator" ? "no portable size option" : "Requested 140 columns by 40 rows");
   });

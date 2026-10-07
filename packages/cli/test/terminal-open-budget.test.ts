@@ -83,6 +83,7 @@ describe("terminal open request budget", () => {
           ? JSON.stringify({ result: { workspaces: [] } })
           : args.includes("--version") ? "herdr 0.9.3" : "/fixture/bin/herdr",
         launch: async () => {}, sleep: async () => {}, id: () => "owned-budget",
+        herdrConfig: () => "/fixture/private herdr.toml",
       },
     };
     const command = new Command();
