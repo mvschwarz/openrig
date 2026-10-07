@@ -164,9 +164,9 @@ function installHerdr(deps: SetupDeps, platform: NodeJS.Platform): SetupStep {
     };
   } catch (err) {
     return {
-      id: "herdr_install", status: "fail",
+      id: "herdr_install", status: "warn",
       message: `Could not install or verify herdr: ${(err as Error).message}`,
-      reason: "The OpenRig view uses herdr. Existing cmux and plain-terminal workflows remain available.",
+      reason: "The OpenRig view can use plain tmux without herdr. Existing cmux workflows remain available.",
       fixHint: `Retry \`${HERDR_INSTALL_COMMAND}\`, or follow https://herdr.dev/docs/install/.`,
     };
   }

@@ -39,13 +39,27 @@ describe("setup Herdr default", () => {
       expect(f.exec.mock.calls.some(([cmd]) => cmd.includes("herdr"))).toBe(false);
     }
   });
-  it("retains install failure and continues other setup steps", async () => {
+  it.each([
+    ["darwin", "install"], ["linux", "install"],
+    ["darwin", "verification"], ["linux", "verification"],
+  ] as const)("keeps setup ready after optional Herdr failure on %s during %s", async (platform, failure) => {
     const f = fixture();
+    f.deps.platform = platform;
     const original = f.deps.exec;
-    f.deps.exec = (cmd, opts) => { if (cmd.includes("herdr.dev/install")) throw new Error("install timeout"); return original(cmd, opts); };
+    f.deps.exec = (cmd, opts) => {
+      if (cmd.includes("herdr.dev/install")) {
+        if (failure === "install") throw new Error("install timeout");
+        return "installer returned without a usable binary";
+      }
+      return original(cmd, opts);
+    };
     const result = await runSetup(f.deps, {});
-    expect(result.ready).toBe(false);
-    expect(result.steps).toContainEqual(expect.objectContaining({ id: "herdr_install", status: "fail", message: expect.stringContaining("install timeout") }));
+    expect(result.ready).toBe(true);
+    expect(result.steps).toContainEqual(expect.objectContaining({
+      id: "herdr_install", status: "warn",
+      message: expect.stringContaining(failure === "install" ? "install timeout" : "could not be verified"),
+      reason: expect.stringContaining("plain tmux"), fixHint: expect.stringContaining("herdr.dev"),
+    }));
     expect(result.steps).toContainEqual(expect.objectContaining({ id: "claude_auth", status: "pass" }));
   });
 });

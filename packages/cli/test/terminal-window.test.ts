@@ -18,6 +18,8 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
     if (file === "/usr/libexec/PlistBuddy") return options.ghostty ?? "1.2.0";
     if (file === "/usr/bin/osascript") return options.ghostty === "1.3.0" ? "tab" : "window";
     if (file === "/bin/sh") return args[1] === "command -v herdr" ? "/fixture/bin/herdr" : "/fixture/bin/tmux";
+    if (args.at(-1) === "default-size") return "120x40";
+    if (args[0] === "show-options" && args.at(-1) === "window-size") return "latest";
     if (args.includes("#{pane_id}")) return `%${++pane}`;
     return "";
   });
@@ -34,7 +36,8 @@ describe("desktop terminal view", () => {
     expect(launch[1][1]).toContain("new tab in front window");
     expect(launch[1][1]).toContain("new window with configuration");
     expect(launch[1][2]).toContain("HERDR_SOCKET_PATH='/daemon home/herdr.sock'");
-    expect(launch[1][2]).toContain("--session 'daemon-session'");
+    expect(launch[1][2]).not.toContain("--session");
+    expect(launch[1][2]).toContain("-u HERDR_SESSION");
     expect(launch[1][2]).not.toContain("wrong-session");
     expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "herdr", expectedPlan: "bound-plan" }, { timeoutMs: 45_000 });
   });
@@ -59,6 +62,18 @@ describe("desktop terminal view", () => {
     expect(tmux.filter(args => args[0] === "select-pane").map(args => args.at(-1))).toEqual(["tui", "advisor", "operator"]);
     expect(tmux).toContainEqual(["select-layout", "-t", "openrig-view-owned-test:view-1", "even-horizontal"]);
     expect(tmux.flat().join(" ")).not.toMatch(/kill|respawn|send-keys/);
+    expect(f.post).not.toHaveBeenCalled();
+  });
+
+  it("names the setup next step when tmux lookup exits nonzero", async () => {
+    const f = fixture({ herdr: false });
+    const original = f.deps.exec;
+    f.deps.exec = vi.fn(async (file, args) => {
+      if (file === "/bin/sh" && args[1] === "command -v tmux") throw new Error("Command failed: /bin/sh -c command -v tmux");
+      return original(file, args);
+    });
+    expect(await openTerminalWindow(f.client, "saved:kernel", undefined, f.deps)).toMatchObject({ ok: false, error: "tmux is unavailable; run rig setup first." });
+    expect(f.exec.mock.calls.some(([file]) => file === "/usr/bin/osascript" || file === "/fixture/bin/tmux")).toBe(false);
     expect(f.post).not.toHaveBeenCalled();
   });
 

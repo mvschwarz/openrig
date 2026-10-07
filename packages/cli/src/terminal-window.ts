@@ -143,8 +143,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     if (herdr) {
       const endpoint = preview.data.status.launch;
       if (!endpoint?.socketPath) throw new Error("The daemon does not report its herdr endpoint. Update the daemon, or use --provider tmux --window.");
-      const session = endpoint.session ? ` --session ${shellQuote(endpoint.session)}` : "";
-      window = await launchWindow(`env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)}${session}`);
+      // A CLI session would override the daemon's resolved socket in Herdr.
+      window = await launchWindow(`env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(endpoint.socketPath)} ${shellQuote(herdr)}`);
       let alive = false;
       for (let attempt = 0; attempt < 20; attempt++) {
         const status = await client.get<{ providers: Array<{ liveness: { alive: boolean } }> }>("/api/terminal/status?provider=herdr");
@@ -158,7 +158,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       return { ...result.data, window, notes: [...(result.data.notes ?? []), "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
     }
 
-    const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"])).trim();
+    const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"]).catch(() => "")).trim();
     if (!tmux) throw new Error("tmux is unavailable; run rig setup first.");
     viewer = `openrig-view-${deps.id()}`;
     for (const [pageIndex, page] of composed.pages.entries()) {
@@ -167,6 +167,11 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       const first = page[0]!;
       const args = pageIndex === 0 ? ["new-session", "-d", "-s", viewer, "-n", name] : ["new-window", "-d", "-t", `${viewer}:`, "-n", name];
       let pane = (await deps.exec(tmux, [...args, "-P", "-F", "#{pane_id}", `env -u TMUX ${first.paneCommand}`])).trim();
+      // Nested source clients on this server can make a new window too narrow to split.
+      // Use the viewer's configured detached size, then restore normal client resizing.
+      const [width, height] = (await deps.exec(tmux, ["show-options", "-v", "-t", viewer, "default-size"])).trim().split("x");
+      const sizing = (await deps.exec(tmux, ["show-options", "-wv", "-t", pane, "window-size"])).trim();
+      await deps.exec(tmux, ["resize-window", "-t", pane, "-x", width!, "-y", height!]);
       await deps.exec(tmux, ["select-pane", "-t", pane, "-T", first.label]);
       for (const item of page.slice(1)) {
         pane = (await deps.exec(tmux, ["split-window", "-d", "-h", "-t", pane, "-P", "-F", "#{pane_id}", `env -u TMUX ${item.paneCommand}`])).trim();
@@ -174,6 +179,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
         await deps.exec(tmux, ["select-layout", "-t", `${viewer}:${name}`, "even-horizontal"]);
       }
       await deps.exec(tmux, ["select-layout", "-t", `${viewer}:${name}`, composed.columns === page.length ? "even-horizontal" : "tiled"]);
+      await deps.exec(tmux, ["set-option", "-w", "-t", `${viewer}:${name}`, "window-size", sizing]);
     }
     await deps.exec(tmux, ["select-window", "-t", `${viewer}:view-1`]);
     window = await launchWindow(`env -u TMUX ${shellQuote(tmux)} attach-session -t ${shellQuote(`=${viewer}`)}`);
