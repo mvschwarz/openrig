@@ -212,8 +212,10 @@ export function addGitContext(source: string, opts: { pack?: string; name?: stri
       checkout = join(parent, randomUUID());
       git(parent, ["clone", "--", remote, checkout]);
     }
-    if (branchRef) {
-      const branch = branchRef.slice("refs/heads/".length);
+    // Older transports can omit HEAD's symref. A full clone may still infer its
+    // default branch; retain that relationship instead of detaching it.
+    const branch = branchRef?.slice("refs/heads/".length) ?? (warning ? optionalGit(checkout, ["symbolic-ref", "--short", "HEAD"]) : null);
+    if (branch) {
       if (!warning) git(checkout, ["update-ref", `refs/remotes/origin/${branch}`, revision]);
       // This is a newly created checkout: pin its branch even after a full fallback.
       git(checkout, ["checkout", "-B", branch, revision]);

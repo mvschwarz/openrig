@@ -7,6 +7,7 @@ import { addGitContext, inspectGitContext, updateGitContext } from "../src/lib/c
 
 const transport = vi.hoisted(() => ({
   refusal: null as string | null,
+  hideHeadSymref: false,
   afterAdvertisement: null as (() => void) | null,
   calls: [] as string[][],
 }));
@@ -21,7 +22,10 @@ vi.mock("node:child_process", async (importOriginal) => {
           throw Object.assign(new Error("fixture transport failure"), { status: 128, stderr: transport.refusal });
         }
       }
-      const result = actual.execFileSync(command, args, options);
+      let result = actual.execFileSync(command, args, options);
+      if (command === "git" && args.includes("ls-remote") && transport.hideHeadSymref) {
+        result = result.replace(/^ref: .*\tHEAD\r?\n/m, "");
+      }
       if (command === "git" && args.includes("ls-remote") && transport.afterAdvertisement) {
         const advance = transport.afterAdvertisement;
         transport.afterAdvertisement = null;
@@ -35,6 +39,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 const homes: string[] = [];
 afterEach(() => {
   transport.refusal = null;
+  transport.hideHeadSymref = false;
   transport.afterAdvertisement = null;
   transport.calls = [];
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
@@ -93,6 +98,7 @@ describe("Git context initial download", () => {
     "fatal: Server does not support shallow requests",
   ])("announces a full-clone fallback only for a shallow refusal: %s", (refusal) => {
     const f = fixture(); transport.refusal = refusal;
+    transport.hideHeadSymref = refusal.includes("dumb http");
     transport.afterAdvertisement = () => { writeFileSync(join(f.upstream, "guide.md"), "Later guide\n"); commit(f.upstream, "later"); };
     const warnings: string[] = [];
     const added = addGitContext(f.upstream, { onWarning: (message) => {
