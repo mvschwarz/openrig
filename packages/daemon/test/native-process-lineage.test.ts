@@ -25,6 +25,22 @@ describe("joined native Codex identity", () => {
   it("proves direct-native resume", async () => {
     expect((await check(() => [{ ...rows()[3]!, pid: 10, ppid: 1 }]))?.process.pid).toBe(10);
   });
+  it.each([
+    `resume ${token} --add-dir /Users/me/code/Bob's app`,
+    `resume --add-dir /Users/me/code/Bob's-app ${token}`,
+    `resume ${token} What's next?`,
+    `resume ${token} --add-dir /Users/me/code/review"app`,
+  ])("preserves literal quote characters in Codex resume argv: %s", async args => {
+    const list = () => rows().map(r => r.pid === 13 ? { ...r, command: `/opt/native/codex ${args}` } : r);
+    expect((await check(list))?.process.pid).toBe(13);
+    expect(await check(list, { expectedToken: "different" })).toBeNull();
+  });
+  it("observes a fresh Codex launch into an apostrophe path", async () => {
+    const list = () => rows().map(r => r.pid === 13
+      ? { ...r, command: "/opt/native/codex -C /Users/me/code/Bob's-app" } : r);
+    expect((await check(list, { requireResume: false }))?.process.pid).toBe(13);
+    expect(await check(list)).toBeNull();
+  });
   it("distinguishes fresh/non-strict runtime proof from exact resume", async () => {
     const fresh = () => rows().map(r => r.pid === 13 ? { ...r, command: "/opt/native/codex -m model" } : r);
     expect(await check(fresh)).toBeNull();
@@ -127,22 +143,32 @@ describe("Claude identity with inline settings in ps output", () => {
     }
   }
   it.each([
-    `--settings '/fixture/settings with spaces.json' --session-id '${token}'`,
     `--settings="/fixture/settings with spaces.json" --session-id ${token}`,
-    `--settings '{"label":"two words"}' --resume "${token}"`,
+    `--settings {"label":"two words"} --resume ${token}`,
     `--settings={"label":"two words"} --session-id=${token}`,
     `--settings /fixture/settings.json --session-id ${token}`,
-  ])("accepts quoted and file settings: %s", async args => {
+    `--settings /fixture/review's-settings.json --session-id ${token}`,
+    `--settings /fixture/review"settings.json --session-id ${token}`,
+  ])("accepts inline and file settings: %s", async args => {
     expect((await verifyClaudePaneProcess(input(args)))?.process.pid).toBe(21);
     expect((await observeClaudeDelivery(input(args))).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...input(args), expectedToken: "different" })).toBeNull();
+  });
+  it("preserves an apostrophe in the native Claude executable path", async () => {
+    const actual = input(`--settings ${settings[0]![1]} --session-id ${token}`);
+    const list = (await actual.listProcesses()).map(r => r.pid === 21 ? { ...r,
+      executableName: "2.1.1", command: r.command.replace(/^claude/, "/home/o'neil/.local/share/claude/versions/2.1.1"),
+    } : r);
+    const native = { ...actual, listProcesses: async () => list };
+    expect((await verifyClaudePaneProcess(native))?.process.pid).toBe(21);
+    expect((await observeClaudeDelivery(native)).state).toBe("verified");
+    expect(await verifyClaudePaneProcess({ ...native, expectedToken: "different" })).toBeNull();
   });
   it.each([
     `--settings ${JSON.stringify({ label: `two words --session-id ${token}` })}`,
     `--settings ${settings[0]![1]} --session-id ${token} --session-id different`,
     `--settings ${settings[1]![1]} --session-id ${token} --unknown`,
-    `--session-id ${token} --settings '{"label":"unterminated"}`,
-    `--session-id ${token} --settings {"label":"unterminated}`,
-  ])("does not promote ambiguous or incomplete argv: %s", async args => {
+  ])("does not promote ambiguous argv: %s", async args => {
     expect(await verifyClaudePaneProcess(input(args))).toBeNull();
     expect((await observeClaudeDelivery(input(args))).state).not.toBe("verified");
   });

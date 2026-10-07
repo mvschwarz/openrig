@@ -22,15 +22,15 @@ export type NativeRuntime = "claude-code" | "codex";
 
 function tokens(command: string): string[] {
   // ps flattens argv: inline JSON keeps its internal quotes, but has no outer
-  // shell quotes. Quoted runs can begin anywhere within a token, not just at its
-  // first character. Preserve escaped JSON quotes while finding token boundaries.
+  // shell quotes. Group double-quoted JSON strings anywhere within a token,
+  // preserving escapes. Apostrophes in paths or prompts are literal argv text.
   const result: string[] = [];
   let start = 0;
   let quote: string | null = null;
   const append = (end: number) => {
     if (start === end) return;
     const token = command.slice(start, end);
-    result.push((token[0] === '"' || token[0] === "'") && token.at(-1) === token[0]
+    result.push(token[0] === '"' && token.at(-1) === '"'
       ? token.slice(1, -1) : token);
   };
   for (let index = 0; index < command.length; index += 1) {
@@ -38,14 +38,16 @@ function tokens(command: string): string[] {
     if (quote !== null) {
       if (quote === '"' && char === "\\") { index += 1; continue; }
       if (char === quote) quote = null;
-    } else if (char === '"' || char === "'") {
+    } else if (char === '"') {
       quote = char;
     } else if (/\s/.test(char)) {
       append(index);
       start = index + 1;
     }
   }
-  if (quote !== null) return []; // Incomplete quoting is not positive identity proof.
+  // A literal double quote in a filename need not have a partner. Preserve the
+  // legacy tokenization when grouping is impossible; selectors still verify identity.
+  if (quote !== null) return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map(token => token.replace(/^['"]|['"]$/g, "")) ?? [];
   append(command.length);
   return result;
 }

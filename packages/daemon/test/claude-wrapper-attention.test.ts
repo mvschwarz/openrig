@@ -61,6 +61,20 @@ function fixture(token: string | null = null) {
 }
 
 describe("Claude wrapper manual attention recovery", () => {
+  it.each(["/fixture/review's-settings.json", '/fixture/review"settings.json'])(
+    "clear-attention preserves a literal quote in a settings filename: %s", async path => {
+      const f = fixture("review-token");
+      f.listProcesses.mockResolvedValue([root, { ...child,
+        command: `${child.command} --settings ${path}`,
+      }]);
+      const result = await f.post();
+      expect(result.status, JSON.stringify(result.body)).toBe(200);
+      expect(f.startup()).toBe("ready");
+      expect((await f.verify(true)).ok).toBe(true);
+      expect(f.sendVerify).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["kernel", "team"])("periodic identity and clear-attention accept inline %s settings", async authority => {
     const settings = operationalLaunchArgs("claude-code", authority === "kernel"
       ? { kernelAuthority: true } : { teamPermissionDefault: true });
