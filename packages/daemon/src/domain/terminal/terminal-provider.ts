@@ -56,6 +56,8 @@ export interface DegradedSeat {
  */
 export interface ComposedView {
   id: string;
+  /** Service-provided preview fingerprint, attached after composition for provider labels. */
+  planId?: string;
   opened: ComposedPane[];
   absent: AbsentSeat[];
   degraded: DegradedSeat[];

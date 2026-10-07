@@ -80,7 +80,7 @@ describe("terminal open request budget", () => {
       windowDeps: {
         platform: "linux", env: { DISPLAY: ":fixture" }, exists: () => false,
         exec: async (file, args) => file === "/usr/bin/env" && args.at(-1) === "list"
-          ? JSON.stringify({ result: { tabs: [] } })
+          ? JSON.stringify({ result: { workspaces: [] } })
           : args.includes("--version") ? "herdr 0.9.3" : "/fixture/bin/herdr",
         launch: async () => {}, sleep: async () => {}, id: () => "owned-budget",
       },

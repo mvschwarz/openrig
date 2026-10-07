@@ -11,7 +11,7 @@ function fixture(options: { herdr?: boolean; ghostty?: string; refusal?: number;
   const client = { baseUrl: "http://localhost:7433", get, post } as unknown as DaemonClient;
   let pane = 0;
   const exec = vi.fn(async (file: string, args: string[]) => {
-    if (file === "/usr/bin/env" && args.at(-1) === "list") return JSON.stringify({ result: { tabs: [] } });
+    if (file === "/usr/bin/env" && args.at(-1) === "list") return JSON.stringify({ result: { workspaces: [] } });
     if (args.includes("--version")) {
       if (options.herdr === false) throw new Error("not installed");
       return "herdr 0.9.3";

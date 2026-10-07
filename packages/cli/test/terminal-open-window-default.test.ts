@@ -18,7 +18,7 @@ function fixture(options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv;
   } : { providers: [{ liveness: { alive: true } }] } }));
   const post = vi.fn(async () => ({ status: 200, data: { provider: "herdr", ok: true, opened: panes.map(p => p.seat), absent: [], degraded: [], pages: 1 } }));
   const exec = vi.fn(async (file: string, args: string[]) => {
-    if (file === "/usr/bin/env" && args.at(-1) === "list") return JSON.stringify({ result: { tabs: [] } });
+    if (file === "/usr/bin/env" && args.at(-1) === "list") return JSON.stringify({ result: { workspaces: [] } });
     if (file === "/usr/bin/osascript") {
       if (options.denial) throw new Error("Automation denied");
       return "window";

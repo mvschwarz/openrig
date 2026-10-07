@@ -254,7 +254,7 @@ export interface HerdrLayoutPlan {
 
 /**
  * Build the herdr socket plan for a composed view. PURE — no I/O. Each page
- * gets a fresh tab labeled `${tabPrefix}:${view.id}#${launchToken}/<pageIndex>`;
+ * gets a fresh tab labeled `${tabPrefix}:${view.id}#<plan>#${launchToken}/<pageIndex>`;
  * two calls with different `launchToken`s produce DIFFERENT labels, which is
  * exactly the fresh-tab-on-relaunch (not-replace) invariant.
  */
@@ -263,7 +263,8 @@ export function planHerdrLayout(
   launchToken: string,
   tabPrefix: string = "openrig",
 ): HerdrLayoutPlan {
-  const base = `${tabPrefix}:${view.id}#${launchToken}`;
+  // Older callers without a preview fingerprint still get fresh, non-reusable tabs.
+  const base = `${tabPrefix}:${view.id}${view.planId ? `#${view.planId.slice(0, 16)}` : ""}#${launchToken}`;
   // The workspace is named for people: the rig name for a rig view, else the view id.
   // Tab labels keep the launch token, so every open is still a fresh, distinct space.
   const workspaceLabel = view.id.startsWith("rig:") ? view.id.slice("rig:".length) : view.id;

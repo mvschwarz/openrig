@@ -274,6 +274,39 @@ describe("one terminal catalog inventory", () => {
   });
 });
 
+describe("Herdr reuse plan labels", () => {
+  async function rendered(service: TerminalService, provider: RecordingProvider, view: string) {
+    const preview = await service.previewView({ view });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect((await service.openView({ view, expectedPlan: preview.planId })).ok).toBe(true);
+    const label = planHerdrLayout(provider.lastView!, "fixed").pages[0]!.tabLabel;
+    expect(label).toBe(`openrig:${preview.composed.id}#${preview.planId.slice(0, 16)}#fixed`);
+    return label;
+  }
+
+  it.each(["membership", "target"])("changes the reuse label when saved view %s changes", async change => {
+    const saved: SavedView = { id: "team", name: "Team", members: [{ seat: "lead", tmuxSession: "original" }] };
+    const { deps, herdr } = makeDeps({ viewsStore: { list: () => [saved], get: () => saved } });
+    const service = new TerminalService(deps);
+    const before = await rendered(service, herdr, "saved:team");
+    expect(await rendered(service, herdr, "saved:team")).toBe(before);
+    if (change === "membership") saved.members.push({ seat: "worker", tmuxSession: "worker" });
+    else saved.members[0]!.tmuxSession = "replacement";
+    expect(await rendered(service, herdr, "saved:team")).not.toBe(before);
+  });
+
+  it("separates saved and derived views with the same resolved id and different members", async () => {
+    const saved: SavedView = { id: "rig:acme-build", name: "Saved", members: [{ seat: "other", tmuxSession: "other" }] };
+    const { deps, herdr } = makeDeps({ viewsStore: { list: () => [saved], get: id => id === saved.id ? saved : null } });
+    const service = new TerminalService(deps);
+    const before = await rendered(service, herdr, "saved:rig:acme-build");
+    const after = await rendered(service, herdr, "rig:acme-build");
+    expect(before).toMatch(/^openrig:rig:acme-build#/);
+    expect(after).toMatch(/^openrig:rig:acme-build#/);
+    expect(after).not.toBe(before);
+  });
+});
+
 describe("default saved kernel conversations", () => {
   function kernel(operatorRuntime = "codex", advisorRuntime = "claude-code"): LiveSeatRow[] {
     // Bindings deliberately differ from the logical IDs and inventory order.
@@ -290,6 +323,23 @@ describe("default saved kernel conversations", () => {
       listRigNames: () => ["kernel"], listRigSeats: name => name === "kernel" ? rows : null,
     });
   }
+
+  it("changes the Herdr reuse label when the kernel operator becomes available", async () => {
+    const { deps, herdr } = makeKernel(kernel());
+    let operatorReady = false;
+    deps.hasSession = session => session !== "operator-bound" || operatorReady;
+    const service = new TerminalService(deps);
+    const before = await service.openView({ view: "saved:kernel" });
+    expect(before.opened).toEqual(["tui-bound", "advisor-bound"]);
+    const oldLabel = planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.tabLabel;
+    operatorReady = true;
+    const preview = await service.previewView({ view: "saved:kernel" });
+    if (!("composed" in preview)) throw new Error("expected preview");
+    expect((await service.openView({ view: "saved:kernel", expectedPlan: preview.planId })).opened).toEqual(["tui-bound", "advisor-bound", "operator-bound"]);
+    const newLabel = planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.tabLabel;
+    expect(newLabel).toBe(`openrig:kernel#${preview.planId.slice(0, 16)}#fixed`);
+    expect(newLabel).not.toBe(oldLabel);
+  });
 
   it.each([false, true])("keeps the default kernel handoff distinct from a team (provider unavailable=%s)", async unavailable => {
     const { deps, herdr } = makeKernel(kernel());
@@ -344,7 +394,7 @@ describe("default saved kernel conversations", () => {
     })).digest("hex"));
     const result = await service.openView({ view: "saved:kernel", expectedPlan: preview.planId });
     expect(result.ok).toBe(true);
-    expect(herdr.lastView).toEqual(preview.composed);
+    expect(herdr.lastView).toEqual({ ...preview.composed, planId: preview.planId });
     expect(planHerdrLayout(herdr.lastView!, "fixed").pages[0]!.root).toEqual(preview.grids[0]!.root);
   });
 
