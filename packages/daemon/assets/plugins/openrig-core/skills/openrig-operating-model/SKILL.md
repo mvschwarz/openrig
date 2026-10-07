@@ -388,7 +388,8 @@ when the log has outgrown the distilled part.
 
 ## 9. Standing the structure up
 
-`scripts/scaffold.sh` creates any missing chain files from `templates/` and
+`node scripts/scaffold.mjs <topology|work> <root> --node <relpath>` creates
+any missing chain files from `templates/` on Windows, macOS and Linux and
 **never overwrites or deletes anything** — so a brand-new workspace and a
 living system are the same command with different starting states. Created
 files are marked UNSEEDED until their real owner writes the first true
@@ -411,4 +412,4 @@ and how you discover which seats cannot yet describe their own job.
 ## Files in this skill
 
 `templates/{SPEC,LEARNED,SOP}.md` ·
-`scripts/{compose.py, trace-due.sh, trace-stamp.sh, trunk-diff.sh, scaffold.sh}`
+`scripts/{compose.py, trace-due.sh, trace-stamp.sh, trunk-diff.sh, scaffold.mjs, scaffold.sh}`

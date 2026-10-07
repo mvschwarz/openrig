@@ -554,7 +554,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // is spawned per command. An injected exec is the test's own, and psmux has no control mode.
   const argvExec = spawnedArgvExec === execArgvCommand && process.platform !== "win32" && process.env.OPENRIG_TMUX_CONTROL === "1"
     ? tmuxControlExec(execArgvCommand, { serverArgs: tmuxSelection?.executionArgs }) : spawnedArgvExec;
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs);
+  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? (process.platform === "win32" ? execCommand : execTmuxCommand), undefined, argvExec, tmuxSelection?.executionArgs,
+    process.platform === "win32" && !opts?.tmuxExec ? "psmux" : "tmux");
   // Inherit keeps the native execution environment; attachment metadata still names
   // its server for a new terminal. Isolated execution and attachment share a fixed socket.
   setDaemonTmuxServer(tmuxSelection?.serverArgs ?? (opts?.tmuxExec ? [] : tmuxServerArgs(process.env)), tmuxSelection);
@@ -723,6 +724,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   const { SeatLaunchEnvironment } = await import("./domain/seat-launch-environment.js");
   const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome,
+    process.platform === "win32" ? "win32" : "posix",
     (nodeId, runtime, ignoreAccountHome) => ignoreAccountHome
       ? effectiveRuntimeHome(db, nodeId, runtime as HomeRuntime, runtime === "codex" ? configuredCodexHome : configuredClaudeHome, true)
       : seatAccountHome(db, nodeId, runtime));
