@@ -53,7 +53,8 @@ commands and error text; don't assume a Windows-related pull request fixes it.
 
 The one-command install ([getting-started](getting-started.md#install-and-sign-in)) prints its plan with
 `--dry-run` and changes nothing. When a step fails it prints `FAILED [n/4] <command> (exit <code>)` and stops; run that
-command by hand to see its full error, and record it in a report.
+command by hand to see its full error, and record it in a report. A `FAILED [4/4]` whose only items are provider
+sign-ins under "Some steps need attention" means the install finished: sign in to the chosen provider and continue.
 
 ### Installation finished, but there is nobody to talk to
 

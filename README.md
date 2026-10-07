@@ -29,6 +29,8 @@ curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/in
 curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.6/scripts/install.sh | sh
 ```
 
+If a provider isn't signed in yet, the last step reports `FAILED [4/4]` after everything is installed, and `rig setup` lists the sign-in under "Some steps need attention". Only the provider you chose needs one; sign in as below.
+
 **Or step by step:**
 
 ```bash

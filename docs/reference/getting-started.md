@@ -59,8 +59,9 @@ With their yes, run the same command without `--dry-run`:
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
 Codex and may install a missing one, as described below. A failed step prints `FAILED [n/4] <command> (exit <code>)`.
-Then check the sign-in of each provider the person chose, as below, and continue at
-[Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
+Where a provider isn't signed in yet, step 4 ends that way after everything is installed: `rig setup` lists each
+provider's sign-in under "Some steps need attention". Only the provider the person chose needs one. Sign in to it as
+below, then continue at [Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
 by step instead:
 
 ### Choose your providers
