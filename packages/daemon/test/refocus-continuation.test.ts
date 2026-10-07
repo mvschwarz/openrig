@@ -17,13 +17,15 @@ function fixture() {
   const trace = join(bin, "trace");
   const rig = join(bin, "rig");
   const calls = join(root, "calls");
+  const transcript = join(root, "transcript.jsonl");
+  writeFileSync(transcript, "x".repeat(100));
   writeFileSync(trace, '#!/bin/sh\nprintf "%s" "$TRACE_RESULT"\n');
   writeFileSync(rig, '#!/bin/sh\nif [ "$1 $2" = "stream emit" ]; then\n printf "%s\\n" "$*" >> "$CALLS"\n exit "${STREAM_EXIT:-0}"\nfi\nprintf "{}"\n');
   chmodSync(trace, 0o755);
   chmodSync(rig, 0o755);
   const run = (event: string, prompt = "continue", good = true, extra: NodeJS.ProcessEnv = {}, identity = "occupant") => {
     const result = spawnSync(process.execPath, [hook, "--runtime", "claude"], {
-      input: JSON.stringify({ hook_event_name: event, session_id: identity, prompt }),
+      input: JSON.stringify({ hook_event_name: event, session_id: identity, prompt, transcript_path: transcript }),
       encoding: "utf8", timeout: 10_000,
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, OPENRIG_HOME: root,
         OPENRIG_SESSION_NAME: "seat@test", OPENRIG_REFOCUS_ENABLED: "1", OPENRIG_REFOCUS_NOW: "",
@@ -35,7 +37,7 @@ function fixture() {
     expect(result.status, result.stderr).toBe(0);
     return result.stdout;
   };
-  return { root, run, calls: () => existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [],
+  return { root, run, transcript, calls: () => existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [],
     state: () => JSON.parse(readFileSync(join(root, "refocus", "seat@test__occupant.json"), "utf8")) };
 }
 
@@ -50,6 +52,16 @@ describe("refocus continuation", () => {
     expect(f.run("UserPromptSubmit", "Restore this session now")).toContain("just compacted");
     expect(f.state().pendingOn).toBeUndefined();
     expect(f.run("UserPromptSubmit")).toBe("");
+  });
+
+  it("preserves the exact PostCompact obligation if its transcript shrinks before restore", () => {
+    const f = fixture();
+    f.run("PostCompact");
+    writeFileSync(f.transcript, "short");
+    expect(f.run("UserPromptSubmit", boundary)).toBe("");
+    expect(f.run("UserPromptSubmit", "Restore now")).toContain("just compacted");
+    expect(f.state().lastBytes).toBe(5);
+    expect(f.state().pendingOn).toBeUndefined();
   });
 
   it("reports only the third failed attempt, retains due state, and resets on a successful delivery", () => {

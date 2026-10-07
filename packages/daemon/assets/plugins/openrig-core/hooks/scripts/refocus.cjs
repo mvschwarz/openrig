@@ -320,16 +320,16 @@ function renderTrace() {
     state = { lastBytes: size, baselineAt: new Date().toISOString() };
     persist();
   } else if (size > 0 && size < Number(state.lastBytes || 0)) {
-    // Shrink clears pending and resets the baseline BEFORE due computation. The
-    // reset itself emits no refocus, and a stale pending can never ride through a
-    // reset into a delivery. Advisory once per reset episode: the reset moment is
-    // the dedupe (afterwards lastBytes === size), and the marker records in state.
-    delete state.pendingOn;
-    delete state.pendingAt;
+    // Shrink invalidates growth-based due state, not an exact PostCompact event
+    // awaiting its actionable restore turn.
+    if (state.pendingOn !== "PostCompact") {
+      delete state.pendingOn;
+      delete state.pendingAt;
+    }
     state.lastReset = { at: new Date().toISOString(), fromBytes: Number(state.lastBytes || 0), toBytes: size };
     state.lastBytes = size;
     persist();
-    process.stderr.write(`refocus: transcript shrank for ${seat} — baseline reset, pending cleared\n`);
+    process.stderr.write(`refocus: transcript shrank for ${seat} — baseline reset; PostCompact pending retained if present\n`);
   }
 
   const lastBytes = Number(state.lastBytes || 0);
