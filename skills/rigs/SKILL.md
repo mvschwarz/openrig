@@ -14,7 +14,10 @@ if the person asks you to. When they say what they want built, hand it to the te
 yourself.
 
 Tell the person what you're about to run and why before you run it. Don't install system packages or change their
-machine without a yes.
+machine without a yes. Starting OpenRig and a team writes files: Codex hooks and settings in
+`~/.codex/config.toml`, a discovery skill in `~/.claude/skills` and `~/.agents/skills`, and, in the repository, managed
+guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say so before you ask to start them
+([the full list](https://github.com/mvschwarz/openrig#what-openrig-changes-on-your-machine)).
 
 ## 1. Install OpenRig, if it isn't installed
 
@@ -23,24 +26,30 @@ machine without a yes.
   missing: `node --version`, `tmux -V`, `claude auth status` or `codex login status`.
 - **Install:** `npm install -g @openrig/cli`, then `rig preflight` (Node, tmux, the daemon port and state folders)
   and `rig doctor`.
-- **Then go on to step 2.** Stop after the install only if the person asked for the install and nothing else.
+- **Then go on to step 2:** say it's installed and ask what they want worked on, and in which repository. A plain
+  "install OpenRig" includes this. Stop here only if they say not to start a team.
 - **If something fails:** `rig context get help` is the help guide for the installed version. If `rig` itself won't
   run, use https://www.openrig.dev/help/agents. Getting started: https://openrig.dev/docs/getting-started
 
 ## 2. Start a team, or join one
 
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
-  don't start it. Starting it also starts OpenRig's own team (the kernel), which looks after OpenRig itself.
+  don't start it. Starting it also starts OpenRig's own team, the kernel. Keep it: its operator can set up a team.
 - **Ask what the team should work on, and in which repository,** unless the person has already said. Keep their words
   for step 3.
 - **See what's running:** `rig ps`, then `rig ps --nodes --rig <rig>` for a team's agents. If a team is already
   running in that repository, offer to use it.
 - **Offer a team:** list the built-in teams with `rig specs ls --kind rig` and look at one with
-  `rig specs preview <name> --kind rig`. For a first team, offer the small builder-and-reviewer team (`starter` from
-  0.6.6, `first-project` in 0.6.5) and say in a sentence what it is. Check the plan with
-  `rig up <name> --cwd <repo> --plan`, then start it with `rig up <name> --cwd <repo>` once the person says yes.
+  `rig specs preview <name> --kind rig`. For a first team, offer `starter`: a Claude Code builder and a Codex
+  reviewer, so it needs both signed in. Say which checkout and branch it will work in. Check the plan with
+  `rig up starter --cwd <repo> --plan`, then start it with `rig up starter --cwd <repo>` once the person says yes.
+- **With only Claude Code or only Codex,** hand the goal and repository to the kernel's operator instead. It adapts a
+  team to what they have, starts it on their yes and gives the goal to the team's lead. The steps are under
+  "Installing-agent handoff" in `rig context get reference/getting-started.md`. Then follow the lead's task as in
+  step 3.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
-  read it with `rig capture <seat>@<rig>`, then answer it or ask the person.
+  read it with `rig capture <seat>@<rig>` and answer with the key that screen shows (`rig send --help` says how to
+  send a digit, a letter or Escape), or ask the person. Capture it again before sending anything more.
 - **Or join this session to a team:**
   `rig attach --self --rig <rigId> --pod <pod> --member <name> --runtime <claude-code|codex> --print-env` adds this
   session as a new member of a pod. `--node <logicalId>` binds it to an existing seat instead. Attach once, and keep
@@ -52,14 +61,18 @@ machine without a yes.
 
 ## 3. Hand the person's work to the team
 
-- **Find the agent that owns the change:** `rig specs preview <name> --kind rig` says what each seat does (the builder
-  in `starter`, the owner in `first-project`).
-- **Hand it over:** write the goal to a file (what to change, in which repository, and what done looks like), then
+- **Find the agent that owns the change:** `rig specs preview <name> --kind rig` says what each seat does
+  (`dev-build@starter` in `starter`; the lead, `orch-lead`, in `workshop` and `factory`).
+- **Hand it over:** write the goal to a file: what to change, in which repository and branch, what done looks like,
+  and that the result comes back to you (the branch or commit, the review, any PR text). Then
   `rig queue create --source <your name> --destination <seat>@<rig> --body-file <file>`. Tell that agent with
   `rig send <seat>@<rig> "task <id> is yours"`. A message informs, and a queue task is the work someone owns.
   `--source` names you when this session hasn't joined the team.
-- **Follow it and read the result back:** `rig queue show <id> --full` and `rig capture <seat>@<rig>`. Tell the person
-  what the team actually did (its notes, the branch or the PR), not just that you sent it.
+- **Follow it to the result:** a task that changed hands isn't finished. `rig queue show <id> --full` names the seat it
+  went to, and that seat's next task is the one whose `handedOffFrom` is your task
+  (`rig queue list --destination <seat>@<rig> -a -o json`). Follow each handoff until an agent reports the result, and
+  use `rig capture <seat>@<rig>` to see what it's doing. Then read what it produced and tell the person what the team
+  actually did (the branch, commit, review or PR text), not just that you sent it.
 - **Then ask what's next.** If no team can take the work, fix that or ask the person. Don't quietly do it yourself.
 - **Other ways to work with the team:** `rig send <seat>@<rig> "..."` types into an agent's terminal,
   `rig capture <seat>@<rig>` reads its screen, and `rig ps --nodes --rig <rig>` shows who's on it.
@@ -71,4 +84,4 @@ machine without a yes.
 - **Everything in the library:** `rig context list`.
 - **Exact syntax:** `rig <command> --help` is always current for the installed version.
 
-Written for OpenRig 0.6.5, with the team names 0.6.6 uses. When something here and `--help` disagree, `--help` wins.
+Written for OpenRig 0.6.6. When something here and `--help` disagree, `--help` wins.
