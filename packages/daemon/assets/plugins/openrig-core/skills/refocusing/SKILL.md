@@ -11,10 +11,11 @@ metadata:
 
 # Refocusing
 
-When invoking through the plugin skill tool, use the registered name
-`openrig-core:refocusing`. If that plugin is not loaded by the current harness,
-read this file and run the bundled script directly; hook registration alone does
-not make a skill visible to the harness.
+Invoke the skill as `refocusing`, its frontmatter name. OpenRig seeds it in the
+Claude and Codex global skill roots and includes selected plugin skills in managed
+loadouts. Existing externally managed copies remain authoritative. If the harness
+has not discovered it yet, read this installed skill file and run its script directly;
+hook registration alone does not prove native skill discovery.
 
 Refocus preserves a long session's earned expertise while re-grounding it in current intent and
 lived context. It is not a restart, wake, or phase checkpoint.

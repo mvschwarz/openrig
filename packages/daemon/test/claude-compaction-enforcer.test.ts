@@ -168,7 +168,7 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(outcome).toEqual({ triggered: true });
     expect(send).toHaveBeenLastCalledWith(
       "claude-seat@rig",
-      expect.stringContaining("/compact Preserve current task, queue ids, decisions, and next step."),
+      expect.stringContaining("Preserve current task, queue ids, decisions, and next step."),
       expect.objectContaining({ beforeWrite: expect.any(Function) }),
     );
     expect(send.mock.calls[1]![1]).toContain("Treat that later normal user message as operator-authorized");

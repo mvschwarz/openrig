@@ -189,6 +189,7 @@ function renderTrace() {
     script,
     "--trees", trees,
     "--depth", process.env.OPENRIG_REFOCUS_DEPTH || "light",
+    "--check",
   ];
   if (process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE) {
     args.push("--topology-start", process.env.OPENRIG_REFOCUS_TOPOLOGY_NODE);
@@ -214,9 +215,11 @@ function renderTrace() {
     maxBuffer: 16 * 1024 * 1024,
   });
   const reason = result.error?.message || result.stderr?.trim() || `trace exited ${result.status ?? "without a status"}`;
-  const trace = !result.error && result.status === 0 && result.stdout.trim()
-    ? result.stdout.trim() : `TRACE GAP — ${String(reason).replace(/\s+/g, " ").trim()}`;
-  return [trace, role].filter(Boolean).join("\n\n");
+  const trace = result.stdout?.trim() || `TRACE GAP — ${String(reason).replace(/\s+/g, " ").trim()}`;
+  return {
+    text: [trace, role].filter(Boolean).join("\n\n"),
+    failed: Boolean(result.error) || result.status !== 0 || !result.stdout?.trim(),
+  };
 }
 
 (async () => {
@@ -227,13 +230,10 @@ function renderTrace() {
   const event = input.hook_event_name || "UserPromptSubmit";
   const harness = runtime();
 
-  // The managed restore first asks for an acknowledgement only. Leave due-state
-  // untouched until the subsequent restore request, when the seat may act.
-  if (event === "UserPromptSubmit" && input.prompt === [
-    "OpenRig post-compaction turn boundary.",
-    "Please acknowledge this message briefly.",
-    "Do not restore yet; the next normal user message will contain the restore instructions.",
-  ].join(" ")) process.exit(0);
+  // The acknowledgement is never an actionable restore turn. The managed
+  // marker below also holds earlier/later peer messages, not just this prompt.
+  const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
+  if (event === "UserPromptSubmit" && prompt.startsWith("OpenRig post-compaction turn boundary.")) process.exit(0);
 
   // Fresh-session orientation is the default onboarding pack's job. Even a manually invoked hook must
   // no-op here, so a stale registration cannot corrupt the world install.
@@ -343,18 +343,39 @@ function renderTrace() {
   if (!due) process.exit(0);
 
   if (event !== "UserPromptSubmit") {
+    if (event === "PostCompact" && harness === "claude") {
+      // PreCompact records whether THIS compact was initiated by the enforcer.
+      // A manual /compact overwrites the marker with false; other occupants
+      // cannot hold this session. Read the early sentinel first if it survives.
+      state.managedRestorePending = false;
+      for (const suffix of [".expected.json", ".json"]) {
+        try {
+          const marker = JSON.parse(fs.readFileSync(path.join(home, "compaction", "restore-pending", seatKey + suffix), "utf8"));
+          if (marker.sessionName !== seat || (marker.sessionId ? marker.sessionId !== identity : !transcriptPath || marker.transcriptPath !== transcriptPath)) continue;
+          state.managedRestorePending = marker.managedRefocusPending === true;
+          break;
+        } catch {}
+      }
+    }
     if (event === "PostCompact" || !state.pendingOn) state.pendingOn = event;
     state.pendingAt ||= new Date().toISOString();
     persist();
     process.exit(0);
   }
 
+  if (harness === "claude" && state.managedRestorePending) {
+    if (!prompt.startsWith("Please respond to this normal user message now by restoring this Claude session after compaction.")) process.exit(0);
+    delete state.managedRestorePending;
+    persist();
+  }
+
   // Run the public trace before resolving a context ref. Besides keeping the
   // content ladder untouched, this makes `rig context get` the last resolver
   // call and preserves the existing observable ref contract.
-  const trace = renderTrace();
+  const rendered = renderTrace();
+  const trace = rendered.text;
   const configured = readConfiguredContent(home);
-  const failed = /(?:TRACE GAP|NOTES RESOLUTION GAP)/.test(trace) || Boolean(configured.failure);
+  const failed = rendered.failed || Boolean(configured.failure);
   const why = onDemand
     ? "on demand"
     : state.pendingOn === "PostCompact"

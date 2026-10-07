@@ -874,10 +874,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       logger: (...args) => console.log("[openrig]", ...args),
     });
     await vendorService.ensureLatest("openrig-core");
-    vendorService.ensureSkillGlobally("openrig-core", "openrig-skills", [
-      nodePath.join(os.homedir(), ".claude", "skills"),
-      nodePath.join(os.homedir(), ".agents", "skills"),
-    ]);
+    for (const skill of ["openrig-skills", "refocusing"]) {
+      vendorService.ensureSkillGlobally("openrig-core", skill, [
+        nodePath.join(os.homedir(), ".claude", "skills"),
+        nodePath.join(os.homedir(), ".agents", "skills"),
+      ]);
+    }
   } catch (err) {
     console.error(`[openrig] plugin vendor setup warning: ${(err as Error).message}`);
   }

@@ -26,7 +26,7 @@ function recordRefocusResult({ home, seat, identity, failed }) {
       "--hint-type", "issue", "--hint-tags", "issue,refocus",
       "--body", `Refocus failed on ${state.failures} consecutive attempts for ${seat}. Orientation remains unverified; inspect this seat's refocus hook diagnostics.`,
       "--json",
-    ], { encoding: "utf8", timeout: 500, maxBuffer: 64 * 1024, env: process.env });
+    ], { encoding: "utf8", timeout: Math.max(1, Math.min(1_500, 4_500 - Math.floor(process.uptime() * 1_000))), maxBuffer: 64 * 1024, env: process.env });
     if (!result.error && result.status === 0) {
       state.reportedAt = new Date().toISOString();
       fs.writeFileSync(file, JSON.stringify(state), { mode: 0o600 });

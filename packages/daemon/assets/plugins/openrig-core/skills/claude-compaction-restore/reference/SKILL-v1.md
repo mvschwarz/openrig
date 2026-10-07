@@ -77,7 +77,7 @@ node ~/.claude/skills/claude-compaction-restore/scripts/restore-from-jsonl.mjs /
    task files in full within the stated budget; record any remaining gaps.
 6. Re-establish the task's purpose and operating context from the current project,
    mission and seat files. A transcript summary alone does not establish current
-   scope or obligations. Use the shipped `openrig-core:refocusing` skill for the path-only
+   scope or obligations. Use the shipped `refocusing` skill for the path-only
    topology/work trace when operating inside OpenRig.
 7. Report the read-depth audit below. Once the required context is restored, use
    the packet's requested acknowledgment, normally:

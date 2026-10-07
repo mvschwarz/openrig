@@ -19,7 +19,7 @@ function fixture() {
   const calls = join(root, "calls");
   const transcript = join(root, "transcript.jsonl");
   writeFileSync(transcript, "x".repeat(100));
-  writeFileSync(trace, '#!/bin/sh\nprintf "%s" "$TRACE_RESULT"\n');
+  writeFileSync(trace, '#!/bin/sh\nprintf "%s" "$TRACE_RESULT"\nexit "${TRACE_STATUS:-0}"\n');
   writeFileSync(rig, '#!/bin/sh\nif [ "$1 $2" = "stream emit" ]; then\n printf "%s\\n" "$*" >> "$CALLS"\n exit "${STREAM_EXIT:-0}"\nfi\nprintf "{}"\n');
   chmodSync(trace, 0o755);
   chmodSync(rig, 0o755);
@@ -32,7 +32,7 @@ function fixture() {
         OPENRIG_REFOCUS_CONTENT_REF: "", OPENRIG_REFOCUS_CONTENT_FILE: "", OPENRIG_REFOCUS_TREES: "work",
         OPENRIG_REFOCUS_WORK_NODE: root, OPENRIG_WORKSPACE_ROOT: root,
         PYTHON: trace, TRACE_RESULT: good ? "WORK TRACE: current intent" : "TRACE GAP — fixture resolver unavailable",
-        CALLS: calls, ...extra },
+        TRACE_STATUS: good ? "0" : "1", CALLS: calls, ...extra },
     });
     expect(result.status, result.stderr).toBe(0);
     return result.stdout;

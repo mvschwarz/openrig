@@ -6,7 +6,7 @@
 
 Discomfort on any of these is the signal: drift feels like work.
 
-The `openrig-core:refocusing` skill carries the source-appropriate path-only trace. Its
+The `refocusing` skill carries the source-appropriate path-only trace. Its
 `scripts/trace-to-root.py` walks both current trees by default: topology `LEARNED.md`, then work
 `SPEC.md` intent plus `NOTES.md`. Change breadth with `OPENRIG_REFOCUS_TREES=topology|work|both`
 and read depth with `OPENRIG_REFOCUS_DEPTH=light|full`.
