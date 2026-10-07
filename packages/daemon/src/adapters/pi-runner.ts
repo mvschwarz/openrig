@@ -15,8 +15,8 @@
 // a dead pi process prints the EXIT/ERROR marker and records `exited` in the
 // sidecar — never a silently frozen pane.
 //
-// Only node builtins + pi-runner-protocol are imported so the compiled entry
-// stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
+// Only node builtins and local runner helpers are imported so the compiled
+// entry stays runnable as `node <dist>/adapters/pi-runner.js` with no daemon deps.
 
 import fs from "node:fs";
 import nodePath from "node:path";
@@ -27,6 +27,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
+import { piCredentialNotice } from "./pi-readiness.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
@@ -828,6 +829,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     runtime,
   });
 
+  if (runtime === "pi") {
+    console.log(`[pi-runner] seat ${args.sessionName}: ${piCredentialNotice({
+      model: args.model, agentDir: paths.agentDir, env: childEnv,
+      readFile: (file) => {
+        if (fs.statSync(file).size > 1024 * 1024) throw new Error("Unbounded metadata");
+        return fs.readFileSync(file, "utf8");
+      },
+    })}`);
+  }
   console.log(`[${runtime}-runner] starting ${runtime} --mode rpc (seat ${args.sessionName})`);
   console.log(`[${runtime}-runner] send text normally; prefixes: "/followup <text>" queues after the turn, "/abort" cancels`);
 
