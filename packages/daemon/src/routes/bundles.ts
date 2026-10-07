@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import nodePath from "node:path";
 import { Hono } from "hono";
+import { bootstrapFailureResponse } from "./bootstrap-failure-response.js";
 import type { EventBus } from "../domain/event-bus.js";
 import type { BootstrapOrchestrator } from "../domain/bootstrap-orchestrator.js";
 import type { BootstrapRepository } from "../domain/bootstrap-repository.js";
@@ -1214,16 +1215,8 @@ bundleRoutes.post("/install", async (c) => {
       }
       // Plan failed — structured mapping (same as bootstrap plan route)
       eventBus.emit({ type: "bootstrap.failed", runId: result.runId, sourceRef: bundlePath, error: result.errors[0] ?? "plan failed" });
-      const failedStage = result.stages.find((s: { status: string; detail?: unknown }) => s.status === "failed" || s.status === "blocked");
-      let httpStatus: number = 500;
-      if (failedStage) {
-        if (failedStage.status === "blocked") httpStatus = 409;
-        else if (failedStage.stage === "resolve_spec") {
-          const detail = failedStage.detail as { code?: string } | undefined;
-          if (detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "bundle_error") httpStatus = 400;
-        }
-      }
-      return c.json(result, httpStatus as 400 | 409 | 500);
+      const failure = bootstrapFailureResponse(result, "plan");
+      return c.json(failure.body, failure.status);
     } catch (err) {
       return c.json({ error: (err as Error).message }, 500);
     }
@@ -1276,8 +1269,8 @@ bundleRoutes.post("/install", async (c) => {
       bundleManifest: installMeta?.bundleManifest,
       routingFailures: result.bundleRouting?.routingFailures,
     });
-    const hasBlocked = result.stages.some((s: { status: string }) => s.status === "blocked");
-    return c.json(result, hasBlocked ? 409 : 500);
+    const failure = bootstrapFailureResponse(result, "apply");
+    return c.json(failure.body, failure.status);
   } catch (err) {
     bootstrapRepo.updateRunStatus(run.id, "failed");
     eventBus.emit({ type: "bootstrap.failed", runId: run.id, sourceRef: bundlePath, error: (err as Error).message });

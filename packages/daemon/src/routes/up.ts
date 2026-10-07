@@ -1,5 +1,6 @@
 import nodePath from "node:path";
 import { Hono } from "hono";
+import { bootstrapFailureResponse } from "./bootstrap-failure-response.js";
 import type { BootstrapOrchestrator } from "../domain/bootstrap-orchestrator.js";
 import type { BootstrapRepository } from "../domain/bootstrap-repository.js";
 import type { EventBus } from "../domain/event-bus.js";
@@ -359,14 +360,8 @@ upRoutes.post("/", async (c) => {
       }
       // Plan failed
       eventBus.emit({ type: "bootstrap.failed", runId: result.runId, sourceRef, error: result.errors[0] ?? "plan failed" });
-      const failedStage = result.stages.find((s) => s.status === "failed" || s.status === "blocked");
-      let httpStatus: 400 | 409 | 500 = 500;
-      if (failedStage?.status === "blocked") httpStatus = 409;
-      else if (failedStage?.stage === "resolve_spec") {
-        const detail = failedStage.detail as { code?: string } | undefined;
-        if (detail?.code === "file_not_found" || detail?.code === "parse_error" || detail?.code === "validation_failed" || detail?.code === "bundle_error" || detail?.code === "cycle_error" || detail?.code === "invalid_cwd") httpStatus = 400;
-      }
-      return c.json(result, httpStatus);
+      const failure = bootstrapFailureResponse(result, "plan");
+      return c.json(failure.body, failure.status);
     }
 
     // Apply mode — full lifecycle
@@ -429,48 +424,8 @@ upRoutes.post("/", async (c) => {
         return c.json({ ...result, attachCommand }, 200);
       }
       eventBus.emit({ type: "bootstrap.failed", runId: result.runId, sourceRef, error: result.errors[0] ?? "failed" });
-      const hasBlocked = result.stages.some((s) => s.status === "blocked");
-      // OPR.0.3.2.22 Bug 1 BONUS — surface the failure code at the TOP LEVEL
-      // and include import_rig-stage codes (cycle_error, preflight_failed,
-      // validation_failed, service_boot_failed) in the 4xx map. CLI up.ts
-      // already branches on res.data["code"] for these codes; before this
-      // fix the daemon left the code buried in stages[N].detail.code and
-      // returned a bare 500, which is exactly what the openrig-comms
-      // hero-flow dogfood hit on a fresh 0.3.1 install.
-      let topLevelCode: string | undefined;
-      // S5b final-fix F1 (OPR.0.5.4.11): the running-name guard refusal is a
-      // CONFLICT, not a server error — promote its code AND its teaching
-      // message to the top level so the CLI can render the locked refusal.
-      // The flat import path packs the full outcome into stage detail
-      // (message present); the pod path lifts the message into
-      // result.errors[0] and packs only the code — read both.
-      let conflictError: string | undefined;
-      const hasConflict = result.stages.some((s) => {
-        if (s.status !== "failed" || s.stage !== "import_rig") return false;
-        const detail = s.detail as { code?: string; message?: string } | undefined;
-        // #141: an import refused because a same-name rig could not be confirmed stopped is a conflict too.
-        if (detail?.code !== "rig_name_running" && detail?.code !== "generation_unconfirmed") return false;
-        topLevelCode ??= detail.code;
-        conflictError ??= detail.message ?? result.errors[0];
-        return true;
-      });
-      const hasBadRequest = result.stages.some((s) => {
-        if (s.status !== "failed") return false;
-        const detail = s.detail as { code?: string } | undefined;
-        const code = detail?.code;
-        if (!code) return false;
-        const isResolveSpec4xx = s.stage === "resolve_spec" && (code === "file_not_found" || code === "parse_error" || code === "validation_failed" || code === "bundle_error" || code === "target_conflict" || code === "cycle_error" || code === "invalid_cwd");
-        const isImportRig4xx = s.stage === "import_rig" && (code === "validation_failed" || code === "preflight_failed" || code === "cycle_error" || code === "service_boot_failed" || code === "compose_project_conflict");
-        if (isResolveSpec4xx || isImportRig4xx) {
-          topLevelCode ??= code;
-          return true;
-        }
-        return false;
-      });
-      const failedBody = topLevelCode
-        ? { ...result, code: topLevelCode, ...(conflictError ? { error: conflictError } : {}) }
-        : result;
-      return c.json(failedBody, hasBlocked || hasConflict ? 409 : hasBadRequest ? 400 : 500);
+      const failure = bootstrapFailureResponse(result, "apply");
+      return c.json(failure.body, failure.status);
     } catch (err) {
       bootstrapRepo.updateRunStatus(run.id, "failed");
       eventBus.emit({ type: "bootstrap.failed", runId: run.id, sourceRef, error: (err as Error).message });
