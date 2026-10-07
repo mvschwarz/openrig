@@ -405,6 +405,10 @@ const CONTINUES_NOTE = "The rest of this brief follows in this thread.";
 const WORST_CASE_MENTION_ID = "U".padEnd(32, "X");
 const DETAIL_NOTE = "Supplemental detail follows in this thread.";
 
+function worstCaseSizing(opts: SubsystemSlackDeliveryOpts): SubsystemSlackDeliveryOpts {
+  return { ...opts, resolveMentionUserId: () => WORST_CASE_MENTION_ID };
+}
+
 function partIdFor(decisionId: string, count: number, index: number): string {
   return count === 1 ? decisionId : `${decisionId}:part:${index + 1}`;
 }
@@ -434,7 +438,7 @@ function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decis
   // The primary is sized with a worst-case mention, not the current one: the mention follows
   // the registry and availability, so sizing with it would move the cuts between an interrupted
   // attempt and its retry, losing or repeating text. The real render is still preflighted.
-  const sizing: SubsystemSlackDeliveryOpts = { ...opts, resolveMentionUserId: () => WORST_CASE_MENTION_ID };
+  const sizing = worstCaseSizing(opts);
   const roomFor = (part: DeliveryPart, index: number, reserve = 0): number => {
     const frame = renderPart(sizing, q, { ...part, body: "" }, index, partIdFor(decisionId, 2, index));
     return Math.min(SLACK_SECTION_CAP, SLACK_TEXT_CAP - frame.text.length - 1) - reserve;
@@ -473,20 +477,28 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
           { ...q, humanDetail: undefined, humanQuestions: undefined, summary: `Supplemental detail: ${q.summary ?? ""}`, body: q.humanDetail, media: [], evidenceRef: null },
         ]
       : [q];
-    const preflight = (candidate: DeliveryPart[]) => {
-      for (const [index, part] of candidate.entries()) renderPart(opts, q, part, index, partIdFor(decision.decisionId, candidate.length, index));
+    const preflight = (candidate: DeliveryPart[], render = opts) => {
+      for (const [index, part] of candidate.entries()) renderPart(render, q, part, index, partIdFor(decision.decisionId, candidate.length, index));
     };
     try {
+      let splitError: unknown;
       try {
-        preflight(parts);
+        // The shape is chosen with the worst-case mention too, so a retry whose mention changed
+        // posts the same parts under the same ids instead of switching between one message and a split.
+        preflight(parts, worstCaseSizing(opts));
       } catch (error) {
         if (!(error instanceof HumanMessageShapeError)) throw error;
         // #897 — too long for the authored parts: split, and refuse only if that can't fit.
-        const split = splitIntoParts(opts, q, decision.decisionId);
-        if (split.length < 2) throw error;
-        preflight(split);
-        parts = split;
+        try {
+          const split = splitIntoParts(opts, q, decision.decisionId);
+          if (split.length > 1) parts = split;
+        } catch (e) {
+          if (!(e instanceof HumanMessageShapeError)) throw e;
+          splitError = e;
+        }
       }
+      // The real render, with the real mention or none.
+      try { preflight(parts); } catch (error) { throw splitError ?? error; }
     } catch (error) {
       const detail = (error as Error).message;
       try { opts.onTransportFailed?.(q, "human-message-unrenderable", detail); }
