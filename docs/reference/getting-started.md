@@ -148,7 +148,7 @@ when it starts the daemon.
 
 ## Open the kernel conversations
 
-This is the **welcome screen** or **OpenRig view**. If someone asks to **“show me my agents”** or **“see my
+This is the **welcome screen** or **OpenRig view**. If someone asks to **“show me my agents”**, **“show me the terminals”** or **“see my
 agents”**, use `rig terminal open saved:kernel --window`; you do not need to have
 run setup yourself to discover or use it. When the person has already asked you
 to open it, act on that request. Otherwise offer it as below.
@@ -203,9 +203,11 @@ view named `kernel` still takes precedence.
 
 Inspect `opened`, `absent`, `degraded`, `window` and any notes. Confirm the new
 surface visibly shows the intended conversations and TUI, and that the original
-terminal remains intact. A created window or successful CLI response alone is
-not visual confirmation. A partial view remains partial. If the shared TUI tile
-shows a shell, the installing agent starts `rig tui` in that new tile.
+terminal remains intact. The person sees Herdr only in a terminal they can see.
+Creating its workspace or switching the shared TUI to `:terminals` does not open
+that terminal. A created window or successful CLI response alone is not visual
+confirmation. A partial view remains partial. If the shared TUI tile shows a
+shell, the installing agent starts `rig tui` in that new tile.
 
 Opening the view can happen while the kernel finishes starting. Report its actual
 state; do not start or restore seats just to obtain a view. If the kernel is absent
@@ -277,10 +279,16 @@ commands need to be assembled by the person.
 ### Headless or SSH handoff
 
 A provider running on the server does not establish a window on the person's
-desktop. Say **“No visible terminal was opened here.”** The installing agent uses
-the known SSH destination and current operator binding to provide an exact remote
-attachment when requested. If only an HTTP daemon address is known, obtain the
-SSH connection details instead of inventing them. No new account or credential
+desktop. Say **“No visible terminal was opened here.”** Ask the person to open a
+new terminal window or tab. The installing agent gives one complete connection
+and attachment command for that terminal, using the known SSH host and account.
+For Herdr, inspect `rig terminal status --provider herdr --json` and use the
+provider's reported `launch.socketPath` with the installed Herdr binary; do not
+guess an endpoint or inherit a different `HERDR_SESSION`. Once that client is
+open, the agent can select `saved:kernel` with the existing-workspace route above.
+For a manual operator-only conversation, use the current operator binding from
+[Talk to the operator in any terminal](#talk-to-the-operator-in-any-terminal).
+If only an HTTP daemon address is known, obtain the SSH connection details instead of inventing them. No new account or credential
 provisioning is part of this handoff. Report any headless or unverified branch.
 
 ### Installing-agent handoff

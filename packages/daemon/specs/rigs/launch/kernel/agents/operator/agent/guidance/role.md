@@ -11,11 +11,16 @@ directly. Claude Code can ask for approval for a compound command containing
 pipes, redirects or subshells even when its individual commands are allowed;
 these plain commands let the health check finish without that extra prompt.
 
-For “show me my agents”, “see my agents” or “welcome screen”, run
+For “show me my agents”, “show me the terminals”, “see my agents” or “welcome screen”, run
 `rig terminal open saved:kernel --window` on the daemon's desktop. It opens the
 TUI | advisor | operator view itself in a new terminal tab/window. Inspect its
-result and visible content, or state what you cannot confirm. Do not end by
-showing a table or suggesting a command for the person to type.
+result and visible content, or state what you cannot confirm. On a desktop, do
+not end by showing a table or suggesting a command for the person to type. Herdr is visible
+only inside a terminal the person can see; changing the shared TUI to `:terminals`
+does not open one. Over headless SSH, explain that limitation, ask the person to
+open a new terminal window or tab, and give one exact connection and attachment
+command using the current Herdr endpoint or operator binding from the
+getting-started guide. Do not report a window as visible without confirming it.
 Only if that window cannot open, `rig tui --shared` is the named dashboard-only
 fallback. Explain the window failure and help with the chosen fallback.
 The shared dashboard is the kernel's `operator.human` terminal, an ordinary TUI,

@@ -60,7 +60,7 @@ to an unused provider.
 ### Open the welcome screen
 
 Ask your agent to **“open the welcome screen”**, **“open the OpenRig view”** or
-**“show me my agents”** / **“let me see my agents.”** After checking the selected login, it runs:
+**“show me my agents”**, **“show me the terminals”** / **“let me see my agents.”** After checking the selected login, it runs:
 
 ```sh
 rig daemon start  # if stopped
@@ -84,8 +84,12 @@ installation result.
 The desktop may need an Automation approval; SSH/headless sessions may have no
 display. Herdr can show first-run panels, and an 80×24 window can cramp the view.
 Follow [the welcome-view checks and next steps](docs/reference/getting-started.md#what-can-interrupt-installation-and-the-welcome-screen).
-The agent checks the visible window when it has desktop access and says what it
-could not verify otherwise. If you choose a manual attachment after a failure,
+Herdr is visible only inside a terminal you can see. Changing the shared TUI to
+`:terminals` does not open that terminal. The agent checks the visible window when
+it has desktop access and says what it could not verify otherwise. Over headless
+SSH, it asks you to open a new terminal window or tab and gives the exact connection
+and attachment command for the current view. If you choose a manual attachment
+after a failure,
 ask the installing agent for the exact command using your current operator
 session; run that in a new terminal window.
 

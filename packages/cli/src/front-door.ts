@@ -81,7 +81,7 @@ export const USAGE_LINES = [
   "  rig              open the status dashboard (interactive terminal only; not agent chat)",
   "  rig tui          open the same status dashboard",
   "  rig terminal open saved:kernel --window   open the welcome screen in a new terminal tab/window",
-  "                   For show me my agents: the agent runs it on the daemon desktop and checks the result",
+  "                   For show me my agents or show me the terminals: the agent runs it on the daemon desktop and checks the result",
   "  rig tui --shared dashboard-only fallback if the welcome window cannot open",
   "  rig --help       full command list",
   "  rig up <rig>     bring a rig up",

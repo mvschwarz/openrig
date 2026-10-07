@@ -16,7 +16,7 @@ machine and have things happen.
   acts on behalf of the operator.human; ops decisions needing human
   approval escalate.
 - **operator.human** is the shared mission-control terminal. A fresh kernel
-  starts `rig tui` there. For “show me my agents” or “welcome screen”, run
+  starts `rig tui` there. For “show me my agents”, “show me the terminals” or “welcome screen”, run
   `rig terminal open saved:kernel --window` to open all three columns. Only if
   the window cannot open, `rig tui --shared` is the dashboard-only fallback;
   detaching preserves navigation. It is a screen, not proof a

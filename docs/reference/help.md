@@ -66,7 +66,7 @@ Follow [Open the kernel conversations](getting-started.md#open-the-kernel-conver
 `rig terminal open saved:kernel --window` needs no saved-view YAML or starter team. After the selected login
 works, start the daemon if stopped, then read `rig status` and `rig ps --nodes --rig kernel`. Started is not ready;
 the view can open while the agents finish starting, with that state reported honestly.
-The person's words **“welcome screen”**, **“OpenRig view”**, **“show me my agents”** or **“see my agents”** lead to that command.
+The person's words **“welcome screen”**, **“OpenRig view”**, **“show me my agents”**, **“show me the terminals”** or **“see my agents”** lead to that command.
 It opens the desktop window itself. An agent can run it from its shell on the daemon's desktop, including when
 it did not run setup; “my shell isn't your terminal” is not a reason to stop. Use the person's request to open it,
 or ask **“Open the OpenRig view now?”** if they have not chosen. The command uses installed Herdr, otherwise plain
@@ -79,6 +79,9 @@ If the person chooses a manual attachment after a failure, read `rig ps --nodes 
 `operator.agent`, and fill its returned `canonicalSessionName` into
 `env -u TMUX tmux attach-session -t '=<canonicalSessionName>'`. Give the completed command for a new terminal on
 that host and account; not every failure prints one. Over SSH, use the known connection details, as in the guide.
+Herdr is visible only inside a terminal the person can see. Switching the shared TUI to `:terminals` does not
+open that terminal. Over headless SSH, tell the person to open a new terminal window or tab and give the exact
+connection and attachment command using the current Herdr endpoint or operator binding, as in the guide.
 No, SSH and headless use are valid background outcomes. For herdr, open or attach the actual session and check the
 visible view; a created workspace or a CLI running in a new OS window is not visual proof.
 Show TUI | advisor | operator for Claude-only, Codex-only and mixed kernels; the queue worker stays accessible through
