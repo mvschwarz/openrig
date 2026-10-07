@@ -208,6 +208,39 @@ describe("long human asks (#897)", () => {
     expect(unescape(posted[0]!.blocks[1]!.text!.text)).toBe(body);
   });
 
+  it("plans again, rather than refusing, when a retry can't render its recorded plan", async () => {
+    // An ask from no seat is signed with the configured sender label. At the limit with one label,
+    // it no longer fits as one message once the label has grown by the retry.
+    const ask = (body: string) => decision("replan", { sourceSession: undefined, body, summary: nearLimitSummary });
+    const fitsWithLabel = async (length: number) => {
+      const posts: Post[] = [];
+      await subsystemSlackDeliver({ ...stores(`label-probe-${length}`), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts) })(ask("a".repeat(length)));
+      return posts.length === 1;
+    };
+    let fits = 0, splits = 6000;
+    while (splits - fits > 1) { const mid = (fits + splits) >> 1; if (await fitsWithLabel(mid)) fits = mid; else splits = mid; }
+    const body = "a".repeat(fits);
+
+    const posted: Post[] = [];
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url, init) => {
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: posted });
+      if (++calls === 1) throw new Error("synthetic timeout before the post landed");
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${calls}.1` };
+      posted.push(msg);
+      return reply({ ok: true, ts: msg.ts });
+    };
+    const base = { ...stores("replan"), botToken: "synthetic", channel: "C", fetchImpl };
+    // The first attempt plans one message, and it never lands.
+    expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask(body))).ok).toBe(false);
+    // The label grows by more than ten characters before the retry.
+    expect(await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask(body))).toEqual({ ok: true });
+    const bodies = posted.map((p) => unescape(p.blocks[1]!.text!.text));
+    expect(bodies.length).toBeGreaterThan(1);
+    expect(bodies[0]!.endsWith(NOTE)).toBe(true);
+    expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(body);
+  });
+
   it("redacts secrets before cutting, so no part carries a piece of one", async () => {
     const posts: Post[] = [];
     const deliver = subsystemSlackDeliver({ ...stores("secret"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts) });

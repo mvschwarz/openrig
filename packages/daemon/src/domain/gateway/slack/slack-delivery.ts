@@ -412,7 +412,8 @@ const DELIVERY_PLAN = "::delivery-plan::";
 
 function recordedPlan(attempted: Set<string>, decisionId: string): DeliveryPlan | undefined {
   const prefix = `${decisionId}${DELIVERY_PLAN}`;
-  const key = [...attempted.keys()].find((candidate) => candidate.startsWith(prefix));
+  // The newest plan wins: a retry that had to plan again keeps its new plan after the first.
+  const key = [...attempted.keys()].filter((candidate) => candidate.startsWith(prefix)).at(-1);
   return key ? JSON.parse(Buffer.from(key.slice(prefix.length), "base64url").toString("utf8")) as DeliveryPlan : undefined;
 }
 
@@ -494,28 +495,42 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
     let recorded: DeliveryPlan | undefined;
     try { recorded = recordedPlan(opts.attempted.load(), decision.decisionId); }
     catch (error) { return { ok: false, class: "receipt-failed", detail: `delivery plan is unreadable: ${(error as Error).message}` }; }
-    const mention = recorded ? recorded.mention : opts.resolveMentionUserId?.(q);
-    const planned: SubsystemSlackDeliveryOpts = { ...opts, resolveMentionUserId: () => mention };
-    let plan: DeliveryPlan = { mention };
-    const preflight = (candidate: DeliveryPart[]) => {
-      for (const [index, part] of candidate.entries()) renderPart(planned, q, part, index, partIdFor(decision.decisionId, candidate.length, index));
+    const authored = parts;
+    /** The parts a plan renders to, preflighted; with no plan, decide one from the real render. */
+    const choose = (kept?: DeliveryPlan) => {
+      const mention = kept ? kept.mention : opts.resolveMentionUserId?.(q);
+      const planned: SubsystemSlackDeliveryOpts = { ...opts, resolveMentionUserId: () => mention };
+      const preflight = (candidate: DeliveryPart[]) => {
+        for (const [index, part] of candidate.entries()) renderPart(planned, q, part, index, partIdFor(decision.decisionId, candidate.length, index));
+      };
+      if (kept?.body) {
+        const split = splitIntoParts(planned, q, decision.decisionId, kept).parts;
+        preflight(split);
+        return { parts: split, planned, plan: kept };
+      }
+      try {
+        preflight(authored);
+        return { parts: authored, planned, plan: { mention } };
+      } catch (error) {
+        if (kept || !(error instanceof HumanMessageShapeError)) throw error;
+        // #897 — too long for the authored parts: split, and refuse only if that can't fit.
+        const split = splitIntoParts(planned, q, decision.decisionId);
+        if (split.parts.length < 2) throw error;
+        preflight(split.parts);
+        return { parts: split.parts, planned, plan: { mention, ...split.plan } };
+      }
     };
+    let chosen: ReturnType<typeof choose>;
+    let replanned = false;
     try {
-      if (recorded?.body) {
-        parts = splitIntoParts(planned, q, decision.decisionId, recorded).parts;
-        preflight(parts);
-      } else {
-        try {
-          preflight(parts);
-        } catch (error) {
-          if (recorded || !(error instanceof HumanMessageShapeError)) throw error;
-          // #897 — too long for the authored parts: split, and refuse only if that can't fit.
-          const split = splitIntoParts(planned, q, decision.decisionId);
-          if (split.parts.length < 2) throw error;
-          preflight(split.parts);
-          parts = split.parts;
-          plan = { mention, ...split.plan };
-        }
+      try {
+        chosen = choose(recorded);
+      } catch (error) {
+        // A recorded plan that no longer renders (the sender label or the rendering changed between
+        // attempts) is planned afresh, as before #897, rather than refused; the new plan is kept.
+        if (!recorded || !(error instanceof HumanMessageShapeError)) throw error;
+        chosen = choose();
+        replanned = true;
       }
     } catch (error) {
       const detail = (error as Error).message;
@@ -523,8 +538,10 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
       catch (receiptError) { return { ok: false, class: "receipt-failed", detail: (receiptError as Error).message }; }
       return { ok: false, class: "human-message-unrenderable", detail };
     }
-    if (!recorded) {
-      try { opts.attempted.mark(`${decision.decisionId}${DELIVERY_PLAN}${Buffer.from(JSON.stringify(plan)).toString("base64url")}`, "delivery-plan"); }
+    parts = chosen.parts;
+    const { planned } = chosen;
+    if (!recorded || replanned) {
+      try { opts.attempted.mark(`${decision.decisionId}${DELIVERY_PLAN}${Buffer.from(JSON.stringify(chosen.plan)).toString("base64url")}`, "delivery-plan"); }
       catch (error) { return { ok: false, class: "receipt-failed", detail: `delivery plan not kept: ${(error as Error).message}` }; }
     }
     const partId = (index: number) => partIdFor(decision.decisionId, parts.length, index);
