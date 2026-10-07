@@ -8,6 +8,10 @@
 // (`slack-posted thread_ts=… message_ts=… channel=… human=… seat=…` — see stampFormat/parse
 // below). rebuildFromStamps() re-derives the table from those stamps, so the map is a cache of
 // queue-row truth, not a second source that can silently diverge.
+//
+// #899 — every message OpenRig posts into a thread for an ask lives in thread_part_map with its own
+// ask and seat (the thread's root may belong to another ask), so a reaction on it can find its ask. Its
+// stamp names its own message_ts and the thread's thread_ts; the root queries below never see these.
 
 import type Database from "better-sqlite3";
 
@@ -109,6 +113,21 @@ export class ThreadSeatMap {
     return row ? project(row) : null;
   }
 
+  /** #899 — record a message OpenRig posted into a thread for an ask, with that ask and its seat (idempotent). */
+  recordPart(m: { messageTs: string; channel: string; threadTs: string; seat: string; conversationId: string }): void {
+    this.db
+      .prepare(`INSERT INTO thread_part_map (message_ts, channel, thread_ts, seat, conversation_id) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(channel, message_ts) DO NOTHING`)
+      .run(m.messageTs, m.channel, m.threadTs, m.seat, m.conversationId);
+  }
+
+  /** #899 — the ask and seat of a message OpenRig posted into a thread in this channel; null for any other message. */
+  partOf(messageTs: string, channel: string): { threadTs: string; seat: string; conversationId: string } | null {
+    const row = this.db.prepare(`SELECT thread_ts, seat, conversation_id FROM thread_part_map WHERE message_ts = ? AND channel = ?`)
+      .get(messageTs, channel) as { thread_ts: string; seat: string; conversation_id: string } | undefined;
+    return row ? { threadTs: row.thread_ts, seat: row.seat, conversationId: row.conversation_id } : null;
+  }
+
   close(threadTs: string): void {
     this.db
       .prepare(`UPDATE thread_seat_map SET state = 'closed', closed_at = ? WHERE thread_ts = ?`)
@@ -123,6 +142,13 @@ export class ThreadSeatMap {
     for (const note of stamps) {
       const m = parsePostedStamp(note);
       if (!m) { skipped++; continue; }
+      if (m.messageTs !== m.threadTs) {
+        // #899 — a reply's stamp maps the message to its own ask and seat; it never opens a thread.
+        if (this.partOf(m.messageTs, m.channel)) { skipped++; continue; }
+        this.recordPart({ messageTs: m.messageTs, channel: m.channel, threadTs: m.threadTs, seat: m.seat, conversationId: m.conversationId });
+        inserted++;
+        continue;
+      }
       const before = this.db.prepare(`SELECT 1 FROM thread_seat_map WHERE thread_ts = ?`).get(m.threadTs);
       if (before) { skipped++; continue; }
       this.open({ threadTs: m.threadTs, channel: m.channel, human: m.human, seat: m.seat, conversationId: m.conversationId });

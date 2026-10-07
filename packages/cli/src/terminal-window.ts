@@ -62,7 +62,7 @@ async function herdrBinary(deps: WindowDeps): Promise<string | null> {
 }
 
 /** New surfaces only. No System Events keystrokes or existing-terminal input. */
-async function windowLauncher(deps: WindowDeps): Promise<(command: string) => Promise<{ app: string; surface: string }>> {
+async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<(command: string) => Promise<{ app: string; surface: string }>> {
   if (deps.platform === "darwin") {
     const app = ["/Applications/Ghostty.app", path.join(deps.env["HOME"] ?? homedir(), "Applications/Ghostty.app")].find(deps.exists);
     let ghostty = false;
@@ -91,15 +91,31 @@ tell application "Ghostty"
 end tell
 end run` : `on run argv
 tell application "Terminal"
-  do script (item 1 of argv)
+  set newTab to do script (item 1 of argv)
+  set sized to false
+  try
+    repeat with targetWindow in windows
+      if newTab is in tabs of targetWindow and (count of tabs of targetWindow) is 1 then
+        set number of columns of newTab to 140
+        set number of rows of newTab to 40
+        set sized to (number of columns of newTab is 140 and number of rows of newTab is 40)
+      end if
+    end repeat
+  end try
   activate
+  if sized then return "window-sized"
 end tell
-return "window"
+return "window-manual"
 end run`;
     // A denied/uncertain Automation request is returned once, never replayed in another app.
     return async command => {
       const surface = (await deps.exec("/usr/bin/osascript", ["-e", script, command], 120_000)).trim();
-      return { app: ghostty ? "Ghostty" : "Terminal", surface };
+      notes.push(ghostty
+        ? "Ghostty's macOS scripting interface does not expose window size. Enlarge the new view manually if its columns are cramped; existing window settings were kept."
+        : surface === "window-sized"
+          ? "The new Terminal tab reports 140 columns by 40 rows."
+          : "Terminal opened, but could not confirm 140 columns by 40 rows. Enlarge the new window manually if needed; do not reopen it just to resize.");
+      return { app: ghostty ? "Ghostty" : "Terminal", surface: ghostty ? surface : "window" };
     };
   }
   if (deps.platform !== "linux" || (!deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"])) {
@@ -108,8 +124,16 @@ end run`;
   for (const app of ["ghostty", "x-terminal-emulator", "gnome-terminal", "konsole", "xterm"]) {
     try { await deps.exec("/bin/sh", ["-c", `command -v ${app}`]); } catch { continue; }
     return async command => {
-      const args = app === "gnome-terminal" ? ["--window", "--", "/bin/sh", "-c", command] : ["-e", "/bin/sh", "-c", command];
+      const prefix = app === "ghostty" ? ["--window-width=140", "--window-height=40", "-e"]
+        : app === "gnome-terminal" ? ["--window", "--geometry=140x40", "--"]
+        : app === "konsole" ? ["-p", "TerminalColumns=140", "-p", "TerminalRows=40", "-e"]
+        : app === "xterm" ? ["-geometry", "140x40", "-e"]
+        : ["-e"];
+      const args = [...prefix, "/bin/sh", "-c", command];
       await deps.launch(app, args);
+      notes.push(app === "x-terminal-emulator"
+        ? "The system terminal launcher has no portable size option. Enlarge the new window manually if its columns are cramped."
+        : "Requested 140 columns by 40 rows for the new window. The desktop may adjust that size; enlarge it manually if needed.");
       return { app, surface: "window-requested" };
     };
   }
@@ -125,10 +149,11 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
   let provider = requestedProvider ?? "herdr";
   let window: { app: string; surface: string } | undefined;
   let viewer: string | undefined;
+  const windowNotes: string[] = [];
   try {
     if (!localDaemon(client.baseUrl)) throw new Error("--window must run on the daemon's own desktop; the configured daemon is remote.");
     if (requestedProvider && !["herdr", "tmux"].includes(requestedProvider)) throw new Error("--window supports herdr or tmux. Use cmux without --window.");
-    const launchWindow = await windowLauncher(deps);
+    const launchWindow = await windowLauncher(deps, windowNotes);
     const herdr = requestedProvider === "tmux" ? null : await herdrBinary(deps);
     if (!herdr && requestedProvider === "herdr") throw new Error("Herdr is not installed. Run rig setup, or use --provider tmux --window.");
     provider = herdr ? "herdr" : "tmux";
@@ -153,9 +178,9 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       }
       if (!alive) throw new Error("The terminal was requested, but herdr's control socket did not become ready. Inspect the new terminal before retrying.");
       const result = await client.post<OpenViewResult>("/api/terminal/open", { view, provider: "herdr", expectedPlan: planId }, { timeoutMs: 45_000 });
-      if (result.status >= 400) return { ...failure(provider, result.data.error ?? `The daemon refused the view (HTTP ${result.status}).`), window, absent: composed.absent, degraded: composed.degraded };
+      if (result.status >= 400) return { ...failure(provider, result.data.error ?? `The daemon refused the view (HTTP ${result.status}).`), window, notes: windowNotes, absent: composed.absent, degraded: composed.degraded };
       if (!Array.isArray(result.data?.opened)) throw new Error("The terminal opened, but the daemon returned no view result. Inspect it before retrying.");
-      return { ...result.data, window, notes: [...(result.data.notes ?? []), "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
+      return { ...result.data, window, notes: [...(result.data.notes ?? []), ...windowNotes, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
     }
 
     const tmux = (await deps.exec("/bin/sh", ["-c", "command -v tmux"]).catch(() => "")).trim();
@@ -183,8 +208,8 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     }
     await deps.exec(tmux, ["select-window", "-t", `${viewer}:view-1`]);
     window = await launchWindow(`env -u TMUX ${shellQuote(tmux)} attach-session -t ${shellQuote(`=${viewer}`)}`);
-    return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
+    return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), absent: composed.absent, degraded: composed.degraded, pages: composed.pages.length, window, notes: [`Viewing session: ${viewer}. Existing conversations were preserved.`, ...windowNotes, "Check the new terminal shows the intended view; window creation alone is not visual confirmation."] };
   } catch (err) {
-    return { ...failure(provider, (err as Error).message), ...(window ? { window } : {}), ...(viewer ? { notes: [`Viewing session ${viewer} may exist. Inspect it before retrying; no existing conversation was replaced.`] } : {}) };
+    return { ...failure(provider, (err as Error).message), ...(window ? { window } : {}), ...(windowNotes.length || viewer ? { notes: [...windowNotes, ...(viewer ? [`Viewing session ${viewer} may exist. Inspect it before retrying; no existing conversation was replaced.`] : [])] } : {}) };
   }
 }
