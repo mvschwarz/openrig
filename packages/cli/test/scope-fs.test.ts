@@ -93,6 +93,47 @@ describe("frontmatter parser", () => {
     expect(fm.custom).toBe("keep-me");
   });
 
+  it.each(["status: active\nstatus: closed", "status: [broken", "- scalar sequence"])("leaves an invalid frontmatter mapping untouched: %j", (block) => {
+    const dir = mktemp();
+    const file = path.join(dir, "README.md");
+    const original = `---\n${block}\n---\n\n# owned body\n`;
+    try {
+      writeFile(file, original);
+      expect(() => updateFrontmatter(file, { status: "closed" })).toThrow(ScopeCliError);
+      expect(fs.readFileSync(file, "utf8")).toBe(original);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("preserves CRLF delimiters, unowned comments, and body when updating a quoted key", () => {
+    const dir = mktemp();
+    const file = path.join(dir, "README.md");
+    const original = "---\r\n\"status\": active\r\n# keep\r\ncustom: 'retain: exactly'\r\n---\r\n\r\n# owned body\r\n";
+    try {
+      writeFile(file, original);
+      updateFrontmatter(file, { status: "closed" });
+      expect(fs.readFileSync(file, "utf8")).toBe(original.replace('"status": active', "status: closed"));
+      expect(readFrontmatter(file)).toMatchObject({ status: "closed", custom: "retain: exactly" });
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it.each([
+    ["owned:\n  stale: value", "replacement"],
+    ["owned: old", { fresh: ["one", "two"] }],
+    ["owned:\n  - stale", { fresh: "value" }],
+    ["owned:", ["fresh"]],
+  ])("replaces the complete owned value in %j", (field, value) => {
+    const dir = mktemp();
+    const file = path.join(dir, "README.md");
+    const unowned = "# retain this comment\ncustom: 'retain: exactly'";
+    try {
+      writeFile(file, `---\n${field}\n${unowned}\n---\nbody\n`);
+      updateFrontmatter(file, { owned: value });
+      expect(readFrontmatter(file)).toEqual({ owned: value, custom: "retain: exactly" });
+      expect(fs.readFileSync(file, "utf8")).toContain(unowned);
+      expect(fs.readFileSync(file, "utf8").endsWith("---\nbody\n")).toBe(true);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+
   it("generates minimal frontmatter when absent", () => {
     const dir = mktemp();
     const p = path.join(dir, "README.md");
