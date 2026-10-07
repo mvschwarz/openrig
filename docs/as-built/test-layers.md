@@ -7,13 +7,13 @@ applies-when: |
   request, what each check actually proves, and what CI will run for you. Also
   read it before claiming a stub-agent scenario covers a behaviour.
 siblings: [arteries.md, README.md, codemap.md]
-last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
 # Test layers: what to run before you push, and what each layer proves
 
-> **This page is a map, not the territory.** It was checked against source at `fcaf1f8e`
+> **This page is a map, not the territory.** It was checked against source at `2620dea8`
 > and it will drift. It is also incomplete on purpose. Before you rely on a command or a
 > claim here, read the script it names or run it. If a behaviour is missing from this page
 > (or from [arteries.md](arteries.md)), that tells you nothing about whether a change to it
@@ -39,7 +39,7 @@ to `main`. In the PR description, say which layers you ran and which you could n
 |---|---|---|---|---|
 | Typecheck | `npm run lint` | Builds the daemon, then `tsc --noEmit` passes for daemon, ui, cli and tui | Any runtime behaviour. Formatting. | Every change |
 | Build | `npm run build` | All four workspaces compile (the UI also runs `vite build`) | That the *published* package is complete (see Packaging) | Every change |
-| Repo checks | `npm run test:repo` | Builds the daemon, then runs `node --test --test-concurrency=1 scripts/*.test.mjs`, `scripts/check-docs-guard.mjs`, `mirror-skills --check` and `generate-context-packs --check` | Package behaviour | Every change. It matters most when you touch `scripts/`, `docs/` or skills. |
+| Repo checks | `npm run test:repo` | Builds the daemon, then runs `node --test --test-concurrency=1 scripts/*.test.mjs`, `scripts/check-first-run-references.mjs`, `scripts/check-docs-guard.mjs`, `mirror-skills --check` and `generate-context-packs --check` | Package behaviour | Every change. It matters most when you touch `scripts/`, `docs/` or skills. |
 | Package suites | `npm run test:workspaces`. One package: `npm run test -w packages/cli`. One file, from the repo root: `npx vitest run packages/cli/test/<file>.test.ts` | Vitest unit and integration tests for daemon, cli and tui. Some of them start real scenario daemons, tmux sessions and stub runners. | The installed package. Real Claude Code or Codex. CI's sandbox conditions (see CI). | Every change (`npm test` covers it) |
 | Web UI suite | `npm run test:ui` | jsdom unit tests for `packages/ui` | Real browser rendering | When you touch `packages/ui`, or a daemon API the UI reads. The web UI is in maintenance mode, so this suite is advisory locally and is not part of `npm test`. |
 | Generated files | `npm run mirror-skills:check`, `npm run generate-context-packs:check` (both part of `npm test`) | Every copy of each shipped skill matches its recorded hash, and every static context pack passes the daemon's own manifest parser and the leak scan | Whether the skill content is any good | After you edit a shipped skill: edit the same file in every copy that carries it, run `node scripts/regen-edge-digests.mjs`, then the check. The full `npm run mirror-skills` apply needs maintainer-only inputs. See "A shipped skill" in [ARCHITECTURE.md](../../ARCHITECTURE.md#a-shipped-skill). |
@@ -66,9 +66,8 @@ are not yet runnable checks.
 ### Gotchas that cost people time
 
 - **Running inside a seat.** The root `vitest.config.ts` makes a root-level file run use its
-  package's config. This bullet reflects #780 (`33eaeda3`, after this page's stamp): the cli,
-  daemon and TUI configs all run the shared root `test/hermetic-env.setup.ts` before any test
-  file. It clears the inherited `OPENRIG_*` and `RIGGED_*` instance selectors (connection,
+  package's config. The cli, daemon and TUI configs all run the shared root
+  `test/hermetic-env.setup.ts` before any test file. It clears the inherited `OPENRIG_*` and `RIGGED_*` instance selectors (connection,
   database, workspace and topology roots, seat identity, bearer tokens), forces a fixture
   `OPENRIG_HOME` and fails if the home is not fixture-scoped. It also wraps `fetch`, so a real
   request to anything other than a loopback ephemeral-port fixture or a registered target fails.
@@ -246,7 +245,7 @@ The stub does not fabricate product outputs. It runs the real daemon, tmux and C
 not Claude Code or Codex, and it differs from them in ways that decide what a stub green
 means:
 
-| Area | What the stub does at `fcaf1f8e` | What that means for your test |
+| Area | What the stub does at `2620dea8` | What that means for your test |
 |---|---|---|
 | Consuming a message | `stub-runner.ts` runs its launch script once and then idles. It has no stdin reader, socket or other input channel. The default script prints `[stub] scripted reply: acknowledged` at boot, before anything has been sent. | A pane showing a reply, or your echoed text, does not prove the message was consumed. No stub scenario can currently prove "delivered and answered". Separately, `rig send --verify` means "appeared in the pane", not acknowledgement (see `rig send --help`), and the scenario `send` step doesn't pass `--verify` at all. |
 | Launch path | `StubRuntimeAdapter` types `node <stub-runner> …` into the pane (`tmux.sendText`, then Enter). Claude Code with an explicit permission mode launches through a managed launch (`ClaudeManagedLaunch.prepare`, `tmux.sendShellCommand`). Otherwise Claude Code, Codex and Pi launch through `SeatLaunchEnvironment.command` and `tmux.sendShellCommand`; the stub adapter does not get that environment. The shell-foreground check in `session-transport.ts` (`unverifiedShellForeground`) runs for every runtime except `terminal` and `claude-code`, and only `codex` has a native-process proof; Claude Code ordinary delivery applies its own uncertainty policy at the input boundary. | A stub seat doesn't exercise the seat launch environment, managed launch, wrappers or native-process identity (the class behind #197). Wrapping the stub in a shell wouldn't change that. |
@@ -383,7 +382,7 @@ not as current status.
 ## Help wanted: command families without a behavioural scenario
 
 > This list may be stale. It was taken from the `rig --help` tree of 0.6.3: 85 visible
-> top-level families. At `fcaf1f8e`, `packages/cli/src/index.ts` registers 87 top-level
+> top-level families. At `2620dea8`, `packages/cli/src/index.ts` registers 87 top-level
 > commands; `roster` and `telemetry` were added since and have no row yet. Before picking one up, check `packages/test-system/scenarios/`, the cases in
 > `scripts/run-pr-scenarios.sh`, and the current `rig --help`.
 > One scenario doesn't cover a family's every option, sequence or platform. A `--help`
@@ -531,10 +530,7 @@ How to make a case useful:
 
 Read these with care. This page notes them and proposes no changes.
 
-- `packages/test-system/README.md`: counts eleven scenarios and says only
-  `queue-baton-survives-restart` runs in CI. The library now holds fifteen, and
-  `transcript-reads-addressed-seat` and `capture-returns-addressed-seat` also run in CI in
-  passing form. `packages/test-system/ci/README.md` describes the CI scenario job, except its
+- `packages/test-system/ci/README.md` describes the CI scenario job, except its
   "Run one case" section, which still says both cases and six runs; the script runs four cases
   and eight containers by default.
 - The headers of `transcript-reads-addressed-seat.yaml` and `capture-returns-addressed-seat.yaml`

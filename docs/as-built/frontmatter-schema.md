@@ -6,13 +6,13 @@ topics: [knowledge-and-context, frontmatter]
 domains: [engineering-advisor, operating-advisor]
 applies-when: |
   Writing or refreshing a source-grounded document under docs/as-built/.
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
 # As-Built Frontmatter
 
-Source snapshot: `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. This describes the source at that commit;
+Source snapshot: `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. This describes the source at that commit;
 it does not establish the version or behavior of a running daemon.
 
 Frontmatter makes an as-built page discoverable and records the source it
@@ -44,7 +44,7 @@ that an installed package or a running system uses that source. Keep runtime
 observations separately qualified.
 
 ```yaml
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ```
 

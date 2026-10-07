@@ -11,7 +11,7 @@ applies-when: |
   and the CLI restore-packet command work.
 siblings: [daemon-core.md, agent-spec-and-startup.md, transport-and-transcripts.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
@@ -22,7 +22,7 @@ The durable-state half of the core product loop:
 captures serialized rig state; restore replays it honestly (no silent
 fresh-fallback); restore-check is a separate read-only readiness probe.
 
-> Verified against source at main `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. Each count below sits beside the
+> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -60,7 +60,7 @@ All in `packages/daemon/src/domain/types.ts`. The spec/projection types live in
     required startup file (`:1161`), or a startup error (`:1271`, `:1282`,
     `:1292`, `:1300`).
   - `operator_recovered` — only from later reconciliation,
-    `reconcileNodeRuntimeTruth` (`:1587`, event at `:1724`).
+    `reconcileNodeRuntimeTruth` (`:1590`, event at `:1727`).
 - **RestoreRigResult** (`types.ts:444`) — the rig-level rollup, **4** values
   (`grep '^export type RestoreRigResult' packages/daemon/src/domain/types.ts | grep -o '"[^"]*"' | wc -l`):
   `fully_restored`, `partially_restored`, `failed`, `not_attempted`.
@@ -200,19 +200,19 @@ cited here by number with the code that carries them):
   (`:1048`); pod-aware resume passes
   `allowFreshFallback: !(isPodAware && resumeRequested)` (`:1217`). Fresh
   launch is explicit: `rig up --existing <rig> --fresh <seats...>`
-  (`packages/cli/src/commands/up.ts:93`). On a terminal, `rig up` asks
+  (`packages/cli/src/commands/up.ts:99`). On a terminal, `rig up` asks
   yes or no for each `awaiting-decision` seat and re-posts with the accepted
-  seats as fresh (`up.ts:578`).
+  seats as fresh (`up.ts:589`).
 - Rule 16 — `rig down` prints the snapshot id and a restore command
-  (`packages/cli/src/commands/down.ts:236–246`); `rig up` on an existing rig
+  (`packages/cli/src/commands/down.ts:242–252`); `rig up` on an existing rig
   prints per-node statuses and the attach command
-  (`packages/cli/src/commands/up.ts:543–576`).
+  (`packages/cli/src/commands/up.ts:554–587`).
 
 (The full rule list lives in `architecture-rules-and-event-system.md`.)
 
 ## 4. Auto-snapshot and existing-rig power-on
 
-- `rig down <rig>` (name or id, `packages/cli/src/commands/down.ts:104`)
+- `rig down <rig>` (name or id, `packages/cli/src/commands/down.ts:110`)
   auto-captures an `auto-pre-down` snapshot before teardown when the rig has
   live sessions (`packages/daemon/src/domain/rig-teardown.ts:117`, capture
   at `:128`, after refreshing resume metadata at `:119`; an already-stopped
@@ -221,9 +221,11 @@ cited here by number with the code that carries them):
   `.yaml`/`.yml`/`.rigbundle`/`.rigtopology` extension is a rig name
   (`packages/daemon/src/domain/up-command-router.ts:49–50`). The CLI refuses
   a name that matches only archived rigs, with `rig unarchive` guidance
-  (`packages/cli/src/commands/up.ts:250`). It then checks the spec library
+  (`packages/cli/src/commands/up.ts:256`). It then checks the spec library
   unless `--existing` is given, and refuses a name that matches both
-  (`up.ts:298–313`). The daemon finds the rig by name, preferring unarchived
+  (`up.ts:306–325`); when `first-project` resolves to the built-in `starter`
+  spec, the archived and existing-rig checks also apply to `starter`
+  (`up.ts:314–317`). The daemon finds the rig by name, preferring unarchived
   rigs (`packages/daemon/src/routes/up.ts:222–225`), and restores from
   `selectRestoreUsable` (`routes/up.ts:105`), which prefers the newest
   `auto-pre-down` or `auto-periodic` snapshot, then the newest other usable
@@ -271,7 +273,7 @@ cited here by number with the code that carries them):
   (`packages/cli/src/commands/seat.ts:364`) calls
   `POST /api/seat/handover/:seatRef` (`routes/seat.ts:94`), which runs
   `SeatHandoverService.handover` (`seat-handover-service.ts:266`).
-  `SuccessorSessionLauncher` (`successor-session-launcher.ts:91`) respawns
+  `SuccessorSessionLauncher` (`successor-session-launcher.ts:92`) respawns
   the same pane in place, so the session name stays the same. The fresh
   source delivers a daemon-built restore packet (`buildRestorePacket`,
   `seat-handover-service.ts:1143`), which is separate from the CLI

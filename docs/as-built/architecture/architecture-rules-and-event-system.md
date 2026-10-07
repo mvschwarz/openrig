@@ -11,7 +11,7 @@ applies-when: |
   compatibility limits that still describe the shipped system.
 siblings: [daemon-core.md, coordination-primitive.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
@@ -21,7 +21,7 @@ This module collects the cross-cutting invariants that do not belong to any
 single subsystem: the architecture rules the codebase holds itself to, the
 event-system shape, and the intentional compatibility limits.
 
-> Verified against source at main `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. Each count below sits beside the
+> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -75,7 +75,7 @@ system-level invariants.
     the blank session rolled back and no session running
     (`restore-orchestrator.ts:1048`). No automatic fresh fallback. Fresh launch
     is explicit follow-up only (`rig up --fresh <seats...>`,
-    `packages/cli/src/commands/up.ts:93`).
+    `packages/cli/src/commands/up.ts:99`).
 16. Post-command handoff required on `up`, `down`, `restore`,
     `snapshot create`: what happened + current state + next action.
 17. Session naming: `{pod}-{member}@{rig}` — human-authored,
@@ -119,7 +119,7 @@ system-level invariants.
 
 The reboot supports `local:...` and `path:/abs/...` agent refs. Remote
 `agent_ref` sources remain unsupported and fail in preflight (schema
-validation, `rigspec-schema.ts:550`; restated in compat note 1).
+validation, `rigspec-schema.ts:555`; restated in compat note 1).
 
 ### Startup, delivery and launch invariants
 
@@ -142,7 +142,7 @@ comments:
   permissions or native settings files, applies only to full-bypass Claude Code
   and Codex seats, and is saved per rig, off by default
   (`adapters/non-interruptive.ts:9`–`26`; `rigs.non_interruptive`, migration
-  `095`).
+  `095`). A rig spec can author it as `non_interruptive` (`rigspec-schema.ts:175`).
 - **Inside a notify envelope, events are delivered from the log.** Within
   `withNotifyEnvelope` (`event-bus.ts:106`–`112`), every event persisted through
   the event bus must be registered before the callback returns; after commit

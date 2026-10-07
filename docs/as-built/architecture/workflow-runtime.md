@@ -7,13 +7,13 @@ domains: [engineering-advisor, operating-advisor]
 applies-when: |
   Following workflow validation, instantiation, projection, routing, failure
   recovery, lifecycle graph revisions, or the corresponding CLI/API.
-last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
 # Workflow Runtime — Specs, Packets, and Lifecycle Graphs
 
-Source snapshot: `fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05`. This describes the source at that commit;
+Source snapshot: `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. This describes the source at that commit;
 it does not establish the version or behavior of a running daemon.
 
 A workflow binds a specification to durable queue packets. The daemon

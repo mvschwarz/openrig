@@ -10,7 +10,7 @@ applies-when: |
   transactional handoff guarantee, or where queue closure is enforced.
 siblings: [workflow-runtime.md, mission-control.md, daemon-core.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
@@ -24,7 +24,7 @@ filesystem path remains untouched, and the daemon-backed `rig queue` /
 only to SQLite (`packages/cli/src/commands/queue.ts:19`,
 `packages/cli/src/commands/stream.ts:11`).
 
-> Verified against source at main `fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05`. Each count below sits beside the
+> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 
@@ -126,7 +126,7 @@ commit (`queue-repository.ts:1404`–`1416`, `:1467`–`1475`). The returned
 `lastNudgeResult` is therefore normally null; `rig queue show <id>` reads the
 wake result later. If create cannot retain the intent, the task is still saved
 and the row records `failed:wake not retained: <reason>`. Startup reconciles
-and drains intents left pending by a crash once (`startup.ts:2334`–`2335`).
+and drains intents left pending by a crash once (`startup.ts:2338`–`2339`).
 `maybeNudge` remains only as the path for a repository with no outbox.
 
 The standing detector in `queue-stuck-sweep.ts` creates findings through the

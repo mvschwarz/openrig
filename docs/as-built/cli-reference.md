@@ -9,13 +9,13 @@ applies-when: |
   the source that implements a command. Use command help for invocation details.
 siblings: [README.md, codemap.md]
 prerequisite-reads: [../reference/help.md]
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
 # CLI Reference — Registered Commands and Options
 
-Verified against source commit `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`.
+Verified against source commit `2620dea84efad75e3c5fff9fcf816a78c8e8155f`.
 The inventory below comes from the actual Commander tree returned by
 [`createProgram()`](../../packages/cli/src/index.ts), not a grep of command
 strings or an installed CLI from a different commit.
@@ -50,11 +50,13 @@ route remain the source for result/error shape and side effects.
 
 ## Entry points and practical routes
 
-Bare `rig` opens the TUI when both stdin and stdout are terminals. Arguments,
+Bare `rig` opens the TUI, the status dashboard rather than an agent conversation, when both
+stdin and stdout are terminals. Arguments,
 pipes, and redirected streams follow normal CLI parsing.
 [`runFrontDoor` and `openMissionControl`](../../packages/cli/src/front-door.ts)
 own the entry behavior; [`tuiCommand`](../../packages/cli/src/commands/tui.ts)
-owns explicit TUI options. A daemon-down transport result can still open the
+owns explicit TUI options; `rig terminal open saved:kernel` opens the kernel dashboard with
+its agent conversations. A daemon-down transport result can still open the
 recovery cockpit; it is not automatically a reason to exit before rendering.
 
 | Need | Start here |

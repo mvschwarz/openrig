@@ -11,7 +11,7 @@ applies-when: |
   lives.
 siblings: [shell-and-routing.md]
 prerequisite-reads: [../README.md, shell-and-routing.md]
-last-verified-against-source: 104b78ee
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
@@ -21,7 +21,7 @@ The Library destination keeps `/specs` as the route and presents the product
 label "Library": specs, applications, context packs, agent specs, agent
 images, plugins, and skills.
 
-> Verified against source at `104b78ee`; package version 0.6.6. Component and
+> Verified against source at `2620dea8`; package version 0.6.6. Component and
 > primitive names below are reconciled against `packages/ui/src/components/`,
 > not taken on trust from `DESIGN.md`'s lists. The web UI is in maintenance
 > mode (`docs/reference/developing.md`).

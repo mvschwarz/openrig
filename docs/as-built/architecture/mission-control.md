@@ -11,7 +11,7 @@ applies-when: |
   coordination primitive's sources.
 siblings: [coordination-primitive.md, workflow-runtime.md, ../ui/project-and-for-you.md]
 prerequisite-reads: [../README.md, coordination-primitive.md]
-last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
@@ -25,7 +25,7 @@ seven views, eight verbs, a recent-ships cap of 10
 table. In the web UI the old `/mission-control` page now redirects to
 `/for-you`, and the For You feed carries the verb actions (§6).
 
-> Verified against source at main `fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05`. A bare file name such as
+> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. A bare file name such as
 > `mission-control-read-layer.ts:31` is in
 > `packages/daemon/src/domain/mission-control/`; `domain/…`, `routes/…`,
 > `middleware/…`, `db/…`, `index.ts`, `server.ts` and `startup.ts` are under
@@ -66,7 +66,7 @@ each view to its source:
   `mission-control-fleet-cli-capability.ts:109`), which walks the rig
   registry (`:110`), summarises each rig's `queue_items` (`:135`), and runs a
   per-rig CLI capability probe (`makeLocalCliCapabilityProbe`, `:77`, wired
-  at `startup.ts:1572`).
+  at `startup.ts:1576`).
 - `recently-active` delegates to the view projector's built-in
   `ViewProjector.show("recently-active")` (`mission-control-read-layer.ts:246`).
 - `recent-observations` reads the latest 50 `stream_items` via `StreamStore`
@@ -190,14 +190,14 @@ in `audit_notes_json` (`domain/scope/scope-approve.ts:292`). The audit browse
   (`notification-adapter-ntfy.ts`, `notification-adapter-webhook.ts`) plus
   `notification-dispatcher.ts`. `OPENRIG_NOTIFICATIONS_MECHANISM` selects
   `ntfy`, `webhook` or `none`, and the default is `none`
-  (`startup.ts:1617`). A dispatcher starts only when
-  `OPENRIG_NOTIFICATIONS_TARGET` is also set (`:1618`, `:1625`) and the
-  target URL passes validation (`:1636`); an unrecognized mechanism with a
-  target set throws during daemon startup (`:1631–1634`). The ntfy adapter
+  (`startup.ts:1621`). A dispatcher starts only when
+  `OPENRIG_NOTIFICATIONS_TARGET` is also set (`:1622`, `:1629`) and the
+  target URL passes validation (`:1640`); an unrecognized mechanism with a
+  target set throws during daemon startup (`:1635–1638`). The ntfy adapter
   posts to a topic URL that the ntfy phone app subscribes to
   (`notification-adapter-ntfy.ts:1–6`). Notifications fire when a
   `human-gate` queue item is created, and also on each completed verb when
-  `OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION=1` (`startup.ts:1623–1624`);
+  `OPENRIG_NOTIFICATIONS_INCLUDE_VERB_COMPLETION=1` (`startup.ts:1627–1628`);
   each item, trigger and mechanism is sent at most once per daemon run
   (`notification-dispatcher.ts:119–134`, `:156–158`). `POST
   /notifications/test` returns 503 `notifications_unconfigured` when no

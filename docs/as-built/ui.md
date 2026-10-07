@@ -11,7 +11,7 @@ applies-when: |
   named ui/ module.
 siblings: [README.md, codemap.md, architecture.md]
 prerequisite-reads: []
-last-verified-against-source: 104b78ee
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 

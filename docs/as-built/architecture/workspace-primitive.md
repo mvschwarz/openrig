@@ -12,7 +12,7 @@ applies-when: |
   Project UI.
 siblings: [content-surfaces.md, daemon-core.md, ../ui/project-and-for-you.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
@@ -26,7 +26,7 @@ through `whoami` / node-inventory and gate per-item repo scope. Alongside it, a
 the Project UI's mission / slice surfaces.
 
 > Paths are relative to `packages/daemon/src/` unless prefixed `packages/` or
-> `docs/`. Verified against source at main `fcaf1f8ee8f09bfc6388b937ea426e3d9496bb05`. Each count sits beside
+> `docs/`. Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count sits beside
 > the command that produces it; run the commands from the repository root.
 > The files / markdown / progress / steering surfaces are in the sibling
 > `content-surfaces.md`.
@@ -61,12 +61,12 @@ Workspace initialization no longer seeds a getting-started mission (§3).
 `whoami` / node-inventory return a null workspace block in that case.
 
 > Source: `domain/types.ts:1159–1166` (`WorkspaceSpec`), `:1149–1155`
-> (`WorkspaceRepoSpec`), `:1182` (`RigSpec.workspace?`).
+> (`WorkspaceRepoSpec`), `:1184` (`RigSpec.workspace?`).
 
 | Field | Shape | Notes |
 |---|---|---|
 | `workspaceRoot` | string | Verbatim from spec |
-| `repos[]` | `{ name, path, kind }[]` | `path` resolved to absolute at parse time (`domain/rigspec-schema.ts:350–352`); authors may declare it relative to `workspaceRoot` in YAML |
+| `repos[]` | `{ name, path, kind }[]` | `path` resolved to absolute at parse time (`domain/rigspec-schema.ts:355–357`); authors may declare it relative to `workspaceRoot` in YAML |
 | `defaultRepo?` | string | active repo when no env override / cwd match |
 | `knowledgeRoot?` | string | treated as `kind=knowledge` when surfaced |
 
@@ -82,7 +82,7 @@ non-empty `workspace_root`, a `repos` array whose names are unique and whose
 `kind` is one of the five kinds, a `default_repo` that names a declared repo,
 and a non-empty `knowledge_root` when present.
 
-> Source: `domain/rigspec-schema.ts:282–332`.
+> Source: `domain/rigspec-schema.ts:287–337`.
 
 ### 1.1 Persistence — migration 038 + RigRepository
 
@@ -114,7 +114,7 @@ workspace-only import route `POST /api/rigs/import/workspace`
 normalizes the block and writes it only when it differs from the stored one.
 
 > Source: `domain/rigspec-instantiator.ts:619` (`materializeValidatedSpec`),
-> `:655–657`; `:1260` (`instantiateOnce`), `:1348–1350`;
+> `:655–657`; `:1260` (`instantiateOnce`), `:1349–1351`;
 > `routes/rigspec.ts:134–173` (validation `:158`; compare-and-write
 > `:168–170`), mounted `server.ts:734`; CLI
 > `packages/cli/src/commands/import.ts:82`.
@@ -265,7 +265,7 @@ hard cap `maxFiles` default 10000.
 CLI surface: `rig workspace validate [root]` and `rig workspace doctor`.
 
 > Source: `packages/cli/src/commands/workspace.ts:86` (`validate`), `:146`
-> (`doctor`); `docs/as-built/cli-reference.md:608–609`.
+> (`doctor`); `docs/as-built/cli-reference.md:610–611`.
 
 ## 3. Default project-workspace scaffold
 
@@ -395,8 +395,8 @@ historical rows are not attributed to a selected project.
 > `proofPacket` `:81`), `:90–111` (`SliceListEntry`, which carries
 > `qitemCount` / `hasProofPacket` instead), `:865–875` and `:936–946` (queue
 > membership; project filter `:870`, `:942`); `domain/workspace/project-catalog.ts:132–138`
-> (`belongsToProject`); startup `startup.ts:1680`, `:1693` (`OPENRIG_SLICES_ROOT`
-> first), `:1700–1705`, `:1718–1723`, proof-source watch `:1737–1740`
+> (`belongsToProject`); startup `startup.ts:1684`, `:1697` (`OPENRIG_SLICES_ROOT`
+> first), `:1704–1709`, `:1722–1727`, proof-source watch `:1741–1744`
 > (`domain/proof/source-watch.ts:16`); default
 > `domain/user-settings/settings-store.ts:486`.
 
@@ -420,8 +420,8 @@ behavior (`workflowBinding`, `specGraph`, `phaseDefinitions` and
 > v1 enrichment), `:16–20` (v0 phase taxonomy removed), `:64`
 > (`StoryEvent.phase`), `:177–203` (`SliceDetailPayload`), `:205–213`
 > (optional `workflowSpecCache`); startup degrade path
-> `startup.ts:1724–1735` (comment `:1724–1730`;
-> `workflowSpecCache: workflowRuntime?.specCache` `:1734`).
+> `startup.ts:1728–1739` (comment `:1728–1734`;
+> `workflowSpecCache: workflowRuntime?.specCache` `:1738`).
 
 ### 4.3 Slices routes — 0.3.0
 

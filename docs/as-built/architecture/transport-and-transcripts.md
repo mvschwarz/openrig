@@ -11,7 +11,7 @@ applies-when: |
   vs tmux-metadata-key naming distinction.
 siblings: [daemon-core.md, lifecycle-snapshot-restore.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
@@ -22,7 +22,7 @@ capture/broadcast wrap tmux with honest errors; transcripts are bounded
 `tmux capture-pane` snapshots written to files; chat is daemon-backed SQLite;
 the daemon's `rig ask` service gathers evidence and never calls an LLM.
 
-> Verified against source at main `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. Each count below sits beside the
+> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. Each count below sits beside the
 > command that produces it; run the command from the repository root to refresh
 > it.
 

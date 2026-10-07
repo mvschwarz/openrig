@@ -9,14 +9,14 @@ applies-when: |
   Follow the module and source entry points below, then read the implementation.
 siblings: [README.md, arteries.md, test-layers.md, cli-reference.md]
 prerequisite-reads: [README.md]
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
 # OpenRig codemap
 
 The paths and named entry points below were checked at main
-`82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. This is a navigation map, not a replacement for
+`2620dea84efad75e3c5fff9fcf816a78c8e8155f`. This is a navigation map, not a replacement for
 reading the implementation. Linked documents retain their individual verification stamps.
 [README.md](README.md) lists the complete document tree and commands to derive its inventory.
 
@@ -78,6 +78,7 @@ stamp says whether it already covers them; until then, start from the source nam
 | How does a member's `permission_policy` become a launch posture, including `builtin:auto`? | `builtinLaunchPosture()` and `resolvePermissionPolicyAttachment()` in `packages/daemon/src/domain/permission-policy/policy-ref.ts` (`builtin:yolo` is full bypass, `builtin:auto` is auto, the other built-ins are the floor), bound per seat in `packages/daemon/src/domain/rigspec-instantiator.ts`. `packages/daemon/src/domain/bundle-behaviour.ts` is the read-only preview of the same mapping for an unopened bundle. | [Adapters and runtimes](architecture/adapters-and-runtimes.md) |
 | What does a non-interruptive launch add? | `nonInterruptiveArgs()` in `packages/daemon/src/adapters/non-interruptive.ts` (per-launch arguments only; it never changes permissions or native settings files). The separate instance-wide YOLO setting, off by default, is in `packages/daemon/src/adapters/yolo-mode.ts`. | [Adapters and runtimes](architecture/adapters-and-runtimes.md) |
 | What launch arguments does a kernel seat get? | `operationalLaunchArgs()` and `KERNEL_CLAUDE_ALLOW` in `packages/daemon/src/adapters/kernel-authority.ts`; `NativePermissionStore.launchOverride()` in `packages/daemon/src/domain/native-permission-store.ts` decides it per launch (only the rig named `kernel`, with no explicit seat choice, permission policy or Codex profile). | [Adapters and runtimes](architecture/adapters-and-runtimes.md) |
+| What launch default does a seat in any other rig get? | Under the same conditions `launchOverride()` sets `teamPermissionDefault`: a Claude seat at the floor posture gets `TEAM_CLAUDE_ALLOW` and `TEAM_CLAUDE_ASK` from `operationalLaunchArgs()` in `packages/daemon/src/adapters/kernel-authority.ts`; a workspace-write Codex seat gets `--add-dir` roots from `prepareCodexTeamWorkspace()` in `packages/daemon/src/domain/codex-team-workspace.ts`. | [Adapters and runtimes](architecture/adapters-and-runtimes.md) |
 | How does `rig seat continue` finish a fresh startup that stopped before its context was delivered? | `continueFreshStartup()` in `packages/daemon/src/domain/seat-lifecycle-service.ts`, `canContinueFresh()` in `packages/daemon/src/domain/startup-orchestrator.ts`, the route in `packages/daemon/src/routes/seat.ts`, and the command in `packages/cli/src/commands/seat.ts`. | [Agent spec and startup](architecture/agent-spec-and-startup.md) |
 | How does `rig context work-install` choose a project and position? | `resolveWorkPosition()` in `packages/cli/src/lib/work-install.ts`, `packages/cli/src/commands/context.ts`, and `packages/daemon/src/domain/workspace/project-catalog.ts`. | [Workspace](architecture/workspace-primitive.md) |
 | Where do rosters come from? | `packages/cli/src/commands/roster.ts`: `rig roster list`, `show` and `find` read JSON roster files from `<workspace.root>/rosters` (or `--folder`) and are read-only. | [Agent spec and startup](architecture/agent-spec-and-startup.md), "Specialist rosters" |

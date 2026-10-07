@@ -11,7 +11,7 @@ applies-when: |
   resolve and preserve identity.
 siblings: [daemon-core.md, adapters-and-runtimes.md, lifecycle-snapshot-restore.md, packaging-bootstrap-bundles.md]
 prerequisite-reads: [../README.md, daemon-core.md]
-last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
+last-verified-against-source: 2620dea84efad75e3c5fff9fcf816a78c8e8155f
 last-updated: 2026-10-05
 ---
 
@@ -22,7 +22,7 @@ and identity-addressable topology. The spec-and-startup contract: parse →
 resolve → project → deliver pre-launch files → persist replay context → launch
 → wait → deliver post-launch files.
 
-> Verified against source at main `82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. `domain/…` and `routes/…` paths
+> Verified against source at main `2620dea84efad75e3c5fff9fcf816a78c8e8155f`. `domain/…` and `routes/…` paths
 > are under `packages/daemon/src/`; a bare file name such as
 > `rigspec-schema.ts:115` is in `packages/daemon/src/domain/`. Each count sits
 > beside the command that produces it; run the command from the repository
@@ -36,15 +36,18 @@ resolve → project → deliver pre-launch files → persist replay context → 
 - **RigSpec** (`types.ts:1168`) — canonical pod-aware rig topology. Uses
   `version: "0.2"` and `pods[]`; owns cross-pod `edges[]`, rig-level startup
   overlays, and `cultureFile`, plus the optional `summary`, `permissionPolicy`,
-  `managedBlocks`, `docs`, `services` and `workspace` fields.
+  `nonInterruptive`, `managedBlocks`, `docs`, `services` and `workspace` fields.
+  An authored `non_interruptive` must be a boolean (`rigspec-schema.ts:175`) and
+  sets the rig's saved non-interruptive choice at instantiation unless an
+  explicit launch option is given (`rigspec-instantiator.ts:1345`).
 
   `version` is the spec-schema version, not the package version. It is not a
   code constant: `RigSpecSchema.validate` requires only a non-empty string
   (`rigspec-schema.ts:115`) and `RigSpecSchema.normalize` carries the authored
-  value through (`rigspec-schema.ts:243`). `"0.2"` is the canonical authored
+  value through (`rigspec-schema.ts:247`). `"0.2"` is the canonical authored
   value, and the pod-aware exporter writes it (`rigspec-exporter.ts:223`).
 
-- **RigServicesSpec** (`types.ts:1215`) — optional `services` block on a
+- **RigServicesSpec** (`types.ts:1217`) — optional `services` block on a
   pod-aware RigSpec. Shipped kind is Compose-backed env management
   (`kind: "compose"`) with `composeFile`, `projectName?`, `profiles?`,
   `downPolicy?`, `waitFor?`, `surfaces?`, `checkpoints?`.
@@ -73,19 +76,19 @@ spec/projection types live here.
 - **ProjectionPlan** (`projection-planner.ts:42`) — runtime projection plan for
   a node: runtime, cwd, projection entries, startup block, diagnostics,
   conflict/no-op classifications.
-- **RuntimeAdapter** (`runtime-adapter.ts:141`) — the five-method contract
+- **RuntimeAdapter** (`runtime-adapter.ts:143`) — the five-method contract
   (adapter detail in `adapters-and-runtimes.md`): `listInstalled(binding)`
-  (`runtime-adapter.ts:151`), `project(plan, binding)` (`:154`),
-  `deliverStartup(files, binding, sendInteractiveText?)` (`:158`),
-  `launchHarness(binding, opts)` (`:168`), `checkReady(binding)` (`:174`). The
-  interface also declares an optional `claudeManagedLaunch` property (`:143`)
-  and an optional method, `skillTargetPath?(...)` (`:148`). Required methods:
+  (`runtime-adapter.ts:153`), `project(plan, binding)` (`:156`),
+  `deliverStartup(files, binding, sendInteractiveText?)` (`:160`),
+  `launchHarness(binding, opts)` (`:170`), `checkReady(binding)` (`:176`). The
+  interface also declares an optional `claudeManagedLaunch` property (`:145`)
+  and an optional method, `skillTargetPath?(...)` (`:150`). Required methods:
   **5**
   (`sed -n '/^export interface RuntimeAdapter /,/^}/p' packages/daemon/src/domain/runtime-adapter.ts | grep -c -E '^  [a-zA-Z]+\('`).
-- **HarnessLaunchResult** (`runtime-adapter.ts:95`) — returned by
+- **HarnessLaunchResult** (`runtime-adapter.ts:97`) — returned by
   `launchHarness`: either `{ ok: true, resumeToken?, resumeType?,
   appliedLaunch? }` or `{ ok: false, error, recovery?, evidence? }`, where
-  `recovery` is `"retry_fresh"` or `"attention_required"` (`:93`).
+  `recovery` is `"retry_fresh"` or `"attention_required"` (`:95`).
 - **StartupOrchestrator** (`startup-orchestrator.ts:140`) — drives the full
   startup sequence (§4 below).
 
@@ -143,7 +146,7 @@ startup context before the harness launch.
   (`startup-orchestrator.ts:130`; held for post-launch and delivered after
   readiness at `:473`). Rebuild artifacts are put in front of these files.
 - **Fresh launch:** the builtin `session_identity` action
-  (`rigspec-instantiator.ts:2654`) is sent as one turn together with the first
+  (`rigspec-instantiator.ts:2655`) is sent as one turn together with the first
   `send_text` file (`deliverInitialSessionPrompt`, `startup-orchestrator.ts:663`).
 - **Resume, fork or rebuild:** applicable `after_ready` `send_text` actions are
   sent ahead of the first `send_text` file as one turn.
@@ -210,11 +213,11 @@ invariant; the cross-cutting architecture rules are collected in
 
 The launch path takes only the actions from `resolveStartup`. It builds the
 startup *file* chain itself (`buildResolvedStartupFiles`,
-`rigspec-instantiator.ts:2517`), in this order: agent base, profile, the shipped
+`rigspec-instantiator.ts:2518`), in this order: agent base, profile, the shipped
 `CULTURE-default.md` floor (`:327`), the rig `culture_file`, rig, pod, member,
-the shipped `openrig-start.md` (`:2571`), and, for fresh launches when enabled,
-the onboarding files (`:2581`). Managed-block guidance is deduplicated, and a
-`starter_ref` layer is put in front when a member names one (`:2242`).
+the shipped `openrig-start.md` (`:2572`), and, for fresh launches when enabled,
+the onboarding files (`:2582`). Managed-block guidance is deduplicated, and a
+`starter_ref` layer is put in front when a member names one (`:2243`).
 
 **Startup action constraints** (`startup-validation.ts`): startup entries must
 be files (`:22`); no shell startup actions (`:65`); action types are
@@ -230,9 +233,9 @@ re-runs a first start that failed at projection, before any harness launch.
 **Remote import constraints**: `agent_ref` and AgentSpec imports accept
 `local:<relative path>` and `path:<absolute path>` only
 (`rigspec-schema.ts:41`, `agent-manifest.ts:40`); a terminal member uses the
-`builtin:terminal` sentinel (`rigspec-schema.ts:519`). Remote `agent_ref`
+`builtin:terminal` sentinel (`rigspec-schema.ts:524`). Remote `agent_ref`
 sources remain unsupported: RigSpec validation rejects them
-(`rigspec-schema.ts:550`), `rigPreflight` runs that validation
+(`rigspec-schema.ts:555`), `rigPreflight` runs that validation
 (`rigspec-preflight.ts:250`), and the resolver refuses a remote import again
 (`agent-resolver.ts:203`).
 
