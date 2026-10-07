@@ -401,6 +401,8 @@ type DeliveryPart = OutboundPostPayload & { media?: SlackMediaRef[] };
 /** #897 — the most Slack messages one ask may post: the primary plus its thread replies. */
 export const MAX_HUMAN_MESSAGE_PARTS = 20;
 const CONTINUES_NOTE = "The rest of this brief follows in this thread.";
+/** Longer than any Slack user id, so a split sized with it fits whichever mention is rendered. */
+const WORST_CASE_MENTION_ID = "U".padEnd(32, "X");
 const DETAIL_NOTE = "Supplemental detail follows in this thread.";
 
 function partIdFor(decisionId: string, count: number, index: number): string {
@@ -429,8 +431,12 @@ function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decis
   const reply = (summary: string): DeliveryPart => ({ ...q, humanDetail: undefined, humanQuestions: undefined, summary, media: [], evidenceRef: null });
   const widest = `${MAX_HUMAN_MESSAGE_PARTS} of ${MAX_HUMAN_MESSAGE_PARTS}`;
   // A part's room is what its subject, options, evidence, sender and marker leave of both limits.
+  // The primary is sized with a worst-case mention, not the current one: the mention follows
+  // the registry and availability, so sizing with it would move the cuts between an interrupted
+  // attempt and its retry, losing or repeating text. The real render is still preflighted.
+  const sizing: SubsystemSlackDeliveryOpts = { ...opts, resolveMentionUserId: () => WORST_CASE_MENTION_ID };
   const roomFor = (part: DeliveryPart, index: number, reserve = 0): number => {
-    const frame = renderPart(opts, q, { ...part, body: "" }, index, partIdFor(decisionId, 2, index));
+    const frame = renderPart(sizing, q, { ...part, body: "" }, index, partIdFor(decisionId, 2, index));
     return Math.min(SLACK_SECTION_CAP, SLACK_TEXT_CAP - frame.text.length - 1) - reserve;
   };
   const primary: DeliveryPart = { ...q, humanDetail: undefined };

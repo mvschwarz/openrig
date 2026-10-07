@@ -116,6 +116,30 @@ describe("long human asks (#897)", () => {
     expect(posted.length).toBe(calls - 1);
   });
 
+  it("keeps the same cuts when the mention changes between an interrupted attempt and its retry", async () => {
+    const posted: Post[] = [];
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url, init) => {
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: posted });
+      calls++;
+      if (calls === 3) throw new Error("synthetic 429");
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${calls}.1` };
+      posted.push(msg);
+      return reply({ ok: true, ts: msg.ts });
+    };
+    // A long subject makes the complete-fallback budget, not the section cap, set the primary's room.
+    let mention: string | undefined;
+    const opts = { ...stores("mention"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl, resolveMentionUserId: () => mention };
+    const ask = decision("mention", { body: longBody, summary: "Approve the plan? ".repeat(62) });
+    expect((await subsystemSlackDeliver(opts)(ask)).ok).toBe(false);
+    mention = "U0123456789";
+    expect(await subsystemSlackDeliver(opts)(ask)).toEqual({ ok: true });
+    // Joined back in posting order, the parts are the whole brief: nothing lost, nothing repeated.
+    const bodies = posted.map((p) => unescape(p.blocks[1]!.text!.text));
+    expect(bodies[0]!.endsWith(NOTE)).toBe(true);
+    expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(longBody);
+  });
+
   it("redacts secrets before cutting, so no part carries a piece of one", async () => {
     const posts: Post[] = [];
     const deliver = subsystemSlackDeliver({ ...stores("secret"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts) });
