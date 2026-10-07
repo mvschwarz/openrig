@@ -18,7 +18,13 @@ even-numbered releases are untested.
 **Choose permissions before starting the team.** Ordinary OpenRig launches use
 Codex's `-s workspace-write`, with approval policy from your native configuration,
 or Claude Code's `acceptEdits`, which still leaves commands subject to native
-rules and prompts (the kernel's own seats get a wider operational default). Codex's
+rules and prompts. A team seat with no permission policy, per-seat choice or
+(for Codex) named profile also gets a per-launch
+[team default](rig-spec.md#team-launch-defaults): Claude runs ordinary `rig`
+commands, project reads and common tests without prompting, while lifecycle
+commands such as `rig up` and `rig down` still ask; Codex also gets the OpenRig
+workspace root and its pod's state directory as writable directories. The
+kernel's own seats get a wider operational default. Codex's
 sandbox normally blocks network access, including the local OpenRig daemon, so
 before that plain launch OpenRig asks Codex for its own configuration and adds
 network access inside the sandbox only when Codex answers that no configuration
@@ -29,10 +35,10 @@ is left unchanged. To keep it off, set `network_access = false` under
 within a few seconds, the seat starts without it. A command allowance does not
 change general sandbox/network settings. The starter's `profile: default` selects OpenRig resources, not a native
 permission profile.
-Agent-guided setup [asks once](#have-your-agent-configure-permissions): “Allow
-your agents to run OpenRig commands without repeated permission prompts?”
-**Yes — recommended** / **No — keep prompts**. An existing explicit choice is
-reused; No or no answer leaves settings unchanged. Broader access is separate.
+Agent-guided setup [recommends keeping the team default](#have-your-agent-configure-permissions)
+and offers to remember selected OpenRig commands in your native settings only if
+you want that. An existing explicit choice is reused; No or no answer keeps the
+team default and leaves settings unchanged. Broader access is separate.
 
 > Everything below reports **what is currently true**, never a guarantee that
 > downstream work will succeed. "Daemon up" does not mean every agent is healthy;
@@ -58,8 +64,10 @@ Install a missing selected CLI using its provider's installation instructions.
 The other provider's CLI/login and Herdr/cmux are optional. Do not copy credentials
 or start repeated sign-in attempts. Recheck the selected login after the user
 completes it. `rig setup --dry-run` previews the broader setup; applying
-`rig setup` installs/checks **both** harnesses and, on macOS, Homebrew and cmux
-(off macOS those steps are skipped, and tmux isn't installed for you). It also
+`rig setup` checks **both** harnesses and installs a missing one with npm; on
+macOS it uses an existing Homebrew (it does not install Homebrew) to install a
+missing tmux and cmux (off macOS those steps are skipped, and tmux isn't
+installed for you). It also
 writes an OpenRig-managed block (mouse on, a longer history) into `~/.tmux.conf`.
 It is optional for this selected-provider path, not a requirement to fix an unused
 provider.
@@ -333,7 +341,9 @@ As shipped, `starter` needs both Claude Code and Codex. With only one of them, t
 operator writes an adapted copy of the team for your providers and keeps its name;
 there are no per-provider variants. `first-project` is starter's old name and
 still starts it, so an old `rig up first-project` now starts a Claude builder and a
-Codex reviewer.
+Codex reviewer. If you already have a rig named `first-project` (or `starter`),
+`rig up first-project` refuses instead and names the `rig up <name> --existing`
+command that brings that rig back.
 
 Claude seats use the native default model, as the Claude kernel does: OpenRig
 does not pass a model override. Read the selected harness's configured model and
@@ -382,7 +392,8 @@ start another seat to clear a prompt.
 Starter is a deliberately small starting point. For a bigger team, `factory` is
 built in (seven agents, using more concurrent capacity), and so are the specialist
 teams `code-review`, `research` and `pm`. Inspect `rig specs ls --kind rig` and
-`rig specs preview <name>` before selecting one. A team published on GitHub, such
+`rig specs preview <name> --kind rig` before selecting one (`pm` is also an agent
+spec's name, so a preview without `--kind rig` reports it as ambiguous). A team published on GitHub, such
 as workshop, installs from its folder link with `rig up <link>` (see
 [publishing a rig bundle](publishing-a-rig-bundle.md)).
 
@@ -489,7 +500,7 @@ This guide remains the short first-use path.
 | Shared terminal is absent | Inspect the existing kernel binding and recovery state; use standalone `rig tui` while resolving it. |
 | Viewing terminal was closed | Reattach with `rig tui --shared`; do not relaunch the team. |
 | Daemon restarted but tmux survived | Re-read `rig status` and the existing queue; a daemon restart is not a fresh project. |
-| Host reboot lost tmux sessions | Open `rig`, start the daemon if needed, and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
+| Host reboot lost tmux sessions | Open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
 | Launch reports no usable snapshot | Inspect the existing rig and retained project files, then follow the same-seat recovery below. |
 | Work is waiting on a prompt or decision | Read the row, transition and named prompt; preserve the obligation until the missing decision arrives. |
 
@@ -524,8 +535,9 @@ Local reading uses this machine's configured workspace paths and file allowlist,
 including when the selected daemon address is remote. It shows disk provenance,
 missing or denied sources, binary files and the 1 MiB text truncation boundary.
 These disk snapshots may change after reading and do not supply live queue,
-execution or topology state. Live views load after a confirmed connection and
-deliberate entry; a stalled live read does not prevent Help or local reading.
+execution or topology state. Once connected, the TUI opens the ordinary work
+views by itself unless you have already pressed a key; **S** returns to startup.
+A stalled live read does not prevent Help or local reading.
 When terminal transport is unavailable, **t** starts the empty terminal service
 so recovery choices can be inspected. It launches no seats.
 
@@ -547,7 +559,7 @@ starts the daemon with kernel auto-boot disabled so the user can select seats:
 
 - `rig setup` installs/verifies the runtime; it does not start the daemon or the
   kernel.
-- Starting the daemon (`rig daemon start`, or implicitly via `rig up`) is what
+- Starting the daemon (`rig daemon start`, or implicitly via `rig up` or `rig context add`) is what
   boots the kernel rig in the background.
 - Starting it from bare `rig` prepares no agents automatically. The TUI offers
   kernel setup and individual seat selection after connecting.
@@ -579,22 +591,26 @@ shows a small reviewed example and how to retain custody through a genuine wait.
 
 ## Have your agent configure permissions
 
-Before team launch, your agent asks once, unless you already made an explicit
-choice for these harnesses and this scope:
+For a team with no permission policy, your agent recommends keeping the
+[team default](rig-spec.md#team-launch-defaults), unless you already made an
+explicit choice for these harnesses and this scope. It offers additional
+remembered allowances only if you want them:
 
-> Allow your agents to run OpenRig commands without repeated permission prompts?
-> **Yes — recommended** / **No — keep prompts**
+> Remember these selected OpenRig commands in your native settings for this
+> project? This is separate from the team launch default; stricter rules and
+> Claude lifecycle asks remain. **Yes / No — keep the team default**
 
-This covers the entire `rig` family, including starting/stopping agents,
-configuration and launching processes. It is not global YOLO or permission to
-invent work. The scope is your personal settings for this project unless you
-explicitly choose user-wide sessions, which can affect your other projects.
+A remembered allowance can cover the whole `rig` family, but on Claude team
+seats lifecycle commands such as `rig up` and `rig down` still ask. It is not
+global YOLO or permission to invent work. The scope is your personal settings
+for this project unless you explicitly choose user-wide sessions, which can
+affect your other projects.
 
 On an actual **Yes**, the agent backs up the relevant files, adds the existing
 native rules without duplicates, and preserves stricter rules and unrelated
 settings. It checks bare and actual absolute-path invocations, rule loading and
 repeated harmless reads in the target conversation. No or no answer leaves
-settings alone and continues with existing prompts. Unsupported scope or a
+settings alone and keeps the team default. Unsupported scope or a
 managed restriction is reported; it is not permission to grant broader access.
 
 The agent remembers an explicit choice, scope and exact additions in existing
@@ -675,7 +691,7 @@ environment-only `OPENRIG_YOLO=1` path remains sandbox-only when no resolved
 policy is present. A standalone `codex --yolo` command is not an OpenRig setting.
 At full access, Codex can show its full-access and GPT-5.1 migration notices at
 first launch. When OpenRig itself selects full bypass for the seat (`builtin:yolo`,
-or an explicit seat `full_bypass`), `rig up <spec> --non-interruptive` hides them
+a `full_bypass` flag policy, or an explicit seat `full_bypass`), `rig up <spec> --non-interruptive` hides them
 with per-launch `-c` overrides (see [non-interruptive mode](non-interruptive-mode.md)).
 Full access chosen inside a native Codex profile, with `permission_policy` absent or
 `none`, doesn't qualify.
@@ -706,7 +722,9 @@ rules/hooks. A later lifecycle action remains a separate decision. The explicit
 seat choice overrides the inherited member/rig policy; `--mode inherit` clears
 it without changing that inherited policy. `floor` selects the existing normal
 launch path (including a Codex named profile when configured); it does not
-rewrite a native profile or force its approval settings.
+rewrite a native profile or force its approval settings. An explicit `floor`
+also replaces any team or kernel launch default with the plain floor flags;
+`inherit` brings the default back.
 
 Codex and Claude accept `floor` and `full_bypass`. Additional Claude native modes,
 including `auto`, require support advertised by the managed executable's help.
@@ -745,8 +763,10 @@ typing guard are separate controls.
 
 In the shipped `starter`, `dev-build` runs Claude Code. For a **Claude Code** seat,
 OpenRig normally passes `--permission-mode acceptEdits`: edits can proceed, while
-other actions follow native rules and prompts. It does not add a global
-`Bash(rig:*)` allowance. To explicitly select the bypass launch flag for that rig:
+other actions follow native rules and prompts. For a seat with no permission
+policy or per-seat choice it also passes the per-launch team default (`--settings` allowing ordinary
+`rig` commands, project reads and common tests, with lifecycle commands as ask
+rules); nothing is written to your settings files. To explicitly select the bypass launch flag for that rig:
 
 ```sh
 rig policy apply yolo --spec ./my-claude-rig/rig.yaml
@@ -766,11 +786,12 @@ which accepts it with a launch flag and writes nothing to your settings; see
 [non-interruptive mode](non-interruptive-mode.md).
 
 `rig policy apply auto --spec ./my-claude-rig/rig.yaml` (also `rig setup --policy
-auto`) records `builtin:auto` instead: Claude seats launch with
+auto --spec ./my-claude-rig/rig.yaml`) records `builtin:auto` instead: Claude seats launch with
 `--permission-mode auto`, and Codex and Pi seats, which have no auto mode, launch
-at the floor. To return
-future launches to OpenRig's `acceptEdits` mode, use `rig policy apply none --spec
-./my-claude-rig/rig.yaml` and remove any member-level bypass override. Native rules
+at the floor. To return future launches to the team default, remove
+`permission_policy` from the spec along with any member-level bypass override.
+`rig policy apply none --spec ./my-claude-rig/rig.yaml` instead records plain
+`acceptEdits` without the team allowances. Native rules
 and managed restrictions still matter; this flag is not a promise about sandbox
 or account access. See [Claude permissions](https://code.claude.com/docs/en/permissions).
 

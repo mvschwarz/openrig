@@ -1,8 +1,8 @@
 # RigSpec Reference
 
 Version: 0.2 (pod-aware)
-Last validated against code: 2026-10-05, at main `fcaf1f8e`
-Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/startup-validation.ts`, `packages/daemon/src/domain/permission-policy/policy-ref.ts`, `packages/daemon/src/domain/profile-resolver.ts`, `packages/daemon/src/domain/rigspec-preflight.ts`
+Last validated against code: 2026-10-07, at the 0.6.6 cut `2620dea8` (whole document at `fcaf1f8e`; changes to its sources since then checked)
+Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/startup-validation.ts`, `packages/daemon/src/domain/permission-policy/policy-ref.ts`, `packages/daemon/src/domain/profile-resolver.ts`, `packages/daemon/src/domain/rigspec-preflight.ts`, `packages/daemon/src/adapters/kernel-authority.ts`, `packages/daemon/src/domain/native-permission-store.ts`, `packages/daemon/src/domain/codex-team-workspace.ts`
 
 This is the canonical reference for the pod-aware RigSpec YAML format. Every field, validation rule, and default documented here was traced from the actual parser and validator code, not from prior documentation.
 
@@ -267,7 +267,8 @@ The destructive class is `delete_everything`, `drop_persistent_store` and
 **At launch.** `builtin:yolo` selects Claude `--dangerously-skip-permissions`, Codex
 `-s danger-full-access -a never`, and Pi `--approve`. `builtin:auto` selects Claude
 `--permission-mode auto`, while Codex and Pi do not have an auto mode and launch at the floor.
-Every other seat launches at the floor:
+Every other seat launches at the floor (a non-kernel seat with no policy also gets the
+[team launch default](#team-launch-defaults) above):
 - Claude `--permission-mode acceptEdits`;
 - Codex `-s workspace-write`, or `-p <profile>` when the member sets
   `codex_config_profile`, in which case the profile governs its own sandbox;
@@ -276,7 +277,8 @@ Every other seat launches at the floor:
 Seats of the rig named `kernel` are the exception. With no member or rig policy, no
 per-seat choice and (for Codex) no named profile, Claude launches in `acceptEdits` with a
 per-launch `--settings` allow list for its file tools and operational commands, and Codex
-launches with `-s danger-full-access -a never`.
+launches with `-s danger-full-access -a never`, plus per-launch `-c` overrides that hide its
+full-access and GPT-5.1 migration notices, whatever the rig's non-interruptive choice.
 
 **Config-surface policies are recorded, not applied at launch.** The seat still starts at
 the floor. The `allow`, `ask` and `deny` rules take effect once they are translated into the

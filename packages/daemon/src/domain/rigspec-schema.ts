@@ -89,6 +89,10 @@ function rejectUnknownTopologyKeys(
     });
 }
 
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 /**
  * Pod-aware RigSpec validator. Canonical contract for the AgentSpec reboot.
  */
@@ -103,7 +107,7 @@ export class RigSpecSchema {
     // OPR.0.5.3.3 — fail-open advisories (never affect `valid`); e.g. alias-form model pins.
     const advisories: string[] = [];
 
-    if (!raw || typeof raw !== "object") {
+    if (!isMapping(raw)) {
       return { valid: false, errors: ["rig spec must be an object"] };
     }
 
@@ -198,11 +202,13 @@ export class RigSpecSchema {
       // Cross-pod edge validation
       const allQualifiedIds = new Set<string>(opts?.externalQualifiedIds ?? []);
       for (const pod of pods) {
+        if (!isMapping(pod)) continue; // Its indexed validation error was recorded above.
         const podId = pod["id"] as string;
         const members = pod["members"] as Record<string, unknown>[] | undefined;
-        if (podId && Array.isArray(members)) {
+        if (typeof podId === "string" && podId.length > 0 && Array.isArray(members)) {
           for (const m of members) {
-            if (m["id"]) allQualifiedIds.add(`${podId}.${m["id"]}`);
+            if (!isMapping(m)) continue;
+            if (typeof m["id"] === "string") allQualifiedIds.add(`${podId}.${m["id"]}`);
             const pinAdvisory = aliasModelPinAdvisory(m["model"], `pods.${podId}.members.${m["id"] ?? "?"}`);
             if (pinAdvisory) advisories.push(pinAdvisory);
           }
@@ -375,6 +381,7 @@ function normalizeWorkspaceBlock(raw: unknown): WorkspaceSpec | undefined {
 function validatePod(pod: Record<string, unknown>, index: number, podIds: Set<string>, advisories: string[]): string[] {
   const errors: string[] = [];
   const prefix = `pods[${index}]`;
+  if (!isMapping(pod)) return [`${prefix}: must be an object`];
   errors.push(...rejectUnknownTopologyKeys(pod, POD_KEYS, prefix));
 
   // id
@@ -431,6 +438,7 @@ function validatePod(pod: Record<string, unknown>, index: number, podIds: Set<st
 function validateMember(member: Record<string, unknown>, index: number, podPrefix: string, memberIds: Set<string>, advisories: string[]): string[] {
   const errors: string[] = [];
   const prefix = `${podPrefix}.members[${index}]`;
+  if (!isMapping(member)) return [`${prefix}: must be an object`];
   errors.push(...rejectUnknownTopologyKeys(member, MEMBER_KEYS, prefix));
 
   // OPR.0.5.6.20 A5 — member-level compaction_strategy: all vocabulary decisions go
@@ -758,6 +766,7 @@ function validateRebuildSessionSource(ss: Record<string, unknown>, prefix: strin
 function validatePodLocalEdge(edge: Record<string, unknown>, index: number, podPrefix: string, memberIds: Set<string>): string[] {
   const errors: string[] = [];
   const prefix = `${podPrefix}.edges[${index}]`;
+  if (!isMapping(edge)) return [`${prefix}: must be an object`];
   errors.push(...rejectUnknownTopologyKeys(edge, EDGE_KEYS, prefix));
   const from = edge["from"] as string;
   const to = edge["to"] as string;
@@ -787,6 +796,7 @@ function validatePodLocalEdge(edge: Record<string, unknown>, index: number, podP
 function validateCrossPodEdge(edge: Record<string, unknown>, index: number, allQualifiedIds: Set<string>): string[] {
   const errors: string[] = [];
   const prefix = `edges[${index}]`;
+  if (!isMapping(edge)) return [`${prefix}: must be an object`];
   errors.push(...rejectUnknownTopologyKeys(edge, EDGE_KEYS, prefix));
   const from = edge["from"] as string;
   const to = edge["to"] as string;
@@ -811,7 +821,7 @@ function validateCrossPodEdge(edge: Record<string, unknown>, index: number, allQ
   }
 
   // Same-pod check: cross-pod edges must reference different pods
-  if (from && to && from.includes(".") && to.includes(".")) {
+  if (typeof from === "string" && typeof to === "string" && from.includes(".") && to.includes(".")) {
     const fromPod = from.split(".")[0];
     const toPod = to.split(".")[0];
     if (fromPod === toPod) {

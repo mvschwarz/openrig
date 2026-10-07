@@ -1,6 +1,6 @@
 # Edge Types Reference
 
-Last validated against code: 2026-10-05, at main `fcaf1f8e`
+Last validated against code: 2026-10-07, at the 0.6.6 cut `2620dea8` (whole document at `fcaf1f8e`; its sources unchanged in edge behaviour since then)
 Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/rigspec-instantiator.ts`, `packages/daemon/src/domain/queue-owner.ts`
 
 ---

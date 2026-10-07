@@ -1,8 +1,8 @@
 # RigBundle Reference
 
 Version: 2 (pod-aware)
-Last validated against code: 2026-10-05, whole document, at main `a350c59b`
-Source of truth: `packages/daemon/src/domain/bundle-types.ts`, `packages/daemon/src/domain/bundle-archive.ts`, `packages/daemon/src/domain/pod-bundle-assembler.ts`, `packages/daemon/src/routes/bundles.ts`, `packages/cli/src/commands/bundle.ts`
+Last validated against code: 2026-10-07, at the 0.6.6 cut `2620dea8` (whole document at `a350c59b`; changes to its sources since then checked)
+Source of truth: `packages/daemon/src/domain/bundle-types.ts`, `packages/daemon/src/domain/bundle-archive.ts`, `packages/daemon/src/domain/pod-bundle-assembler.ts`, `packages/daemon/src/routes/bundles.ts`, `packages/cli/src/commands/bundle.ts`, `packages/daemon/src/domain/bundle-install-context.ts`, `packages/daemon/src/domain/bundle-source-resolver.ts`, `packages/daemon/src/domain/bootstrap-orchestrator.ts`
 
 A `.rigbundle` is a self-contained distributable archive that packages a rig spec, all referenced agent specs, their resources (skills, guidance, startup files), culture file, documentation, and an integrity manifest into a single file. The recipient can install and launch the rig without needing the original source tree.
 
@@ -334,7 +334,9 @@ Under "Needs (not checked)" the view lists the author's setup preconditions, wit
 shell, in order". For a declared full-bypass Claude seat it notes that Claude Code asks once to accept its bypass
 warning, and when any Claude or Codex seat is full bypass it says that `--non-interruptive` is available (see
 [non-interruptive mode](non-interruptive-mode.md)). It doesn't select the mode or check whether you've already
-accepted the warning.
+accepted the warning. When the bundle's `rig.yaml` declares `non_interruptive: true`, the view instead says that the
+bundle declares non-interruptive launches for those seats, with broad file, command and network access, and that
+`--no-non-interruptive` overrides it; the asks-once note is left out.
 
 `rig bundle install` and bundle-form `rig up` print this same view to stderr before the existing action, including
 `--plan`. With `--json`, stdout remains one result; its optional `behaviour` field carries the structured view.
@@ -367,9 +369,9 @@ rig bundle install <bundle-path-or-github-link> [--plan] [--yes] [--target <root
 | `--target <root>` | yes in apply mode, for an archive path | the current directory for a link | Directory the bundle is installed into and launched from. Required for an archive path unless `--plan` is used. |
 | `--cwd <dir>` | no | — | Working directory for every launched member, for this install only (for example, the repository the rig works on). Does not change the install target. |
 | `--preset <name>`, `--seat <pod.member=runtime>` | no | — | For a GitHub link, the declared configuration to build and install. |
-| `--non-interruptive` | no | off, or the operator setting `launch.non_interruptive` | Accept the harnesses' first-launch warnings for this rig's full-bypass Claude and Codex seats with launch flags, writing nothing to your settings. The choice is saved on the rig. `--no-non-interruptive` turns a saved choice off; stop a running rig with `rig down` first. See [non-interruptive mode](non-interruptive-mode.md). |
+| `--non-interruptive` | no | the bundle `rig.yaml`'s `non_interruptive`, else the operator setting `launch.non_interruptive`, else off | Accept the harnesses' first-launch warnings for this rig's full-bypass Claude and Codex seats with launch flags, writing nothing to your settings. The choice is saved on the rig. `--no-non-interruptive` turns a saved choice off; stop a running rig with `rig down` first. See [non-interruptive mode](non-interruptive-mode.md). |
 | `--skip-version-check` | no | off | Skip the compatibility check below. Not for routine use. |
-| `--force` | no | off | Skip the rig-name conflict check below. Not for routine use: a conflict can leave a partial install. |
+| `--force` | no | off | Skip the running-team check below. Not for routine use. A pod-aware bundle is still refused before anything is written when a team with the same name is running; a legacy (schema 1) bundle can be left partly installed. |
 | `--json` | no | `false` | Emit machine-readable JSON. |
 
 Install **launches the rig**; it does not just unpack it. It extracts the bundle to a temporary directory, validates integrity, and bootstraps the rig. In apply mode, the daemon requires `targetRoot`, so `rig bundle install` must be given `--target <root>` for an archive path unless you are running with `--plan`.
@@ -377,16 +379,27 @@ Install **launches the rig**; it does not just unpack it. It extracts the bundle
 Before it plans or applies, install runs two checks on the archive, both also under `--plan`:
 - **compatibility:** the manifest's `min_daemon_version` and `min_cli_version` against this daemon and CLI. A failure
   reports "Bundle compatibility check failed" with the versions involved.
-- **rig-name conflict:** the bundle's rig name against every rig this daemon knows, running or not. A match reports
-  "Bundle install conflict check failed".
+- **running team:** a running team with the bundle's rig name refuses the install with "Bundle install conflict check
+  failed". The error names the installed and the offered team and lists three choices: use the existing team, stop it
+  with `rig down` and retry to replace it, or cancel. This check does not refuse a stopped team with that name.
 
-Each error lists its fixes, including the override flag.
+Each error lists its fixes; the compatibility error also names `--skip-version-check`.
+
+For a pod-aware (schema version 2) bundle, installing a team whose rig name matches a stopped team replaces it: the
+earlier team is archived when the new one is created, and the result gives the `rig unarchive <id>` command that
+restores it. If OpenRig cannot confirm the earlier team is stopped, install refuses with `generation_unconfirmed` and
+creates no replacement team. For an install into that team's own install folder, OpenRig makes this check before
+writing any files; for any other target, bundle files already copied there stay.
+
+A legacy (schema version 1) bundle does not replace a stopped team. Its approved external and package install steps run
+first, and then its rig-name check fails preflight with "Rig name '<name>' already exists".
 
 For a pod-aware (schema version 2) bundle, apply copies every extracted file (`bundle.yaml`, `rig.yaml`, `agents/`, culture and docs files, and any carried `project/`, `context-packs/` and author-declared contents) into the target and launches from there, then removes the temporary extraction. So:
 
 - the target becomes the rig root: `agent_ref` paths resolve inside it, and a member with `cwd: "."` starts in the target (every pod-aware member must declare a `cwd`);
 - an absolute member `cwd` stays as authored, and `--cwd <dir>` (on `rig bundle install` or `rig up`) still overrides every member's cwd;
-- if the target already has a file with **different** content at any bundle path (for example its own `rig.yaml`), install refuses with `target_conflict` and writes nothing. Identical target files don't cause a target-content conflict; the other installation checks above, including the rig-name conflict check, still apply. Use an empty or dedicated directory as the target.
+- if the target already has a file with **different** content at any bundle path (for example its own `rig.yaml`), install refuses with `target_conflict` and writes nothing. Identical target files don't cause a target-content conflict; the other installation checks above, including the running-team check, still apply. Use an empty or dedicated directory as the target.
+- exception: reinstalling over a stopped team into that team's own install folder (the target's `bundle.yaml` is schema version 2 with the same bundle name) replaces its files there. Each differing path is first copied under `<OpenRig home>/bundle-backups/reinstall-*/files/`, with a `RESTORE.json` beside it; other files in the folder are kept. The files stay installed even if a later launch fails.
 
 The bundle's declared skills, plugins, workflow specs, context packs and agent images are routed into your libraries **before any member launches**, and the context-pack library is rescanned, so a member's first turn can already read a pack the bundle carried. A routing failure does not stop the install: it is printed as a warning, returned in `routingFailures`, and recorded in the install audit. The human output lists what each declared kind routed and any entry that was not routed.
 
@@ -437,17 +450,20 @@ rig up <bundle-path-or-github-link> [--target <root>] [--cwd <dir>] [--plan] [--
 take different routes:
 - **A GitHub link** builds the archive and installs it through the `rig bundle install` path, with its compatibility
   and rig-name checks and the install audit.
-- **A local `.rigbundle` path** goes through the bundle bootstrap path directly. It skips the compatibility and
-  rig-name checks, isn't recorded in the install audit (so `rig bundle history` doesn't list it), and doesn't print the
-  routing summary. A legacy (schema 1) archive gets no post-install routing this way. To get the checks and the audit
-  for a local archive, use `rig bundle install` or `rig bootstrap`.
+- **A local `.rigbundle` path** goes through the bundle bootstrap path directly. It skips the compatibility check,
+  isn't recorded in the install audit (so `rig bundle history` doesn't list it), and doesn't print the routing summary.
+  For a pod-aware archive, a running team with the same name is still refused before anything is written, and a
+  stopped one is replaced as described under "Install a bundle". A legacy (schema 1) archive runs its approved install
+  steps before its rig-name check, which then refuses a running team and fails preflight for a stopped one; it also
+  gets no post-install routing this way. To get the checks and the audit for a local archive, use `rig bundle install`
+  or `rig bootstrap`.
 
 `rig bootstrap <bundle-path>` also accepts archives and uses the ordinary bundle
 install path, including compatibility checks and the install audit. Use `--plan`
 to preview, or `--target <root>` to choose the persistent install directory. Its
 default target is the caller's current directory; `--cwd` only changes the agents'
 working directory. YAML files and library spec names keep the spec bootstrap path.
-It prints no behaviour view and has no `--non-interruptive` option.
+It prints no behaviour view and has no `--non-interruptive` option; a bundle's declared `non_interruptive` still applies.
 
 - `--target <root>` is the install target described above (for a schema-version-2 bundle, the directory the bundle is copied into and launched from)
 - if `--target` is omitted for a `.rigbundle` or a link, the CLI defaults the install target to the current working directory, so the bundle's files are written there

@@ -24,7 +24,8 @@ rig doctor --json
 ```
 
 Use the installed command's `--help` if an option is unavailable. Read the diagnostic findings; don't treat them as
-instructions to reset the machine. If the daemon is involved, `rig daemon status` and `rig daemon logs` show its state
+instructions to reset the machine. `rig doctor` does not check provider logins or whether agents can work: also run
+`claude auth status` or `codex login status` for the selected providers, and `rig ps --nodes --rig <rig>`. If the daemon is involved, `rig daemon status` and `rig daemon logs` show its state
 and recent output.
 
 **If OpenRig won't install or `rig` won't run, start here anyway.** Record the attempted package version, install
@@ -36,7 +37,8 @@ help.
 The reference documents beside this file describe the version they were installed with. GitHub's default branch can
 contain changes that haven't reached your user's version. For release notes and known limitations, open
 `https://github.com/mvschwarz/openrig/blob/v<version>/docs/releases/v<version>.md`, using the version number from
-`rig --version` (without the commit it may show in parentheses). If the matching document isn't available, say so
+`rig --version` (without the commit it may show in parentheses). When that file doesn't exist, use the version's
+section of `https://github.com/mvschwarz/openrig/blob/v<version>/CHANGELOG.md`. If neither is available, say so
 rather than treating a newer command as installed.
 
 ## Find your next step
@@ -44,8 +46,10 @@ rather than treating a newer command as installed.
 ### Installation or platform problems
 
 Supported platforms are macOS and Linux. Native Windows is not supported yet, and WSL2 has not been tested. OpenRig needs
-Node.js 22 or 24 and tmux. A WSL error needs its actual versions, commands and error text; don't assume a
-Windows-related pull request fixes it.
+Node.js 22 or 24 and tmux. A Linux distribution's own Node.js can be older; check `node --version`. With npm 11 or
+later, an `npm warn install-scripts` line for `@openrig/cli` means only the postinstall Node.js and SQLite check was
+skipped; `node "$(npm root -g)/@openrig/cli/scripts/check-abi.mjs"` runs it. A WSL error needs its actual versions,
+commands and error text; don't assume a Windows-related pull request fixes it.
 
 ### Installation finished, but there is nobody to talk to
 

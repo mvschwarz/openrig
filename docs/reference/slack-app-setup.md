@@ -121,8 +121,9 @@ not covered by that margin. A corrupt or unreadable checkpoint leaves recovery u
 and preserves the existing file; live inbound continues.
 
 Each pass admits at most four pages, 100 entries and 15 seconds of work, with a
-five-second history-request ceiling. An already admitted attachment/landing keeps
-its owner until it settles. Rate limits retain Slack's Retry-After across restart.
+five-second history-request ceiling. Work already started on a message, such as
+an attachment transfer, is not cancelled by these limits or by a stop, and a new
+pass waits for it to finish. Rate limits retain Slack's Retry-After across restart.
 Transport and server failures use a five-second backoff unless Slack supplies Retry-After.
 When Slack reports a plan history limit, recovery still lands the available page
 and advances normally, retaining an older-history limitation in status across restarts.

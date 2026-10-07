@@ -168,30 +168,13 @@ export class SnapshotRepository {
   }
 
   pruneSnapshots(rigId: string, keepCount: number): number {
-    // Find IDs to keep (newest N)
-    const keepers = this.db
-      .prepare(
-        "SELECT id FROM snapshots WHERE rig_id = ? ORDER BY created_at DESC LIMIT ?"
-      )
-      .all(rigId, keepCount) as { id: string }[];
-
-    const keepIds = new Set(keepers.map((r) => r.id));
-
-    // Delete everything else for this rig
-    const all = this.db
-      .prepare("SELECT id FROM snapshots WHERE rig_id = ?")
-      .all(rigId) as { id: string }[];
-
-    const toDelete = all.filter((r) => !keepIds.has(r.id));
-
-    if (toDelete.length === 0) return 0;
-
-    const placeholders = toDelete.map(() => "?").join(",");
-    this.db
-      .prepare(`DELETE FROM snapshots WHERE id IN (${placeholders})`)
-      .run(...toDelete.map((r) => r.id));
-
-    return toDelete.length;
+    // Select the small keeper set in SQLite: expanding every discarded ID into
+    // a parameter makes retention fail above SQLite's variable-number limit.
+    return this.db.prepare(`DELETE FROM snapshots
+      WHERE rig_id = ? AND id NOT IN (
+        SELECT id FROM snapshots WHERE rig_id = ?
+        ORDER BY created_at DESC, rowid DESC LIMIT ?
+      )`).run(rigId, rigId, keepCount).changes;
   }
 
   /** OPR.0.3.4.9 — kind-scoped retention. Keeps the newest `keepCount` rows
@@ -199,27 +182,11 @@ export class SnapshotRepository {
    *  other kinds. Hard floor: keepCount >= 1 (never prune to zero). */
   pruneSnapshotsByKind(rigId: string, kind: string, keepCount: number): number {
     const effectiveKeep = Math.max(1, keepCount);
-    const keepers = this.db
-      .prepare(
-        "SELECT id FROM snapshots WHERE rig_id = ? AND kind = ? ORDER BY created_at DESC LIMIT ?"
-      )
-      .all(rigId, kind, effectiveKeep) as { id: string }[];
-
-    const keepIds = new Set(keepers.map((r) => r.id));
-
-    const all = this.db
-      .prepare("SELECT id FROM snapshots WHERE rig_id = ? AND kind = ?")
-      .all(rigId, kind) as { id: string }[];
-
-    const toDelete = all.filter((r) => !keepIds.has(r.id));
-    if (toDelete.length === 0) return 0;
-
-    const placeholders = toDelete.map(() => "?").join(",");
-    this.db
-      .prepare(`DELETE FROM snapshots WHERE id IN (${placeholders})`)
-      .run(...toDelete.map((r) => r.id));
-
-    return toDelete.length;
+    return this.db.prepare(`DELETE FROM snapshots
+      WHERE rig_id = ? AND kind = ? AND id NOT IN (
+        SELECT id FROM snapshots WHERE rig_id = ? AND kind = ?
+        ORDER BY created_at DESC, rowid DESC LIMIT ?
+      )`).run(rigId, kind, rigId, kind, effectiveKeep).changes;
   }
 
   private restoreUsableRow(row: SnapshotRow): Snapshot | null {
