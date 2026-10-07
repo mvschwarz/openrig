@@ -280,6 +280,54 @@ describe("PluginVendorService — vendoring (HG-2.3)", () => {
       ]),
     ).toThrow(/missing-seed/);
   });
+
+  // The person-facing rigs skill installs from its packaged folder under OpenRig's own version.
+  const RIGS = "/pkg/daemon/assets/skills/rigs";
+  const service = (fs: ReturnType<typeof mockFs>, logger = vi.fn()) => new PluginVendorService({
+    vendoredAssetsDir: "/asset-root",
+    userPluginsDir: "/home/test/.openrig/plugins",
+    fs,
+    httpClient: vi.fn().mockResolvedValue({ ok: false, status: 404 }),
+    logger,
+  });
+
+  it("projects a skill folder under an explicit version and leaves a copy installed another way alone", () => {
+    const fs = mockFs({
+      [`${RIGS}/SKILL.md`]: "# rigs 0.6.7",
+      "/home/test/.agents/skills/rigs/SKILL.md": "# rigs installed by skills.sh",
+    });
+    const logger = vi.fn();
+
+    service(fs, logger).ensureSkillDirGlobally(RIGS, "rigs", "0.6.7", ["/home/test/.claude/skills", "/home/test/.agents/skills"]);
+
+    expect(fs._store["/home/test/.claude/skills/rigs/SKILL.md"]).toBe("# rigs 0.6.7");
+    expect(fs._store["/home/test/.claude/skills/rigs/.openrig-vendor-version"]).toBe("0.6.7\n");
+    expect(fs._store["/home/test/.agents/skills/rigs/SKILL.md"]).toBe("# rigs installed by skills.sh");
+    expect(fs._store["/home/test/.agents/skills/rigs/.openrig-vendor-version"]).toBeUndefined();
+    expect(logger).toHaveBeenCalledWith(expect.stringMatching(/'rigs'.*unversioned\/external authority.*unchanged/i));
+  });
+
+  it("refreshes a projected skill folder on a newer version, keeps it on an equal one, and refuses a version that isn't x.y.z", () => {
+    const marker = "/home/test/.claude/skills/rigs/.openrig-vendor-version";
+    const skill = "/home/test/.claude/skills/rigs/SKILL.md";
+    const fs = mockFs({ [`${RIGS}/SKILL.md`]: "# rigs 0.6.8", [marker]: "0.6.7\n", [skill]: "# rigs 0.6.7" });
+    const svc = service(fs);
+
+    svc.ensureSkillDirGlobally(RIGS, "rigs", "0.6.8", ["/home/test/.claude/skills"]);
+    expect(fs._store[skill]).toBe("# rigs 0.6.8");
+    expect(fs._store[marker]).toBe("0.6.8\n");
+
+    fs._store[`${RIGS}/SKILL.md`] = "# rigs edited, same version";
+    svc.ensureSkillDirGlobally(RIGS, "rigs", "0.6.8", ["/home/test/.claude/skills"]);
+    expect(fs._store[skill]).toBe("# rigs 0.6.8");
+
+    expect(() => svc.ensureSkillDirGlobally(RIGS, "rigs", "unknown", ["/home/test/.claude/skills"])).toThrow(/invalid version 'unknown'/);
+    expect(fs._store[marker]).toBe("0.6.8\n");
+  });
+
+  it("fails loudly when a skill folder to project is missing", () => {
+    expect(() => service(mockFs()).ensureSkillDirGlobally(RIGS, "rigs", "0.6.7", ["/home/test/.claude/skills"])).toThrow(/'rigs' is missing at/);
+  });
 });
 
 describe("PluginVendorService — auto-fetch (HG-2.4 + HG-2.5)", () => {
