@@ -231,17 +231,26 @@ as `rig down --help`, `rig bundle install -h` and `rig help down`, run without
 that lifecycle prompt. Native personal, project and managed deny/ask rules still
 apply; OpenRig does not remove or override them.
 
-The hook recognizes literal command words (including quoted or absolute paths),
-leading environment assignments, and `env`, `command` and `exec` wrappers without
-options other than `--`. The same existing team allowances apply after spelling
+For allowances, the hook recognizes literal command words (including quoted or absolute paths),
+leading environment assignments that do not change executable lookup or startup,
+and `env`, `command` and `exec` wrappers without options other than `--`.
+Relative executable paths and assignments such as `PATH` or `NODE_OPTIONS` stay
+with native checks. The same existing team allowances apply after spelling
 normalization; project `node_modules/.bin/vitest` and `jest` paths match their
 existing `npx` allowances. It does not automatically allow pipelines, command
 substitutions, redirects, heredocs, shell functions or other unrecognized syntax.
-Lifecycle calls in recognized command positions and substitutions still ask;
-quoted text and quoted heredoc bodies are not commands. These are command
+Lifecycle prefixes are checked at every word position, including after wrappers,
+control-flow words and CLI argument separators; unquoted prose containing a
+lifecycle command may also ask. Quoted messages and quoted heredoc bodies remain
+data. Comments and arithmetic shifts cannot hide later lifecycle commands. These are command
 allowances, not containment: a project's test command can execute code. The
 hook and allowances are passed with `--settings` at launch, including resume
 and fork; nothing is written to personal or project permission files.
+
+If the helper asset is missing at launch, OpenRig falls back to the native lifecycle
+ask rules; help can prompt in that fallback. A helper that disappears or times out
+after launch cannot supply a decision, leaving Claude's remaining native rules
+in effect. The hook is a convenience policy, not a containment boundary.
 
 Codex keeps `workspace-write` with its existing approval policy and receives the
 configured OpenRig workspace root plus its pod's shared state directory as

@@ -2,6 +2,7 @@ import type { NodeBinding } from "../domain/runtime-adapter.js";
 import { nonInterruptiveArgs } from "./non-interruptive.js";
 import { shellQuote } from "./shell-quote.js";
 import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 
 // Command families used for rig lifecycle, substrate inspection, remote operations and upgrades.
 // These are tool allowances, not containment: node/npm/ssh can themselves run arbitrary code.
@@ -44,6 +45,9 @@ export function operationalLaunchArgs(runtime: string, choice: LaunchChoice): st
       && (!choice.launchPosture || choice.launchPosture === "floor")) {
       const policy = Buffer.from(JSON.stringify({ allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK })).toString("base64");
       const hook = fileURLToPath(new URL("../../assets/claude-team-permissions.cjs", import.meta.url));
+      if (!existsSync(hook)) {
+        return ["--settings", JSON.stringify({ permissions: { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK } })];
+      }
       const command = [process.execPath, hook, policy].map(shellQuote).join(" ");
       return ["--settings", JSON.stringify({
         permissions: { allow: TEAM_CLAUDE_ALLOW },

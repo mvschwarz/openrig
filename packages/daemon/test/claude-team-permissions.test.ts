@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, copyFileSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, copyFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,10 @@ import { shellQuote } from "../src/adapters/shell-quote.js";
 const asset = fileURLToPath(new URL("../assets/claude-team-permissions.cjs", import.meta.url));
 const { decide } = createRequire(import.meta.url)(asset);
 const policy = { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK };
+vi.mock("node:fs", async importOriginal => {
+  const original = await importOriginal<typeof import("node:fs")>();
+  return { ...original, existsSync: vi.fn(original.existsSync) };
+});
 
 describe("Claude team command permissions", () => {
   for (const rule of TEAM_CLAUDE_ASK) {
@@ -20,6 +24,7 @@ describe("Claude team command permissions", () => {
       for (const flag of ["--help", "-h"]) {
         expect(decide(`${command} ${flag}`, policy)).toBe("allow");
         expect(decide(`${command} example ${flag}`, policy)).toBe("allow");
+        expect(decide(`${command} ${flag} example`, policy)).toBe("allow");
       }
     });
   }
@@ -33,6 +38,7 @@ describe("Claude team command permissions", () => {
     "npm test", "/opt/tools/npm test", "'/project/node_modules/.bin/vitest' run test/unit.test.ts",
     "/private/tmp/project/node_modules/.bin/jest test/unit.test.ts", "python3 -m pytest",
     "rig send worker 'literal rig down text'", "rig send worker 'multiline\nrig down example'",
+    "rig -- down --help example", "rig seat -- stop --help example@demo",
   ])("allows existing allowance spelling: %s", command => expect(decide(command, policy)).toBe("allow"));
 
   it.each([
@@ -42,6 +48,15 @@ describe("Claude team command permissions", () => {
     "rig down example && rig down --help", "rig status; /opt/tools/rig down example", "rig down example | cat",
     'echo "$(rig down example)"', "echo `rig up example`", "cat <<EOF\n$(rig down example)\nEOF",
     'git commit -m "multiline\nquoted" <<EOF\n$(rig down example)\nEOF',
+    "timeout 30 rig down example", "time rig down example", "nice -n 5 rig down example",
+    "nohup rig down example", "stdbuf -oL rig down example", "noglob rig down example",
+    "xargs rig down", "if true; then rig down example; fi",
+    "for s in example; do rig down $s; done", "{ rig down example; }", "! rig down example",
+    "rig -- down example", "rig seat -- stop example@demo --reason maintenance",
+    "ls # <<pwd\nrig down example\npwd", "ls # ' <<pwd\nrig down example\npwd",
+    "echo $((1 <<value))\nrig down example\nvalue", "((1 <<value))\nrig down example\nvalue",
+    "echo $((\n1 <<value))\nrig down example\nvalue",
+    "PATH=/inert rig down example", "NODE_OPTIONS=--no-warnings rig down example", "./rig down example",
   ])("retains lifecycle confirmation: %s", command => expect(decide(command, policy)).toBe("ask"));
 
   it.each([
@@ -51,7 +66,17 @@ describe("Claude team command permissions", () => {
     "rig send worker $(cat message.txt)", 'rig send worker "$MESSAGE"',
     "sudo rig status", "env -i rig status", "command -v rig", "node arbitrary.js", "npm install",
     "'/opt/tools/rig down' example", "'A=value' rig status", "not-rig down example", "", "'unterminated",
+    "PATH=/inert rig status", "LD_PRELOAD=/inert rig status", "DYLD_INSERT_LIBRARIES=/inert rig status",
+    "env NODE_OPTIONS=--no-warnings rig status", "BASH_ENV=/inert rig status", "ENV=/inert rig status", "./rig status",
+    "echo safe # $(rig down example)", "cat <<'EOF' # <<OTHER\nrig down example\nEOF\nOTHER",
   ])("leaves unrelated/data/complex forms to native checks: %s", command => expect(decide(command, policy)).toBeUndefined());
+
+  it("falls back to native lifecycle asks when the launch asset is absent", () => {
+    vi.mocked(existsSync).mockReturnValueOnce(false);
+    const args = operationalLaunchArgs("claude-code", { teamPermissionDefault: true });
+    expect(JSON.parse(args[1])).toEqual({ permissions: { allow: TEAM_CLAUDE_ALLOW, ask: TEAM_CLAUDE_ASK } });
+    expect(operationalLaunchArgs("claude-code", { teamPermissionDefault: true, permissionMode: "plan" })).toEqual([]);
+  });
 
   it("executes the launch-provided hook via stdin without changing its input or settings", () => {
     const args = operationalLaunchArgs("claude-code", { teamPermissionDefault: true });

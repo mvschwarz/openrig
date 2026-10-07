@@ -3,10 +3,10 @@
 // Session-only Claude PreToolUse helper. The launcher supplies the existing team
 // lists; this file never reads or writes a person's permission settings.
 // This is command convenience, not containment (test runners can execute code).
-const { basename } = require("node:path");
+const { basename, isAbsolute } = require("node:path");
 
-function scanQuotes(text, keepDouble = false, initial = "") {
-  let out = "", state = initial, start = 0;
+function scanQuotes(text, keepDouble = false, initial = "", arithmetic = 0) {
+  let out = "", state = initial, start = 0, arithmeticStart = 0, wordStarted = Boolean(initial);
   const spans = [];
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -17,33 +17,51 @@ function scanQuotes(text, keepDouble = false, initial = "") {
       if (keepDouble) out += c;
       continue;
     }
-    if (c === "\\") { out += c + (text[i + 1] || ""); i++; continue; }
-    if (c === "'" || c === '"') { state = c; start = i; out += c; continue; }
+    if (c === "\\") { out += c + (text[i + 1] || ""); i++; wordStarted = true; continue; }
+    if (c === "'" || c === '"') { state = c; start = i; out += c; wordStarted = true; continue; }
+    if (arithmetic) {
+      if (c === "(") arithmetic++;
+      if (c === ")" && --arithmetic === 0) spans.push([arithmeticStart, i]);
+      out += c;
+      continue;
+    }
+    if (c === "#" && !wordStarted) {
+      const end = text.indexOf("\n", i);
+      spans.push([i, end === -1 ? text.length : end]);
+      i = end === -1 ? text.length : end - 1;
+      continue;
+    }
+    if (c === "(" && text[i + 1] === "(") {
+      arithmetic = 2; arithmeticStart = i; out += "(("; i++; continue;
+    }
+    wordStarted = !/[\s;&|()<>]/.test(c);
     out += c;
   }
   if (state) spans.push([start, text.length]);
-  return { text: out, spans, state };
+  if (arithmetic) spans.push([arithmeticStart, text.length]);
+  return { text: out, spans, state, arithmetic };
 }
 
 // Split heredoc bodies off the command text. Quoted delimiters ('EOF', "EOF") make a literal body that never runs;
 // an unquoted delimiter's body still expands substitutions, so it is returned for substitution checks only.
-// A heredoc whose closing line is missing is left in place, so a misread `<<` can't hide later commands.
+// Only operators outside quotes, comments and arithmetic can start a heredoc.
+// A missing closing delimiter leaves the remaining text in place for conservative ask detection.
 function splitHeredocs(cmd) {
   const lines = cmd.split("\n");
   const main = [];
   const expanding = [];
   // Quote state carries across lines: a double-quoted commit message can span several lines, and a `<<` after its
   // closing quote is still an operator. Heredoc bodies are skipped, so they never change the state.
-  let carry = "";
+  let carry = "", arithmetic = 0;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     main.push(line);
-    // A `<<` inside a quoted string isn't an operator.
-    const scanned = scanQuotes(line, false, carry);
+    const scanned = scanQuotes(line, false, carry, arithmetic);
     const { spans } = scanned;
     carry = scanned.state;
+    arithmetic = scanned.arithmetic;
     const found = [...line.matchAll(/(?<!<)<<(-?)(?!<)\s*(?:'([^']+)'|"([^"]+)"|\\?([A-Za-z_][A-Za-z0-9_]*))/g)]
-      .filter(m => !spans.some(([a, b]) => m.index > a && m.index < b));
+      .filter(m => !spans.some(([a, b]) => m.index >= a && m.index <= b));
     let j = i;
     for (const m of found) {
       const delim = m[2] || m[3] || m[4];
@@ -119,12 +137,18 @@ function words(command) {
   return { commands, simple: simple && commands.length === 1 };
 }
 
-function normalize(tokens) {
+function normalize(tokens, forAllow = false) {
   const result = [...tokens];
   while (result.length) {
     const first = result[0];
-    if (first.assignment) result.shift();
+    if (first.assignment) {
+      // These can change the executable or inject startup code. Ask detection
+      // still looks through them; an allowance leaves them to native checks.
+      if (forAllow && /^(?:PATH|LD_[A-Za-z0-9_]*|DYLD_[A-Za-z0-9_]*|NODE_OPTIONS|BASH_ENV|ENV)=/.test(first.value)) return [];
+      result.shift();
+    }
     else if (first.literal && ["env", "command", "exec"].includes(basename(first.value))) {
+      if (forAllow && first.value.includes("/") && !isAbsolute(first.value)) return [];
       result.shift();
       if (result[0]?.value === "--") result.shift();
       // Other wrapper options (including sudo) stay with native checks.
@@ -132,6 +156,7 @@ function normalize(tokens) {
   }
   if (!result[0]?.literal) return [];
   const executable = result[0].value;
+  if (forAllow && executable.includes("/") && !isAbsolute(executable)) return [];
   result[0] = { value: basename(executable), literal: true };
   if (/\/(?:node_modules\/\.bin)\/(vitest|jest)$/.test(executable)) {
     result.unshift({ value: "npx", literal: true });
@@ -140,7 +165,7 @@ function normalize(tokens) {
     // Host selection does not change the lifecycle being requested.
     while (result[1]?.literal && /^--host(?:=|$)/.test(result[1].value)) {
       if (result[1].value === "--host") {
-        if (!result[2]) return [];
+        if (!result[2] || (forAllow && !result[2].literal)) return [];
         result.splice(1, 2);
       } else result.splice(1, 1);
     }
@@ -148,8 +173,16 @@ function normalize(tokens) {
   return result;
 }
 
-function matches(tokens, prefix) {
-  return prefix.every((part, i) => tokens[i]?.literal && tokens[i].value === part);
+function prefixEnd(tokens, prefix) {
+  let i = 0;
+  for (const part of prefix) {
+    // Commander accepts separators before a subcommand, including at root.
+    // A separator AFTER the lifecycle prefix still terminates help options.
+    while (prefix[0] === "rig" && i > 0 && tokens[i]?.literal && tokens[i].value === "--") i++;
+    if (!tokens[i]?.literal || tokens[i].value !== part) return undefined;
+    i++;
+  }
+  return i;
 }
 
 function prefixes(rules) {
@@ -159,13 +192,13 @@ function prefixes(rules) {
   });
 }
 
-function helpOnly(tokens, prefix) {
-  const args = tokens.slice(prefix.length);
+function helpOnly(tokens, prefixLength) {
+  const args = tokens.slice(prefixLength);
   // A help-looking option value or text after -- is not a help invocation.
-  // Recognize the common literal help form, optionally after positional args.
-  return args.length > 0 && args.every(t => t.literal)
-    && ["--help", "-h"].includes(args.at(-1).value)
-    && args.slice(0, -1).every(t => !t.value.startsWith("-"));
+  // Commander also accepts help before positional arguments.
+  const help = args.findIndex(t => ["--help", "-h"].includes(t.value));
+  return help !== -1 && args.every(t => t.literal)
+    && args.slice(0, help).every(t => !t.value.startsWith("-"));
 }
 
 function decide(command, policy, depth = 0) {
@@ -179,14 +212,24 @@ function decide(command, policy, depth = 0) {
     }
   }
   const parsed = words(main.trim());
-  const commands = parsed.commands.map(normalize);
   const asks = prefixes(policy.ask);
-  for (const tokens of commands) {
-    const lifecycle = asks.find(prefix => matches(tokens, prefix));
-    if (lifecycle && !helpOnly(tokens, lifecycle)) return "ask";
+  const askExecutables = new Set(asks.map(prefix => prefix[0]));
+  for (const command of parsed.commands) {
+    // ponytail: ask conservatively at every word position rather than owning a
+    // second shell grammar for wrappers/control flow. Unquoted prose may ask;
+    // quoted messages remain single words, and literal heredoc bodies are gone.
+    for (let i = 0; i < command.length; i++) {
+      if (!command[i].literal || !askExecutables.has(basename(command[i].value))) continue;
+      const tokens = normalize(command.slice(i));
+      for (const prefix of asks) {
+        const end = prefixEnd(tokens, prefix);
+        if (end !== undefined && !helpOnly(tokens, end)) return "ask";
+      }
+    }
   }
-  if (!parsed.simple || commands[0]?.some(t => !t.literal)) return undefined;
-  return prefixes(policy.allow).some(prefix => matches(commands[0] || [], prefix)) ? "allow" : undefined;
+  const tokens = normalize(parsed.commands[0] || [], true);
+  if (!parsed.simple || tokens.some(t => !t.literal)) return undefined;
+  return prefixes(policy.allow).some(prefix => prefixEnd(tokens, prefix) !== undefined) ? "allow" : undefined;
 }
 
 module.exports = { decide };
