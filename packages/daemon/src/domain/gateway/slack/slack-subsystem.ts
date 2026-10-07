@@ -261,8 +261,33 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
   // OPR.0.5.6.14 — a failed post writes the transport-failed ledger transition so the
   // undelivered surface (and --verify) can name the gateway's error instead of guessing
   // from nudge telemetry. One receipt per episode.
+  // #897 — an ask that can't be rendered fails the same way on every retry, so the person never
+  // sees it. Tell the seat that asked, once: the notice's id derives from the ask's, so a replay
+  // returns the same row instead of a second one.
+  const notifySourceUndeliverable = (p: OutboundPostPayload, detail: string): void => {
+    const seat = p.sourceSession;
+    if (!p.qitemId || !seat) return;
+    const human = p.destinationSession ?? "the person";
+    opts.queueRepo.create({
+      qitemId: `${p.qitemId}-undeliverable`,
+      sourceSession: seat,
+      destinationSession: seat,
+      summary: `Not delivered to ${human}: ${p.summary ?? p.qitemId}`,
+      body: [
+        `OpenRig could not post your ask ${p.qitemId} to Slack, so ${human} has not seen it.`,
+        "",
+        `Reason: ${detail}`,
+        "",
+        "Shorten it and send it as a new ask. The original row stays open until you close it.",
+      ].join("\n"),
+      evidenceRef: `rig queue show ${p.qitemId}`,
+      tags: ["slack-undeliverable"],
+    }).catch((e) => log(`undeliverable notice FAILED for ${p.qitemId}: ${(e as Error).message}`));
+  };
+
   const recordTransportFailed = (p: OutboundPostPayload, failureClass: string, detail: string): void => {
     if (!p.qitemId) return;
+    if (failureClass === "human-message-unrenderable") notifySourceUndeliverable(p, detail);
     const key = p.notificationKey ?? p.qitemId;
     const alreadyRecorded = opts.queueRepo.transitionLog.listForQitem(p.qitemId).some((transition) =>
       transition.transitionNote?.startsWith("slack-owner-notification-transport-failed ")

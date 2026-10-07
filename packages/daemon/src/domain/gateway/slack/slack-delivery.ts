@@ -16,7 +16,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { postChatMessage, getUploadURLExternal, uploadBytesExternal, completeUploadExternal, fetchRecentMessageTexts, type FetchImpl } from "./slack-api.js";
-import { buildOutboundMessage, attributionFromSession, reconcileToken, redactSecrets, type SlackMediaRef } from "./message.js";
+import {
+  buildOutboundMessage, attributionFromSession, reconcileToken, redactSecrets, splitForSlack,
+  HumanMessageShapeError, SLACK_SECTION_CAP, SLACK_TEXT_CAP, type SlackMediaRef,
+} from "./message.js";
 import type { SeenStore } from "./state-store.js";
 import type { OutboundDecision } from "../protocol.js";
 import type { SubsystemDeliverFn, SubsystemDeliveryOutcome } from "../gateway-subsystem.js";
@@ -393,34 +396,90 @@ function deliverSinglePart(opts: SubsystemSlackDeliveryOpts, markEpisode = true)
   };
 }
 
-/** One authored primary and, optionally, one coherent supplemental reply. The
+type DeliveryPart = OutboundPostPayload & { media?: SlackMediaRef[] };
+
+/** #897 — the most Slack messages one ask may post: the primary plus its thread replies. */
+export const MAX_HUMAN_MESSAGE_PARTS = 20;
+const CONTINUES_NOTE = "The rest of this brief follows in this thread.";
+const DETAIL_NOTE = "Supplemental detail follows in this thread.";
+
+function partIdFor(decisionId: string, count: number, index: number): string {
+  return count === 1 ? decisionId : `${decisionId}:part:${index + 1}`;
+}
+
+/** Render one part exactly as deliverSinglePart will, throwing HumanMessageShapeError if it can't. */
+function renderPart(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, part: DeliveryPart, index: number, partId: string) {
+  // #47 — preflight must mirror deliverSinglePart exactly: the same evidenceRef
+  // split (image attachment vs. plain link) so the shape check sees the true payload.
+  const partEvidence = evidenceAttachment(part.media, part.evidenceRef, part.summary);
+  return buildOutboundMessage(part, {
+    sourceLabel: opts.sourceLabel,
+    attribution: attributionFromSession(part.sourceSession),
+    mentionUserId: index === 0 ? opts.resolveMentionUserId?.(q) : undefined,
+    reconcileMarker: reconcileToken(partId),
+    mediaRefs: partEvidence.mediaRefs,
+    evidenceLink: partEvidence.evidenceLink,
+  });
+}
+
+/** #897 — a brief or supplemental detail too long for one message: the primary keeps the
+ *  subject, the start of the brief, any options and the evidence; the rest follows as
+ *  numbered replies in its thread, each sized to its own message limits. */
+function splitIntoParts(opts: SubsystemSlackDeliveryOpts, q: DeliveryPart, decisionId: string): DeliveryPart[] {
+  const reply = (summary: string): DeliveryPart => ({ ...q, humanDetail: undefined, humanQuestions: undefined, summary, media: [], evidenceRef: null });
+  const widest = `${MAX_HUMAN_MESSAGE_PARTS} of ${MAX_HUMAN_MESSAGE_PARTS}`;
+  // A part's room is what its subject, options, evidence, sender and marker leave of both limits.
+  const roomFor = (part: DeliveryPart, index: number, reserve = 0): number => {
+    const frame = renderPart(opts, q, { ...part, body: "" }, index, partIdFor(decisionId, 2, index));
+    return Math.min(SLACK_SECTION_CAP, SLACK_TEXT_CAP - frame.text.length - 1) - reserve;
+  };
+  const primary: DeliveryPart = { ...q, humanDetail: undefined };
+  const body = splitForSlack(q.body ?? "", (i) => i === 0
+    ? roomFor(primary, 0, Math.max(CONTINUES_NOTE.length, DETAIL_NOTE.length) + 2)
+    : roomFor(reply(`Continued (${widest})`), i));
+  const first = Math.max(body.length, 1);
+  const detail = q.humanDetail
+    ? splitForSlack(q.humanDetail, (j) => roomFor(reply(`Supplemental detail (${widest})`), first + j))
+    : [];
+  // A brief that fits keeps the usual note; only a brief that continues says so.
+  const note = body.length > 1 ? CONTINUES_NOTE : DETAIL_NOTE;
+  const parts: DeliveryPart[] = [{ ...primary, body: body[0] ? `${body[0]}\n\n${note}` : note }];
+  for (let k = 1; k < body.length; k++) parts.push({ ...reply(`Continued (${k + 1} of ${body.length})`), body: body[k] });
+  detail.forEach((piece, j) => parts.push({ ...reply(`Supplemental detail (${j + 1} of ${detail.length})`), body: piece }));
+  if (parts.length > MAX_HUMAN_MESSAGE_PARTS) {
+    throw new HumanMessageShapeError(`This brief needs ${parts.length} Slack messages (maximum ${MAX_HUMAN_MESSAGE_PARTS}). Shorten it, or put the long part in a file and link it.`);
+  }
+  return parts;
+}
+
+/** One authored primary and, optionally, one coherent supplemental reply; a brief or
+ * detail too long for that is posted as more numbered thread replies (#897). The
  * existing attempted/delivered stores and marker reconciler own each stable part.
  * Preflight ALL parts before posting; the episode receipt is written only after
  * every required part. A restart retries missing parts and the final receipt. */
 export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): SubsystemDeliverFn {
   return async (decision) => {
     if (opts.delivered.load().has(decision.decisionId)) return { ok: true };
-    const q = (decision.payload ?? {}) as OutboundPostPayload & { media?: SlackMediaRef[] };
-    const parts = q.humanDetail
+    const q = (decision.payload ?? {}) as DeliveryPart;
+    let parts: DeliveryPart[] = q.humanDetail
       ? [
-          { ...q, humanDetail: undefined, body: `${q.body ?? ""}\n\nSupplemental detail follows in this thread.` },
+          { ...q, humanDetail: undefined, body: `${q.body ?? ""}\n\n${DETAIL_NOTE}` },
           { ...q, humanDetail: undefined, humanQuestions: undefined, summary: `Supplemental detail: ${q.summary ?? ""}`, body: q.humanDetail, media: [], evidenceRef: null },
         ]
       : [q];
-    const partId = (index: number) => parts.length === 1 ? decision.decisionId : `${decision.decisionId}:part:${index + 1}`;
+    const preflight = (candidate: DeliveryPart[]) => {
+      for (const [index, part] of candidate.entries()) renderPart(opts, q, part, index, partIdFor(decision.decisionId, candidate.length, index));
+    };
     try {
-      for (const [index, part] of parts.entries()) {
-        // #47 — preflight must mirror deliverSinglePart exactly: the same evidenceRef
-        // split (image attachment vs. plain link) so the shape check sees the true payload.
-        const partEvidence = evidenceAttachment(part.media, part.evidenceRef, part.summary);
-        buildOutboundMessage(part, {
-          sourceLabel: opts.sourceLabel,
-          attribution: attributionFromSession(part.sourceSession),
-          mentionUserId: index === 0 ? opts.resolveMentionUserId?.(q) : undefined,
-          reconcileMarker: reconcileToken(partId(index)),
-          mediaRefs: partEvidence.mediaRefs,
-          evidenceLink: partEvidence.evidenceLink,
-        });
+      try {
+        preflight(parts);
+      } catch (error) {
+        if (!(error instanceof HumanMessageShapeError)) throw error;
+        // #897 — too long for the authored parts: split, and refuse only if that can't fit.
+        const split = splitIntoParts(opts, q, decision.decisionId);
+        if (split.length < 2) throw error;
+        preflight(split);
+        parts = split;
       }
     } catch (error) {
       const detail = (error as Error).message;
@@ -428,6 +487,7 @@ export function subsystemSlackDeliver(opts: SubsystemSlackDeliveryOpts): Subsyst
       catch (receiptError) { return { ok: false, class: "receipt-failed", detail: (receiptError as Error).message }; }
       return { ok: false, class: "human-message-unrenderable", detail };
     }
+    const partId = (index: number) => partIdFor(decision.decisionId, parts.length, index);
     if (parts.length === 1) return deliverSinglePart(opts)(decision);
 
     const rootPrefix = `${decision.decisionId}::primary-receipt::`;
