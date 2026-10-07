@@ -9,7 +9,7 @@
     "openrig-tui": "dist/main.js"
   },
   "scripts": {
-    "build": "tsc && chmod +x dist/main.js",
+    "build": "tsc && node ../../scripts/prepare-workspace-build.mjs tui",
     "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest"
