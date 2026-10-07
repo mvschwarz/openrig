@@ -335,6 +335,62 @@ describe("rig scope slice create", () => {
 // HG-5 + HG-9: rig scope slice ship — git mv + frontmatter update
 // ---------------------------------------------------------------------
 
+describe("rig scope slice rollback snapshots", () => {
+  let env: { root: string; missionsRoot: string };
+  beforeEach(() => { env = seedSubstrate(); });
+  afterEach(() => { fs.rmSync(env.root, { recursive: true, force: true }); });
+
+  // Root can read mode-000 files, so it cannot exercise this refusal.
+  it.skipIf(process.getuid?.() === 0).each([
+    { operation: "close", unreadable: "source" },
+    { operation: "ship", unreadable: "source" },
+    { operation: "move", unreadable: "source" },
+    { operation: "ship", unreadable: "target" },
+    { operation: "move", unreadable: "target" },
+  ])("preserves composition when $operation cannot snapshot $unreadable", async ({ operation, unreadable }) => {
+    const sourceManifest = seedMissionComposition(env.missionsRoot, "backlog", [
+      { ref: "slices/01-debt-foo/slice.yaml", order: 10, active: true },
+    ]);
+    const targetManifest = seedMissionComposition(env.missionsRoot, "release-0.3.2", [
+      { ref: "slices/01-existing/slice.yaml", order: 10, active: true },
+    ]);
+    commitFixture(env.root);
+    const sourceSlice = path.join(env.missionsRoot, "backlog", "slices", "01-debt-foo");
+    const sourceNode = path.join(sourceSlice, "README.md");
+    const targetNode = path.join(env.missionsRoot, "release-0.3.2", "README.md");
+    const sourceBefore = fs.readFileSync(sourceManifest, "utf8");
+    const targetBefore = fs.readFileSync(targetManifest, "utf8");
+    const sourceNodeBefore = fs.readFileSync(sourceNode, "utf8");
+    const targetNodeBefore = fs.readFileSync(targetNode, "utf8");
+    const deniedPath = unreadable === "source" ? sourceNode : targetNode;
+    const originalMode = fs.statSync(deniedPath).mode;
+    const args = operation === "close"
+      ? ["slice", "close", "01-debt-foo", "--reason", "wontfix"]
+      : ["slice", operation, "01-debt-foo", "release-0.3.2"];
+    let result: CaptureResult;
+    fs.chmodSync(deniedPath, 0o000);
+    try {
+      result = await run([...args, "--mission", "backlog", "--json"], env.missionsRoot);
+    } finally {
+      fs.chmodSync(deniedPath, originalMode);
+    }
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout + result.stderr).toContain("EACCES");
+    expect(fs.readFileSync(sourceManifest, "utf8")).toBe(sourceBefore);
+    expect(fs.readFileSync(targetManifest, "utf8")).toBe(targetBefore);
+    expect(fs.readFileSync(sourceNode, "utf8")).toBe(sourceNodeBefore);
+    expect(fs.readFileSync(targetNode, "utf8")).toBe(targetNodeBefore);
+    expect(fs.existsSync(sourceSlice)).toBe(true);
+    const destination = operation === "close"
+      ? path.join(env.missionsRoot, "backlog", "closed", "01-debt-foo")
+      : path.join(env.missionsRoot, "release-0.3.2", "slices", "02-debt-foo");
+    expect(fs.existsSync(destination)).toBe(false);
+    expect(execFileSync("git", ["-C", env.root, "status", "--porcelain"], { encoding: "utf8" })).toBe("");
+    expect(execFileSync("git", ["-C", env.root, "diff", "--cached", "--name-only"], { encoding: "utf8" })).toBe("");
+  });
+});
+
 describe("rig scope slice ship (HG-5)", () => {
   let env: { root: string; missionsRoot: string };
   beforeEach(() => { env = seedSubstrate(); });
