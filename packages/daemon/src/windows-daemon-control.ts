@@ -2,14 +2,21 @@ import { createConnection, createServer } from "node:net";
 import { randomBytes, timingSafeEqual, createHash } from "node:crypto";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
-const FILE = "daemon-control.json";
+const FILE = "windows-control/daemon-control.json";
 interface ControlRecord { schema: "openrig.windows-control/v1"; pid: number; pipe: string; token: string }
 const read = (file: string): any => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; } };
 
 /** Windows SIGTERM force-terminates Node. This instance capability requests the
  * same bounded drain used by POSIX signals, without accepting an HTTP command. */
 export async function startWindowsDaemonControl(home: string, shutdown: () => void): Promise<() => Promise<void>> {
+  const powershell = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+  try {
+    await promisify(execFile)(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+      path.join(import.meta.dirname, "../assets/windows-private-directory.ps1"), "-Path", path.join(home, "windows-control")], { windowsHide: true, timeout: 5000 });
+  } catch { throw new Error("Windows private control directory unavailable; no capability published"); }
   const nonce = randomBytes(24).toString("hex");
   const record: ControlRecord = { schema: "openrig.windows-control/v1", pid: process.pid,
     pipe: `\\\\.\\pipe\\openrig-${createHash("sha256").update(home).digest("hex").slice(0, 16)}-${process.pid}-${nonce}`,

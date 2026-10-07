@@ -40,7 +40,7 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
       expect(JSON.parse(await waitForFile(output))).toBe(message);
     } finally {
       await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }, 20_000);
   it("delivers exact native argv and environment through a real pane", async () => {
@@ -76,7 +76,7 @@ describe.skipIf(!enabled)("native psmux PowerShell staging", () => {
     } finally {
       await invoke(["tmux", "kill-session", "-t", `=${session}`]).catch(() => {});
       await invoke(["tmux", "kill-session", "-t", `=${decoy}`]).catch(() => {});
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   }, 20_000);
 });

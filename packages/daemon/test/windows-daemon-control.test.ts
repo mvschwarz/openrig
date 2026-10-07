@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -9,6 +9,13 @@ import { startWindowsDaemonControl, requestWindowsDaemonStop } from "../src/wind
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const run of cleanup.splice(0).reverse()) await run(); });
 describe.skipIf(process.platform !== "win32")("native Windows drain request", () => {
+  it("refuses an inherited-access control directory before publishing a capability", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "openrig-control-acl-"));
+    cleanup.push(() => rmSync(home, { recursive: true, force: true }));
+    mkdirSync(path.join(home, "windows-control"));
+    await expect(startWindowsDaemonControl(home, () => {})).rejects.toThrow("no capability published");
+    expect(existsSync(path.join(home, "windows-control/daemon-control.json"))).toBe(false);
+  });
   it("crosses the production startServer drain and persists a clean receipt", async () => {
     const home = mkdtempSync(path.join(tmpdir(), "openrig-control-drain-"));
     const root = path.resolve(import.meta.dirname, "../../..");
@@ -27,7 +34,7 @@ describe.skipIf(process.platform !== "win32")("native Windows drain request", ()
       const [code] = await exited;
       expect(code).toBe(0);
       expect(JSON.parse(readFileSync(path.join(home, "daemon-shutdown.json"), "utf8"))).toMatchObject({ pid: child.pid, outcome: "clean", phase: "complete" });
-      expect(existsSync(path.join(home, "daemon-control.json"))).toBe(false);
+      expect(existsSync(path.join(home, "windows-control/daemon-control.json"))).toBe(false);
       expect(readFileSync(path.join(home, `measurements-${child.pid}.jsonl`), "utf8")).toContain("shutdown.consumer");
     } finally {
       if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await once(child, "exit"); }
@@ -51,7 +58,7 @@ describe.skipIf(process.platform !== "win32")("native Windows drain request", ()
     const home = mkdtempSync(path.join(tmpdir(), "openrig-control-"));
     cleanup.push(() => rmSync(home, { recursive: true, force: true }));
     const close = await startWindowsDaemonControl(home, () => {});
-    const file = path.join(home, "daemon-control.json");
+    const file = path.join(home, "windows-control/daemon-control.json");
     const successor = { ...JSON.parse(readFileSync(file, "utf8")), token: "successor" };
     writeFileSync(file, JSON.stringify(successor));
     await close();

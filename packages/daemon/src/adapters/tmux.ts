@@ -708,14 +708,21 @@ export class TmuxAdapter {
   /** Launch-only repair of a recognised terminal reply, before accepting seat work. */
   async prepareWindowsCodexComposer(target: string): Promise<TmuxResult> {
     if (this.terminalKind !== "psmux" || process.platform !== "win32") return { ok: true };
-    const content = await this.capturePaneContent(target);
-    if (!content || !hasOnlyWindowsTerminalResponseDraft(content)) return { ok: true };
+    // The terminal's OSC colour replies may arrive after the first ready screen.
+    // Stay inside launch's input guard while observing this bounded startup window.
+    let responseDraft = false;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const content = await this.capturePaneScreen(target);
+      if (content && hasOnlyWindowsTerminalResponseDraft(content)) { responseDraft = true; break; }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (!responseDraft) return { ok: true };
     const result = await this.sendKeys(target, ["C-u"]);
     if (!result.ok) return result;
     // ConPTY capture can precede the TUI redraw. Observe one write's result;
     // never repeat the clearing key against a possibly changed user draft.
     for (let attempt = 0; attempt < 10; attempt++) {
-      const after = await this.capturePaneContent(target);
+      const after = await this.capturePaneScreen(target);
       if (after && !hasOnlyWindowsTerminalResponseDraft(after)) return { ok: true };
       await new Promise(resolve => setTimeout(resolve, 50));
     }
