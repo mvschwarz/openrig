@@ -16,7 +16,7 @@ import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 import { observeClaudePaneProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { shellQuote } from "./shell-quote.js";
-import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
+import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH } from "../domain/claude-activity-hooks.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
 import type { ClaudeManagedLaunch } from "../domain/claude-managed-launch.js";
@@ -871,7 +871,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * to the desired `enabled` state, driven ONCE from the always-run `project()` seam.
    *
    * ENABLE (only when the relay SOURCE is readable): deliver `activity-relay.cjs` →
-   * `<cwd>/.openrig/hooks/scripts/` (mode preserved, 0755 from the source asset) and upsert
+   * the configured instance state directory (mode preserved, 0755 from the source asset) and upsert
    * the owned command for each relay event DERIVED from the canonical claude.json manifest
    * (compaction hooks excluded). If the source is missing, deliver NOTHING (no dangling
    * commands) and report `sourceMissing` so the caller can surface a warning + not claim
@@ -883,7 +883,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * untouched. Not `mergeJsonFragment` (additive union-by-key can't strip on disable).
    */
   private reconcileClaudeActivityHooks(cwd: string, enabled: boolean): ActivityHookOutcome {
-    const relayDest = nodePath.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const relayDest = claudeActivityRelayPath(this.stateDir ?? undefined);
     const ownedCmd = `node ${shellQuote(relayDest)}`;
     const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
 
@@ -940,7 +940,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     //    PREVALIDATED relay event (derived from the canonical manifest above).
     if (deliverable) {
       this.fs.mkdirp(nodePath.dirname(relayDest));
-      this.fs.copyFile(this.activityRelayPath!, relayDest);
+      // Sibling seats share this relay. Do not truncate identical bytes while a hook reads it.
+      if (!this.fs.exists(relayDest) || this.fs.readFile(relayDest) !== this.fs.readFile(this.activityRelayPath!)) {
+        this.fs.copyFile(this.activityRelayPath!, relayDest);
+      }
       this.preserveMode(this.activityRelayPath!, relayDest);
       for (const { event, timeout } of derivedEvents) {
         const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
@@ -980,7 +983,7 @@ interface ActivityHookOutcome {
 // OpenRig-owned relay path suffix. Ownership is the EXACT `node <arg>` command whose single
 // argument ends with this path — a changed prefix still matches (replace, not duplicate); a
 // user command that merely contains the path (echo, or node with extra args) does NOT.
-const OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
+const LEGACY_OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
 
 function hookCommand(hook: unknown): string | undefined {
   return isPlainObject(hook) && typeof hook["command"] === "string" ? (hook["command"] as string) : undefined;
@@ -1015,7 +1018,8 @@ function isOwnedRelayCommand(cmd: string | undefined): boolean {
   // args merely concatenate to text ending in the relay suffix (e.g. `node 'x' '<relay>'`), which
   // must never be recognised as owned and deleted.
   if (shellQuote(decoded) !== arg) return false;
-  return decoded.endsWith(OWNED_RELAY_SUFFIX);
+  return decoded.endsWith(LEGACY_OWNED_RELAY_SUFFIX)
+    || decoded.endsWith(`/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`);
 }
 
 /** Decode ONE POSIX single-quoted shell token as produced by shellQuote (outer `'…'` with an

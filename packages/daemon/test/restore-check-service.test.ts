@@ -8,6 +8,8 @@ import {
   type NodeInventoryEntry,
 } from "../src/domain/restore-check-service.js";
 
+const RELAY_PATH = "/custom-instance/state/claude-activity-hooks/activity-relay.cjs";
+
 const VALID_HOST_INFRA_DECLARATION = JSON.stringify({
   schemaVersion: 1,
   daemonBootstrap: {
@@ -89,6 +91,7 @@ function mockDeps(overrides?: Partial<RestoreCheckDeps & {
   getStartupContext: (nodeId: string) => unknown;
 }>): RestoreCheckDeps {
   return {
+    stateDir: "/custom-instance",
     listRigs: () => [{ rigId: "rig-1", name: "test-rig" }],
     getNodeInventory: () => [
       {
@@ -894,7 +897,7 @@ describe("RestoreCheckService", () => {
   it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"])("checks usable selected activity-hook matcher %s", (matcher) => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
-    const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const relayPath = RELAY_PATH;
     const events = ["SessionStart", "UserPromptSubmit"];
     const settings = JSON.stringify({ hooks: Object.fromEntries(events.map((event) => [event, [{ matcher, hooks: [
       { type: "command", command: `node '${relayPath}'` },
@@ -919,7 +922,7 @@ describe("RestoreCheckService", () => {
   it.each(["disabled", "compact-only", "prompt-handler", "invalid-matcher", "substring-matcher"])("keeps %s selected activity hooks as a caveat", (kind) => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat-unusable");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
-    const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const relayPath = RELAY_PATH;
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ cwd })],
       getStartupContext: () => startupContextProbe({ projectionEntries: [{
@@ -946,7 +949,7 @@ describe("RestoreCheckService", () => {
   it("does not accept a similarly named command as the projected Claude activity hook", () => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat-lookalike");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
-    const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const relayPath = RELAY_PATH;
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ cwd })],
       getStartupContext: () => startupContextProbe({ projectionEntries: [{
@@ -968,7 +971,7 @@ describe("RestoreCheckService", () => {
   it("warns when a selected Claude activity hook event is not projected", () => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat-partial");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
-    const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const relayPath = RELAY_PATH;
     const service = new RestoreCheckService(mockDeps({
       getNodeInventory: () => [claudeNode({ cwd })],
       getStartupContext: () => startupContextProbe({ projectionEntries: [{
@@ -985,6 +988,26 @@ describe("RestoreCheckService", () => {
     const hook = service.check({}).checks.find((entry) => entry.check === "seat.dev-impl@test-rig.hooks");
     expect(hook?.status).toBe("yellow");
     expect(hook?.evidence).toContain("UserPromptSubmit");
+  });
+
+  it("does not count stale project-local commands as delivered instance hooks", () => {
+    const cwd = "/project";
+    const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const legacy = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [{
+        absolutePath: "/source/openrig-core", category: "runtime_resource", resourceType: "claude_activity_hooks",
+      }] }),
+      getClaudeActivityHookEvents: () => ["Stop"],
+      exists: () => true,
+      readFile: candidate => candidate === settingsPath
+        ? JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: `node '${legacy}'` }] }] } })
+        : VALID_HOST_INFRA_DECLARATION,
+    }));
+    const hook = service.check({}).checks.find(entry => entry.check === "seat.dev-impl@test-rig.hooks");
+    expect(hook?.status).toBe("yellow");
+    expect(hook?.evidence).toContain("missing relay entries for: Stop");
   });
 
   it("treats deliberately unselected Claude activity hooks as not applicable", () => {
