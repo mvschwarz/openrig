@@ -1,6 +1,7 @@
 import { Command } from "commander";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { terminalCommand, type TerminalDeps } from "../src/commands/terminal.js";
+import { DaemonConnectionError, DaemonResponseError, DaemonTimeoutError } from "../src/client.js";
 import type { WindowDeps } from "../src/terminal-window.js";
 
 vi.mock("../src/daemon-lifecycle.js", async () => ({
@@ -39,13 +40,19 @@ function fixture(options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv;
 
 describe("terminal open desktop default", () => {
   let logs: string[];
+  let originalExit: typeof process.exitCode;
   beforeEach(() => {
     logs = [];
     vi.spyOn(console, "log").mockImplementation((...args) => logs.push(args.join(" ")));
+    originalExit = process.exitCode;
     process.exitCode = undefined;
   });
+  afterEach(() => {
+    process.exitCode = originalExit;
+    vi.restoreAllMocks();
+  });
 
-  it.each([{ args: [] }, { args: ["--window"] }, { args: ["--provider", "herdr"] }])("opens the desktop with arguments $args, even when the provider socket already answers", async ({ args }) => {
+  it.each([{ args: [] }, { args: ["--window"] }, { args: ["--provider", "herdr", "--window"] }])("opens the desktop with arguments $args, even when the provider socket already answers", async ({ args }) => {
     const f = fixture();
     await f.run(["saved:kernel", ...args, "--json"]);
     expect(process.exitCode).toBeUndefined();
@@ -82,10 +89,38 @@ describe("terminal open desktop default", () => {
     expect(f.post).not.toHaveBeenCalled();
   });
 
-  it("keeps explicit cmux on its existing GUI provider route", async () => {
-    const f = fixture();
-    await f.run(["saved:kernel", "--provider", "cmux", "--json"]);
-    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider: "cmux" }, { timeoutMs: 45_000 });
+  it.each(["herdr", "cmux"])("keeps explicit %s on its existing-workspace route from a headless caller", async provider => {
+    const f = fixture({ platform: "linux", env: {} });
+    await f.run(["saved:kernel", "--provider", provider]);
+    expect(process.exitCode).toBeUndefined();
+    expect(f.post).toHaveBeenCalledExactlyOnceWith("/api/terminal/open", { view: "saved:kernel", provider }, { timeoutMs: 45_000 });
+    expect(f.get).not.toHaveBeenCalled();
     expect(f.exec).not.toHaveBeenCalled();
+    expect(f.windowDeps.launch).not.toHaveBeenCalled();
+    expect(logs[0]).toContain("Prepared 3 tile(s)");
+    expect(logs[0]).not.toMatch(/window requested|Terminal:/i);
+  });
+
+  it.each([
+    { name: "lost", error: new DaemonConnectionError("Reply connection lost") },
+    { name: "unreadable", error: new DaemonResponseError(200, "truncated") },
+    { name: "timed out", error: new DaemonTimeoutError("Reply timed out") },
+  ].flatMap(row => [false, true].map(json => ({ ...row, json }))))("preserves unknown outcome after an applied layout and $name reply (json=$json)", async ({ error, json }) => {
+    const f = fixture();
+    const applied: string[] = [];
+    f.post.mockImplementation(async () => {
+      applied.push("saved:kernel");
+      throw error;
+    });
+    await f.run(["saved:kernel", ...(json ? ["--json"] : [])]);
+    expect(applied).toEqual(["saved:kernel"]);
+    expect(process.exitCode).toBe(1);
+    const message = json ? JSON.parse(logs[0]!).error : logs[0];
+    expect(message).toMatch(/^A terminal window was requested, but the view outcome could not be confirmed\./);
+    expect(message).toContain("Inspect the terminal before retrying");
+    expect(message).not.toMatch(/view did not open|No terminal window was opened/);
+    expect(f.exec.mock.calls.filter(([file]) => file === "/usr/bin/osascript")).toHaveLength(1);
+    expect(f.post).toHaveBeenCalledTimes(1);
+    if (json) expect(JSON.parse(logs[0]!)).toMatchObject({ ok: false, window: { app: "Terminal", surface: "window" } });
   });
 });

@@ -35,6 +35,12 @@ function harness(opts: { admitted?: boolean; failCreates?: number; newerRoot?: s
       return ts === "400.0" ? { seat: "asker@rig", channel: "C1", conversationId: "qitem-ask-1", threadTs: ts, state: "open" } : null;
     },
     resolveByConversation: () => opts.newerRoot ? { threadTs: opts.newerRoot } : null,
+    // Messages OpenRig posted into a thread: a long ask's reply part (400.5), and a second ask posted
+    // into the first ask's thread (400.7), which belongs to its own seat, not to the thread's root.
+    partOf: (ts: string, channel: string) => channel !== "C1" ? null
+      : ts === "400.5" ? { threadTs: "400.0", seat: "asker@rig", conversationId: "qitem-ask-1" }
+      : ts === "400.7" ? { threadTs: "400.0", seat: "other@rig", conversationId: "qitem-ask-2" }
+      : null,
   } as never;
   const deadLetter = new DeadLetterStore<SlackEvent>("/d.jsonl", fs, clock);
   const router = new InboundRouter({
@@ -97,6 +103,20 @@ describe("#899 reactions on an ask", () => {
     const h = harness({ newerRoot: "450.0" });
     expect(await deliver(h, reaction())).toEqual({ status: "accepted", reason: "reaction" });
     expect(h.rows[0]).toMatchObject({ destination: "asker@rig", summary: "Founder via Slack: reacted :white_check_mark: to qitem-ask-1" });
+  });
+
+  it("on a reply part OpenRig posted for a long ask reach the seat that asked, as on the ask itself", async () => {
+    const h = harness({ newerRoot: "400.0" });
+    expect(await deliver(h, reaction({ item: { type: "message", channel: "C1", ts: "400.5" } }))).toEqual({ status: "accepted", reason: "reaction" });
+    expect(h.rows).toHaveLength(1);
+    expect(h.rows[0]).toMatchObject({ destination: "asker@rig", summary: "Founder via Slack: reacted :white_check_mark: to qitem-ask-1" });
+  });
+
+  it("on an ask posted into another ask's thread reach that ask's own seat, not the thread owner's", async () => {
+    const h = harness();
+    expect(await deliver(h, reaction({ item: { type: "message", channel: "C1", ts: "400.7" } }))).toEqual({ status: "accepted", reason: "reaction" });
+    expect(h.rows).toHaveLength(1);
+    expect(h.rows[0]).toMatchObject({ destination: "other@rig", summary: "Founder via Slack: reacted :white_check_mark: to qitem-ask-2" });
   });
 
   it("are ignored on any message that isn't an ask, with no row for anyone", async () => {

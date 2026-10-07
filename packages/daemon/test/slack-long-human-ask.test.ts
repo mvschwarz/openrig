@@ -245,7 +245,7 @@ describe("long human asks (#897)", () => {
     expect([bodies[0]!.slice(0, -NOTE.length), ...bodies.slice(1)].join("")).toBe(body);
   });
 
-  it("refuses the rest, loudly, rather than planning again when the ask may already be in Slack", async () => {
+  it("acknowledges a one-message ask already in Slack, rather than refusing or repeating it", async () => {
     const { ask, body } = await askAtLabelLimit("landed");
     const posted: Post[] = [];
     let calls = 0;
@@ -257,14 +257,109 @@ describe("long human asks (#897)", () => {
       return reply({ ok: true, ts: msg.ts });
     };
     const failed = vi.fn();
-    const base = { ...stores("landed"), botToken: "synthetic", channel: "C", fetchImpl, onTransportFailed: failed };
+    const onPosted = vi.fn();
+    const base = { ...stores("landed"), botToken: "synthetic", channel: "C", fetchImpl, onTransportFailed: failed, onPosted };
     // The first attempt's one message lands, but its response is lost.
     expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask(body))).ok).toBe(false);
-    // A longer label before the retry: a new plan would split under new ids and post the brief again.
+    // A longer label before the retry: the recorded one message no longer renders, but it is the whole
+    // ask and it is in Slack, so the retry records it as delivered, with its real ts for thread replies.
+    expect(await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask(body))).toEqual({ ok: true });
+    expect(posted).toHaveLength(1);
+    expect(onPosted).toHaveBeenCalledWith(expect.anything(), "1.1", undefined);
+    expect(failed.mock.calls.map((call) => call[1])).not.toContain("human-message-unrenderable");
+  });
+
+  it("still refuses a one-message ask whose history scan is incomplete, rather than marking it delivered", async () => {
+    const { ask, body } = await askAtLabelLimit("unverified");
+    const posted: Post[] = [];
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url, init) => {
+      // One readable page that says there is more, with no cursor: the scan can't rule the message in or out.
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: [], has_more: true });
+      if (++calls === 1) throw new Error("synthetic timeout; the post may or may not have landed");
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${calls}.1` };
+      posted.push(msg);
+      return reply({ ok: true, ts: msg.ts });
+    };
+    const failed = vi.fn();
+    const onPosted = vi.fn();
+    const base = { ...stores("unverified"), botToken: "synthetic", channel: "C", fetchImpl, onTransportFailed: failed, onPosted };
+    expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask(body))).ok).toBe(false);
     const retry = await subsystemSlackDeliver({ ...base, sourceLabel: "fixture-0123456789" })(ask(body));
+    expect(retry).toMatchObject({ ok: false, class: "human-message-unrenderable" });
+    expect(posted).toHaveLength(0);
+    expect(onPosted).not.toHaveBeenCalled();
+    expect(failed).toHaveBeenLastCalledWith(expect.anything(), "human-message-unrenderable", expect.any(String), true);
+  });
+
+  it("refuses the rest, loudly, when a split's first part is in Slack and the rest no longer renders", async () => {
+    const ask = decision("partial", { sourceSession: undefined, body: "a".repeat(4000), summary: nearLimitSummary });
+    const posted: Post[] = [];
+    let calls = 0;
+    const fetchImpl: FetchImpl = async (url, init) => {
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: posted });
+      if (++calls === 2) throw new Error("synthetic timeout before the reply landed");
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${calls}.1` };
+      posted.push(msg);
+      return reply({ ok: true, ts: msg.ts });
+    };
+    const failed = vi.fn();
+    const base = { ...stores("partial"), botToken: "synthetic", channel: "C", fetchImpl, onTransportFailed: failed };
+    expect((await subsystemSlackDeliver({ ...base, sourceLabel: "fixture" })(ask)).ok).toBe(false);
+    expect(posted).toHaveLength(1);
+    // A sender label past its 2,000-unit limit renders no part at all, and the first part is already posted.
+    const retry = await subsystemSlackDeliver({ ...base, sourceLabel: "x".repeat(2001) })(ask);
     expect(retry).toMatchObject({ ok: false, class: "human-message-unrenderable" });
     expect(posted).toHaveLength(1);
     expect(failed).toHaveBeenLastCalledWith(expect.anything(), "human-message-unrenderable", expect.any(String), true);
+  });
+
+  it("reports each reply part with its ask's root, so a reaction on it can find the ask (#899)", async () => {
+    const posts: Post[] = [];
+    const onPostedPart = vi.fn();
+    const deliver = subsystemSlackDeliver({ ...stores("parts"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(posts), onPostedPart });
+    expect(await deliver(decision("parts", { body: longBody }))).toEqual({ ok: true });
+    expect(posts.length).toBeGreaterThan(2);
+    expect(onPostedPart.mock.calls.map((call) => [call[1], call[2]])).toEqual(posts.slice(1).map((_, i) => [`${i + 2}.1`, "1.1"]));
+  });
+
+  it("reports every message of an ask posted into an existing thread, first message included (#899)", async () => {
+    // A later notification in the ask's own thread, or an ask posted into another thread: its first message is a reply.
+    const shortPosts: Post[] = [];
+    const shortParts = vi.fn();
+    const onPostedRoot = vi.fn();
+    const short = subsystemSlackDeliver({ ...stores("threaded"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(shortPosts), resolveThreadTs: () => "9.9", onPostedPart: shortParts, onPostedRoot });
+    expect(await short(decision("threaded", { body: "Why: restores status. Approve or hold?" }))).toEqual({ ok: true });
+    expect(shortPosts.map((p) => p.thread_ts)).toEqual(["9.9"]);
+    expect(onPostedRoot).not.toHaveBeenCalled();
+    expect(shortParts.mock.calls.map((call) => [call[0].qitemId, call[1], call[2]])).toEqual([["q-threaded", "1.1", "9.9"]]);
+
+    const longPosts: Post[] = [];
+    const longParts = vi.fn();
+    const long = subsystemSlackDeliver({ ...stores("threaded-long"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: recorder(longPosts), resolveThreadTs: () => "9.9", onPostedPart: longParts });
+    expect(await long(decision("threaded-long", { body: longBody }))).toEqual({ ok: true });
+    expect(longPosts.length).toBeGreaterThan(2);
+    expect(longParts.mock.calls.map((call) => [call[0].qitemId, call[1], call[2]])).toEqual(longPosts.map((_, i) => ["q-threaded-long", `${i + 1}.1`, "9.9"]));
+
+    // The first message landed in the thread but its response was lost: the retry finds it there and reports it.
+    const landed: Post[] = [];
+    let calls = 0;
+    const lostResponse: FetchImpl = async (url, init) => {
+      if (!url.endsWith("chat.postMessage")) return reply({ ok: true, messages: landed });
+      const msg = { ...JSON.parse(String(init?.body)), ts: `${++calls}.1` };
+      landed.push(msg);
+      if (calls === 1) throw new Error("synthetic timeout after the post landed");
+      return reply({ ok: true, ts: msg.ts });
+    };
+    const reconciledParts = vi.fn();
+    const base = { ...stores("threaded-landed"), botToken: "synthetic", channel: "C", sourceLabel: "fixture", fetchImpl: lostResponse, resolveThreadTs: () => "9.9", onPostedPart: reconciledParts, onPostedRoot };
+    const ask = decision("threaded-landed", { body: "Why: restores status. Approve or hold?" });
+    expect((await subsystemSlackDeliver(base)(ask)).ok).toBe(false);
+    expect(reconciledParts).not.toHaveBeenCalled();
+    expect(await subsystemSlackDeliver(base)(ask)).toEqual({ ok: true });
+    expect(landed).toHaveLength(1);
+    expect(onPostedRoot).not.toHaveBeenCalled();
+    expect(reconciledParts.mock.calls.map((call) => [call[0].qitemId, call[1], call[2]])).toEqual([["q-threaded-landed", "1.1", "9.9"]]);
   });
 
   it("keeps the recorded cuts when only parts already delivered would no longer fit", async () => {

@@ -107,15 +107,15 @@ export function terminalCommand(depsOverride?: TerminalDeps): Command {
     .command("open")
     .argument("<view>", "a rig name, mission:<id>, slice:<id>, or a saved-view id")
     .description("Open a desktop terminal showing the view's live agents as interactive tiles")
-    .option("--provider <name>", "herdr (default), cmux, or plain tmux")
-    .option("--window", "Open a new desktop terminal tab/window (the default for herdr and tmux)")
+    .option("--provider <name>", "herdr or cmux: use an existing workspace without opening a window; tmux requires --window")
+    .option("--window", "Open a new desktop terminal tab/window (the default when --provider is omitted)")
     .option("--json", "JSON output for agents")
     .action(async (view: string, opts: { provider?: string; json?: boolean; window?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         // Herdr's control socket can answer with no desktop client attached.
-        // Use the desktop path by default; cmux already runs as a GUI provider.
-        if (opts.window || opts.provider !== "cmux") {
+        // The default requests a desktop; an explicit provider reuses its workspace.
+        if (opts.window || !opts.provider) {
           const result = await openTerminalWindow(client, view, opts.provider, deps.windowDeps);
           printOpen(opts.json ?? false, result, 200);
           return;
