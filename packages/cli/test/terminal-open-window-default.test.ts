@@ -45,7 +45,7 @@ describe("terminal open desktop default", () => {
     process.exitCode = undefined;
   });
 
-  it.each([[], ["--window"], ["--provider", "herdr"]])("opens the desktop with arguments %j, even when the provider socket already answers", async args => {
+  it.each([{ args: [] }, { args: ["--window"] }, { args: ["--provider", "herdr"] }])("opens the desktop with arguments $args, even when the provider socket already answers", async ({ args }) => {
     const f = fixture();
     await f.run(["saved:kernel", ...args, "--json"]);
     expect(process.exitCode).toBeUndefined();
