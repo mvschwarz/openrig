@@ -439,14 +439,15 @@ it('failed publication retains the temp map and sends no compact',async()=>{
 });
 for(const end of ['expiry','cancel','disable','replacement'])it(`manual ${end} during idle wait never publishes the temp or compacts`,async()=>{
  const f=fixture();f.onSleep(async()=>{stageMap(f);});
- vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async()=>{
+ const idle=vi.spyOn(f.transport,'waitUntilIdle').mockImplementationOnce(async()=>{
   if(end==='expiry')f.advance(1001);
   if(end==='cancel')f.e.cancelPreparation(seat);
   if(end==='disable')f.policy.enabled=false;
   if(end==='replacement')f.generation('generation-two');
   return {ok:true,activity:{state:'idle',reason:'fixture',evidenceSource:'fixture'},waitedMs:0,attempts:1} as any;
  });
- expect((await f.e.triggerManualCompact(input,{operatorInitiated:true})).triggered).toBe(false);
+ expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:{expiry:'preparation_incomplete',cancel:'preparation_cancelled',disable:'disabled',replacement:'stale_generation'}[end]});
+ expect(idle).toHaveBeenCalledTimes(1);
  expect(compacts(f)).toHaveLength(0);expect(existsSync(f.e.getPreparationState(seat)!.mapPath)).toBe(false);
 });
 it('legacy fallback parent is created before asking the seat to edit its temp file',async()=>{

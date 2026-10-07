@@ -263,11 +263,14 @@ already-triggered latch; an active manual attempt also blocks it.
 1. The first above-threshold tick starts an attempt with its own ID, the seat's occupant
    generation, a restore-map path and a completion marker, then sends only the prep prompt.
    An unknown occupant generation stops the attempt at once.
-2. Later ticks return `preparation_pending` until the attempt's `RESTORE-MAP.md` exists and
-   ends with that exact marker. The map path is under the seat's working directory
+2. The agent writes `RESTORE-MAP.md.tmp` with its file-edit tool, completion marker last.
+   Later ticks return `preparation_pending` until that exact map is complete. The map path is under the seat's working directory
    (`.openrig/compaction/preparation/<session>/<attempt>/`, with a `.gitignore` of `*`) when
    that is writable, otherwise under `compaction/preparation/` in the OpenRig home.
-3. Only then is `/compact` sent, with the map path appended to the compact instruction.
+3. The daemon atomically renames the completed temp file to `RESTORE-MAP.md` in its existing
+   final send checks, after rechecking the attempt and occupant. An already-complete final map
+   remains compatible. Only then is `/compact` sent, with the final map path appended to the
+   compact instruction. Publication failure cannot authorize `/compact`.
 4. The continuation then runs below the threshold: turn boundary, restore prompt, then a
    read-depth audit prompt (each item marked `FULL`, `PARTIAL` or `NOT_READ`).
 
