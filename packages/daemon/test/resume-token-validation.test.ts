@@ -81,6 +81,19 @@ describe("validateResumeToken", () => {
 // claude/codex id-shape rules are byte-identical before/after (the id-rule
 // tests above must keep passing unchanged).
 describe("validateResumeToken — pi_session_file (path-shaped, per-type)", () => {
+  it.each(["pi", "omp"])("accepts native Windows session paths for %s", runtime => {
+    for (const token of [String.raw`C:\Users\测试 user\.openrig\seat@rig\session.jsonl`, "D:/OpenRig data/session.jsonl", String.raw`\\server\share\seat\session.jsonl`]) {
+      expect(validateResumeToken(runtime, token, "win32")).toMatchObject({ ok: true, token });
+      expect(validateResumeToken(runtime, token, "linux").ok).toBe(false);
+    }
+  });
+  it("rejects Windows relative, traversal, device and alternate-stream paths without echoing them", () => {
+    for (const token of [String.raw`C:session.jsonl`, String.raw`\seat\session.jsonl`, String.raw`C:\seat\..\session.jsonl`, String.raw`\\?\C:\seat\session.jsonl`, String.raw`C:\seat\file:stream.jsonl`, String.raw`C:\seat\x;secret.jsonl`]) {
+      const result = validateResumeToken("pi", token, "win32");
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).not.toContain(token);
+    }
+  });
   const validPath = "/Users/someone/.openrig/state/pi/seat-a/sessions/2026-07-06T10-00-00_0197a2f0-1234-7abc-8def-0123456789ab.jsonl";
 
   it("accepts a valid absolute .jsonl session-file path and returns pi_session_file", () => {

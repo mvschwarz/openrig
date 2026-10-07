@@ -1,4 +1,5 @@
 import { writeFileSync, renameSync } from "node:fs";
+export { requestWindowsDaemonStop, startWindowsDaemonControl } from "./windows-daemon-control.js";
 
 export const DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
 export const DAEMON_STOP_WAIT_MS = DAEMON_SHUTDOWN_TIMEOUT_MS + 2_000;

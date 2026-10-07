@@ -37,3 +37,13 @@ export function renderWindowsLaunch(command: string, env: Readonly<Record<string
   }).join("");
   return `${assignments}& ${powershellQuote(executable!)} @(${args.map(powershellQuote).join(", ")})`;
 }
+/** psmux can deliver late OSC colour replies as native Windows key events.
+ * Only recognise an entire otherwise-empty current composer, never old history
+ * or a human draft containing additional text. Used during owned launch only. */
+export function hasOnlyWindowsTerminalResponseDraft(content: string): boolean {
+  const lines = content.split(/\r?\n/);
+  let current = -1;
+  for (let i = 0; i < lines.length; i++) if (/^\s*[›>]\s/.test(lines[i]!)) current = i;
+  if (current < 0 || (lines[current + 1] ?? "").trim() !== "") return false;
+  return /^\s*[›>]\s*(?:\](?:10|11);rgb:[0-9a-f]{1,4}\/[0-9a-f]{1,4}\/[0-9a-f]{1,4}\\){1,2}\s*$/i.test(lines[current]!);
+}

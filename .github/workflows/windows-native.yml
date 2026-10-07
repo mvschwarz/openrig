@@ -1,0 +1,39 @@
+name: Windows native experiment
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/windows-support-validation]
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run lint
+      - name: Install pinned portable psmux
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'psmux.zip'
+          Invoke-WebRequest 'https://github.com/psmux/psmux/releases/download/v3.3.8/psmux-v3.3.8-windows-x64.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne '1ad127ba937194a890b933a73d9b023e297bd73dc742abd841bf159984c2effe') { throw 'psmux archive checksum mismatch' }
+          $install = Join-Path $env:RUNNER_TEMP 'psmux'
+          Expand-Archive $archive $install
+          $binary = @(Get-ChildItem $install -Filter tmux.exe -Recurse)
+          if ($binary.Count -ne 1) { throw 'Expected one portable tmux.exe' }
+          "OPENRIG_TEST_PSMUX=$($binary[0].FullName)" >> $env:GITHUB_ENV
+      - name: Native terminal, identity and production drain tests
+        working-directory: packages/daemon
+        run: npx vitest run test/windows-terminal-native.test.ts test/windows-launch.test.ts test/windows-pi-command.test.ts test/windows-process-lineage.test.ts test/windows-daemon-control.test.ts test/resume-token-validation.test.ts test/native-process-lineage.test.ts test/tmux-adapter.test.ts test/tmux-argv-exec.test.ts
+      - name: CLI lifecycle
+        working-directory: packages/cli
+        run: npx vitest run test/daemon-lifecycle.test.ts test/daemon-lifecycle-status.test.ts test/daemon-lifecycle-event-loop.test.ts
+      - name: Native package assembly
+        run: npm run build:package

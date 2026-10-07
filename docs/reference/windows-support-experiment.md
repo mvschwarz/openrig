@@ -1,78 +1,100 @@
-# Windows support experiment
+# Native Windows Codex/Pi experiment
 
-Status: experimental foundation. Native Windows is not yet a supported runtime.
 Tracking: https://github.com/mvschwarz/openrig/issues/88
 
-## Delivery plan
+This branch implements native Windows headless Codex/Pi launch, message delivery,
+process observation, snapshot/down/restore, and graceful daemon stop. It remains
+an experimental fork; it is not an upstream Windows support announcement.
+RepoStew migration is deferred.
 
-1. Keep WSL2 as the usable deployment path. Run Node, tmux, Codex and Pi inside
-   Linux, with Linux-local state and separate provider authentication. Validate
-   live replies and snapshot/warm restore before moving existing work.
-2. Remove POSIX shell utilities from workspace build preparation. Preserve the
-   packaged CLI schemas, templates, LICENSE and README, and POSIX executable bits.
-   This independently reviewable change is implemented and validated.
-3. Introduce a PowerShell launch path that accepts only generated literal argv,
-   sets a validated environment, stages a short invocation and refuses unknown
-   shells. Resolve standard npm Pi launchers through Node rather than cmd.exe.
-   These foundations are implemented on this branch.
-4. Treat psmux as a distinct terminal backend. psmux runs a server per session,
-   so local `%N` IDs need session scope. This branch preserves both in an opaque
-   pane reference and sends an explicit global session selector before the local
-   pane selector. Buffer loading/deletion use the same server scope. Unscoped
-   process batching falls back to scoped reads. Complete protocol conformance
-   tests for guarded multi-seat lifecycle before upstreaming this backend.
-5. Complete Windows process ancestry, termination receipts, cold recovery and
-   terminal/UI acceptance. Only then add a Windows CI lane and a support claim.
-   These are outstanding; WSL success does not establish their correctness.
+## Design
 
-## Evidence collected on 2026-10-08
+1. Use psmux as a distinct backend. Its per-session servers reuse local pane
+   IDs, so OpenRig preserves session scope in an opaque pane reference. Buffer
+   operations share that scope. Termination checks the session ID on the selected
+   connection and kills that server itself, without resolving a session name again.
+2. Render generated literal argv into a staged PowerShell command. Refuse unknown
+   shells and shell expansions. Expose the paired CLI through PowerShell, cmd and
+   Git Bash entries. Resolve a standard npm Pi shim through Node, without cmd eval.
+3. ConPTY drops VT paste framing. Node's Pi runner receives bracketed paste via
+   native console input; native Codex receives character events and Shift+Return
+   for newlines. A launch-only repair removes a recognised otherwise-empty OSC
+   colour-response draft. It never clears additional user text or old history.
+4. Read Windows process identity and birth times through CIM. Require unique
+   executable ancestry, creation ordering, a runtime foreground label and stable
+   samples; do not invent Unix foreground process groups. Accept validated drive
+   and UNC Pi session paths only on Windows; reject traversal and device/ADS paths.
+5. Windows SIGTERM force-terminates Node. An instance-specific named pipe and
+   private capability instead request the existing bounded shutdown drain. Check
+   current daemon PID/start identity and the resulting receipt. Refuse unavailable
+   channels without force termination. Remove only the closing instance's capability.
 
-WSL2: Ubuntu 24.04, Linux 6.18.40.1, Node 24.14.1, tmux 3.4, OpenRig 0.6.6,
-Codex 0.161.0 and Pi 1.0.4. Both managed seats answered unique messages. After
-snapshot/down and warm restore, both recalled their preceding message without
-being given it again. No kernel/operator, suspend, reboot or GUI acceptance was
-included. Report: https://github.com/mvschwarz/openrig/issues/88#issuecomment-6043925546
+## Local evidence, 2026-10-08
 
-Native Windows: psmux 3.3.8, PowerShell and Node. Full workspace build and
-workspace typechecking pass. The real terminal test runs two sessions with
-duplicate local pane IDs and verifies exact native arguments containing spaces,
-apostrophes, Unicode, shell metacharacters, an empty value and a trailing
-backslash, plus an environment marker. The selected session writes the expected
-result through its scoped pane reference.
+Windows, Node 24.14.1, psmux 3.3.8, Codex 0.153.4 and Pi 0.87.1:
 
-The complete native managed Codex/Pi rig **does not pass readiness**. Both seats
-remain attention-required after startup timeouts. No successful native model
-reply or native resume is claimed. After three targeted fixes, further launch
-changes were paused: compatibility between psmux's independent session servers
-and the full guarded terminal binding protocol remains an unproven assumption.
-Isolate that protocol with a multi-seat conformance harness before resuming.
+- Both managed native seats reached ready and replied to unique markers.
+- Actual native conversation files preserved a two-line message containing
+  Chinese characters, an apostrophe and a semicolon. Both replied with the marker.
+- Snapshot/down stopped exactly the two intended sessions. A sibling session
+  remained present. Restore reported both nodes resumed; both recalled the prior
+  marker without receiving its value again.
+- Graceful daemon stop produced a clean/complete receipt. Restart retained the
+  running seats and bindings. A production startServer fixture also persisted
+  its recorder data and clean receipt through the Windows control channel.
+- Native terminal tests verify exact argv, Unicode, empty arguments, a trailing
+  backslash, multiline runner submission and sibling-safe termination. CIM tests
+  exercise the actual Windows reader as well as ambiguity and recycled-parent refusal.
+- Workspace build, typechecking and native Git Bash package assembly passed.
 
-## Reproduction
+The first isolated-profile harness failed because ConPTY did not start with a
+redirected USERPROFILE. Keep the real OS profile and isolate product/provider
+homes instead. A copied Pi OAuth refresh token was stale after another instance
+rotated it; use independently established sign-ins for persistent installations.
 
-Use Node 22 or 24 and install dependencies with `npm ci`, then `npm run build`
-and `npm run lint`. Build preparation fixtures run with:
+Acceptance boundaries: no physical reboot/suspend or GUI terminal acceptance;
+no kernel/operator or other runtime acceptance; no upstream merge/review claim.
+psmux 3.3.8 does not expose tmux server clipboard options, so that capability is
+reported unavailable. Git for Windows is required for Pi bash tools and packaging.
+WSL is not used by the native runtime or native build path.
 
-```sh
-node --test scripts/prepare-workspace-build.test.mjs
-```
+## Reproduce
 
-On Linux, also run `node --test scripts/cli-license.test.mjs` to verify the
-actual npm archive retains the original license and README.
-
-Focused runtime tests:
-
-```sh
-npm exec --workspace @openrig/daemon -- vitest run test/windows-launch.test.ts test/windows-pi-command.test.ts test/pi-runner.test.ts
-```
-
-The native terminal test is opt-in and creates/kills only its own uniquely named
-test sessions. It requires the absolute path to the real psmux `tmux.exe`:
+Install Node 22/24, Git for Windows, PowerShell and psmux 3.3.8. Put the portable
+psmux directory on PATH ahead of unrelated tmux installations. Keep USERPROFILE
+unchanged. Use a separate OPENRIG_HOME and explicitly selected CODEX_HOME; establish
+provider sign-ins there. Configure Codex's supported Windows sandbox for that home
+before using OpenRig's normal workspace-write floor. The local test used
+`[windows] sandbox = 'unelevated'`; it did not disable the workspace sandbox.
 
 ```powershell
+npm ci
+npm run build
+npm run lint
+npm run build:package
 $env:OPENRIG_TEST_PSMUX = 'C:\path\to\psmux\tmux.exe'
-npm exec --workspace @openrig/daemon -- vitest run test/windows-terminal-native.test.ts
+npm exec --workspace @openrig/daemon -- vitest run test/windows-terminal-native.test.ts test/windows-launch.test.ts test/windows-pi-command.test.ts test/windows-process-lineage.test.ts test/windows-daemon-control.test.ts test/resume-token-validation.test.ts
 ```
 
-Never include provider authentication, session environments, staged launch
-scripts or raw argv containing credentials in public diagnostics. Keep runtime
-state and provider files outside the source checkout.
+The native terminal tests create and remove only their uniquely named fixtures.
+The Windows workflow verifies the pinned psmux archive digest and runs provider-free
+terminal, identity, drain, lifecycle and package checks. Live provider responses
+remain separate local evidence; a green CI job does not establish account access.
+
+```powershell
+rig daemon start --no-kernel
+rig up path\to\rig.yaml --plan
+rig up path\to\rig.yaml --json
+rig ps --nodes --rig my-rig --json
+rig send seat@my-rig 'unique test marker' --raw --json
+rig down my-rig --snapshot --json
+rig restore SNAPSHOT_ID --rig RIG_ID
+rig restore status ATTEMPT_ID --rig RIG_ID --json
+rig daemon stop
+```
+
+Keep authentication, session environments, staged launch scripts and raw launch
+argv out of public diagnostics. Runtime state stays outside the source checkout.
+
+Prior WSL evidence (a separate deployment, not native acceptance):
+https://github.com/mvschwarz/openrig/issues/88#issuecomment-6043925546

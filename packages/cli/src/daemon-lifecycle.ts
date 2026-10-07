@@ -216,6 +216,7 @@ export interface StartOptions {
 }
 
 export interface LifecycleDeps {
+  requestStop?: (state: DaemonState) => Promise<void>;
   /** Required by startDaemon; read-only lifecycle consumers need no launch capability. */
   acquireStartLock?: () => DaemonStartLock;
   spawn: (cmd: string, args: string[], opts: {
@@ -982,8 +983,9 @@ export async function stopDaemon(deps: LifecycleDeps): Promise<"stopped" | "no-t
   let requested = "";
   if (pidState !== "dead") {
     notBefore = Date.now();
-    requested = `; SIGTERM requested at ${new Date(notBefore).toISOString()}`;
-    deps.kill(state.pid, "SIGTERM");
+    requested = `; ${deps.requestStop ? "graceful stop" : "SIGTERM"} requested at ${new Date(notBefore).toISOString()}`;
+    if (deps.requestStop) await deps.requestStop(state);
+    else deps.kill(state.pid, "SIGTERM");
     // One signal. An already-exited target goes straight to the same judgment.
     const deadline = Date.now() + DAEMON_STOP_WAIT_MS;
     while (deps.isProcessAlive(state.pid) && Date.now() < deadline) {
