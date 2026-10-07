@@ -25,7 +25,7 @@ function fixture(options: { platform?: NodeJS.Platform; env?: NodeJS.ProcessEnv;
     }
     if (args.includes("--version")) return "herdr 0.9.3";
     if (file === "/bin/sh") {
-      if (options.unsupported) throw new Error("not installed");
+      if (options.unsupported && args[1] !== "command -v herdr") throw new Error("not installed");
       return args[1] === "command -v herdr" ? "/fixture/bin/herdr" : "/fixture/bin/terminal";
     }
     return "";

@@ -62,17 +62,26 @@ async function herdrBinary(deps: WindowDeps): Promise<string | null> {
 }
 
 /** New surfaces only. No System Events keystrokes or existing-terminal input. */
-async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<(command: string) => Promise<{ app: string; surface: string }>> {
+async function windowLauncher(deps: WindowDeps, notes: string[]): Promise<((command: string) => Promise<{ app: string; surface: string }>) | null> {
+  // Shell tools can pipe stdio while still running inside the person's terminal.
+  const program = deps.env["TERM_PROGRAM"];
+  const host = !program || program === "tmux" ? deps.env["__CFBundleIdentifier"] : program;
+  if (deps.env["CI"] && !["0", "false"].includes(deps.env["CI"])) return null;
+  if ((deps.env["SSH_CONNECTION"] || deps.env["SSH_CLIENT"] || deps.env["SSH_TTY"])
+    && (deps.platform === "darwin" || (!deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"]))) return null;
   if (deps.platform === "darwin") {
-    const app = ["/Applications/Ghostty.app", path.join(deps.env["HOME"] ?? homedir(), "Applications/Ghostty.app")].find(deps.exists);
+    const inGhostty = host === "ghostty" || host === "com.mitchellh.ghostty";
+    if (!inGhostty && host !== "Apple_Terminal" && host !== "com.apple.Terminal") return null;
+    const app = inGhostty ? ["/Applications/Ghostty.app", path.join(deps.env["HOME"] ?? homedir(), "Applications/Ghostty.app")].find(deps.exists) : undefined;
     let ghostty = false;
     if (app) {
       try {
         const version = await deps.exec("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleShortVersionString", path.join(app, "Contents/Info.plist")]);
         const [major, minor] = version.trim().split(".").map(Number);
         ghostty = major! > 1 || (major === 1 && minor! >= 3);
-      } catch { /* Older/non-scriptable Ghostty uses the system terminal. */ }
+      } catch { /* No other app is a substitute for the hosting terminal. */ }
     }
+    if (inGhostty && !ghostty) return null;
     // Native macOS tab groups appear as separate one-tab Terminal windows.
     // That is not evidence that resizing one would leave existing windows alone.
     const script = ghostty ? `on run argv
@@ -108,9 +117,9 @@ end run`;
     };
   }
   if (deps.platform !== "linux" || (!deps.env["DISPLAY"] && !deps.env["WAYLAND_DISPLAY"])) {
-    throw new Error("No local desktop display is available.");
+    return null;
   }
-  for (const app of ["ghostty", "x-terminal-emulator", "gnome-terminal", "konsole", "xterm"]) {
+  for (const app of ["ghostty", "gnome-terminal", "konsole", "xterm"].filter(app => app === host)) {
     try { await deps.exec("/bin/sh", ["-c", `command -v ${app}`]); } catch { continue; }
     return async command => {
       const prefix = app === "ghostty" ? ["--window-width=140", "--window-height=40", "-e"]
@@ -120,13 +129,11 @@ end run`;
         : ["-e"];
       const args = [...prefix, "/bin/sh", "-c", command];
       await deps.launch(app, args);
-      notes.push(app === "x-terminal-emulator"
-        ? "The system terminal launcher has no portable size option. Enlarge the new window manually if its columns are cramped."
-        : "Requested 140 columns by 40 rows for the new window. The desktop may adjust that size; enlarge it manually if needed.");
+      notes.push("Requested 140 columns by 40 rows for the new window. The desktop may adjust that size; enlarge it manually if needed.");
       return { app, surface: "window-requested" };
     };
   }
-  throw new Error("No supported desktop terminal was found; install Ghostty or a system terminal and retry.");
+  return null;
 }
 
 function failure(provider: string, error: string): OpenViewResult {
@@ -162,6 +169,13 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
       return failure(provider, "The terminal view changed since preview. Refresh the preview before opening.");
     }
     if (!composed.opened.length) return { ...failed("No conversations are attachable."), absent: composed.absent, degraded: composed.degraded };
+    if (!launchWindow) {
+      const socket = preview.data.status.launch?.socketPath;
+      const command = herdr && socket
+        ? `env -u TMUX -u HERDR_SESSION -u HERDR_SOCKET_PATH HERDR_SOCKET_PATH=${shellQuote(socket)} ${shellQuote(herdr)}`
+        : composed.opened[0]!.paneCommand;
+      return { ...failure(provider, `No terminal window was opened. Can't open a window from this terminal. Open a new terminal window on the daemon's desktop and run: ${command}`), windowAttempted: false, absent: composed.absent, degraded: composed.degraded };
+    }
 
     if (herdr) {
       const endpoint = preview.data.status.launch;
