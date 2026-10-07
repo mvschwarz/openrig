@@ -16,6 +16,9 @@ const { recordRefocusResult } = require("./refocus-health.cjs");
 const DEFAULT_THRESHOLD = 2_600_000;
 const FALSE_VALUES = new Set(["0", "false", "off", "no"]);
 const CONTENT_LOOKUP_TIMEOUT_MS = 2_000;
+// Normal managed restore advances on ~30 s polls with a 10 s idle wait.
+// A lost daemon stage must not suppress this occupant's refocus indefinitely.
+const MANAGED_RESTORE_HOLD_MS = 10 * 60_000;
 
 function runtime() {
   const index = process.argv.indexOf("--runtime");
@@ -360,6 +363,8 @@ function renderTrace() {
           break;
         } catch {}
       }
+      if (state.managedRestorePending) state.managedRestorePendingAt = new Date().toISOString();
+      else delete state.managedRestorePendingAt;
     }
     if (event === "PostCompact" || !state.pendingOn) state.pendingOn = event;
     state.pendingAt ||= new Date().toISOString();
@@ -368,8 +373,13 @@ function renderTrace() {
   }
 
   if (harness === "claude" && state.managedRestorePending) {
-    if (!prompt.startsWith("Please respond to this normal user message now by restoring this Claude session after compaction.")) process.exit(0);
+    const heldFor = Date.now() - Date.parse(state.managedRestorePendingAt);
+    // Missing/invalid timestamps from older state, or a clock moving backwards,
+    // cannot establish a live hold. No timer or extra turn is created here.
+    if (heldFor >= 0 && heldFor < MANAGED_RESTORE_HOLD_MS
+      && !prompt.startsWith("Please respond to this normal user message now by restoring this Claude session after compaction.")) process.exit(0);
     delete state.managedRestorePending;
+    delete state.managedRestorePendingAt;
     persist();
   }
 

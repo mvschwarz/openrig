@@ -53,13 +53,17 @@ printf '{}'
     expect(result.status, result.stderr).toBe(0);
     return result.stdout;
   };
+  let compactEvent = 0;
   return { root, env, notes, transcript,
-    run: (event: string, prompt = "continue", extra: NodeJS.ProcessEnv = {}) => invoke(hook, { hook_event_name: event, prompt }, extra),
+    run: (event: string, prompt = "continue", extra: NodeJS.ProcessEnv = {}) => invoke(hook, {
+      hook_event_name: event, prompt, ...(event === "PostCompact" ? { event_id: `compact-${++compactEvent}` } : {}),
+    }, extra),
     prepare: (managed: boolean) => invoke(join(plugin, "skills/claude-compaction-restore/scripts/precompact-hook.mjs"), {
       hook_event_name: "PreCompact", trigger: "manual",
       custom_instructions: managed ? buildCompactCommand("").slice("/compact ".length) : null,
     }),
     state: () => JSON.parse(readFileSync(join(root, "refocus/seat@test__occupant.json"), "utf8")),
+    setState: (state: object) => writeFileSync(join(root, "refocus/seat@test__occupant.json"), JSON.stringify(state)),
     calls: () => existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n") : [],
   };
 }
@@ -88,6 +92,48 @@ describe("managed refocus and trace results", () => {
     f.run("PostCompact");
     expect(f.run("UserPromptSubmit")).toContain("just compacted");
     expect(f.state().pendingOn).toBeUndefined();
+  });
+
+  it("delivers on the next ordinary prompt after ten minutes without a restore request", () => {
+    const f = fixture();
+    f.prepare(true);
+    const armedAfter = Date.now();
+    f.run("PostCompact");
+    const armedAt = f.state().managedRestorePendingAt;
+    f.setState({ ...f.state(), managedRestorePendingAt: new Date(Date.now() - 9 * 60_000).toISOString() });
+    expect(f.run("UserPromptSubmit", "A peer arrived before restore.")).toBe("");
+    f.setState({ ...f.state(), managedRestorePendingAt: new Date(Date.now() - 11 * 60_000).toISOString() });
+    expect(f.run("UserPromptSubmit", buildPostCompactTurnBoundaryPrompt())).toBe("");
+    expect(f.run("UserPromptSubmit", "Continue after restarting the daemon.")).toContain("just compacted");
+    expect(Date.parse(armedAt)).toBeGreaterThanOrEqual(armedAfter);
+    expect(f.state().managedRestorePending).toBeUndefined();
+    expect(f.state().managedRestorePendingAt).toBeUndefined();
+    expect(f.state().pendingOn).toBeUndefined();
+    expect(f.run("UserPromptSubmit")).toBe("");
+    expect(f.calls()).toEqual([]);
+  });
+
+  it.each([undefined, "invalid", "2999-01-01T00:00:00.000Z"])("does not strand a managed hold with an unusable timestamp: %s", (timestamp) => {
+    const f = fixture();
+    f.prepare(true);
+    f.run("PostCompact");
+    f.setState({ ...f.state(), managedRestorePendingAt: timestamp });
+    expect(f.run("UserPromptSubmit")).toContain("just compacted");
+    expect(f.state().managedRestorePending).toBeUndefined();
+  });
+
+  it("a new managed compaction rearms the hold and a manual compaction clears it", () => {
+    const f = fixture();
+    f.prepare(true);
+    f.run("PostCompact");
+    f.setState({ ...f.state(), managedRestorePendingAt: new Date(Date.now() - 11 * 60_000).toISOString() });
+    f.prepare(true);
+    f.run("PostCompact");
+    expect(f.run("UserPromptSubmit")).toBe("");
+    f.prepare(false);
+    f.run("PostCompact");
+    expect(f.state().managedRestorePendingAt).toBeUndefined();
+    expect(f.run("UserPromptSubmit")).toContain("just compacted");
   });
 
   it("does not inherit a managed restore marker from a different occupant", () => {
@@ -149,12 +195,19 @@ describe("managed refocus and trace results", () => {
     expect(f.calls()).toHaveLength(1);
   });
 
-  it("startup seeds a loadable bare refocusing skill with its scripts for both harnesses", async () => {
+  it.each([false, true])("startup seeds a loadable bare refocusing skill for both harnesses (router seed fails: %s)", async (failRouterSeed) => {
     const f = fixture();
     vi.stubEnv("OPENRIG_HOME", f.root);
     vi.stubEnv("OPENRIG_NO_KERNEL", "1");
     vi.spyOn(os, "homedir").mockReturnValue(f.root);
     vi.spyOn(PluginVendorService.prototype, "attemptAutoFetch").mockResolvedValue();
+    if (failRouterSeed) {
+      const original = PluginVendorService.prototype.ensureSkillGlobally;
+      vi.spyOn(PluginVendorService.prototype, "ensureSkillGlobally").mockImplementation(function (this: PluginVendorService, ...args) {
+        if (args[1] === "openrig-skills") throw new Error("injected router seed failure");
+        return original.apply(this, args);
+      });
+    }
     const { db } = await createDaemon({ dbPath: ":memory:", tmuxExec: async () => "", cmuxFactory: async () => { throw new Error("inert fixture"); } });
     try {
       for (const harness of [".claude", ".agents"]) {
