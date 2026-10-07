@@ -347,15 +347,36 @@ describe("Chatroom CLI", () => {
   });
 
   it.each(["0.05", "0.05s"])("chatroom wait preserves the fractional deadline for %s", async (timeout) => {
-    capturedUrls.length = 0;
-    const started = Date.now();
-    const { logs, exitCode } = await captureLogs(() => makeCmd().parseAsync([
-      "node", "rig", "chatroom", "wait", "my-rig", "--after", "ZZZ", "--timeout", timeout,
-    ]));
-    expect(exitCode).toBe(1);
-    expect(logs.join("\n")).toContain("Timed out");
-    expect(Date.now() - started).toBeGreaterThanOrEqual(50);
-    expect(capturedUrls.filter(url => url.includes("/chat/history"))).toHaveLength(1);
+    // Isolate the deadline from HTTP latency and real timers, which can wake early.
+    vi.useFakeTimers();
+    const get = vi.spyOn(DaemonClient.prototype, "get")
+      .mockResolvedValueOnce({ status: 200, data: rigSummary })
+      .mockResolvedValue({ status: 200, data: [] });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const previousExitCode = process.exitCode;
+    process.exitCode = undefined;
+    try {
+      const settled = vi.fn();
+      const wait = makeCmd().parseAsync([
+        "node", "rig", "chatroom", "wait", "my-rig", "--after", "ZZZ", "--timeout", timeout,
+      ]).then(settled);
+
+      await vi.advanceTimersByTimeAsync(49);
+      expect(get).toHaveBeenNthCalledWith(2, "/api/rigs/rig-1/chat/history?after=ZZZ");
+      expect(settled).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toHaveBeenCalledOnce();
+      await wait;
+      expect(process.exitCode).toBe(1);
+      expect(error).toHaveBeenCalledWith(`Timed out after ${timeout} seconds — no new messages matching filters.`);
+      expect(get).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      get.mockRestore();
+      error.mockRestore();
+      process.exitCode = previousExitCode;
+    }
   });
 
   it.each(["abc", "NaN", "Infinity", "-Infinity", "", " ", "-1", "-1s", "1e309", "1e309s"])("chatroom wait rejects invalid timeout %s before requests", async (timeout) => {
