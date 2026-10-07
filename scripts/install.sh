@@ -42,7 +42,7 @@ install_main() {
     "        Show the installed version's setup plan without applying it." \
     '  [4/4] rig setup' \
     '        Checks both Claude Code and Codex; may install missing tools.' \
-    '        Checks tmux and writes its defaults. Installs herdr unless declined with --no-herdr;' \
+    '        Checks tmux and writes its defaults. rig setup installs herdr by default;' \
     '        an unavailable herdr install is a warning. Existing cmux settings stay unchanged.' \
     '        On macOS, an installing agent offers Ghostty; rig setup --ghostty attempts it after acceptance.' \
     'This broader setup is optional for the manual selected-provider path.' \

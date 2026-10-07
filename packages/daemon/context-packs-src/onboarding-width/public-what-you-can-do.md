@@ -109,11 +109,14 @@ unseen — which makes messages the one delivery channel that never gets skipped
 - **`rig stream emit` / `list` / `watch` / `archive`** — drop an observation somewhere the *next*
   agent will find it. Emitting costs nothing and does not interrupt anyone; the value appears when
   someone lists the stream before starting.
-- **`rig terminal open <view>`** — bring every live agent in a rig, mission or slice up as real
-  typeable tiles at once. **`rig terminal open saved:kernel`** opens the dashboard, the advisor
-  and the operator with no YAML. Without Herdr, a failed open prints exact tmux attach commands,
-  and `rig ps --nodes --rig <rig> --json --fields canonicalSessionName,tmuxAttachCommand` gives
-  one per seat.
+- **`rig terminal open <view> --window`** — open a new desktop terminal with live agent tiles.
+  For “show me my agents” or “welcome screen”, run **`rig terminal open saved:kernel --window`**
+  on the daemon's desktop: TUI | advisor | operator, no YAML, herdr when installed or plain tmux.
+  Inspect the result and visible content, or say what cannot be verified. Do not finish by
+  printing a command for the person to type. Only if the window cannot open, `rig tui --shared`
+  is the dashboard-only fallback; explain the failure. Existing herdr or cmux workspaces
+  can use `rig terminal open <view> --provider herdr` or `--provider cmux` without `--window`
+  to add tiles inside that provider, not to open the first desktop window.
   In the TUI, **TERMINALS** keeps Saved views prominent and Derived groups collapsed until
   expanded. Names load before detailed readiness. Select a view to inspect its members,
   layout and pages; preview is passive. Saved membership requires deliberate setup.

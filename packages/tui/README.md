@@ -30,10 +30,10 @@ layer):
     #   --demo            labeled demo fixture instead of live reads (never mixes with live)
     #   --no-color        plain text, no color
 
-`rig terminal open <view>` opens every live agent in a view as terminal tiles
-(herdr by default, or `--provider cmux`). The view is a rig name,
-`mission:<id>`, `slice:<id>` or a saved-view id, not a command;
-`rig terminal open kernel --provider herdr|cmux` opens the kernel's terminal.
+Inside an existing herdr or cmux workspace, `rig terminal open <view> --provider herdr`
+(or `--provider cmux`) adds terminal tiles without opening a desktop window. The view
+is a rig name, `mission:<id>`, `slice:<id>` or a saved-view id. For the first desktop
+view, use `rig terminal open saved:kernel --window` as above.
 
 ## Driving it (human or agent — same grammar, same state)
 
